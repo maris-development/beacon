@@ -1,0 +1,10 @@
+[workspace]
+members = ["beacon-api", "beacon-core", "beacon-logger"]
+
+[workspace.dependencies]
+tokio = { version = "1.43.0", features = ["full"] }
+
+utoipa = { version= "=5.3.1", features = ["chrono","preserve_order", "preserve_path_order","rc_schema"] }
+
+serde = "=1.0.200"
+serde_json = "=1.0.120"

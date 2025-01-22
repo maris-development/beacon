@@ -1,0 +1,10 @@
+[package]
+name = "beacon-api"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.8.1"
+utoipa = { workspace = true }
+tokio = { workspace = true}
+serde = { workspace = true}
