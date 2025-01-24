@@ -3,6 +3,11 @@ members = ["beacon-api", "beacon-config", "beacon-core", "beacon-logger"]
 
 [workspace.dependencies]
 tokio = { version = "1.43.0", features = ["full"] }
+tokio-util = {version ="0.7.13", features = ["io"]}
+futures = "0.3.31"
+futures-util = "0.3.31"
+async-trait = "0.1.85"
+bytes = "1.9.0"
 
 utoipa = { version= "=5.3.1", features = ["chrono","preserve_order", "preserve_path_order","rc_schema", "axum_extras"] }
 utoipa-axum = "0.2.0"
@@ -15,3 +20,11 @@ anyhow = "1.0.95"
 
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+
+tempfile = "3.15.0"
+typetag = "0.2.19"
+
+
+datafusion = "44.0.0"
+arrow = "53.3.0"

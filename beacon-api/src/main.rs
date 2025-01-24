@@ -1,5 +1,6 @@
 use std::{net::IpAddr, str::FromStr, time::Duration};
 
+use admin::setup_admin_router;
 use axum::{
     body::Bytes,
     extract::MatchedPath,
@@ -8,11 +9,10 @@ use axum::{
     routing::get,
     Router,
 };
+use client::setup_client_router;
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use utoipa::OpenApi;
-use utoipa_axum::router::OpenApiRouter;
 use utoipa_scalar::{Scalar, Servable};
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -29,25 +29,19 @@ fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::
     openapi
 }
 
-fn setup_client_router() -> Router {
-    let (router, client_api) =
-        OpenApiRouter::with_openapi(client::ClientApiDoc::openapi()).split_for_parts();
-
-    router
-        .merge(Scalar::with_url(
-            "/docs/",
-            set_api_docs_info(client_api.clone()),
-        ))
-        .route("/docs", get(|| async { Redirect::permanent("/docs/") }))
-        .merge(
-            SwaggerUi::new("/swagger").url("/api-docs/openapi.json", set_api_docs_info(client_api)),
-        )
-}
-
-#[tokio::main]
+#[tokio::main(worker_threads = 8)]
 async fn main() -> anyhow::Result<()> {
-    let mut router = Router::new();
-    router = router.nest("/api", setup_client_router());
+    let (client_router, mut api_docs_client) = setup_client_router();
+    let (admin_router, api_docs_admin) = setup_admin_router();
+    //Merge the two openapi docs
+    api_docs_client.merge(api_docs_admin);
+    api_docs_client = set_api_docs_info(api_docs_client);
+
+    let mut router = client_router
+        .merge(admin_router)
+        .merge(Scalar::with_url("/scalar/", api_docs_client.clone()))
+        .route("/scalar", get(|| async { Redirect::to("/scalar/") }))
+        .merge(SwaggerUi::new("/swagger").url("/api/openapi.json", api_docs_client.clone()));
 
     let addr = std::net::SocketAddr::new(
         IpAddr::from_str(&beacon_config::CONFIG.host)
@@ -55,14 +49,13 @@ async fn main() -> anyhow::Result<()> {
         beacon_config::CONFIG.port,
     );
 
-    router = router.route("/", get(|| async { "Hello, world!" }));
     router = setup_tracing(router);
 
-    // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind to address {}: {}", addr, e))?;
-    tracing::debug!("listening on {}", listener.local_addr().unwrap());
+
+    tracing::info!("listening on {}", listener.local_addr().unwrap());
 
     axum::serve(listener, router)
         .await

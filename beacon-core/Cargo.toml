@@ -4,9 +4,17 @@ version = "1.0.0"
 edition = "2021"
 
 [dependencies]
-
-
-
+futures = { workspace=true}
+futures-util = { workspace=true}
+bytes = { workspace=true}
+anyhow = { workspace=true}
+tempfile = { workspace=true}
+serde = { workspace=true}
+utoipa = { workspace=true}
+typetag =  { workspace=true}
+async-trait = { workspace=true}
+datafusion = { workspace=true}
+arrow = { workspace=true}
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }

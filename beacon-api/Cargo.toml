@@ -6,11 +6,16 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.8.1", features = ["tracing"] }
 tower-http = { version = "0.6.1", features = ["trace"] }
+
+futures = { workspace = true }
+futures-util = { workspace = true }
+
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 utoipa-scalar = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 tokio = { workspace = true}
+tokio-util = { workspace = true}
 serde = { workspace = true}
 anyhow = { workspace = true}
 
@@ -20,3 +25,4 @@ tracing-subscriber = { workspace = true}
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-logger = { path = "../beacon-logger" }
+beacon-core = { path = "../beacon-core" }
