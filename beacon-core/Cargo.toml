@@ -1,6 +1,12 @@
 [package]
 name = "beacon-core"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
+
+
+
+
+# Local dependencies
+beacon-config = { path = "../beacon-config" }
