@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use axum::Router;
+use beacon_core::runtime::Runtime;
 use utoipa::{
     openapi::security::{Http, SecurityScheme},
     Modify, OpenApi,
@@ -11,7 +14,7 @@ mod stats;
 #[openapi(modifiers(&SecurityAddon))]
 pub struct AdminApiDoc;
 
-pub(crate) fn setup_admin_router() -> (Router, utoipa::openapi::OpenApi) {
+pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
         .routes(routes!(stats::stats))
         .split_for_parts();

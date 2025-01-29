@@ -9,6 +9,11 @@ pub struct Config {
     pub host: String,
     #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
     pub log_level: String,
+    #[envconfig(from = "BEACON_DATASETS_DIR", default = "./datasets")]
+    pub datasets_dir: String,
+    //Memory size in MB
+    #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "512")]
+    pub vm_memory_size: usize,
 }
 
 impl Config {

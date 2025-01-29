@@ -29,7 +29,7 @@ impl DefaultNetCDFProvider {
             .iter()
             .map(|path| netcdf::open(path).map(Arc::new))
             .collect::<Result<Vec<_>, _>>()?;
-
+        println!("Files: {:?}", files);
         //Determine the schema
         // Read all the global attributes, variables and variable attributes as fields
         let mut schemas = vec![];
@@ -44,7 +44,7 @@ impl DefaultNetCDFProvider {
 
         // Merge all the schemas
         let schema = datafusion::arrow::datatypes::Schema::try_merge(schemas)?;
-
+        println!("Schema: {:?}", schema);
         Ok(Self {
             files,
             provider_schema: Arc::new(schema),
@@ -151,12 +151,7 @@ impl DefaultNetCDFExec {
             broadcasted_arrays.push(array.broadcast(&largest_shape).into_arrow_array());
         }
 
-        // for arr in &broadcasted_arrays {
-        //     println!("Array: {:?}", arr.len());
-        // }
-
         let record_batch = RecordBatch::try_new(self.schema().clone(), broadcasted_arrays).unwrap();
-        // println!("RecordBatch: {:?}", record_batch);
 
         println!(
             "Size of record batch: {}",

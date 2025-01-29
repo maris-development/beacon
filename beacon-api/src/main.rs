@@ -1,4 +1,4 @@
-use std::{net::IpAddr, str::FromStr, time::Duration};
+use std::{net::IpAddr, str::FromStr, sync::Arc, time::Duration};
 
 use admin::setup_admin_router;
 use axum::{
@@ -9,6 +9,7 @@ use axum::{
     routing::get,
     Router,
 };
+use beacon_core::runtime::Runtime;
 use client::setup_client_router;
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{info_span, Span};
@@ -36,19 +37,25 @@ fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::
     openapi
 }
 
+#[derive(Debug, Clone)]
+struct Test {}
+
 #[tokio::main(worker_threads = 8)]
 async fn main() -> anyhow::Result<()> {
+    let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new()?);
+
     let (client_router, mut api_docs_client) = setup_client_router();
     let (admin_router, api_docs_admin) = setup_admin_router();
     //Merge the two openapi docs
     api_docs_client.merge(api_docs_admin);
     api_docs_client = set_api_docs_info(api_docs_client);
 
-    let mut router = client_router
+    let mut router: Router<_> = client_router
         .merge(admin_router)
         .merge(Scalar::with_url("/scalar/", api_docs_client.clone()))
         .route("/scalar", get(|| async { Redirect::to("/scalar/") }))
-        .merge(SwaggerUi::new("/swagger").url("/api/openapi.json", api_docs_client.clone()));
+        .merge(SwaggerUi::new("/swagger").url("/api/openapi.json", api_docs_client.clone()))
+        .with_state::<_>(beacon_runtime);
 
     let addr = std::net::SocketAddr::new(
         IpAddr::from_str(&beacon_config::CONFIG.host)

@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use datafusion::{
     catalog::TableFunctionImpl, functions_table::create_udtf_function, logical_expr::Signature,
     scalar::ScalarValue,
@@ -27,9 +29,21 @@ impl TableFunctionImpl for NetCDF {
         match &args[0] {
             datafusion::prelude::Expr::Literal(ScalarValue::Utf8(Some(path))) => {
                 if let Ok(paths) = glob(path) {
+                    // Get the directory where the datasets are stored
+                    let datasets_dir =
+                        PathBuf::from(&beacon_config::CONFIG.datasets_dir).canonicalize()?;
+                    println!("{:?}", datasets_dir);
                     let mut files = vec![];
                     for path in paths.into_iter() {
-                        let path = path.unwrap();
+                        //Canocalize the paths
+                        let path = path.unwrap().canonicalize().unwrap();
+                        //Ensure it starts with datasets directory defined in the config
+                        if !path.starts_with(&datasets_dir) {
+                            return Err(datafusion::error::DataFusionError::Execution(
+                                "Path is not allowed".to_string(),
+                            ));
+                        }
+
                         files.push(path);
                     }
 
@@ -42,7 +56,8 @@ impl TableFunctionImpl for NetCDF {
                     ));
                 }
             }
-            _ => {
+            value => {
+                println!("{:?}", value);
                 return Err(datafusion::error::DataFusionError::Execution(
                     "NetCDF provider expects a string literal".to_string(),
                 ));

@@ -1,12 +1,27 @@
+use std::sync::Arc;
+
 use axum::{
     body::Body,
+    extract::State,
     http::header,
     response::{IntoResponse, Response},
     Json,
 };
-use beacon_core::output;
+use beacon_core::{
+    output,
+    query::{self, Query},
+    runtime::Runtime,
+};
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[tracing::instrument]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Args {
+    inner: String,
+    output: String,
+}
+
+#[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     post,
     path = "/query",
@@ -14,8 +29,11 @@ use beacon_core::output;
         (status=200, description="Response containing the query results in the format specified by the query"),
     )
 )]
-pub(crate) async fn query() -> Result<Response<Body>, Json<String>> {
-    let result = beacon_core::query().await;
+pub(crate) async fn query(
+    State(state): State<Arc<Runtime>>,
+    Json(query_obj): Json<Query>,
+) -> Result<Response<Body>, Json<String>> {
+    let result = state.run_client_query(query_obj).await;
 
     match result {
         Ok(output) => match output.output_method {
