@@ -19,6 +19,13 @@ use utoipa_swagger_ui::SwaggerUi;
 mod admin;
 mod client;
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::OpenApi {

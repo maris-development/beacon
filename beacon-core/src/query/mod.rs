@@ -16,4 +16,15 @@ pub enum InnerQuery {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct QueryBody {}
+pub struct QueryBody {
+    query_parameters: Vec<QueryParameter>,
+    filters: Option<Vec<Filter>>,
+    from: Option<String>,
+    distinct: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct QueryParameter {}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Filter {}

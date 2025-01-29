@@ -15,6 +15,12 @@ typetag =  { workspace=true}
 async-trait = { workspace=true}
 datafusion = { workspace=true}
 arrow = { workspace=true}
+glob = { workspace = true}
+
+netcdf = { version = "0.10.5", features = ["static"] }
+
+nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main" }
+
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
