@@ -3,7 +3,9 @@ use std::{any::Any, fmt::Formatter, path::PathBuf, sync::Arc};
 use arrow::array::*;
 use arrow::buffer::*;
 use arrow::datatypes::SchemaRef;
+use datafusion::catalog::TableFunctionImpl;
 use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::scalar::ScalarValue;
 use datafusion::{
     catalog::{Session, TableProvider},
     datasource::TableType,
@@ -15,22 +17,58 @@ use datafusion::{
 use nd_arrow_array::NdArrowArray;
 use netcdf::Extents;
 
-use super::util;
+use crate::providers::netcdf::util;
+use crate::providers::util::find_in;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct NetCDFDataFunction;
+
+impl TableFunctionImpl for NetCDFDataFunction {
+    fn call(
+        &self,
+        args: &[datafusion::prelude::Expr],
+    ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        //Expect 1 argument, which is a string glob path
+        if args.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "NetCDF provider expects 1 argument".to_string(),
+            ));
+        }
+
+        //Get the string literal from the argument
+        match &args[0] {
+            datafusion::prelude::Expr::Literal(ScalarValue::Utf8(Some(path))) => {
+                let paths = find_in(&path, beacon_config::CONFIG.datasets_dir.clone())
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+                let provider = NetCDFDataProvider::new(paths)
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+                Ok(std::sync::Arc::new(provider))
+            }
+            value => {
+                // println!("{:?}", value);
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "NetCDF provider expects a string literal".to_string(),
+                ));
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
-pub struct DefaultNetCDFProvider {
+pub struct NetCDFDataProvider {
     files: Vec<Arc<netcdf::File>>,
     provider_schema: SchemaRef,
 }
 
-impl DefaultNetCDFProvider {
+impl NetCDFDataProvider {
     pub fn new(paths: Vec<PathBuf>) -> anyhow::Result<Self> {
         let files = paths
             .iter()
             .map(|path| netcdf::open(path).map(Arc::new))
             .collect::<Result<Vec<_>, _>>()?;
-        println!("Files: {:?}", files);
-        //Determine the schema
+        // Determine the schema
         // Read all the global attributes, variables and variable attributes as fields
         let mut schemas = vec![];
 
@@ -44,7 +82,7 @@ impl DefaultNetCDFProvider {
 
         // Merge all the schemas
         let schema = datafusion::arrow::datatypes::Schema::try_merge(schemas)?;
-        println!("Schema: {:?}", schema);
+        // println!("Schema: {:?}", schema);
         Ok(Self {
             files,
             provider_schema: Arc::new(schema),
@@ -53,7 +91,7 @@ impl DefaultNetCDFProvider {
 }
 
 #[async_trait::async_trait]
-impl TableProvider for DefaultNetCDFProvider {
+impl TableProvider for NetCDFDataProvider {
     /// Returns the table provider as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any {
@@ -83,19 +121,19 @@ impl TableProvider for DefaultNetCDFProvider {
         };
 
         Ok(
-            Arc::new(DefaultNetCDFExec::new(self.files.clone(), projected_schema))
+            Arc::new(NetCDFExec::new(self.files.clone(), projected_schema))
                 as Arc<dyn ExecutionPlan>,
         )
     }
 }
 
 #[derive(Debug)]
-pub struct DefaultNetCDFExec {
+pub struct NetCDFExec {
     plan_properties: PlanProperties,
     netcdf_files: Vec<Arc<netcdf::File>>,
 }
 
-impl DefaultNetCDFExec {
+impl NetCDFExec {
     pub fn new(files: Vec<Arc<netcdf::File>>, schema: SchemaRef) -> Self {
         Self {
             plan_properties: Self::plan_properties(files.len(), schema),
@@ -153,25 +191,20 @@ impl DefaultNetCDFExec {
 
         let record_batch = RecordBatch::try_new(self.schema().clone(), broadcasted_arrays).unwrap();
 
-        println!(
-            "Size of record batch: {}",
-            record_batch.get_array_memory_size()
-        );
-
         Ok(Box::pin(
             MemoryStream::try_new(vec![record_batch], self.schema(), None).unwrap(),
         ))
     }
 }
 
-impl DisplayAs for DefaultNetCDFExec {
+impl DisplayAs for NetCDFExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
         write!(f, "NetCDFExec")
     }
 }
 
 #[async_trait::async_trait]
-impl ExecutionPlan for DefaultNetCDFExec {
+impl ExecutionPlan for NetCDFExec {
     fn name(&self) -> &str {
         "NetCDF"
     }

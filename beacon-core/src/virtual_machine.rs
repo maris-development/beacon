@@ -5,13 +5,11 @@ use datafusion::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, runtime_env::RuntimeEnvBuilder,
     },
     prelude::{SQLOptions, SessionConfig, SessionContext},
-    sql::sqlparser::ast::SqlOption,
 };
-use tempfile::NamedTempFile;
 
 use crate::{
     output::{Output, OutputFormat},
-    providers::netcdf::NetCDF,
+    providers::{datasets::DatasetsProviderFunction, BeaconProvider},
 };
 
 pub struct VirtualMachine {
@@ -50,7 +48,16 @@ impl VirtualMachine {
 
         let session_context = SessionContext::new_with_config_rt(config, runtime_env);
 
-        session_context.register_udtf("netcdf", Arc::new(NetCDF));
+        for provider in inventory::iter::<&'static dyn BeaconProvider> {
+            let function = provider.function();
+            let schema_function = provider.schema_function();
+
+            session_context.register_udtf(function.name(), function.function().clone());
+            session_context
+                .register_udtf(schema_function.name(), schema_function.function().clone());
+        }
+
+        session_context.register_udtf("datasets", Arc::new(DatasetsProviderFunction));
 
         Ok(Arc::new(session_context))
     }

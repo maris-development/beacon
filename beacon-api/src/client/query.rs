@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{io::Read, sync::Arc};
 
 use axum::{
     body::Body,
@@ -49,8 +49,7 @@ pub(crate) async fn query(
                     .into_response())
             }
             output::OutputMethod::File(named_temp_file) => {
-                let file = named_temp_file.into_file();
-                let file = tokio::fs::File::from_std(file);
+                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
                 let stream = tokio_util::io::ReaderStream::new(file);
                 let inner_stream = Body::from_stream(stream);
                 Ok((

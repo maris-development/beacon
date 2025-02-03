@@ -12,6 +12,7 @@ use utoipa::ToSchema;
 
 mod csv;
 mod ipc;
+mod json;
 mod parquet;
 
 pub struct Output {
@@ -46,6 +47,7 @@ pub enum OutputFormat {
     Csv,
     Ipc,
     Parquet,
+    Json,
 }
 
 impl OutputFormat {
@@ -54,6 +56,7 @@ impl OutputFormat {
             OutputFormat::Csv => csv::output(df).await,
             OutputFormat::Ipc => ipc::output(ctx, df).await,
             OutputFormat::Parquet => parquet::output(df).await,
+            OutputFormat::Json => json::output(df).await,
         }
     }
 }

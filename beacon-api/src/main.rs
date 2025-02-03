@@ -12,7 +12,7 @@ use axum::{
 use beacon_core::runtime::Runtime;
 use client::setup_client_router;
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
-use tracing::{info_span, Span};
+use tracing::{field::Empty, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa_scalar::{Scalar, Servable};
 use utoipa_swagger_ui::SwaggerUi;
@@ -109,20 +109,35 @@ where
 
                 info_span!(
                     "http_request",
-                    method = ?request.method(),
                     matched_path,
                     some_other_field = tracing::field::Empty,
                 )
             })
-            .on_request(|_request: &Request<_>, _span: &Span| {
-                // You can use `_span.record("some_other_field", value)` in one of these
-                // closures to attach a value to the initially empty field in the info_span
-                // created above.
-                tracing::info!("Request Received.");
+            .on_request(|request: &Request<_>, span: &Span| {
+                let method = request.method();
+                let path = request.uri();
+
+                // Attach method & path to the tracing span
+                span.record("method", &method.to_string());
+                span.record("path", &path.to_string());
+
+                tracing::info!(
+                    parent: span,
+                    method = %method,
+                    path = %path,
+                    "Request received"
+                );
             })
-            .on_response(|_response: &Response, _latency: Duration, _span: &Span| {
+            .on_response(|response: &Response, latency: Duration, span: &Span| {
                 // ...
-                tracing::info!("Response Completed. Duration: {:?}", _latency);
+                let status = response.status();
+
+                tracing::info!(
+                    parent: span,
+                    status = %status.as_u16(),
+                    latency = ?latency,
+                    "Response completed"
+                );
             })
             .on_body_chunk(|_chunk: &Bytes, _latency: Duration, _span: &Span| {
                 // ...
@@ -133,9 +148,30 @@ where
                 },
             )
             .on_failure(
-                |_error: ServerErrorsFailureClass, _latency: Duration, _span: &Span| {
-                    // ...
-                    tracing::error!("Request failed..")
+                |error: ServerErrorsFailureClass, latency: Duration, span: &Span| {
+                    let method = span
+                        .metadata()
+                        .and_then(|m| m.fields().field("method"))
+                        .unwrap();
+                    let path = span
+                        .metadata()
+                        .and_then(|m| m.fields().field("path"))
+                        .unwrap();
+
+                    let status_code = match &error {
+                        ServerErrorsFailureClass::StatusCode(status) => status.as_u16(),
+                        _ => 0, // Unknown or internal failure
+                    };
+
+                    tracing::error!(
+                        parent: span,
+                        method = %method,
+                        path = %path,
+                        status = status_code,
+                        error = ?error,
+                        latency = ?latency,
+                        "Request failed"
+                    );
                 },
             ),
     );
