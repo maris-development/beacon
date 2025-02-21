@@ -9,7 +9,7 @@ pub mod writer;
 pub struct NcFixedSizedString(Vec<u8>);
 
 #[repr(transparent)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct NcChar(u8);
 unsafe impl NcTypeDescriptor for NcChar {
     fn type_descriptor() -> NcVariableType {
