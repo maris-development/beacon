@@ -68,7 +68,6 @@ impl VirtualMachine {
             .with_allow_dml(false)
             .with_allow_statements(false);
         let df = self.session_ctx.sql_with_options(sql, sql_options).await?;
-
         output.output(self.session_ctx.clone(), df).await
     }
 
