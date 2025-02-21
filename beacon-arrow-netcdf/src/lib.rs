@@ -1,8 +1,12 @@
 use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
 pub mod encoders;
+pub mod nc_array;
 pub mod reader;
 pub mod writer;
+#[repr(transparent)]
+#[derive(Clone)]
+pub struct NcFixedSizedString(Vec<u8>);
 
 #[repr(transparent)]
 #[derive(Copy, Clone)]
