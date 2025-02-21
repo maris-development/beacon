@@ -1,12 +1,12 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use arrow::{
-    array::ArrayRef,
+    array::{ArrayRef, Int16Array, RecordBatch},
     datatypes::{DataType, Field, SchemaRef},
 };
 use netcdf::{types::NcVariableType, FileMut};
 
-use crate::FixedSizeString;
+use crate::NcChar;
 
 use super::Encoder;
 
@@ -19,6 +19,23 @@ pub struct DefaultEncoder {
 impl DefaultEncoder {
     const OBS_DIM_NAME: &'static str = "obs";
 }
+
+macro_rules! downcast_and_put_values {
+    ($array:expr, $variable:expr, $extents:expr, $arrow_type:ty, $native_type:ty) => {{
+        let array = $array
+            .as_any()
+            .downcast_ref::<$arrow_type>()
+            .expect(concat!("Failed to downcast to ", stringify!($arrow_type)));
+
+        let temp_buffer = array
+            .iter()
+            .map(|x| x.unwrap_or(<$native_type>::MIN))
+            .collect::<Vec<_>>();
+
+        $variable.put_values::<$native_type, _>(&temp_buffer, $extents)?;
+    }};
+}
+
 impl DefaultEncoder {
     fn define_variable(file: &mut FileMut, field: &Field) -> anyhow::Result<()> {
         match field.data_type() {
@@ -29,12 +46,12 @@ impl DefaultEncoder {
                     file.add_dimension(&strlen_dim_name, *size as usize)?;
                 }
 
-                let mut variable = file.add_variable::<FixedSizeString>(
+                let mut variable = file.add_variable::<NcChar>(
                     field.name(),
                     &[Self::OBS_DIM_NAME, &strlen_dim_name],
                 )?;
 
-                variable.set_fill_value(FixedSizeString(b'\0'))?;
+                variable.set_fill_value(NcChar(b'\0'))?;
             }
             DataType::Int8 => {
                 let mut variable = file.add_variable::<i8>(field.name(), &[Self::OBS_DIM_NAME])?;
@@ -126,21 +143,79 @@ impl DefaultEncoder {
                 let byte_slice = array.value_data();
                 //We can transmute the byte slice to FixedSizeString as they have the same memory layout (1 ubyte) & repr(transparent)
                 let fixed_size_string =
-                    unsafe { std::mem::transmute::<&[u8], &[FixedSizeString]>(byte_slice) };
+                    unsafe { std::mem::transmute::<&[u8], &[NcChar]>(byte_slice) };
 
-                variable.put_values::<FixedSizeString, _>(fixed_size_string, extents)?;
+                variable.put_values::<NcChar, _>(fixed_size_string, extents)?;
             }
             DataType::Int8 => {
-                let array = array
-                    .as_any()
-                    .downcast_ref::<arrow::array::Int8Array>()
-                    .expect("Failed to downcast to Int8Array");
-                let temp_buffer = array
-                    .iter()
-                    .map(|x| x.unwrap_or(i8::MIN))
-                    .collect::<Vec<_>>();
-                variable.put_values::<i8, _>(&temp_buffer, extents)?;
+                downcast_and_put_values!(array, variable, extents, arrow::array::Int8Array, i8);
             }
+            DataType::Int16 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::Int16Array, i16);
+            }
+            DataType::Int32 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::Int32Array, i32);
+            }
+            DataType::Int64 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::Int64Array, i64);
+            }
+            DataType::UInt8 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::UInt8Array, u8);
+            }
+            DataType::UInt16 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::UInt16Array, u16);
+            }
+            DataType::UInt32 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::UInt32Array, u32);
+            }
+            DataType::UInt64 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::UInt64Array, u64);
+            }
+            DataType::Float32 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::Float32Array, f32);
+            }
+            DataType::Float64 => {
+                downcast_and_put_values!(array, variable, extents, arrow::array::Float64Array, f64);
+            }
+            DataType::Timestamp(time_unit, _) => match time_unit {
+                arrow::datatypes::TimeUnit::Second => {
+                    downcast_and_put_values!(
+                        array,
+                        variable,
+                        extents,
+                        arrow::array::TimestampSecondArray,
+                        i64
+                    );
+                }
+                arrow::datatypes::TimeUnit::Millisecond => {
+                    downcast_and_put_values!(
+                        array,
+                        variable,
+                        extents,
+                        arrow::array::TimestampMillisecondArray,
+                        i64
+                    );
+                }
+                arrow::datatypes::TimeUnit::Microsecond => {
+                    downcast_and_put_values!(
+                        array,
+                        variable,
+                        extents,
+                        arrow::array::TimestampMicrosecondArray,
+                        i64
+                    );
+                }
+                arrow::datatypes::TimeUnit::Nanosecond => {
+                    downcast_and_put_values!(
+                        array,
+                        variable,
+                        extents,
+                        arrow::array::TimestampNanosecondArray,
+                        i64
+                    );
+                }
+            },
+
             dtype => anyhow::bail!(
                 "Unsupported data type: {:?} for writing netcdf variable chunk: {}",
                 dtype,
@@ -179,7 +254,13 @@ impl Encoder for DefaultEncoder {
         })
     }
 
-    fn write_column(&mut self, name: &str, array: arrow::array::ArrayRef) -> anyhow::Result<()> {
-        todo!()
+    fn write_column(&mut self, name: &str, array: ArrayRef) -> anyhow::Result<()> {
+        let offset = *self.offsets.get(name).expect("Column not found in schema");
+
+        self.write_array_chunk(name, array.clone(), offset)?;
+
+        self.offsets.get_mut(name).map(|x| *x += array.len());
+
+        Ok(())
     }
 }

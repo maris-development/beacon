@@ -4,11 +4,14 @@ use std::{
     marker::PhantomData,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
 };
 
 use arrow::{
-    array::{Array, FixedSizeBinaryArray, FixedSizeBinaryBuilder, StringArray},
-    datatypes::{DataType, SchemaRef},
+    array::{
+        Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, RecordBatch, StringArray,
+    },
+    datatypes::{DataType, Field, SchemaRef},
     ipc::writer::FileWriter,
 };
 use tempfile::SpooledTempFile;
@@ -27,6 +30,15 @@ impl<E: Encoder> Writer<E> {
         let encoder = E::create(nc_file.clone(), schema)?;
 
         Ok(Self { nc_file, encoder })
+    }
+
+    pub fn write_record_batch(
+        &mut self,
+        record_batch: arrow::record_batch::RecordBatch,
+    ) -> anyhow::Result<()> {
+        self.encoder.write_record_batch(record_batch)?;
+
+        Ok(())
     }
 }
 
@@ -88,9 +100,49 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         let inner_f = self.writer.get_mut();
         let reader = arrow::ipc::reader::FileReader::try_new(inner_f, None)?;
 
-        let nc_writer = Writer::<E>::new(&self.path, self.writer.schema().clone())?;
+        let mut updated_schema_fields = vec![];
+        for field in reader.schema().fields() {
+            if let Some(size) = self.fixed_string_sizes.get(field.name()) {
+                updated_schema_fields.push(arrow::datatypes::Field::new(
+                    field.name(),
+                    arrow::datatypes::DataType::FixedSizeBinary(*size as i32),
+                    field.is_nullable(),
+                ));
+            } else {
+                updated_schema_fields.push(Field::new(
+                    field.name(),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                ));
+            }
+        }
+
+        let updated_schema = Arc::new(arrow::datatypes::Schema::new(updated_schema_fields));
+
+        let mut nc_writer = Writer::<E>::new(&self.path, updated_schema.clone())?;
+
+        for batch in reader {
+            let batch = batch?;
+            let updated_batch = Self::map_record_batch(batch, updated_schema.clone());
+            nc_writer.write_record_batch(updated_batch)?;
+        }
 
         Ok(())
+    }
+
+    fn map_record_batch(record_batch: RecordBatch, schema: SchemaRef) -> RecordBatch {
+        let mut arrays = vec![];
+        for (idx, column) in record_batch.columns().iter().enumerate() {
+            if let DataType::FixedSizeBinary(size) = schema.field(idx).data_type() {
+                let string_array = column.as_any().downcast_ref::<StringArray>().unwrap();
+                let casted_array = string_array_to_fixed_binary(string_array, *size as usize);
+                arrays.push(Arc::new(casted_array) as ArrayRef);
+            } else {
+                arrays.push(column.clone());
+            }
+        }
+
+        RecordBatch::try_new(schema, arrays).unwrap()
     }
 }
 

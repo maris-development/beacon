@@ -6,8 +6,8 @@ pub mod writer;
 
 #[repr(transparent)]
 #[derive(Copy, Clone)]
-struct FixedSizeString(u8);
-unsafe impl NcTypeDescriptor for FixedSizeString {
+pub struct NcChar(u8);
+unsafe impl NcTypeDescriptor for NcChar {
     fn type_descriptor() -> NcVariableType {
         NcVariableType::Char
     }
