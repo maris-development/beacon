@@ -1,5 +1,6 @@
 use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
+pub mod cf_time;
 pub mod encoders;
 pub mod nc_array;
 pub mod reader;

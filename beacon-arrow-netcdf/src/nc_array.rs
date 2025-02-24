@@ -106,6 +106,17 @@ impl NetCDFNdArray {
                 fixed_sized_string_ndarray_to_arrow(array_base.inner.view(), &mut builder);
                 Arc::new(builder.finish())
             }
+            NetCDFNdArrayInner::String(array_base) => {
+                let mut builder = StringBuilder::new();
+                for s in array_base.inner.iter() {
+                    if s.is_empty() {
+                        builder.append_null();
+                    } else {
+                        builder.append_value(s);
+                    }
+                }
+                Arc::new(builder.finish())
+            }
         }
     }
 }
@@ -115,7 +126,7 @@ fn char_to_arrow<'a>(
     builder: &mut StringBuilder,
     fill_value: Option<NcChar>,
 ) {
-    array.iter().map(|c| {
+    array.iter().for_each(|c| {
         if *c == fill_value.unwrap_or(NcChar(0)) {
             builder.append_null();
         } else {
@@ -183,4 +194,5 @@ pub enum NetCDFNdArrayInner {
     TimestampSecond(NetCDFNdArrayBase<i64>),
     Char(NetCDFNdArrayBase<NcChar>),
     FixedStringSize(NetCDFNdArrayBase<NcChar>),
+    String(NetCDFNdArrayBase<String>),
 }

@@ -10,3 +10,5 @@ arrow = { workspace=true }
 anyhow = { workspace=true }
 tempfile = { workspace=true}
 ndarray = "0.16.1"
+hifitime = "4.0.2"
+regex = "1.11.1"
