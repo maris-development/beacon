@@ -5,6 +5,7 @@ use netcdf::{
 };
 
 use crate::{
+    cf_time::is_cf_time_variable,
     nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner},
     NcChar,
 };
@@ -121,6 +122,7 @@ pub fn arrow_schema(nc_file: &netcdf::File) -> anyhow::Result<arrow::datatypes::
 
 fn variable_as_arrow_field(variable: &Variable) -> anyhow::Result<arrow::datatypes::Field> {
     let name = variable.name();
+
     let arrow_type = variable_to_arrow_type(variable)?;
     Ok(arrow::datatypes::Field::new(name, arrow_type, true))
 }
@@ -141,6 +143,13 @@ fn variable_attributes_as_arrow_fields(
 }
 
 fn variable_to_arrow_type(variable: &Variable) -> anyhow::Result<arrow::datatypes::DataType> {
+    if is_cf_time_variable(variable) {
+        return Ok(arrow::datatypes::DataType::Timestamp(
+            arrow::datatypes::TimeUnit::Second,
+            None,
+        ));
+    }
+
     match variable.vartype() {
         netcdf::types::NcVariableType::Int(IntType::I8) => Ok(arrow::datatypes::DataType::Int8),
         netcdf::types::NcVariableType::Int(IntType::I16) => Ok(arrow::datatypes::DataType::Int16),
