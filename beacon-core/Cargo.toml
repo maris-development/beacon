@@ -16,6 +16,7 @@ async-trait = { workspace=true}
 datafusion = { workspace=true}
 arrow = { workspace=true}
 glob = { workspace = true}
+tokio = { workspace = true }
 
 netcdf = { version = "0.10.5", features = ["static"] }
 inventory = "0.3.18"

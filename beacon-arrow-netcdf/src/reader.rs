@@ -116,13 +116,23 @@ pub fn global_attribute(
 }
 
 pub fn arrow_schema(nc_file: &netcdf::File) -> anyhow::Result<arrow::datatypes::Schema> {
-    // Ok(arrow::datatypes::Schema::new(fields))
-    todo!()
+    let mut fields = vec![];
+    for variable in nc_file.variables() {
+        let field = variable_as_arrow_field(&variable)?;
+        fields.push(field);
+
+        let attr_fields = variable_attributes_as_arrow_fields(&variable)?;
+        fields.extend(attr_fields);
+    }
+
+    let global_attr_fields = global_attributes_as_arrow_fields(&nc_file)?;
+    fields.extend(global_attr_fields);
+
+    Ok(arrow::datatypes::Schema::new(fields))
 }
 
 fn variable_as_arrow_field(variable: &Variable) -> anyhow::Result<arrow::datatypes::Field> {
     let name = variable.name();
-
     let arrow_type = variable_to_arrow_type(variable)?;
     Ok(arrow::datatypes::Field::new(name, arrow_type, true))
 }

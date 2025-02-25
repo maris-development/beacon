@@ -13,6 +13,8 @@ use utoipa::ToSchema;
 mod csv;
 mod ipc;
 mod json;
+mod netcdf;
+mod odv;
 mod parquet;
 
 pub struct Output {
@@ -36,11 +38,6 @@ pub enum OutputMethod {
     File(NamedTempFile),
 }
 
-// #[typetag::serde]
-// #[async_trait::async_trait]
-// pub trait OutputFormat: Debug {
-//     async fn output(&self, ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<Output>;
-// }
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
@@ -48,6 +45,7 @@ pub enum OutputFormat {
     Ipc,
     Parquet,
     Json,
+    Odv { options: odv::Options },
 }
 
 impl OutputFormat {
@@ -57,6 +55,7 @@ impl OutputFormat {
             OutputFormat::Ipc => ipc::output(ctx, df).await,
             OutputFormat::Parquet => parquet::output(df).await,
             OutputFormat::Json => json::output(df).await,
+            OutputFormat::Odv { options } => odv::output(ctx.clone(), df, options.clone()).await,
         }
     }
 }
