@@ -4,12 +4,14 @@ use datafusion::{
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, runtime_env::RuntimeEnvBuilder,
     },
-    prelude::{SQLOptions, SessionConfig, SessionContext},
+    logical_expr::LogicalPlan,
+    prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
 };
 
 use crate::{
     output::{Output, OutputFormat},
     providers::{datasets::DatasetsProviderFunction, BeaconProvider},
+    query::InnerQuery,
 };
 
 pub struct VirtualMachine {
@@ -62,12 +64,25 @@ impl VirtualMachine {
         Ok(Arc::new(session_context))
     }
 
+    pub fn session_ctx(&self) -> Arc<SessionContext> {
+        self.session_ctx.clone()
+    }
+
     pub async fn run_client_sql(&self, sql: &str, output: &OutputFormat) -> anyhow::Result<Output> {
         let sql_options = SQLOptions::new()
             .with_allow_ddl(false)
             .with_allow_dml(false)
             .with_allow_statements(false);
         let df = self.session_ctx.sql_with_options(sql, sql_options).await?;
+        output.output(self.session_ctx.clone(), df).await
+    }
+
+    pub async fn run_plan(
+        &self,
+        plan: LogicalPlan,
+        output: &OutputFormat,
+    ) -> anyhow::Result<Output> {
+        let df = DataFrame::new(self.session_ctx.state(), plan);
         output.output(self.session_ctx.clone(), df).await
     }
 

@@ -1,4 +1,8 @@
-use crate::{output::Output, query::Query, virtual_machine};
+use crate::{
+    output::Output,
+    query::{parser::Parser, Query},
+    virtual_machine,
+};
 
 pub struct Runtime {
     virtual_machine: virtual_machine::VirtualMachine,
@@ -11,15 +15,8 @@ impl Runtime {
     }
 
     pub async fn run_client_query(&self, query: Query) -> anyhow::Result<Output> {
-        match query.inner {
-            crate::query::InnerQuery::Sql(sql) => {
-                self.virtual_machine
-                    .run_client_sql(&sql, &query.output)
-                    .await
-            }
-            crate::query::InnerQuery::Json(query_body) => {
-                return anyhow::Result::Err(anyhow::anyhow!("Not implemented yet"));
-            }
-        }
+        let plan = Parser::parse(self.virtual_machine.session_ctx().as_ref(), query.inner).await?;
+        let output = self.virtual_machine.run_plan(plan, &query.output).await?;
+        Ok(output)
     }
 }
