@@ -1,3 +1,7 @@
+use std::{path::Path, sync::Arc};
+
+use arrow::array::RecordBatch;
+use nd_arrow_array::NdArrowArray;
 use ndarray::{ArrayBase, ArrayD};
 use netcdf::{
     types::{FloatType, IntType},
@@ -5,10 +9,88 @@ use netcdf::{
 };
 
 use crate::{
-    cf_time::is_cf_time_variable,
+    cf_time::{decode_cf_time_variable, is_cf_time_variable},
     nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner},
     NcChar,
 };
+
+pub struct NetCDFArrowReader {
+    file_schema: arrow::datatypes::SchemaRef,
+    file: netcdf::File,
+}
+
+impl NetCDFArrowReader {
+    pub fn new<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        let file = netcdf::open(path)?;
+        let file_schema = Arc::new(arrow_schema(&file)?);
+        Ok(Self { file_schema, file })
+    }
+
+    pub fn schema(&self) -> arrow::datatypes::SchemaRef {
+        self.file_schema.clone()
+    }
+
+    pub fn read_as_batch<P: AsRef<[usize]>>(
+        &self,
+        projection: Option<P>,
+    ) -> anyhow::Result<RecordBatch> {
+        let projected_schema = if let Some(projection) = projection {
+            Arc::new(self.file_schema.project(projection.as_ref())?)
+        } else {
+            self.file_schema.clone()
+        };
+
+        let mut columns = indexmap::IndexMap::new();
+        for field in projected_schema.fields() {
+            let name = field.name();
+            if name.contains('.') {
+                let parts = name.split('.').collect::<Vec<_>>();
+                if parts.len() != 2 {
+                    anyhow::bail!("Invalid field name: {}", name);
+                }
+                if parts[0].is_empty() {
+                    //Global attribute
+                    let attr_name = parts[1];
+                    let attr_value = global_attribute(&self.file, attr_name)?
+                        .expect("Attribute not found but was in schema.");
+                    columns.insert(field.clone(), attr_value.into_nd_arrow_array());
+                } else {
+                    //Variable attribute
+                    let variable = self
+                        .file
+                        .variable(parts[0])
+                        .expect("Variable not found but was in schema.");
+                    columns.insert(
+                        field.clone(),
+                        variable_attribute(&variable, parts[1])?
+                            .expect("Attribute not found but was in schema.")
+                            .into_nd_arrow_array(),
+                    );
+                }
+            } else {
+                let variable = self
+                    .file
+                    .variable(name)
+                    .expect("Variable not found but was in schema.");
+                let array = read_variable(&variable)?;
+                columns.insert(field.clone(), array.into_nd_arrow_array());
+            }
+        }
+        let arrays = columns.iter().map(|(_, v)| v).collect::<Vec<_>>();
+        let broadcast_shape = NdArrowArray::find_broadcast_shape(arrays)
+            .map_err(|e| anyhow::anyhow!("Failed to find broadcast shape: {}", e))?;
+
+        let mut arrays = vec![];
+        for (_, column) in columns {
+            let broadcast_array = column.broadcast(&broadcast_shape);
+            arrays.push(broadcast_array.into_arrow_array());
+        }
+
+        let record_batch = RecordBatch::try_new(projected_schema, arrays)?;
+
+        Ok(record_batch)
+    }
+}
 
 macro_rules! create_netcdf_ndarray {
     ($var:ident, $t:ty, $inner_variant:ident) => {{
@@ -36,6 +118,12 @@ macro_rules! create_netcdf_ndarray {
 }
 
 pub fn read_variable(variable: &Variable) -> anyhow::Result<NetCDFNdArray> {
+    if is_cf_time_variable(variable) {
+        if let Some(array) = decode_cf_time_variable(variable)? {
+            return Ok(array);
+        }
+    }
+
     match variable.vartype() {
         netcdf::types::NcVariableType::Int(IntType::I8) => {
             create_netcdf_ndarray!(variable, i8, I8)

@@ -16,7 +16,7 @@ use datafusion::{
 use utoipa::ToSchema;
 
 use crate::{
-    output::OutputFormat, sources::parquet::SuperParquetFormat, super_typing::super_type_schema,
+    output::OutputFormat, sources::parquet_format::SuperParquetFormat, super_typing::super_type_schema,
 };
 
 pub mod parser;
@@ -106,6 +106,8 @@ impl From {
                     .map(|path| ListingTableUrl::parse(path).unwrap())
                     .collect::<Vec<_>>();
 
+                // LogicalPlanBuilder::copy_to(input, output_url, file_type, options, partition_by)
+
                 let mut schemas = vec![];
                 for table_url in &table_urls {
                     let schema = listing_options
@@ -176,10 +178,7 @@ pub enum Filter {
         column: String,
     },
     And(Vec<Filter>),
-    Or {
-        #[serde(flatten)]
-        filters: Vec<Filter>,
-    },
+    Or(Vec<Filter>),
     #[serde(untagged)]
     Range {
         column: String,
@@ -233,7 +232,7 @@ impl Filter {
         Ok(match self {
             Filter::Range { column, filter } => filter
                 .to_expr(Self::column_name(column))
-                .ok_or_else(|| anyhow::anyhow!("Invalid range filter"))?,
+                .ok_or_else(|| anyhow::anyhow!("Invalid range filter expression."))?,
             Filter::GreaterThan { column, filter } => filter.to_expr(col(column)),
             Filter::GreaterThanOrEqual { column, filter } => filter.to_expr(col(column)),
             Filter::LessThan { column, filter } => filter.to_expr(col(column)),
@@ -248,7 +247,7 @@ impl Filter {
                 .fold(Ok(lit(true)), |acc, expr| {
                     acc.and_then(|acc| expr.map(|expr| acc.and(expr)))
                 })?,
-            Filter::Or { filters } => filters
+            Filter::Or(filters) => filters
                 .iter()
                 .map(|f| f.to_expr())
                 .fold(Ok(lit(false)), |acc, expr| {

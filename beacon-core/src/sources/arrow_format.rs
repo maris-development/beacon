@@ -5,8 +5,8 @@ use datafusion::{
     common::Statistics,
     datasource::{
         file_format::{
-            file_compression_type::FileCompressionType, parquet::ParquetFormat, FileFormat,
-            FilePushdownSupport,
+            arrow::ArrowFormat, file_compression_type::FileCompressionType, parquet::ParquetFormat,
+            FileFormat, FilePushdownSupport,
         },
         physical_plan::{FileScanConfig, FileSinkConfig},
     },
@@ -20,23 +20,12 @@ use object_store::{ObjectMeta, ObjectStore};
 use crate::super_typing;
 
 #[derive(Debug)]
-pub struct SuperParquetFormat {
-    inner_format: ParquetFormat,
-}
-
-impl SuperParquetFormat {
-    pub fn new() -> Self {
-        Self {
-            inner_format: ParquetFormat::default()
-                .with_enable_pruning(true)
-                .with_skip_metadata(true)
-                .with_force_view_types(false),
-        }
-    }
+pub struct SuperArrowFormat {
+    inner_format: ArrowFormat,
 }
 
 #[async_trait::async_trait]
-impl FileFormat for SuperParquetFormat {
+impl FileFormat for SuperArrowFormat {
     /// Returns the table provider as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any {
@@ -70,7 +59,6 @@ impl FileFormat for SuperParquetFormat {
         //Retrieve the schema for each object
         let mut schemas = Vec::new();
         for object in objects {
-            println!("Path: {}", &object.location);
             let schema = self
                 .inner_format
                 .infer_schema(state, store, &[object.clone()])

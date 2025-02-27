@@ -4,13 +4,24 @@ use arrow::datatypes::SchemaRef;
 use datafusion::{
     catalog::{Session, TableProvider},
     common::{Constraints, Statistics},
-    datasource::{listing::ListingTable, TableType},
+    datasource::{
+        file_format::FileFormat,
+        listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
+        TableType,
+    },
+    execution::SessionState,
     logical_expr::{dml::InsertOp, LogicalPlan, TableProviderFilterPushDown},
     physical_plan::ExecutionPlan,
     prelude::Expr,
 };
 
-pub mod parquet;
+use crate::super_typing::super_type_schema;
+
+pub mod arrow_format;
+pub mod csv_format;
+pub mod netcdf_format;
+pub mod odv_format;
+pub mod parquet_format;
 
 #[derive(Debug)]
 pub struct DataSource {
@@ -18,7 +29,34 @@ pub struct DataSource {
 }
 
 impl DataSource {
-    
+    pub async fn new(
+        session_state: &SessionState,
+        file_format: Arc<dyn FileFormat>,
+        table_urls: Vec<ListingTableUrl>,
+    ) -> anyhow::Result<Self> {
+        let listing_options = ListingOptions::new(file_format);
+
+        let mut schemas = vec![];
+        for table_url in &table_urls {
+            let schema = listing_options
+                .infer_schema(&session_state, table_url)
+                .await?;
+            schemas.push(schema);
+        }
+
+        let super_schema = Arc::new(
+            super_type_schema(&schemas)
+                .map_err(|e| anyhow::anyhow!("Failed to super type schema: {}", e))?,
+        );
+
+        let config = ListingTableConfig::new_with_multi_paths(table_urls)
+            .with_listing_options(listing_options)
+            .with_schema(super_schema);
+
+        let table = ListingTable::try_new(config)?;
+
+        Ok(Self { inner_table: table })
+    }
 }
 
 #[async_trait::async_trait]

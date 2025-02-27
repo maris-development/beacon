@@ -9,6 +9,7 @@ nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", bran
 arrow = { workspace=true }
 anyhow = { workspace=true }
 tempfile = { workspace=true}
+indexmap = { workspace=true }
 ndarray = "0.16.1"
 hifitime = "4.0.2"
 regex = "1.11.1"

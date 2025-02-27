@@ -19,6 +19,7 @@ glob = { workspace = true}
 tokio = { workspace = true }
 indexmap = { workspace = true }
 object_store = "0.11.2"
+async-stream = "0.3.6"
 
 netcdf = { version = "0.10.5", features = ["static"] }
 inventory = "0.3.18"
@@ -27,3 +28,4 @@ nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", bran
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
+beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
