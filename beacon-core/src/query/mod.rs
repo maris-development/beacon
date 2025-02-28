@@ -3,8 +3,9 @@ use std::sync::Arc;
 use datafusion::{
     common::Column,
     datasource::{
+        file_format::format_as_file_type,
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
-        physical_plan::{parquet::ParquetExecBuilder, FileScanConfig},
+        physical_plan::{parquet::ParquetExecBuilder, FileScanConfig}, provider_as_source,
     },
     execution::{
         object_store::ObjectStoreUrl,
@@ -16,7 +17,9 @@ use datafusion::{
 use utoipa::ToSchema;
 
 use crate::{
-    output::OutputFormat, sources::parquet_format::SuperParquetFormat, super_typing::super_type_schema,
+    output::OutputFormat,
+    sources::{parquet_format::SuperParquetFormat, DataSource},
+    super_typing::super_type_schema,
 };
 
 pub mod parser;
@@ -86,6 +89,22 @@ pub enum PathType {
     Path(String),
 }
 
+impl TryInto<Vec<ListingTableUrl>> for &PathType {
+    type Error = anyhow::Error;
+
+    fn try_into(self) -> Result<Vec<ListingTableUrl>, Self::Error> {
+        match self {
+            PathType::ManyPaths(items) => Ok(items
+                .into_iter()
+                .map(|path| ListingTableUrl::parse(&path).map_err(anyhow::Error::msg))
+                .collect::<anyhow::Result<_>>()?),
+            PathType::Path(path) => Ok(vec![
+                ListingTableUrl::parse(&path).map_err(anyhow::Error::msg)?
+            ]),
+        }
+    }
+}
+
 impl From {
     pub async fn init_builder(
         &self,
@@ -93,45 +112,19 @@ impl From {
     ) -> anyhow::Result<LogicalPlanBuilder> {
         match self {
             From::Parquet { path } => {
-                let paths = match path {
-                    PathType::ManyPaths(items) => items.clone(),
-                    PathType::Path(path) => vec![path.clone()],
-                };
-                let session_state = session_ctx.state();
+                let table_urls: Vec<ListingTableUrl> = path.try_into()?;
+                let source = DataSource::new(
+                    &session_ctx.state(),
+                    Arc::new(SuperParquetFormat::new()),
+                    table_urls,
+                )
+                .await?;
 
-                let listing_options = ListingOptions::new(Arc::new(SuperParquetFormat::new()));
+                let source = provider_as_source(Arc::new(source));
 
-                let table_urls = paths
-                    .iter()
-                    .map(|path| ListingTableUrl::parse(path).unwrap())
-                    .collect::<Vec<_>>();
+                LogicalPlanBuilder::scan("parquet_table", source, projection)
 
-                // LogicalPlanBuilder::copy_to(input, output_url, file_type, options, partition_by)
-
-                let mut schemas = vec![];
-                for table_url in &table_urls {
-                    let schema = listing_options
-                        .infer_schema(&session_state, table_url)
-                        .await?;
-                    schemas.push(schema);
-                }
-
-                let super_schema = Arc::new(
-                    super_type_schema(&schemas)
-                        .map_err(|e| anyhow::anyhow!("Failed to super type schema: {}", e))?,
-                );
-
-                let config = ListingTableConfig::new_with_multi_paths(table_urls)
-                    .with_listing_options(listing_options)
-                    .with_schema(super_schema);
-
-                let table = ListingTable::try_new(config).unwrap();
-
-                let plan = session_ctx
-                    .read_table(Arc::new(table))?
-                    .into_unoptimized_plan();
-
-                Ok(LogicalPlanBuilder::new(plan))
+                todo!()
             }
             From::Csv {
                 path,

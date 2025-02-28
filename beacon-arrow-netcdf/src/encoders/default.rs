@@ -11,7 +11,7 @@ use crate::NcChar;
 use super::Encoder;
 
 pub struct DefaultEncoder {
-    nc_file: Rc<RefCell<FileMut>>,
+    nc_file: FileMut,
     schema: SchemaRef,
     offsets: HashMap<String, usize>,
 }
@@ -129,7 +129,7 @@ impl DefaultEncoder {
     ) -> anyhow::Result<()> {
         let mut extents = vec![offset..offset + array.len()];
 
-        let mut nc_file = self.nc_file.borrow_mut();
+        let nc_file = &mut self.nc_file;
         let mut variable = nc_file.variable_mut(var_name).expect("Variable not found");
 
         match array.data_type() {
@@ -228,17 +228,15 @@ impl DefaultEncoder {
 }
 
 impl Encoder for DefaultEncoder {
-    fn create(nc_file: Rc<RefCell<FileMut>>, schema: SchemaRef) -> anyhow::Result<Self>
+    fn create(mut nc_file: FileMut, schema: SchemaRef) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
         //Add unlimited dimension to append data as it comes
-        nc_file
-            .borrow_mut()
-            .add_unlimited_dimension(Self::OBS_DIM_NAME)?;
+        nc_file.add_unlimited_dimension(Self::OBS_DIM_NAME)?;
 
         for field in schema.fields() {
-            Self::define_variable(&mut nc_file.borrow_mut(), field)?;
+            Self::define_variable(&mut nc_file, field)?;
         }
 
         let offsets = schema

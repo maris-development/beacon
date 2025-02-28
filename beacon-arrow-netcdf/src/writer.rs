@@ -19,17 +19,16 @@ use tempfile::SpooledTempFile;
 use crate::encoders::Encoder;
 
 pub struct Writer<E: Encoder> {
-    nc_file: Rc<RefCell<netcdf::FileMut>>,
     encoder: E,
 }
 
 impl<E: Encoder> Writer<E> {
     pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
-        let nc_file = Rc::new(RefCell::new(netcdf::create(path)?));
+        let nc_file = netcdf::create(path)?;
 
-        let encoder = E::create(nc_file.clone(), schema)?;
+        let encoder = E::create(nc_file, schema)?;
 
-        Ok(Self { nc_file, encoder })
+        Ok(Self { encoder })
     }
 
     pub fn write_record_batch(
@@ -52,7 +51,8 @@ pub struct ArrowRecordBatchWriter<E: Encoder> {
 impl<E: Encoder> ArrowRecordBatchWriter<E> {
     pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = SpooledTempFile::new(256_000_000);
+        // 256 MB spooled temp file
+        let file = SpooledTempFile::new(256 * 1024 * 1024);
         let writer = FileWriter::try_new(file, &schema)?;
         let mut fixed_string_sizes = HashMap::new();
 

@@ -1,10 +1,15 @@
-use std::{any::Any, fmt::Formatter, sync::Arc};
+use std::{
+    any::Any,
+    fmt::Formatter,
+    sync::{Arc, Mutex},
+};
 
 use arrow::{
     datatypes::{Schema, SchemaRef},
     error::ArrowError,
 };
 use async_stream::{stream, try_stream};
+use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
 use datafusion::{
     common::Statistics,
     datasource::{
@@ -23,6 +28,7 @@ use datafusion::{
     },
     prelude::Expr,
 };
+use futures::{pin_mut, StreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::super_typing;
@@ -229,6 +235,7 @@ impl ExecutionPlan for NetCDFExec {
 
 pub struct NetCDFSink {
     sink_conf: FileSinkConfig,
+    nc_writer: Arc<Mutex<beacon_arrow_netcdf::writer::ArrowRecordBatchWriter<DefaultEncoder>>>,
 }
 
 impl std::fmt::Debug for NetCDFSink {
@@ -256,8 +263,24 @@ impl DataSink for NetCDFSink {
     async fn write_all(
         &self,
         data: SendableRecordBatchStream,
-        context: &Arc<TaskContext>,
+        _context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
-        todo!()
+        pin_mut!(data);
+        while let Some(batch) = data.next().await {
+            let batch = batch?;
+            self.nc_writer
+                .lock()
+                .unwrap()
+                .write_record_batch(batch)
+                .expect("write_record_batch failed");
+        }
+
+        self.nc_writer
+            .lock()
+            .unwrap()
+            .finish()
+            .expect("finish failed");
+
+        Ok(0)
     }
 }
