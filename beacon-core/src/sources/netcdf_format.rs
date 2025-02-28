@@ -11,7 +11,7 @@ use arrow::{
 use async_stream::{stream, try_stream};
 use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
 use datafusion::{
-    common::Statistics,
+    common::{not_impl_err, Statistics},
     datasource::{
         file_format::{
             file_compression_type::FileCompressionType, FileFormat, FilePushdownSupport,
@@ -20,11 +20,14 @@ use datafusion::{
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
     execution::{SendableRecordBatchStream, SessionState, TaskContext},
+    logical_expr::dml::InsertOp,
     physical_expr::{EquivalenceProperties, LexRequirement},
     physical_plan::{
-        insert::DataSink, memory::MemoryStream, metrics::MetricsSet,
-        stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan,
-        PhysicalExpr, PlanProperties,
+        insert::{DataSink, DataSinkExec},
+        memory::MemoryStream,
+        metrics::MetricsSet,
+        stream::RecordBatchStreamAdapter,
+        DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
     },
     prelude::Expr,
 };
@@ -114,7 +117,29 @@ impl FileFormat for NetCDFFormat {
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        todo!()
+        if conf.insert_op != InsertOp::Append {
+            return not_impl_err!("Only Append is supported");
+        }
+        let file_path = conf.table_paths.get(0).unwrap().to_string();
+
+        let sink_schema = Arc::clone(conf.output_schema());
+        let sink = Arc::new(NetCDFSink {
+            sink_conf: conf,
+            nc_writer: Arc::new(Mutex::new(
+                beacon_arrow_netcdf::writer::ArrowRecordBatchWriter::new(
+                    file_path,
+                    sink_schema.clone(),
+                )
+                .expect("ArrowRecordBatchWriter::new failed"),
+            )),
+        });
+
+        Ok(Arc::new(DataSinkExec::new(
+            input,
+            sink,
+            sink_schema,
+            order_requirements,
+        )))
     }
 }
 

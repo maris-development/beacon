@@ -5,7 +5,8 @@ use datafusion::{
     datasource::{
         file_format::format_as_file_type,
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
-        physical_plan::{parquet::ParquetExecBuilder, FileScanConfig}, provider_as_source,
+        physical_plan::{parquet::ParquetExecBuilder, FileScanConfig},
+        provider_as_source,
     },
     execution::{
         object_store::ObjectStoreUrl,
@@ -18,7 +19,7 @@ use utoipa::ToSchema;
 
 use crate::{
     output::OutputFormat,
-    sources::{parquet_format::SuperParquetFormat, DataSource},
+    sources::{arrow_format::SuperArrowFormat, parquet_format::SuperParquetFormat, DataSource},
     super_typing::super_type_schema,
 };
 
@@ -122,9 +123,24 @@ impl From {
 
                 let source = provider_as_source(Arc::new(source));
 
-                LogicalPlanBuilder::scan("parquet_table", source, projection)
+                let plan_builder = LogicalPlanBuilder::scan("parquet_table", source, None)?;
 
-                todo!()
+                Ok(plan_builder)
+            }
+            From::ArrowIpc { path } => {
+                let table_urls: Vec<ListingTableUrl> = path.try_into()?;
+                let source = DataSource::new(
+                    &session_ctx.state(),
+                    Arc::new(SuperArrowFormat::new()),
+                    table_urls,
+                )
+                .await?;
+
+                let source = provider_as_source(Arc::new(source));
+
+                let plan_builder = LogicalPlanBuilder::scan("parquet_table", source, None)?;
+
+                Ok(plan_builder)
             }
             From::Csv {
                 path,
@@ -141,18 +157,6 @@ impl From {
                 Ok(LogicalPlanBuilder::new(
                     session_ctx
                         .read_csv(paths, options)
-                        .await?
-                        .into_unoptimized_plan(),
-                ))
-            }
-            From::ArrowIpc { path } => {
-                let path = match path {
-                    PathType::ManyPaths(items) => items.clone(),
-                    PathType::Path(path) => vec![path.clone()],
-                };
-                Ok(LogicalPlanBuilder::new(
-                    session_ctx
-                        .read_arrow(path, ArrowReadOptions::default())
                         .await?
                         .into_unoptimized_plan(),
                 ))

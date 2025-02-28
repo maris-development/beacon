@@ -1,11 +1,10 @@
-use std::{collections::HashMap, io::Write, sync::Arc};
+use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Schema};
 use datafusion::{
     config::CsvOptions,
     dataframe::DataFrameWriteOptions,
     logical_expr::SortExpr,
-    parquet::data_type,
     prelude::{col, lit, DataFrame, Expr, SessionContext},
 };
 use serde::{Deserialize, Serialize};

@@ -26,7 +26,7 @@ impl FileFormat for OdvFormat {
 
     /// Returns the extension for this FileFormat, e.g. "file.csv" -> csv
     fn get_ext(&self) -> String {
-        "nc".to_string()
+        "txt".to_string()
     }
 
     /// Returns the extension for this FileFormat when compressed, e.g. "file.csv.gz" -> csv
@@ -34,7 +34,7 @@ impl FileFormat for OdvFormat {
         &self,
         _file_compression_type: &FileCompressionType,
     ) -> datafusion::error::Result<String> {
-        Ok("nc".to_string())
+        Ok("txt".to_string())
     }
 
     /// Infer the common schema of the provided objects. The objects will usually

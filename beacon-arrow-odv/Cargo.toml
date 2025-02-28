@@ -1,0 +1,15 @@
+[package]
+name = "beacon-arrow-odv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace=true}
+tokio = { workspace = true }
+indexmap = { workspace = true }
+arrow = { workspace=true}
+arrow-csv = "53.3.0"
+anyhow = { workspace=true}
+async-trait = { workspace=true}
+futures = { workspace=true}
+futures-util = { workspace=true}

@@ -24,6 +24,14 @@ pub struct SuperArrowFormat {
     inner_format: ArrowFormat,
 }
 
+impl SuperArrowFormat {
+    pub fn new() -> Self {
+        Self {
+            inner_format: ArrowFormat::default(),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl FileFormat for SuperArrowFormat {
     /// Returns the table provider as [`Any`](std::any::Any) so that it can be
