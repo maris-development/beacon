@@ -9,11 +9,11 @@ use axum::{
     routing::get,
     Router,
 };
-use beacon_core::runtime::Runtime;
+use beacon_core::{query::Query, runtime::Runtime};
 use client::setup_client_router;
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
-use tracing::{field::Empty, info_span, Span};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::{field::Empty, info_span, Level, Span};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, FmtSubscriber};
 use utoipa_scalar::{Scalar, Servable};
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -37,11 +37,11 @@ fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::
     openapi
 }
 
-#[derive(Debug, Clone)]
-struct Test {}
-
 #[tokio::main(worker_threads = 8)]
 async fn main() -> anyhow::Result<()> {
+    setup_tracing();
+
+    tracing::info!("Beacon API v{}", BEACON_VERSION);
     let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new()?);
 
     let (client_router, mut api_docs_client) = setup_client_router();
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(Scalar::with_url("/scalar/", api_docs_client.clone()))
         .route("/scalar", get(|| async { Redirect::to("/scalar/") }))
         .merge(SwaggerUi::new("/swagger").url("/api/openapi.json", api_docs_client.clone()))
-        .with_state::<_>(beacon_runtime);
+        .with_state::<_>(beacon_runtime.clone());
 
     let addr = std::net::SocketAddr::new(
         IpAddr::from_str(&beacon_config::CONFIG.host)
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         beacon_config::CONFIG.port,
     );
 
-    router = setup_tracing(router);
+    router = setup_tracing_router(router);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -78,17 +78,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn setup_tracing<T>(mut router: Router<T>) -> Router<T>
-where
-    T: Send + Sync + Clone + 'static,
-{
+fn setup_tracing() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 // axum logs rejections from built-in extractors with the `axum::rejection`
                 // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
                 format!(
-                    "{}=debug,tower_http=debug,axum::rejection=trace",
+                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug",
                     env!("CARGO_CRATE_NAME")
                 )
                 .into()
@@ -96,7 +93,12 @@ where
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+}
 
+fn setup_tracing_router<T>(mut router: Router<T>) -> Router<T>
+where
+    T: Send + Sync + Clone + 'static,
+{
     router = router.layer(
         TraceLayer::new_for_http()
             .make_span_with(|request: &Request<_>| {

@@ -38,6 +38,7 @@ impl DataSource {
 
         let mut schemas = vec![];
         for table_url in &table_urls {
+            tracing::debug!("Infer schema for table: {}", table_url);
             let schema = listing_options
                 .infer_schema(&session_state, table_url)
                 .await?;

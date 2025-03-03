@@ -19,4 +19,9 @@ impl Runtime {
         let output = self.virtual_machine.run_plan(plan, &query.output).await?;
         Ok(output)
     }
+
+    pub fn test(&self) {
+        tracing::info!("test");
+        println!("test");
+    }
 }

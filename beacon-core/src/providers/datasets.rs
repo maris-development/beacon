@@ -33,7 +33,7 @@ pub struct DatasetsProvider {
 
 impl DatasetsProvider {
     pub fn new() -> Self {
-        let dir = PathBuf::from(beacon_config::CONFIG.datasets_dir.clone());
+        let dir = PathBuf::from("./data/datasets");
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("filename", DataType::Utf8, false),

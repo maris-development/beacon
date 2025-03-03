@@ -59,3 +59,13 @@ impl OutputFormat {
         }
     }
 }
+
+pub fn create_temp_file(prefix: &str, suffix: &str) -> anyhow::Result<NamedTempFile> {
+    let temp_dir = beacon_config::DATA_DIR.join(beacon_config::TMP_DIR_PATH.as_path());
+    println!("temp_dir: {:?}", temp_dir);
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(suffix)
+        .tempfile_in(temp_dir)
+        .map_err(Into::into)
+}

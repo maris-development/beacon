@@ -38,7 +38,7 @@ impl TableFunctionImpl for NetCDFDataFunction {
         //Get the string literal from the argument
         match &args[0] {
             datafusion::prelude::Expr::Literal(ScalarValue::Utf8(Some(path))) => {
-                let paths = find_in(&path, beacon_config::CONFIG.datasets_dir.clone())
+                let paths = find_in(&path, "./data/datasets")
                     .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
                 let provider = NetCDFDataProvider::new(paths)

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::format, path::Path, sync::Arc};
 
 use datafusion::{
     common::Column,
@@ -8,6 +8,7 @@ use datafusion::{
     logical_expr::{LogicalPlanBuilder, SortExpr},
     prelude::{col, lit, CsvReadOptions, Expr, SessionContext},
 };
+use object_store::{local::LocalFileSystem, ObjectStore};
 use utoipa::ToSchema;
 
 use crate::{
@@ -99,13 +100,13 @@ impl Select {
 #[serde(deny_unknown_fields)]
 pub enum From {
     Parquet {
-        path: PathType,
+        path: FileSystemPath,
     },
     ArrowIpc {
-        path: PathType,
+        path: FileSystemPath,
     },
     Csv {
-        path: PathType,
+        path: FileSystemPath,
         delimiter: Option<char>,
         header: Option<bool>,
     },
@@ -114,23 +115,40 @@ pub enum From {
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 #[serde(deny_unknown_fields)]
-pub enum PathType {
+pub enum FileSystemPath {
     ManyPaths(Vec<String>),
     Path(String),
 }
 
-impl TryInto<Vec<ListingTableUrl>> for &PathType {
+impl FileSystemPath {
+    pub fn parse_to_url<P: AsRef<Path>>(path: P) -> anyhow::Result<ListingTableUrl> {
+        let table_url =
+            ListingTableUrl::parse(&format!("/datasets/{}", path.as_ref().to_string_lossy()))?;
+        if table_url
+            .prefix()
+            .prefix_matches(&beacon_config::DATASETS_DIR_PREFIX)
+        {
+            Ok(table_url)
+        } else {
+            Err(anyhow::anyhow!(
+                "Path {} is not within the datasets directory.",
+                table_url.as_str()
+            ))
+        }
+    }
+}
+
+impl TryInto<Vec<ListingTableUrl>> for &FileSystemPath {
     type Error = anyhow::Error;
 
     fn try_into(self) -> Result<Vec<ListingTableUrl>, Self::Error> {
         match self {
-            PathType::ManyPaths(items) => Ok(items
+            FileSystemPath::ManyPaths(items) => Ok(items
                 .into_iter()
-                .map(|path| ListingTableUrl::parse(&path).map_err(anyhow::Error::msg))
+                .map(|path| FileSystemPath::parse_to_url(path))
                 .collect::<anyhow::Result<_>>()?),
-            PathType::Path(path) => Ok(vec![
-                ListingTableUrl::parse(&path).map_err(anyhow::Error::msg)?
-            ]),
+            FileSystemPath::Path(path) => Ok(vec![FileSystemPath::parse_to_url(path)
+                .map_err(|e| anyhow::anyhow!("Failed to parse path: {}", e))?]),
         }
     }
 }
@@ -180,8 +198,8 @@ impl From {
                     .delimiter_option(delimiter.map(|d| d as u8))
                     .has_header(header.unwrap_or(true));
                 let paths = match path {
-                    PathType::ManyPaths(items) => items.clone(),
-                    PathType::Path(path) => vec![path.clone()],
+                    FileSystemPath::ManyPaths(items) => items.clone(),
+                    FileSystemPath::Path(path) => vec![path.clone()],
                 };
                 Ok(LogicalPlanBuilder::new(
                     session_ctx

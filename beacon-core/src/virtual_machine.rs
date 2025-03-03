@@ -2,11 +2,15 @@ use std::sync::Arc;
 
 use datafusion::{
     execution::{
-        disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, runtime_env::RuntimeEnvBuilder,
+        disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, object_store::ObjectStoreUrl,
+        runtime_env::RuntimeEnvBuilder,
     },
     logical_expr::LogicalPlan,
     prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
 };
+use futures::StreamExt;
+use object_store::{local::LocalFileSystem, ObjectStore};
+use tracing::{event, Level};
 
 use crate::{
     output::{Output, OutputFormat},
@@ -59,6 +63,10 @@ impl VirtualMachine {
                 .register_udtf(schema_function.name(), schema_function.function().clone());
         }
 
+        session_context.register_object_store(
+            ObjectStoreUrl::parse("file://").unwrap().as_ref(),
+            beacon_config::OBJECT_STORE_LOCAL_FS.clone(),
+        );
         session_context.register_udtf("datasets", Arc::new(DatasetsProviderFunction));
 
         Ok(Arc::new(session_context))

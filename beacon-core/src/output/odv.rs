@@ -8,11 +8,7 @@ use datafusion::{
     logical_expr::SortExpr,
     prelude::{col, lit, DataFrame, Expr, SessionContext},
 };
-use futures::{pin_mut, StreamExt};
-use serde::{Deserialize, Serialize};
-use tempfile::tempdir;
-use tokio::io::AsyncWriteExt;
-use utoipa::ToSchema;
+use futures::StreamExt;
 
 use super::{Output, OutputMethod};
 
