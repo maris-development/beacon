@@ -45,7 +45,7 @@ pub enum OutputFormat {
     Ipc,
     Parquet,
     Json,
-    Odv { options: odv::Options },
+    Odv,
 }
 
 impl OutputFormat {
@@ -55,7 +55,7 @@ impl OutputFormat {
             OutputFormat::Ipc => ipc::output(ctx, df).await,
             OutputFormat::Parquet => parquet::output(df).await,
             OutputFormat::Json => json::output(df).await,
-            OutputFormat::Odv { options } => odv::output(ctx.clone(), df, options.clone()).await,
+            OutputFormat::Odv => odv::output(ctx.clone(), df).await,
         }
     }
 }

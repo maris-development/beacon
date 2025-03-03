@@ -117,29 +117,7 @@ impl FileFormat for NetCDFFormat {
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        if conf.insert_op != InsertOp::Append {
-            return not_impl_err!("Only Append is supported");
-        }
-        let file_path = conf.table_paths.get(0).unwrap().to_string();
-
-        let sink_schema = Arc::clone(conf.output_schema());
-        let sink = Arc::new(NetCDFSink {
-            sink_conf: conf,
-            nc_writer: Arc::new(Mutex::new(
-                beacon_arrow_netcdf::writer::ArrowRecordBatchWriter::new(
-                    file_path,
-                    sink_schema.clone(),
-                )
-                .expect("ArrowRecordBatchWriter::new failed"),
-            )),
-        });
-
-        Ok(Arc::new(DataSinkExec::new(
-            input,
-            sink,
-            sink_schema,
-            order_requirements,
-        )))
+        not_impl_err!("create_writer_physical_plan")
     }
 }
 
@@ -255,57 +233,5 @@ impl ExecutionPlan for NetCDFExec {
         _context: Arc<TaskContext>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         Ok(self.read_partition(partition))
-    }
-}
-
-pub struct NetCDFSink {
-    sink_conf: FileSinkConfig,
-    nc_writer: Arc<Mutex<beacon_arrow_netcdf::writer::ArrowRecordBatchWriter<DefaultEncoder>>>,
-}
-
-impl std::fmt::Debug for NetCDFSink {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CsvSink").finish()
-    }
-}
-
-impl DisplayAs for NetCDFSink {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "NetCDFSink")
-    }
-}
-
-#[async_trait::async_trait]
-impl DataSink for NetCDFSink {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn metrics(&self) -> Option<MetricsSet> {
-        None
-    }
-
-    async fn write_all(
-        &self,
-        data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
-    ) -> datafusion::error::Result<u64> {
-        pin_mut!(data);
-        while let Some(batch) = data.next().await {
-            let batch = batch?;
-            self.nc_writer
-                .lock()
-                .unwrap()
-                .write_record_batch(batch)
-                .expect("write_record_batch failed");
-        }
-
-        self.nc_writer
-            .lock()
-            .unwrap()
-            .finish()
-            .expect("finish failed");
-
-        Ok(0)
     }
 }

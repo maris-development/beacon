@@ -2,25 +2,17 @@ use std::sync::Arc;
 
 use datafusion::{
     common::Column,
-    datasource::{
-        file_format::format_as_file_type,
-        listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
-        physical_plan::{parquet::ParquetExecBuilder, FileScanConfig},
-        provider_as_source,
-    },
-    execution::{
-        object_store::ObjectStoreUrl,
-        options::{ArrowReadOptions, ReadOptions},
-    },
+    datasource::{listing::ListingTableUrl, provider_as_source},
+    execution::SessionState,
+    functions::string::concat,
     logical_expr::{LogicalPlanBuilder, SortExpr},
-    prelude::{col, lit, CsvReadOptions, Expr, ParquetReadOptions, SessionContext},
+    prelude::{col, lit, CsvReadOptions, Expr, SessionContext},
 };
 use utoipa::ToSchema;
 
 use crate::{
     output::OutputFormat,
     sources::{arrow_format::SuperArrowFormat, parquet_format::SuperParquetFormat, DataSource},
-    super_typing::super_type_schema,
 };
 
 pub mod parser;
@@ -42,8 +34,9 @@ pub enum InnerQuery {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(deny_unknown_fields)]
 pub struct QueryBody {
+    #[serde(alias = "query_parameters")]
     select: Vec<Select>,
     filter: Option<Filter>,
     from: From,
@@ -52,23 +45,58 @@ pub struct QueryBody {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub struct Select {
-    pub column: String,
-    pub alias: Option<String>,
+#[serde(untagged)]
+pub enum Select {
+    Column {
+        #[serde(alias = "column_name")]
+        column: String,
+        alias: Option<String>,
+    },
+    Function {
+        function: String,
+        args: Vec<Select>,
+        alias: String,
+    },
 }
 
 impl Select {
-    pub fn to_expr(&self) -> Expr {
-        match &self.alias {
-            Some(alias) => col(Column::from_qualified_name_ignore_case(&self.column)).alias(alias),
-            None => col(Column::from_qualified_name_ignore_case(&self.column)),
+    pub fn to_expr(&self, session_state: &SessionState) -> anyhow::Result<Expr> {
+        match self {
+            Select::Column { column, alias } => match alias {
+                Some(alias) => {
+                    Ok(col(Column::from_qualified_name_ignore_case(column)).alias(alias))
+                }
+                None => Ok(col(Column::from_qualified_name_ignore_case(column))),
+            },
+            Select::Function {
+                function,
+                args,
+                alias,
+            } => {
+                let function = session_state
+                    .scalar_functions()
+                    .get(function)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Function {} not found in the registry.", function)
+                    })?
+                    .clone();
+
+                let args = args
+                    .iter()
+                    .map(|arg| arg.to_expr(session_state))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+
+                let expr = function.call(args);
+
+                Ok(expr.alias(alias))
+            }
         }
     }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
+#[serde(deny_unknown_fields)]
 pub enum From {
     Parquet {
         path: PathType,
@@ -85,6 +113,7 @@ pub enum From {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
+#[serde(deny_unknown_fields)]
 pub enum PathType {
     ManyPaths(Vec<String>),
     Path(String),
@@ -166,11 +195,17 @@ impl From {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Filter {
+    #[serde(alias = "is_null", alias = "is_missing")]
     IsNull {
         column: String,
     },
+    #[serde(
+        alias = "is_not_null",
+        alias = "skip_fill_values",
+        alias = "skip_missing"
+    )]
     IsNotNull {
         column: String,
     },
@@ -230,14 +265,16 @@ impl Filter {
             Filter::Range { column, filter } => filter
                 .to_expr(Self::column_name(column))
                 .ok_or_else(|| anyhow::anyhow!("Invalid range filter expression."))?,
-            Filter::GreaterThan { column, filter } => filter.to_expr(col(column)),
-            Filter::GreaterThanOrEqual { column, filter } => filter.to_expr(col(column)),
-            Filter::LessThan { column, filter } => filter.to_expr(col(column)),
-            Filter::LessThanOrEqual { column, filter } => filter.to_expr(col(column)),
-            Filter::Equality { column, filter } => filter.to_expr(col(column)),
-            Filter::NotEqual { column, filter } => filter.to_expr(col(column)),
-            Filter::IsNull { column } => col(column).is_null(),
-            Filter::IsNotNull { column } => col(column).is_not_null(),
+            Filter::GreaterThan { column, filter } => filter.to_expr(Self::column_name(column)),
+            Filter::GreaterThanOrEqual { column, filter } => {
+                filter.to_expr(Self::column_name(column))
+            }
+            Filter::LessThan { column, filter } => filter.to_expr(Self::column_name(column)),
+            Filter::LessThanOrEqual { column, filter } => filter.to_expr(Self::column_name(column)),
+            Filter::Equality { column, filter } => filter.to_expr(Self::column_name(column)),
+            Filter::NotEqual { column, filter } => filter.to_expr(Self::column_name(column)),
+            Filter::IsNull { column } => Self::column_name(column).is_null(),
+            Filter::IsNotNull { column } => Self::column_name(column).is_not_null(),
             Filter::And(filters) => filters
                 .iter()
                 .map(|f| f.to_expr())
@@ -399,4 +436,20 @@ impl Sort {
             Sort::Desc(column) => SortExpr::new(col(column), false, false),
         }
     }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub enum CopyTo {
+    #[serde(alias = "csv")]
+    Csv,
+    #[serde(alias = "parquet")]
+    Parquet,
+    #[serde(alias = "arrow")]
+    ArrowIpc,
+    #[serde(alias = "json")]
+    Json,
+    #[serde(alias = "odv")]
+    Odv,
+    #[serde(alias = "netcdf")]
+    NetCDF,
 }

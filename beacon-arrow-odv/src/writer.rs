@@ -1,64 +1,154 @@
 use std::{
     io::Write,
-    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use arrow::{
-    array::RecordBatch,
+    array::{Array, RecordBatch},
     datatypes::{DataType, Field, Schema, SchemaRef},
-    record_batch,
 };
-use tokio::io::AsyncWriteExt;
-
+/// Information about a column in ODV format
+///
+/// This struct contains metadata about how a data column should be formatted and written in ODV output,
+/// including its label, comments, precision, quality flags, and units.
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
+    /// The name/label of the column
     pub label: String,
+    /// Optional descriptive comment about the column's contents
     pub comment: Option<String>,
+    /// Number of significant digits to use when writing numeric values
     pub significant_digits: Option<u32>,
-    pub qf_schema: Option<String>,
+    /// Name of an optional quality flag column associated with this data column
     pub qf_column: Option<String>,
+    /// Physical units of the column values (e.g. "degrees_C", "PSU")
+    pub units: Option<String>,
 }
 
+/// Configuration options for ODV output
+///
+/// This struct contains all the configuration needed to properly format data for ODV output,
+/// including column specifications and mappings.
 #[derive(Debug, Clone)]
 pub struct OdvOptions {
+    /// Specification for the longitude column
     pub longitude_column: ColumnInfo,
+    /// Specification for the latitude column
     pub latitude_column: ColumnInfo,
+    /// Specification for the depth/pressure column
     pub depth_column: ColumnInfo,
+    /// Name of the column containing timestamp data
     pub time_column: String,
+    /// Name of the column containing cruise/deployment identifiers
     pub key_column: String,
+    /// Quality flag schema identifier
     pub qf_schema: String,
+    /// Specifications for data value columns
     pub data_columns: Vec<ColumnInfo>,
+    /// Specifications for metadata columns
     pub meta_columns: Vec<ColumnInfo>,
 }
 
 impl OdvOptions {
+    pub fn try_from_arrow_schema(schema: SchemaRef) -> anyhow::Result<Self> {
+        let mut options = Self::default();
+
+        let columns: indexmap::IndexMap<String, Arc<Field>> = schema
+            .fields()
+            .iter()
+            .map(|field| (field.name().to_lowercase(), field.clone()))
+            .collect();
+
+        for (column, field) in &columns {
+            if !column.ends_with("_qc") && !column.ends_with("_qf") {
+                if column != &options.depth_column.label.to_lowercase()
+                    && column != &options.time_column.to_lowercase()
+                    && column != &options.latitude_column.label.to_lowercase()
+                    && column != &options.longitude_column.label.to_lowercase()
+                    && column != &options.key_column.to_lowercase()
+                {
+                    // Assume its a metadata column
+                    let mut column_info = ColumnInfo {
+                        label: field.name().clone(),
+                        comment: None,
+                        significant_digits: None,
+                        qf_column: None,
+                        units: None,
+                    };
+
+                    //Check if we can find a quality flag column for this data column
+                    let expected_qf_col_names =
+                        vec![format!("{}_qf", column), format!("{}_qc", column)];
+
+                    for qf_col_name in expected_qf_col_names {
+                        if let Some(qf_field) = columns.get(&qf_col_name) {
+                            column_info.qf_column = Some(qf_field.name().to_string());
+                            break;
+                        }
+                    }
+
+                    if column_info.qf_column.is_some() {
+                        options.data_columns.push(column_info);
+                    } else {
+                        options.meta_columns.push(column_info);
+                    }
+                }
+            }
+        }
+
+        Ok(options)
+    }
+
+    /// Sets the longitude column specification
+    ///
+    /// # Arguments
+    /// * `column` - Column info for longitude values
     pub fn with_longitude_column(mut self, column: ColumnInfo) -> Self {
         self.longitude_column = column;
         self
     }
 
+    /// Sets the latitude column specification
+    ///
+    /// # Arguments
+    /// * `column` - Column info for latitude values
     pub fn with_latitude_column(mut self, column: ColumnInfo) -> Self {
         self.latitude_column = column;
         self
     }
 
+    /// Sets the depth column specification
+    ///
+    /// # Arguments
+    /// * `column` - Column info for depth/pressure values
     pub fn with_depth_column(mut self, column: ColumnInfo) -> Self {
         self.depth_column = column;
         self
     }
 
+    /// Sets the time column name
+    ///
+    /// # Arguments
+    /// * `column` - Name of column containing timestamps
     pub fn with_time_column(mut self, column: String) -> Self {
         self.time_column = column;
         self
     }
 
+    /// Sets the key column name
+    ///
+    /// # Arguments
+    /// * `column` - Name of column containing cruise/deployment IDs
     pub fn with_key_column(mut self, column: String) -> Self {
         self.key_column = column;
         self
     }
 
+    /// Sets the quality flag schema
+    ///
+    /// # Arguments
+    /// * `schema` - Quality flag schema identifier
     pub fn with_qf_schema(mut self, schema: String) -> Self {
         self.qf_schema = schema;
         self
@@ -68,29 +158,29 @@ impl OdvOptions {
 impl Default for OdvOptions {
     fn default() -> Self {
         Self {
-            time_column: "TIME".to_string(),
-            key_column: "CRUISE".to_string(),
-            qf_schema: "".to_string(),
+            time_column: "yyyy-MM-ddTHH:mm:ss.SSS".to_string(),
+            key_column: "Cruise".to_string(),
+            qf_schema: "SEADATANET".to_string(),
             depth_column: ColumnInfo {
-                label: "DEPTH".to_string(),
+                label: "Depth [m]".to_string(),
                 comment: None,
                 significant_digits: None,
-                qf_schema: None,
                 qf_column: None,
+                units: None,
             },
             latitude_column: ColumnInfo {
-                label: "LATITUDE".to_string(),
+                label: "Latitude [degrees north]".to_string(),
                 comment: None,
                 significant_digits: None,
-                qf_schema: None,
                 qf_column: None,
+                units: None,
             },
             longitude_column: ColumnInfo {
-                label: "LONGITUDE".to_string(),
+                label: "Longitude [degrees east]".to_string(),
                 comment: None,
                 significant_digits: None,
-                qf_schema: None,
                 qf_column: None,
+                units: None,
             },
             data_columns: vec![],
             meta_columns: vec![],
@@ -98,48 +188,374 @@ impl Default for OdvOptions {
     }
 }
 
+/// Asynchronous writer for ODV formatted data files
+///
+/// This struct handles writing data in ODV format, automatically classifying data into different ODV types
+/// (profiles, time series, trajectories) and writing to appropriate output files.
 pub struct AsyncOdvWriter {
+    /// Configuration options for ODV output
     options: OdvOptions,
+    /// Output directory path
     directory: PathBuf,
+    /// File for writing records that cannot be clearly classified
     error_file: OdvFile<Error>,
+    /// File for writing time series data
     timeseries_file: OdvFile<TimeSeries>,
+    /// File for writing profile data
     profile_file: OdvFile<Profiles>,
+    /// File for writing trajectory data
     trajectory_file: OdvFile<Trajectories>,
 }
 
 impl AsyncOdvWriter {
-    pub async fn new<P: AsRef<Path>>(options: OdvOptions, dir_path: P) -> anyhow::Result<Self> {
-        todo!()
+    /// Creates a new ODV writer instance
+    ///
+    /// # Arguments
+    /// * `options` - Configuration options for ODV output
+    /// * `input_schema` - Schema of the input data
+    /// * `dir_path` - Directory where ODV files will be written
+    ///
+    /// # Returns
+    /// Result containing new AsyncOdvWriter or error if creation fails
+    pub async fn new<P: AsRef<Path>>(
+        options: OdvOptions,
+        input_schema: SchemaRef,
+        dir_path: P,
+    ) -> anyhow::Result<Self> {
+        //Create the directory if it does not exist
+        let dir_path = dir_path.as_ref();
+        if !dir_path.exists() {
+            std::fs::create_dir_all(dir_path)?;
+        }
+
+        let error_file =
+            OdvFile::<Error>::new(dir_path.join("error.txt"), &options, input_schema.clone())?;
+
+        let timeseries_file = OdvFile::<TimeSeries>::new(
+            dir_path.join("timeseries.txt"),
+            &options,
+            input_schema.clone(),
+        )?;
+
+        let profile_file =
+            OdvFile::<Profiles>::new(dir_path.join("profile.txt"), &options, input_schema.clone())?;
+
+        let trajectory_file = OdvFile::<Trajectories>::new(
+            dir_path.join("trajectory.txt"),
+            &options,
+            input_schema.clone(),
+        )?;
+
+        Ok(Self {
+            options,
+            directory: dir_path.to_path_buf(),
+            error_file,
+            timeseries_file,
+            profile_file,
+            trajectory_file,
+        })
     }
 
-    pub async fn write(&self, record_batch: RecordBatch) -> anyhow::Result<()> {
-        todo!()
+    /// Creates a compressed tar archive containing all ODV output files
+    ///
+    /// # Arguments
+    /// * `file_name` - Base name for the archive file
+    /// * `dir_path` - Directory where archive should be written
+    ///
+    /// # Returns
+    /// Result containing path to created archive or error if archival fails
+    pub fn finish_to_tar<W: Write>(&mut self, file: &mut W) -> anyhow::Result<()> {
+        let enc = zstd::Encoder::new(file, 0)
+            .map_err(|e| anyhow::anyhow!("Failed to create zstd encoder: {:?}", e))?;
+        let mut tar_builder = tar::Builder::new(enc);
+
+        tar_builder
+            .append_dir_all("", self.directory.as_path())
+            .map_err(|e| anyhow::anyhow!("Failed to append directory to tar archive: {:?}", e))?;
+
+        Ok(())
+    }
+
+    /// Writes a record batch of data in ODV format
+    ///
+    /// This method:
+    /// 1. Splits the batch by key values
+    /// 2. Classifies each sub-batch into an ODV type
+    /// 3. Writes to the appropriate output file
+    ///
+    /// # Arguments
+    /// * `record_batch` - Arrow record batch containing data to write
+    ///
+    /// # Returns
+    /// Result indicating success or error during writing
+    pub async fn write(&mut self, record_batch: RecordBatch) -> anyhow::Result<()> {
+        //Key batches
+        let key_batches = Self::key_batches(record_batch, &self.options)?;
+        let mut classified_batches = vec![];
+        for batch in key_batches {
+            let batch_type = Self::classify_batch(batch, &self.options)?;
+            classified_batches.push(batch_type);
+        }
+
+        for batch in classified_batches {
+            match batch {
+                OdvBatchType::Ambiguous(batch) => {
+                    self.error_file.write_batch(batch)?;
+                }
+                OdvBatchType::TimeSeries(batch) => {
+                    self.timeseries_file.write_batch(batch)?;
+                }
+                OdvBatchType::Profile(batch) => {
+                    self.profile_file.write_batch(batch)?;
+                }
+                OdvBatchType::Trajectory(batch) => {
+                    self.trajectory_file.write_batch(batch)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Splits a record batch into sub-batches based on key column values
+    ///
+    /// # Arguments
+    /// * `batch` - Record batch to split
+    /// * `odv_options` - ODV configuration options
+    ///
+    /// # Returns
+    /// Result containing vector of sub-batches or error if splitting fails
+    fn key_batches(
+        batch: RecordBatch,
+        odv_options: &OdvOptions,
+    ) -> anyhow::Result<Vec<RecordBatch>> {
+        let mut batches = vec![];
+
+        let key_array = batch
+            .column_by_name(&odv_options.key_column)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Key column '{}' not found in batch.",
+                    odv_options.key_column
+                )
+            })?;
+
+        let casted_array = arrow::compute::cast(key_array, &DataType::Utf8).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to cast key column '{}' to UTF-8: {:?}",
+                odv_options.key_column,
+                e
+            )
+        })?;
+
+        let ranges = arrow::compute::kernels::partition::partition(&[casted_array])
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to partition key column '{}': {:?}",
+                    odv_options.key_column,
+                    e
+                )
+            })?
+            .ranges();
+
+        for range in ranges {
+            let batch = batch.slice(range.start, range.end - range.start);
+            batches.push(batch);
+        }
+
+        Ok(batches)
+    }
+
+    /// Classifies a record batch into an ODV data type
+    ///
+    /// Classification is based on which columns show variation:
+    /// - Changing position + time = Trajectory
+    /// - Fixed position + changing time = Time Series
+    /// - Fixed position + time + changing depth = Profile
+    ///
+    /// # Arguments
+    /// * `batch` - Record batch to classify
+    /// * `odv_options` - ODV configuration options
+    ///
+    /// # Returns
+    /// Result containing classified ODV batch type or error if classification fails
+    fn classify_batch(
+        batch: RecordBatch,
+        odv_options: &OdvOptions,
+    ) -> anyhow::Result<OdvBatchType> {
+        let lon_col = batch
+            .column_by_name(&odv_options.longitude_column.label)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Longitude column '{}' not found in batch.",
+                    odv_options.longitude_column.label
+                )
+            })?;
+        let lat_col = batch
+            .column_by_name(&odv_options.latitude_column.label)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Latitude column '{}' not found in batch.",
+                    odv_options.latitude_column.label
+                )
+            })?;
+        let time_col = batch
+            .column_by_name(&odv_options.time_column)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Time column '{}' not found in batch.",
+                    odv_options.time_column
+                )
+            })?;
+        let depth_col = batch
+            .column_by_name(&odv_options.depth_column.label)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Depth column '{}' not found in batch.",
+                    odv_options.depth_column.label
+                )
+            })?;
+
+        let has_moving_position = Self::has_changes(lon_col) || Self::has_changes(lat_col);
+        let has_changing_time = Self::has_changes(time_col);
+        let has_changing_depth = Self::has_changes(depth_col);
+
+        let mut types = vec![];
+
+        println!(
+            "Batch classification: moving_position={}, changing_time={}, changing_depth={}",
+            has_moving_position, has_changing_time, has_changing_depth
+        );
+
+        if has_moving_position && has_changing_time && !has_changing_depth {
+            types.push(OdvBatchType::Trajectory(batch.clone()));
+        }
+        if !has_moving_position && has_changing_time && !has_changing_depth {
+            types.push(OdvBatchType::TimeSeries(batch.clone()));
+        }
+        if !has_moving_position && !has_changing_time && has_changing_depth {
+            types.push(OdvBatchType::Profile(batch.clone()));
+        }
+
+        if types.len() > 1 || (has_moving_position && has_changing_time && has_changing_depth) {
+            return Ok(OdvBatchType::Ambiguous(batch));
+        }
+
+        Ok(types.pop().unwrap_or(OdvBatchType::Profile(batch))) // Default to Profile
+    }
+
+    /// Checks if an array contains varying values
+    ///
+    /// # Arguments
+    /// * `array` - Array to check for changes
+    ///
+    /// # Returns
+    /// true if the array contains different values, false if all values are the same
+    fn has_changes(array: &dyn arrow::array::Array) -> bool {
+        if array.len() < 2 {
+            return false; // If there's only one row, no changes are possible
+        }
+
+        macro_rules! check_array_type {
+            ($array_type:ty) => {
+                if let Some(array) = array.as_any().downcast_ref::<$array_type>() {
+                    for i in 1..array.len() {
+                        if array.value(i) != array.value(i - 1) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            };
+        }
+
+        check_array_type!(arrow::array::StringArray);
+        check_array_type!(arrow::array::TimestampSecondArray);
+        check_array_type!(arrow::array::TimestampMillisecondArray);
+        check_array_type!(arrow::array::TimestampMicrosecondArray);
+        check_array_type!(arrow::array::TimestampNanosecondArray);
+        check_array_type!(arrow::array::Float64Array);
+        check_array_type!(arrow::array::Float32Array);
+        check_array_type!(arrow::array::Int64Array);
+        check_array_type!(arrow::array::Int32Array);
+        check_array_type!(arrow::array::Int16Array);
+        check_array_type!(arrow::array::Int8Array);
+        check_array_type!(arrow::array::UInt64Array);
+        check_array_type!(arrow::array::UInt32Array);
+        check_array_type!(arrow::array::UInt16Array);
+        check_array_type!(arrow::array::UInt8Array);
+        check_array_type!(arrow::array::BooleanArray);
+
+        false
     }
 }
 
+/// Represents different types of ODV (Ocean Data View) data batches
+#[derive(Debug)]
+pub enum OdvBatchType {
+    /// Data that could not be clearly classified as one specific type
+    Ambiguous(RecordBatch),
+    /// Time series data with measurements at fixed locations over time
+    TimeSeries(RecordBatch),
+    /// Vertical profile data at fixed locations
+    Profile(RecordBatch),
+    /// Moving trajectory data with changing positions and times
+    Trajectory(RecordBatch),
+}
+
+/// File handler for writing ODV formatted data
+///
+/// Generic over type T which must implement OdvType to specify the data format
 pub struct OdvFile<T: OdvType> {
+    /// Phantom data to track the ODV type parameter
     _type: std::marker::PhantomData<T>,
+    /// CSV writer for the underlying file
     writer: arrow_csv::Writer<std::fs::File>,
+    /// Schema mapper to transform input data to ODV format
+    schema_mapper: OdvBatchSchemaMapper,
 }
 
 impl<T: OdvType> OdvFile<T> {
+    /// Creates a new ODV file with the specified options and schema
+    ///
+    /// # Arguments
+    /// * `path` - Path where the ODV file should be created
+    /// * `options` - Configuration options for the ODV output
+    /// * `input_schema` - Schema of the input data to be written
+    ///
+    /// # Returns
+    /// Result containing the OdvFile or an error if creation fails
     pub fn new<P: AsRef<Path>>(
         path: P,
         options: &OdvOptions,
-        output_schema: arrow::datatypes::SchemaRef,
+        input_schema: arrow::datatypes::SchemaRef,
     ) -> anyhow::Result<Self> {
-        let file = std::fs::File::create(path)?;
+        let mut file = std::fs::File::create(path)?;
+        let schema_mapper =
+            OdvBatchSchemaMapper::new(T::map_schema(input_schema.clone()), options.clone())?;
+
+        Self::write_header(&mut file, options, schema_mapper.output_schema())?;
 
         Ok(Self {
             _type: std::marker::PhantomData,
             writer: arrow_csv::WriterBuilder::new()
-                .with_header(false)
+                .with_header(true)
                 .with_timestamp_format("%Y-%m-%dT%H:%M:%S%.3f".to_string())
                 .with_delimiter(b'\t')
                 .build(file),
+            schema_mapper,
         })
     }
 
+    /// Writes the ODV header information to the file
+    ///
+    /// # Arguments
+    /// * `writer` - File writer to output header
+    /// * `options` - ODV configuration options
+    /// * `output_schema` - Schema for the output data
+    ///
+    /// # Returns
+    /// Result indicating success or error writing header
     fn write_header<W: Write>(
         writer: &mut W,
         options: &OdvOptions,
@@ -255,9 +671,18 @@ impl<T: OdvType> OdvFile<T> {
             )?;
         }
 
-        todo!()
+        writeln!(writer, "//")?;
+
+        Ok(())
     }
 
+    /// Converts Arrow data types to ODV value types
+    ///
+    /// # Arguments
+    /// * `arrow_type` - Arrow data type to convert
+    ///
+    /// # Returns
+    /// Result containing the ODV value type string or error if type is unsupported
     fn arrow_to_value_type(arrow_type: &DataType) -> anyhow::Result<String> {
         match arrow_type {
             DataType::Null => Ok("INDEXED_TEXT".to_string()),
@@ -278,6 +703,13 @@ impl<T: OdvType> OdvFile<T> {
         }
     }
 
+    /// Generates the ODV header for a data variable
+    ///
+    /// # Arguments
+    /// * `label` - Name of the variable
+    /// * `qf_schema` - Quality flag schema
+    /// * `value_type` - ODV value type
+    /// * `comment` - Optional comment about the variable
     fn data_header(label: &str, qf_schema: &str, value_type: &str, comment: &str) -> String {
         const GENERIC_DATA_HEADER : &'static str = "//<DataVariable> label=\"$LABEL\" value_type=\"$VALUE_TYPE\" qf_scheme=\"$QF_SCHEMA\" comment=\"$COMMENT\" </DataVariable>";
 
@@ -290,6 +722,13 @@ impl<T: OdvType> OdvFile<T> {
         header
     }
 
+    /// Generates the ODV header for a metadata variable
+    ///
+    /// # Arguments
+    /// * `label` - Name of the metadata variable
+    /// * `qf_schema` - Quality flag schema
+    /// * `value_type` - ODV value type
+    /// * `comment` - Optional comment about the variable
     fn meta_header(label: &str, qf_schema: &str, value_type: &str, comment: &str) -> String {
         const GENERIC_META_HEADER: &'static str = "//<MetaVariable> label=\"$LABEL\" value_type=\"$VALUE_TYPE\" qf_schema=\"$QF_SCHEMA\" comment=\"$COMMENT\"</MetaVariable>";
 
@@ -302,18 +741,62 @@ impl<T: OdvType> OdvFile<T> {
         header
     }
 
+    /// Writes a record batch to the ODV file
+    ///
+    /// # Arguments
+    /// * `batch` - Record batch to write
+    ///
+    /// # Returns
+    /// Result indicating success or error writing batch
     pub fn write_batch(&mut self, batch: RecordBatch) -> anyhow::Result<()> {
+        let batch = self.schema_mapper.map(T::map_batch(batch));
         self.writer.write(&batch)?;
         Ok(())
     }
 
+    /// Finishes writing and returns the underlying file
     pub fn finish(self) -> anyhow::Result<std::fs::File> {
         Ok(self.writer.into_inner())
     }
 }
 
+/// Generates a column name with optional units
+///
+/// # Arguments
+/// * `name` - Base name of the column
+/// * `units` - Optional units to append in brackets
+///
+/// # Returns
+/// Column name with units if provided, otherwise just the name
+fn generate_column_name<S: AsRef<str>>(name: &str, units: Option<S>) -> String {
+    match units {
+        Some(units) => format!("{} [{}]", name, units.as_ref()),
+        None => name.to_string(),
+    }
+}
+
+/// Trait defining behavior for different ODV data types
 pub trait OdvType {
+    /// Returns the ODV type header string
     fn type_header() -> String;
+    fn map_schema(schema: SchemaRef) -> SchemaRef {
+        let mut fields = schema.fields().to_vec();
+        fields.push(Arc::new(Field::new("Station", DataType::Int64, false)));
+        fields.push(Arc::new(Field::new("Type", DataType::Utf8, false)));
+        Arc::new(Schema::new(fields))
+    }
+
+    fn map_batch(record_batch: RecordBatch) -> RecordBatch {
+        Self::map_type(Self::map_station(record_batch))
+    }
+
+    /// Maps station information into a record batch
+    ///
+    /// # Arguments
+    /// * `record_batch` - Input batch to add station info to
+    ///
+    /// # Returns
+    /// New record batch with station column added
     fn map_station(record_batch: RecordBatch) -> RecordBatch {
         let mut fields = record_batch.schema().fields().to_vec();
         fields.push(Arc::new(Field::new("Station", DataType::Int64, false)));
@@ -325,6 +808,14 @@ pub trait OdvType {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
             .expect("Mapping of station number failed.")
     }
+
+    /// Maps type information into a record batch
+    ///
+    /// # Arguments
+    /// * `record_batch` - Input batch to add type info to
+    ///
+    /// # Returns
+    /// New record batch with type column added
     fn map_type(record_batch: RecordBatch) -> RecordBatch {
         let mut fields = record_batch.schema().fields().to_vec();
         fields.push(Arc::new(Field::new("Type", DataType::Utf8, false)));
@@ -338,6 +829,7 @@ pub trait OdvType {
     }
 }
 
+/// ODV Profile data type
 pub struct Profiles;
 impl OdvType for Profiles {
     fn type_header() -> String {
@@ -345,6 +837,7 @@ impl OdvType for Profiles {
     }
 }
 
+/// ODV Time Series data type
 pub struct TimeSeries;
 impl OdvType for TimeSeries {
     fn type_header() -> String {
@@ -352,6 +845,7 @@ impl OdvType for TimeSeries {
     }
 }
 
+/// ODV Trajectory data type
 pub struct Trajectories;
 impl OdvType for Trajectories {
     fn type_header() -> String {
@@ -359,36 +853,191 @@ impl OdvType for Trajectories {
     }
 
     fn map_station(record_batch: RecordBatch) -> RecordBatch {
-        todo!()
+        //Add the station column as an incremental number for each row
+        let len = record_batch.num_rows();
+        let station = arrow::array::Int64Array::from((1..len as i64 + 1).collect::<Vec<i64>>());
+
+        let mut fields = record_batch.schema().fields().to_vec();
+        fields.push(Arc::new(Field::new("Station", DataType::Int64, false)));
+
+        let mut arrays = record_batch.columns().to_vec();
+        arrays.push(Arc::new(station) as Arc<dyn arrow::array::Array>);
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+            .expect("Mapping of station number failed.")
     }
 }
 
+/// ODV Error data type for problematic data
 pub struct Error;
 impl OdvType for Error {
     fn type_header() -> String {
         format!("//<DataType>Error</DataType>")
     }
 }
-
+/// A schema mapper that handles the transformation of input Arrow record batches to ODV-compatible formats.
+/// This struct maintains the mapping between input and output schemas and handles column projections.
 pub struct OdvBatchSchemaMapper {
+    /// The original input schema from the source data
     input_schema: SchemaRef,
+    /// The transformed schema that matches ODV format requirements
     output_schema: SchemaRef,
+    /// Column indices used for projecting input data to output format
     projection: Arc<[usize]>,
 }
 
 impl OdvBatchSchemaMapper {
+    /// Creates a new ODV batch schema mapper with the given input schema and ODV options.
+    ///
+    /// This function:
+    /// 1. Maps required ODV columns (Cruise, Station, Type, Time, Longitude, Latitude)
+    /// 2. Handles data columns including their quality flags if specified
+    /// 3. Maps metadata columns
+    /// 4. Creates projection indices for efficient data transformation
+    ///
+    /// # Arguments
+    /// * `input_schema` - The schema of the input data
+    /// * `odv_options` - Configuration options for ODV output format
+    ///
+    /// # Returns
+    /// A Result containing the new OdvBatchSchemaMapper or an error if schema mapping fails
     pub fn new(input_schema: SchemaRef, odv_options: OdvOptions) -> anyhow::Result<Self> {
+        //Get the projection to create the output schema
         let mut output_fields = vec![];
+        let mut projection = vec![];
 
-        odv_options.key_column;
+        let (projection_idx, field) = input_schema
+            .column_with_name(&odv_options.key_column)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Key column '{}' not found in input schema.",
+                    odv_options.key_column
+                )
+            })?;
 
-        todo!()
+        projection.push(projection_idx);
+        output_fields.push(field.clone().with_name("Cruise"));
+
+        let (projection_idx, field) = input_schema
+            .column_with_name("Station")
+            .ok_or_else(|| anyhow::anyhow!("Station column not found in input schema.",))?;
+
+        projection.push(projection_idx);
+        output_fields.push(field.clone().with_name("Station"));
+
+        let (projection_idx, field) = input_schema
+            .column_with_name("Type")
+            .ok_or_else(|| anyhow::anyhow!("Type column not found in input schema.",))?;
+
+        projection.push(projection_idx);
+        output_fields.push(field.clone().with_name("Type"));
+
+        let (projection_idx, field) = input_schema
+            .column_with_name(&odv_options.time_column)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Time column '{}' not found in input schema.",
+                    odv_options.time_column
+                )
+            })?;
+
+        projection.push(projection_idx);
+        output_fields.push(field.clone().with_name("yyyy-MM-ddTHH:mm:ss.SSS"));
+
+        let (projection_idx, field) = input_schema
+            .column_with_name(&odv_options.longitude_column.label)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Longitude column '{}' not found in input schema.",
+                    odv_options.longitude_column.label
+                )
+            })?;
+
+        projection.push(projection_idx);
+        output_fields.push(field.clone().with_name("Longitude [degrees east]"));
+
+        let (projection_idx, field) = input_schema
+            .column_with_name(&odv_options.latitude_column.label)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Latitude column '{}' not found in input schema.",
+                    odv_options.latitude_column.label
+                )
+            })?;
+
+        projection.push(projection_idx);
+        output_fields.push(field.clone().with_name("Latitude [degrees north]"));
+
+        for data_column in odv_options.data_columns.iter() {
+            let (projection_idx, field) = input_schema
+                .column_with_name(&data_column.label)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Data column '{}' not found in input schema.",
+                        data_column.label
+                    )
+                })?;
+            let column_name =
+                generate_column_name(&data_column.label, data_column.units.as_deref());
+            projection.push(projection_idx);
+            output_fields.push(field.clone().with_name(column_name.clone()));
+
+            if let Some(qf_col) = &data_column.qf_column {
+                let (projection_idx, field) =
+                    input_schema.column_with_name(qf_col).ok_or_else(|| {
+                        anyhow::anyhow!("QF column '{}' not found in input schema.", qf_col)
+                    })?;
+
+                projection.push(projection_idx);
+                output_fields.push(
+                    field
+                        .clone()
+                        .with_name(format!("QV:{}:{}", odv_options.qf_schema, column_name)),
+                );
+            }
+        }
+
+        for meta_column in &odv_options.meta_columns {
+            let (projection_idx, field) = input_schema
+                .column_with_name(&meta_column.label)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Meta column '{}' not found in input schema.",
+                        meta_column.label
+                    )
+                })?;
+            let column_name =
+                generate_column_name(&meta_column.label, meta_column.units.as_deref());
+            projection.push(projection_idx);
+            output_fields.push(field.clone().with_name(column_name));
+        }
+
+        let output_schema = Arc::new(Schema::new(output_fields));
+
+        Ok(Self {
+            input_schema,
+            output_schema,
+            projection: projection.into(),
+        })
     }
 
+    /// Returns a reference to the output schema that will be used for ODV data.
+    ///
+    /// # Returns
+    /// A cloned reference to the output schema
     pub fn output_schema(&self) -> SchemaRef {
         self.output_schema.clone()
     }
 
+    /// Maps an input record batch to the ODV output format using the configured schema mapping.
+    ///
+    /// # Arguments
+    /// * `batch` - The input record batch to transform
+    ///
+    /// # Returns
+    /// A new record batch with the ODV-compatible schema
+    ///
+    /// # Panics
+    /// Will panic if the input batch schema doesn't match the expected input schema
     pub fn map(&self, batch: RecordBatch) -> RecordBatch {
         assert_eq!(
             &batch.schema(),
@@ -398,5 +1047,119 @@ impl OdvBatchSchemaMapper {
         let projected_batch = batch.project(&self.projection).unwrap();
         let arrays = projected_batch.columns().to_vec();
         RecordBatch::try_new(self.output_schema.clone(), arrays).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::*;
+    use arrow::datatypes::*;
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    use crate::writer::AsyncOdvWriter;
+    use crate::writer::OdvOptions;
+
+    use super::OdvBatchType;
+
+    #[test]
+    fn test_key_batches() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+            ],
+        )
+        .unwrap();
+
+        let options = OdvOptions::default().with_key_column("key".to_string());
+
+        let result = AsyncOdvWriter::key_batches(batch, &options).unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].num_rows(), 2);
+        assert_eq!(result[1].num_rows(), 2);
+    }
+
+    #[test]
+    fn test_classify_batch() {
+        let schema = Schema::new(vec![
+            Field::new("CRUISE", DataType::Utf8, false),
+            Field::new("LONGITUDE", DataType::Float64, false),
+            Field::new("LATITUDE", DataType::Float64, false),
+            Field::new("TIME", DataType::Int64, false),
+            Field::new("DEPTH", DataType::Float64, false),
+        ]);
+
+        // Test Profile
+        let profile_batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a"])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![2.0, 2.0])),
+                Arc::new(Int64Array::from(vec![100, 100])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+            ],
+        )
+        .unwrap();
+
+        match AsyncOdvWriter::classify_batch(profile_batch, &OdvOptions::default()).unwrap() {
+            OdvBatchType::Profile(_) => (),
+            _ => panic!("Expected Profile type"),
+        }
+
+        // Test TimeSeries
+        let timeseries_batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a"])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![2.0, 2.0])),
+                Arc::new(Int64Array::from(vec![100, 200])),
+                Arc::new(Float64Array::from(vec![10.0, 10.0])),
+            ],
+        )
+        .unwrap();
+
+        match AsyncOdvWriter::classify_batch(timeseries_batch, &OdvOptions::default()).unwrap() {
+            OdvBatchType::TimeSeries(_) => (),
+            _ => panic!("Expected TimeSeries type"),
+        }
+
+        // Test Trajectory
+        let trajectory_batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![2.0, 3.0])),
+                Arc::new(Int64Array::from(vec![100, 200])),
+                Arc::new(Float64Array::from(vec![10.0, 10.0])),
+            ],
+        )
+        .unwrap();
+
+        match AsyncOdvWriter::classify_batch(trajectory_batch, &OdvOptions::default()).unwrap() {
+            OdvBatchType::Trajectory(_) => (),
+            _ => panic!("Expected Trajectory type"),
+        }
+    }
+
+    #[test]
+    fn test_has_changes() {
+        let array = Float64Array::from(vec![1.0, 1.0, 1.0]);
+        assert!(!AsyncOdvWriter::has_changes(&array));
+
+        let array = Float64Array::from(vec![1.0, 2.0, 1.0]);
+        assert!(AsyncOdvWriter::has_changes(&array));
+
+        let array = Float64Array::from(vec![1.0]);
+        assert!(!AsyncOdvWriter::has_changes(&array));
     }
 }

@@ -29,3 +29,4 @@ nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", bran
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
+beacon-arrow-odv = { path = "../beacon-arrow-odv" }

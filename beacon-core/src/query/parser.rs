@@ -14,7 +14,13 @@ impl Parser {
             super::InnerQuery::Json(query_body) => {
                 let mut builder = query_body.from.init_builder(&session).await?;
 
-                builder = builder.project(query_body.select.iter().map(|s| s.to_expr()))?;
+                builder = builder.project(
+                    query_body
+                        .select
+                        .iter()
+                        .map(|s| s.to_expr(&session.state()))
+                        .collect::<anyhow::Result<Vec<_>>>()?,
+                )?;
 
                 if let Some(filter) = query_body.filter {
                     builder = builder.filter(filter.to_expr()?)?;
