@@ -1,23 +1,24 @@
 use datafusion::{dataframe::DataFrameWriteOptions, prelude::DataFrame};
 use object_store::local::LocalFileSystem;
 
-use super::{create_temp_file, Output};
+use super::{Output, TempOutputFile};
 
 pub async fn output(df: DataFrame) -> anyhow::Result<Output> {
     //Create temp path
-    let temp_f = create_temp_file("beacon", ".csv").unwrap();
-    println!("Temp file: {:?}", temp_f.path());
-    let path = object_store::path::Path::from(temp_f.path().to_str().unwrap());
-    println!("Path: {:?}", path);
+    let temp_f = TempOutputFile::new("beacon", ".csv")?;
+    println!(
+        "Temp file path: {:?}",
+        temp_f.object_store_path().to_string()
+    );
     df.write_csv(
-        temp_f.path().as_os_str().to_str().unwrap(),
+        &temp_f.object_store_path().to_string(),
         DataFrameWriteOptions::new(),
         None,
     )
     .await?;
 
     Ok(Output {
-        output_method: super::OutputMethod::File(temp_f),
+        output_method: super::OutputMethod::File(temp_f.file),
         content_type: "text/csv".to_string(),
         content_disposition: "attachment".to_string(),
     })

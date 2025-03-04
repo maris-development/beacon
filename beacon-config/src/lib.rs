@@ -35,7 +35,7 @@ lazy_static! {
     pub static ref TMP_DIR_PATH: PathBuf = DATA_DIR.join("tmp");
     /// The prefix for the temporary directory for object store paths
     pub static ref TMP_DIR_PATH_PREFIX: object_store::path::Path =
-        object_store::path::Path::from("tmp");
+        object_store::path::Path::from("/tmp/");
 
     /// The path to the datasets directory
     pub static ref DATASETS_DIR_PATH: PathBuf = DATA_DIR.join("datasets/");
