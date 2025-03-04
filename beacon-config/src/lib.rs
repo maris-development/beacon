@@ -27,30 +27,40 @@ lazy_static! {
     pub static ref CONFIG: Config = Config::init();
     pub static ref DATA_DIR: PathBuf = PathBuf::from("./data/");
     pub static ref OBJECT_STORE_LOCAL_FS: Arc<LocalFileSystem> = {
+        //Create the dir if it doesn't exist
+        std::fs::create_dir_all(DATA_DIR.as_path()).expect("Failed to create data dir");
         Arc::new(LocalFileSystem::new_with_prefix(DATA_DIR.clone())
             .expect("Failed to create local file system. Is the data dir set correctly?"))
     };
-    // Prefixes for the different directories
-    /// The path to the temporary directory
-    pub static ref TMP_DIR_PATH: PathBuf = DATA_DIR.join("tmp");
-    /// The prefix for the temporary directory for object store paths
-    pub static ref TMP_DIR_PATH_PREFIX: object_store::path::Path =
-        object_store::path::Path::from("/tmp/");
-
     /// The path to the datasets directory
-    pub static ref DATASETS_DIR_PATH: PathBuf = DATA_DIR.join("datasets/");
+    pub static ref DATASETS_DIR_PATH: PathBuf = {
+        //Create the dir if it doesn't exist
+        let dir = DATA_DIR.join("datasets");
+        std::fs::create_dir_all(&dir).expect("Failed to create datasets dir");
+        dir
+    };
     /// The prefix for the datasets directory for object store paths
     pub static ref DATASETS_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("datasets");
 
     /// The path to the indexes directory
-    pub static ref INDEX_DIR_PATH: PathBuf = DATA_DIR.join("indexes");
+    pub static ref INDEX_DIR_PATH: PathBuf = {
+        //Create the dir if it doesn't exist
+        let dir = DATA_DIR.join("indexes");
+        std::fs::create_dir_all(&dir).expect("Failed to create indexes dir");
+        dir
+    };
     /// The prefix for the indexes directory for object store paths
     pub static ref INDEX_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("indexes");
 
     /// The path to the cache directory
-    pub static ref CACHE_DIR_PATH: PathBuf = DATA_DIR.join("cache");
+    pub static ref CACHE_DIR_PATH: PathBuf = {
+        //Create the dir if it doesn't exist
+        let dir = DATA_DIR.join("cache");
+        std::fs::create_dir_all(&dir).expect("Failed to create cache dir");
+        dir
+    };
     /// The prefix for the cache directory for object store paths
     pub static ref CACHE_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("cache");

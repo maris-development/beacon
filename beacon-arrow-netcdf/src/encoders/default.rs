@@ -85,6 +85,14 @@ impl DefaultEncoder {
                 let mut variable = file.add_variable::<u64>(field.name(), &[Self::OBS_DIM_NAME])?;
                 variable.set_fill_value(u64::MAX)?;
             }
+            DataType::Float32 => {
+                let mut variable = file.add_variable::<f32>(field.name(), &[Self::OBS_DIM_NAME])?;
+                variable.set_fill_value(f32::MAX)?;
+            }
+            DataType::Float64 => {
+                let mut variable = file.add_variable::<f64>(field.name(), &[Self::OBS_DIM_NAME])?;
+                variable.set_fill_value(f64::MAX)?;
+            }
             DataType::Timestamp(time_unit, _) => {
                 let mut variable = file.add_variable::<i64>(field.name(), &[Self::OBS_DIM_NAME])?;
                 variable.put_attribute("calendar", "gregorian")?;

@@ -1,4 +1,4 @@
-use std::{fmt::Debug, pin::Pin, sync::Arc};
+use std::{fmt::Debug, path::PathBuf, pin::Pin, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
@@ -46,6 +46,7 @@ pub enum OutputFormat {
     Parquet,
     Json,
     Odv,
+    NetCDF,
 }
 
 impl OutputFormat {
@@ -56,27 +57,44 @@ impl OutputFormat {
             OutputFormat::Parquet => parquet::output(df).await,
             OutputFormat::Json => json::output(df).await,
             OutputFormat::Odv => odv::output(ctx.clone(), df).await,
+            OutputFormat::NetCDF => netcdf::output(ctx.clone(), df).await,
         }
     }
 }
 
 pub struct TempOutputFile {
+    pub tmp_dir_path: PathBuf,
     pub file: NamedTempFile,
 }
 
 impl TempOutputFile {
     pub fn new(prefix: &str, suffix: &str) -> anyhow::Result<Self> {
+        //Create the temp dir if it doesn't exist
+        let tmp_dir_path = beacon_config::DATA_DIR.join("tmp");
+        std::fs::create_dir_all(tmp_dir_path.as_path())?;
+
         Ok(Self {
             file: tempfile::Builder::new()
                 .prefix(prefix)
                 .suffix(suffix)
-                .tempfile_in(beacon_config::TMP_DIR_PATH.as_path())?,
+                .tempfile_in(tmp_dir_path.as_path())?,
+            tmp_dir_path,
         })
     }
 
+    pub fn path(&self) -> PathBuf {
+        self.file.path().to_path_buf()
+    }
+
     pub fn object_store_path(&self) -> String {
-        beacon_config::TMP_DIR_PATH_PREFIX
-            .child(self.file.path().to_string_lossy().to_string())
-            .to_string()
+        format!(
+            "/tmp/{}",
+            self.file
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        )
     }
 }

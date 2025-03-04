@@ -10,15 +10,12 @@ use datafusion::{
 };
 use futures::StreamExt;
 
-use super::{Output, OutputMethod};
+use super::{Output, OutputMethod, TempOutputFile};
 
 pub async fn output(ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<Output> {
     let temp_dir = tempfile::tempdir()?;
     let arrow_schema = Arc::new(df.schema().as_arrow().clone());
-    let mut file = tempfile::Builder::new()
-        .prefix("beacon")
-        .suffix(".tar.zst")
-        .tempfile()?;
+    let mut file = TempOutputFile::new("beacon", ".tar.zst")?;
 
     let mut odv_writer = AsyncOdvWriter::new(
         OdvOptions::try_from_arrow_schema(arrow_schema.clone())?,
@@ -33,10 +30,10 @@ pub async fn output(ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<O
         odv_writer.write(batch).await?;
     }
 
-    odv_writer.finish_to_tar(file.as_file_mut())?;
+    odv_writer.finish_to_tar(file.file.as_file_mut())?;
     drop(temp_dir);
     Ok(Output {
-        output_method: OutputMethod::File(file),
+        output_method: OutputMethod::File(file.file),
         content_type: "application/tar+zstd".to_string(),
         content_disposition: "attachment".to_string(),
     })

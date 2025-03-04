@@ -65,7 +65,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         Ok(Self {
             path,
             writer,
-            fixed_string_sizes: HashMap::new(),
+            fixed_string_sizes: fixed_string_sizes,
             encoder: PhantomData,
         })
     }
@@ -102,7 +102,9 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
         let mut updated_schema_fields = vec![];
         for field in reader.schema().fields() {
+            println!("field: {:?}", field);
             if let Some(size) = self.fixed_string_sizes.get(field.name()) {
+                println!("size: {:?}", size);
                 updated_schema_fields.push(arrow::datatypes::Field::new(
                     field.name(),
                     arrow::datatypes::DataType::FixedSizeBinary(*size as i32),
@@ -118,6 +120,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         }
 
         let updated_schema = Arc::new(arrow::datatypes::Schema::new(updated_schema_fields));
+        println!("updated_schema: {:?}", updated_schema);
 
         let mut nc_writer = Writer::<E>::new(&self.path, updated_schema.clone())?;
 
