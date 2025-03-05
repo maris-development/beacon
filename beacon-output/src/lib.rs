@@ -1,6 +1,7 @@
 use std::{fmt::Debug, path::PathBuf, pin::Pin, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
+use beacon_arrow_odv::writer::OdvOptions;
 use bytes::Bytes;
 use datafusion::{
     execution::SendableRecordBatchStream,
@@ -45,7 +46,7 @@ pub enum OutputFormat {
     Ipc,
     Parquet,
     Json,
-    Odv,
+    Odv { options: Option<OdvOptions> },
     NetCDF,
 }
 
@@ -56,7 +57,7 @@ impl OutputFormat {
             OutputFormat::Ipc => ipc::output(ctx, df).await,
             OutputFormat::Parquet => parquet::output(df).await,
             OutputFormat::Json => json::output(df).await,
-            OutputFormat::Odv => odv::output(ctx.clone(), df).await,
+            OutputFormat::Odv { options } => odv::output(ctx.clone(), df, options.clone()).await,
             OutputFormat::NetCDF => netcdf::output(ctx.clone(), df).await,
         }
     }

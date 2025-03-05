@@ -14,5 +14,6 @@ async-trait = { workspace=true}
 futures = { workspace=true}
 futures-util = { workspace=true}
 tempfile = { workspace=true}
+utoipa = { workspace=true}
 tar = "0.4.44"
 zstd = "0.13.3"

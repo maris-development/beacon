@@ -15,6 +15,7 @@ use beacon_sources::{
 };
 
 pub mod parser;
+pub mod plan;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct Query {

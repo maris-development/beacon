@@ -1,4 +1,4 @@
-use std::{io::Read, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -7,11 +7,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use beacon_core::{
-    output,
-    query::{self, Query},
-    runtime::Runtime,
-};
+use beacon_core::runtime::Runtime;
+use beacon_query::Query;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -37,7 +34,7 @@ pub(crate) async fn query(
 
     match result {
         Ok(output) => match output.output_method {
-            output::OutputMethod::Stream(stream) => {
+            beacon_output::OutputMethod::Stream(stream) => {
                 let inner_stream = Body::from_stream(stream);
                 Ok((
                     [
@@ -48,7 +45,7 @@ pub(crate) async fn query(
                 )
                     .into_response())
             }
-            output::OutputMethod::File(named_temp_file) => {
+            beacon_output::OutputMethod::File(named_temp_file) => {
                 let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
                 let stream = tokio_util::io::ReaderStream::new(file);
                 let inner_stream = Body::from_stream(stream);

@@ -8,11 +8,13 @@ use arrow::{
     array::{Array, RecordBatch},
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 /// Information about a column in ODV format
 ///
 /// This struct contains metadata about how a data column should be formatted and written in ODV output,
 /// including its label, comments, precision, quality flags, and units.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ColumnInfo {
     /// The name/label of the column
     pub label: String,
@@ -30,7 +32,7 @@ pub struct ColumnInfo {
 ///
 /// This struct contains all the configuration needed to properly format data for ODV output,
 /// including column specifications and mappings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct OdvOptions {
     /// Specification for the longitude column
     pub longitude_column: ColumnInfo,

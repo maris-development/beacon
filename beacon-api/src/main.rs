@@ -9,7 +9,6 @@ use axum::{
     routing::get,
     Router,
 };
-use beacon_core::{query::Query, runtime::Runtime};
 use client::setup_client_router;
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{field::Empty, info_span, Level, Span};

@@ -28,4 +28,5 @@ indexmap = "2.7.1"
 
 datafusion = "44.0.0"
 object_store = "0.11.2"
-arrow = "53.3.0"
+arrow = { version = "=53.3.0" }
+arrow-schema = { version = "=53.3.0", features = ["serde"] }

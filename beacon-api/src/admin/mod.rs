@@ -15,9 +15,8 @@ mod stats;
 pub struct AdminApiDoc;
 
 pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
-    let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
-        .routes(routes!(stats::stats))
-        .split_for_parts();
+    let (admin_router, admin_api) =
+        OpenApiRouter::with_openapi(AdminApiDoc::openapi()).split_for_parts();
 
     (admin_router, admin_api)
 }
