@@ -17,7 +17,7 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::super_typing;
+use beacon_common::super_typing;
 
 #[derive(Debug)]
 pub struct SuperCsvFormat {

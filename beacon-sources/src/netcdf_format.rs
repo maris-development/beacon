@@ -34,7 +34,7 @@ use datafusion::{
 use futures::{pin_mut, StreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::super_typing;
+use beacon_common::super_typing;
 
 #[derive(Debug)]
 pub struct NetCDFFormat {

@@ -25,5 +25,4 @@ tracing-subscriber = { workspace = true}
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
-beacon-logger = { path = "../beacon-logger" }
 beacon-core = { path = "../beacon-core" }

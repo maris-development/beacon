@@ -5,8 +5,8 @@ use datafusion::{
     common::Statistics,
     datasource::{
         file_format::{
-            arrow::ArrowFormat, file_compression_type::FileCompressionType, parquet::ParquetFormat,
-            FileFormat, FilePushdownSupport,
+            file_compression_type::FileCompressionType, parquet::ParquetFormat, FileFormat,
+            FilePushdownSupport,
         },
         physical_plan::{FileScanConfig, FileSinkConfig},
     },
@@ -17,23 +17,26 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::super_typing;
+use beacon_common::super_typing;
 
 #[derive(Debug)]
-pub struct SuperArrowFormat {
-    inner_format: ArrowFormat,
+pub struct SuperParquetFormat {
+    inner_format: ParquetFormat,
 }
 
-impl SuperArrowFormat {
+impl SuperParquetFormat {
     pub fn new() -> Self {
         Self {
-            inner_format: ArrowFormat::default(),
+            inner_format: ParquetFormat::default()
+                .with_enable_pruning(true)
+                .with_skip_metadata(true)
+                .with_force_view_types(false),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl FileFormat for SuperArrowFormat {
+impl FileFormat for SuperParquetFormat {
     /// Returns the table provider as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any {

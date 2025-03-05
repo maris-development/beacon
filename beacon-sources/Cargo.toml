@@ -1,35 +1,26 @@
 [package]
-name = "beacon-core"
+name = "beacon-sources"
 version = "1.0.0"
 edition = "2021"
 
 [dependencies]
 futures = { workspace=true}
 futures-util = { workspace=true}
-bytes = { workspace=true}
-anyhow = { workspace=true}
-tempfile = { workspace=true}
-serde = { workspace=true}
-utoipa = { workspace=true}
-typetag =  { workspace=true}
 async-trait = { workspace=true}
 datafusion = { workspace=true}
-arrow = { workspace=true}
+arrow = { workspace=true }
+anyhow = { workspace=true}
 glob = { workspace = true}
 tokio = { workspace = true }
 indexmap = { workspace = true }
 object_store = { workspace = true }
 async-stream = "0.3.6"
-
-netcdf = { version = "0.10.5", features = ["static"] }
-inventory = "0.3.18"
-pathdiff = "0.2.3"
 nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main" }
-tracing = { workspace=true}
+tracing = { workspace=true }
+
+
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
-beacon-sources = { path = "../beacon-sources" }
-beacon-output = { path = "../beacon-output" }
-beacon-query = { path = "../beacon-query" }
+beacon-common = { path = "../beacon-common" }

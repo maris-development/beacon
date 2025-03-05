@@ -15,7 +15,7 @@ use datafusion::{
     prelude::Expr,
 };
 
-use crate::super_typing::super_type_schema;
+use beacon_common::super_typing::super_type_schema;
 
 pub mod arrow_format;
 pub mod csv_format;

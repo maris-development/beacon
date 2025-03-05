@@ -16,5 +16,5 @@ pub struct Index {
 #[typetag::serde]
 pub trait IndexProvider: Debug {
     fn as_table(&self, session_ctx: SessionContext) -> Arc<dyn TableProvider>;
-    fn update(&self, update: IndexUpdate) -> anyhow::Result<()>;
+    fn update(&self, session_ctx: SessionContext, update: IndexUpdate) -> anyhow::Result<()>;
 }

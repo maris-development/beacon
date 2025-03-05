@@ -14,7 +14,6 @@ use tracing::{event, Level};
 
 use crate::{
     output::{Output, OutputFormat},
-    providers::{datasets::DatasetsProviderFunction, BeaconProvider},
     query::InnerQuery,
 };
 
@@ -54,20 +53,10 @@ impl VirtualMachine {
 
         let session_context = SessionContext::new_with_config_rt(config, runtime_env);
 
-        for provider in inventory::iter::<&'static dyn BeaconProvider> {
-            let function = provider.function();
-            let schema_function = provider.schema_function();
-
-            session_context.register_udtf(function.name(), function.function().clone());
-            session_context
-                .register_udtf(schema_function.name(), schema_function.function().clone());
-        }
-
         session_context.register_object_store(
             ObjectStoreUrl::parse("file://").unwrap().as_ref(),
             beacon_config::OBJECT_STORE_LOCAL_FS.clone(),
         );
-        session_context.register_udtf("datasets", Arc::new(DatasetsProviderFunction));
 
         Ok(Arc::new(session_context))
     }

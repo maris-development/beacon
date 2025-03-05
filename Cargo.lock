@@ -468,7 +468,6 @@ dependencies = [
  "axum",
  "beacon-config",
  "beacon-core",
- "beacon-logger",
  "futures",
  "futures-util",
  "serde",
@@ -519,6 +518,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-common"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "indexmap",
+]
+
+[[package]]
 name = "beacon-config"
 version = "1.0.0"
 dependencies = [
@@ -538,6 +546,9 @@ dependencies = [
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
  "beacon-config",
+ "beacon-output",
+ "beacon-query",
+ "beacon-sources",
  "bytes",
  "datafusion",
  "futures",
@@ -570,15 +581,62 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-logger"
+name = "beacon-output"
 version = "1.0.0"
 dependencies = [
+ "anyhow",
+ "arrow",
+ "beacon-arrow-netcdf",
+ "beacon-arrow-odv",
  "beacon-config",
- "chrono",
- "console",
- "lazy_static",
- "log",
- "rolling-file",
+ "bytes",
+ "datafusion",
+ "futures",
+ "futures-util",
+ "indexmap",
+ "object_store",
+ "serde",
+ "tempfile",
+ "tokio",
+ "utoipa",
+]
+
+[[package]]
+name = "beacon-query"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "beacon-config",
+ "beacon-output",
+ "beacon-sources",
+ "datafusion",
+ "serde",
+ "tokio",
+ "tracing",
+ "utoipa",
+]
+
+[[package]]
+name = "beacon-sources"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-stream",
+ "async-trait",
+ "beacon-arrow-netcdf",
+ "beacon-arrow-odv",
+ "beacon-common",
+ "beacon-config",
+ "datafusion",
+ "futures",
+ "futures-util",
+ "glob",
+ "indexmap",
+ "nd-arrow-array",
+ "object_store",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -732,9 +790,7 @@ checksum = "7e36cc9d416881d2e24f9a963be5fb1cd90966419ac844274161d10488b3e825"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
- "js-sys",
  "num-traits",
- "wasm-bindgen",
  "windows-targets 0.52.6",
 ]
 
@@ -776,19 +832,6 @@ checksum = "4a65ebfec4fb190b6f90e944a817d60499ee0744e582530e2c9900a22e591d9a"
 dependencies = [
  "unicode-segmentation",
  "unicode-width",
-]
-
-[[package]]
-name = "console"
-version = "0.15.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea3c6ecd8059b57859df5c69830340ed3c41d30e3da0c1cbed90a96ac853041b"
-dependencies = [
- "encode_unicode",
- "libc",
- "once_cell",
- "unicode-width",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1376,12 +1419,6 @@ name = "either"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
-
-[[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "envconfig"
@@ -2799,15 +2836,6 @@ name = "regex-syntax"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
-
-[[package]]
-name = "rolling-file"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8395b4f860856b740f20a296ea2cd4d823e81a2658cf05ef61be22916026a906"
-dependencies = [
- "chrono",
-]
 
 [[package]]
 name = "rust-embed"

@@ -47,7 +47,11 @@ impl IndexProvider for GlobIndex {
         todo!()
     }
 
-    fn update(&self, update: super::IndexUpdate) -> anyhow::Result<()> {
+    fn update(
+        &self,
+        session_ctx: SessionContext,
+        update: super::IndexUpdate,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }

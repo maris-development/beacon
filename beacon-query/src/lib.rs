@@ -1,19 +1,17 @@
-use std::{fmt::format, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
+use beacon_output::OutputFormat;
 use datafusion::{
     common::Column,
     datasource::{listing::ListingTableUrl, provider_as_source},
     execution::SessionState,
-    functions::string::concat,
     logical_expr::{LogicalPlanBuilder, SortExpr},
     prelude::{col, lit, CsvReadOptions, Expr, SessionContext},
 };
-use object_store::{local::LocalFileSystem, ObjectStore};
 use utoipa::ToSchema;
 
-use crate::{
-    output::OutputFormat,
-    sources::{arrow_format::SuperArrowFormat, parquet_format::SuperParquetFormat, DataSource},
+use beacon_sources::{
+    arrow_format::SuperArrowFormat, parquet_format::SuperParquetFormat, DataSource,
 };
 
 pub mod parser;
