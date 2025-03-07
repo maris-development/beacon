@@ -24,6 +24,16 @@ pub struct SuperCsvFormat {
     inner_format: CsvFormat,
 }
 
+impl SuperCsvFormat {
+    pub fn new(delimiter: u8, infer_records: usize) -> Self {
+        Self {
+            inner_format: CsvFormat::default()
+                .with_delimiter(delimiter)
+                .with_schema_infer_max_rec(infer_records),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl FileFormat for SuperCsvFormat {
     /// Returns the table provider as [`Any`](std::any::Any) so that it can be

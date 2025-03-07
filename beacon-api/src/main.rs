@@ -36,7 +36,7 @@ fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::
     openapi
 }
 
-#[tokio::main(worker_threads = 8)]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
     setup_tracing();
 

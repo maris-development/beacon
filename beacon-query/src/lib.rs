@@ -25,7 +25,7 @@ pub struct Query {
     pub output: OutputFormat,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub enum InnerQuery {
     #[serde(rename = "sql")]
     Sql(String),
@@ -33,7 +33,7 @@ pub enum InnerQuery {
     Json(QueryBody),
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueryBody {
     #[serde(alias = "query_parameters")]
@@ -44,7 +44,7 @@ pub struct QueryBody {
     distinct: Option<Vec<String>>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum Select {
     Column {
@@ -94,7 +94,7 @@ impl Select {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 #[serde(deny_unknown_fields)]
 pub enum From {
@@ -111,7 +111,7 @@ pub enum From {
     },
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 #[serde(deny_unknown_fields)]
 pub enum FileSystemPath {
@@ -211,7 +211,7 @@ impl From {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Filter {
     #[serde(alias = "is_null", alias = "is_missing")]
@@ -308,7 +308,7 @@ impl Filter {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum RangeFilter {
     Numeric {
@@ -344,7 +344,7 @@ impl RangeFilter {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum EqualityFilter {
     Numeric { eq: f64 },
@@ -360,7 +360,7 @@ impl EqualityFilter {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum NotEqualFilter {
     Numeric { neq: f64 },
@@ -376,7 +376,7 @@ impl NotEqualFilter {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum GreaterThanFilter {
     Numeric { gt: f64 },
@@ -392,7 +392,7 @@ impl GreaterThanFilter {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum GreaterThanOrEqualFilter {
     Numeric { gte: f64 },
@@ -408,7 +408,7 @@ impl GreaterThanOrEqualFilter {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum LessThanFilter {
     Numeric { lt: f64 },
@@ -424,7 +424,7 @@ impl LessThanFilter {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum LessThanOrEqualFilter {
     Numeric { lte: f64 },
@@ -440,7 +440,7 @@ impl LessThanOrEqualFilter {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub enum Sort {
     Asc(String),
     Desc(String),

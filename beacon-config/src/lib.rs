@@ -43,6 +43,9 @@ lazy_static! {
     pub static ref DATASETS_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("datasets");
 
+    pub static ref TABLES_DIR_PREFIX: object_store::path::Path =
+        object_store::path::Path::from("tables");
+
     /// The path to the indexes directory
     pub static ref INDEX_DIR_PATH: PathBuf = {
         //Create the dir if it doesn't exist

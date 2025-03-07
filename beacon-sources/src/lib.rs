@@ -7,7 +7,7 @@ use datafusion::{
     datasource::{
         file_format::FileFormat,
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
-        TableType,
+        source_as_provider, TableType,
     },
     execution::SessionState,
     logical_expr::{dml::InsertOp, LogicalPlan, TableProviderFilterPushDown},
@@ -55,7 +55,6 @@ impl DataSource {
             .with_schema(super_schema);
 
         let table = ListingTable::try_new(config)?;
-
         Ok(Self { inner_table: table })
     }
 }

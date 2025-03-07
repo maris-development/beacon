@@ -1,6 +1,6 @@
 use datafusion::{logical_expr::LogicalPlan, prelude::SessionContext};
 
-use crate::{plan::BeaconQueryPlan, QueryBody};
+use crate::{plan::BeaconQueryPlan, InnerQuery, QueryBody};
 
 use super::Query;
 
@@ -8,21 +8,29 @@ pub struct Parser;
 
 impl Parser {
     pub async fn parse(session: &SessionContext, query: Query) -> anyhow::Result<BeaconQueryPlan> {
-        let datafusion_logical_plan = match query.inner {
-            super::InnerQuery::Sql(_) => {
+        let datafusion_logical_plan = Self::parse_to_logical_plan(session, query.inner).await?;
+        Ok(BeaconQueryPlan::new(datafusion_logical_plan, query.output))
+    }
+
+    pub async fn parse_to_logical_plan(
+        session: &SessionContext,
+        inner_query: InnerQuery,
+    ) -> anyhow::Result<LogicalPlan> {
+        let datafusion_logical_plan = match inner_query {
+            InnerQuery::Sql(_) => {
                 tracing::error!("SQL queries are not supported yet");
                 anyhow::bail!("SQL queries are not supported yet")
             }
-            super::InnerQuery::Json(query_body) => {
+            InnerQuery::Json(query_body) => {
                 let datafusion_plan = Self::parse_json_query(query_body, session).await?;
                 datafusion_plan
             }
         };
 
-        Ok(BeaconQueryPlan::new(datafusion_logical_plan, query.output))
+        Ok(datafusion_logical_plan)
     }
 
-    async fn parse_json_query(
+    pub async fn parse_json_query(
         query_body: QueryBody,
         session: &SessionContext,
     ) -> anyhow::Result<LogicalPlan> {

@@ -18,7 +18,6 @@ async-stream = "0.3.6"
 nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main" }
 tracing = { workspace=true }
 
-
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
