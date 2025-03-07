@@ -9,7 +9,6 @@ use datafusion::{
 use table::BeaconTable;
 
 pub mod glob_table;
-pub mod indexed_table;
 pub mod table;
 
 #[derive(Debug)]
