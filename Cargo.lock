@@ -528,6 +528,7 @@ dependencies = [
  "futures",
  "futures-util",
  "indexmap",
+ "regex",
  "serde",
  "tar",
  "tempfile",

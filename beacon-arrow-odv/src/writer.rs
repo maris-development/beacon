@@ -93,9 +93,6 @@ impl ArchivingMethod {
                 f.read_to_end(&mut buffer)?;
                 zip.write_all(&buffer)?;
                 buffer.clear();
-            } else if name.as_os_str().len() != 0 {
-                // If it's a directory (and not the root), add it
-                zip.add_directory(name.to_str().unwrap(), options)?;
             }
         }
         zip.finish()?;

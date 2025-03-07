@@ -13,7 +13,7 @@ pub async fn output(
 ) -> anyhow::Result<Output> {
     let temp_dir = tempfile::tempdir()?;
     let arrow_schema = Arc::new(df.schema().as_arrow().clone());
-    let mut file = TempOutputFile::new("beacon", ".tar.zst")?;
+    let mut file = TempOutputFile::new("beacon", ".zip")?;
 
     let odv_options =
         odv_options.unwrap_or(OdvOptions::try_from_arrow_schema(arrow_schema.clone())?);
