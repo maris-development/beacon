@@ -7,8 +7,7 @@ use datafusion::{catalog::TableProvider, execution::SessionState, prelude::Sessi
 pub trait BeaconTable: Debug + Send + Sync {
     fn table_name(&self) -> &str;
     async fn as_table(&self, session_state: Arc<SessionState>) -> Arc<dyn TableProvider>;
-
-    async fn rebuild(&self, session_state: Arc<SessionContext>) -> anyhow::Result<()> {
+    async fn rebuild(&self, _session_state: Arc<SessionContext>) -> anyhow::Result<()> {
         Ok(())
     }
 }

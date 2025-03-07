@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Schema};
 use beacon_arrow_odv::writer::{AsyncOdvWriter, OdvOptions};
-use datafusion::prelude::{col, lit, DataFrame, Expr, SessionContext};
+use datafusion::prelude::{DataFrame, SessionContext};
 use futures::StreamExt;
 
 use super::{Output, OutputMethod, TempOutputFile};
 
 pub async fn output(
-    ctx: Arc<SessionContext>,
+    _ctx: Arc<SessionContext>,
     df: DataFrame,
     odv_options: Option<OdvOptions>,
 ) -> anyhow::Result<Output> {
@@ -28,11 +27,11 @@ pub async fn output(
         odv_writer.write(batch).await?;
     }
 
-    odv_writer.finish_to_tar(file.file.as_file_mut())?;
+    odv_writer.finish_to_archive(file.file.as_file_mut())?;
     drop(temp_dir);
     Ok(Output {
         output_method: OutputMethod::File(file.file),
-        content_type: "application/tar+zstd".to_string(),
+        content_type: "application/zip".to_string(),
         content_disposition: "attachment".to_string(),
     })
 }

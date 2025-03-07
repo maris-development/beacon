@@ -1,5 +1,6 @@
 use std::{
-    io::Write,
+    fs::File,
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,6 +11,8 @@ use arrow::{
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use walkdir::WalkDir;
+use zip::write::FileOptions;
 /// Information about a column in ODV format
 ///
 /// This struct contains metadata about how a data column should be formatted and written in ODV output,
@@ -50,6 +53,68 @@ pub struct OdvOptions {
     pub data_columns: Vec<ColumnInfo>,
     /// Specifications for metadata columns
     pub meta_columns: Vec<ColumnInfo>,
+    #[serde(default)]
+    pub archiving: ArchivingMethod,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub enum ArchivingMethod {
+    #[default]
+    ZipStd,
+    ZipDeflate,
+}
+
+impl ArchivingMethod {
+    fn impl_archive_directory<T>(
+        src_dir: &Path,
+        writer: T,
+        method: zip::CompressionMethod,
+    ) -> zip::result::ZipResult<()>
+    where
+        T: Write + Seek,
+    {
+        let mut zip = zip::ZipWriter::new(writer);
+        let options: FileOptions<'_, ()> = FileOptions::default()
+            .compression_method(method)
+            .large_file(true);
+
+        let src_dir = src_dir.canonicalize()?;
+        let mut buffer = Vec::new();
+
+        for entry in WalkDir::new(&src_dir) {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let name = path.strip_prefix(&src_dir).unwrap();
+
+            if path.is_file() {
+                // Start a new file entry in the archive
+                zip.start_file(name.to_str().unwrap(), options)?;
+                let mut f = File::open(path)?;
+                f.read_to_end(&mut buffer)?;
+                zip.write_all(&buffer)?;
+                buffer.clear();
+            } else if name.as_os_str().len() != 0 {
+                // If it's a directory (and not the root), add it
+                zip.add_directory(name.to_str().unwrap(), options)?;
+            }
+        }
+        zip.finish()?;
+        Ok(())
+    }
+
+    pub fn archive_directory<T>(&self, src_dir: &Path, writer: T) -> zip::result::ZipResult<()>
+    where
+        T: Write + Seek,
+    {
+        match self {
+            Self::ZipStd => {
+                Self::impl_archive_directory(src_dir, writer, zip::CompressionMethod::Stored)
+            }
+            Self::ZipDeflate => {
+                Self::impl_archive_directory(src_dir, writer, zip::CompressionMethod::Deflated)
+            }
+        }
+    }
 }
 
 impl OdvOptions {
@@ -186,6 +251,7 @@ impl Default for OdvOptions {
             },
             data_columns: vec![],
             meta_columns: vec![],
+            archiving: ArchivingMethod::default(),
         }
     }
 }
@@ -258,7 +324,7 @@ impl AsyncOdvWriter {
         })
     }
 
-    /// Creates a compressed tar archive containing all ODV output files
+    /// Creates a compressed zip archive containing all ODV output files
     ///
     /// # Arguments
     /// * `file_name` - Base name for the archive file
@@ -266,14 +332,11 @@ impl AsyncOdvWriter {
     ///
     /// # Returns
     /// Result containing path to created archive or error if archival fails
-    pub fn finish_to_tar<W: Write>(&mut self, file: &mut W) -> anyhow::Result<()> {
-        let enc = zstd::Encoder::new(file, 0)
-            .map_err(|e| anyhow::anyhow!("Failed to create zstd encoder: {:?}", e))?;
-        let mut tar_builder = tar::Builder::new(enc);
-
-        tar_builder
-            .append_dir_all("", self.directory.as_path())
-            .map_err(|e| anyhow::anyhow!("Failed to append directory to tar archive: {:?}", e))?;
+    pub fn finish_to_archive<W: Write + Seek>(&mut self, file: &mut W) -> anyhow::Result<()> {
+        self.options
+            .archiving
+            .archive_directory(&self.directory.as_path(), file)
+            .map_err(|e| anyhow::anyhow!("Error archiving ODV files: {:?}", e))?;
 
         Ok(())
     }

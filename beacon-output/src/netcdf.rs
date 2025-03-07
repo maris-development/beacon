@@ -1,19 +1,12 @@
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Schema};
 use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
-use beacon_arrow_odv::writer::{AsyncOdvWriter, OdvOptions};
-use datafusion::{
-    config::CsvOptions,
-    dataframe::DataFrameWriteOptions,
-    logical_expr::SortExpr,
-    prelude::{col, lit, DataFrame, Expr, SessionContext},
-};
+use datafusion::prelude::{DataFrame, SessionContext};
 use futures::StreamExt;
 
 use super::{Output, OutputMethod, TempOutputFile};
 
-pub async fn output(ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<Output> {
+pub async fn output(_ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<Output> {
     let arrow_schema = Arc::new(df.schema().as_arrow().clone());
     let file = TempOutputFile::new("beacon", ".nc")?;
     let mut nc_writer = beacon_arrow_netcdf::writer::ArrowRecordBatchWriter::<DefaultEncoder>::new(

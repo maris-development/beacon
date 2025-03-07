@@ -17,3 +17,5 @@ tempfile = { workspace=true}
 utoipa = { workspace=true}
 tar = "0.4.44"
 zstd = "0.13.3"
+zip = "2.2.3"
+walkdir = "2.5.0"

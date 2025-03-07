@@ -16,7 +16,8 @@ serde = { workspace=true}
 utoipa = { workspace=true}
 bytes = { workspace=true}
 object_store = { workspace = true }
-
+zip = "2.2.3"
+walkdir = "2.5.0"
 
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }

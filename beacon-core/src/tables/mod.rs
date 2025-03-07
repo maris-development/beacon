@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::{any::Any, path::PathBuf, sync::Arc};
 
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
@@ -14,37 +14,68 @@ pub mod table;
 #[derive(Debug)]
 pub struct BeaconSchemaProvider {
     session_state: Arc<SessionState>,
-    tables: Arc<tokio::sync::Mutex<indexmap::IndexMap<String, Arc<dyn BeaconTable>>>>,
+    tables_map: Arc<tokio::sync::Mutex<indexmap::IndexMap<String, Arc<dyn BeaconTable>>>>,
+    root_dir_path: PathBuf,
 }
 
 impl BeaconSchemaProvider {
     pub async fn new(session_state: Arc<SessionState>) -> anyhow::Result<Self> {
+        let root_dir_path = beacon_config::DATA_DIR
+            .join(beacon_config::TABLES_DIR_PREFIX.to_string())
+            .canonicalize()?;
+
         //Read all tables. Each .json file in the tables directory is a table.
-        let tables = Arc::new(tokio::sync::Mutex::new(indexmap::IndexMap::new()));
-        while let Ok(entry) = tokio::fs::read_dir("tables").await?.next_entry().await {
-            if let Some(path) = entry {
-                if path.file_type().await?.is_file() {
-                    let json_string = tokio::fs::read_to_string(path.path()).await?;
-                    let table: Arc<dyn BeaconTable> = serde_json::from_str(&json_string)?;
-                    tables
-                        .lock()
-                        .await
-                        .insert(table.table_name().to_string(), table);
-                }
-            }
+        let mut tables_map = indexmap::IndexMap::new();
+        let tables = Self::load_tables(&root_dir_path).await?;
+        for table in tables {
+            tables_map.insert(table.table_name().to_string(), table);
         }
 
         Ok(Self {
             session_state,
-            tables: Arc::new(tokio::sync::Mutex::new(indexmap::IndexMap::new())),
+            tables_map: Arc::new(tokio::sync::Mutex::new(tables_map)),
+            root_dir_path,
         })
     }
 
-    pub async fn add_table(&self, table: Arc<dyn BeaconTable>) {
-        self.tables
-            .lock()
-            .await
-            .insert(table.table_name().to_string(), table);
+    async fn load_tables(
+        base_path: &std::path::Path,
+    ) -> std::io::Result<Vec<Arc<dyn BeaconTable>>> {
+        let mut tables = Vec::new();
+        let mut dir = tokio::fs::read_dir(base_path).await?;
+
+        while let Some(entry) = dir.next_entry().await? {
+            let path = entry.path();
+
+            // Use async metadata to check if the path is a directory.
+            if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                if metadata.is_dir() {
+                    let json_path = path.join("table.json");
+                    // Check if the JSON file exists.
+                    if tokio::fs::metadata(&json_path).await.is_ok() {
+                        let json_data = tokio::fs::read_to_string(&json_path).await?;
+                        let table: Arc<dyn BeaconTable> = serde_json::from_str(&json_data)
+                            .expect("Failed to deserialize DataTable");
+                        tables.push(table);
+                    }
+                }
+            }
+        }
+        Ok(tables)
+    }
+
+    pub async fn add_table(&self, table: Arc<dyn BeaconTable>) -> anyhow::Result<()> {
+        let mut locked_tables = self.tables_map.lock().await;
+        if !locked_tables.contains_key(table.table_name()) {
+            let table_path = self.root_dir_path.join(table.table_name());
+            let table_json = serde_json::to_string(&table)?;
+            tokio::fs::write(table_path, table_json).await?;
+            locked_tables.insert(table.table_name().to_string(), table);
+
+            Ok(())
+        } else {
+            anyhow::bail!("Table with name {} already exists", table.table_name());
+        }
     }
 }
 
@@ -64,14 +95,14 @@ impl SchemaProvider for BeaconSchemaProvider {
 
     /// Retrieves the list of available table names in this schema.
     fn table_names(&self) -> Vec<String> {
-        self.tables.blocking_lock().keys().cloned().collect()
+        self.tables_map.blocking_lock().keys().cloned().collect()
     }
 
     /// Retrieves a specific table from the schema by name, if it exists,
     /// otherwise returns `None`.
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
         let state_cloned = self.session_state.clone();
-        if let Some(table) = self.tables.lock().await.get(name).cloned() {
+        if let Some(table) = self.tables_map.lock().await.get(name).cloned() {
             let table = table.as_table(state_cloned).await;
             Ok(Some(table))
         } else {
@@ -90,7 +121,7 @@ impl SchemaProvider for BeaconSchemaProvider {
         name: String,
         table: Arc<dyn TableProvider>,
     ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
-        not_impl_err!("schema provider does not support registering tables")
+        not_impl_err!("Beacon does not support registering tables.")
     }
 
     /// If supported by the implementation, removes the `name` table from this
@@ -102,11 +133,11 @@ impl SchemaProvider for BeaconSchemaProvider {
         &self,
         name: &str,
     ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
-        not_impl_err!("schema provider does not support deregistering tables")
+        not_impl_err!("Beacon does not support deregistering tables.")
     }
 
     /// Returns true if table exist in the schema provider, false otherwise.
     fn table_exist(&self, name: &str) -> bool {
-        self.tables.blocking_lock().contains_key(name)
+        self.tables_map.blocking_lock().contains_key(name)
     }
 }

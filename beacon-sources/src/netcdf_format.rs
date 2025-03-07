@@ -1,37 +1,21 @@
-use std::{
-    any::Any,
-    fmt::Formatter,
-    sync::{Arc, Mutex},
-};
+use std::{any::Any, fmt::Formatter, sync::Arc};
 
-use arrow::{
-    datatypes::{Schema, SchemaRef},
-    error::ArrowError,
-};
-use async_stream::{stream, try_stream};
-use beacon_arrow_netcdf::encoders::default::DefaultEncoder;
+use arrow::datatypes::SchemaRef;
+use async_stream::try_stream;
 use datafusion::{
-    common::{not_impl_err, Statistics},
+    common::Statistics,
     datasource::{
-        file_format::{
-            file_compression_type::FileCompressionType, FileFormat, FilePushdownSupport,
-        },
-        physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileScanConfig, FileSinkConfig},
+        file_format::{file_compression_type::FileCompressionType, FileFormat},
+        physical_plan::FileScanConfig,
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
     execution::{SendableRecordBatchStream, SessionState, TaskContext},
-    logical_expr::dml::InsertOp,
-    physical_expr::{EquivalenceProperties, LexRequirement},
+    physical_expr::EquivalenceProperties,
     physical_plan::{
-        insert::{DataSink, DataSinkExec},
-        memory::MemoryStream,
-        metrics::MetricsSet,
-        stream::RecordBatchStreamAdapter,
-        DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
+        stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan,
+        PhysicalExpr, PlanProperties,
     },
-    prelude::Expr,
 };
-use futures::{pin_mut, StreamExt};
 use object_store::{ObjectMeta, ObjectStore};
 
 use beacon_common::super_typing;
@@ -108,16 +92,6 @@ impl FileFormat for NetCDFFormat {
         _filters: Option<&Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(NetCDFExec::new(conf)))
-    }
-
-    async fn create_writer_physical_plan(
-        &self,
-        input: Arc<dyn ExecutionPlan>,
-        state: &SessionState,
-        conf: FileSinkConfig,
-        order_requirements: Option<LexRequirement>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        not_impl_err!("create_writer_physical_plan")
     }
 }
 

@@ -3,8 +3,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_output::{Output, OutputFormat};
 use datafusion::{
-    catalog::TableProvider,
-    datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl},
+    datasource::listing::{ListingTableConfig, ListingTableUrl},
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, object_store::ObjectStoreUrl,
         runtime_env::RuntimeEnvBuilder,
@@ -13,11 +12,9 @@ use datafusion::{
     prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
 };
 use futures::StreamExt;
-use object_store::{local::LocalFileSystem, ObjectStore};
 use tracing::{event, Level};
 
 pub struct VirtualMachine {
-    memory_pool: Arc<FairSpillPool>,
     session_ctx: Arc<SessionContext>,
 }
 
@@ -29,10 +26,7 @@ impl VirtualMachine {
 
         let session_ctx = Self::init_ctx(memory_pool.clone())?;
 
-        Ok(Self {
-            memory_pool,
-            session_ctx,
-        })
+        Ok(Self { session_ctx })
     }
 
     fn init_ctx(mem_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {

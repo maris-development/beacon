@@ -5,7 +5,7 @@ on:
   # using the `master` branch as the default branch.
   push:
     # branches: [main]
-    branches: ['*']
+    branches: ['main']
 
 
   # Allows you to run this workflow manually from the Actions tab

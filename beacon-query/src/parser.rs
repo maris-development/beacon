@@ -17,7 +17,8 @@ impl Parser {
         inner_query: InnerQuery,
     ) -> anyhow::Result<LogicalPlan> {
         let datafusion_logical_plan = match inner_query {
-            InnerQuery::Sql(_) => {
+            //ToDO: Implement SQL queries
+            InnerQuery::Sql(_sql) => {
                 tracing::error!("SQL queries are not supported yet");
                 anyhow::bail!("SQL queries are not supported yet")
             }
