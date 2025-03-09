@@ -11,7 +11,8 @@ use datafusion::{
 use utoipa::ToSchema;
 
 use beacon_sources::{
-    arrow_format::SuperArrowFormat, parquet_format::SuperParquetFormat, DataSource,
+    arrow_format::SuperArrowFormat, odv_format::OdvFormat, parquet_format::SuperParquetFormat,
+    DataSource,
 };
 
 pub mod parser;
@@ -108,6 +109,9 @@ pub enum From {
         path: FileSystemPath,
         delimiter: Option<char>,
         header: Option<bool>,
+    },
+    Odv {
+        path: FileSystemPath,
     },
 }
 
@@ -206,6 +210,17 @@ impl From {
                         .await?
                         .into_unoptimized_plan(),
                 ))
+            }
+            From::Odv { path } => {
+                let table_urls: Vec<ListingTableUrl> = path.try_into()?;
+                let source =
+                    DataSource::new(&session_ctx.state(), Arc::new(OdvFormat), table_urls).await?;
+
+                let source = provider_as_source(Arc::new(source));
+
+                let plan_builder = LogicalPlanBuilder::scan("odv_table", source, None)?;
+
+                Ok(plan_builder)
             }
         }
     }

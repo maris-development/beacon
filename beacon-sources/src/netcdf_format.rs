@@ -21,15 +21,11 @@ use object_store::{ObjectMeta, ObjectStore};
 use beacon_common::super_typing;
 
 #[derive(Debug)]
-pub struct NetCDFFormat {
-    schema_adapter: Arc<dyn SchemaAdapterFactory>,
-}
+pub struct NetCDFFormat;
 
 impl NetCDFFormat {
     pub fn new() -> Self {
-        Self {
-            schema_adapter: Arc::new(DefaultSchemaAdapterFactory),
-        }
+        Self
     }
 
     pub fn read_arrow_schema(&self, file_path: &str) -> anyhow::Result<SchemaRef> {

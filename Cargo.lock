@@ -525,9 +525,11 @@ dependencies = [
  "arrow",
  "arrow-csv",
  "async-trait",
+ "csv",
  "futures",
  "futures-util",
  "indexmap",
+ "quick-xml",
  "regex",
  "serde",
  "tar",
@@ -2821,6 +2823,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f58e5423e24c18cc840e1c98370b3993c6649cd1678b4d24318bcf0a083cbe88"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.37.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "165859e9e55f79d67b96c5d96f4e88b6f2695a1972849c15a6a3f5c59fc2c003"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
