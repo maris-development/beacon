@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_output::{Output, OutputFormat};
 use datafusion::{
+    catalog::SchemaProvider,
     datasource::{
         file_format::{
             arrow::ArrowFormatFactory, csv::CsvFormatFactory, parquet::ParquetFormatFactory,
@@ -20,19 +21,33 @@ use datafusion::{
 use futures::StreamExt;
 use tracing::{event, Level};
 
+use crate::tables::{table::BeaconTable, BeaconSchemaProvider};
+
 pub struct VirtualMachine {
     session_ctx: Arc<SessionContext>,
+    schema_provider: Arc<BeaconSchemaProvider>,
 }
 
 impl VirtualMachine {
-    pub fn new() -> anyhow::Result<Self> {
+    pub async fn new() -> anyhow::Result<Self> {
         let memory_pool = Arc::new(FairSpillPool::new(
             beacon_config::CONFIG.vm_memory_size * 1024 * 1024,
         ));
 
         let session_ctx = Self::init_ctx(memory_pool.clone())?;
 
-        Ok(Self { session_ctx })
+        let beacon_schema_provider =
+            Arc::new(BeaconSchemaProvider::new(Arc::new(session_ctx.state())).await?);
+
+        session_ctx
+            .catalog("datafusion")
+            .unwrap()
+            .register_schema("public", beacon_schema_provider.clone())?;
+
+        Ok(Self {
+            session_ctx,
+            schema_provider: beacon_schema_provider,
+        })
     }
 
     fn init_ctx(mem_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
@@ -64,6 +79,26 @@ impl VirtualMachine {
         self.session_ctx.clone()
     }
 
+    pub fn list_tables(&self) -> Vec<String> {
+        self.schema_provider.table_names()
+    }
+
+    pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
+        self.session_ctx
+            .table(table_name)
+            .await
+            .map(|t| Arc::new(t.schema().as_arrow().to_owned()))
+            .ok()
+    }
+
+    pub async fn add_table(&self, table: Arc<dyn BeaconTable>) -> anyhow::Result<()> {
+        self.schema_provider.add_table(table).await
+    }
+
+    pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
+        self.schema_provider.delete_table(table_name).await
+    }
+
     pub async fn run_client_sql(&self, sql: &str, output: &OutputFormat) -> anyhow::Result<Output> {
         let sql_options = SQLOptions::new()
             .with_allow_ddl(false)
@@ -86,23 +121,6 @@ impl VirtualMachine {
         let df = self.session_ctx.sql(sql).await?;
 
         output.output(self.session_ctx.clone(), df).await
-    }
-
-    pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
-        self.session_ctx
-            .table(table_name)
-            .await
-            .map(|t| Arc::new(t.schema().as_arrow().to_owned()))
-            .ok()
-    }
-
-    pub async fn list_tables(&self) -> Vec<String> {
-        self.session_ctx
-            .catalog("datafusion")
-            .unwrap()
-            .schema("public")
-            .unwrap()
-            .table_names()
     }
 
     pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {

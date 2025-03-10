@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     setup_tracing();
 
     tracing::info!("Beacon API v{}", BEACON_VERSION);
-    let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new()?);
+    let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new().await?);
 
     let (client_router, mut api_docs_client) = setup_client_router();
     let (admin_router, api_docs_admin) = setup_admin_router();

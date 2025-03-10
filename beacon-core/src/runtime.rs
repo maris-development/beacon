@@ -1,4 +1,6 @@
-use crate::virtual_machine;
+use std::sync::Arc;
+
+use crate::{tables::table::BeaconTable, virtual_machine};
 use arrow::datatypes::SchemaRef;
 use beacon_output::Output;
 use beacon_query::{parser::Parser, Query};
@@ -8,8 +10,8 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn new() -> anyhow::Result<Self> {
-        let virtual_machine = virtual_machine::VirtualMachine::new()?;
+    pub async fn new() -> anyhow::Result<Self> {
+        let virtual_machine = virtual_machine::VirtualMachine::new().await?;
         Ok(Self { virtual_machine })
     }
 
@@ -22,12 +24,12 @@ impl Runtime {
         Ok(output)
     }
 
-    pub async fn add_table(&self) -> anyhow::Result<()> {
-        todo!()
+    pub async fn add_table(&self, table: Arc<dyn BeaconTable>) -> anyhow::Result<()> {
+        self.virtual_machine.add_table(table).await
     }
 
-    pub async fn list_tables(&self) -> Vec<String> {
-        self.virtual_machine.list_tables().await
+    pub fn list_tables(&self) -> Vec<String> {
+        self.virtual_machine.list_tables()
     }
 
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {

@@ -17,7 +17,7 @@ pub struct ListDatasetsQuery {
 }
 
 #[tracing::instrument(level = "info", skip(state))]
-#[utoipa::path(get, path = "/datasets", params(ListDatasetsQuery),responses((status = 200, description = "List of datasets")))]
+#[utoipa::path(get, path = "/api/datasets", params(ListDatasetsQuery),responses((status = 200, description = "List of datasets")))]
 pub(crate) async fn list_datasets(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListDatasetsQuery>,
@@ -44,7 +44,7 @@ pub struct ListSchemaQuery {
 }
 
 #[tracing::instrument(level = "info", skip(state))]
-#[utoipa::path(get, path = "/dataset-schema", params(ListSchemaQuery),responses((status = 200, description = "List the schema/available columns")))]
+#[utoipa::path(get, path = "/api/dataset-schema", params(ListSchemaQuery),responses((status = 200, description = "List the schema/available columns")))]
 pub(crate) async fn list_dataset_schema(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListSchemaQuery>,

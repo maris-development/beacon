@@ -8,6 +8,7 @@ use datafusion::{
 };
 use table::BeaconTable;
 
+pub mod empty_table;
 pub mod glob_table;
 pub mod table;
 
@@ -20,9 +21,15 @@ pub struct BeaconSchemaProvider {
 
 impl BeaconSchemaProvider {
     pub async fn new(session_state: Arc<SessionState>) -> anyhow::Result<Self> {
-        let root_dir_path = beacon_config::DATA_DIR
-            .join(beacon_config::TABLES_DIR_PREFIX.to_string())
-            .canonicalize()?;
+        //Create tables dir if it doesnt exists
+        let root_dir_path =
+            beacon_config::DATA_DIR.join(beacon_config::TABLES_DIR_PREFIX.to_string());
+
+        tokio::fs::create_dir_all(&root_dir_path).await?;
+
+        let canon_path = root_dir_path
+            .canonicalize()
+            .expect("Failed to canonicalize tables directory path");
 
         //Read all tables. Each .json file in the tables directory is a table.
         let mut tables_map = indexmap::IndexMap::new();
@@ -42,7 +49,8 @@ impl BeaconSchemaProvider {
         base_path: &std::path::Path,
     ) -> std::io::Result<Vec<Arc<dyn BeaconTable>>> {
         let mut tables = Vec::new();
-        let mut dir = tokio::fs::read_dir(base_path).await?;
+
+        let mut dir = tokio::fs::read_dir(base_path).await.unwrap();
 
         while let Some(entry) = dir.next_entry().await? {
             let path = entry.path();
@@ -75,6 +83,17 @@ impl BeaconSchemaProvider {
             Ok(())
         } else {
             anyhow::bail!("Table with name {} already exists", table.table_name());
+        }
+    }
+
+    pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
+        let mut locked_tables = self.tables_map.lock().await;
+        if let Some(table) = locked_tables.shift_remove(table_name) {
+            let table_path = self.root_dir_path.join(table_name);
+            tokio::fs::remove_file(table_path).await?;
+            Ok(())
+        } else {
+            anyhow::bail!("Table with name {} does not exist", table_name);
         }
     }
 }

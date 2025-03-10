@@ -482,6 +482,7 @@ dependencies = [
  "arrow",
  "arrow-schema",
  "axum",
+ "base64",
  "beacon-config",
  "beacon-core",
  "beacon-output",

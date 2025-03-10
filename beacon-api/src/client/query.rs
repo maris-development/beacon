@@ -21,7 +21,7 @@ pub struct Args {
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     post,
-    path = "/query",
+    path = "/api/query",
     responses(
         (status=200, description="Response containing the query results in the format specified by the query"),
     )

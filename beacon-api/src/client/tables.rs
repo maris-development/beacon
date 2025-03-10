@@ -10,9 +10,9 @@ use beacon_core::runtime::Runtime;
 use utoipa::{IntoParams, ToSchema};
 
 #[tracing::instrument(level = "info", skip(state))]
-#[utoipa::path(get, path = "/tables", responses((status = 200, description = "List of tables")))]
+#[utoipa::path(get, path = "/api/tables", responses((status = 200, description = "List of tables")))]
 pub(crate) async fn list_tables(State(state): State<Arc<Runtime>>) -> Json<Vec<String>> {
-    let result = state.list_tables().await;
+    let result = state.list_tables();
     Json(result)
 }
 
@@ -22,7 +22,7 @@ pub struct ListTableSchemaQuery {
 }
 
 #[tracing::instrument(level = "info", skip(state))]
-#[utoipa::path(get, path = "/table-schema", params(ListTableSchemaQuery) ,responses((status = 200, description = "List of schema of a table")))]
+#[utoipa::path(get, path = "/api/table-schema", params(ListTableSchemaQuery) ,responses((status = 200, description = "List of schema of a table")))]
 pub(crate) async fn list_table_schema(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListTableSchemaQuery>,
