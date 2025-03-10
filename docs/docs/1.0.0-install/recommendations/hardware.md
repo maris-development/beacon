@@ -2,7 +2,7 @@
 
 Beacon is a lightweight tool that can run on most modern hardware. The following are the minimum and recommended hardware requirements for running Beacon.
 
-# Server Hardware Specifications for Software Tool
+# Server Hardware Specifications for Beacon
 
 ## Minimum Hardware Requirements
 
@@ -67,4 +67,4 @@ For optimal performance, especially when handling large datasets or performing c
 
 By meeting the minimum requirements, servers can run the software tool with basic functionality. However, for a smooth and efficient experience, especially when dealing with larger datasets or more intensive operations, it is highly recommended to follow the suggested hardware specifications.
 
-For any further queries or support, please refer to our [support page](#).
+For any further queries or support, please [contact us](beacon.maris.nl/contact).

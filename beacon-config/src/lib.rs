@@ -13,7 +13,7 @@ pub struct Config {
     #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
     pub log_level: String,
     //Memory size in MB
-    #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "512")]
+    #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "4096")]
     pub vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     pub default_table: String,

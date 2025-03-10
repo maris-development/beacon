@@ -68,6 +68,7 @@ export default defineConfig({
             {
               text: 'Installation',
               link: '/docs/1.0.0-install/',
+              collapsed: true,
               items: [
                 {
                   text: 'Docker',
@@ -75,7 +76,7 @@ export default defineConfig({
                 },
                 {
                   text: 'Activation',
-                  link: '/docs/1.0.0-install#activation'
+                  link: '/docs/1.0.0-install#activation-standard-edition'
                 },
                 {
                   text: 'Troubleshooting',
@@ -88,42 +89,41 @@ export default defineConfig({
               link: '/docs/1.0.0-install/configuration'
             },
             {
-              text: 'Importing Datasets',
-              link: '/docs/1.0.0-install/importing-datasets/netcdf',
+              text: 'Datasets',
+              link: '/docs/1.0.0-install/datasets'
+            },
+            {
+              text: 'Data Tables',
+              link: '/docs/1.0.0-install/data-tables'
+            },
+            {
+              text: 'Beacon Binary Format',
+              link: '/docs/1.0.0-install/beacon-binary-format/',
+              collapsed: true,
               items: [
                 {
-                  text: 'NetCDF',
-                  link: '/docs/1.0.0-install/importing-datasets/netcdf',
-                  // items: [
-                  //   {
-                  //     text: 'Default',
-                  //     link: '/docs/1.0.0-install/importing-datasets/netcdf'
-                  //   },
-                  //   {
-                  //     text: 'NetCDF Ragged',
-                  //     link: '/docs/1.0.0-install/importing-datasets/ragged-netcdf'
-                  //   },
-                  //   {
-                  //     text: 'NetCDF CMEMS CORA',
-                  //     link: '/docs/1.0.0-install/importing-datasets/cora-netcdf'
-                  //   },
-                  //   {
-                  //     text: 'NetCDF CMEMS BGC',
-                  //     link: '/docs/1.0.0-install/importing-datasets/cora-netcdf'
-                  //   }
-                  // ]
+                  text: 'Import NetCDF',
+                  link: '/docs/1.0.0-install/beacon-binary-format/import-netcdf',
                 },
                 {
-                  text: 'CSV',
-                  link: '/docs/1.0.0-install/importing-datasets/csv'
+                  text: 'Import CSV',
+                  link: '/docs/1.0.0-install/beacon-binary-format/import-csv'
                 },
                 {
-                  text: 'ODV',
-                  link: '/docs/1.0.0-install/importing-datasets/odv'
+                  text: 'Import ODV',
+                  link: '/docs/1.0.0-install/beacon-binary-format/import-odv'
                 },
                 {
-                  text: 'Parquet',
-                  link: '/docs/1.0.0-install/importing-datasets/parquet'
+                  text: 'Import Parquet',
+                  link: '/docs/1.0.0-install/beacon-binary-format/import-parquet'
+                },
+                {
+                  text: 'Import Arrow Ipc/Feather',
+                  link: '/docs/1.0.0-install/beacon-binary-format/import-arrow-ipc'
+                },
+                {
+                  text: 'How to use',
+                  link: '/docs/1.0.0-install/beacon-binary-format/usage'
                 }
               ]
             },
@@ -134,7 +134,12 @@ export default defineConfig({
             {
               text: 'Hardware Recommendations',
               link: '/docs/1.0.0-install/recommendations/hardware'
-            }]
+            },
+            {
+              text: 'Support',
+              link: '/docs/1.0.0-install/support'
+            }
+          ]
         }
       ],
       '/docs/1.0.0/query-docs': [
@@ -182,6 +187,7 @@ export default defineConfig({
 
     socialLinks: [
       { icon: 'slack', link: 'https://join.slack.com/t/beacontechnic-wwa5548/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg' },
+      { icon: 'github', link: 'https://github.com/maris-development/beacon' },
     ]
   }
 })

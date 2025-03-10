@@ -1,5 +1,9 @@
 # 🛠️ Installation
 
+::: info
+The Installation Guide for both the Beacon Community Edition and Beacon Standard Edition is the same. The only difference is the activation of extra features in the Enterprise Edition which requires a token.
+:::
+
 Welcome to the installation guide for Beacon. In this chapter, we will walk you through the installation process of Beacon using a Docker image. By leveraging Docker, you can quickly and easily deploy Beacon on various operating systems without worrying about complex dependencies or compatibility issues.
 
 To proceed with the installation, make sure you have Docker installed on your system. Docker provides comprehensive installation guides for various operating systems on their official website (https://www.docker.com/). Follow the instructions specific to your operating system to set up Docker.
@@ -13,13 +17,13 @@ In this chapter, we will guide you through the step-by-step installation procedu
 
 Let's get started with the installation process:
 
-Step 1: Download the Beacon Docker Image
+## Step 1: Download the Beacon Docker Image
 
 * Open your web browser and navigate to our GitHub repository (https://github.com/maris-development/beacon/releases).
 * Locate the Beacon Docker image file, typically named beacon-docker.x.x.x.tar.
 * Click on the file to initiate the download process. Choose a suitable location on your machine to save the file.
 
-Step 2: Load the Docker Image
+## Step 2: Load the Docker Image
 
 * Open a terminal or command prompt on your machine.
 * Navigate to the directory where you downloaded the Beacon Docker image file.
@@ -31,7 +35,7 @@ docker load -i beacon-x.x.x.tar
 
 Replace beacon-x.x.x.tar with the actual name of the downloaded file if it differs.
 
-Step 3: Deploy the Beacon Docker Container
+## Step 3: Deploy the Beacon Docker Container
 
 * With the Beacon Docker image loaded, you can now deploy it as a container. Run the following command:
 
@@ -48,19 +52,7 @@ The -v /path/to/datasets:/datasets flag maps a directory on your host machine co
 * Replace /path/to/dataset with the actual path to your dataset directory.
 * Finally, beacon-image represents the name of the loaded Docker image. Make sure to use the correct image name.
 
-### Optional: Mounting the Beacon Data Directory (e.g., for Backup)
-
-If you want to mount the directory that beacon creates for the internal representation of the data (e.g., for backup), you can add another -v flag to the command:
-
-```bash
-docker run -d -p 5001:5001 -v /path/to/datasets:/beacon/datasets -v /path/to/beacon/data:/beacon/data beacon-image
-```
-
-::: warning
-It's recommended to use Docker Volumes if performance is a concern. Docker Volumes are usually more performant than bind mounts.
-:::
-
-Step 4: Verify the Installation
+## Step 4: Verify the Installation
 
 * Open a web browser and enter http://localhost:5001/swagger/ in the address bar.
 If the installation was successful, you should see the Beacon Swagger Interface indicating that Beacon is running.
@@ -69,7 +61,7 @@ Congratulations! You have successfully installed Beacon using Docker. You can no
 In case you encounter any issues during the installation process, please refer to the troubleshooting section of this documentation or reach out to our support team for assistance.
 
 
-### Activation [Extra Features]
+### Activation [Standard Edition]
 
 To get access to features such as beacon-binary-format, you will need to activate Beacon. This requires you to set the following environment variables:
 
