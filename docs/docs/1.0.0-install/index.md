@@ -1,7 +1,7 @@
 # 🛠️ Installation
 
 ::: info
-The Installation Guide for both the Beacon Community Edition and Beacon Standard Edition is the same. The only difference is the activation of extra features in the Enterprise Edition which requires a token.
+The Installation guide for both the Beacon Community Edition and Beacon Standard Edition is the same. The only difference is the activation of extra features in the Standard Edition that requires a token.
 :::
 
 Welcome to the installation guide for Beacon. In this chapter, we will walk you through the installation process of Beacon using a Docker image. By leveraging Docker, you can quickly and easily deploy Beacon on various operating systems without worrying about complex dependencies or compatibility issues.
@@ -20,7 +20,9 @@ Let's get started with the installation process:
 ## Step 1: Download the Beacon Docker Image
 
 * Open your web browser and navigate to our GitHub repository (https://github.com/maris-development/beacon/releases).
-* Locate the Beacon Docker image file, typically named beacon-docker.x.x.x.tar.
+* Locate the Beacon Docker image file of your choice (see: [Beacon plans](https://beacon.maris.nl/plans)):
+    * Community edition: *beacon-community.x.x.x.tar*;
+    * Standard edition: *beacon-standard.x.x.x.tar*.
 * Click on the file to initiate the download process. Choose a suitable location on your machine to save the file.
 
 ## Step 2: Load the Docker Image
@@ -33,7 +35,7 @@ Let's get started with the installation process:
 docker load -i beacon-x.x.x.tar
 ```
 
-Replace beacon-x.x.x.tar with the actual name of the downloaded file if it differs.
+Replace beacon-community/standard.x.x.x.tar with the actual name of the downloaded file if it differs.
 
 ## Step 3: Deploy the Beacon Docker Container
 
@@ -60,16 +62,15 @@ Congratulations! You have successfully installed Beacon using Docker. You can no
 
 In case you encounter any issues during the installation process, please refer to the troubleshooting section of this documentation or reach out to our support team for assistance.
 
-
-### Activation [Standard Edition]
-
+::: info Activation - only required for Standard Edition
 To get access to features such as beacon-binary-format, you will need to activate Beacon. This requires you to set the following environment variables:
 
 - `BEACON_TOKEN=YOUR_TOKEN` - The token to activate Beacon.
 
 This check will be done on startup and can only be used to start a single Beacon Instance. You can request another token if you would like to spawn another instance of Beacon at https://beacon.maris.nl/.
+::: 
 
-### Troubleshooting
+## Troubleshooting
 
 If you encounter any issues during the installation process, please refer to the following troubleshooting steps:
 - Ensure that Docker is installed correctly on your system.
