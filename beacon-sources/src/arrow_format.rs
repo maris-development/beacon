@@ -2,11 +2,11 @@ use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::{
-    common::Statistics,
+    common::{GetExt, Statistics},
     datasource::{
         file_format::{
             arrow::ArrowFormat, file_compression_type::FileCompressionType, FileFormat,
-            FilePushdownSupport,
+            FileFormatFactory, FilePushdownSupport,
         },
         physical_plan::FileScanConfig,
     },
@@ -17,6 +17,33 @@ use datafusion::{
 use object_store::{ObjectMeta, ObjectStore};
 
 use beacon_common::super_typing;
+
+#[derive(Debug)]
+pub struct SuperArrowFormatFactory;
+
+impl FileFormatFactory for SuperArrowFormatFactory {
+    fn create(
+        &self,
+        state: &SessionState,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        Ok(Arc::new(SuperArrowFormat::new()))
+    }
+
+    fn default(&self) -> Arc<dyn FileFormat> {
+        Arc::new(SuperArrowFormat::new())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl GetExt for SuperArrowFormatFactory {
+    fn get_ext(&self) -> String {
+        "parquet".to_string()
+    }
+}
 
 #[derive(Debug)]
 pub struct SuperArrowFormat {

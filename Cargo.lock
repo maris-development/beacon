@@ -651,8 +651,10 @@ dependencies = [
  "indexmap",
  "nd-arrow-array",
  "object_store",
+ "serde",
  "tokio",
  "tracing",
+ "utoipa",
 ]
 
 [[package]]

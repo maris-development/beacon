@@ -36,7 +36,7 @@ Step 3: Deploy the Beacon Docker Container
 * With the Beacon Docker image loaded, you can now deploy it as a container. Run the following command:
 
 ```bash
-docker run -d -p 5001:5001 -v /path/to/datasets:/beacon/datasets beacon-image
+docker run -d -p 5001:5001 -v /path/to/datasets:/beacon/data/datasets beacon-image
 ```
 
 The -d flag runs the container in detached mode, allowing it to run in the background should you want it to.
@@ -69,14 +69,13 @@ Congratulations! You have successfully installed Beacon using Docker. You can no
 In case you encounter any issues during the installation process, please refer to the troubleshooting section of this documentation or reach out to our support team for assistance.
 
 
-### Activation
+### Activation [Extra Features]
 
-To activate Beacon, you need to set the following environment variables:
+To get access to features such as beacon-binary-format, you will need to activate Beacon. This requires you to set the following environment variables:
 
 - `BEACON_TOKEN=YOUR_TOKEN` - The token to activate Beacon.
 
 This check will be done on startup and can only be used to start a single Beacon Instance. You can request another token if you would like to spawn another instance of Beacon at https://beacon.maris.nl/.
-
 
 ### Troubleshooting
 

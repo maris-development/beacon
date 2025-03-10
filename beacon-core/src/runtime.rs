@@ -22,6 +22,10 @@ impl Runtime {
         Ok(output)
     }
 
+    pub async fn add_table(&self) -> anyhow::Result<()> {
+        todo!()
+    }
+
     pub async fn list_tables(&self) -> Vec<String> {
         self.virtual_machine.list_tables().await
     }

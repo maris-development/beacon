@@ -18,3 +18,4 @@ Some of the configuration options can be set using environment variables. The fo
 - `PORT` - Port number to listen on.
 - `IP_ADDRESS` - IP address to listen on.
 - `BEACON_LOG_LEVEL` - Log level [`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`].
+- `BEACON_TOKEN=YOUR_TOKEN` - The token to activate Beacon.

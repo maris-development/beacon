@@ -11,8 +11,8 @@ use datafusion::{
 use utoipa::ToSchema;
 
 use beacon_sources::{
-    arrow_format::SuperArrowFormat, odv_format::OdvFormat, parquet_format::SuperParquetFormat,
-    DataSource,
+    arrow_format::SuperArrowFormat, formats_factory::Formats, odv_format::OdvFormat,
+    parquet_format::SuperParquetFormat, DataSource,
 };
 
 pub mod parser;
@@ -40,7 +40,8 @@ pub struct QueryBody {
     #[serde(alias = "query_parameters")]
     select: Vec<Select>,
     filter: Option<Filter>,
-    from: From,
+    #[serde(default)]
+    from: Option<From>,
     sort_by: Option<Vec<Sort>>,
     distinct: Option<Vec<String>>,
 }
@@ -99,20 +100,22 @@ impl Select {
 #[serde(rename_all = "lowercase")]
 #[serde(deny_unknown_fields)]
 pub enum From {
-    Parquet {
-        path: FileSystemPath,
+    Table {
+        #[serde(flatten)]
+        table: String,
     },
-    ArrowIpc {
-        path: FileSystemPath,
+    Format {
+        #[serde(flatten)]
+        format: Formats,
     },
-    Csv {
-        path: FileSystemPath,
-        delimiter: Option<char>,
-        header: Option<bool>,
-    },
-    Odv {
-        path: FileSystemPath,
-    },
+}
+
+impl Default for From {
+    fn default() -> Self {
+        From::Table {
+            table: beacon_config::CONFIG.default_table.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -162,66 +165,18 @@ impl From {
         session_ctx: &SessionContext,
     ) -> anyhow::Result<LogicalPlanBuilder> {
         match self {
-            From::Parquet { path } => {
-                let table_urls: Vec<ListingTableUrl> = path.try_into()?;
-                let source = DataSource::new(
-                    &session_ctx.state(),
-                    Arc::new(SuperParquetFormat::new()),
-                    table_urls,
-                )
-                .await?;
-
-                let source = provider_as_source(Arc::new(source));
-
-                let plan_builder = LogicalPlanBuilder::scan("parquet_table", source, None)?;
-
-                Ok(plan_builder)
-            }
-            From::ArrowIpc { path } => {
-                let table_urls: Vec<ListingTableUrl> = path.try_into()?;
-                let source = DataSource::new(
-                    &session_ctx.state(),
-                    Arc::new(SuperArrowFormat::new()),
-                    table_urls,
-                )
-                .await?;
-
-                let source = provider_as_source(Arc::new(source));
-
-                let plan_builder = LogicalPlanBuilder::scan("parquet_table", source, None)?;
-
-                Ok(plan_builder)
-            }
-            From::Csv {
-                path,
-                delimiter,
-                header,
-            } => {
-                let options = CsvReadOptions::new()
-                    .delimiter_option(delimiter.map(|d| d as u8))
-                    .has_header(header.unwrap_or(true));
-                let paths = match path {
-                    FileSystemPath::ManyPaths(items) => items.clone(),
-                    FileSystemPath::Path(path) => vec![path.clone()],
-                };
-                Ok(LogicalPlanBuilder::new(
-                    session_ctx
-                        .read_csv(paths, options)
-                        .await?
-                        .into_unoptimized_plan(),
-                ))
-            }
-            From::Odv { path } => {
-                let table_urls: Vec<ListingTableUrl> = path.try_into()?;
-                let source =
-                    DataSource::new(&session_ctx.state(), Arc::new(OdvFormat), table_urls).await?;
-
-                let source = provider_as_source(Arc::new(source));
-
-                let plan_builder = LogicalPlanBuilder::scan("odv_table", source, None)?;
-
-                Ok(plan_builder)
-            }
+            From::Table { table } => session_ctx
+                .table(table)
+                .await
+                .map(|table| LogicalPlanBuilder::new(table.into_unoptimized_plan()))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to create logical plan builder for table {}: {}",
+                        table,
+                        e
+                    )
+                }),
+            From::Format { format } => format.create_plan_builder(&session_ctx.state()).await,
         }
     }
 }

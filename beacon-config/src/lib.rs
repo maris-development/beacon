@@ -15,6 +15,8 @@ pub struct Config {
     //Memory size in MB
     #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "512")]
     pub vm_memory_size: usize,
+    #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
+    pub default_table: String,
 }
 
 impl Config {

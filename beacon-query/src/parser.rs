@@ -35,7 +35,11 @@ impl Parser {
         query_body: QueryBody,
         session: &SessionContext,
     ) -> anyhow::Result<LogicalPlan> {
-        let mut builder = query_body.from.init_builder(&session).await?;
+        let mut builder = query_body
+            .from
+            .unwrap_or_default()
+            .init_builder(&session)
+            .await?;
 
         builder = builder.project(
             query_body

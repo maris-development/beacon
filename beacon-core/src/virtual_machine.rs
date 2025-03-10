@@ -3,7 +3,13 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_output::{Output, OutputFormat};
 use datafusion::{
-    datasource::listing::{ListingTableConfig, ListingTableUrl},
+    datasource::{
+        file_format::{
+            arrow::ArrowFormatFactory, csv::CsvFormatFactory, parquet::ParquetFormatFactory,
+            FileFormatFactory,
+        },
+        listing::{ListingTableConfig, ListingTableUrl},
+    },
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, object_store::ObjectStoreUrl,
         runtime_env::RuntimeEnvBuilder,

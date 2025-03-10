@@ -59,8 +59,13 @@ impl FileFormat for NetCDFFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         let schemas = objects
             .iter()
-            .map(|object| object.location.filename())
-            .flat_map(|p| p.map(|p| self.read_arrow_schema(&p)))
+            .map(|p| {
+                self.read_arrow_schema(&format!(
+                    "{}/{}",
+                    beacon_config::DATA_DIR.to_string_lossy(),
+                    p.location.to_string()
+                ))
+            })
             .collect::<anyhow::Result<Vec<_>>>()
             .map_err(|e| datafusion::error::DataFusionError::Internal(e.to_string()))?;
 
@@ -142,7 +147,11 @@ impl NetCDFExec {
         let stream = try_stream! {
             for sub_partition in partition {
                 let file_path = sub_partition.path().to_string();
-                let reader = beacon_arrow_netcdf::reader::NetCDFArrowReader::new(file_path)
+                let reader = beacon_arrow_netcdf::reader::NetCDFArrowReader::new(format!(
+                    "{}/{}",
+                    beacon_config::DATA_DIR.to_string_lossy(),
+                    file_path
+                ))
                     .expect("NetCDFArrowReader::new failed");
 
                 let file_schema = reader.schema().clone();

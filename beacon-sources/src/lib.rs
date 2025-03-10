@@ -19,6 +19,7 @@ use beacon_common::super_typing::super_type_schema;
 
 pub mod arrow_format;
 pub mod csv_format;
+pub mod formats_factory;
 pub mod netcdf_format;
 pub mod odv_format;
 pub mod parquet_format;
