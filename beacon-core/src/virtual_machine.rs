@@ -91,6 +91,19 @@ impl VirtualMachine {
             .ok()
     }
 
+    pub async fn list_default_table_schema(&self) -> SchemaRef {
+        let table = self
+            .session_ctx
+            .table(beacon_config::CONFIG.default_table.as_str())
+            .await
+            .expect("Default table not found");
+        Arc::new(table.schema().as_arrow().to_owned())
+    }
+
+    pub fn default_table(&self) -> String {
+        beacon_config::CONFIG.default_table.clone()
+    }
+
     pub async fn add_table(&self, table: Arc<dyn BeaconTable>) -> anyhow::Result<()> {
         self.schema_provider.add_table(table).await
     }

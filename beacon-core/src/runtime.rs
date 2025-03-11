@@ -32,8 +32,16 @@ impl Runtime {
         self.virtual_machine.list_tables()
     }
 
+    pub fn default_table(&self) -> String {
+        self.virtual_machine.default_table()
+    }
+
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
         self.virtual_machine.list_table_schema(table_name).await
+    }
+
+    pub async fn list_default_table_schema(&self) -> SchemaRef {
+        self.virtual_machine.list_default_table_schema().await
     }
 
     pub async fn list_datasets(

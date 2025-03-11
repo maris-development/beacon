@@ -46,8 +46,9 @@ async fn basic_auth(
 
     let (username, password) = (parts[0], parts[1]);
 
-    // Replace with your actual authentication logic
-    if username == "admin" && password == "password" {
+    if username == beacon_config::CONFIG.admin_username
+        && password == beacon_config::CONFIG.admin_password
+    {
         Ok(next.run(request).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)

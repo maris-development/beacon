@@ -6,6 +6,10 @@ use object_store::local::LocalFileSystem;
 
 #[derive(Debug, Envconfig)]
 pub struct Config {
+    #[envconfig(from = "BEACON_ADMIN_USERNAME", default = "beacon-admin")]
+    pub admin_username: String,
+    #[envconfig(from = "BEACON_ADMIN_PASSWORD", default = "beacon-password")]
+    pub admin_password: String,
     #[envconfig(from = "BEACON_PORT", default = "5001")]
     pub port: u16,
     #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]

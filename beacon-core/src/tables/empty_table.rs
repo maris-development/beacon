@@ -15,7 +15,18 @@ pub struct EmptyDefaultTable {
     table_name: String,
 }
 
-#[typetag::serde]
+impl EmptyDefaultTable {
+    /// Creates a new `EmptyDefaultTable` with the given name.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - A `String` representing the name of the table.
+    pub fn new(table_name: String) -> Self {
+        Self { table_name }
+    }
+}
+
+#[typetag::serde(name = "empty_table")]
 #[async_trait::async_trait]
 /// Implementation of the `BeaconTable` trait for the `EmptyDefaultTable` struct.
 ///

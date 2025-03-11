@@ -6,13 +6,14 @@ use datafusion::{datasource::listing::ListingTableUrl, execution::SessionState};
 use super::table::BeaconTable;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct GlobTable {
     table_name: String,
     glob: String,
     file_format: FileFormat,
 }
 
-#[typetag::serde]
+#[typetag::serde(name = "glob_table")]
 #[async_trait::async_trait]
 impl BeaconTable for GlobTable {
     async fn as_table(
@@ -42,6 +43,7 @@ impl BeaconTable for GlobTable {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FileFormat {
     ArrowIpc,
     Parquet,

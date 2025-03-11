@@ -12,11 +12,13 @@ use utoipa::{IntoParams, ToSchema};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct CreateTable {
     #[schema(value_type = Object)]
+    #[serde(flatten)]
     inner: Arc<dyn BeaconTable>,
 }
 
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
+    tag = "tables",
     post, 
     path = "/api/admin/create-table", 
     responses((status = 200, description = "Create a new table")),
@@ -27,8 +29,15 @@ pub struct CreateTable {
 pub(crate) async fn create_table(
     State(state): State<Arc<Runtime>>,
     Json(create_table): Json<CreateTable>,
-) -> Json<Vec<String>> {
-    todo!()
+) -> Result<(StatusCode,String), Json<String>> {
+    let result = state.add_table(create_table.inner.clone()).await;
+    match result {
+        Ok(_) => Ok((StatusCode::OK, format!("Table: {} was created", create_table.inner.table_name()))),
+        Err(err) => {
+            tracing::error!("Error creating table: {:?}", err);
+            Err(Json(format!("Error creating table: {:?}", err)))
+        }
+    }
 }
 
 
@@ -39,6 +48,7 @@ pub struct DeleteTable {
 
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
+    tag = "tables",
     delete, 
     path = "/api/admin/delete-table", 
     params(DeleteTable),

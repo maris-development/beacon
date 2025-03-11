@@ -10,7 +10,16 @@ use beacon_core::runtime::Runtime;
 use utoipa::{IntoParams, ToSchema};
 
 #[tracing::instrument(level = "info", skip(state))]
-#[utoipa::path(get, path = "/api/tables", responses((status = 200, description = "List of tables")))]
+#[utoipa::path(
+    tag = "tables",
+    get, 
+    path = "/api/tables", 
+    responses((status = 200, description = "List of tables")),
+    security(
+        (),
+        ("basic-auth" = [])
+    )
+)]
 pub(crate) async fn list_tables(State(state): State<Arc<Runtime>>) -> Json<Vec<String>> {
     let result = state.list_tables();
     Json(result)
@@ -22,7 +31,17 @@ pub struct ListTableSchemaQuery {
 }
 
 #[tracing::instrument(level = "info", skip(state))]
-#[utoipa::path(get, path = "/api/table-schema", params(ListTableSchemaQuery) ,responses((status = 200, description = "List of schema of a table")))]
+#[utoipa::path(
+    tag = "tables",
+    get, 
+    path = "/api/table-schema", 
+    params(ListTableSchemaQuery) ,
+    responses((status = 200, description = "List of schema of a table")),
+    security(
+        (),
+        ("basic-auth" = [])
+    )
+)]
 pub(crate) async fn list_table_schema(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListTableSchemaQuery>,
@@ -39,4 +58,36 @@ pub(crate) async fn list_table_schema(
             ))
         }
     }
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "tables",
+    get, 
+    path = "/api/default-table-schema", 
+    responses((status = 200, description = "List of schema of the default table")),
+    security(
+        (),
+        ("basic-auth" = [])
+    )
+)]
+pub(crate) async fn default_table_schema(State(state): State<Arc<Runtime>>) -> Json<SchemaRef> {
+    let result = state.list_default_table_schema().await;
+    Json(result)
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "tables",
+    get, 
+    path = "/api/default-table", 
+    responses((status = 200, description = "Name of the default table")),
+    security(
+        (),
+        ("basic-auth" = [])
+    )
+)]
+pub(crate) async fn default_table(State(state): State<Arc<Runtime>>) -> Json<String> {
+    let result = state.default_table();
+    Json(result)
 }

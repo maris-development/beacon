@@ -1151,11 +1151,11 @@ mod tests {
     #[test]
     fn test_classify_batch() {
         let schema = Schema::new(vec![
-            Field::new("CRUISE", DataType::Utf8, false),
-            Field::new("LONGITUDE", DataType::Float64, false),
-            Field::new("LATITUDE", DataType::Float64, false),
-            Field::new("TIME", DataType::Int64, false),
-            Field::new("DEPTH", DataType::Float64, false),
+            Field::new("Cruise", DataType::Utf8, false),
+            Field::new("Longitude [degrees east]", DataType::Float64, false),
+            Field::new("Latitude [degrees north]", DataType::Float64, false),
+            Field::new("yyyy-MM-ddTHH:mm:ss.SSS", DataType::Int64, false),
+            Field::new("Depth [m]", DataType::Float64, false),
         ]);
 
         // Test Profile

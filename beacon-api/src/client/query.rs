@@ -20,10 +20,15 @@ pub struct Args {
 
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
+    tag = "query",
     post,
     path = "/api/query",
     responses(
         (status=200, description="Response containing the query results in the format specified by the query"),
+    ),
+    security(
+        (),
+        ("basic-auth" = [])
     )
 )]
 pub(crate) async fn query(
@@ -65,4 +70,30 @@ pub(crate) async fn query(
             Err(Json(err.to_string()))
         }
     }
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "query",
+    post,
+    path = "/api/query/available_columns",
+    responses(
+        (status=200, description="Response containing the available columns in the default table schema"),
+    ),
+    security(
+        (),
+        ("basic-auth" = [])
+    )
+)]
+#[deprecated = "Use /api/default-table-schema instead"]
+pub(crate) async fn available_columns(State(state): State<Arc<Runtime>>) -> Json<Vec<String>> {
+    Json(
+        state
+            .list_default_table_schema()
+            .await
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect(),
+    )
 }
