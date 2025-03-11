@@ -26,9 +26,13 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 COPY beacon-api/ /beacon-api/
 COPY beacon-arrow-netcdf/ /beacon-arrow-netcdf/
 COPY beacon-arrow-odv/ /beacon-arrow-odv/
+COPY beacon-common/ /beacon-common/
 COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
-COPY beacon-logger/ /beacon-logger/
+COPY beacon-functions/ /beacon-functions/
+COPY beacon-output/ /beacon-output/
+COPY beacon-query/ /beacon-query/
+COPY beacon-sources/ /beacon-sources/
 
 COPY Cargo.toml /
 COPY Cargo.lock /

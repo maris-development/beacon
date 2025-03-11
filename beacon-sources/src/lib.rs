@@ -7,7 +7,7 @@ use datafusion::{
     datasource::{
         file_format::FileFormat,
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
-        source_as_provider, TableType,
+        TableType,
     },
     execution::SessionState,
     logical_expr::{dml::InsertOp, LogicalPlan, TableProviderFilterPushDown},
