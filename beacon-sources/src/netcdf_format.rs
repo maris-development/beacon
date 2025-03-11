@@ -3,9 +3,9 @@ use std::{any::Any, fmt::Formatter, sync::Arc};
 use arrow::datatypes::SchemaRef;
 use async_stream::try_stream;
 use datafusion::{
-    common::Statistics,
+    common::{GetExt, Statistics},
     datasource::{
-        file_format::{file_compression_type::FileCompressionType, FileFormat},
+        file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
         physical_plan::FileScanConfig,
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
@@ -19,6 +19,33 @@ use datafusion::{
 use object_store::{ObjectMeta, ObjectStore};
 
 use beacon_common::super_typing;
+
+#[derive(Debug)]
+pub struct NetCDFFileFormatFactory;
+
+impl FileFormatFactory for NetCDFFileFormatFactory {
+    fn create(
+        &self,
+        state: &SessionState,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        Ok(Arc::new(NetCDFFormat::new()))
+    }
+
+    fn default(&self) -> Arc<dyn FileFormat> {
+        Arc::new(NetCDFFormat::new())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl GetExt for NetCDFFileFormatFactory {
+    fn get_ext(&self) -> String {
+        "nc".to_string()
+    }
+}
 
 #[derive(Debug)]
 pub struct NetCDFFormat;
@@ -107,10 +134,15 @@ pub struct NetCDFExec {
 
 impl NetCDFExec {
     pub fn new(file_scan_conf: FileScanConfig) -> Self {
+        let projected_schema = file_scan_conf
+            .projection
+            .as_ref()
+            .map(|p| Arc::new(file_scan_conf.file_schema.project(p).unwrap()))
+            .unwrap_or(file_scan_conf.file_schema.clone());
         Self {
             plan_properties: Self::plan_properties(
                 file_scan_conf.file_groups.len(),
-                file_scan_conf.file_schema.clone(),
+                projected_schema,
             ),
             projection: file_scan_conf.projection.clone().map(Arc::from),
             schema_adapter_factory: Arc::new(DefaultSchemaAdapterFactory),

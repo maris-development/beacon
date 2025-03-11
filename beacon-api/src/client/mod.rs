@@ -20,6 +20,7 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(query::explain_query))
         .routes(routes!(query::available_columns))
         .routes(routes!(query::list_functions))
+        .routes(routes!(datasets::list_datasets))
         .routes(routes!(datasets::list_dataset_schema))
         .routes(routes!(tables::list_tables))
         .routes(routes!(tables::default_table))

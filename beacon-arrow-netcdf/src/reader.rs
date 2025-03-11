@@ -232,10 +232,11 @@ fn variable_attributes_as_arrow_fields(
     let variable_name = variable.name();
     for attr in variable.attributes() {
         let name = attr.name();
-        let arrow_type = attribute_to_arrow_type(&attr)?;
-        let field =
-            arrow::datatypes::Field::new(format!("{variable_name}.{name}"), arrow_type, true);
-        fields.push(field);
+        if let Ok(arrow_type) = attribute_to_arrow_type(&attr) {
+            let field =
+                arrow::datatypes::Field::new(format!("{variable_name}.{name}"), arrow_type, true);
+            fields.push(field);
+        }
     }
     Ok(fields)
 }
@@ -274,9 +275,10 @@ fn global_attributes_as_arrow_fields(
     let mut fields = Vec::new();
     for attr in nc_file.attributes() {
         let name = attr.name();
-        let arrow_type = attribute_to_arrow_type(&attr)?;
-        let field = arrow::datatypes::Field::new(format!(".{name}"), arrow_type, true);
-        fields.push(field);
+        if let Ok(arrow_type) = attribute_to_arrow_type(&attr) {
+            let field = arrow::datatypes::Field::new(format!(".{name}"), arrow_type, true);
+            fields.push(field);
+        }
     }
     Ok(fields)
 }

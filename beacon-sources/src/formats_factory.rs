@@ -49,10 +49,10 @@ impl Formats {
         }
     }
 
-    pub async fn create_plan_builder(
+    pub async fn create_datasource(
         &self,
         session_state: &SessionState,
-    ) -> anyhow::Result<LogicalPlanBuilder> {
+    ) -> anyhow::Result<DataSource> {
         let file_format = self.file_format();
         let table_urls: Vec<ListingTableUrl> = match &self {
             Formats::Arrow { path } => path.try_into().unwrap(),
@@ -62,7 +62,14 @@ impl Formats {
             Formats::NetCDF { path } => path.try_into().unwrap(),
         };
 
-        let datasource = DataSource::new(session_state, file_format, table_urls).await?;
+        DataSource::new(session_state, file_format, table_urls).await
+    }
+
+    pub async fn create_plan_builder(
+        &self,
+        session_state: &SessionState,
+    ) -> anyhow::Result<LogicalPlanBuilder> {
+        let datasource = self.create_datasource(session_state).await?;
 
         let source = provider_as_source(Arc::new(datasource));
 

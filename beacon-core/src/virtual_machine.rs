@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::{Output, OutputFormat};
+use beacon_sources::{formats_factory::Formats, netcdf_format::NetCDFFileFormatFactory};
 use datafusion::{
     catalog::SchemaProvider,
     datasource::{
@@ -14,7 +15,7 @@ use datafusion::{
     },
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, object_store::ObjectStoreUrl,
-        runtime_env::RuntimeEnvBuilder,
+        runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
     logical_expr::LogicalPlan,
     prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
@@ -72,7 +73,14 @@ impl VirtualMachine {
             .with_memory_pool(mem_pool)
             .build_arc()?;
 
-        let session_context = SessionContext::new_with_config_rt(config, runtime_env);
+        let mut session_state = SessionStateBuilder::new()
+            .with_config(config)
+            .with_runtime_env(runtime_env)
+            .build();
+
+        session_state.register_file_format(Arc::new(NetCDFFileFormatFactory), true)?;
+
+        let session_context = SessionContext::new_with_state(session_state);
 
         session_context.register_object_store(
             ObjectStoreUrl::parse("file://").unwrap().as_ref(),

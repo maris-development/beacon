@@ -5,6 +5,7 @@ use arrow::datatypes::SchemaRef;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::Output;
 use beacon_query::{parser::Parser, Query};
+use beacon_sources::formats_factory::Formats;
 
 pub struct Runtime {
     virtual_machine: virtual_machine::VirtualMachine,

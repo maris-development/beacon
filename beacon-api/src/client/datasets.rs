@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
+use beacon_sources::formats_factory::Formats;
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
@@ -49,7 +50,7 @@ pub(crate) async fn list_datasets(
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
-pub struct ListSchemaQuery {
+pub struct ListDatasetSchemaQuery {
     pub file: String,
 }
 
@@ -58,7 +59,7 @@ pub struct ListSchemaQuery {
     tag = "datasets",
     get, 
     path = "/api/dataset-schema", 
-    params(ListSchemaQuery),
+    params(ListDatasetSchemaQuery),
     responses((status = 200, description = "List the schema/available columns")),
     security(
         (),
@@ -67,7 +68,7 @@ pub struct ListSchemaQuery {
 )]
 pub(crate) async fn list_dataset_schema(
     State(state): State<Arc<Runtime>>,
-    Query(query): Query<ListSchemaQuery>,
+    Query(query): Query<ListDatasetSchemaQuery>,
 ) -> Result<Json<SchemaRef>, (StatusCode, String)> {
     let result = state.list_dataset_schema(query.file.clone()).await;
 

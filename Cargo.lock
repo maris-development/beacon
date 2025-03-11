@@ -497,6 +497,7 @@ dependencies = [
  "beacon-functions",
  "beacon-output",
  "beacon-query",
+ "beacon-sources",
  "futures",
  "futures-util",
  "serde",

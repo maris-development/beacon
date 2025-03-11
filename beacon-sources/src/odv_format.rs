@@ -107,10 +107,16 @@ pub struct OdvExec {
 
 impl OdvExec {
     pub fn new(file_scan_conf: FileScanConfig) -> Self {
+        let projected_schema = file_scan_conf
+            .projection
+            .as_ref()
+            .map(|p| Arc::new(file_scan_conf.file_schema.project(p).unwrap()))
+            .unwrap_or(file_scan_conf.file_schema.clone());
+
         Self {
             plan_properties: Self::plan_properties(
                 file_scan_conf.file_groups.len(),
-                file_scan_conf.file_schema.clone(),
+                projected_schema,
             ),
             projection: file_scan_conf.projection.clone().map(Arc::from),
             schema_adapter_factory: Arc::new(DefaultSchemaAdapterFactory),
