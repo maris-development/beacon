@@ -484,10 +484,10 @@ impl AsyncOdvWriter {
 
         let mut types = vec![];
 
-        println!(
-            "Batch classification: moving_position={}, changing_time={}, changing_depth={}",
-            has_moving_position, has_changing_time, has_changing_depth
-        );
+        // println!(
+        //     "Batch classification: moving_position={}, changing_time={}, changing_depth={}",
+        //     has_moving_position, has_changing_time, has_changing_depth
+        // );
 
         if has_moving_position && has_changing_time && !has_changing_depth {
             types.push(OdvBatchType::Trajectory(batch.clone()));
