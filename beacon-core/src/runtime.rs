@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::{tables::table::BeaconTable, virtual_machine};
 use arrow::datatypes::SchemaRef;
+use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::Output;
 use beacon_query::{parser::Parser, Query};
 
@@ -17,11 +18,22 @@ impl Runtime {
 
     pub async fn run_client_query(&self, query: Query) -> anyhow::Result<Output> {
         let plan = Parser::parse(self.virtual_machine.session_ctx().as_ref(), query).await?;
+
         let output = self
             .virtual_machine
             .run_plan(plan.inner_datafusion_plan, &plan.output)
             .await?;
         Ok(output)
+    }
+
+    pub async fn explain_client_query(&self, query: Query) -> anyhow::Result<String> {
+        let plan = Parser::parse(self.virtual_machine.session_ctx().as_ref(), query).await?;
+        let json = plan.inner_datafusion_plan.display_pg_json().to_string();
+        Ok(json)
+    }
+
+    pub fn list_functions(&self) -> Vec<FunctionDoc> {
+        self.virtual_machine.list_functions()
     }
 
     pub async fn add_table(&self, table: Arc<dyn BeaconTable>) -> anyhow::Result<()> {

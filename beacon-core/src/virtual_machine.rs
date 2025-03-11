@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::{Output, OutputFormat};
 use datafusion::{
     catalog::SchemaProvider,
@@ -44,6 +45,12 @@ impl VirtualMachine {
             .unwrap()
             .register_schema("public", beacon_schema_provider.clone())?;
 
+        //INIT FUNCTIONS FROM beacon-functions module
+        let geo_udfs = beacon_functions::geo::geo_udfs();
+        for udf in geo_udfs {
+            session_ctx.register_udf(udf);
+        }
+
         Ok(Self {
             session_ctx,
             schema_provider: beacon_schema_provider,
@@ -77,6 +84,21 @@ impl VirtualMachine {
 
     pub fn session_ctx(&self) -> Arc<SessionContext> {
         self.session_ctx.clone()
+    }
+
+    pub fn list_functions(&self) -> Vec<FunctionDoc> {
+        let mut functions: Vec<FunctionDoc> = self
+            .session_ctx
+            .state()
+            .scalar_functions()
+            .values()
+            .map(|f| FunctionDoc::from_scalar(f))
+            .collect();
+
+        functions.sort_by(|a, b| a.function_name.cmp(&b.function_name));
+        functions.dedup_by(|a, b| a.function_name == b.function_name);
+
+        functions
     }
 
     pub fn list_tables(&self) -> Vec<String> {

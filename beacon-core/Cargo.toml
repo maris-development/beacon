@@ -37,3 +37,4 @@ beacon-arrow-odv = { path = "../beacon-arrow-odv" }
 beacon-sources = { path = "../beacon-sources" }
 beacon-output = { path = "../beacon-output" }
 beacon-query = { path = "../beacon-query" }
+beacon-functions = { path = "../beacon-functions" }

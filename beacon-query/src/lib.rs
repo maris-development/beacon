@@ -100,10 +100,9 @@ impl Select {
 #[serde(rename_all = "lowercase")]
 #[serde(deny_unknown_fields)]
 pub enum From {
-    Table {
-        #[serde(flatten)]
-        table: String,
-    },
+    #[serde(untagged)]
+    Table(String),
+    #[serde(untagged)]
     Format {
         #[serde(flatten)]
         format: Formats,
@@ -112,9 +111,7 @@ pub enum From {
 
 impl Default for From {
     fn default() -> Self {
-        From::Table {
-            table: beacon_config::CONFIG.default_table.clone(),
-        }
+        From::Table(beacon_config::CONFIG.default_table.clone())
     }
 }
 
@@ -165,7 +162,7 @@ impl From {
         session_ctx: &SessionContext,
     ) -> anyhow::Result<LogicalPlanBuilder> {
         match self {
-            From::Table { table } => session_ctx
+            From::Table(table) => session_ctx
                 .table(table)
                 .await
                 .map(|table| LogicalPlanBuilder::new(table.into_unoptimized_plan()))
@@ -240,6 +237,12 @@ pub enum Filter {
         #[serde(flatten)]
         filter: NotEqualFilter,
     },
+    #[serde(untagged)]
+    GeoJson(GeoJsonFilter),
+}
+
+fn column_name(name: &str) -> Expr {
+    col(Column::from_qualified_name_ignore_case(name))
 }
 
 impl Filter {
@@ -247,7 +250,7 @@ impl Filter {
         col(Column::from_qualified_name_ignore_case(name))
     }
 
-    pub fn to_expr(&self) -> anyhow::Result<Expr> {
+    pub fn to_expr(&self, session_state: &SessionState) -> anyhow::Result<Expr> {
         Ok(match self {
             Filter::Range { column, filter } => filter
                 .to_expr(Self::column_name(column))
@@ -264,17 +267,55 @@ impl Filter {
             Filter::IsNotNull { column } => Self::column_name(column).is_not_null(),
             Filter::And(filters) => filters
                 .iter()
-                .map(|f| f.to_expr())
+                .map(|f| f.to_expr(session_state))
                 .fold(Ok(lit(true)), |acc, expr| {
                     acc.and_then(|acc| expr.map(|expr| acc.and(expr)))
                 })?,
             Filter::Or(filters) => filters
                 .iter()
-                .map(|f| f.to_expr())
+                .map(|f| f.to_expr(session_state))
                 .fold(Ok(lit(false)), |acc, expr| {
                     acc.and_then(|acc| expr.map(|expr| acc.or(expr)))
                 })?,
+            Filter::GeoJson(filter) => filter.to_expr(session_state)?,
         })
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct GeoJsonFilter {
+    #[serde(alias = "longitude_query_parameter")]
+    longitude_column: String,
+    #[serde(alias = "latitude_query_parameter")]
+    latitude_column: String,
+    #[schema(value_type = Object)]
+    geometry: geojson::Geometry,
+}
+
+impl GeoJsonFilter {
+    pub fn to_expr(&self, session_state: &SessionState) -> anyhow::Result<Expr> {
+        let lon = column_name(&self.longitude_column);
+        let lat = column_name(&self.latitude_column);
+
+        let st_geojson_as_wkt = session_state
+            .scalar_functions()
+            .get("st_geojson_as_wkt")
+            .ok_or_else(|| {
+                anyhow::anyhow!("Function st_geojson_as_wkt not found in the registry.")
+            })?
+            .clone();
+
+        let wkt_str = st_geojson_as_wkt.call(vec![lit(self.geometry.to_string())]);
+
+        let st_within_point = session_state
+            .scalar_functions()
+            .get("st_within_point")
+            .ok_or_else(|| anyhow::anyhow!("Function st_within_point not found in the registry."))?
+            .clone();
+
+        let filter_expr = st_within_point.call(vec![wkt_str, lon, lat]);
+
+        Ok(filter_expr)
     }
 }
 

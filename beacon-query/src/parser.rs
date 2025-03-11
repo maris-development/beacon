@@ -40,6 +40,7 @@ impl Parser {
             .unwrap_or_default()
             .init_builder(&session)
             .await?;
+        let session_state = session.state();
 
         builder = builder.project(
             query_body
@@ -50,7 +51,7 @@ impl Parser {
         )?;
 
         if let Some(filter) = query_body.filter {
-            builder = builder.filter(filter.to_expr()?)?;
+            builder = builder.filter(filter.to_expr(&session_state)?)?;
         }
 
         if let Some(sort_by) = query_body.sort_by {
@@ -58,7 +59,6 @@ impl Parser {
         }
 
         let plan = builder.build()?;
-
         Ok(plan)
     }
 }

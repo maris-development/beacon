@@ -8,6 +8,7 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
+use beacon_functions::function_doc::FunctionDoc;
 use beacon_query::Query;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -70,6 +71,58 @@ pub(crate) async fn query(
             Err(Json(err.to_string()))
         }
     }
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "query",
+    post,
+    path = "/api/explain-query",
+    responses(
+        (status=200, description="Explains the produced plan of a given query"),
+    ),
+    security(
+        (),
+        ("basic-auth" = [])
+    )
+)]
+pub(crate) async fn explain_query(
+    State(state): State<Arc<Runtime>>,
+    Json(query_obj): Json<Query>,
+) -> Result<Response<Body>, Json<String>> {
+    let result = state.explain_client_query(query_obj).await;
+    match result {
+        Ok(explanation) => Ok((
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CONTENT_DISPOSITION, "attachment"),
+            ],
+            Body::from(explanation),
+        )
+            .into_response()),
+        Err(err) => {
+            tracing::error!("Error explaining beacon query: {}", err);
+
+            Err(Json(err.to_string()))
+        }
+    }
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "query",
+    post,
+    path = "/api/query/functions",
+    responses(
+        (status=200, description="Response containing all the available functions"),
+    ),
+    security(
+        (),
+        ("basic-auth" = [])
+    )
+)]
+pub(crate) async fn list_functions(State(state): State<Arc<Runtime>>) -> Json<Vec<FunctionDoc>> {
+    Json(state.list_functions())
 }
 
 #[tracing::instrument(level = "info", skip(state))]

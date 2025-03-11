@@ -13,23 +13,24 @@ use crate::{
     odv_format::OdvFormat, parquet_format::SuperParquetFormat, DataSource,
 };
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum Formats {
     Arrow {
-        paths: FileSystemPath,
+        path: FileSystemPath,
     },
     Parquet {
-        paths: FileSystemPath,
+        path: FileSystemPath,
     },
     Csv {
-        paths: FileSystemPath,
+        path: FileSystemPath,
         delimiter: u8,
         infer_schema_records: usize,
     },
     Odv {
-        paths: FileSystemPath,
+        path: FileSystemPath,
     },
     NetCDF {
-        paths: FileSystemPath,
+        path: FileSystemPath,
     },
 }
 
@@ -54,11 +55,11 @@ impl Formats {
     ) -> anyhow::Result<LogicalPlanBuilder> {
         let file_format = self.file_format();
         let table_urls: Vec<ListingTableUrl> = match &self {
-            Formats::Arrow { paths } => paths.try_into().unwrap(),
-            Formats::Parquet { paths } => paths.try_into().unwrap(),
-            Formats::Csv { paths, .. } => paths.try_into().unwrap(),
-            Formats::Odv { paths } => paths.try_into().unwrap(),
-            Formats::NetCDF { paths } => paths.try_into().unwrap(),
+            Formats::Arrow { path } => path.try_into().unwrap(),
+            Formats::Parquet { path } => path.try_into().unwrap(),
+            Formats::Csv { path, .. } => path.try_into().unwrap(),
+            Formats::Odv { path } => path.try_into().unwrap(),
+            Formats::NetCDF { path } => path.try_into().unwrap(),
         };
 
         let datasource = DataSource::new(session_state, file_format, table_urls).await?;
