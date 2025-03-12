@@ -1,0 +1,9 @@
+[package]
+name = "beacon-common"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+arrow = { workspace=true }
+anyhow = { workspace=true }
+indexmap = { workspace = true }

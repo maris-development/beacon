@@ -1,0 +1,16 @@
+[package]
+name = "beacon-arrow-netcdf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netcdf = { version = "0.10.5", features = ["static", "ndarray"] }
+nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main" }
+arrow = { workspace=true }
+anyhow = { workspace=true }
+tempfile = { workspace=true}
+indexmap = { workspace=true }
+ndarray = "0.16.1"
+hifitime = "4.0.2"
+regex = "1.11.1"
+num-traits = "0.2.19"
