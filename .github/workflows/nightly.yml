@@ -7,6 +7,7 @@ on:
     
 permissions:
   packages: write
+  contents: write
   
 jobs:
     build:
@@ -50,6 +51,6 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               with:
                   tag_name: nightly
-                  release_name: Nightly Build ${{ env.DATE_TAG }}
+                  release_name: Nightly Build
                   draft: false
                   prerelease: true
