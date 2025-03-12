@@ -32,6 +32,9 @@ jobs:
               id: tag
               run: echo "DATE_TAG=nightly-$(date +'%Y%m%d')" >> $GITHUB_ENV
 
+            - name: Log Nightly Tag
+              run: echo ${{ env.DATE_TAG }}
+
             - name: Build and Push Docker Image
               uses: docker/build-push-action@v3
               with:
@@ -46,7 +49,7 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               with:
-                  tag_name: ${{ env.DATE_TAG }}
+                  tag_name: nightly
                   release_name: Nightly Build ${{ env.DATE_TAG }}
                   draft: false
                   prerelease: true
