@@ -1,0 +1,9 @@
+[package]
+name = "beacon-config"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+lazy_static = "1.4.0"
+envconfig = "0.11.0"
+object_store = "0.11.2"

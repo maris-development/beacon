@@ -1,0 +1,19 @@
+[package]
+name = "beacon-query"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+utoipa = { workspace=true}
+serde = { workspace=true}
+tokio = { workspace = true }
+datafusion = { workspace=true}
+tracing = { workspace=true}
+anyhow = { workspace=true}
+
+geojson = "0.24.2"
+
+beacon-sources = { path = "../beacon-sources" }
+beacon-output = { path = "../beacon-output" }
+beacon-config = { path = "../beacon-config" }
+beacon-functions = { path = "../beacon-functions" }
