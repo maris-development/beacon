@@ -1,7 +1,7 @@
 # Beacon Binary Format
 
 > [!WARNING]
-> This is a Feature that requires the `Beacon Standard Edition` with an activated Token. See: [Beacon Plans](https://beacon.maris.nl/plans)
+> This is a Feature that requires the `Beacon Standard Edition` with an activated Token. See: [Beacon plans](https://beacon.maris.nl/plans)
 
 Beacon Binary Format is a multi-block based data format. It enables users to combine millions of datasets into a single file, which can be directly used in Beacon. The Beacon Binary Format is designed to be fast, efficient, and scalable, making it ideal for large-scale marine and oceanographic datasets.
 

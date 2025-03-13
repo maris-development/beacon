@@ -14,11 +14,6 @@ A Beacon node is set-up for a set of the Euro-Argo data, which is retrieved from
 
 ![Argo floats salinity](/argo-psal-example.png)
 
-<!-- ### EMODnet Chemistry
-EMODnet Chemistry North East Atlantic Collection (subset of the complete collection), retrieved from EMODnet Chemistry [WebODV](https://emodnet-chemistry.webodv.awi.de/service/emodnet-chem_2023_eutrophication%3EAtlantic%3EEutrophication_Atlantic_profiles_2023_unrestricted). Below you can see an example map plot generated with the demo notebook available on the [Beacon-Blue-Cloud GitHub](https://github.com/maris-development/beacon-blue-cloud/tree/main/notebook-examples).
-
-![EMODnet Chemistry Temperature](/emodnet-chem-example.png) -->
-
 ### World Ocean Database 
 The World Ocean Database (WOD) is a comprehensive collection of oceanographic data developed and maintained by the National Oceanographic Data Center (NODC) and the World Data Service for Oceanography. It provides a globally integrated and consistent dataset of oceanographic parameters, including temperature, salinity, oxygen, nutrients, and plankton data, among many others. The data is collected from a variety of sources, such as research vessels, autonomous floats, and fixed ocean stations, covering the world's oceans from the surface to the deep sea.
 
@@ -45,11 +40,3 @@ CORA Timeseries data, retrieved from CMEMS [product](https://data.marine.coperni
 5. Upon opening this page, you will find URLs to the different Beacon instances and options to create and remove tokens. 
 6. You can then query the different Beacon nodes using your personal Bearer token. 
 7. This token can also be used in the Swagger environment via the “Authorize” button. 
-
-<!-- ### CMEMS BGC 
-CMEMS BGC data, retrieved from CMEMS [product](https://data.marine.copernicus.eu/product/INSITU_GLO_BGC_DISCRETE_MY_013_046/files).
-
-### SeaDataNet T&S Collection
-SeaDataNet CDI TS data, retrieved from [EGI-ACE webODV](https://webodv-egi-ace.cloud.ba.infn.it/login)
-
-### SeaDataNet CDI   -->

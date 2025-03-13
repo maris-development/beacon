@@ -72,11 +72,11 @@ export default defineConfig({
               items: [
                 {
                   text: 'Docker',
-                  link: '/docs/1.0.0-install#docker'
+                  link: '/docs/1.0.0-install#step-1-download-the-beacon-docker-image'
                 },
                 {
                   text: 'Activation',
-                  link: '/docs/1.0.0-install#activation-standard-edition'
+                  link: '/docs/1.0.0-install#step-4-verify-the-installation'
                 },
                 {
                   text: 'Troubleshooting',
