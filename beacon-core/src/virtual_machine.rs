@@ -83,6 +83,7 @@ impl VirtualMachine {
         let mut session_state = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(runtime_env)
+            .with_default_features()
             .build();
 
         session_state.register_file_format(Arc::new(NetCDFFileFormatFactory), true)?;
