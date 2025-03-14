@@ -595,7 +595,6 @@ impl<T: OdvType> OdvFile<T> {
         let mut file = std::fs::File::create(path)?;
         let schema_mapper =
             OdvBatchSchemaMapper::new(T::map_schema(input_schema.clone()), options.clone())?;
-
         Self::write_header(&mut file, options, schema_mapper.output_schema())?;
 
         Ok(Self {
@@ -637,7 +636,7 @@ impl<T: OdvType> OdvFile<T> {
                 &options.qf_schema,
                 &Self::arrow_to_value_type(
                     output_schema
-                        .field_with_name(&options.key_column)
+                        .field_with_name("Cruise")
                         .expect("")
                         .data_type()
                 )?,
@@ -665,7 +664,7 @@ impl<T: OdvType> OdvFile<T> {
                 &options.qf_schema,
                 &Self::arrow_to_value_type(
                     output_schema
-                        .field_with_name(&options.longitude_column.label)
+                        .field_with_name("Longitude [degrees east]")
                         .expect("")
                         .data_type()
                 )?,
@@ -681,7 +680,7 @@ impl<T: OdvType> OdvFile<T> {
                 &options.qf_schema,
                 &Self::arrow_to_value_type(
                     output_schema
-                        .field_with_name(&options.latitude_column.label)
+                        .field_with_name("Latitude [degrees north]")
                         .expect("")
                         .data_type()
                 )?,
