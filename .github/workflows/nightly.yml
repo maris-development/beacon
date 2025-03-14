@@ -31,7 +31,7 @@ jobs:
 
             - name: Generate date tag
               id: tag
-              run: echo "DATE_TAG=nightly-$(date +'%Y%m%d')" >> $GITHUB_ENV
+              run: echo "DATE_TAG=$(date +'%Y%m%d')" >> $GITHUB_ENV
 
             - name: Log Nightly Tag
               run: echo ${{ env.DATE_TAG }}
@@ -43,14 +43,4 @@ jobs:
                   push: true
                   platforms: linux/amd64
                   tags: |
-                      ghcr.io/${{ github.repository_owner }}/beacon:community-nightly
-
-            - name: Create GitHub Release
-              uses: actions/create-release@v1
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  tag_name: nightly
-                  release_name: Nightly Build
-                  draft: false
-                  prerelease: true
+                      ghcr.io/${{ github.repository_owner }}/beacon:community-nightly-${{ env.DATE_TAG }}
