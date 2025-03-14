@@ -53,11 +53,12 @@ async fn main() -> anyhow::Result<()> {
         .merge(admin_router)
         .merge(Scalar::with_url("/scalar/", api_docs_client.clone()))
         .route("/scalar", get(|| async { Redirect::to("/scalar/") }))
-        .merge(SwaggerUi::new("/swagger").url("/api/openapi.json", api_docs_client.clone()))
+        .merge(SwaggerUi::new("/swagger").url("/openapi.json", api_docs_client.clone()))
         .route(
             "/api/health",
             get(|| async { Response::new("Ok".to_string()) }),
         )
+        .route("/", get(|| async { Redirect::to("/swagger") }))
         .with_state::<_>(beacon_runtime.clone());
 
     let addr = std::net::SocketAddr::new(
