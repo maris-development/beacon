@@ -335,7 +335,7 @@ pub enum RangeFilter {
         min: Option<f64>,
         max: Option<f64>,
     },
-    DateTime {
+    Timestamp {
         min: Option<chrono::NaiveDateTime>,
         max: Option<chrono::NaiveDateTime>,
     },
@@ -356,7 +356,7 @@ impl RangeFilter {
                 (None, Some(max)) => Some(col.lt_eq(lit(*max))),
                 (None, None) => None,
             },
-            RangeFilter::DateTime { min, max } => match (min, max) {
+            RangeFilter::Timestamp { min, max } => match (min, max) {
                 (Some(min), Some(max)) => Some(
                     col.clone()
                         .gt_eq(lit_timestamp_nano(min.timestamp_nanos()))
