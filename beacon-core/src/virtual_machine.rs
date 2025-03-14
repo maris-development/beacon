@@ -68,6 +68,10 @@ impl VirtualMachine {
             .with_information_schema(true);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
+        config
+            .options_mut()
+            .execution
+            .listing_table_ignore_subdirectory = false;
 
         let disk_manager_conf = DiskManagerConfig::NewOs;
 
@@ -83,6 +87,8 @@ impl VirtualMachine {
 
         session_state.register_file_format(Arc::new(NetCDFFileFormatFactory), true)?;
         session_state.register_file_format(Arc::new(SuperParquetFormatFactory), true)?;
+        session_state.register_file_format(Arc::new(ArrowFormatFactory::new()), true)?;
+        session_state.register_file_format(Arc::new(CsvFormatFactory::new()), true)?;
 
         let session_context = SessionContext::new_with_state(session_state);
 
@@ -218,6 +224,8 @@ impl VirtualMachine {
                 e
             )
         })?;
+
+        tracing::debug!("Listing datasets from: {:?}", table_url);
 
         let mut datasets = Vec::new();
         let mut stream = table_url

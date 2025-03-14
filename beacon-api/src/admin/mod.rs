@@ -9,7 +9,7 @@ use axum::{
 };
 use beacon_core::runtime::Runtime;
 use utoipa::{
-    openapi::security::{Http, SecurityScheme},
+    openapi::security::{Http, HttpAuthScheme, SecurityScheme},
     Modify, OpenApi,
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -73,7 +73,11 @@ impl Modify for SecurityAddon {
             components.add_security_scheme(
                 "basic-auth",
                 SecurityScheme::Http(Http::new(utoipa::openapi::security::HttpAuthScheme::Basic)),
-            )
+            );
+            components.add_security_scheme(
+                "bearer",
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+            );
         }
     }
 }
