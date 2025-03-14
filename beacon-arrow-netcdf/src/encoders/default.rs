@@ -1,12 +1,13 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, ffi::CString, rc::Rc, str::FromStr};
 
 use arrow::{
-    array::{ArrayRef, Int16Array, RecordBatch},
+    array::{self, ArrayRef, Int16Array, RecordBatch},
     datatypes::{DataType, Field, SchemaRef},
 };
+use ndarray::ArrayView;
 use netcdf::{types::NcVariableType, FileMut};
 
-use crate::NcChar;
+use crate::{NcChar, NcString};
 
 use super::Encoder;
 
@@ -52,6 +53,11 @@ impl DefaultEncoder {
                 )?;
 
                 variable.set_fill_value(NcChar(b'\0'))?;
+            }
+            DataType::Utf8 => {
+                let mut variable =
+                    file.add_variable::<NcString>(field.name(), &[Self::OBS_DIM_NAME])?;
+                variable.set_fill_value(NcString::new(""))?;
             }
             DataType::Int8 => {
                 let mut variable = file.add_variable::<i8>(field.name(), &[Self::OBS_DIM_NAME])?;
@@ -116,9 +122,9 @@ impl DefaultEncoder {
                 }
                 variable.set_fill_value(i64::MAX)?;
             }
-            DataType::Utf8 => {
-                anyhow::bail!("Variable sized string not supported yet");
-            }
+            // DataType::Utf8 => {
+            //     anyhow::bail!("Variable sized string not supported yet");
+            // }
             _ => anyhow::bail!(
                 "Unsupported data type: {:?} for defining netcdf variable: {}",
                 field.data_type(),
@@ -150,10 +156,34 @@ impl DefaultEncoder {
 
                 let byte_slice = array.value_data();
                 //We can transmute the byte slice to FixedSizeString as they have the same memory layout (1 ubyte) & repr(transparent)
-                let fixed_size_string =
-                    unsafe { std::mem::transmute::<&[u8], &[NcChar]>(byte_slice) };
+                let fixed_size_string = unsafe {
+                    std::slice::from_raw_parts(
+                        byte_slice.as_ptr() as *const NcChar,
+                        byte_slice.len(),
+                    )
+                };
+                // println!("Byte slice: {:?}", byte_slice.len());
 
-                variable.put_values::<NcChar, _>(fixed_size_string, extents)?;
+                let view = ArrayView::from_shape((1_000_000, 5), byte_slice).unwrap();
+                // println!("View: {:?}", view.len());
+                // println!("Extents: {:?}", extents);
+
+                variable.put(extents, view).unwrap();
+                // variable.put_values::<NcChar, _>(fixed_size_string, extents)?;
+                // std::mem::drop(fixed_size_string);
+            }
+            DataType::Utf8 => {
+                let string_array = array
+                    .as_any()
+                    .downcast_ref::<array::StringArray>()
+                    .expect("Failed to downcast to StringArray");
+
+                let cstrings = string_array
+                    .iter()
+                    .map(|x| NcString::new(x.unwrap_or("")))
+                    .collect::<Vec<_>>();
+
+                variable.put_values::<NcString, _>(&cstrings, extents)?;
             }
             DataType::Int8 => {
                 downcast_and_put_values!(array, variable, extents, arrow::array::Int8Array, i8);

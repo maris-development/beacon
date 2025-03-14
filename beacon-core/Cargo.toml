@@ -23,8 +23,6 @@ object_store = { workspace = true }
 async-stream = "0.3.6"
 parking_lot = { workspace = true}
 
-
-netcdf = { version = "0.10.5", features = ["static"] }
 inventory = "0.3.18"
 pathdiff = "0.2.3"
 
