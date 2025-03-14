@@ -3,7 +3,10 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::{Output, OutputFormat};
-use beacon_sources::{formats_factory::Formats, netcdf_format::NetCDFFileFormatFactory};
+use beacon_sources::{
+    formats_factory::Formats, netcdf_format::NetCDFFileFormatFactory,
+    parquet_format::SuperParquetFormatFactory,
+};
 use datafusion::{
     catalog::SchemaProvider,
     datasource::{
@@ -79,6 +82,7 @@ impl VirtualMachine {
             .build();
 
         session_state.register_file_format(Arc::new(NetCDFFileFormatFactory), true)?;
+        session_state.register_file_format(Arc::new(SuperParquetFormatFactory), true)?;
 
         let session_context = SessionContext::new_with_state(session_state);
 
