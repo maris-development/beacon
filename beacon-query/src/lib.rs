@@ -6,7 +6,7 @@ use datafusion::{
     datasource::{listing::ListingTableUrl, provider_as_source},
     execution::SessionState,
     logical_expr::{LogicalPlanBuilder, SortExpr},
-    prelude::{col, lit, CsvReadOptions, Expr, SessionContext},
+    prelude::{col, lit, lit_timestamp_nano, CsvReadOptions, Expr, SessionContext},
 };
 use utoipa::ToSchema;
 
@@ -183,6 +183,7 @@ impl From {
 pub enum Filter {
     #[serde(alias = "is_null", alias = "is_missing")]
     IsNull {
+        #[serde(alias = "for_query_parameter")]
         column: String,
     },
     #[serde(
@@ -191,51 +192,59 @@ pub enum Filter {
         alias = "skip_missing"
     )]
     IsNotNull {
+        #[serde(alias = "for_query_parameter")]
         column: String,
     },
     And(Vec<Filter>),
     Or(Vec<Filter>),
     #[serde(untagged)]
-    Range {
-        column: String,
-        #[serde(flatten)]
-        filter: RangeFilter,
-    },
-    #[serde(untagged)]
     GreaterThan {
+        #[serde(alias = "for_query_parameter")]
         column: String,
         #[serde(flatten)]
         filter: GreaterThanFilter,
     },
     #[serde(untagged)]
     GreaterThanOrEqual {
+        #[serde(alias = "for_query_parameter")]
         column: String,
         #[serde(flatten)]
         filter: GreaterThanOrEqualFilter,
     },
     #[serde(untagged)]
     LessThan {
+        #[serde(alias = "for_query_parameter")]
         column: String,
         #[serde(flatten)]
         filter: LessThanFilter,
     },
     #[serde(untagged)]
     LessThanOrEqual {
+        #[serde(alias = "for_query_parameter")]
         column: String,
         #[serde(flatten)]
         filter: LessThanOrEqualFilter,
     },
     #[serde(untagged)]
     Equality {
+        #[serde(alias = "for_query_parameter")]
         column: String,
         #[serde(flatten)]
         filter: EqualityFilter,
     },
     #[serde(untagged)]
     NotEqual {
+        #[serde(alias = "for_query_parameter")]
         column: String,
         #[serde(flatten)]
         filter: NotEqualFilter,
+    },
+    #[serde(untagged)]
+    Range {
+        #[serde(alias = "for_query_parameter")]
+        column: String,
+        #[serde(flatten)]
+        filter: RangeFilter,
     },
     #[serde(untagged)]
     GeoJson(GeoJsonFilter),
@@ -326,6 +335,10 @@ pub enum RangeFilter {
         min: Option<f64>,
         max: Option<f64>,
     },
+    Timestamp {
+        min: Option<chrono::NaiveDateTime>,
+        max: Option<chrono::NaiveDateTime>,
+    },
     String {
         min: Option<String>,
         max: Option<String>,
@@ -341,6 +354,16 @@ impl RangeFilter {
                 }
                 (Some(min), None) => Some(col.gt_eq(lit(*min))),
                 (None, Some(max)) => Some(col.lt_eq(lit(*max))),
+                (None, None) => None,
+            },
+            RangeFilter::Timestamp { min, max } => match (min, max) {
+                (Some(min), Some(max)) => Some(
+                    col.clone()
+                        .gt_eq(lit_timestamp_nano(min.timestamp_nanos()))
+                        .and(col.lt_eq(lit_timestamp_nano(max.timestamp_nanos()))),
+                ),
+                (Some(min), None) => Some(col.gt_eq(lit_timestamp_nano(min.timestamp_nanos()))),
+                (None, Some(max)) => Some(col.lt_eq(lit_timestamp_nano(max.timestamp_nanos()))),
                 (None, None) => None,
             },
             RangeFilter::String { min, max } => match (min, max) {
@@ -359,6 +382,7 @@ impl RangeFilter {
 #[serde(untagged)]
 pub enum EqualityFilter {
     Numeric { eq: f64 },
+    Timestamp { eq: chrono::NaiveDateTime },
     String { eq: String },
 }
 
@@ -366,6 +390,7 @@ impl EqualityFilter {
     pub fn to_expr(&self, col: Expr) -> Expr {
         match self {
             EqualityFilter::Numeric { eq } => col.eq(lit(*eq)),
+            EqualityFilter::Timestamp { eq } => col.eq(lit_timestamp_nano(eq.timestamp_nanos())),
             EqualityFilter::String { eq } => col.eq(lit(eq)),
         }
     }
@@ -375,6 +400,7 @@ impl EqualityFilter {
 #[serde(untagged)]
 pub enum NotEqualFilter {
     Numeric { neq: f64 },
+    Timestamp { neq: chrono::NaiveDateTime },
     String { neq: String },
 }
 
@@ -382,6 +408,9 @@ impl NotEqualFilter {
     pub fn to_expr(&self, col: Expr) -> Expr {
         match self {
             NotEqualFilter::Numeric { neq } => col.not_eq(lit(*neq)),
+            NotEqualFilter::Timestamp { neq } => {
+                col.not_eq(lit_timestamp_nano(neq.timestamp_nanos()))
+            }
             NotEqualFilter::String { neq } => col.not_eq(lit(neq)),
         }
     }
@@ -391,6 +420,7 @@ impl NotEqualFilter {
 #[serde(untagged)]
 pub enum GreaterThanFilter {
     Numeric { gt: f64 },
+    Timestamp { gt: chrono::NaiveDateTime },
     String { gt: String },
 }
 
@@ -398,6 +428,7 @@ impl GreaterThanFilter {
     pub fn to_expr(&self, col: Expr) -> Expr {
         match self {
             GreaterThanFilter::Numeric { gt } => col.gt(lit(*gt)),
+            GreaterThanFilter::Timestamp { gt } => col.gt(lit_timestamp_nano(gt.timestamp_nanos())),
             GreaterThanFilter::String { gt } => col.gt(lit(gt)),
         }
     }
@@ -407,6 +438,7 @@ impl GreaterThanFilter {
 #[serde(untagged)]
 pub enum GreaterThanOrEqualFilter {
     Numeric { gte: f64 },
+    Timestamp { gte: chrono::NaiveDateTime },
     String { gte: String },
 }
 
@@ -414,6 +446,9 @@ impl GreaterThanOrEqualFilter {
     pub fn to_expr(&self, col: Expr) -> Expr {
         match self {
             GreaterThanOrEqualFilter::Numeric { gte } => col.gt_eq(lit(*gte)),
+            GreaterThanOrEqualFilter::Timestamp { gte } => {
+                col.gt_eq(lit_timestamp_nano(gte.timestamp_nanos()))
+            }
             GreaterThanOrEqualFilter::String { gte } => col.gt_eq(lit(gte)),
         }
     }
@@ -423,6 +458,7 @@ impl GreaterThanOrEqualFilter {
 #[serde(untagged)]
 pub enum LessThanFilter {
     Numeric { lt: f64 },
+    Timestamp { lt: chrono::NaiveDateTime },
     String { lt: String },
 }
 
@@ -430,6 +466,7 @@ impl LessThanFilter {
     pub fn to_expr(&self, col: Expr) -> Expr {
         match self {
             LessThanFilter::Numeric { lt } => col.lt(lit(*lt)),
+            LessThanFilter::Timestamp { lt } => col.lt(lit_timestamp_nano(lt.timestamp_nanos())),
             LessThanFilter::String { lt } => col.lt(lit(lt)),
         }
     }
@@ -439,6 +476,7 @@ impl LessThanFilter {
 #[serde(untagged)]
 pub enum LessThanOrEqualFilter {
     Numeric { lte: f64 },
+    Timestamp { lte: chrono::NaiveDateTime },
     String { lte: String },
 }
 
@@ -446,6 +484,9 @@ impl LessThanOrEqualFilter {
     pub fn to_expr(&self, col: Expr) -> Expr {
         match self {
             LessThanOrEqualFilter::Numeric { lte } => col.lt_eq(lit(*lte)),
+            LessThanOrEqualFilter::Timestamp { lte } => {
+                col.lt_eq(lit_timestamp_nano(lte.timestamp_nanos()))
+            }
             LessThanOrEqualFilter::String { lte } => col.lt_eq(lit(lte)),
         }
     }
