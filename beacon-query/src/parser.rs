@@ -54,6 +54,12 @@ impl Parser {
             builder = builder.filter(filter.to_expr(&session_state)?)?;
         }
 
+        if let Some(filters) = query_body.filters {
+            for filter in filters {
+                builder = builder.filter(filter.to_expr(&session_state)?)?;
+            }
+        }
+
         if let Some(sort_by) = query_body.sort_by {
             builder = builder.sort(sort_by.iter().map(|s| s.to_expr()))?;
         }

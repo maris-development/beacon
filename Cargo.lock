@@ -2423,7 +2423,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -2608,7 +2608,7 @@ dependencies = [
 [[package]]
 name = "nd-arrow-array"
 version = "0.1.0"
-source = "git+https://github.com/robinskil/nd-arrow-array.git?branch=main#17cedd8c2a197d2b4f03d59e29c06c44ba4a41c6"
+source = "git+https://github.com/robinskil/nd-arrow-array.git?branch=main#14020a9c11d73f6eef66f55012ab2b934822b183"
 dependencies = [
  "arrow",
 ]

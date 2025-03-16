@@ -68,6 +68,10 @@ impl Runtime {
             .await
     }
 
+    pub async fn total_datasets(&self) -> anyhow::Result<usize> {
+        self.virtual_machine.total_datasets().await
+    }
+
     pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {
         self.virtual_machine.list_dataset_schema(file).await
     }

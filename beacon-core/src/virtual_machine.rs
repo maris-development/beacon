@@ -260,4 +260,38 @@ impl VirtualMachine {
             })
             .collect())
     }
+
+    pub async fn total_datasets(&self) -> anyhow::Result<usize> {
+        let discovery_path = format!("/{}/*", beacon_config::DATASETS_DIR_PREFIX.to_string());
+
+        let state = self.session_ctx.state();
+
+        let object_store = beacon_config::OBJECT_STORE_LOCAL_FS.clone();
+        let table_url = ListingTableUrl::parse(&discovery_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Error parsing discovery path: {:?} - {:?}",
+                discovery_path,
+                e
+            )
+        })?;
+
+        let mut count = 0;
+        let mut stream = table_url
+            .list_all_files(&state, object_store.as_ref(), "")
+            .await
+            .map_err(|e| anyhow::anyhow!("Error listing datasets: {:?}", e))?;
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(_) => {
+                    count += 1;
+                }
+                Err(e) => {
+                    event!(Level::ERROR, "Error listing datasets: {:?}", e);
+                }
+            }
+        }
+
+        Ok(count)
+    }
 }

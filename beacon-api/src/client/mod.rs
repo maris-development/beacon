@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{routing::post, Router};
 use beacon_core::runtime::Runtime;
+use datasets::total_datasets;
 use query::available_columns;
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -22,6 +23,7 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(query::list_functions))
         .routes(routes!(datasets::list_datasets))
         .routes(routes!(datasets::list_dataset_schema))
+        .routes(routes!(datasets::total_datasets))
         .routes(routes!(tables::list_tables))
         .routes(routes!(tables::default_table))
         .routes(routes!(tables::list_table_schema))
