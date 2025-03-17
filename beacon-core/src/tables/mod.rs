@@ -102,7 +102,7 @@ impl BeaconSchemaProvider {
         let mut locked_tables = self.tables_map.lock();
         if let Some(table) = locked_tables.shift_remove(table_name) {
             let table_path = self.root_dir_path.join(table_name);
-            tokio::fs::remove_file(table_path).await?;
+            tokio::fs::remove_dir_all(table_path).await?;
             Ok(())
         } else {
             anyhow::bail!("Table with name {} does not exist", table_name);

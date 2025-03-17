@@ -41,6 +41,10 @@ impl Runtime {
         self.virtual_machine.add_table(table).await
     }
 
+    pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
+        self.virtual_machine.delete_table(table_name).await
+    }
+
     pub fn list_tables(&self) -> Vec<String> {
         self.virtual_machine.list_tables()
     }

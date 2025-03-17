@@ -26,7 +26,8 @@ pub struct ListDatasetsQuery {
     responses((status = 200, description = "List of datasets")),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn list_datasets(
@@ -63,7 +64,8 @@ pub struct ListDatasetSchemaQuery {
     responses((status = 200, description = "List the schema/available columns")),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn list_dataset_schema(
@@ -92,7 +94,8 @@ pub(crate) async fn list_dataset_schema(
     responses((status = 200, description = "List the total amount of datasets available")),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn total_datasets(

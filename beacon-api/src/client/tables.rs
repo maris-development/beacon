@@ -17,7 +17,8 @@ use utoipa::{IntoParams, ToSchema};
     responses((status = 200, description = "List of tables")),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn list_tables(State(state): State<Arc<Runtime>>) -> Json<Vec<String>> {
@@ -39,7 +40,8 @@ pub struct ListTableSchemaQuery {
     responses((status = 200, description = "List of schema of a table")),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn list_table_schema(
@@ -68,7 +70,8 @@ pub(crate) async fn list_table_schema(
     responses((status = 200, description = "List of schema of the default table")),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn default_table_schema(State(state): State<Arc<Runtime>>) -> Json<SchemaRef> {
@@ -84,7 +87,8 @@ pub(crate) async fn default_table_schema(State(state): State<Arc<Runtime>>) -> J
     responses((status = 200, description = "Name of the default table")),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn default_table(State(state): State<Arc<Runtime>>) -> Json<String> {
