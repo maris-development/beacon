@@ -40,22 +40,18 @@ pub fn units(variable: &Variable) -> Option<String> {
 
 fn is_cf_time_variable_impl(variable: &Variable) -> Option<(Unit, Epoch)> {
     let units = units(variable);
-    let calendar = calendar(variable);
+    // let calendar = calendar(variable);
 
-    match (units, calendar) {
-        (Some(units), Some(calendar)) => {
-            let calendar_l = calendar.to_lowercase();
-            if calendar_l == "gregorian" || calendar_l == "standard" {
-                let units_l = units.to_lowercase();
-                let units = extract_units(units_l.as_str());
-                let epoch = extract_epoch(units_l.as_str());
+    match units {
+        Some(units) => {
+            let units_l = units.to_lowercase();
+            let units = extract_units(units_l.as_str());
+            let epoch = extract_epoch(units_l.as_str());
 
-                match (units, epoch) {
-                    (Some(units), Some(epoch)) => return Some((units, epoch)),
-                    _ => return None,
-                }
+            match (units, epoch) {
+                (Some(units), Some(epoch)) => return Some((units, epoch)),
+                _ => return None,
             }
-            None
         }
         _ => None,
     }
