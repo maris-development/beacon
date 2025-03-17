@@ -113,7 +113,7 @@ pub(crate) async fn explain_query(
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "query",
-    post,
+    get,
     path = "/api/query/functions",
     responses(
         (status=200, description="Response containing all the available functions"),
@@ -131,8 +131,8 @@ pub(crate) async fn list_functions(State(state): State<Arc<Runtime>>) -> Json<Ve
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "query",
-    post,
-    path = "/api/query/available_columns",
+    get,
+    path = "/api/query/available-columns",
     responses(
         (status=200, description="Response containing the available columns in the default table schema"),
     ),
