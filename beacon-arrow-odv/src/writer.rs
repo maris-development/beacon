@@ -20,7 +20,7 @@ use zip::write::FileOptions;
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ColumnInfo {
     /// The name/label of the column
-    pub label: String,
+    pub column_name: String,
     /// Optional descriptive comment about the column's contents
     pub comment: Option<String>,
     /// Number of significant digits to use when writing numeric values
@@ -61,6 +61,7 @@ pub struct OdvOptions {
 pub enum ArchivingMethod {
     #[default]
     ZipStd,
+    #[serde(rename = "zip_deflate")]
     ZipDeflate,
 }
 
@@ -126,15 +127,15 @@ impl OdvOptions {
 
         for (column, field) in &columns {
             if !column.ends_with("_qc") && !column.ends_with("_qf") {
-                if column != &options.depth_column.label.to_lowercase()
+                if column != &options.depth_column.column_name.to_lowercase()
                     && column != &options.time_column.to_lowercase()
-                    && column != &options.latitude_column.label.to_lowercase()
-                    && column != &options.longitude_column.label.to_lowercase()
+                    && column != &options.latitude_column.column_name.to_lowercase()
+                    && column != &options.longitude_column.column_name.to_lowercase()
                     && column != &options.key_column.to_lowercase()
                 {
                     // Assume its a metadata column
                     let mut column_info = ColumnInfo {
-                        label: field.name().clone(),
+                        column_name: field.name().clone(),
                         comment: None,
                         significant_digits: None,
                         qf_column: None,
@@ -226,21 +227,21 @@ impl Default for OdvOptions {
             key_column: "Cruise".to_string(),
             qf_schema: "SEADATANET".to_string(),
             depth_column: ColumnInfo {
-                label: "Depth [m]".to_string(),
+                column_name: "Depth [m]".to_string(),
                 comment: None,
                 significant_digits: None,
                 qf_column: None,
                 units: None,
             },
             latitude_column: ColumnInfo {
-                label: "Latitude [degrees north]".to_string(),
+                column_name: "Latitude [degrees north]".to_string(),
                 comment: None,
                 significant_digits: None,
                 qf_column: None,
                 units: None,
             },
             longitude_column: ColumnInfo {
-                label: "Longitude [degrees east]".to_string(),
+                column_name: "Longitude [degrees east]".to_string(),
                 comment: None,
                 significant_digits: None,
                 qf_column: None,
@@ -446,19 +447,19 @@ impl AsyncOdvWriter {
         odv_options: &OdvOptions,
     ) -> anyhow::Result<OdvBatchType> {
         let lon_col = batch
-            .column_by_name(&odv_options.longitude_column.label)
+            .column_by_name(&odv_options.longitude_column.column_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Longitude column '{}' not found in batch.",
-                    odv_options.longitude_column.label
+                    odv_options.longitude_column.column_name
                 )
             })?;
         let lat_col = batch
-            .column_by_name(&odv_options.latitude_column.label)
+            .column_by_name(&odv_options.latitude_column.column_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Latitude column '{}' not found in batch.",
-                    odv_options.latitude_column.label
+                    odv_options.latitude_column.column_name
                 )
             })?;
         let time_col = batch
@@ -470,11 +471,11 @@ impl AsyncOdvWriter {
                 )
             })?;
         let depth_col = batch
-            .column_by_name(&odv_options.depth_column.label)
+            .column_by_name(&odv_options.depth_column.column_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Depth column '{}' not found in batch.",
-                    odv_options.depth_column.label
+                    odv_options.depth_column.column_name
                 )
             })?;
 
@@ -660,7 +661,7 @@ impl<T: OdvType> OdvFile<T> {
             writer,
             "{}",
             Self::meta_header(
-                &options.longitude_column.label,
+                "Longitude [degrees east]",
                 &options.qf_schema,
                 &Self::arrow_to_value_type(
                     output_schema
@@ -676,7 +677,7 @@ impl<T: OdvType> OdvFile<T> {
             writer,
             "{}",
             Self::meta_header(
-                &options.latitude_column.label,
+                "Latitude [degrees north]",
                 &options.qf_schema,
                 &Self::arrow_to_value_type(
                     output_schema
@@ -688,11 +689,28 @@ impl<T: OdvType> OdvFile<T> {
             )
         )?;
 
+        //Write depth column
+        writeln!(
+            writer,
+            "{}",
+            Self::meta_header(
+                &options.depth_column.column_name,
+                &options.qf_schema,
+                &Self::arrow_to_value_type(
+                    output_schema
+                        .field_with_name(&options.depth_column.column_name)
+                        .expect("")
+                        .data_type()
+                )?,
+                &options.depth_column.comment.as_deref().unwrap_or("")
+            )
+        )?;
+
         //Write all the metadata variables/columns
         for column in options.meta_columns.iter() {
             let value_type = Self::arrow_to_value_type(
                 output_schema
-                    .field_with_name(&column.label)
+                    .field_with_name(&column.column_name)
                     .expect("Column not found in output schema.")
                     .data_type(),
             )?;
@@ -701,7 +719,7 @@ impl<T: OdvType> OdvFile<T> {
                 writer,
                 "{}",
                 Self::meta_header(
-                    &column.label,
+                    &column.column_name,
                     &options.qf_schema,
                     &value_type,
                     &column.comment.as_deref().unwrap_or("")
@@ -715,7 +733,7 @@ impl<T: OdvType> OdvFile<T> {
         for column in options.data_columns.iter() {
             let value_type = Self::arrow_to_value_type(
                 output_schema
-                    .field_with_name(&column.label)
+                    .field_with_name(&column.column_name)
                     .expect("Column not found in output schema.")
                     .data_type(),
             )?;
@@ -724,7 +742,7 @@ impl<T: OdvType> OdvFile<T> {
                 writer,
                 "{}",
                 Self::data_header(
-                    &column.label,
+                    &column.column_name,
                     &options.qf_schema,
                     &value_type,
                     &column.comment.as_deref().unwrap_or("")
@@ -1005,11 +1023,11 @@ impl OdvBatchSchemaMapper {
         output_fields.push(field.clone().with_name("yyyy-MM-ddTHH:mm:ss.SSS"));
 
         let (projection_idx, field) = input_schema
-            .column_with_name(&odv_options.longitude_column.label)
+            .column_with_name(&odv_options.longitude_column.column_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Longitude column '{}' not found in input schema.",
-                    odv_options.longitude_column.label
+                    odv_options.longitude_column.column_name
                 )
             })?;
 
@@ -1017,28 +1035,40 @@ impl OdvBatchSchemaMapper {
         output_fields.push(field.clone().with_name("Longitude [degrees east]"));
 
         let (projection_idx, field) = input_schema
-            .column_with_name(&odv_options.latitude_column.label)
+            .column_with_name(&odv_options.latitude_column.column_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Latitude column '{}' not found in input schema.",
-                    odv_options.latitude_column.label
+                    odv_options.latitude_column.column_name
                 )
             })?;
 
         projection.push(projection_idx);
         output_fields.push(field.clone().with_name("Latitude [degrees north]"));
 
+        let (projection_idx, field) = input_schema
+            .column_with_name(&odv_options.depth_column.column_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Depth column '{}' not found in input schema.",
+                    odv_options.depth_column.column_name
+                )
+            })?;
+
+        projection.push(projection_idx);
+        output_fields.push(field.clone());
+
         for data_column in odv_options.data_columns.iter() {
             let (projection_idx, field) = input_schema
-                .column_with_name(&data_column.label)
+                .column_with_name(&data_column.column_name)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Data column '{}' not found in input schema.",
-                        data_column.label
-                    )
-                })?;
+                anyhow::anyhow!(
+                    "Data column '{}' not found in input schema.",
+                    data_column.column_name
+                )
+            })?;
             let column_name =
-                generate_column_name(&data_column.label, data_column.units.as_deref());
+                generate_column_name(&data_column.column_name, data_column.units.as_deref());
             projection.push(projection_idx);
             output_fields.push(field.clone().with_name(column_name.clone()));
 
@@ -1059,15 +1089,15 @@ impl OdvBatchSchemaMapper {
 
         for meta_column in &odv_options.meta_columns {
             let (projection_idx, field) = input_schema
-                .column_with_name(&meta_column.label)
+                .column_with_name(&meta_column.column_name)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Meta column '{}' not found in input schema.",
-                        meta_column.label
-                    )
-                })?;
+                anyhow::anyhow!(
+                    "Meta column '{}' not found in input schema.",
+                    meta_column.column_name
+                )
+            })?;
             let column_name =
-                generate_column_name(&meta_column.label, meta_column.units.as_deref());
+                generate_column_name(&meta_column.column_name, meta_column.units.as_deref());
             projection.push(projection_idx);
             output_fields.push(field.clone().with_name(column_name));
         }
