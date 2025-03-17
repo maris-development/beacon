@@ -62,6 +62,14 @@ pub struct DeleteTable {
 pub(crate) async fn delete_table(
     State(state): State<Arc<Runtime>>,
     Query(delete_table): Query<DeleteTable>,
-) -> Json<Vec<String>> {
-    Json(vec!["Table deleted".to_string()])
+) -> (StatusCode, String) {
+    let result = state.delete_table(&delete_table.table_name).await;
+
+    match result {
+        Ok(_) => (StatusCode::OK, format!("Table: {} was deleted", delete_table.table_name)),
+        Err(err) => {
+            tracing::error!("Error deleting table: {:?}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Error deleting table: {:?}", err))
+        }
+    }
 }
