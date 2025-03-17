@@ -594,7 +594,6 @@ dependencies = [
  "indexmap",
  "inventory",
  "nd-arrow-array",
- "netcdf",
  "object_store",
  "parking_lot",
  "pathdiff",
@@ -2424,7 +2423,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -2609,7 +2608,7 @@ dependencies = [
 [[package]]
 name = "nd-arrow-array"
 version = "0.1.0"
-source = "git+https://github.com/robinskil/nd-arrow-array.git?branch=main#17cedd8c2a197d2b4f03d59e29c06c44ba4a41c6"
+source = "git+https://github.com/robinskil/nd-arrow-array.git?branch=main#14020a9c11d73f6eef66f55012ab2b934822b183"
 dependencies = [
  "arrow",
 ]
@@ -2632,8 +2631,7 @@ dependencies = [
 [[package]]
 name = "netcdf"
 version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3edbd8b8e273c08e42ec7cc255cb907a16f78db0833b8ad3b6457168d90f3a39"
+source = "git+https://github.com/robinskil/netcdf.git#4e003679930b9160734d4cf2dbdb8ef35bd8e616"
 dependencies = [
  "bitflags 2.8.0",
  "libc",
@@ -2645,8 +2643,7 @@ dependencies = [
 [[package]]
 name = "netcdf-src"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db385e065fef89907fbc08858dddadf7a0e219b654333e7ce31260641a2238b3"
+source = "git+https://github.com/robinskil/netcdf.git#4e003679930b9160734d4cf2dbdb8ef35bd8e616"
 dependencies = [
  "cmake",
  "hdf5-metno-sys",
@@ -2656,8 +2653,7 @@ dependencies = [
 [[package]]
 name = "netcdf-sys"
 version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e848a01eaee33a1c3f0b2b2e92f03c7fcface4384c0f7cef00024954f19c7868"
+source = "git+https://github.com/robinskil/netcdf.git#4e003679930b9160734d4cf2dbdb8ef35bd8e616"
 dependencies = [
  "curl-sys",
  "hdf5-metno-sys",

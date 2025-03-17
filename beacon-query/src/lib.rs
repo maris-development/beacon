@@ -40,6 +40,9 @@ pub struct QueryBody {
     #[serde(alias = "query_parameters")]
     select: Vec<Select>,
     filter: Option<Filter>,
+    // To Support legacy queries
+    #[schema(ignore)]
+    filters: Option<Vec<Filter>>,
     #[serde(default)]
     from: Option<From>,
     sort_by: Option<Vec<Sort>>,

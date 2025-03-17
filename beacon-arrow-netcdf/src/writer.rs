@@ -56,11 +56,11 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         let writer = FileWriter::try_new(file, &schema)?;
         let mut fixed_string_sizes = HashMap::new();
 
-        for field in schema.fields() {
-            if field.data_type() == &DataType::Utf8 {
-                fixed_string_sizes.insert(field.name().to_string(), 0);
-            }
-        }
+        // for field in schema.fields() {
+        //     if field.data_type() == &DataType::Utf8 {
+        //         fixed_string_sizes.insert(field.name().to_string(), 0);
+        //     }
+        // }
 
         Ok(Self {
             path,
@@ -76,21 +76,21 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
     ) -> anyhow::Result<()> {
         self.writer.write(&record_batch)?;
 
-        for (name, size) in self.fixed_string_sizes.iter_mut() {
-            let max_size = record_batch
-                .column_by_name(name)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap()
-                .iter()
-                .map(|x| x.map(|x| x.len()).unwrap_or(0))
-                .max();
+        // for (name, size) in self.fixed_string_sizes.iter_mut() {
+        //     let max_size = record_batch
+        //         .column_by_name(name)
+        //         .unwrap()
+        //         .as_any()
+        //         .downcast_ref::<arrow::array::StringArray>()
+        //         .unwrap()
+        //         .iter()
+        //         .map(|x| x.map(|x| x.len()).unwrap_or(0))
+        //         .max();
 
-            if let Some(max_size) = max_size {
-                *size = (*size).max(max_size);
-            }
-        }
+        //     if let Some(max_size) = max_size {
+        //         *size = (*size).max(max_size);
+        //     }
+        // }
 
         Ok(())
     }
@@ -124,6 +124,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         for batch in reader {
             let batch = batch?;
             let updated_batch = Self::map_record_batch(batch, updated_schema.clone());
+            println!("Size: {}", updated_batch.get_array_memory_size());
             nc_writer.write_record_batch(updated_batch)?;
         }
 
@@ -167,4 +168,50 @@ fn string_array_to_fixed_binary(
     });
 
     builder.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::{array::Int32Array, datatypes::Schema};
+    use tempfile::{tempfile, NamedTempFile};
+
+    use super::*;
+
+    #[test]
+    fn test_name() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "text_array",
+            DataType::Utf8,
+            true,
+        )]));
+        let arrays = vec![Arc::new(StringArray::from(vec![Some("hello"); 1_000_000])) as ArrayRef];
+
+        // let schema = Arc::new(Schema::new(vec![Field::new(
+        //     "text_array",
+        //     DataType::Int32,
+        //     true,
+        // )]));
+        // let arrays = vec![Arc::new(Int32Array::from(vec![12; 1_000_000])) as ArrayRef];
+
+        let mut writer = ArrowRecordBatchWriter::<crate::encoders::default::DefaultEncoder>::new(
+            "test.nc",
+            schema.clone(),
+        )
+        .unwrap();
+
+        let record_batch = RecordBatch::try_new(schema, arrays).unwrap();
+        println!("Record batch created");
+        println!("Size: {}", record_batch.get_array_memory_size());
+
+        writer.write_record_batch(record_batch).unwrap();
+
+        println!("To NetCDF");
+        writer.finish().unwrap();
+
+        println!("Finished writing");
+
+        drop(writer);
+
+        std::thread::sleep(std::time::Duration::from_secs(1000));
+    }
 }

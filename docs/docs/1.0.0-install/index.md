@@ -28,7 +28,7 @@ version: "3.8"
 
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:community-nightly
+        image: ghcr.io/maris-development/beacon:community-nightly-latest
         container_name: beacon
         restart: unless-stopped
         ports:
@@ -50,7 +50,7 @@ version: "3.8"
 
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:standard-nightly
+        image: ghcr.io/maris-development/beacon:standard-nightly-latest
         container_name: beacon
         restart: unless-stopped
         ports:

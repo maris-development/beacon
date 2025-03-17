@@ -83,3 +83,31 @@ pub(crate) async fn list_dataset_schema(
         }
     }
 }
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "datasets",
+    get, 
+    path = "/api/total-datasets", 
+    responses((status = 200, description = "List the total amount of datasets available")),
+    security(
+        (),
+        ("basic-auth" = [])
+    )
+)]
+pub(crate) async fn total_datasets(
+    State(state): State<Arc<Runtime>>,
+) -> Result<Json<usize>, (StatusCode, String)> {
+    let result = state.total_datasets().await;
+
+    match result {
+        Ok(total_datasets) => Ok(Json(total_datasets)),
+        Err(err) => {
+            tracing::error!("Error reading total datasets: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Error reading total datasets".to_string(),
+            ))
+        }
+    }
+}
