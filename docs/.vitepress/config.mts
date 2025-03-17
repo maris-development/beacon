@@ -101,6 +101,21 @@ export default defineConfig({
               link: '/docs/1.0.0-install/sql'
             },
             {
+              text: 'Tuning for performance',
+              link: '/docs/1.0.0-install/performance',
+              collapsed: true,
+              items: [
+                {
+                  text: 'NetCDF',
+                  link: '/docs/1.0.0-install/performance/netcdf'
+                },
+                {
+                  text: 'Analyze Query Plan',
+                  link: '/docs/1.0.0-install/performance/analyze-query'
+                }
+              ]
+            },
+            {
               text: 'Beacon Binary Format',
               link: '/docs/1.0.0-install/beacon-binary-format/',
               collapsed: true,
@@ -110,20 +125,8 @@ export default defineConfig({
                   link: '/docs/1.0.0-install/beacon-binary-format/import-netcdf',
                 },
                 {
-                  text: 'Import CSV',
-                  link: '/docs/1.0.0-install/beacon-binary-format/import-csv'
-                },
-                {
-                  text: 'Import ODV',
-                  link: '/docs/1.0.0-install/beacon-binary-format/import-odv'
-                },
-                {
-                  text: 'Import Parquet',
-                  link: '/docs/1.0.0-install/beacon-binary-format/import-parquet'
-                },
-                {
-                  text: 'Import Arrow Ipc/Feather',
-                  link: '/docs/1.0.0-install/beacon-binary-format/import-arrow-ipc'
+                  text: 'Removing Datasets',
+                  link: '/docs/1.0.0-install/beacon-binary-format/removing',
                 },
                 {
                   text: 'How to use',
