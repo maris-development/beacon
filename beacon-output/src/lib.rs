@@ -18,7 +18,7 @@ mod netcdf;
 mod odv;
 mod parquet;
 
-pub struct Output {
+pub struct OutputResponse {
     pub output_method: OutputMethod,
     pub content_type: String,
     pub content_disposition: String,
@@ -40,18 +40,30 @@ pub enum OutputMethod {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct Output {
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     Csv,
     Ipc,
     Parquet,
     Json,
-    Odv { options: Option<OdvOptions> },
+    Odv {
+        #[serde(flatten)]
+        options: Option<OdvOptions>,
+    },
     NetCDF,
 }
 
 impl OutputFormat {
-    pub async fn output(&self, ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<Output> {
+    pub async fn output(
+        &self,
+        ctx: Arc<SessionContext>,
+        df: DataFrame,
+    ) -> anyhow::Result<OutputResponse> {
         match self {
             OutputFormat::Csv => csv::output(df).await,
             OutputFormat::Ipc => ipc::output(ctx, df).await,

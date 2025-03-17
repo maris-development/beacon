@@ -162,7 +162,10 @@ pub fn read_variable(variable: &Variable) -> anyhow::Result<NetCDFNdArray> {
             //Get the last dimension of the variable
             if let Some(dim) = variable.dimensions().last() {
                 //Check if the dimensions starts with STRING** or strlen**
-                if dim.name().starts_with("STRING") || dim.name().starts_with("strlen") {
+                if dim.name().starts_with("STRING")
+                    || dim.name().starts_with("strlen")
+                    || dim.name().starts_with("strnlen")
+                {
                     let dims = variable
                         .dimensions()
                         .iter()

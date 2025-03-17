@@ -146,7 +146,7 @@ fn fixed_sized_string_ndarray_to_arrow<'a>(
         let nc_bytes = array.as_slice().expect("Array should be contiguous");
         //Transmute to &[u8] slice
         let bytes = unsafe { std::mem::transmute::<&[NcChar], &[u8]>(nc_bytes) };
-        let s = std::str::from_utf8(bytes).expect("Invalid UTF-8 data");
+        let s = String::from_utf8_lossy(bytes);
         let string = s.trim_end_matches('\0');
         if string.is_empty() {
             builder.append_null();
@@ -163,7 +163,7 @@ fn fixed_sized_string_ndarray_to_arrow<'a>(
             let nc_bytes = row.as_slice().expect("Array should be contiguous");
             //Transmute to &[u8] slice
             let bytes = unsafe { std::mem::transmute::<&[NcChar], &[u8]>(nc_bytes) };
-            let s = std::str::from_utf8(bytes).expect("Invalid UTF-8 data");
+            let s = String::from_utf8_lossy(bytes);
             let string = s.trim_end_matches('\0');
             if string.is_empty() {
                 builder.append_null();

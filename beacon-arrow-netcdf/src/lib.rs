@@ -32,14 +32,14 @@ impl NcString {
     pub fn new(s: &str) -> Self {
         let c_str = CString::new(s).unwrap();
         let ptr = c_str.into_raw();
-        Self(ptr)
+        Self(ptr.cast())
     }
 }
 
 impl Drop for NcString {
     fn drop(&mut self) {
         unsafe {
-            drop(CString::from_raw(self.0));
+            drop(CString::from_raw(self.0.cast()));
         }
     }
 }

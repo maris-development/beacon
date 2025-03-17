@@ -4,13 +4,13 @@ use beacon_arrow_odv::writer::{AsyncOdvWriter, OdvOptions};
 use datafusion::prelude::{DataFrame, SessionContext};
 use futures::StreamExt;
 
-use super::{Output, OutputMethod, TempOutputFile};
+use super::{OutputResponse, OutputMethod, TempOutputFile};
 
 pub async fn output(
     _ctx: Arc<SessionContext>,
     df: DataFrame,
     odv_options: Option<OdvOptions>,
-) -> anyhow::Result<Output> {
+) -> anyhow::Result<OutputResponse> {
     let temp_dir = tempfile::tempdir()?;
     let arrow_schema = Arc::new(df.schema().as_arrow().clone());
     let mut file = TempOutputFile::new("beacon", ".zip")?;
@@ -29,7 +29,7 @@ pub async fn output(
 
     odv_writer.finish_to_archive(file.file.as_file_mut())?;
     drop(temp_dir);
-    Ok(Output {
+    Ok(OutputResponse {
         output_method: OutputMethod::File(file.file),
         content_type: "application/zip".to_string(),
         content_disposition: "attachment".to_string(),

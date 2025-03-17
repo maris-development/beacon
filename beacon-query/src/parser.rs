@@ -9,7 +9,10 @@ pub struct Parser;
 impl Parser {
     pub async fn parse(session: &SessionContext, query: Query) -> anyhow::Result<BeaconQueryPlan> {
         let datafusion_logical_plan = Self::parse_to_logical_plan(session, query.inner).await?;
-        Ok(BeaconQueryPlan::new(datafusion_logical_plan, query.output))
+        Ok(BeaconQueryPlan::new(
+            datafusion_logical_plan,
+            query.output.format,
+        ))
     }
 
     pub async fn parse_to_logical_plan(

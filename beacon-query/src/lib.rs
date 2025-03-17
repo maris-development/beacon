@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use beacon_output::OutputFormat;
+use beacon_output::{Output, OutputFormat};
 use datafusion::{
     common::Column,
     datasource::{listing::ListingTableUrl, provider_as_source},
@@ -23,7 +23,7 @@ pub struct Query {
     #[serde(flatten)]
     pub inner: InnerQuery,
     #[schema(value_type = Object)]
-    pub output: OutputFormat,
+    pub output: Output,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]

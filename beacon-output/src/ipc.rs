@@ -6,9 +6,9 @@ use datafusion::{
     prelude::{DataFrame, SessionContext},
 };
 
-use super::{Output, TempOutputFile};
+use super::{OutputResponse, TempOutputFile};
 
-pub async fn output(ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<Output> {
+pub async fn output(ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<OutputResponse> {
     //Create temp path
     let temp_f = TempOutputFile::new("beacon", ".arrow")?;
 
@@ -28,7 +28,7 @@ pub async fn output(ctx: Arc<SessionContext>, df: DataFrame) -> anyhow::Result<O
 
     DataFrame::new(state, plan).collect().await?;
 
-    Ok(Output {
+    Ok(OutputResponse {
         output_method: super::OutputMethod::File(temp_f.file),
         content_type: "application/vnd.apache.arrow.file".to_string(),
         content_disposition: "attachment".to_string(),
