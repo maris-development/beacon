@@ -23,7 +23,8 @@ pub struct CreateTable {
     path = "/api/admin/create-table", 
     responses((status = 200, description = "Create a new table")),
     security(
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     ))
 ]
 pub(crate) async fn create_table(
@@ -54,7 +55,8 @@ pub struct DeleteTable {
     params(DeleteTable),
     responses((status = 200, description = "Delete a table")),
     security(
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     ))
 ]
 pub(crate) async fn delete_table(

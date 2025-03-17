@@ -29,7 +29,8 @@ pub struct Args {
     ),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn query(
@@ -83,7 +84,8 @@ pub(crate) async fn query(
     ),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn explain_query(
@@ -118,7 +120,8 @@ pub(crate) async fn explain_query(
     ),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 pub(crate) async fn list_functions(State(state): State<Arc<Runtime>>) -> Json<Vec<FunctionDoc>> {
@@ -135,7 +138,8 @@ pub(crate) async fn list_functions(State(state): State<Arc<Runtime>>) -> Json<Ve
     ),
     security(
         (),
-        ("basic-auth" = [])
+        ("basic-auth" = []),
+        ("bearer" = [])
     )
 )]
 #[deprecated = "Use /api/default-table-schema instead"]
