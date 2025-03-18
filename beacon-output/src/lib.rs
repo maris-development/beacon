@@ -51,10 +51,7 @@ pub enum OutputFormat {
     Ipc,
     Parquet,
     Json,
-    Odv {
-        #[serde(flatten)]
-        options: Option<OdvOptions>,
-    },
+    Odv(OdvOptions),
     NetCDF,
 }
 
@@ -69,7 +66,7 @@ impl OutputFormat {
             OutputFormat::Ipc => ipc::output(ctx, df).await,
             OutputFormat::Parquet => parquet::output(df).await,
             OutputFormat::Json => json::output(df).await,
-            OutputFormat::Odv { options } => odv::output(ctx.clone(), df, options.clone()).await,
+            OutputFormat::Odv(options) => odv::output(ctx.clone(), df, Some(options.clone())).await,
             OutputFormat::NetCDF => netcdf::output(ctx.clone(), df).await,
         }
     }

@@ -22,13 +22,11 @@ Content-Type: application/json
 Authorization: Basic <base64-encoded-username-and-password>
 
 {
-    "name": "example",
-    "paths": [
-        "/dir2/*.nc",
-        "/dir1/dataset2.nc",
-        "dataset3.nc",
-    ],
+  "glob_table" : {
+    "table_name": "example",
+    "glob": "/dir2/*.nc",
     "file_format": "netcdf"
+  }
 }
 ```
 
