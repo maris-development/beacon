@@ -229,7 +229,21 @@ fn extract_units(input: &str) -> Option<hifitime::Unit> {
 /// Extracts the epoch date from a string like "days since -4713-11-24"
 fn extract_epoch(input: &str) -> Option<Epoch> {
     let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})").unwrap();
-    re.captures(input)
-        .map(|caps| Epoch::from_str(caps["epoch"].to_string().as_str()).ok())
-        .flatten()
+    let result = re
+        .captures(input)
+        .map(|caps| {
+            let epoch_str = caps["epoch"].to_string();
+            let mut epoch = Epoch::from_str(&epoch_str).ok();
+
+            if epoch.is_none() {
+                if epoch_str == "-4713-01-01" {
+                    epoch = Some(Epoch::from_jde_utc(0.0));
+                }
+            }
+
+            epoch
+        })
+        .flatten();
+
+    result
 }
