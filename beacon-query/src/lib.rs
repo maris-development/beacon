@@ -68,10 +68,8 @@ impl Select {
     pub fn to_expr(&self, session_state: &SessionState) -> anyhow::Result<Expr> {
         match self {
             Select::Column { column, alias } => match alias {
-                Some(alias) => {
-                    Ok(col(Column::from_qualified_name_ignore_case(column)).alias(alias))
-                }
-                None => Ok(col(Column::from_qualified_name_ignore_case(column))),
+                Some(alias) => Ok(column_name(column).alias(alias)),
+                None => Ok(column_name(column)),
             },
             Select::Function {
                 function,
@@ -254,29 +252,23 @@ pub enum Filter {
 }
 
 fn column_name(name: &str) -> Expr {
-    col(Column::from_qualified_name_ignore_case(name))
+    col(Column::from_name(name))
 }
 
 impl Filter {
-    pub fn column_name(name: &str) -> Expr {
-        col(Column::from_qualified_name_ignore_case(name))
-    }
-
     pub fn to_expr(&self, session_state: &SessionState) -> anyhow::Result<Expr> {
         Ok(match self {
             Filter::Range { column, filter } => filter
-                .to_expr(Self::column_name(column))
+                .to_expr(column_name(column))
                 .ok_or_else(|| anyhow::anyhow!("Invalid range filter expression."))?,
-            Filter::GreaterThan { column, filter } => filter.to_expr(Self::column_name(column)),
-            Filter::GreaterThanOrEqual { column, filter } => {
-                filter.to_expr(Self::column_name(column))
-            }
-            Filter::LessThan { column, filter } => filter.to_expr(Self::column_name(column)),
-            Filter::LessThanOrEqual { column, filter } => filter.to_expr(Self::column_name(column)),
-            Filter::Equality { column, filter } => filter.to_expr(Self::column_name(column)),
-            Filter::NotEqual { column, filter } => filter.to_expr(Self::column_name(column)),
-            Filter::IsNull { column } => Self::column_name(column).is_null(),
-            Filter::IsNotNull { column } => Self::column_name(column).is_not_null(),
+            Filter::GreaterThan { column, filter } => filter.to_expr(column_name(column)),
+            Filter::GreaterThanOrEqual { column, filter } => filter.to_expr(column_name(column)),
+            Filter::LessThan { column, filter } => filter.to_expr(column_name(column)),
+            Filter::LessThanOrEqual { column, filter } => filter.to_expr(column_name(column)),
+            Filter::Equality { column, filter } => filter.to_expr(column_name(column)),
+            Filter::NotEqual { column, filter } => filter.to_expr(column_name(column)),
+            Filter::IsNull { column } => column_name(column).is_null(),
+            Filter::IsNotNull { column } => column_name(column).is_not_null(),
             Filter::And(filters) => filters
                 .iter()
                 .map(|f| f.to_expr(session_state))
