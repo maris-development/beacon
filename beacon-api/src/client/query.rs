@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::State,
-    http::header,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -36,7 +36,7 @@ pub struct Args {
 pub(crate) async fn query(
     State(state): State<Arc<Runtime>>,
     Json(query_obj): Json<Query>,
-) -> Result<Response<Body>, Json<String>> {
+) -> Result<Response<Body>, (StatusCode, Json<String>)> {
     let result = state.run_client_query(query_obj).await;
 
     match result {
@@ -68,8 +68,7 @@ pub(crate) async fn query(
         },
         Err(err) => {
             tracing::error!("Error querying beacon: {}", err);
-
-            Err(Json(err.to_string()))
+            Err((StatusCode::BAD_REQUEST, Json(err.to_string())))
         }
     }
 }
@@ -91,7 +90,7 @@ pub(crate) async fn query(
 pub(crate) async fn explain_query(
     State(state): State<Arc<Runtime>>,
     Json(query_obj): Json<Query>,
-) -> Result<Response<Body>, Json<String>> {
+) -> Result<Response<Body>, (StatusCode, Json<String>)> {
     let result = state.explain_client_query(query_obj).await;
     match result {
         Ok(explanation) => Ok((
@@ -104,8 +103,7 @@ pub(crate) async fn explain_query(
             .into_response()),
         Err(err) => {
             tracing::error!("Error explaining beacon query: {}", err);
-
-            Err(Json(err.to_string()))
+            Err((StatusCode::BAD_REQUEST, Json(err.to_string())))
         }
     }
 }

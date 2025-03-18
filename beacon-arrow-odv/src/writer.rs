@@ -52,6 +52,7 @@ pub struct OdvOptions {
     /// Specifications for data value columns
     pub data_columns: Vec<ColumnInfo>,
     /// Specifications for metadata columns
+    #[serde(alias = "metadata_columns")]
     pub meta_columns: Vec<ColumnInfo>,
     #[serde(default)]
     pub archiving: ArchivingMethod,
@@ -920,7 +921,7 @@ impl OdvType for Profiles {
 pub struct TimeSeries;
 impl OdvType for TimeSeries {
     fn type_header() -> String {
-        format!("//<DataType>Timeseries</DataType>")
+        format!("//<DataType>TimeSeries</DataType>")
     }
 }
 
@@ -928,7 +929,7 @@ impl OdvType for TimeSeries {
 pub struct Trajectories;
 impl OdvType for Trajectories {
     fn type_header() -> String {
-        format!("//<DataType>Timeseries</DataType>")
+        format!("//<DataType>Trajectories</DataType>")
     }
 
     fn map_station(record_batch: RecordBatch) -> RecordBatch {
@@ -1057,6 +1058,24 @@ impl OdvBatchSchemaMapper {
 
         projection.push(projection_idx);
         output_fields.push(field.clone());
+
+        if let Some(depth_qc_col) = odv_options.depth_column.qf_column {
+            let (projection_idx, field) =
+                input_schema
+                    .column_with_name(&depth_qc_col)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Depth QF column '{}' not found in input schema.",
+                            depth_qc_col
+                        )
+                    })?;
+
+            projection.push(projection_idx);
+            output_fields.push(field.clone().with_name(format!(
+                "QV:{}:{}",
+                odv_options.qf_schema, odv_options.depth_column.column_name
+            )));
+        }
 
         for data_column in odv_options.data_columns.iter() {
             let (projection_idx, field) = input_schema

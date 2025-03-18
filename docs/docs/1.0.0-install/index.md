@@ -34,8 +34,8 @@ services:
         ports:
             - "8080:8080" # Adjust the port mapping as needed
         environment:
-            - ADMIN_USERNAME=admin # Replace with your admin username
-            - ADMIN_PASSWORD=securepassword # Replace with your admin password
+            - BEACON_ADMIN_USERNAME=admin # Replace with your admin username
+            - BEACON_ADMIN_PASSWORD=securepassword # Replace with your admin password
             - BEACON_VM_MEMORY_SIZE=4096 # Adjust memory allocation as needed (in MB)
             - BEACON_DEFAULT_TABLE=default # Set default table name
             - BEACON_LOG_LEVEL=INFO # Adjust log level
@@ -56,8 +56,8 @@ services:
         ports:
             - "8080:8080" # Adjust the port mapping as needed
         environment:
-            - ADMIN_USERNAME=admin # Replace with your admin username
-            - ADMIN_PASSWORD=securepassword # Replace with your admin password
+            - BEACON_ADMIN_USERNAME=admin # Replace with your admin username
+            - BEACON_ADMIN_PASSWORD=securepassword # Replace with your admin password
             - BEACON_VM_MEMORY_SIZE=4096 # Adjust memory allocation as needed (in MB)
             - BEACON_DEFAULT_TABLE=default # Set default table name
             - BEACON_LOG_LEVEL=INFO # Adjust log level
