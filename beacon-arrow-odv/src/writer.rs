@@ -694,7 +694,7 @@ impl<T: OdvType> OdvFile<T> {
         writeln!(
             writer,
             "{}",
-            Self::meta_header(
+            Self::data_header(
                 &options.depth_column.column_name,
                 &options.qf_schema,
                 &Self::arrow_to_value_type(
