@@ -690,23 +690,6 @@ impl<T: OdvType> OdvFile<T> {
             )
         )?;
 
-        //Write depth column
-        writeln!(
-            writer,
-            "{}",
-            Self::data_header(
-                &options.depth_column.column_name,
-                &options.qf_schema,
-                &Self::arrow_to_value_type(
-                    output_schema
-                        .field_with_name(&options.depth_column.column_name)
-                        .expect("")
-                        .data_type()
-                )?,
-                &options.depth_column.comment.as_deref().unwrap_or("")
-            )
-        )?;
-
         //Write all the metadata variables/columns
         for column in options.meta_columns.iter() {
             let value_type = Self::arrow_to_value_type(
@@ -729,6 +712,23 @@ impl<T: OdvType> OdvFile<T> {
         }
 
         writeln!(writer, "//")?;
+
+        //Write depth column
+        writeln!(
+            writer,
+            "{}",
+            Self::data_header(
+                &options.depth_column.column_name,
+                &options.qf_schema,
+                &Self::arrow_to_value_type(
+                    output_schema
+                        .field_with_name(&options.depth_column.column_name)
+                        .expect("")
+                        .data_type()
+                )?,
+                &options.depth_column.comment.as_deref().unwrap_or("")
+            )
+        )?;
 
         //Write all the data variables/columns
         for column in options.data_columns.iter() {
