@@ -713,22 +713,82 @@ impl<T: OdvType> OdvFile<T> {
 
         writeln!(writer, "//")?;
 
-        //Write depth column
-        writeln!(
-            writer,
-            "{}",
-            Self::data_header(
-                &options.depth_column.column_name,
-                &options.qf_schema,
-                &Self::arrow_to_value_type(
-                    output_schema
-                        .field_with_name(&options.depth_column.column_name)
-                        .expect("")
-                        .data_type()
-                )?,
-                &options.depth_column.comment.as_deref().unwrap_or("")
-            )
-        )?;
+        match T::file_type() {
+            OdvFileType::Profiles => {
+                //Write depth column
+                writeln!(
+                    writer,
+                    "{}",
+                    Self::primary_data_header(
+                        &options.depth_column.column_name,
+                        &options.qf_schema,
+                        &Self::arrow_to_value_type(
+                            output_schema
+                                .field_with_name(&options.depth_column.column_name)
+                                .expect("")
+                                .data_type()
+                        )?,
+                        &options.depth_column.comment.as_deref().unwrap_or(""),
+                        "T"
+                    )
+                )?;
+
+                //Write time column
+                writeln!(
+                    writer,
+                    "{}",
+                    Self::primary_data_header(
+                        &options.time_column,
+                        &options.qf_schema,
+                        &Self::arrow_to_value_type(
+                            output_schema
+                                .field_with_name(&options.time_column)
+                                .expect("")
+                                .data_type()
+                        )?,
+                        "",
+                        "F"
+                    )
+                )?;
+            }
+            OdvFileType::TimeSeries | OdvFileType::Trajectories => {
+                //Write depth column
+                writeln!(
+                    writer,
+                    "{}",
+                    Self::primary_data_header(
+                        &options.depth_column.column_name,
+                        &options.qf_schema,
+                        &Self::arrow_to_value_type(
+                            output_schema
+                                .field_with_name(&options.depth_column.column_name)
+                                .expect("")
+                                .data_type()
+                        )?,
+                        &options.depth_column.comment.as_deref().unwrap_or(""),
+                        "F"
+                    )
+                )?;
+
+                //Write time column
+                writeln!(
+                    writer,
+                    "{}",
+                    Self::primary_data_header(
+                        &options.time_column,
+                        &options.qf_schema,
+                        &Self::arrow_to_value_type(
+                            output_schema
+                                .field_with_name(&options.time_column)
+                                .expect("")
+                                .data_type()
+                        )?,
+                        "",
+                        "T"
+                    )
+                )?;
+            }
+        }
 
         //Write all the data variables/columns
         for column in options.data_columns.iter() {
@@ -802,6 +862,32 @@ impl<T: OdvType> OdvFile<T> {
         header
     }
 
+    /// Generates the ODV header for a data variable
+    ///
+    /// # Arguments
+    /// * `label` - Name of the variable
+    /// * `qf_schema` - Quality flag schema
+    /// * `value_type` - ODV value type
+    /// * `comment` - Optional comment about the variable
+    fn primary_data_header(
+        label: &str,
+        qf_schema: &str,
+        value_type: &str,
+        comment: &str,
+        primary_variable: &str,
+    ) -> String {
+        const GENERIC_DATA_HEADER : &'static str = "//<DataVariable> label=\"$LABEL\" value_type=\"$VALUE_TYPE\" qf_scheme=\"$QF_SCHEMA\" comment=\"$COMMENT\" is_primary_variable=\"$PRIMARY_VARIABLE\" </DataVariable>";
+
+        let header = GENERIC_DATA_HEADER
+            .replace("$LABEL", label)
+            .replace("$VALUE_TYPE", value_type)
+            .replace("$QF_SCHEMA", qf_schema)
+            .replace("$COMMENT", comment)
+            .replace("$PRIMARY_VARIABLE", primary_variable);
+
+        header
+    }
+
     /// Generates the ODV header for a metadata variable
     ///
     /// # Arguments
@@ -855,8 +941,15 @@ fn generate_column_name<S: AsRef<str>>(name: &str, units: Option<S>) -> String {
     }
 }
 
+pub enum OdvFileType {
+    Profiles,
+    TimeSeries,
+    Trajectories,
+}
+
 /// Trait defining behavior for different ODV data types
 pub trait OdvType {
+    fn file_type() -> OdvFileType;
     /// Returns the ODV type header string
     fn type_header() -> String;
     fn map_schema(schema: SchemaRef) -> SchemaRef {
@@ -915,6 +1008,9 @@ impl OdvType for Profiles {
     fn type_header() -> String {
         format!("//<DataType>Profiles</DataType>")
     }
+    fn file_type() -> OdvFileType {
+        OdvFileType::Profiles
+    }
 }
 
 /// ODV Time Series data type
@@ -923,11 +1019,17 @@ impl OdvType for TimeSeries {
     fn type_header() -> String {
         format!("//<DataType>TimeSeries</DataType>")
     }
+    fn file_type() -> OdvFileType {
+        OdvFileType::TimeSeries
+    }
 }
 
 /// ODV Trajectory data type
 pub struct Trajectories;
 impl OdvType for Trajectories {
+    fn file_type() -> OdvFileType {
+        OdvFileType::Trajectories
+    }
     fn type_header() -> String {
         format!("//<DataType>Trajectories</DataType>")
     }
@@ -952,6 +1054,9 @@ pub struct Error;
 impl OdvType for Error {
     fn type_header() -> String {
         format!("//<DataType>Error</DataType>")
+    }
+    fn file_type() -> OdvFileType {
+        OdvFileType::Profiles
     }
 }
 /// A schema mapper that handles the transformation of input Arrow record batches to ODV-compatible formats.
@@ -1046,6 +1151,19 @@ impl OdvBatchSchemaMapper {
 
         projection.push(projection_idx);
         output_fields.push(field.clone().with_name("Latitude [degrees north]"));
+
+        //Write time column
+        let (projection_idx, field) = input_schema
+            .column_with_name(&odv_options.time_column)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Time column '{}' not found in input schema.",
+                    odv_options.time_column
+                )
+            })?;
+
+        projection.push(projection_idx);
+        output_fields.push(field.clone());
 
         let (projection_idx, field) = input_schema
             .column_with_name(&odv_options.depth_column.column_name)
