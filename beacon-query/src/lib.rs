@@ -62,6 +62,27 @@ pub enum Select {
         args: Vec<Select>,
         alias: String,
     },
+    Literal {
+        value: Literal,
+        alias: String,
+    },
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum Literal {
+    String(String),
+    Number(f64),
+    Boolean(bool),
+}
+
+impl Literal {
+    pub fn to_expr(&self) -> Expr {
+        match self {
+            Literal::String(s) => lit(s),
+            Literal::Number(n) => lit(*n),
+            Literal::Boolean(b) => lit(*b),
+        }
+    }
 }
 
 impl Select {
@@ -71,6 +92,10 @@ impl Select {
                 Some(alias) => Ok(column_name(column).alias(alias)),
                 None => Ok(column_name(column)),
             },
+            Select::Literal { value, alias } => {
+                let expr = value.to_expr();
+                Ok(expr.alias(alias))
+            }
             Select::Function {
                 function,
                 args,
