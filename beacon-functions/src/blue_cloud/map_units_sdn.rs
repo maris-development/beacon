@@ -49,7 +49,7 @@ lazy_static! {
     };
 }
 
-pub fn map_wod_instrument_l06() -> ScalarUDF {
+pub fn map_units_seadatanet() -> ScalarUDF {
     ScalarUDF::new_from_impl(MapUnitsSeaDataNet::new())
 }
 

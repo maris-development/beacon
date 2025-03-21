@@ -55,6 +55,17 @@ impl VirtualMachine {
             session_ctx.register_udf(udf);
         }
 
+        let utils_ufds = beacon_functions::util::util_udfs();
+        for udf in utils_ufds {
+            session_ctx.register_udf(udf);
+        }
+
+        let blue_cloud_udfs = beacon_functions::blue_cloud::blue_cloud_udfs();
+        for udf in blue_cloud_udfs {
+            session_ctx.register_udf(udf);
+        }
+        //FINISH INIT FUNCTIONS FROM beacon-functions module
+
         Ok(Self {
             session_ctx,
             schema_provider: beacon_schema_provider,
