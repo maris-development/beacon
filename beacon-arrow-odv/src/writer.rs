@@ -44,7 +44,7 @@ pub struct OdvOptions {
     /// Specification for the depth/pressure column
     pub depth_column: ColumnInfo,
     /// Name of the column containing timestamp data
-    pub time_column: String,
+    pub time_column: ColumnInfo,
     /// Name of the column containing cruise/deployment identifiers
     pub key_column: String,
     /// Quality flag schema identifier
@@ -129,7 +129,7 @@ impl OdvOptions {
         for (column, field) in &columns {
             if !column.ends_with("_qc") && !column.ends_with("_qf") {
                 if column != &options.depth_column.column_name.to_lowercase()
-                    && column != &options.time_column.to_lowercase()
+                    && column != &options.time_column.column_name.to_lowercase()
                     && column != &options.latitude_column.column_name.to_lowercase()
                     && column != &options.longitude_column.column_name.to_lowercase()
                     && column != &options.key_column.to_lowercase()
@@ -197,7 +197,7 @@ impl OdvOptions {
     ///
     /// # Arguments
     /// * `column` - Name of column containing timestamps
-    pub fn with_time_column(mut self, column: String) -> Self {
+    pub fn with_time_column(mut self, column: ColumnInfo) -> Self {
         self.time_column = column;
         self
     }
@@ -224,7 +224,13 @@ impl OdvOptions {
 impl Default for OdvOptions {
     fn default() -> Self {
         Self {
-            time_column: "yyyy-MM-ddTHH:mm:ss.SSS".to_string(),
+            time_column: ColumnInfo {
+                column_name: "yyyy-MM-ddTHH:mm:ss.SSS".to_string(),
+                comment: None,
+                significant_digits: None,
+                qf_column: None,
+                units: None,
+            },
             key_column: "Cruise".to_string(),
             qf_schema: "SEADATANET".to_string(),
             depth_column: ColumnInfo {
@@ -464,11 +470,11 @@ impl AsyncOdvWriter {
                 )
             })?;
         let time_col = batch
-            .column_by_name(&odv_options.time_column)
+            .column_by_name(&odv_options.time_column.column_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Time column '{}' not found in batch.",
-                    odv_options.time_column
+                    odv_options.time_column.column_name
                 )
             })?;
         let depth_col = batch
@@ -738,11 +744,11 @@ impl<T: OdvType> OdvFile<T> {
                     writer,
                     "{}",
                     Self::primary_data_header(
-                        &options.time_column,
+                        &options.time_column.column_name,
                         &options.qf_schema,
                         &Self::arrow_to_value_type(
                             output_schema
-                                .field_with_name(&options.time_column)
+                                .field_with_name(&options.time_column.column_name)
                                 .expect("")
                                 .data_type()
                         )?,
@@ -775,11 +781,11 @@ impl<T: OdvType> OdvFile<T> {
                     writer,
                     "{}",
                     Self::primary_data_header(
-                        &options.time_column,
+                        &options.time_column.column_name,
                         &options.qf_schema,
                         &Self::arrow_to_value_type(
                             output_schema
-                                .field_with_name(&options.time_column)
+                                .field_with_name(&options.time_column.column_name)
                                 .expect("")
                                 .data_type()
                         )?,
@@ -1117,11 +1123,11 @@ impl OdvBatchSchemaMapper {
         output_fields.push(field.clone().with_name("Type"));
 
         let (projection_idx, field) = input_schema
-            .column_with_name(&odv_options.time_column)
+            .column_with_name(&odv_options.time_column.column_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Time column '{}' not found in input schema.",
-                    odv_options.time_column
+                    odv_options.time_column.column_name
                 )
             })?;
 
@@ -1154,16 +1160,32 @@ impl OdvBatchSchemaMapper {
 
         //Write time column
         let (projection_idx, field) = input_schema
-            .column_with_name(&odv_options.time_column)
+            .column_with_name(&odv_options.time_column.column_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Time column '{}' not found in input schema.",
-                    odv_options.time_column
+                    odv_options.time_column.column_name
                 )
             })?;
 
         projection.push(projection_idx);
         output_fields.push(field.clone());
+
+        if let Some(time_qc_col) = odv_options.time_column.qf_column {
+            let (projection_idx, field) =
+                input_schema.column_with_name(&time_qc_col).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Time QF column '{}' not found in input schema.",
+                        time_qc_col
+                    )
+                })?;
+
+            projection.push(projection_idx);
+            output_fields.push(field.clone().with_name(format!(
+                "QV:{}:{}",
+                odv_options.qf_schema, odv_options.time_column.column_name
+            )));
+        }
 
         let (projection_idx, field) = input_schema
             .column_with_name(&odv_options.depth_column.column_name)
