@@ -52,6 +52,7 @@ pub struct QueryBody {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum Select {
+    ColumnName(String),
     Column {
         #[serde(alias = "column_name")]
         column: String,
@@ -88,6 +89,7 @@ impl Literal {
 impl Select {
     pub fn to_expr(&self, session_state: &SessionState) -> anyhow::Result<Expr> {
         match self {
+            Select::ColumnName(name) => Ok(column_name(name)),
             Select::Column { column, alias } => match alias {
                 Some(alias) => Ok(column_name(column).alias(alias)),
                 None => Ok(column_name(column)),
