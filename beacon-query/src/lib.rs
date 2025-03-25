@@ -2,11 +2,13 @@ use std::{path::Path, sync::Arc};
 
 use beacon_output::{Output, OutputFormat};
 use datafusion::{
+    arrow::datatypes::DataType,
     common::Column,
     datasource::{listing::ListingTableUrl, provider_as_source},
     execution::SessionState,
-    logical_expr::{LogicalPlanBuilder, SortExpr},
-    prelude::{col, lit, lit_timestamp_nano, CsvReadOptions, Expr, SessionContext},
+    logical_expr::{expr, ExprSchemable, LogicalPlanBuilder, SortExpr},
+    prelude::{col, lit, lit_timestamp_nano, try_cast, CsvReadOptions, Expr, SessionContext},
+    scalar::ScalarValue,
 };
 use utoipa::ToSchema;
 
@@ -52,6 +54,12 @@ pub struct QueryBody {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum Select {
+    TryCast {
+        #[serde(flatten)]
+        select: Box<Select>,
+        #[schema(value_type = String)]
+        try_cast: DataType,
+    },
     ColumnName(String),
     Column {
         #[serde(alias = "column_name")]
@@ -61,11 +69,11 @@ pub enum Select {
     Function {
         function: String,
         args: Vec<Select>,
-        alias: String,
+        alias: Option<String>,
     },
     Literal {
         value: Literal,
-        alias: String,
+        alias: Option<String>,
     },
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -74,11 +82,13 @@ pub enum Literal {
     String(String),
     Number(f64),
     Boolean(bool),
+    Null(Option<()>),
 }
 
 impl Literal {
     pub fn to_expr(&self) -> Expr {
         match self {
+            Literal::Null(_) => lit(ScalarValue::Null),
             Literal::String(s) => lit(s),
             Literal::Number(n) => lit(*n),
             Literal::Boolean(b) => lit(*b),
@@ -96,7 +106,11 @@ impl Select {
             },
             Select::Literal { value, alias } => {
                 let expr = value.to_expr();
-                Ok(expr.alias(alias))
+
+                match alias {
+                    Some(alias) => Ok(expr.alias(alias)),
+                    None => Ok(expr),
+                }
             }
             Select::Function {
                 function,
@@ -118,7 +132,18 @@ impl Select {
 
                 let expr = function.call(args);
 
-                Ok(expr.alias(alias))
+                match alias {
+                    Some(alias) => Ok(expr.alias(alias)),
+                    None => Ok(expr),
+                }
+            }
+            Select::TryCast {
+                select,
+                try_cast: cast_as,
+            } => {
+                let expr = select.to_expr(session_state)?;
+
+                Ok(try_cast(expr, cast_as.clone()))
             }
         }
     }
