@@ -7,6 +7,7 @@ use datafusion::{
     execution::SessionState,
     logical_expr::{LogicalPlanBuilder, SortExpr},
     prelude::{col, lit, lit_timestamp_nano, CsvReadOptions, Expr, SessionContext},
+    scalar::ScalarValue,
 };
 use utoipa::ToSchema;
 
@@ -61,11 +62,11 @@ pub enum Select {
     Function {
         function: String,
         args: Vec<Select>,
-        alias: String,
+        alias: Option<String>,
     },
     Literal {
         value: Literal,
-        alias: String,
+        alias: Option<String>,
     },
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -74,11 +75,13 @@ pub enum Literal {
     String(String),
     Number(f64),
     Boolean(bool),
+    Null(Option<()>),
 }
 
 impl Literal {
     pub fn to_expr(&self) -> Expr {
         match self {
+            Literal::Null(_) => lit(ScalarValue::Null),
             Literal::String(s) => lit(s),
             Literal::Number(n) => lit(*n),
             Literal::Boolean(b) => lit(*b),
@@ -96,7 +99,11 @@ impl Select {
             },
             Select::Literal { value, alias } => {
                 let expr = value.to_expr();
-                Ok(expr.alias(alias))
+
+                match alias {
+                    Some(alias) => Ok(expr.alias(alias)),
+                    None => Ok(expr),
+                }
             }
             Select::Function {
                 function,
@@ -118,7 +125,10 @@ impl Select {
 
                 let expr = function.call(args);
 
-                Ok(expr.alias(alias))
+                match alias {
+                    Some(alias) => Ok(expr.alias(alias)),
+                    None => Ok(expr),
+                }
             }
         }
     }
