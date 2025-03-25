@@ -12,19 +12,19 @@ use datafusion::{
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref L35_MAP: HashMap<i64, &'static str> = {
+    static ref L35_MAP: HashMap<&'static str, &'static str> = {
         let mut map = HashMap::new();
-        map.insert(834, "SDN:L35::MAN0013");
-        map.insert(835, "SDN:L35::MAN0002");
-        map.insert(836, "SDN:L35::MAN0002");
-        map.insert(837, "SDN:L35::MAN0013");
-        map.insert(838, "SDN:L35::MAN0013");
-        map.insert(841, "SDN:L35::MAN0013");
-        map.insert(844, "SDN:L35::MAN0013");
-        map.insert(846, "SDN:L35::MAN0013");
-        map.insert(860, "SDN:L35::MAN0013");
-        map.insert(865, "SDN:L35::MAN0013");
-        map.insert(878, "SDN:L35::MAN0049");
+        map.insert("834", "SDN:L35::MAN0013");
+        map.insert("835", "SDN:L35::MAN0002");
+        map.insert("836", "SDN:L35::MAN0002");
+        map.insert("837", "SDN:L35::MAN0013");
+        map.insert("838", "SDN:L35::MAN0013");
+        map.insert("841", "SDN:L35::MAN0013");
+        map.insert("844", "SDN:L35::MAN0013");
+        map.insert("846", "SDN:L35::MAN0013");
+        map.insert("860", "SDN:L35::MAN0013");
+        map.insert("865", "SDN:L35::MAN0013");
+        map.insert("878", "SDN:L35::MAN0049");
 
         map
     };
@@ -47,7 +47,7 @@ fn map_argo_instrument_l35_impl(
         ColumnarValue::Array(flag) => {
             let flag_array = flag
                 .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
+                .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
 
             let array = flag_array.iter().map(|flag| {
@@ -59,9 +59,10 @@ fn map_argo_instrument_l35_impl(
 
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
-        ColumnarValue::Scalar(ScalarValue::Int64(value)) => {
+        ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
-                .map(|wmo_code| L35_MAP.get(&wmo_code).map(|s| s.to_string()))
+                .as_ref()
+                .map(|wmo_code| L35_MAP.get(wmo_code.as_str()).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(

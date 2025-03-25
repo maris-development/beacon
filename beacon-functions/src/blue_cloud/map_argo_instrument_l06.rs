@@ -10,7 +10,7 @@ use datafusion::{
 pub fn map_argo_instrument_l06() -> ScalarUDF {
     create_udf(
         "map_argo_instrument_l06",
-        vec![datafusion::arrow::datatypes::DataType::Int64],
+        vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
         Arc::new(map_argo_instrument_l06_impl),
