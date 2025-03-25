@@ -2,11 +2,12 @@ use std::{path::Path, sync::Arc};
 
 use beacon_output::{Output, OutputFormat};
 use datafusion::{
+    arrow::datatypes::DataType,
     common::Column,
     datasource::{listing::ListingTableUrl, provider_as_source},
     execution::SessionState,
-    logical_expr::{LogicalPlanBuilder, SortExpr},
-    prelude::{col, lit, lit_timestamp_nano, CsvReadOptions, Expr, SessionContext},
+    logical_expr::{expr, ExprSchemable, LogicalPlanBuilder, SortExpr},
+    prelude::{col, lit, lit_timestamp_nano, try_cast, CsvReadOptions, Expr, SessionContext},
     scalar::ScalarValue,
 };
 use utoipa::ToSchema;
@@ -53,6 +54,12 @@ pub struct QueryBody {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum Select {
+    TryCast {
+        #[serde(flatten)]
+        select: Box<Select>,
+        #[schema(value_type = String)]
+        try_cast: DataType,
+    },
     ColumnName(String),
     Column {
         #[serde(alias = "column_name")]
@@ -129,6 +136,14 @@ impl Select {
                     Some(alias) => Ok(expr.alias(alias)),
                     None => Ok(expr),
                 }
+            }
+            Select::TryCast {
+                select,
+                try_cast: cast_as,
+            } => {
+                let expr = select.to_expr(session_state)?;
+
+                Ok(try_cast(expr, cast_as.clone()))
             }
         }
     }
