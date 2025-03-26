@@ -36,10 +36,10 @@ fn pressure_to_depth_impl(
                 .unwrap();
 
             let array = PrimitiveArray::<Float64Type>::from_iter(
-                float_array.iter().zip(lat.iter()).map(|(p, l)| {
-                    p.zip(l)
-                        .map(|(p, l)| gsw::conversions::z_from_p(p, l, 0.0, 0.0))
-                }),
+                float_array
+                    .iter()
+                    .zip(lat.iter())
+                    .map(|(p, l)| p.zip(l).map(|(p, l)| gsw_depth_from_pressure(p, l))),
             );
 
             Ok(ColumnarValue::Array(Arc::new(array)))
@@ -52,7 +52,7 @@ fn pressure_to_depth_impl(
 
             let array = PrimitiveArray::<Float64Type>::from_iter(lat.iter().map(|l| {
                 l.zip(pressure.clone())
-                    .map(|(l, p)| gsw::conversions::z_from_p(p, l, 0.0, 0.0))
+                    .map(|(l, p)| gsw_depth_from_pressure(p, l))
             }));
 
             Ok(ColumnarValue::Array(Arc::new(array)))
@@ -65,7 +65,7 @@ fn pressure_to_depth_impl(
 
             let array = PrimitiveArray::<Float64Type>::from_iter(float_array.iter().map(|p| {
                 p.zip(latitude.clone())
-                    .map(|(p, l)| gsw::conversions::z_from_p(p, l, 0.0, 0.0))
+                    .map(|(p, l)| gsw_depth_from_pressure(p, l))
             }));
 
             Ok(ColumnarValue::Array(Arc::new(array)))
@@ -76,7 +76,7 @@ fn pressure_to_depth_impl(
         ) => {
             let value = pressure
                 .zip(latitude.clone())
-                .map(|(p, l)| gsw::conversions::z_from_p(p, l, 0.0, 0.0));
+                .map(|(p, l)| gsw_depth_from_pressure(p, l));
 
             Ok(ColumnarValue::Scalar(ScalarValue::Float64(value)))
         }
@@ -84,4 +84,8 @@ fn pressure_to_depth_impl(
             "Invalid input types".to_string(),
         )),
     }
+}
+
+fn gsw_depth_from_pressure(pressure: f64, latitude: f64) -> f64 {
+    -gsw::conversions::z_from_p(pressure, latitude, 0.0, 0.0)
 }
