@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::{array::PrimitiveArray, datatypes::Float64Type};
+use arrow::{
+    array::PrimitiveArray,
+    datatypes::{DataType, Float64Type},
+};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
 };
@@ -61,7 +64,10 @@ struct MapUnitsSeaDataNet {
 impl MapUnitsSeaDataNet {
     pub fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![], datafusion::logical_expr::Volatility::Immutable),
+            signature: Signature::exact(
+                vec![DataType::Utf8, DataType::Utf8, DataType::Float64],
+                datafusion::logical_expr::Volatility::Immutable,
+            ),
         }
     }
 }
