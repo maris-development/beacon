@@ -547,6 +547,7 @@ dependencies = [
  "serde",
  "tar",
  "tempfile",
+ "thiserror 2.0.12",
  "tokio",
  "utoipa",
  "walkdir",
