@@ -8,7 +8,10 @@ use netcdf::{
 };
 use regex::Regex;
 
-use crate::nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner};
+use crate::{
+    nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner},
+    NcResult,
+};
 
 pub fn calendar(variable: &Variable) -> Option<String> {
     variable
@@ -61,7 +64,7 @@ pub fn is_cf_time_variable(variable: &Variable) -> bool {
     is_cf_time_variable_impl(variable).is_some()
 }
 
-pub fn decode_cf_time_variable(variable: &Variable) -> anyhow::Result<Option<NetCDFNdArray>> {
+pub fn decode_cf_time_variable(variable: &Variable) -> NcResult<Option<NetCDFNdArray>> {
     if let Some((units, epoch)) = is_cf_time_variable_impl(variable) {
         let (array, fill) = match variable.vartype() {
             netcdf::types::NcVariableType::Int(IntType::I8) => (

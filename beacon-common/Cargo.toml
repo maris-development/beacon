@@ -7,3 +7,4 @@ edition = "2021"
 arrow = { workspace=true }
 anyhow = { workspace=true }
 indexmap = { workspace = true }
+thiserror = { workspace=true }

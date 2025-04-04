@@ -4,9 +4,13 @@ use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
 pub mod cf_time;
 pub mod encoders;
+pub mod error;
 pub mod nc_array;
 pub mod reader;
 pub mod writer;
+
+pub type NcResult<T> = std::result::Result<T, error::ArrowNetCDFError>;
+
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct NcFixedSizedString(Vec<u8>);

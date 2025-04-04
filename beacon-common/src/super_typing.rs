@@ -1,8 +1,22 @@
 use arrow::datatypes::{DataType, Fields, Schema, TimeUnit};
 
-pub fn super_type_schema(schemas: &[arrow::datatypes::SchemaRef]) -> anyhow::Result<Schema> {
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SuperTypeError {
+    #[error("Cannot find a common super type for {left} and {right} in column {column_name}")]
+    NoCommonSuperType {
+        left: DataType,
+        right: DataType,
+        column_name: String,
+    },
+    #[error("No schemas provided")]
+    NoSchemasProvided,
+}
+
+pub type Result<T> = std::result::Result<T, SuperTypeError>;
+
+pub fn super_type_schema(schemas: &[arrow::datatypes::SchemaRef]) -> Result<Schema> {
     if schemas.is_empty() {
-        return Err(anyhow::anyhow!("No schemas provided"));
+        return Err(SuperTypeError::NoSchemasProvided);
     }
 
     let mut fields = indexmap::IndexMap::new();
@@ -15,12 +29,11 @@ pub fn super_type_schema(schemas: &[arrow::datatypes::SchemaRef]) -> anyhow::Res
                     if let Some(supert_type) = super_type_arrow(existing_dtype, &dtype) {
                         *existing_dtype = supert_type;
                     } else {
-                        return Err(anyhow::anyhow!(
-                            "Cannot find a common super type for {:?} and {:?} in column {}",
-                            existing_dtype,
-                            dtype,
-                            field.name()
-                        ));
+                        return Err(SuperTypeError::NoCommonSuperType {
+                            left: existing_dtype.clone(),
+                            right: dtype,
+                            column_name: field.name().to_string(),
+                        });
                     }
                 }
                 None => {

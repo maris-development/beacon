@@ -9,7 +9,7 @@ use netcdf::{types::NcVariableType, FileMut};
 
 use crate::{NcChar, NcString};
 
-use super::Encoder;
+use super::{Encoder, EncoderError};
 
 pub struct DefaultEncoder {
     nc_file: FileMut,
@@ -266,7 +266,7 @@ impl DefaultEncoder {
 }
 
 impl Encoder for DefaultEncoder {
-    fn create(mut nc_file: FileMut, schema: SchemaRef) -> anyhow::Result<Self>
+    fn create(mut nc_file: FileMut, schema: SchemaRef) -> Result<Self, EncoderError>
     where
         Self: Sized,
     {
@@ -290,7 +290,7 @@ impl Encoder for DefaultEncoder {
         })
     }
 
-    fn write_column(&mut self, name: &str, array: ArrayRef) -> anyhow::Result<()> {
+    fn write_column(&mut self, name: &str, array: ArrayRef) -> Result<(), EncoderError> {
         let offset = *self.offsets.get(name).expect("Column not found in schema");
 
         self.write_array_chunk(name, array.clone(), offset)?;
@@ -298,5 +298,9 @@ impl Encoder for DefaultEncoder {
         self.offsets.get_mut(name).map(|x| *x += array.len());
 
         Ok(())
+    }
+
+    fn encoder_name() -> &'static str {
+        "DefaultEncoder"
     }
 }
