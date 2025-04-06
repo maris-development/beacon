@@ -3,7 +3,7 @@ use std::sync::Arc;
 use beacon_sources::netcdf_format::NetCDFFormat;
 
 #[async_trait::async_trait]
-#[typetag::serde]
+#[typetag::serde(tag = "file_format")]
 pub trait FileFormat: std::fmt::Debug + Send + Sync {
     fn file_format(&self) -> Arc<dyn datafusion::datasource::file_format::FileFormat>;
 }

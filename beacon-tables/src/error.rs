@@ -10,10 +10,10 @@ pub enum TableError {
     TableDoesNotExist(String),
     #[error("Logical table error: {0}")]
     LogicalTableError(#[from] LogicalTableError),
-    #[error("Failed to find table configuration file: {0}.")]
-    TableConfigFileError(std::io::Error),
-    #[error("Failed to parse table configuration file: {0}")]
-    TableConfigFileParseError(#[from] serde_json::Error),
+    #[error("Failed to find table configuration file: {0} for table: {1}")]
+    TableConfigFileError(std::io::Error, String),
+    #[error("Failed to parse table configuration file: {0} for table: {1}")]
+    TableConfigFileParseError(serde_json::Error, String),
     #[error("Failed to create table: {0}")]
     TableCreationError(Box<Self>),
     #[error("Failed to serialize table config: {0}")]
@@ -30,4 +30,6 @@ pub enum TableError {
     BaseTableDirectoryDoesNotExist,
     #[error("Failed to create Base Table Directory: {0}")]
     FailedToCreateBaseTableDirectory(std::io::Error),
+    #[error("Failed to create table directory: {0} for table: {1}")]
+    FailedToCreateTableDirectory(std::io::Error, String),
 }

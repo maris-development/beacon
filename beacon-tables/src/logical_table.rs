@@ -20,6 +20,7 @@ pub enum LogicalTableError {
 pub struct LogicalTable {
     table_name: String,
     paths: Vec<String>,
+    #[serde(flatten)]
     file_format: Arc<dyn FileFormat>,
 }
 

@@ -27,6 +27,7 @@ impl From<Arc<dyn LogicalTableProvider>> for Table {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TableType {
     Logical(Arc<dyn LogicalTableProvider>),
 }
@@ -43,10 +44,13 @@ impl Table {
 
         // Read the table configuration file
         let table_config_path = dir.as_ref().join("table.json");
-        let table_config_file = std::fs::File::open(&table_config_path)
-            .map_err(|e| TableError::TableConfigFileError(e))?;
+        let table_config_file = std::fs::File::open(&table_config_path).map_err(|e| {
+            TableError::TableConfigFileError(e, dir.as_ref().to_string_lossy().to_string())
+        })?;
 
-        let table: Table = serde_json::from_reader(table_config_file)?;
+        let table: Table = serde_json::from_reader(table_config_file).map_err(|e| {
+            TableError::TableConfigFileParseError(e, dir.as_ref().to_string_lossy().to_string())
+        })?;
         tracing::debug!("Opened table: {}", table.table_name);
 
         Ok(table)
@@ -65,6 +69,11 @@ impl Table {
 
         //Create the table directory
         let directory = table_directory.join(&self.table_name);
+        if !directory.exists() {
+            tokio::fs::create_dir_all(&directory).await.map_err(|e| {
+                TableError::FailedToCreateTableDirectory(e, directory.to_string_lossy().to_string())
+            })?;
+        }
 
         //Write the table (self) as a json file to the directory
         let table_config_path = directory.join("table.json");
@@ -72,7 +81,7 @@ impl Table {
             .map_err(|e| TableError::TableConfigWriteError(e))?;
 
         // Serialize the table to JSON and write it to the file
-        let table_json = serde_json::to_string(self)
+        let table_json = serde_json::to_string_pretty(self)
             .map_err(|e| TableError::TableConfigSerializationError(e))?;
 
         std::fs::write(&table_config_path, table_json)
