@@ -698,6 +698,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-config",
+ "beacon-query",
  "beacon-sources",
  "datafusion",
  "indexmap",

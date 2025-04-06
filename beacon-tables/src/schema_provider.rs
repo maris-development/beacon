@@ -7,7 +7,12 @@ use datafusion::{
     prelude::SessionContext,
 };
 
-use crate::{empty_table::EmptyTable, error::TableError, table::Table, LogicalTableProvider};
+use crate::{
+    empty_table::EmptyTable,
+    error::TableError,
+    table::{Table, TableInfo},
+    LogicalTableProvider,
+};
 
 /// A schema provider for Beacon which manages a collection of tables stored on disk.
 ///
@@ -15,7 +20,7 @@ use crate::{empty_table::EmptyTable, error::TableError, table::Table, LogicalTab
 /// methods for adding, deleting, and retrieving tables.
 pub struct BeaconSchemaProvider {
     session_ctx: Arc<SessionContext>,
-    tables_map: Arc<parking_lot::Mutex<indexmap::IndexMap<String, Table>>>,
+    tables_map: Arc<parking_lot::Mutex<indexmap::IndexMap<String, TableInfo>>>,
     root_dir_path: PathBuf,
 }
 
@@ -54,8 +59,8 @@ impl BeaconSchemaProvider {
         let mut tables_map = indexmap::IndexMap::new();
         let tables = Self::load_tables(&root_dir_path).await?;
         for table in tables {
-            tracing::debug!("Loaded table: {}", table.table_name());
-            tables_map.insert(table.table_name().to_string(), table);
+            tracing::debug!("Loaded table: {}", table.table.table_name());
+            tables_map.insert(table.table.table_name().to_string(), table);
         }
 
         let provider = Self {
@@ -85,7 +90,7 @@ impl BeaconSchemaProvider {
     ///
     /// # Errors
     /// Returns a [`TableError`] if reading the directory or loading a table fails.
-    async fn load_tables(base_path: &std::path::Path) -> Result<Vec<Table>, TableError> {
+    async fn load_tables(base_path: &std::path::Path) -> Result<Vec<TableInfo>, TableError> {
         let mut tables = Vec::new();
 
         let mut dir = tokio::fs::read_dir(base_path)
@@ -103,7 +108,11 @@ impl BeaconSchemaProvider {
             if let Ok(metadata) = tokio::fs::metadata(&path).await {
                 if metadata.is_dir() {
                     let table = Table::open(path.clone())?;
-                    tables.push(table);
+                    let table_info = TableInfo {
+                        table: table,
+                        table_directory: path,
+                    };
+                    tables.push(table_info);
                 }
             }
         }
@@ -123,11 +132,11 @@ impl BeaconSchemaProvider {
         let mut locked_tables = self.tables_map.lock();
         if !locked_tables.contains_key(table.table_name()) {
             // Create the directory with the name of the table in the tables directory.
-            table
+            let table_info = table
                 .create(self.root_dir_path.clone(), self.session_ctx.clone())
                 .await?;
-            tracing::debug!("Created table: {}", table.table_name());
-            locked_tables.insert(table.table_name().to_string(), table);
+            tracing::debug!("Created table: {}", table_info.table.table_name());
+            locked_tables.insert(table_info.table.table_name().to_string(), table_info);
 
             Ok(())
         } else {
@@ -192,8 +201,10 @@ impl SchemaProvider for BeaconSchemaProvider {
     /// An optional [`Arc<dyn TableProvider>`] wrapped in a `Result`. Returns `None` if the table does not exist.
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
         if let Some(table) = self.tables_map.lock().get(name) {
+            let table_directory = table.table_directory.clone();
             let table = table
-                .table_provider(self.session_ctx.clone())
+                .table
+                .table_provider(table_directory, self.session_ctx.clone())
                 .await
                 .map_err(|e| {
                     DataFusionError::Execution(format!(

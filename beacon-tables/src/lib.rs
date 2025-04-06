@@ -7,6 +7,7 @@ pub mod empty_table;
 pub mod error;
 pub mod file_format;
 pub mod logical_table;
+pub mod physical_table;
 pub mod schema_provider;
 pub mod table;
 

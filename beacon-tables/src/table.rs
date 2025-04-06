@@ -5,7 +5,13 @@ use std::{
 
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 
-use crate::{error::TableError, LogicalTableProvider};
+use crate::{error::TableError, physical_table::PhysicalTableProvider, LogicalTableProvider};
+
+#[derive(Debug)]
+pub struct TableInfo {
+    pub table: Table,
+    pub table_directory: PathBuf,
+}
 
 /// Represents a table configuration along with its associated provider.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -40,6 +46,7 @@ impl From<Arc<dyn LogicalTableProvider>> for Table {
 pub enum TableType {
     /// A logical table with its associated provider.
     Logical(Arc<dyn LogicalTableProvider>),
+    Physical(Arc<dyn PhysicalTableProvider>),
 }
 
 impl Table {
@@ -97,40 +104,57 @@ impl Table {
     /// Returns a `TableError` if the base directory does not exist, or if any file system or serialization
     /// operation fails.
     pub async fn create(
-        &self,
-        table_directory: PathBuf,
+        self,
+        base_table_directory: PathBuf,
         session_ctx: Arc<SessionContext>,
-    ) -> Result<(), TableError> {
+    ) -> Result<TableInfo, TableError> {
         // Ensure the base table directory exists.
-        if !table_directory.exists() {
+        if !base_table_directory.exists() {
             return Err(TableError::BaseTableDirectoryDoesNotExist);
         }
 
         // Create the specific table directory.
-        let directory = table_directory.join(&self.table_name);
-        if !directory.exists() {
-            tokio::fs::create_dir_all(&directory).await.map_err(|e| {
-                TableError::FailedToCreateTableDirectory(e, directory.to_string_lossy().to_string())
-            })?;
+        let table_directory = base_table_directory.join(&self.table_name);
+        if !table_directory.exists() {
+            tokio::fs::create_dir_all(&table_directory)
+                .await
+                .map_err(|e| {
+                    TableError::FailedToCreateTableDirectory(
+                        e,
+                        table_directory.to_string_lossy().to_string(),
+                    )
+                })?;
         }
 
         // Write the table configuration as a JSON file to the directory.
-        let table_config_path = directory.join("table.json");
+        let table_config_path = table_directory.join("table.json");
         std::fs::File::create(&table_config_path)
             .map_err(|e| TableError::TableConfigWriteError(e))?;
 
         // Serialize the table into pretty JSON format.
-        let table_json = serde_json::to_string_pretty(self)
+        let table_json = serde_json::to_string_pretty(&self)
             .map_err(|e| TableError::TableConfigSerializationError(e))?;
         std::fs::write(&table_config_path, table_json)
             .map_err(|e| TableError::TableConfigWriteError(e))?;
 
         // Initialize the table using its logical table provider.
         match &self.table_type {
-            TableType::Logical(logical_table_provider) => Ok(logical_table_provider
-                .create(directory, session_ctx)
-                .await?),
-        }
+            TableType::Logical(logical_table_provider) => {
+                logical_table_provider
+                    .create(table_directory.clone(), session_ctx)
+                    .await?
+            }
+            TableType::Physical(physical_table_provider) => physical_table_provider
+                .create(table_directory.clone(), session_ctx)
+                .await
+                .unwrap(),
+        };
+
+        // Return the table information.
+        Ok(TableInfo {
+            table: self,
+            table_directory,
+        })
     }
 
     /// Obtains a `TableProvider` for executing queries against this table.
@@ -147,12 +171,16 @@ impl Table {
     /// Returns a `TableError` if there is an issue retrieving the table provider.
     pub async fn table_provider(
         &self,
+        table_directory: PathBuf,
         session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         match &self.table_type {
             TableType::Logical(logical_table) => {
                 Ok(logical_table.table_provider(session_ctx).await?)
             }
+            TableType::Physical(physical_table) => Ok(physical_table
+                .table_provider(table_directory, session_ctx)
+                .await?),
         }
     }
 
