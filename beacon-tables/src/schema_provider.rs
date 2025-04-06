@@ -9,6 +9,10 @@ use datafusion::{
 
 use crate::{empty_table::EmptyTable, error::TableError, table::Table, LogicalTableProvider};
 
+/// A schema provider for Beacon which manages a collection of tables stored on disk.
+///
+/// This provider integrates with DataFusion's [`SchemaProvider`] trait and exposes
+/// methods for adding, deleting, and retrieving tables.
 pub struct BeaconSchemaProvider {
     session_ctx: Arc<SessionContext>,
     tables_map: Arc<parking_lot::Mutex<indexmap::IndexMap<String, Table>>>,
@@ -25,16 +29,28 @@ impl Debug for BeaconSchemaProvider {
 }
 
 impl BeaconSchemaProvider {
+    /// Creates a new instance of [`BeaconSchemaProvider`].
+    ///
+    /// This function initializes the tables directory, loads existing tables from disk,
+    /// and ensures that a default table exists.
+    ///
+    /// # Parameters
+    /// - `session_ctx`: A shared session context used for table operations.
+    ///
+    /// # Errors
+    /// Returns a [`TableError`] if the base directory cannot be created or if there is
+    /// an error loading existing tables.
     pub async fn new(session_ctx: Arc<SessionContext>) -> Result<Self, TableError> {
-        //Create tables dir if it doesnt exists
+        // Construct the path to the tables directory.
         let root_dir_path =
             beacon_config::DATA_DIR.join(beacon_config::TABLES_DIR_PREFIX.to_string());
 
+        // Create the tables directory if it does not exist.
         tokio::fs::create_dir_all(&root_dir_path)
             .await
             .map_err(|e| TableError::FailedToCreateBaseTableDirectory(e))?;
 
-        // //Read all tables. Each .json file in the tables directory is a table.
+        // Load all existing tables from the tables directory.
         let mut tables_map = indexmap::IndexMap::new();
         let tables = Self::load_tables(&root_dir_path).await?;
         for table in tables {
@@ -60,6 +76,15 @@ impl BeaconSchemaProvider {
         Ok(provider)
     }
 
+    /// Loads tables from the given directory.
+    ///
+    /// This function reads the directory entries & attempts to open each directory as a table.
+    ///
+    /// # Parameters
+    /// - `base_path`: The path where tables are stored.
+    ///
+    /// # Errors
+    /// Returns a [`TableError`] if reading the directory or loading a table fails.
     async fn load_tables(base_path: &std::path::Path) -> Result<Vec<Table>, TableError> {
         let mut tables = Vec::new();
 
@@ -85,10 +110,19 @@ impl BeaconSchemaProvider {
         Ok(tables)
     }
 
+    /// Adds a new table to the schema provider.
+    ///
+    /// This function attempts to create the table's directory and adds the table to the managed map.
+    ///
+    /// # Parameters
+    /// - `table`: The table to add.
+    ///
+    /// # Errors
+    /// Returns a [`TableError`] if the table already exists or if creation fails.
     pub async fn add_table(&self, table: Table) -> Result<(), TableError> {
         let mut locked_tables = self.tables_map.lock();
         if !locked_tables.contains_key(table.table_name()) {
-            //Create the dir with the name of the table in the tables directory
+            // Create the directory with the name of the table in the tables directory.
             table
                 .create(self.root_dir_path.clone(), self.session_ctx.clone())
                 .await?;
@@ -104,9 +138,18 @@ impl BeaconSchemaProvider {
         }
     }
 
+    /// Deletes a table from the schema provider.
+    ///
+    /// This function removes the table's directory from disk and deletes the entry from the map.
+    ///
+    /// # Parameters
+    /// - `table_name`: The name of the table to delete.
+    ///
+    /// # Errors
+    /// Returns a [`TableError`] if the table does not exist or if there is an error during deletion.
     pub async fn delete_table(&self, table_name: &str) -> Result<(), TableError> {
         let mut locked_tables = self.tables_map.lock();
-        if let Some(table) = locked_tables.shift_remove(table_name) {
+        if let Some(_table) = locked_tables.shift_remove(table_name) {
             tracing::debug!("Deleting table: {}", table_name);
             let table_path = self.root_dir_path.join(table_name);
             tokio::fs::remove_dir_all(table_path).await.map_err(|e| {
@@ -122,25 +165,31 @@ impl BeaconSchemaProvider {
 
 #[async_trait::async_trait]
 impl SchemaProvider for BeaconSchemaProvider {
-    /// Returns the owner of the Schema, default is None. This value is reported
-    /// as part of `information_tables.schemata
+    /// Returns the owner of the schema.
+    ///
+    /// Currently, Beacon does not specify an owner so this value is always `None`.
     fn owner_name(&self) -> Option<&str> {
         None
     }
 
-    /// Returns this `SchemaProvider` as [`Any`] so that it can be downcast to a
-    /// specific implementation.
+    /// Provides access to the inner object as [`Any`], allowing the schema provider
+    /// to be downcast to a concrete type.
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    /// Retrieves the list of available table names in this schema.
+    /// Retrieves a list of available table names managed by this schema provider.
     fn table_names(&self) -> Vec<String> {
         self.tables_map.lock().keys().cloned().collect()
     }
 
-    /// Retrieves a specific table from the schema by name, if it exists,
-    /// otherwise returns `None`.
+    /// Retrieves a specific table by name, if it exists.
+    ///
+    /// # Parameters
+    /// - `name`: The name of the table to retrieve.
+    ///
+    /// # Returns
+    /// An optional [`Arc<dyn TableProvider>`] wrapped in a `Result`. Returns `None` if the table does not exist.
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
         if let Some(table) = self.tables_map.lock().get(name) {
             let table = table
@@ -158,11 +207,9 @@ impl SchemaProvider for BeaconSchemaProvider {
         }
     }
 
-    /// If supported by the implementation, adds a new table named `name` to
-    /// this schema.
+    /// Registers a new table with the given name.
     ///
-    /// If a table of the same name was already registered, returns "Table
-    /// already exists" error.
+    /// Beacon does not support registering tables via this function, so an error is returned.
     #[allow(unused_variables)]
     fn register_table(
         &self,
@@ -172,10 +219,9 @@ impl SchemaProvider for BeaconSchemaProvider {
         not_impl_err!("Beacon does not support registering tables.")
     }
 
-    /// If supported by the implementation, removes the `name` table from this
-    /// schema and returns the previously registered [`TableProvider`], if any.
+    /// Deregisters a table with the given name.
     ///
-    /// If no `name` table exists, returns Ok(None).
+    /// Beacon does not support deregistering tables via this function, so an error is returned.
     #[allow(unused_variables)]
     fn deregister_table(
         &self,
@@ -184,7 +230,13 @@ impl SchemaProvider for BeaconSchemaProvider {
         not_impl_err!("Beacon does not support deregistering tables.")
     }
 
-    /// Returns true if table exist in the schema provider, false otherwise.
+    /// Checks if a table exists in the schema provider.
+    ///
+    /// # Parameters
+    /// - `name`: The name of the table to check for existence.
+    ///
+    /// # Returns
+    /// `true` if the table exists, `false` otherwise.
     fn table_exist(&self, name: &str) -> bool {
         self.tables_map.lock().contains_key(name)
     }
