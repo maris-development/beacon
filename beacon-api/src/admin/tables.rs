@@ -6,14 +6,15 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use beacon_core::{runtime::Runtime, tables::table::BeaconTable};
+use beacon_core::{runtime::Runtime};
+use beacon_tables::table::Table;
 use utoipa::{IntoParams, ToSchema};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct CreateTable {
     #[schema(value_type = Object)]
     #[serde(flatten)]
-    inner: Arc<dyn BeaconTable>,
+    inner: Table,
 }
 
 #[tracing::instrument(level = "info", skip(state))]
@@ -31,9 +32,10 @@ pub(crate) async fn create_table(
     State(state): State<Arc<Runtime>>,
     Json(create_table): Json<CreateTable>,
 ) -> Result<(StatusCode,String), Json<String>> {
-    let result = state.add_table(create_table.inner.clone()).await;
+    let table_name = create_table.inner.table_name().to_string();
+    let result = state.add_table(create_table.inner).await;
     match result {
-        Ok(_) => Ok((StatusCode::OK, format!("Table: {} was created", create_table.inner.table_name()))),
+        Ok(_) => Ok((StatusCode::OK, format!("Table: {} was created", table_name))),
         Err(err) => {
             tracing::error!("Error creating table: {:?}", err);
             Err(Json(format!("Error creating table: {:?}", err)))

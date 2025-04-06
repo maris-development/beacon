@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use crate::{tables::table::BeaconTable, virtual_machine};
+use crate::virtual_machine;
 use arrow::datatypes::SchemaRef;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::OutputResponse;
 use beacon_query::{parser::Parser, Query};
 use beacon_sources::formats_factory::Formats;
+use beacon_tables::table::Table;
 
 pub struct Runtime {
     virtual_machine: virtual_machine::VirtualMachine,
@@ -37,7 +38,7 @@ impl Runtime {
         self.virtual_machine.list_functions()
     }
 
-    pub async fn add_table(&self, table: Arc<dyn BeaconTable>) -> anyhow::Result<()> {
+    pub async fn add_table(&self, table: Table) -> anyhow::Result<()> {
         self.virtual_machine.add_table(table).await
     }
 
