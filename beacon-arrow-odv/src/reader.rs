@@ -133,16 +133,35 @@ impl OdvReader {
             let comment = &cap[4];
 
             let mut metadata = HashMap::new();
-            let arrow_dtype = Self::value_type_to_arrow_type(value_type).map_err(|e| {
-                OdvError::ArrowFieldError {
-                    inner: Box::new(e),
-                    field: label.to_string(),
-                }
-            })?;
-            let field = Field::new(label, arrow_dtype, true);
 
-            metadata.insert("qf_schema".to_string(), qf_schema.to_string());
-            metadata.insert("comment".to_string(), comment.to_string());
+            let units_re = Regex::new(r"^(.*?)\s*\[(.*?)\]$").unwrap();
+
+            let field_name = if let Some(caps) = units_re.captures(label) {
+                let name = caps.get(1).map_or("", |m| m.as_str());
+                let units = caps.get(2).map_or("", |m| m.as_str());
+
+                if !units.is_empty() {
+                    metadata.insert("units".to_string(), units.to_string());
+                }
+
+                name.to_string()
+            } else {
+                label.to_string()
+            };
+
+            let field = Field::new(
+                field_name,
+                Self::value_type_to_arrow_type(value_type)?,
+                true,
+            );
+
+            if !qf_schema.is_empty() {
+                metadata.insert("qf_schema".to_string(), qf_schema.to_string());
+            }
+
+            if !comment.is_empty() {
+                metadata.insert("comment".to_string(), comment.to_string());
+            }
 
             return Ok(Some(field.with_metadata(metadata)));
         }
@@ -167,7 +186,19 @@ impl OdvReader {
     ) -> OdvResult<SchemaRef> {
         let mut schema_fields = vec![];
 
+        fn remove_units(s: &str) -> &str {
+            if let Some(pos) = s.rfind(" [") {
+                if s.ends_with(']') {
+                    return &s[..pos];
+                }
+            }
+            s
+        }
+
+        // println!("Discovered fields: {:?}", discovered_fields);
+
         for (_, name) in header.iter().enumerate() {
+            let name = remove_units(name);
             if let Some(field) = discovered_fields.get(name) {
                 schema_fields.push(field.clone());
             } else {
@@ -184,14 +215,14 @@ impl OdvReader {
                             .last()
                             .ok_or(OdvError::QualityControlFieldNotFound(name.to_string()))?;
                         let qf_field = Field::new(
-                            format!("{}_QF", previous_field.name()),
+                            format!("{}_qc", previous_field.name()),
                             DataType::Utf8,
                             true,
                         );
                         schema_fields.push(qf_field);
                     } else if parts.len() == 3 {
                         //If it contains 3 parts, then the QF field is relative to last part which is the field name
-                        let qf_field = Field::new(format!("{}_QF", parts[2]), DataType::Utf8, true);
+                        let qf_field = Field::new(format!("{}_qc", parts[2]), DataType::Utf8, true);
                         schema_fields.push(qf_field);
                     } else {
                         //Invalid QF field
@@ -293,7 +324,7 @@ mod tests {
         let schema = reader.schema();
         // println!("{:?}", schema);
 
-        let batch = reader.read(Some([0, 1, 2, 3, 4, 5]));
-        println!("{:?}", batch);
+        // let batch = reader.read(Some([0, 1, 2, 3, 4, 5, 13])).unwrap();
+        // println!("{:?}", batch);
     }
 }
