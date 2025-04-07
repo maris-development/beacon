@@ -23,6 +23,7 @@ pub mod formats_factory;
 pub mod netcdf_format;
 pub mod odv_format;
 pub mod parquet_format;
+pub mod sql;
 
 #[derive(Debug)]
 pub struct DataSource {

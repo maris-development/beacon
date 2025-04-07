@@ -65,6 +65,9 @@ impl VirtualMachine {
         }
         //FINISH INIT FUNCTIONS FROM beacon-functions module
 
+        //Register format functions
+        beacon_sources::sql::table_functions(session_ctx.clone());
+
         Ok(Self {
             session_ctx,
             schema_provider: beacon_schema_provider,
