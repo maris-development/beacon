@@ -66,15 +66,12 @@ impl PhysicalTableProvider for PhysicalTable {
         let logical_plan =
             Parser::parse_to_logical_plan(&session_ctx, self.table_generation_query.clone())
                 .await
-                .unwrap();
+                .map_err(|e| PhysicalTableError::ParseError(e))?;
 
         let dataframe = DataFrame::new(session_ctx.state(), logical_plan);
 
         //Run the query against the engine
-        self.engine
-            .create(table_directory, dataframe)
-            .await
-            .unwrap();
+        self.engine.create(table_directory, dataframe).await?;
 
         Ok(())
     }
