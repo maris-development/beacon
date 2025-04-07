@@ -55,6 +55,7 @@ pub struct QueryBody {
 #[serde(untagged)]
 pub enum Select {
     TryCast {
+        #[serde(skip_serializing)]
         #[serde(flatten)]
         select: Box<Select>,
         #[schema(value_type = String)]

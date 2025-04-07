@@ -19,3 +19,4 @@ tracing = { workspace = true }
 
 beacon-sources = { path = "../beacon-sources" }
 beacon-config = { path = "../beacon-config" }
+beacon-query = { path = "../beacon-query" }

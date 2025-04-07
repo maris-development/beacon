@@ -1,4 +1,4 @@
-use crate::logical_table::LogicalTableError;
+use crate::{logical_table::LogicalTableError, physical_table};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TableError {
@@ -32,4 +32,6 @@ pub enum TableError {
     FailedToCreateBaseTableDirectory(std::io::Error),
     #[error("Failed to create table directory: {0} for table: {1}")]
     FailedToCreateTableDirectory(std::io::Error, String),
+    #[error("Physical table error: {0}")]
+    PhysicalTableError(#[from] physical_table::error::PhysicalTableError),
 }
