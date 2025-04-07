@@ -20,7 +20,7 @@ impl ParquetTableFunction {
 
 impl std::fmt::Debug for ParquetTableFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NetCDFTableFunction").finish()
+        f.debug_struct("ParquetTableFunction").finish()
     }
 }
 

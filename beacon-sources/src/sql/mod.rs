@@ -52,7 +52,7 @@ pub(crate) fn parse_exprs_to_urls(
     // Check if urls are empty
     if urls.is_empty() {
         return Err(datafusion::error::DataFusionError::Plan(
-            "No URLs provided for NetCDF table function".to_string(),
+            "No URLs/datasets provided for table function".to_string(),
         ));
     }
     // Check if urls are valid
