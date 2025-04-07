@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-output", "beacon-query", "beacon-sources"]
+members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-tables", "beacon-output", "beacon-query", "beacon-sources"]
 
 [workspace.dependencies]
 tokio = { version = "1.43.0", features = ["full"] }
