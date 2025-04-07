@@ -8,8 +8,6 @@ use datafusion::{
 use error::PhysicalTableError;
 use table_engine::TableEngine;
 
-use crate::error::TableError;
-
 pub mod error;
 pub mod table_engine;
 #[async_trait::async_trait]

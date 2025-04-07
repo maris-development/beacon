@@ -57,7 +57,7 @@ impl TableEngine for ParquetTable {
     ) -> Result<Arc<dyn TableProvider>, TableEngineError> {
         //Table url
         let table_url = ListingTableUrl::parse(&format!(
-            "{}/{}/{}",
+            "/{}/{}/{}",
             beacon_config::TABLES_DIR_PREFIX.to_string(),
             table_directory.file_name().unwrap().to_string_lossy(),
             "table.parquet"
