@@ -7,6 +7,7 @@ use beacon_sources::{
     formats_factory::Formats, netcdf_format::NetCDFFileFormatFactory,
     parquet_format::SuperParquetFormatFactory,
 };
+use beacon_tables::{schema_provider::BeaconSchemaProvider, table::Table};
 use datafusion::{
     catalog::SchemaProvider,
     datasource::{
@@ -26,8 +27,6 @@ use datafusion::{
 use futures::StreamExt;
 use tracing::{event, Level};
 
-use crate::tables::{table::BeaconTable, BeaconSchemaProvider};
-
 pub struct VirtualMachine {
     session_ctx: Arc<SessionContext>,
     schema_provider: Arc<BeaconSchemaProvider>,
@@ -42,7 +41,7 @@ impl VirtualMachine {
         let session_ctx = Self::init_ctx(memory_pool.clone())?;
 
         let beacon_schema_provider =
-            Arc::new(BeaconSchemaProvider::new(Arc::new(session_ctx.state())).await?);
+            Arc::new(BeaconSchemaProvider::new(session_ctx.clone()).await?);
 
         session_ctx
             .catalog("datafusion")
@@ -65,6 +64,9 @@ impl VirtualMachine {
             session_ctx.register_udf(udf);
         }
         //FINISH INIT FUNCTIONS FROM beacon-functions module
+
+        //Register format functions
+        beacon_sources::sql::table_functions(session_ctx.clone());
 
         Ok(Self {
             session_ctx,
@@ -156,12 +158,12 @@ impl VirtualMachine {
         beacon_config::CONFIG.default_table.clone()
     }
 
-    pub async fn add_table(&self, table: Arc<dyn BeaconTable>) -> anyhow::Result<()> {
-        self.schema_provider.add_table(table).await
+    pub async fn add_table(&self, table: Table) -> anyhow::Result<()> {
+        Ok(self.schema_provider.add_table(table).await?)
     }
 
     pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
-        self.schema_provider.delete_table(table_name).await
+        Ok(self.schema_provider.delete_table(table_name).await?)
     }
 
     pub async fn run_client_sql(

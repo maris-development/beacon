@@ -498,6 +498,7 @@ dependencies = [
  "beacon-output",
  "beacon-query",
  "beacon-sources",
+ "beacon-tables",
  "futures",
  "futures-util",
  "serde",
@@ -589,6 +590,7 @@ dependencies = [
  "beacon-output",
  "beacon-query",
  "beacon-sources",
+ "beacon-tables",
  "bytes",
  "datafusion",
  "futures",
@@ -689,6 +691,27 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "beacon-tables"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "beacon-config",
+ "beacon-query",
+ "beacon-sources",
+ "datafusion",
+ "indexmap",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+ "typetag",
 ]
 
 [[package]]
