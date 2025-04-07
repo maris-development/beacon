@@ -20,7 +20,7 @@ pub struct ParquetTable {}
 
 impl ParquetTable {}
 
-#[typetag::serde]
+#[typetag::serde(name = "parquet")]
 #[async_trait::async_trait]
 impl TableEngine for ParquetTable {
     async fn create(
@@ -29,7 +29,6 @@ impl TableEngine for ParquetTable {
         dataframe: DataFrame,
     ) -> Result<(), TableEngineError> {
         // Implement the logic to create a Parquet table
-
         // Directory name
         let directory_name = table_directory
             .file_name()
@@ -37,7 +36,7 @@ impl TableEngine for ParquetTable {
 
         //Path if relative to the object store filesystem root
         let path = format!(
-            "{}/{}/{}",
+            "/{}/{}/{}",
             beacon_config::TABLES_DIR_PREFIX.to_string(),
             directory_name.to_string_lossy(),
             "table.parquet"

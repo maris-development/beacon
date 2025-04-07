@@ -8,8 +8,9 @@ use error::TableEngineError;
 
 pub mod error;
 pub mod parquet;
+
 #[async_trait::async_trait]
-#[typetag::serde]
+#[typetag::serde(tag = "table_engine")]
 pub trait TableEngine: std::fmt::Debug + Send + Sync {
     async fn create(
         &self,

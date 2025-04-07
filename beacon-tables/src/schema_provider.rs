@@ -131,11 +131,15 @@ impl BeaconSchemaProvider {
     pub async fn add_table(&self, table: Table) -> Result<(), TableError> {
         let mut locked_tables = self.tables_map.lock();
         if !locked_tables.contains_key(table.table_name()) {
-            // Create the directory with the name of the table in the tables directory.
+            drop(locked_tables); // Drop the lock before creating the table otherwise it might deadlock on the creation of the table.
+                                 // Create the directory with the name of the table in the tables directory.
             let table_info = table
                 .create(self.root_dir_path.clone(), self.session_ctx.clone())
                 .await?;
             tracing::debug!("Created table: {}", table_info.table.table_name());
+
+            // Re-lock the tables map to insert the new table.
+            locked_tables = self.tables_map.lock();
             locked_tables.insert(table_info.table.table_name().to_string(), table_info);
 
             Ok(())

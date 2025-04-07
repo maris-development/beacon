@@ -23,18 +23,18 @@ impl Parser {
         inner_query: InnerQuery,
     ) -> anyhow::Result<LogicalPlan> {
         let datafusion_logical_plan = match inner_query {
-            //ToDO: Implement SQL queries
             InnerQuery::Sql(sql) => {
                 if beacon_config::CONFIG.enable_sql {
                     let sql_options = SQLOptions::new()
                         .with_allow_ddl(false)
                         .with_allow_dml(false)
                         .with_allow_statements(false);
+
                     let logical_plan = session
                         .sql_with_options(&sql, sql_options)
                         .await?
-                        .into_unoptimized_plan();
-
+                        .into_parts()
+                        .1;
                     logical_plan
                 } else {
                     // Return an error if SQL queries are not enabled

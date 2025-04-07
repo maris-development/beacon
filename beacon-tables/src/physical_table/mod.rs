@@ -50,6 +50,7 @@ pub trait PhysicalTableProvider: std::fmt::Debug + Send + Sync {
 pub struct PhysicalTable {
     pub table_name: String,
     pub table_generation_query: InnerQuery,
+    #[serde(flatten)]
     pub engine: Arc<dyn TableEngine>,
 }
 
