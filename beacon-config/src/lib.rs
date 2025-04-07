@@ -21,6 +21,8 @@ pub struct Config {
     pub vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     pub default_table: String,
+    #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
+    pub enable_sql: bool,
 }
 
 impl Config {

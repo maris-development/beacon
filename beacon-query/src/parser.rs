@@ -1,4 +1,7 @@
-use datafusion::{logical_expr::LogicalPlan, prelude::SessionContext};
+use datafusion::{
+    logical_expr::LogicalPlan,
+    prelude::{SQLOptions, SessionContext},
+};
 
 use crate::{plan::BeaconQueryPlan, InnerQuery, QueryBody};
 
@@ -21,9 +24,23 @@ impl Parser {
     ) -> anyhow::Result<LogicalPlan> {
         let datafusion_logical_plan = match inner_query {
             //ToDO: Implement SQL queries
-            InnerQuery::Sql(_sql) => {
-                tracing::error!("SQL queries are not supported yet");
-                anyhow::bail!("SQL queries are not supported yet")
+            InnerQuery::Sql(sql) => {
+                if beacon_config::CONFIG.enable_sql {
+                    let sql_options = SQLOptions::new()
+                        .with_allow_ddl(false)
+                        .with_allow_dml(false)
+                        .with_allow_statements(false);
+                    let logical_plan = session
+                        .sql_with_options(&sql, sql_options)
+                        .await?
+                        .into_unoptimized_plan();
+
+                    logical_plan
+                } else {
+                    // Return an error if SQL queries are not enabled
+                    tracing::warn!("SQL queries are not enabled");
+                    return Err(anyhow::anyhow!("SQL queries are not enabled"));
+                }
             }
             InnerQuery::Json(query_body) => {
                 let datafusion_plan = Self::parse_json_query(query_body, session).await?;
