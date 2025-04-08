@@ -8,7 +8,10 @@ use netcdf::{
 };
 use regex::Regex;
 
-use crate::nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner};
+use crate::{
+    nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner},
+    NcResult,
+};
 
 pub fn calendar(variable: &Variable) -> Option<String> {
     variable
@@ -61,7 +64,7 @@ pub fn is_cf_time_variable(variable: &Variable) -> bool {
     is_cf_time_variable_impl(variable).is_some()
 }
 
-pub fn decode_cf_time_variable(variable: &Variable) -> anyhow::Result<Option<NetCDFNdArray>> {
+pub fn decode_cf_time_variable(variable: &Variable) -> NcResult<Option<NetCDFNdArray>> {
     if let Some((units, epoch)) = is_cf_time_variable_impl(variable) {
         let (array, fill) = match variable.vartype() {
             netcdf::types::NcVariableType::Int(IntType::I8) => (
@@ -177,7 +180,7 @@ pub fn decode_cf_time_variable(variable: &Variable) -> anyhow::Result<Option<Net
                 })
                 .collect::<Vec<_>>();
 
-            let inner_array = NetCDFNdArrayInner::TimestampSecond(NetCDFNdArrayBase {
+            let inner_array = NetCDFNdArrayInner::TimestampMillisecond(NetCDFNdArrayBase {
                 fill_value: fill,
                 inner: array,
             });
@@ -193,7 +196,7 @@ fn convert_fill_value<T: num_traits::cast::AsPrimitive<f64>>(
     unit: Unit,
     epoch: Epoch,
 ) -> i64 {
-    (epoch + (fill_value.as_() * unit)).to_unix_seconds() as i64
+    (epoch + (fill_value.as_() * unit)).to_unix_milliseconds() as i64
 }
 
 fn convert_nd_array<T: num_traits::cast::AsPrimitive<f64>>(
@@ -205,7 +208,7 @@ fn convert_nd_array<T: num_traits::cast::AsPrimitive<f64>>(
     let data = base
         .iter_mut()
         .map(|v| epoch + (v.as_() * unit))
-        .map(|v| v.to_unix_seconds() as i64)
+        .map(|v| v.to_unix_milliseconds() as i64)
         .collect::<Vec<_>>();
 
     ArrayBase::from_shape_vec(shape, data).unwrap()

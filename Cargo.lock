@@ -528,6 +528,7 @@ dependencies = [
  "num-traits",
  "regex",
  "tempfile",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
@@ -547,6 +548,7 @@ dependencies = [
  "serde",
  "tar",
  "tempfile",
+ "thiserror 2.0.12",
  "tokio",
  "utoipa",
  "walkdir",
@@ -561,6 +563,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "indexmap",
+ "thiserror 2.0.12",
 ]
 
 [[package]]

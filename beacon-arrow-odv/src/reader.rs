@@ -13,6 +13,8 @@ use csv::StringRecord;
 use indexmap::IndexMap;
 use regex::Regex;
 
+use crate::{error::OdvError, OdvResult};
+
 pub struct OdvReader {
     row_reader: arrow_csv::Reader<std::fs::File>,
     decoder: OdvDecoder,
@@ -22,15 +24,25 @@ impl OdvReader {
     pub fn new<P: AsRef<Path>>(path: P, batch_size: usize) -> anyhow::Result<Self> {
         let file = std::fs::File::open(path)?;
         let mut buf_reader = BufReader::new(file);
-        let schema = Self::parse_odv_header(&mut buf_reader)?;
+
+        //Parse the ODV header to get the arrow schema
+        let schema = Self::parse_odv_header(&mut buf_reader)
+            .map_err(|e| OdvError::ArrowSchemaError(Box::new(e)))?;
+
+        //Reset the reader to the start of the file
         buf_reader.seek(std::io::SeekFrom::Start(0)).unwrap();
+
+        //Create the ODV decoder that uses the Arrow schema to convert the columns to the correct types
         let decoder = OdvDecoder::new(schema.clone());
+
+        //Create the CSV reader
         let row_reader = arrow_csv::ReaderBuilder::new(schema.clone())
             .with_batch_size(batch_size)
             .with_comment(b'/')
             .with_delimiter(b'\t')
             .with_header(true)
-            .build(buf_reader.into_inner())?;
+            .build(buf_reader.into_inner())
+            .map_err(OdvError::ColumnReaderCreationError)?;
 
         Ok(Self {
             row_reader,
@@ -45,16 +57,18 @@ impl OdvReader {
     pub fn read<P: AsRef<[usize]>>(
         &mut self,
         projection: Option<P>,
-    ) -> Option<anyhow::Result<RecordBatch>> {
+    ) -> Option<OdvResult<RecordBatch>> {
         let batch = self.row_reader.next();
         batch.map(|batch| {
-            batch
-                .map_err(Into::into)
-                .and_then(|batch| self.decoder.decode_batch(projection, batch))
+            batch.map_err(OdvError::ColumnReadError).and_then(|batch| {
+                self.decoder
+                    .decode_batch(projection, batch)
+                    .map_err(|e| OdvError::RecordBatchDecodeError(Box::new(e)))
+            })
         })
     }
 
-    fn parse_odv_header<R: BufRead + Seek>(reader: &mut R) -> anyhow::Result<SchemaRef> {
+    fn parse_odv_header<R: BufRead + Seek>(reader: &mut R) -> OdvResult<SchemaRef> {
         let header_lines = Self::metadata_lines(reader)?;
         let mut discovered_fields = IndexMap::new();
 
@@ -92,12 +106,12 @@ impl OdvReader {
         Self::parse_header_row_with_metadata_to_schema(&header_row, discovered_fields)
     }
 
-    fn metadata_lines<R: BufRead>(read: &mut R) -> anyhow::Result<Vec<String>> {
+    fn metadata_lines<R: BufRead>(read: &mut R) -> OdvResult<Vec<String>> {
         //Read the lines until we find the first line without a // prefix
         let mut header_lines = vec![];
 
         for line in read.lines() {
-            let line = line?;
+            let line = line.map_err(OdvError::MetadataReadError)?;
             if !line.starts_with("//") {
                 break;
             }
@@ -107,7 +121,7 @@ impl OdvReader {
         Ok(header_lines)
     }
 
-    fn odv_field_from_header(line: &str) -> anyhow::Result<Option<Field>> {
+    fn odv_field_from_header(line: &str) -> OdvResult<Option<Field>> {
         let re = Regex::new(
             r#"(?m)^//<(?:MetaVariable|DataVariable)>.*?label="([^"]+)".*?value_type="([^"]+)".*?qf_schema="([^"]+)".*?comment="([^"]*)".*?</(?:MetaVariable|DataVariable)>"#
         ).unwrap();
@@ -119,10 +133,35 @@ impl OdvReader {
             let comment = &cap[4];
 
             let mut metadata = HashMap::new();
-            let field = Field::new(label, Self::value_type_to_arrow_type(value_type)?, true);
 
-            metadata.insert("qf_schema".to_string(), qf_schema.to_string());
-            metadata.insert("comment".to_string(), comment.to_string());
+            let units_re = Regex::new(r"^(.*?)\s*\[(.*?)\]$").unwrap();
+
+            let field_name = if let Some(caps) = units_re.captures(label) {
+                let name = caps.get(1).map_or("", |m| m.as_str());
+                let units = caps.get(2).map_or("", |m| m.as_str());
+
+                if !units.is_empty() {
+                    metadata.insert("units".to_string(), units.to_string());
+                }
+
+                name.to_string()
+            } else {
+                label.to_string()
+            };
+
+            let field = Field::new(
+                field_name,
+                Self::value_type_to_arrow_type(value_type)?,
+                true,
+            );
+
+            if !qf_schema.is_empty() {
+                metadata.insert("qf_schema".to_string(), qf_schema.to_string());
+            }
+
+            if !comment.is_empty() {
+                metadata.insert("comment".to_string(), comment.to_string());
+            }
 
             return Ok(Some(field.with_metadata(metadata)));
         }
@@ -130,24 +169,36 @@ impl OdvReader {
         Ok(None)
     }
 
-    fn value_type_to_arrow_type(value_type: &str) -> anyhow::Result<DataType> {
+    fn value_type_to_arrow_type(value_type: &str) -> OdvResult<DataType> {
         match value_type {
             "INDEXED_TEXT" => Ok(DataType::Utf8),
             "INTEGER" => Ok(DataType::Int64),
             "FLOAT" => Ok(DataType::Float32),
             "DOUBLE" => Ok(DataType::Float64),
             _ if value_type.starts_with("TEXT:") => Ok(DataType::Utf8),
-            _ => Err(anyhow::anyhow!("Unsupported value type: {}", value_type)),
+            dtype => Err(OdvError::UnsupportedDataType(dtype.to_string())),
         }
     }
 
     fn parse_header_row_with_metadata_to_schema(
         header: &StringRecord,
         discovered_fields: IndexMap<String, Field>,
-    ) -> anyhow::Result<SchemaRef> {
+    ) -> OdvResult<SchemaRef> {
         let mut schema_fields = vec![];
 
-        for (idx, name) in header.iter().enumerate() {
+        fn remove_units(s: &str) -> &str {
+            if let Some(pos) = s.rfind(" [") {
+                if s.ends_with(']') {
+                    return &s[..pos];
+                }
+            }
+            s
+        }
+
+        // println!("Discovered fields: {:?}", discovered_fields);
+
+        for (_, name) in header.iter().enumerate() {
+            let name = remove_units(name);
             if let Some(field) = discovered_fields.get(name) {
                 schema_fields.push(field.clone());
             } else {
@@ -160,23 +211,22 @@ impl OdvReader {
                     //If it only contains 2 parts, then the QF field is relative to the previous field
                     if parts.len() == 2 {
                         //Get the previous field
-                        let previous_field = schema_fields.last().ok_or(anyhow::anyhow!(
-                            "QF field {} is relative to a field that does not exist",
-                            name
-                        ))?;
+                        let previous_field = schema_fields
+                            .last()
+                            .ok_or(OdvError::QualityControlFieldNotFound(name.to_string()))?;
                         let qf_field = Field::new(
-                            format!("{}_QF", previous_field.name()),
+                            format!("{}_qc", previous_field.name()),
                             DataType::Utf8,
                             true,
                         );
                         schema_fields.push(qf_field);
                     } else if parts.len() == 3 {
                         //If it contains 3 parts, then the QF field is relative to last part which is the field name
-                        let qf_field = Field::new(format!("{}_QF", parts[2]), DataType::Utf8, true);
+                        let qf_field = Field::new(format!("{}_qc", parts[2]), DataType::Utf8, true);
                         schema_fields.push(qf_field);
                     } else {
                         //Invalid QF field
-                        return Err(anyhow::anyhow!("Invalid QF field: {}", name));
+                        return Err(OdvError::InvalidQualityControlField(name.to_string()));
                     }
                 } else {
                     //Its an unknown field
@@ -229,7 +279,7 @@ impl OdvDecoder {
         &self,
         projection: Option<P>,
         batch: RecordBatch,
-    ) -> anyhow::Result<RecordBatch> {
+    ) -> OdvResult<RecordBatch> {
         let mut schema = self.decoded_schema.clone();
         let mut arrays = batch
             .columns()
@@ -253,20 +303,14 @@ impl OdvDecoder {
                 .iter()
                 .map(|&idx| arrays[idx].clone())
                 .collect::<Vec<_>>();
-            schema = Arc::new(schema.project(&projection).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to apply projection during ODV batch decoding. {}",
-                    e
-                )
-            })?);
+            schema = Arc::new(
+                schema
+                    .project(&projection)
+                    .map_err(OdvError::SchemaProjectionError)?,
+            );
         }
 
-        RecordBatch::try_new(schema, arrays).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create record batch during ODV batch decoding. {}",
-                e
-            )
-        })
+        RecordBatch::try_new(schema, arrays).map_err(OdvError::RecordBatchCreationError)
     }
 }
 
@@ -280,7 +324,7 @@ mod tests {
         let schema = reader.schema();
         // println!("{:?}", schema);
 
-        let batch = reader.read(Some([0, 1, 2, 3, 4, 5]));
-        println!("{:?}", batch);
+        // let batch = reader.read(Some([0, 1, 2, 3, 4, 5, 13])).unwrap();
+        // println!("{:?}", batch);
     }
 }

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
-    StringBuilder, TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    StringBuilder, TimestampMillisecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
+    UInt64Array, UInt8Array,
 };
 use nd_arrow_array::{shape::Shape, NdArrowArray};
 use ndarray::{ArrayBase, ArrayViewD, Axis, Dim, IxDynImpl, OwnedRepr};
@@ -95,6 +96,9 @@ impl NetCDFNdArray {
             }
             NetCDFNdArrayInner::TimestampSecond(array_base) => {
                 create_array_builder!(TimestampSecondArray, array_base)
+            }
+            NetCDFNdArrayInner::TimestampMillisecond(array_base) => {
+                create_array_builder!(TimestampMillisecondArray, array_base)
             }
             NetCDFNdArrayInner::Char(array_base) => {
                 let mut builder = StringBuilder::new();
@@ -192,6 +196,7 @@ pub enum NetCDFNdArrayInner {
     F32(NetCDFNdArrayBase<f32>),
     F64(NetCDFNdArrayBase<f64>),
     TimestampSecond(NetCDFNdArrayBase<i64>),
+    TimestampMillisecond(NetCDFNdArrayBase<i64>),
     Char(NetCDFNdArrayBase<NcChar>),
     FixedStringSize(NetCDFNdArrayBase<NcChar>),
     String(NetCDFNdArrayBase<String>),

@@ -10,8 +10,9 @@ use netcdf::{
 
 use crate::{
     cf_time::{decode_cf_time_variable, is_cf_time_variable},
+    error::ArrowNetCDFError,
     nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner},
-    NcChar,
+    NcChar, NcResult,
 };
 
 pub struct NetCDFArrowReader {
@@ -20,7 +21,7 @@ pub struct NetCDFArrowReader {
 }
 
 impl NetCDFArrowReader {
-    pub fn new<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+    pub fn new<P: AsRef<Path>>(path: P) -> NcResult<Self> {
         let file = netcdf::open(path)?;
         let file_schema = Arc::new(arrow_schema(&file)?);
         Ok(Self { file_schema, file })
@@ -30,12 +31,13 @@ impl NetCDFArrowReader {
         self.file_schema.clone()
     }
 
-    pub fn read_as_batch<P: AsRef<[usize]>>(
-        &self,
-        projection: Option<P>,
-    ) -> anyhow::Result<RecordBatch> {
+    pub fn read_as_batch<P: AsRef<[usize]>>(&self, projection: Option<P>) -> NcResult<RecordBatch> {
         let projected_schema = if let Some(projection) = projection {
-            Arc::new(self.file_schema.project(projection.as_ref())?)
+            Arc::new(
+                self.file_schema
+                    .project(projection.as_ref())
+                    .map_err(|e| ArrowNetCDFError::ArrowSchemaProjectionError(e))?,
+            )
         } else {
             self.file_schema.clone()
         };
@@ -46,7 +48,7 @@ impl NetCDFArrowReader {
             if name.contains('.') {
                 let parts = name.split('.').collect::<Vec<_>>();
                 if parts.len() != 2 {
-                    anyhow::bail!("Invalid field name: {}", name);
+                    return Err(ArrowNetCDFError::InvalidFieldName(name.to_string()));
                 }
                 if parts[0].is_empty() {
                     //Global attribute
@@ -72,13 +74,14 @@ impl NetCDFArrowReader {
                     .file
                     .variable(name)
                     .expect("Variable not found but was in schema.");
-                let array = read_variable(&variable)?;
+                let array = read_variable(&variable)
+                    .map_err(|e| ArrowNetCDFError::VariableReadError(Box::new(e)))?;
                 columns.insert(field.clone(), array.into_nd_arrow_array());
             }
         }
         let arrays = columns.iter().map(|(_, v)| v).collect::<Vec<_>>();
         let broadcast_shape = NdArrowArray::find_broadcast_shape(arrays)
-            .map_err(|e| anyhow::anyhow!("Failed to find broadcast shape: {}", e))?;
+            .map_err(|e| ArrowNetCDFError::UnableToBroadcast(e.to_string()))?;
 
         let mut arrays = vec![];
         for (_, column) in columns {
@@ -86,7 +89,8 @@ impl NetCDFArrowReader {
             arrays.push(broadcast_array.into_arrow_array());
         }
 
-        let record_batch = RecordBatch::try_new(projected_schema, arrays)?;
+        let record_batch = RecordBatch::try_new(projected_schema, arrays)
+            .map_err(|e| ArrowNetCDFError::ArrowRecordBatchError(e))?;
 
         Ok(record_batch)
     }
@@ -117,9 +121,11 @@ macro_rules! create_netcdf_ndarray {
     }};
 }
 
-pub fn read_variable(variable: &Variable) -> anyhow::Result<NetCDFNdArray> {
+pub fn read_variable(variable: &Variable) -> NcResult<NetCDFNdArray> {
     if is_cf_time_variable(variable) {
-        if let Some(array) = decode_cf_time_variable(variable)? {
+        if let Some(array) = decode_cf_time_variable(variable)
+            .map_err(|e| ArrowNetCDFError::TimeVariableReadError(Box::new(e)))?
+        {
             return Ok(array);
         }
     }
@@ -161,10 +167,11 @@ pub fn read_variable(variable: &Variable) -> anyhow::Result<NetCDFNdArray> {
 
             //Get the last dimension of the variable
             if let Some(dim) = variable.dimensions().last() {
-                //Check if the dimensions starts with STRING** or strlen**
-                if dim.name().starts_with("STRING")
-                    || dim.name().starts_with("strlen")
-                    || dim.name().starts_with("strnlen")
+                //Check if the dimensions starts with string** or strlen**
+                let dim_name = dim.name().to_lowercase();
+                if dim_name.starts_with("string")
+                    || dim_name.starts_with("strlen")
+                    || dim_name.starts_with("strnlen")
                 {
                     let dims = variable
                         .dimensions()
@@ -191,14 +198,16 @@ pub fn read_variable(variable: &Variable) -> anyhow::Result<NetCDFNdArray> {
             }
             return create_netcdf_ndarray!(variable, NcChar, Char);
         }
-        nctype => anyhow::bail!("Unsupported variable type: {:?}", nctype),
+        nctype => {
+            return Err(ArrowNetCDFError::UnsupportedNetCDFDataType(nctype));
+        }
     }
 }
 
 pub fn global_attribute(
     nc_file: &netcdf::File,
     attribute_name: &str,
-) -> anyhow::Result<Option<NetCDFNdArray>> {
+) -> NcResult<Option<NetCDFNdArray>> {
     let attr = nc_file.attribute(attribute_name);
     match attr {
         Some(attr) => attribute_to_nd_array(&attr).map(Some),
@@ -206,31 +215,29 @@ pub fn global_attribute(
     }
 }
 
-pub fn arrow_schema(nc_file: &netcdf::File) -> anyhow::Result<arrow::datatypes::Schema> {
+pub fn arrow_schema(nc_file: &netcdf::File) -> NcResult<arrow::datatypes::Schema> {
     let mut fields = vec![];
     for variable in nc_file.variables() {
         let field = variable_as_arrow_field(&variable)?;
         fields.push(field);
 
-        let attr_fields = variable_attributes_as_arrow_fields(&variable)?;
+        let attr_fields = variable_attributes_as_arrow_fields(&variable);
         fields.extend(attr_fields);
     }
 
-    let global_attr_fields = global_attributes_as_arrow_fields(&nc_file)?;
+    let global_attr_fields = global_attributes_as_arrow_fields(&nc_file);
     fields.extend(global_attr_fields);
 
     Ok(arrow::datatypes::Schema::new(fields))
 }
 
-fn variable_as_arrow_field(variable: &Variable) -> anyhow::Result<arrow::datatypes::Field> {
+fn variable_as_arrow_field(variable: &Variable) -> NcResult<arrow::datatypes::Field> {
     let name = variable.name();
     let arrow_type = variable_to_arrow_type(variable)?;
     Ok(arrow::datatypes::Field::new(name, arrow_type, true))
 }
 
-fn variable_attributes_as_arrow_fields(
-    variable: &Variable,
-) -> anyhow::Result<Vec<arrow::datatypes::Field>> {
+fn variable_attributes_as_arrow_fields(variable: &Variable) -> Vec<arrow::datatypes::Field> {
     let mut fields = Vec::new();
     let variable_name = variable.name();
     for attr in variable.attributes() {
@@ -241,13 +248,13 @@ fn variable_attributes_as_arrow_fields(
             fields.push(field);
         }
     }
-    Ok(fields)
+    fields
 }
 
-fn variable_to_arrow_type(variable: &Variable) -> anyhow::Result<arrow::datatypes::DataType> {
+fn variable_to_arrow_type(variable: &Variable) -> NcResult<arrow::datatypes::DataType> {
     if is_cf_time_variable(variable) {
         return Ok(arrow::datatypes::DataType::Timestamp(
-            arrow::datatypes::TimeUnit::Second,
+            arrow::datatypes::TimeUnit::Millisecond,
             None,
         ));
     }
@@ -268,13 +275,11 @@ fn variable_to_arrow_type(variable: &Variable) -> anyhow::Result<arrow::datatype
             Ok(arrow::datatypes::DataType::Float64)
         }
         netcdf::types::NcVariableType::Char => Ok(arrow::datatypes::DataType::Utf8),
-        nctype => anyhow::bail!("Unsupported variable type: {:?}", nctype),
+        nctype => Err(ArrowNetCDFError::UnsupportedNetCDFDataType(nctype)),
     }
 }
 
-fn global_attributes_as_arrow_fields(
-    nc_file: &netcdf::File,
-) -> anyhow::Result<Vec<arrow::datatypes::Field>> {
+fn global_attributes_as_arrow_fields(nc_file: &netcdf::File) -> Vec<arrow::datatypes::Field> {
     let mut fields = Vec::new();
     for attr in nc_file.attributes() {
         let name = attr.name();
@@ -283,10 +288,10 @@ fn global_attributes_as_arrow_fields(
             fields.push(field);
         }
     }
-    Ok(fields)
+    fields
 }
 
-fn attribute_to_arrow_type(attribute: &Attribute) -> anyhow::Result<arrow::datatypes::DataType> {
+fn attribute_to_arrow_type(attribute: &Attribute) -> NcResult<arrow::datatypes::DataType> {
     match attribute.value()? {
         netcdf::AttributeValue::Schar(_) => Ok(arrow::datatypes::DataType::Int8),
         netcdf::AttributeValue::Uchar(_) => Ok(arrow::datatypes::DataType::UInt8),
@@ -299,14 +304,14 @@ fn attribute_to_arrow_type(attribute: &Attribute) -> anyhow::Result<arrow::datat
         netcdf::AttributeValue::Float(_) => Ok(arrow::datatypes::DataType::Float32),
         netcdf::AttributeValue::Double(_) => Ok(arrow::datatypes::DataType::Float64),
         netcdf::AttributeValue::Str(_) => Ok(arrow::datatypes::DataType::Utf8),
-        attr_value => anyhow::bail!("Unsupported attribute value: {:?}", attr_value),
+        attr_value => Err(ArrowNetCDFError::UnsupportedAttributeValueType(attr_value)),
     }
 }
 
 pub fn variable_attribute(
     variable: &Variable,
     attribute_name: &str,
-) -> anyhow::Result<Option<NetCDFNdArray>> {
+) -> NcResult<Option<NetCDFNdArray>> {
     let attr = variable.attribute(attribute_name);
     match attr {
         Some(attr) => attribute_to_nd_array(&attr).map(Some),
@@ -314,11 +319,12 @@ pub fn variable_attribute(
     }
 }
 
-pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdArray> {
+pub fn attribute_to_nd_array(attribute: &Attribute) -> NcResult<NetCDFNdArray> {
     match attribute.value()? {
         netcdf::AttributeValue::Schar(value) => {
             let base = NetCDFNdArrayBase::<i8> {
-                inner: ArrayD::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayD::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::I8(base);
@@ -330,7 +336,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Uchar(value) => {
             let base = NetCDFNdArrayBase::<u8> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::U8(base);
@@ -342,7 +349,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Short(value) => {
             let base = NetCDFNdArrayBase::<i16> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::I16(base);
@@ -354,7 +362,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Ushort(value) => {
             let base = NetCDFNdArrayBase::<u16> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::U16(base);
@@ -366,7 +375,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Int(value) => {
             let base = NetCDFNdArrayBase::<i32> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::I32(base);
@@ -378,7 +388,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Uint(value) => {
             let base = NetCDFNdArrayBase::<u32> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::U32(base);
@@ -390,7 +401,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Longlong(value) => {
             let base = NetCDFNdArrayBase::<i64> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::I64(base);
@@ -402,7 +414,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Ulonglong(value) => {
             let base = NetCDFNdArrayBase::<u64> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::U64(base);
@@ -414,7 +427,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Float(value) => {
             let base = NetCDFNdArrayBase::<f32> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::F32(base);
@@ -426,7 +440,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
         }
         netcdf::AttributeValue::Double(value) => {
             let base = NetCDFNdArrayBase::<f64> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::F64(base);
@@ -439,7 +454,8 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
 
         netcdf::AttributeValue::Str(value) => {
             let base = NetCDFNdArrayBase::<String> {
-                inner: ArrayBase::from_shape_vec(vec![], vec![value])?,
+                inner: ArrayBase::from_shape_vec(vec![], vec![value])
+                    .map_err(|e| ArrowNetCDFError::AttributeShapeError(e))?,
                 fill_value: None,
             };
             let inner_array = NetCDFNdArrayInner::String(base);
@@ -449,6 +465,6 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> anyhow::Result<NetCDFNdAr
                 array: inner_array,
             })
         }
-        attr_value => anyhow::bail!("Unsupported attribute value: {:?}", attr_value),
+        attr_value => Err(ArrowNetCDFError::UnsupportedAttributeValueType(attr_value)),
     }
 }
