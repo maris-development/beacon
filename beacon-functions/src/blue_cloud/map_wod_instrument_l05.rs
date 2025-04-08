@@ -12,20 +12,8 @@ use datafusion::{
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref L05_MAP: HashMap<&'static str, &'static str> = {
-        let mut map = HashMap::new();
-        map.insert(
-            "CTD: AML Micro CTD (Applied Microsystems Limited)",
-            "SDN:L05::130",
-        );
-        map.insert(
-            "XCTD: XCTD (TSK - TSURUMI SEIKI Co., 1000 meter max)",
-            "SDN:L05::132",
-        );
-        map.insert("XCTD: XCTD-2 (TSK - TSURUMI SEIKI Co.)", "SDN:L05::132");
-        map.insert("XCTD: XCTD-2F (TSK - TSURUMI SEIKI Co.)", "SDN:L05::132");
-
-        map
+    static ref L05_MAP: HashMap<String, String> = {
+        super::util::read_mappings("./mappings/wod-sdn-instruments.csv", "L05").unwrap_or_default()
     };
 }
 
@@ -50,7 +38,7 @@ fn map_wod_instrument_l05_impl(
                 .unwrap();
 
             let array = flag_array.iter().map(|flag| {
-                flag.map(|value| L05_MAP.get(&value).map(|s| s).cloned())
+                flag.map(|value| L05_MAP.get(value).map(|s| s).cloned())
                     .flatten()
             });
 
