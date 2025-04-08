@@ -167,10 +167,11 @@ pub fn read_variable(variable: &Variable) -> NcResult<NetCDFNdArray> {
 
             //Get the last dimension of the variable
             if let Some(dim) = variable.dimensions().last() {
-                //Check if the dimensions starts with STRING** or strlen**
-                if dim.name().starts_with("STRING")
-                    || dim.name().starts_with("strlen")
-                    || dim.name().starts_with("strnlen")
+                //Check if the dimensions starts with string** or strlen**
+                let dim_name = dim.name().to_lowercase();
+                if dim_name.starts_with("string")
+                    || dim_name.starts_with("strlen")
+                    || dim_name.starts_with("strnlen")
                 {
                     let dims = variable
                         .dimensions()
@@ -253,7 +254,7 @@ fn variable_attributes_as_arrow_fields(variable: &Variable) -> Vec<arrow::dataty
 fn variable_to_arrow_type(variable: &Variable) -> NcResult<arrow::datatypes::DataType> {
     if is_cf_time_variable(variable) {
         return Ok(arrow::datatypes::DataType::Timestamp(
-            arrow::datatypes::TimeUnit::Second,
+            arrow::datatypes::TimeUnit::Millisecond,
             None,
         ));
     }
