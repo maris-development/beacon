@@ -208,7 +208,7 @@ fn convert_nd_array<T: num_traits::cast::AsPrimitive<f64>>(
     let data = base
         .iter_mut()
         .map(|v| epoch + (v.as_() * unit))
-        .map(|v| v.to_unix_seconds() as i64)
+        .map(|v| v.to_unix_milliseconds() as i64)
         .collect::<Vec<_>>();
 
     ArrayBase::from_shape_vec(shape, data).unwrap()
