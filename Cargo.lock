@@ -543,6 +543,7 @@ dependencies = [
  "futures",
  "futures-util",
  "indexmap",
+ "lz4_flex",
  "quick-xml",
  "regex",
  "serde",

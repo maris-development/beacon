@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Seek},
+    io::{BufRead, BufReader, Read, Seek},
     path::Path,
     sync::Arc,
 };
@@ -16,21 +16,39 @@ use regex::Regex;
 use crate::{error::OdvError, OdvResult};
 
 pub struct OdvReader {
-    row_reader: arrow_csv::Reader<std::fs::File>,
+    row_reader: arrow_csv::Reader<BufReader<Box<dyn Read + Send>>>,
     decoder: OdvDecoder,
 }
 
 impl OdvReader {
+    fn odv_file_reader<P: AsRef<Path>>(path: P) -> anyhow::Result<BufReader<Box<dyn Read + Send>>> {
+        match path.as_ref().extension() {
+            Some(ext) if ext == "zst" => {
+                let file = std::fs::File::open(path)?;
+                let decoder = zstd::Decoder::new(file)?;
+                Ok(BufReader::new(Box::new(decoder)))
+            }
+            Some(ext) if ext == "lz4" => {
+                let file = std::fs::File::open(path)?;
+                let decoder = lz4_flex::frame::FrameDecoder::new(file);
+                Ok(BufReader::new(Box::new(decoder)))
+            }
+            _ => {
+                let file = std::fs::File::open(path)?;
+                let buf_reader = BufReader::new(Box::new(file) as Box<dyn Read + Send>);
+                Ok(buf_reader)
+            }
+        }
+    }
+
     pub fn new<P: AsRef<Path>>(path: P, batch_size: usize) -> anyhow::Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let mut buf_reader = BufReader::new(file);
+        let discovered_fields =
+            Self::discovered_fields(&mut Self::odv_file_reader(path.as_ref())?)?;
+        let header_row = Self::header_row(&mut Self::odv_file_reader(path.as_ref())?)?;
 
         //Parse the ODV header to get the arrow schema
-        let schema = Self::parse_odv_header(&mut buf_reader)
+        let schema = Self::parse_odv_header(discovered_fields, &header_row)
             .map_err(|e| OdvError::ArrowSchemaError(Box::new(e)))?;
-
-        //Reset the reader to the start of the file
-        buf_reader.seek(std::io::SeekFrom::Start(0)).unwrap();
 
         //Create the ODV decoder that uses the Arrow schema to convert the columns to the correct types
         let decoder = OdvDecoder::new(schema.clone());
@@ -41,7 +59,7 @@ impl OdvReader {
             .with_comment(b'/')
             .with_delimiter(b'\t')
             .with_header(true)
-            .build(buf_reader.into_inner())
+            .build(Self::odv_file_reader(path.as_ref())?)
             .map_err(OdvError::ColumnReaderCreationError)?;
 
         Ok(Self {
@@ -68,7 +86,7 @@ impl OdvReader {
         })
     }
 
-    fn parse_odv_header<R: BufRead + Seek>(reader: &mut R) -> OdvResult<SchemaRef> {
+    fn discovered_fields(reader: &mut dyn BufRead) -> OdvResult<IndexMap<String, Field>> {
         let header_lines = Self::metadata_lines(reader)?;
         let mut discovered_fields = IndexMap::new();
 
@@ -94,7 +112,11 @@ impl OdvReader {
                 discovered_fields.insert(field.name().to_string(), field);
             }
         }
-        reader.seek(std::io::SeekFrom::Start(0)).unwrap();
+
+        Ok(discovered_fields)
+    }
+
+    fn header_row(reader: &mut dyn BufRead) -> OdvResult<StringRecord> {
         let mut csv_builder = csv::ReaderBuilder::new();
         csv_builder
             .has_headers(true)
@@ -102,11 +124,17 @@ impl OdvReader {
             .comment(Some(b'/'));
         let mut csv_reader = csv_builder.from_reader(reader);
         let header_row = csv_reader.headers().unwrap().clone();
-
-        Self::parse_header_row_with_metadata_to_schema(&header_row, discovered_fields)
+        Ok(header_row)
     }
 
-    fn metadata_lines<R: BufRead>(read: &mut R) -> OdvResult<Vec<String>> {
+    fn parse_odv_header(
+        discovered_fields: IndexMap<String, Field>,
+        header: &StringRecord,
+    ) -> OdvResult<SchemaRef> {
+        Self::parse_header_row_with_metadata_to_schema(&header, discovered_fields)
+    }
+
+    fn metadata_lines<R: BufRead + ?Sized>(read: &mut R) -> OdvResult<Vec<String>> {
         //Read the lines until we find the first line without a // prefix
         let mut header_lines = vec![];
 
