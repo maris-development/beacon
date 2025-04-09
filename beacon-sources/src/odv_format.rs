@@ -149,7 +149,6 @@ impl OdvExec {
         let schema_adapter = self
             .schema_adapter_factory
             .create(projected_table_schema.clone(), self.table_schema.clone());
-        let projection = self.projection.clone();
 
         let stream = try_stream! {
             for sub_partition in partition {
@@ -168,7 +167,7 @@ impl OdvExec {
                     .map_schema(&file_schema)
                     .expect("map_schema failed");
 
-                while let Some(batch)= reader.read(projection.as_deref()) {
+                while let Some(batch)= reader.read(Some(&adapted_projection)) {
                     let batch = batch.map_err(|e| {
                         datafusion::error::DataFusionError::Execution(format!("Failed to read ODV batch: {}", e))
                     })?;

@@ -103,7 +103,11 @@ impl OdvReader {
         field_map.insert("Type".to_string(), Field::new("Type", DataType::Utf8, true));
         field_map.insert(
             "yyyy-mm-ddThh:mm:ss.sss".to_string(),
-            Field::new("yyyy-mm-ddThh:mm:ss.sss", DataType::Utf8, true),
+            Field::new(
+                "yyyy-mm-ddThh:mm:ss.sss",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                true,
+            ),
         );
 
         for line in &header_lines {
@@ -228,7 +232,14 @@ impl OdvReader {
         for (_, name) in header.iter().enumerate() {
             let name = remove_units(name);
             if let Some(field) = discovered_fields.get(name) {
-                schema_fields.push(field.clone());
+                if name.to_lowercase() == "time_iso8601" {
+                    schema_fields.push(field.clone().with_data_type(DataType::Timestamp(
+                        arrow::datatypes::TimeUnit::Millisecond,
+                        None,
+                    )));
+                } else {
+                    schema_fields.push(field.clone());
+                }
             } else {
                 //Field is not in schema, this means it can be a QF field or an unknown field
                 if name.starts_with("QV:") {
@@ -262,6 +273,7 @@ impl OdvReader {
                 }
             }
         }
+
         Ok(Arc::new(arrow::datatypes::Schema::new(schema_fields)))
     }
 }
@@ -314,7 +326,6 @@ impl OdvDecoder {
             .iter()
             .map(|array| array.clone())
             .collect::<Vec<_>>();
-
         for (_, value) in self.added_fields.iter() {
             let array = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
                 value.clone(),
