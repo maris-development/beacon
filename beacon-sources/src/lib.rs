@@ -36,7 +36,8 @@ impl DataSource {
         file_format: Arc<dyn FileFormat>,
         table_urls: Vec<ListingTableUrl>,
     ) -> anyhow::Result<Self> {
-        let listing_options = ListingOptions::new(file_format);
+        //Set file extension to empty string to avoid file extension check
+        let listing_options = ListingOptions::new(file_format).with_file_extension("");
 
         let mut schemas = vec![];
         for table_url in &table_urls {
