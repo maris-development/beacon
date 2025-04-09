@@ -28,6 +28,11 @@ impl OdvReader {
                 let decoder = zstd::Decoder::new(file)?;
                 Ok(BufReader::new(Box::new(decoder)))
             }
+            Some(ext) if ext == "lz4" => {
+                let file = std::fs::File::open(path)?;
+                let decoder = lz4_flex::frame::FrameDecoder::new(file);
+                Ok(BufReader::new(Box::new(decoder)))
+            }
             _ => {
                 let file = std::fs::File::open(path)?;
                 let buf_reader = BufReader::new(Box::new(file) as Box<dyn Read + Send>);
