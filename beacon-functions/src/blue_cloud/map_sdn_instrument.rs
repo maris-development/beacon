@@ -23,10 +23,11 @@ pub fn map_sdn_instrument_l05() -> ScalarUDF {
 fn map_sdn_instrument_l05_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
-    fn extract_first_value(s: &str) -> Option<&str> {
+    fn extract_first_value(s: &str) -> Option<String> {
         if let Some(start) = s.find('(') {
             if let Some(end) = s[start..].find(')') {
-                return Some(&s[start + 1..start + end]);
+                let l05_code = &s[start + 1..start + end];
+                return Some(format!("SDN:L05::{}", l05_code));
             }
         }
         None
