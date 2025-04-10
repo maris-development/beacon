@@ -12,35 +12,33 @@ use datafusion::{
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref L35_MAP: HashMap<i64, &'static str> = {
-        let mut map = HashMap::new();
-
-        map
+    static ref L33_MAP: HashMap<String, String> = {
+        super::util::read_mappings("./mappings/wod-sdn-instruments.csv", "L33").unwrap_or_default()
     };
 }
 
-pub fn map_cora_instrument_l35() -> ScalarUDF {
+pub fn map_wod_instrument_l33() -> ScalarUDF {
     create_udf(
-        "map_cora_instrument_l35",
-        vec![datafusion::arrow::datatypes::DataType::Int64],
+        "map_wod_instrument_l33",
+        vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_cora_instrument_l35_impl),
+        Arc::new(map_wod_instrument_l33_impl),
     )
 }
 
-fn map_cora_instrument_l35_impl(
+fn map_wod_instrument_l33_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
             let flag_array = flag
                 .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
+                .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
 
             let array = flag_array.iter().map(|flag| {
-                flag.map(|wmo_code| L35_MAP.get(&wmo_code).map(|s| s).cloned())
+                flag.map(|value| L33_MAP.get(value).map(|s| s).cloned())
                     .flatten()
             });
 
@@ -48,9 +46,10 @@ fn map_cora_instrument_l35_impl(
 
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
-        ColumnarValue::Scalar(ScalarValue::Int64(value)) => {
+        ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
-                .map(|wmo_code| L35_MAP.get(&wmo_code).map(|s| s.to_string()))
+                .as_ref()
+                .map(|value| L33_MAP.get(value.as_str()).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(

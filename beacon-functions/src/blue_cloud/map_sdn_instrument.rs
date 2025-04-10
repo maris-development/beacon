@@ -9,46 +9,29 @@ use datafusion::{
     prelude::create_udf,
     scalar::ScalarValue,
 };
-use lazy_static::lazy_static;
 
-lazy_static! {
-    static ref L35_MAP: HashMap<&'static str, &'static str> = {
-        let mut map = HashMap::new();
-        map.insert(
-            "ANIMAL MOUNTED: Satellite Relay Data Logger (SRDL) (SMRU Instrumentation)",
-            "SDN:L35::MAN0109",
-        );
-        map.insert(
-            "ANIMAL MOUNTED: TDR (Time-Depth Recorder) Tag (Wildlife Computers)",
-            "SDN:L35::MAN0191",
-        );
-        map.insert(
-            "CTD: AML Micro CTD (Applied Microsystems Limited)",
-            "SDN:L35::MAN0032",
-        );
-        map.insert(
-            "CTD: Sea-Bird Electronics, MODEL UNKNOWN",
-            "SDN:L35::MAN0013",
-        );
-        map.insert("CTD: TYPE UNKNOWN", "SDN:L35::MAN0002");
-
-        map
-    };
-}
-
-pub fn map_wod_instrument_l35() -> ScalarUDF {
+pub fn map_sdn_instrument_l05() -> ScalarUDF {
     create_udf(
-        "map_wod_instrument_l35",
+        "map_sdn_instrument_l05",
         vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_wod_instrument_l35_impl),
+        Arc::new(map_sdn_instrument_l05_impl),
     )
 }
 
-fn map_wod_instrument_l35_impl(
+fn map_sdn_instrument_l05_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
+    fn extract_first_value(s: &str) -> Option<&str> {
+        if let Some(start) = s.find('(') {
+            if let Some(end) = s[start..].find(')') {
+                return Some(&s[start + 1..start + end]);
+            }
+        }
+        None
+    }
+
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
             let flag_array = flag
@@ -56,10 +39,9 @@ fn map_wod_instrument_l35_impl(
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
 
-            let array = flag_array.iter().map(|flag| {
-                flag.map(|value| L35_MAP.get(&value).map(|s| s).cloned())
-                    .flatten()
-            });
+            let array = flag_array
+                .iter()
+                .map(|flag| flag.map(|value| extract_first_value(value)).flatten());
 
             let array = StringArray::from_iter(array);
 
@@ -68,7 +50,7 @@ fn map_wod_instrument_l35_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
                 .as_ref()
-                .map(|value| L35_MAP.get(value.as_str()).map(|s| s.to_string()))
+                .map(|value| extract_first_value(value).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(
