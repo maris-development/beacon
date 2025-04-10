@@ -91,17 +91,16 @@ impl OdvReader {
         let mut discovered_fields = IndexMap::new();
 
         //Insert the default/expected fields
-        let mut field_map = IndexMap::new();
-        field_map.insert(
+        discovered_fields.insert(
             "Cruise".to_string(),
             Field::new("Cruise", DataType::Utf8, true),
         );
-        field_map.insert(
+        discovered_fields.insert(
             "Station".to_string(),
             Field::new("Station", DataType::Utf8, true),
         );
-        field_map.insert("Type".to_string(), Field::new("Type", DataType::Utf8, true));
-        field_map.insert(
+        discovered_fields.insert("Type".to_string(), Field::new("Type", DataType::Utf8, true));
+        discovered_fields.insert(
             "yyyy-mm-ddThh:mm:ss.sss".to_string(),
             Field::new(
                 "yyyy-mm-ddThh:mm:ss.sss",
