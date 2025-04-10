@@ -44,7 +44,7 @@ RUN cargo build --release
 FROM ubuntu:latest AS node
 WORKDIR /beacon
 COPY --from=builder /target/release/beacon-api /beacon/
-COPY --from=builder /mappings/ /mappings/
+COPY --from=builder /mappings/ /beacon/mappings/
 
 #Install Dependencies
 RUN apt-get update
