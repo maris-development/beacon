@@ -1,0 +1,3 @@
+[submodule "beacon-py"]
+	path = beacon-py
+	url = https://github.com/maris-development/beacon-py.git
