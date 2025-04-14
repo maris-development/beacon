@@ -564,6 +564,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "indexmap",
+ "regex",
  "thiserror 2.0.12",
 ]
 
@@ -689,6 +690,7 @@ dependencies = [
  "indexmap",
  "nd-arrow-array",
  "object_store",
+ "regex",
  "serde",
  "tokio",
  "tracing",

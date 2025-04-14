@@ -8,3 +8,4 @@ arrow = { workspace=true }
 anyhow = { workspace=true }
 indexmap = { workspace = true }
 thiserror = { workspace=true }
+regex = "1.11.1"
