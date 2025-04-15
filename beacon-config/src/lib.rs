@@ -23,6 +23,8 @@ pub struct Config {
     pub default_table: String,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
     pub enable_sql: bool,
+    #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
+    pub sanitize_schema: bool,
 }
 
 impl Config {
