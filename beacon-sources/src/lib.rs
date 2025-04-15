@@ -196,7 +196,8 @@ impl TableProvider for DataSource {
                 .scan(state, projection, transformed_filters.as_slice(), limit)
                 .await?;
 
-            let sanitized_plan = SanitizedPlan::new(sanitized_schema.clone(), plan.clone());
+            let sanitized_plan =
+                SanitizedPlan::new(sanitized_schema.clone(), projection.cloned(), plan.clone());
             return Ok(Arc::new(sanitized_plan));
         } else {
             let plan = self
@@ -237,13 +238,22 @@ struct SanitizedPlan {
 }
 
 impl SanitizedPlan {
-    fn new(sanitized_schema: SchemaRef, sub_plan: Arc<dyn ExecutionPlan>) -> Self {
+    fn new(
+        sanitized_schema: SchemaRef,
+        projection: Option<Vec<usize>>,
+        sub_plan: Arc<dyn ExecutionPlan>,
+    ) -> Self {
         let original_plan_props = sub_plan.properties().clone();
+        let projected_schema = if let Some(projection) = projection {
+            Arc::new(sanitized_schema.project(&projection).unwrap())
+        } else {
+            sanitized_schema
+        };
 
         let eq_props = original_plan_props
             .eq_properties
             .clone()
-            .with_new_schema(sanitized_schema.clone())
+            .with_new_schema(projected_schema.clone())
             .unwrap();
         let plan_properties = original_plan_props.with_eq_properties(eq_props);
 
