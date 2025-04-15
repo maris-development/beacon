@@ -563,6 +563,11 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "async-stream",
+ "async-trait",
+ "datafusion",
+ "futures",
+ "futures-util",
  "indexmap",
  "regex",
  "thiserror 2.0.12",

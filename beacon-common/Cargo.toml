@@ -5,7 +5,12 @@ edition = "2021"
 
 [dependencies]
 arrow = { workspace=true }
+datafusion = {workspace = true}
 anyhow = { workspace=true }
 indexmap = { workspace = true }
 thiserror = { workspace=true }
+async-trait = { workspace=true }
+async-stream = "0.3.6"
 regex = "1.11.1"
+futures = { workspace=true}
+futures-util = { workspace=true}

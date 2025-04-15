@@ -72,8 +72,11 @@ impl BeaconSchemaProvider {
         // If the default table does not exist, create an empty default logical table.
         if !provider.table_exist(beacon_config::CONFIG.default_table.as_str()) {
             let empty_table = EmptyTable::new(beacon_config::CONFIG.default_table.clone());
-            let empty_table_provider =
-                Table::from(Arc::new(empty_table) as Arc<dyn LogicalTableProvider>);
+            let empty_table_provider = Table::new(
+                empty_table.table_name().to_string(),
+                Arc::new(empty_table) as Arc<dyn LogicalTableProvider>,
+                vec![],
+            );
 
             provider.add_table(empty_table_provider).await?;
         }
