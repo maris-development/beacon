@@ -18,7 +18,7 @@ pub struct VerticalAxis {
 
 const VERTICAL_COLUMN_NAME: &str = "vertical_axis";
 
-#[typetag::serde(name = "vectical_axis")]
+#[typetag::serde(name = "vertical_axis")]
 impl TableExtension for VerticalAxis {
     fn as_any(&self) -> &dyn Any {
         self
