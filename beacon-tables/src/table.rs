@@ -17,7 +17,7 @@ pub struct TableInfo {
 }
 
 /// Represents a table configuration along with its associated provider.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Table {
     /// The name of the table.
     pub table_name: String,
@@ -54,7 +54,7 @@ impl Table {
 }
 
 /// Enum representing different types of tables.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TableType {
     /// A logical table with its associated provider.

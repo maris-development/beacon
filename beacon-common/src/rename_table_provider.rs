@@ -1,6 +1,6 @@
 use std::{any::Any, borrow::Cow, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::{
     catalog::{Session, TableProvider},
     common::{
@@ -60,6 +60,38 @@ impl RenameTableProvider {
                 .name()
                 .to_string(),
         )
+    }
+
+    pub fn rename_field(
+        schema: &Schema,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<Schema, GenericError> {
+        //Ensure the field exists in the schema
+        if schema.index_of(old_name).is_err() {
+            return Err(GenericError::from(format!(
+                "Field {} not found in schema",
+                old_name
+            )));
+        }
+
+        let new_fields: Vec<Arc<Field>> = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                if field.name() == old_name {
+                    Arc::new(Field::new(
+                        new_name,
+                        field.data_type().clone(),
+                        field.is_nullable(),
+                    ))
+                } else {
+                    field.clone()
+                }
+            })
+            .collect();
+
+        Ok(Schema::new(new_fields))
     }
 }
 

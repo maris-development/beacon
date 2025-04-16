@@ -1,20 +1,25 @@
 use std::{any::Any, path::PathBuf, sync::Arc};
 
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::Schema;
 use beacon_common::rename_table_provider::RenameTableProvider;
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 
-use super::{TableExtension, TableExtensionError, TableExtensionResult};
+use crate::table_extension::TableExtensionError;
+
+use super::{
+    geo_spatial::GeoSpatialExtension, temporal::TemporalExtension, TableExtension,
+    TableExtensionResult,
+};
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct TemporalExtension {
-    pub table_time_column: String,
+pub struct VerticalAxis {
+    pub table_vertical_column: String,
 }
 
-const TIME_COLUMN_NAME: &str = "time";
+const VERTICAL_COLUMN_NAME: &str = "vertical_axis";
 
-#[typetag::serde(name = "temporal")]
-impl TableExtension for TemporalExtension {
+#[typetag::serde(name = "vectical_axis")]
+impl TableExtension for VerticalAxis {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -28,8 +33,8 @@ impl TableExtension for TemporalExtension {
         let origin_schema = origin_table_provider.schema();
         let renamed_schema = RenameTableProvider::rename_field(
             &origin_schema,
-            &self.table_time_column,
-            TIME_COLUMN_NAME,
+            &self.table_vertical_column,
+            VERTICAL_COLUMN_NAME,
         )
         .map_err(|e| TableExtensionError::from(format!("Failed to rename field: {}", e)))?;
 

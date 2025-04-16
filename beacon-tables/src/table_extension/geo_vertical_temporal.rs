@@ -3,18 +3,19 @@ use std::{any::Any, path::PathBuf, sync::Arc};
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 
 use super::{
-    geo_spatial::GeoSpatialExtension, temporal::TemporalExtension, TableExtension,
-    TableExtensionResult,
+    geo_spatial::GeoSpatialExtension, temporal::TemporalExtension, vertical_axis::VerticalAxis,
+    TableExtension, TableExtensionResult,
 };
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct GeoTemporal {
+pub struct GeoVerticalTemporal {
     pub geo_spatial: GeoSpatialExtension,
+    pub vertical_axis: VerticalAxis,
     pub temporal: TemporalExtension,
 }
 
-#[typetag::serde(name = "geo_temporal")]
-impl TableExtension for GeoTemporal {
+#[typetag::serde(name = "geo_vertical_temporal")]
+impl TableExtension for GeoVerticalTemporal {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -31,11 +32,18 @@ impl TableExtension for GeoTemporal {
             origin_table_provider.clone(),
         )?;
 
-        let geo_temporal_provider =
-            self.temporal
-                .table_provider(table_directory, session_ctx, geo_spatial_provider)?;
+        let geo_temporal_provider = self.temporal.table_provider(
+            table_directory.clone(),
+            session_ctx.clone(),
+            geo_spatial_provider,
+        )?;
 
-        // Combine the two providers into a single provider
-        Ok(geo_temporal_provider)
+        let geo_vertical_temporal_provider = self.vertical_axis.table_provider(
+            table_directory.clone(),
+            session_ctx.clone(),
+            geo_temporal_provider.clone(),
+        )?;
+
+        Ok(geo_vertical_temporal_provider)
     }
 }

@@ -177,6 +177,15 @@ impl BeaconSchemaProvider {
             Err(TableError::TableDoesNotExist(table_name.to_string()))
         }
     }
+
+    pub async fn list_table_config(&self, table_name: String) -> Result<Table, TableError> {
+        let locked_tables = self.tables_map.lock();
+        if let Some(table) = locked_tables.get(&table_name) {
+            Ok(table.table.clone())
+        } else {
+            Err(TableError::TableDoesNotExist(table_name))
+        }
+    }
 }
 
 #[async_trait::async_trait]
