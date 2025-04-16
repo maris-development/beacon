@@ -13,7 +13,7 @@ pub struct GeoSpatialExtension {
 }
 
 const LONGITUDE_COLUMN_NAME: &str = "longitude";
-const LATITUDE_COLUMN_NAME: &str = "longitude";
+const LATITUDE_COLUMN_NAME: &str = "latitude";
 
 #[typetag::serde(name = "geo_spatial")]
 impl TableExtension for GeoSpatialExtension {
