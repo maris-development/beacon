@@ -315,4 +315,17 @@ impl VirtualMachine {
 
         Ok(count)
     }
+
+    pub(crate) async fn list_table_config(
+        &self,
+        table_name: String,
+    ) -> Result<Table, anyhow::Error> {
+        let result = self
+            .schema_provider
+            .list_table_config(table_name)
+            .await
+            .map_err(|e| anyhow::anyhow!("Error listing table config: {:?}", e));
+
+        Ok(result?)
+    }
 }

@@ -34,4 +34,6 @@ pub enum TableError {
     FailedToCreateTableDirectory(std::io::Error, String),
     #[error("Physical table error: {0}")]
     PhysicalTableError(#[from] physical_table::error::PhysicalTableError),
+    #[error("Invalid table name: {0}")]
+    InvalidTableName(String),
 }

@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
+use beacon_tables::table::Table;
 use utoipa::{IntoParams, ToSchema};
 
 #[tracing::instrument(level = "info", skip(state))]
@@ -54,6 +55,42 @@ pub(crate) async fn list_table_schema(
         Some(schema) => Ok(Json(schema)),
         None => {
             tracing::error!("Error listing table schema: table not found");
+            Err((
+                StatusCode::NOT_FOUND,
+                format!("Table {} not found", query.table_name),
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
+pub struct ListTableConfigQuery {
+    pub table_name: String,
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "tables",
+    get, 
+    path = "/api/table-config", 
+    params(ListTableConfigQuery) ,
+    responses((status = 200, description = "List of schema of a table")),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn list_table_config(
+    State(state): State<Arc<Runtime>>,
+    Query(query): Query<ListTableConfigQuery>,
+) -> Result<Json<Table>, (StatusCode, String)> {
+    let result = state.list_table_config(query.table_name.clone()).await;
+
+    match result {
+        Ok(config) => Ok(Json(config)),
+        Err(_) => {
+            tracing::error!("Error listing table config: table not found");
             Err((
                 StatusCode::NOT_FOUND,
                 format!("Table {} not found", query.table_name),

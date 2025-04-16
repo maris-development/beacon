@@ -5,7 +5,10 @@ use std::{
 
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 
-use crate::{error::TableError, physical_table::PhysicalTableProvider, LogicalTableProvider};
+use crate::{
+    error::TableError, physical_table::PhysicalTableProvider, table_extension::TableExtension,
+    LogicalTableProvider,
+};
 
 #[derive(Debug)]
 pub struct TableInfo {
@@ -14,39 +17,55 @@ pub struct TableInfo {
 }
 
 /// Represents a table configuration along with its associated provider.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Table {
     /// The name of the table.
     pub table_name: String,
     /// The type of the table which determines its behavior.
     pub table_type: TableType,
+    /// A vector of table extensions that provide additional functionality.
+    #[serde(default)]
+    pub table_extensions: Vec<Arc<dyn TableExtension>>,
 }
 
-impl From<Arc<dyn LogicalTableProvider>> for Table {
-    /// Creates a `Table` from a logical table provider.
+impl Table {
+    /// Creates a new instance of `Table`.
     ///
     /// # Arguments
     ///
-    /// * `logical_table` - An `Arc` to a logical table provider.
+    /// * `table_name` - The name of the table.
+    /// * `table_type` - The type of the table (logical or physical).
+    /// * `table_extensions` - A vector of table extensions associated with the table.
     ///
     /// # Returns
     ///
-    /// A new instance of `Table` with the provided logical table provider.
-    fn from(logical_table: Arc<dyn LogicalTableProvider>) -> Self {
+    /// A new instance of `Table`.
+    pub fn new(
+        table_name: String,
+        table_type: impl Into<TableType>,
+        table_extensions: Vec<Arc<dyn TableExtension>>,
+    ) -> Self {
         Table {
-            table_name: logical_table.table_name().to_string(),
-            table_type: TableType::Logical(logical_table),
+            table_name,
+            table_type: table_type.into(),
+            table_extensions,
         }
     }
 }
 
 /// Enum representing different types of tables.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TableType {
     /// A logical table with its associated provider.
     Logical(Arc<dyn LogicalTableProvider>),
     Physical(Arc<dyn PhysicalTableProvider>),
+}
+
+impl From<Arc<dyn LogicalTableProvider>> for TableType {
+    fn from(logical_table_provider: Arc<dyn LogicalTableProvider>) -> Self {
+        TableType::Logical(logical_table_provider)
+    }
 }
 
 impl Table {

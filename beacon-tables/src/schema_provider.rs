@@ -72,8 +72,11 @@ impl BeaconSchemaProvider {
         // If the default table does not exist, create an empty default logical table.
         if !provider.table_exist(beacon_config::CONFIG.default_table.as_str()) {
             let empty_table = EmptyTable::new(beacon_config::CONFIG.default_table.clone());
-            let empty_table_provider =
-                Table::from(Arc::new(empty_table) as Arc<dyn LogicalTableProvider>);
+            let empty_table_provider = Table::new(
+                empty_table.table_name().to_string(),
+                Arc::new(empty_table) as Arc<dyn LogicalTableProvider>,
+                vec![],
+            );
 
             provider.add_table(empty_table_provider).await?;
         }
@@ -119,6 +122,20 @@ impl BeaconSchemaProvider {
         Ok(tables)
     }
 
+    fn validate_table_name(table_name: &str) -> Result<(), TableError> {
+        if table_name.is_empty() {
+            return Err(TableError::InvalidTableName(
+                "Table name cannot be empty".to_string(),
+            ));
+        }
+        if table_name.contains("__") {
+            return Err(TableError::InvalidTableName(
+                "Table name cannot contain '__'".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Adds a new table to the schema provider.
     ///
     /// This function attempts to create the table's directory and adds the table to the managed map.
@@ -129,6 +146,9 @@ impl BeaconSchemaProvider {
     /// # Errors
     /// Returns a [`TableError`] if the table already exists or if creation fails.
     pub async fn add_table(&self, table: Table) -> Result<(), TableError> {
+        // Validate the table name.
+        Self::validate_table_name(table.table_name())?;
+
         let mut locked_tables = self.tables_map.lock();
         if !locked_tables.contains_key(table.table_name()) {
             drop(locked_tables); // Drop the lock before creating the table otherwise it might deadlock on the creation of the table.
@@ -174,6 +194,15 @@ impl BeaconSchemaProvider {
             Err(TableError::TableDoesNotExist(table_name.to_string()))
         }
     }
+
+    pub async fn list_table_config(&self, table_name: String) -> Result<Table, TableError> {
+        let locked_tables = self.tables_map.lock();
+        if let Some(table) = locked_tables.get(&table_name) {
+            Ok(table.table.clone())
+        } else {
+            Err(TableError::TableDoesNotExist(table_name))
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -204,9 +233,13 @@ impl SchemaProvider for BeaconSchemaProvider {
     /// # Returns
     /// An optional [`Arc<dyn TableProvider>`] wrapped in a `Result`. Returns `None` if the table does not exist.
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
-        if let Some(table) = self.tables_map.lock().get(name) {
-            let table_directory = table.table_directory.clone();
-            let table = table
+        //Split the name on '__'
+        let name_parts: Vec<&str> = name.split("__").collect();
+
+        if let Some(table_info) = self.tables_map.lock().get(name_parts[0]) {
+            //Get the initial table provider
+            let table_directory = table_info.table_directory.clone();
+            let table = table_info
                 .table
                 .table_provider(table_directory, self.session_ctx.clone())
                 .await
@@ -216,7 +249,39 @@ impl SchemaProvider for BeaconSchemaProvider {
                         name, e
                     ))
                 })?;
-            Ok(Some(table))
+
+            // Check if the name has one or two parts
+            // If it has one part, return the table provider
+            // If it has two parts, return the extension table provider
+            // If it has more than two parts, return an error
+            if name_parts.len() == 1 {
+                Ok(Some(table))
+            } else if name_parts.len() == 2 {
+                // We are called with a table extensions (eg. table__extension)
+                let extension_table = table_info
+                    .table
+                    .table_extensions
+                    .iter()
+                    .find(|extension| extension.table_ext() == name_parts[1]);
+
+                if let Some(extension_table) = extension_table {
+                    Ok(Some(extension_table.table_provider(
+                        table_info.table_directory.clone(),
+                        self.session_ctx.clone(),
+                        table.clone(),
+                    )?))
+                } else {
+                    Err(DataFusionError::Execution(format!(
+                        "Table extension not found for table {}",
+                        name
+                    )))
+                }
+            } else {
+                Err(DataFusionError::Execution(format!(
+                    "Invalid table name: {}",
+                    name
+                )))
+            }
         } else {
             Ok(None)
         }

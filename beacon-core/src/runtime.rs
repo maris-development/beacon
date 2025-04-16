@@ -54,6 +54,10 @@ impl Runtime {
         self.virtual_machine.default_table()
     }
 
+    pub async fn list_table_config(&self, table_name: String) -> anyhow::Result<Table> {
+        self.virtual_machine.list_table_config(table_name).await
+    }
+
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
         self.virtual_machine.list_table_schema(table_name).await
     }
