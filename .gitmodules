@@ -1,3 +1,6 @@
 [submodule "beacon-py"]
 	path = beacon-py
 	url = https://github.com/maris-development/beacon-py.git
+[submodule "beacon-example"]
+	path = beacon-example
+	url = https://github.com/maris-development/beacon-example.git
