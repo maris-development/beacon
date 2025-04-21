@@ -12,6 +12,7 @@ use tempfile::NamedTempFile;
 use utoipa::ToSchema;
 
 mod csv;
+mod geo_arrow;
 mod ipc;
 mod json;
 mod netcdf;
