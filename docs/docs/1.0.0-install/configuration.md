@@ -19,6 +19,8 @@ Some of the configuration options can be set using environment variables. The fo
 - `BEACON_LOG_LEVEL` - Log level [`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`].
 - `BEACON_HOST` - IP address to listen on.
 - `BEACON_PORT` - Port number to listen on.
+- `BEACON_SANITIZE_SCHEMAS` - Whether to sanitize schemas or not. Set to `true` to enable sanitization.
+- `BEACON_ENABLE_SQL` - Whether to enable SQL support or not. Set to `true` to enable SQL support.
 
 ### Optional Environment Variables
 

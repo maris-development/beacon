@@ -75,7 +75,7 @@ export default defineConfig({
                   link: '/docs/1.0.0-install#deploy-using-docker-compose'
                 },
                 {
-                  text: 'Activation',
+                  text: 'Verify the installation',
                   link: '/docs/1.0.0-install#verify-the-installation'
                 },
                 {
@@ -83,6 +83,10 @@ export default defineConfig({
                   link: '/docs/1.0.0-install#troubleshooting'
                 },
               ]
+            },
+            {
+              text: 'Getting started',
+              link: '/docs/1.0.0-install/getting-started',
             },
             {
               text: 'Configuration',
@@ -94,7 +98,39 @@ export default defineConfig({
             },
             {
               text: 'Data Tables',
-              link: '/docs/1.0.0-install/data-tables'
+              link: '/docs/1.0.0-install/data-tables',
+              items: [
+                {
+                  text: 'Logical Data Tables',
+                  link: '/docs/1.0.0-install/data-tables#logical-data-tables'
+                },
+                {
+                  text: 'Physical Data Tables',
+                  link: '/docs/1.0.0-install/data-tables#physical-data-tables'
+                },
+                {
+                  text: 'Table Extensions',
+                  link: '/docs/1.0.0-install/data-tables#table-extensions',
+                  items: [
+                    {
+                      text: 'Temporal',
+                      link: '/docs/1.0.0-install/data-tables#temporal'
+                    },
+                    {
+                      text: 'Vertical Axis',
+                      link: '/docs/1.0.0-install/data-tables#vertical-axis'
+                    },
+                    {
+                      text: 'Geo Spatial',
+                      link: '/docs/1.0.0-install/data-tables#geo-spatial'
+                    },
+                    {
+                      text: 'WMS',
+                      link: '/docs/1.0.0-install/data-tables#wms'
+                    }
+                  ]
+                },
+              ]
             },
             {
               text: 'Using SQL',
