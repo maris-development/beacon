@@ -30,7 +30,7 @@ export default defineConfig({
         text: 'Query docs', items: [
           {
             text: '1.0.0 (latest)',
-            link: '/docs/1.0.0/query-docs/',
+            link: '/docs/1.0.0/query-docs/data-lake/introduction',
             activeMatch: '/docs/1.0.0/query-docs/'
           }
         ]
@@ -185,13 +185,40 @@ export default defineConfig({
           ]
         }
       ],
-      '/docs/1.0.0/query-docs': [
+      '/docs/1.0.0/query-docs/': [
         {
           text: 'Docs 1.0.0',
           items: [
             {
-              text: 'Introduction',
-              link: '/docs/1.0.0/query-docs'
+              text: 'Data Lake',
+              items: [
+                {
+                  text: 'Introduction',
+                  link: '/docs/1.0.0/query-docs/data-lake/introduction',
+                },
+                {
+                  text: 'Datasets',
+                  link: '/docs/1.0.0/query-docs/data-lake/datasets'
+                },
+                {
+                  text: 'Data Tables',
+                  link: '/docs/1.0.0/query-docs/data-lake/data-tables'
+                }
+              ]
+            },
+            {
+              text: 'JSON Query',
+              link: '/docs/1.0.0/query-docs/json',
+              items: [
+
+              ]
+            },
+            {
+              text: 'SQL Query',
+              link: '/docs/1.0.0/query-docs/sql',
+              items: [
+
+              ]
             },
             {
               text: 'API request',
