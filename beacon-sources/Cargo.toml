@@ -15,7 +15,7 @@ tokio = { workspace = true }
 indexmap = { workspace = true }
 object_store = { workspace = true }
 async-stream = "0.3.6"
-nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main" }
+nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main", version = "0.2.2" }
 tracing = { workspace=true }
 serde = { workspace=true}
 utoipa = { workspace=true}

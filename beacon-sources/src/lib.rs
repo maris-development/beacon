@@ -25,10 +25,12 @@ use regex::Regex;
 pub mod arrow_format;
 pub mod csv_format;
 pub mod formats_factory;
+pub mod nd_parquet_format;
 pub mod netcdf_format;
 pub mod odv_format;
 pub mod parquet_format;
 pub mod sql;
+pub mod util;
 
 #[derive(Debug)]
 pub struct DataSource {

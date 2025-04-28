@@ -10,6 +10,7 @@ use table_engine::TableEngine;
 
 pub mod error;
 pub mod table_engine;
+
 #[async_trait::async_trait]
 #[typetag::serde]
 pub trait PhysicalTableProvider: std::fmt::Debug + Send + Sync {
