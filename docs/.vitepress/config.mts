@@ -61,9 +61,10 @@ export default defineConfig({
           link: '/available-nodes/available-nodes#obtain-personal-access-token',
         }
       ],
+
       '/docs/1.0.0-install': [
         {
-          text: 'Docs 1.0.0',
+          text: 'Installation Docs (1.0.0)',
           items: [
             {
               text: 'Installation',
@@ -93,41 +94,92 @@ export default defineConfig({
               link: '/docs/1.0.0-install/configuration'
             },
             {
-              text: 'Datasets',
-              link: '/docs/1.0.0-install/datasets'
-            },
-            {
-              text: 'Data Tables',
-              link: '/docs/1.0.0-install/data-tables',
+              'text': 'Data Lake Setup',
               items: [
                 {
-                  text: 'Logical Data Tables',
-                  link: '/docs/1.0.0-install/data-tables#logical-data-tables'
+                  text: 'Introduction',
+                  link: '/docs/1.0.0-install/data-lake/introduction',
                 },
                 {
-                  text: 'Physical Data Tables',
-                  link: '/docs/1.0.0-install/data-tables#physical-data-tables'
-                },
-                {
-                  text: 'Table Extensions',
-                  link: '/docs/1.0.0-install/data-tables#table-extensions',
+                  text: 'Datasets',
+                  link: '/docs/1.0.0-install/data-lake/datasets',
+                  collapsed: true,
                   items: [
                     {
-                      text: 'Temporal',
-                      link: '/docs/1.0.0-install/data-tables#temporal'
+                      text: 'File Formats',
+                      collapsed: true,
+                      items: [
+                        {
+                          text: 'NetCDF',
+                          link: '/docs/1.0.0-install/data-lake/datasets#netcdf'
+                        },
+                        {
+                          text: 'ODV ASCII',
+                          link: '/docs/1.0.0-install/data-lake/datasets#odv-ascii'
+                        },
+                        {
+                          text: 'Parquet',
+                          link: '/docs/1.0.0-install/data-lake/datasets#parquet'
+                        },
+                        {
+                          text: 'CSV',
+                          link: '/docs/1.0.0-install/data-lake/datasets#csv'
+                        },
+                        {
+                          text: 'Arrow IPC',
+                          link: '/docs/1.0.0-install/data-lake/datasets#arrow-ipc'
+                        },
+                        {
+                          text: 'Beacon Binary Format',
+                          link: '/docs/1.0.0-install/data-lake/datasets#beacon-binary-format'
+                        },
+                      ]
                     },
                     {
-                      text: 'Vertical Axis',
-                      link: '/docs/1.0.0-install/data-tables#vertical-axis'
+                      text: 'Managing Datasets',
+                      link: '/docs/1.0.0-install/data-lake/datasets#managing-datasets',
                     },
                     {
-                      text: 'Geo Spatial',
-                      link: '/docs/1.0.0-install/data-tables#geo-spatial'
-                    },
-                    {
-                      text: 'WMS',
-                      link: '/docs/1.0.0-install/data-tables#wms'
+                      text: 'Exploring Datasets',
+                      link: '/docs/1.0.0-install/data-lake/datasets#exploring-datasets',
                     }
+                  ]
+                },
+                {
+                  text: 'Data Tables',
+                  link: '/docs/1.0.0-install/data-lake/data-tables',
+                  collapsed: true,
+                  items: [
+                    {
+                      text: 'Logical Data Tables',
+                      link: '/docs/1.0.0-install/data-lake/data-tables#logical-data-tables'
+                    },
+                    {
+                      text: 'Physical Data Tables',
+                      link: '/docs/1.0.0-install/data-lake/data-tables#physical-data-tables'
+                    },
+                    {
+                      text: 'Table Extensions',
+                      link: '/docs/1.0.0-install/data-lake/data-tables#table-extensions',
+                      items: [
+                        {
+                          text: 'Temporal',
+                          link: '/docs/1.0.0-install/data-lake/data-tables#temporal'
+                        },
+                        {
+                          text: 'Vertical Axis',
+                          link: '/docs/1.0.0-install/data-lake/data-tables#vertical-axis'
+                        },
+                        {
+                          text: 'Geo Spatial',
+                          link: '/docs/1.0.0-install/data-lake/data-tables#geo-spatial'
+                        },
+                        {
+                          text: 'WMS',
+                          link: '/docs/1.0.0-install/data-lake/data-tables#wms'
+                        }
+                      ]
+                    },
                   ]
                 },
               ]
@@ -187,7 +239,7 @@ export default defineConfig({
       ],
       '/docs/1.0.0/query-docs/': [
         {
-          text: 'Docs 1.0.0',
+          text: 'Query Docs (1.0.0)',
           items: [
             {
               text: 'Data Lake',
@@ -207,49 +259,54 @@ export default defineConfig({
               ]
             },
             {
-              text: 'JSON Query',
+              text: 'Exploring the Data Lake',
+              items: [
+
+              ]
+            },
+            {
+              text: 'Querying API',
+              items: [
+                {
+                  text: 'Introduction',
+                  link: '/docs/1.0.0/query-docs/querying/introduction'
+                },
+                {
+                  text: 'Querying with SQL',
+                  link: '/docs/1.0.0/query-docs/querying/sql'
+                },
+                {
+                  text: 'Querying with JSON',
+                  link: '/docs/1.0.0/query-docs/querying/json',
+                  items: [
+                    {
+                      text: 'Selecting Columns',
+                      link: '/docs/1.0.0/query-docs/querying/json'
+                    },
+                    {
+                      text: 'Filtering',
+                      link: '/docs/1.0.0/query-docs/querying/json'
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              text: 'Query Libraries',
+              items: [
+                {
+                  text: 'Python',
+                  link: '/docs/1.0.0/query-docs/libraries/python'
+                }
+              ]
+            },
+            {
+              text: 'Studio (Web UI)',
               link: '/docs/1.0.0/query-docs/json',
               items: [
 
               ]
             },
-            {
-              text: 'SQL Query',
-              link: '/docs/1.0.0/query-docs/sql',
-              items: [
-
-              ]
-            },
-            {
-              text: 'API request',
-              link: '/docs/1.0.0/query-docs#sending-an-api-request'
-            },
-            {
-              text: 'API query body',
-              link: '/docs/1.0.0/query-docs#constructing-the-api-query-body',
-              items: [
-                {
-                  text: 'Query parameters',
-                  link: '/docs/1.0.0/query-docs#query-parameters'
-                },
-                {
-                  text: 'Filters',
-                  link: '/docs/1.0.0/query-docs#filters'
-                },
-                {
-                  text: 'Distinct',
-                  link: '/docs/1.0.0/query-docs.html#distinct'
-                },
-                {
-                  text: 'Output formats',
-                  link: '/docs/1.0.0/query-docs#output-format'
-                }
-              ]
-            },
-            {
-              text: 'Union queries',
-              link: '/docs/1.0.0/query-docs#union-queries'
-            }
           ]
         }
       ]

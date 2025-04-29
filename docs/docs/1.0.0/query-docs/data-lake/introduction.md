@@ -1,3 +1,5 @@
-# Querying
+# Introduction Beacon Data Lake
 
-In this section, we will explore how you can query data from Beacon. Beacon provides a flexible and powerful query interface that allows you to retrieve specific data based on your requirements. By constructing a JSON query object and sending a POST request to the query endpoint (e.g. `https://beacon-{collection-name}.maris.nl/api/query`), you can retrieve data that matches your specified column_names, filters, and other criteria.
+In this section, we will explore how the Beacon Data Lake organizes its datasets and how you can query them. The Beacon Data Lake is designed to provide a unified interface for accessing and querying datasets, regardless of their underlying format or storage location. This allows users to work with datasets in a consistent and efficient manner.
+
+## Data Lake Architecture
