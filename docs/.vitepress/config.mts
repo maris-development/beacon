@@ -30,7 +30,7 @@ export default defineConfig({
         text: 'Query docs', items: [
           {
             text: '1.0.0 (latest)',
-            link: '/docs/1.0.0/query-docs/data-lake/introduction',
+            link: '/docs/1.0.0/query-docs/data-lake',
             activeMatch: '/docs/1.0.0/query-docs/'
           }
         ]
@@ -94,7 +94,8 @@ export default defineConfig({
               link: '/docs/1.0.0-install/configuration'
             },
             {
-              'text': 'Data Lake Setup',
+              text: 'Data Lake Setup',
+              link: '/docs/1.0.0-install/data-lake/introduction',
               items: [
                 {
                   text: 'Introduction',
@@ -243,29 +244,36 @@ export default defineConfig({
           items: [
             {
               text: 'Data Lake',
+              link: '/docs/1.0.0/query-docs/data-lake#introduction-beacon-data-lake',
               items: [
                 {
                   text: 'Introduction',
-                  link: '/docs/1.0.0/query-docs/data-lake/introduction',
+                  link: '/docs/1.0.0/query-docs/data-lake#introduction-beacon-data-lake',
                 },
                 {
                   text: 'Datasets',
-                  link: '/docs/1.0.0/query-docs/data-lake/datasets'
+                  link: '/docs/1.0.0/query-docs/data-lake#datasets'
                 },
                 {
                   text: 'Data Tables',
-                  link: '/docs/1.0.0/query-docs/data-lake/data-tables'
+                  link: '/docs/1.0.0/query-docs/data-lake#data-tables'
                 }
               ]
             },
             {
+              text: 'Getting Started',
+              link: '/docs/1.0.0/query-docs/getting-started',
+            },
+            {
               text: 'Exploring the Data Lake',
+              link: '/docs/1.0.0/query-docs/exploring-data-lake',
               items: [
 
               ]
             },
             {
               text: 'Querying API',
+              link: '/docs/1.0.0/query-docs/querying/introduction',
               items: [
                 {
                   text: 'Introduction',
@@ -293,6 +301,7 @@ export default defineConfig({
             },
             {
               text: 'Query Libraries',
+              link: '/docs/1.0.0/query-docs/libraries/python',
               items: [
                 {
                   text: 'Python',
@@ -302,10 +311,7 @@ export default defineConfig({
             },
             {
               text: 'Studio (Web UI)',
-              link: '/docs/1.0.0/query-docs/json',
-              items: [
-
-              ]
+              link: '/docs/1.0.0/query-docs/web-ui',
             },
           ]
         }
