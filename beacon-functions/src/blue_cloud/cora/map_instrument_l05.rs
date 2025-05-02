@@ -13,7 +13,7 @@ const L05_MAPPINGS_CSV: &[u8] = include_bytes!("l05.csv");
 
 lazy_static! {
     static ref L05_MAP: HashMap<String, String> =
-        util::read_mappings_from_reader(L05_MAPPINGS_CSV, "L05").unwrap();
+        util::read_mappings_from_reader(L05_MAPPINGS_CSV, "L05").unwrap_or_default();
 }
 
 pub fn map_cora_instrument_l05() -> ScalarUDF {
