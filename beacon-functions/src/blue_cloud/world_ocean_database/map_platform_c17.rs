@@ -62,3 +62,14 @@ fn map_wod_platform_c17_impl(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loading_c17_mappings() {
+        let mappings = C17_MAP.clone();
+        assert!(!mappings.is_empty(), "C17 mappings should not be empty");
+    }
+}

@@ -62,3 +62,14 @@ fn map_platform_c17_l06_impl(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loading_c17_l06_mappings() {
+        let mappings = C17_L06_MAP.clone();
+        assert!(!mappings.is_empty(), "C17 L06 mappings should not be empty");
+    }
+}

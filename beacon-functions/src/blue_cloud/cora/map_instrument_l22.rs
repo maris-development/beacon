@@ -62,3 +62,14 @@ fn map_cora_instrument_l22_impl(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loading_l22_mappings() {
+        let mappings = L22_MAP.clone();
+        assert!(!mappings.is_empty());
+    }
+}

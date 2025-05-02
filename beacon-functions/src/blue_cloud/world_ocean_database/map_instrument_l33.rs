@@ -62,3 +62,14 @@ fn map_wod_instrument_l33_impl(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loading_l33_mappings() {
+        let mappings = L33_MAP.clone();
+        assert!(!mappings.is_empty());
+    }
+}

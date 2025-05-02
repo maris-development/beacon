@@ -62,3 +62,14 @@ fn map_cora_instrument_l05_impl(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loading_l05_mappings() {
+        let mappings = L05_MAP.clone();
+        assert!(!mappings.is_empty());
+    }
+}
