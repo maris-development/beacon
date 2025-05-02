@@ -1,40 +1,31 @@
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::{
-    array::{PrimitiveArray, StringArray},
-    datatypes::Float64Type,
-};
+use crate::blue_cloud::util;
+use arrow::array::StringArray;
 use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF},
     prelude::create_udf,
     scalar::ScalarValue,
 };
 use lazy_static::lazy_static;
+const L22_MAPPINGS_CSV: &[u8] = include_bytes!("l22.csv");
 
 lazy_static! {
-    static ref L05_MAP: HashMap<&'static str, &'static str> = {
-        let mut map = HashMap::new();
-        map.insert("BO", "SDN:L05::30");
-        map.insert("CT", "SDN:L05::130");
-        map.insert("XB", "SDN:L05::132");
-        map.insert("TX", "SDN:L05::135");
-        map.insert("TS", "SDN:L05::133");
-
-        map
-    };
+    static ref L22_MAP: HashMap<String, String> =
+        util::read_mappings_from_reader(L22_MAPPINGS_CSV, "L22").unwrap();
 }
 
-pub fn map_cmems_bigram_l05() -> ScalarUDF {
+pub fn map_wod_instrument_l22() -> ScalarUDF {
     create_udf(
-        "map_cmems_bigram_l05",
+        "map_wod_instrument_l22",
         vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_cmems_bigram_l05_impl),
+        Arc::new(map_wod_instrument_l22_impl),
     )
 }
 
-fn map_cmems_bigram_l05_impl(
+fn map_wod_instrument_l22_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
@@ -45,7 +36,7 @@ fn map_cmems_bigram_l05_impl(
                 .unwrap();
 
             let array = flag_array.iter().map(|flag| {
-                flag.map(|value| L05_MAP.get(&value).map(|s| s).cloned())
+                flag.map(|value| L22_MAP.get(value).map(|s| s).cloned())
                     .flatten()
             });
 
@@ -56,7 +47,7 @@ fn map_cmems_bigram_l05_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
                 .as_ref()
-                .map(|value| L05_MAP.get(value.as_str()).map(|s| s.to_string()))
+                .map(|value| L22_MAP.get(value.as_str()).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(

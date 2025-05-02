@@ -52,16 +52,16 @@ lazy_static! {
     };
 }
 
-pub fn map_units_seadatanet() -> ScalarUDF {
-    ScalarUDF::new_from_impl(MapUnitsSeaDataNet::new())
+pub fn map_units() -> ScalarUDF {
+    ScalarUDF::new_from_impl(MapUnits::new())
 }
 
 #[derive(Clone, Debug)]
-struct MapUnitsSeaDataNet {
+struct MapUnits {
     signature: datafusion::logical_expr::Signature,
 }
 
-impl MapUnitsSeaDataNet {
+impl MapUnits {
     pub fn new() -> Self {
         Self {
             signature: Signature::exact(
@@ -72,13 +72,13 @@ impl MapUnitsSeaDataNet {
     }
 }
 
-impl ScalarUDFImpl for MapUnitsSeaDataNet {
+impl ScalarUDFImpl for MapUnits {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
     fn name(&self) -> &str {
-        "map_units_seadatanet"
+        "map_units"
     }
 
     fn signature(&self) -> &datafusion::logical_expr::Signature {
@@ -183,7 +183,7 @@ mod tests {
             return_type: &DataType::Float64,
         };
 
-        let function = map_units_seadatanet();
+        let function = map_units();
 
         let result = function.invoke_with_args(function_args).unwrap();
 

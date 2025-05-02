@@ -1,9 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::{
-    array::{PrimitiveArray, StringArray},
-    datatypes::Float64Type,
-};
+use crate::blue_cloud::util;
+use arrow::array::StringArray;
 use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF},
     prelude::create_udf,
@@ -11,23 +9,24 @@ use datafusion::{
 };
 use lazy_static::lazy_static;
 
+const C17_MAPPINGS_CSV: &[u8] = include_bytes!("c17.csv");
+
 lazy_static! {
-    static ref L22_MAP: HashMap<String, String> = {
-        super::util::read_mappings("./mappings/cora-sdn-instruments.csv", "L22").unwrap_or_default()
-    };
+    static ref C17_MAP: HashMap<String, String> =
+        util::read_mappings_from_reader(C17_MAPPINGS_CSV, "C17").unwrap();
 }
 
-pub fn map_cora_instrument_l22() -> ScalarUDF {
+pub fn map_wod_platform_c17() -> ScalarUDF {
     create_udf(
-        "map_cora_instrument_l22",
+        "map_wod_platform_c17",
         vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_cora_instrument_l22_impl),
+        Arc::new(map_wod_platform_c17_impl),
     )
 }
 
-fn map_cora_instrument_l22_impl(
+fn map_wod_platform_c17_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
@@ -38,7 +37,7 @@ fn map_cora_instrument_l22_impl(
                 .unwrap();
 
             let array = flag_array.iter().map(|flag| {
-                flag.map(|wmo_code| L22_MAP.get(wmo_code).map(|s| s).cloned())
+                flag.map(|value| C17_MAP.get(value).map(|s| s).cloned())
                     .flatten()
             });
 
@@ -49,7 +48,7 @@ fn map_cora_instrument_l22_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
                 .as_ref()
-                .map(|wmo_code| L22_MAP.get(wmo_code).map(|s| s.to_string()))
+                .map(|value| C17_MAP.get(value.as_str()).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(

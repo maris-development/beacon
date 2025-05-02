@@ -27,17 +27,19 @@ lazy_static! {
     };
 }
 
-pub fn map_wod_flag_sdn_function() -> ScalarUDF {
+pub fn map_wod_quality_flag() -> ScalarUDF {
     create_udf(
-        "wod_flag_to_sdn",
+        "map_wod_quality_flag",
         vec![datafusion::arrow::datatypes::DataType::Int64],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(wod_flag_to_sdn_impl),
+        Arc::new(map_wod_quality_flag_impl),
     )
 }
 
-fn wod_flag_to_sdn_impl(parameters: &[ColumnarValue]) -> datafusion::error::Result<ColumnarValue> {
+fn map_wod_quality_flag_impl(
+    parameters: &[ColumnarValue],
+) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
             let flag_array = flag

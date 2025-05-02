@@ -1,35 +1,35 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use arrow::{
-    array::{PrimitiveArray, StringArray},
-    datatypes::Float64Type,
-};
+use arrow::array::StringArray;
 use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF},
     prelude::create_udf,
     scalar::ScalarValue,
 };
-use lazy_static::lazy_static;
 
-lazy_static! {
-    static ref L33_MAP: HashMap<String, String> = {
-        super::util::read_mappings("./mappings/wod-sdn-instruments.csv", "L33").unwrap_or_default()
-    };
-}
-
-pub fn map_wod_instrument_l33() -> ScalarUDF {
+pub fn map_emodnet_chemistry_instrument_l05() -> ScalarUDF {
     create_udf(
-        "map_wod_instrument_l33",
+        "map_emodnet_chemistry_instrument_l05",
         vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_wod_instrument_l33_impl),
+        Arc::new(map_emodnet_chemistry_instrument_l05_impl),
     )
 }
 
-fn map_wod_instrument_l33_impl(
+fn map_emodnet_chemistry_instrument_l05_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
+    fn extract_first_value(s: &str) -> Option<String> {
+        if let Some(start) = s.find('(') {
+            if let Some(end) = s[start..].find(')') {
+                let l05_code = &s[start + 1..start + end];
+                return Some(format!("SDN:L05::{}", l05_code));
+            }
+        }
+        None
+    }
+
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
             let flag_array = flag
@@ -37,10 +37,9 @@ fn map_wod_instrument_l33_impl(
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
 
-            let array = flag_array.iter().map(|flag| {
-                flag.map(|value| L33_MAP.get(value).map(|s| s).cloned())
-                    .flatten()
-            });
+            let array = flag_array
+                .iter()
+                .map(|flag| flag.map(|value| extract_first_value(value)).flatten());
 
             let array = StringArray::from_iter(array);
 
@@ -49,7 +48,7 @@ fn map_wod_instrument_l33_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
                 .as_ref()
-                .map(|value| L33_MAP.get(value.as_str()).map(|s| s.to_string()))
+                .map(|value| extract_first_value(value).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(
