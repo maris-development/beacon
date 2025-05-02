@@ -61,6 +61,5 @@ pub fn read_mappings_from_reader<R: std::io::Read>(
         }
     }
 
-    // Print to verify
     Ok(map)
 }
