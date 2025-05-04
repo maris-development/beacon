@@ -4,3 +4,6 @@
 [submodule "beacon-example"]
 	path = beacon-example
 	url = https://github.com/maris-development/beacon-example.git
+[submodule "beacon-studio"]
+	path = beacon-studio
+	url = https://github.com/maris-development/beacon-studio.git
