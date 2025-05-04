@@ -11,6 +11,7 @@ use crate::{
     empty_table::EmptyTable,
     error::TableError,
     table::{Table, TableInfo},
+    table_extension::TableExtension,
     LogicalTableProvider,
 };
 
@@ -18,6 +19,7 @@ use crate::{
 ///
 /// This provider integrates with DataFusion's [`SchemaProvider`] trait and exposes
 /// methods for adding, deleting, and retrieving tables.
+#[derive(Clone)]
 pub struct BeaconSchemaProvider {
     session_ctx: Arc<SessionContext>,
     tables_map: Arc<parking_lot::Mutex<indexmap::IndexMap<String, TableInfo>>>,
@@ -203,6 +205,15 @@ impl BeaconSchemaProvider {
             Err(TableError::TableDoesNotExist(table_name))
         }
     }
+
+    pub fn table_extensions(&self, table_name: &str) -> Option<Vec<Arc<dyn TableExtension>>> {
+        let locked_tables = self.tables_map.lock();
+        if let Some(table_info) = locked_tables.get(table_name) {
+            Some(table_info.table.table_extensions.clone())
+        } else {
+            None
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -233,10 +244,7 @@ impl SchemaProvider for BeaconSchemaProvider {
     /// # Returns
     /// An optional [`Arc<dyn TableProvider>`] wrapped in a `Result`. Returns `None` if the table does not exist.
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
-        //Split the name on '__'
-        let name_parts: Vec<&str> = name.split("__").collect();
-
-        if let Some(table_info) = self.tables_map.lock().get(name_parts[0]) {
+        if let Some(table_info) = self.tables_map.lock().get(name) {
             //Get the initial table provider
             let table_directory = table_info.table_directory.clone();
             let table = table_info
@@ -249,39 +257,7 @@ impl SchemaProvider for BeaconSchemaProvider {
                         name, e
                     ))
                 })?;
-
-            // Check if the name has one or two parts
-            // If it has one part, return the table provider
-            // If it has two parts, return the extension table provider
-            // If it has more than two parts, return an error
-            if name_parts.len() == 1 {
-                Ok(Some(table))
-            } else if name_parts.len() == 2 {
-                // We are called with a table extensions (eg. table__extension)
-                let extension_table = table_info
-                    .table
-                    .table_extensions
-                    .iter()
-                    .find(|extension| extension.table_ext() == name_parts[1]);
-
-                if let Some(extension_table) = extension_table {
-                    Ok(Some(extension_table.table_provider(
-                        table_info.table_directory.clone(),
-                        self.session_ctx.clone(),
-                        table.clone(),
-                    )?))
-                } else {
-                    Err(DataFusionError::Execution(format!(
-                        "Table extension not found for table {}",
-                        name
-                    )))
-                }
-            } else {
-                Err(DataFusionError::Execution(format!(
-                    "Invalid table name: {}",
-                    name
-                )))
-            }
+            Ok(Some(table))
         } else {
             Ok(None)
         }
