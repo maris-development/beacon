@@ -1,35 +1,35 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use arrow::{
-    array::{PrimitiveArray, StringArray},
-    datatypes::Float64Type,
-};
+use arrow::array::StringArray;
 use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF},
     prelude::create_udf,
     scalar::ScalarValue,
 };
-use lazy_static::lazy_static;
 
-lazy_static! {
-    static ref L22_MAP: HashMap<String, String> = {
-        super::util::read_mappings("./mappings/cora-sdn-instruments.csv", "L22").unwrap_or_default()
-    };
-}
-
-pub fn map_cora_instrument_l22() -> ScalarUDF {
+pub fn map_emodnet_chemistry_instrument_l05() -> ScalarUDF {
     create_udf(
-        "map_cora_instrument_l22",
+        "map_emodnet_chemistry_instrument_l05",
         vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_cora_instrument_l22_impl),
+        Arc::new(map_emodnet_chemistry_instrument_l05_impl),
     )
 }
 
-fn map_cora_instrument_l22_impl(
+fn map_emodnet_chemistry_instrument_l05_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
+    fn extract_first_value(s: &str) -> Option<String> {
+        if let Some(start) = s.find('(') {
+            if let Some(end) = s[start..].find(')') {
+                let l05_code = &s[start + 1..start + end];
+                return Some(format!("SDN:L05::{}", l05_code));
+            }
+        }
+        None
+    }
+
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
             let flag_array = flag
@@ -37,10 +37,9 @@ fn map_cora_instrument_l22_impl(
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
 
-            let array = flag_array.iter().map(|flag| {
-                flag.map(|wmo_code| L22_MAP.get(wmo_code).map(|s| s).cloned())
-                    .flatten()
-            });
+            let array = flag_array
+                .iter()
+                .map(|flag| flag.map(|value| extract_first_value(value)).flatten());
 
             let array = StringArray::from_iter(array);
 
@@ -49,7 +48,7 @@ fn map_cora_instrument_l22_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
                 .as_ref()
-                .map(|wmo_code| L22_MAP.get(wmo_code).map(|s| s.to_string()))
+                .map(|value| extract_first_value(value).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(

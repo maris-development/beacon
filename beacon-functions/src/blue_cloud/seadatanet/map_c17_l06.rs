@@ -1,9 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::{
-    array::{PrimitiveArray, StringArray},
-    datatypes::Float64Type,
-};
+use crate::blue_cloud::util;
+use arrow::array::StringArray;
 use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF},
     prelude::create_udf,
@@ -11,23 +9,24 @@ use datafusion::{
 };
 use lazy_static::lazy_static;
 
+const C17_L06_MAPPINGS_CSV: &[u8] = include_bytes!("c17_l06.csv");
+
 lazy_static! {
-    static ref L05_MAP: HashMap<String, String> = {
-        super::util::read_mappings("./mappings/wod-sdn-instruments.csv", "L05").unwrap_or_default()
-    };
+    static ref C17_L06_MAP: HashMap<String, String> =
+        util::read_mappings_from_reader(C17_L06_MAPPINGS_CSV, "L06").unwrap();
 }
 
-pub fn map_wod_instrument_l05() -> ScalarUDF {
+pub fn map_platform_c17_l06() -> ScalarUDF {
     create_udf(
-        "map_wod_instrument_l05",
+        "map_platform_c17_l06",
         vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_wod_instrument_l05_impl),
+        Arc::new(map_platform_c17_l06_impl),
     )
 }
 
-fn map_wod_instrument_l05_impl(
+fn map_platform_c17_l06_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
@@ -38,7 +37,7 @@ fn map_wod_instrument_l05_impl(
                 .unwrap();
 
             let array = flag_array.iter().map(|flag| {
-                flag.map(|value| L05_MAP.get(value).map(|s| s).cloned())
+                flag.map(|value| C17_L06_MAP.get(value).map(|s| s).cloned())
                     .flatten()
             });
 
@@ -49,7 +48,7 @@ fn map_wod_instrument_l05_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
                 .as_ref()
-                .map(|value| L05_MAP.get(value.as_str()).map(|s| s.to_string()))
+                .map(|value| C17_L06_MAP.get(value.as_str()).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(
@@ -61,5 +60,16 @@ fn map_wod_instrument_l05_impl(
                 "Invalid input type".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loading_c17_l06_mappings() {
+        let mappings = C17_L06_MAP.clone();
+        assert!(!mappings.is_empty(), "C17 L06 mappings should not be empty");
     }
 }

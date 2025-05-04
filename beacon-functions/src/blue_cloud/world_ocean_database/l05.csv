@@ -1,0 +1,71 @@
+INSTRUMENT_KEY,L05
+BOTTLE: Autoanalyzer - Alpkem,SDN:L05::30
+BOTTLE: Autoanalyzer: Sumigraph analyzer; model unknown,SDN:L05::30
+BOTTLE: Autolab Inductive Salinometer,SDN:L05::30
+BOTTLE: Automated titrator: type unknown,SDN:L05::30
+BOTTLE: Beckman DU II spectrophotometer,SDN:L05::30
+BOTTLE: Beckman pH meter Model G,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): Alpkem; model unknown,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): Bran+Luebbe III,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): Bran+Luebbe trAAcs 800,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): ChemLab AAII,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): Instrument manufacturer and model unknown,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): Skalar Sanplus Autoanalyzer,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): Skalar; model unknown,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): Technicon AAII,SDN:L05::30
+BOTTLE: Continuous Flow Autoanalyzer (CFA): Technicon; model unknown,SDN:L05::30
+BOTTLE: Continuous Segmented Flow Analyzer: SEAL Autoanalyzer 3HR,SDN:L05::30
+"BOTTLE: Fluorometer, TD-700",SDN:L05::30
+"BOTTLE: Fluorometer, Turner Designs, model 10",SDN:L05::30
+"BOTTLE: Fluorometer, Turner Designs, model 10-005 R",SDN:L05::30
+"BOTTLE: Fluorometer, Turner Designs, model 10-AU",SDN:L05::30
+"BOTTLE: Fluorometer, Turner Designs, model 10-AU-005-CE",SDN:L05::30
+"BOTTLE: Fluorometer, Turner Designs, model unknown",SDN:L05::30
+"BOTTLE: Gas chromatograph (GC) with electron capture detector (ECD), model unknown",SDN:L05::30
+BOTTLE: Guildline Autosal (model unknown),SDN:L05::30
+BOTTLE: Guildline model 8400 Autosal,SDN:L05::30
+BOTTLE: Guildline model 8400A Autosal,SDN:L05::30
+BOTTLE: Guildline model 8400B Autosal,SDN:L05::30
+BOTTLE: Guildline model 8410 Portasal,SDN:L05::30
+BOTTLE: Hirama Riken laboratory photometric titrater (ART-3 D0-1),SDN:L05::30
+BOTTLE: Horiba pH meter - Automatic Temperature Compensation (model unknown),SDN:L05::30
+BOTTLE: HPLC,SDN:L05::30
+BOTTLE: HPLC: High Performance Liquid Chromatography; model unknown,SDN:L05::30
+"BOTTLE: Induction conductivity and temperature instrument (Schiemer and Pritchard, 1961)",SDN:L05::30
+"BOTTLE: Kahlisco induction salinometer, model unknown.",SDN:L05::30
+BOTTLE: Klehn 50100 auto-titrator (Friederich et al.; 1991),SDN:L05::30
+"BOTTLE: Klett-Summerson photo-electric colorimeter (Garver, 1951)",SDN:L05::30
+BOTTLE: Lachat QuikChem 8000 FIA+ (Flow Injection Analyzer),SDN:L05::30
+BOTTLE: Methrohm Dosimat 665 automatic buret,SDN:L05::30
+BOTTLE: OPEN BUCKET,SDN:L05::30
+"BOTTLE: pH meter manufactured by the Chesapeake Bay Institute, John Hopkins University (model unknown)",SDN:L05::30
+BOTTLE: Salinometer AGE Minisal 2100,SDN:L05::30
+BOTTLE: Salinometer brand/model unknown (generic),SDN:L05::30
+BOTTLE: Salinometer Kahlsico R-10,SDN:L05::30
+BOTTLE: Spectronic 20 spectrophotometer,SDN:L05::30
+BOTTLE: Titroprocessor - Metrohm 682,SDN:L05::30
+"CTD: Fluorometer, TD-700",SDN:L05::113
+"CTD: Fluorometer, Turner Designs, model 10-AU",SDN:L05::113
+CTD: Fluorometer: Chelsea AquaTracka,SDN:L05::113
+"CTD: Fluorometer: Chelsea, model unknown",SDN:L05::113
+CTD: Fluorometer: Instrument manufacturer and model unknown,SDN:L05::113
+"CTD: Fluorometer: Seapoint Chlorophyll Fluorometer (Seapoint Sensors, Inc.)",SDN:L05::113
+"CTD: Fluorometer: SeaTech, model unknown",SDN:L05::113
+"CTD: Fluorometer: Turner Designs, model unknown",SDN:L05::113
+CTD: Fluorometer: WET Labs ECO-AFL,SDN:L05::113
+CTD: Fluorometer: WET Labs WETStar,SDN:L05::113
+"CTD: Radiometer, Profiling Ultraviolet Radiometer and Surface Reference PUV-500B/510B (Biospherical Instruments Inc.)",SDN:L05::122
+"CTD: SBE 9 (Deep ocean precision CTD, Sea-Bird Electronics, Inc.)",SDN:L05::130
+CTD: WET Labs Eco fluorometer for color dissolved organic matter (CDOM),SDN:L05::113
+"DBT: BRANCKER RBR XL-200, mBT (Micro BT)",SDN:L05::132
+DBT: TYPE UNKNOWN,SDN:L05::132
+In-Situ: Automated dissolved oxygen sensor: Aanderaa Oxygen Optode 5013/5014,SDN:L05::351
+In-Situ: Automated dissolved oxygen sensor: Beckman polarographic; model unknown,SDN:L05::351
+In-Situ: Automated dissolved oxygen sensor: brand and model unknown,SDN:L05::351
+THERMISTER CHAIN: THERMISTER CHAIN,SDN:L05::135
+"UNDERWAY: THERMOSALINOGRAPH, UNKNOWN BRAND & MODEL",SDN:L05::133
+XCTD: DEEP (SIPPICAN),SDN:L05::354
+XCTD: SSXCTD (SIPPICAN),SDN:L05::354
+XCTD: STANDARD (SIPPICAN),SDN:L05::354
+XCTD: TYPE UNKNOWN,SDN:L05::354
+XCTD: Under-Ice Subsurface XCTD (SIPPICAN),SDN:L05::354

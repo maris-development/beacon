@@ -1,9 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::{
-    array::{PrimitiveArray, StringArray},
-    datatypes::Float64Type,
-};
+use crate::blue_cloud::util;
+use arrow::array::StringArray;
 use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF},
     prelude::create_udf,
@@ -11,23 +9,24 @@ use datafusion::{
 };
 use lazy_static::lazy_static;
 
+const L22_MAPPINGS_CSV: &[u8] = include_bytes!("l22.csv");
+
 lazy_static! {
-    static ref L33_MAP: HashMap<String, String> = {
-        super::util::read_mappings("./mappings/wod-sdn-instruments.csv", "L33").unwrap_or_default()
-    };
+    static ref L22_MAP: HashMap<String, String> =
+        util::read_mappings_from_reader(L22_MAPPINGS_CSV, "L22").unwrap_or_default();
 }
 
-pub fn map_wod_instrument_l33() -> ScalarUDF {
+pub fn map_cora_instrument_l22() -> ScalarUDF {
     create_udf(
-        "map_wod_instrument_l33",
+        "map_cora_instrument_l22",
         vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_wod_instrument_l33_impl),
+        Arc::new(map_cora_instrument_l22_impl),
     )
 }
 
-fn map_wod_instrument_l33_impl(
+fn map_cora_instrument_l22_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
@@ -38,7 +37,7 @@ fn map_wod_instrument_l33_impl(
                 .unwrap();
 
             let array = flag_array.iter().map(|flag| {
-                flag.map(|value| L33_MAP.get(value).map(|s| s).cloned())
+                flag.map(|wmo_code| L22_MAP.get(wmo_code).map(|s| s).cloned())
                     .flatten()
             });
 
@@ -49,7 +48,7 @@ fn map_wod_instrument_l33_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value
                 .as_ref()
-                .map(|value| L33_MAP.get(value.as_str()).map(|s| s.to_string()))
+                .map(|wmo_code| L22_MAP.get(wmo_code).map(|s| s.to_string()))
                 .flatten();
 
             Ok(ColumnarValue::Scalar(
@@ -61,5 +60,16 @@ fn map_wod_instrument_l33_impl(
                 "Invalid input type".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loading_l22_mappings() {
+        let mappings = L22_MAP.clone();
+        assert!(!mappings.is_empty());
     }
 }

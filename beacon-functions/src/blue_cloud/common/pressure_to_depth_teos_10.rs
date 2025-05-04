@@ -7,20 +7,20 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-pub fn map_pressure_to_depth_function() -> ScalarUDF {
+pub fn pressure_to_depth_teos_10() -> ScalarUDF {
     create_udf(
-        "pressure_to_depth",
+        "pressure_to_depth_teos_10",
         vec![
             datafusion::arrow::datatypes::DataType::Float64,
             datafusion::arrow::datatypes::DataType::Float64,
         ],
         datafusion::arrow::datatypes::DataType::Float64,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(pressure_to_depth_impl),
+        Arc::new(pressure_to_depth_teos_10_impl),
     )
 }
 
-fn pressure_to_depth_impl(
+fn pressure_to_depth_teos_10_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
     //Should accept 1 parameter that is a float

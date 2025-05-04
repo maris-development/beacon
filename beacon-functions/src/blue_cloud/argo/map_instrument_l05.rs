@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use arrow::{array::PrimitiveArray, datatypes::Float64Type};
 use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDF},
     prelude::create_udf,
