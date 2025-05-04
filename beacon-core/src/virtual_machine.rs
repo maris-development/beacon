@@ -68,6 +68,13 @@ impl VirtualMachine {
         //Register format functions
         beacon_sources::sql::table_functions(session_ctx.clone());
 
+        //Register table extensions
+        let functions =
+            beacon_tables::table_extension::table_extension_functions(session_ctx.clone());
+        for function in functions {
+            session_ctx.register_udtf(function.name(), function.function().clone());
+        }
+
         Ok(Self {
             session_ctx,
             schema_provider: beacon_schema_provider,
@@ -104,14 +111,14 @@ impl VirtualMachine {
         session_state.register_file_format(Arc::new(ArrowFormatFactory::new()), true)?;
         session_state.register_file_format(Arc::new(CsvFormatFactory::new()), true)?;
 
-        let session_context = SessionContext::new_with_state(session_state);
+        let session_context = Arc::new(SessionContext::new_with_state(session_state));
 
         session_context.register_object_store(
             ObjectStoreUrl::parse("file://").unwrap().as_ref(),
             beacon_config::OBJECT_STORE_LOCAL_FS.clone(),
         );
 
-        Ok(Arc::new(session_context))
+        Ok(session_context)
     }
 
     pub fn session_ctx(&self) -> Arc<SessionContext> {
@@ -143,6 +150,21 @@ impl VirtualMachine {
             .await
             .map(|t| Arc::new(t.schema().as_arrow().to_owned()))
             .ok()
+    }
+
+    pub async fn list_table_extensions(
+        &self,
+        table_name: String,
+    ) -> anyhow::Result<Vec<Arc<dyn beacon_tables::table_extension::TableExtension>>> {
+        let extensions =
+            self.schema_provider
+                .table_extensions(&table_name)
+                .ok_or(anyhow::anyhow!(
+                    "Error listing table extensions: table: {0} not found",
+                    table_name
+                ))?;
+
+        Ok(extensions)
     }
 
     pub async fn list_default_table_schema(&self) -> SchemaRef {

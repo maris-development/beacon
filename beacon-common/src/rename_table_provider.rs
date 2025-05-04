@@ -1,4 +1,4 @@
-use std::{any::Any, borrow::Cow, sync::Arc};
+use std::{any::Any, borrow::Cow, ops::DerefMut, sync::Arc};
 
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::{
@@ -60,6 +60,38 @@ impl RenameTableProvider {
                 .name()
                 .to_string(),
         )
+    }
+
+    pub fn rename_fields(
+        schema: &Schema,
+        rename_map: &[(String, String)],
+    ) -> Result<Schema, GenericError> {
+        let mut index_map_fields = indexmap::IndexMap::new();
+        for field in schema.fields() {
+            index_map_fields.insert(field.name().to_string(), field.clone());
+        }
+
+        for (old_name, new_name) in rename_map {
+            //Ensure the field exists in the schema
+            if index_map_fields.get(old_name).is_none() {
+                return Err(GenericError::from(format!(
+                    "Field {} not found in schema",
+                    old_name
+                )));
+            }
+
+            //Rename the field
+            if let Some(field) = index_map_fields.get_mut(old_name) {
+                *field = Arc::new(field.as_ref().clone().with_name(new_name));
+            }
+        }
+
+        Ok(Schema::new(
+            index_map_fields
+                .into_iter()
+                .map(|(_, field)| field)
+                .collect::<Vec<_>>(),
+        ))
     }
 
     pub fn rename_field(

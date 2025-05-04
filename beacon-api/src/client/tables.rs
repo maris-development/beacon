@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
-use beacon_tables::table::Table;
+use beacon_tables::{table::Table, table_extension::description::TableExtensionDescription};
 use utoipa::{IntoParams, ToSchema};
 
 #[tracing::instrument(level = "info", skip(state))]
@@ -61,6 +61,43 @@ pub(crate) async fn list_table_schema(
             ))
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
+pub struct ListTableExtensionsQuery {
+    pub table_name: String,
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "tables",
+    get, 
+    path = "/api/table-extensions", 
+    params(ListTableExtensionsQuery) ,
+    responses((status = 200, description = "List of extensions of a table")),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn list_table_extensions(
+    State(state): State<Arc<Runtime>>,
+    Query(query): Query<ListTableExtensionsQuery>,
+) -> Result<Json<Vec<TableExtensionDescription>>, (StatusCode, String)> {
+    let result = state.list_table_extensions(query.table_name.clone()).await;
+
+    match result {
+        Ok(extensions) => Ok(Json(extensions.iter().map(|ext| ext.description()).collect())),
+        Err(error_msg) => {
+            tracing::error!("Error listing table extensions: {}", error_msg);
+            Err((
+                StatusCode::NOT_FOUND,
+                format!("Error listing table extensions: {}", error_msg)
+            ))
+        }
+    }
+
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]

@@ -62,6 +62,13 @@ impl Runtime {
         self.virtual_machine.list_table_schema(table_name).await
     }
 
+    pub async fn list_table_extensions(
+        &self,
+        table_name: String,
+    ) -> anyhow::Result<Vec<Arc<dyn beacon_tables::table_extension::TableExtension>>> {
+        self.virtual_machine.list_table_extensions(table_name).await
+    }
+
     pub async fn list_default_table_schema(&self) -> SchemaRef {
         self.virtual_machine.list_default_table_schema().await
     }
