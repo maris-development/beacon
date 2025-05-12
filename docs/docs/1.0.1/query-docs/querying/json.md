@@ -63,10 +63,8 @@ In the sections below, each of these elements will be highlighted and details wi
 {
     "query_parameters": [
         {
-            "column_name": "",
-            "alias": "",
-            "optional": true,
-            "skip_fill_values": true,
+            "column_name": "query_parameter1",
+            "alias": "query_parameter1_alias"
         }
     ],
     "filters": [
@@ -99,12 +97,10 @@ One single query parameter has the following schema:
 {
     "column_name": "sea_surface_temperature", // The data parameter you would like to query
     "alias": "temperature", // Create an alias for the output column name
-    "optional": true, // If the column is optional or not, if it is optional it is treated as an "OR" gate
-    "skip_fill_values": true, //Skips any rows that have fill values in this column
 }
 ```
 
-#### Column name
+#### Column names
 
 In order to retrieve the available column names you can send a GET request to the `available-columns` endpoint. Below you can find examples for Python, cURL and JavaScript.
 
@@ -146,6 +142,18 @@ Within Beacon we currently have four types of filters.
 * Geo polygon filtering
 * Time filtering
 
+#### Filter Null (Fill Values)
+
+This is relevant for data filters where you want to filter out rows that have fill values in this column. This is useful if you want to filter out rows that have missing data in this column.
+
+```json
+{
+    "is_not_null": {
+        "for_query_parameter": "{query_parameter_alias}"
+    }
+}
+```
+
 #### Min-max
 
 This is relevant for data filters where you need to specify a minimum and maximum value, or for data filters where you need to specify a spatial boundary in the form of a bounding box (using longitude min/max and latitude min/max).
@@ -184,6 +192,24 @@ If the column that you want to query on contains strings you will need to provid
 }
 ```
 
+#### Not eq filter
+
+If the column that you want to query on contains strings you will need to provide the filter as shown in the example below.
+
+```json
+{
+    "for_query_parameter": "query_parameter_alias",
+    "neq": 5
+}
+```
+
+```json
+{
+    "for_query_parameter": "query_parameter_alias",
+    "neq": "string"
+}
+```
+
 #### Geo polygon
 
 This is relevant for data filters where you need to specify a spatial boundary in the form of a polygon.
@@ -213,14 +239,49 @@ This is relevant for data filters where you need to specify a spatial boundary i
 
 #### Time filtering
 
-In the example below you can see how you can query on a "time" column. This requires however, that the column can be converted by Beacon into the standard datetime format.
+In the example below you can see how you can query on a "time" column. This requires you to use the ISO8601 format. The time filter can be used to filter on a specific time range.
 
 ```json
 {
     "for_query_parameter": "datetime_query_parameter_alias",
     "min": "2000-00-00T00:00:00",
     "max": "2001-00-00T00:00:00",
-    "cast": "timestamp"
+}
+```
+
+#### Combining filters using AND / OR
+
+You can combine filters using the `and` and `or` keywords. This allows you to create more complex queries.
+
+```json
+{
+    "and": [
+        {
+            "for_query_parameter": "query_parameter_alias",
+            "min": 0,
+            "max": 5
+        },
+        {
+            "for_query_parameter": "query_parameter_alias",
+            "eq": "string"
+        }
+    ]
+}
+```
+
+```json
+{
+    "or": [
+        {
+            "for_query_parameter": "query_parameter_alias",
+            "min": 0,
+            "max": 5
+        },
+        {
+            "for_query_parameter": "query_parameter_alias",
+            "eq": "string"
+        }
+    ]
 }
 ```
 
@@ -268,21 +329,13 @@ Here you select the output format and choose between CSV, netCDF, ODV, ..
 
 Some output formats might have different options due to them having more features such as internal compression or file layout.
 
-All output formats also include the ability to be compressed on output by adding `"compression" : "{compression_format}"`
-We currently support the following compression formats (`zstd` is recommended):
-
-* zstd : `"compression" : "zstd"`
-* gzip : `"compression" : "gzip"`
-* biz2 : `"compression" : "biz2"`
-
 We have the following output formats:
 
 #### NetCDF
 
 ```json
 {
-    "format": "netcdf",
-    "compression" : "zstd" // This line is optional if you want the output compressed using zstd
+    "format": "netcdf"
 }
 ```
 
@@ -296,45 +349,77 @@ For the data columns it is possible to specify a `qf_column` that will be used a
 You can also specify the `metadata_columns` array to include additional metadata columns in the ODV file.
 
 ```json
-{
 "output": {
-        "format": {
-            "odv": {
-                "longitude_column": {
-                    "column_name": "Longitude [degrees_east]"
+    "format": {
+        "odv": {
+            "longitude_column": {"column_name": "LONGITUDE"},
+            "latitude_column": {"column_name": "LATITUDE"},
+            "time_column": {"column_name": "time_ISO8601 [yyyy-MM-ddTHH:mm:ss.SSS]"},
+            "depth_column": {
+                "column_name": "Depth [m]",
+                "qf_column": "DEPTH_QC",
+            },
+            "data_columns": [
+                {
+                    "column_name": "TEMPERATURE",
+                    "qf_column": "TEMPERATURE_QC",
                 },
-                "latitude_column": {
-                    "column_name": "Latitude [degrees_north]"
+                {
+                    "column_name": "SALINITY",
+                    "qf_column": "SALINITY_QC",
                 },
-                "timestamp_column": {
-                    "data_column_name": "iso_timestamp",
-                    "comment": "_"
+            ],
+            "metadata_columns": [
+                {
+                    "column_name": "TEMPERATURE_P01",
                 },
-                "depth_column": {
-                    "data_column_name": "Depth [m]",
-                    "comment": "Codes: SDN:P01::ADEPZZ01 SDN:P06::ULAA"
+                {
+                    "column_name": "TEMPERATURE_P06",
                 },
-                "data_columns": [
-                    {
-                        "data_column_name": "Temperature [celsius]",
-                        "comment": "Codes: SDN:P01::TEMPPR01 SDN:P06::UPAA",
-                        "qf_column": "Temperature_qc"
-                    },
-                    {
-                        "data_column_name": "Time [days since -4713-01-01T00:00:00Z]",
-                        "comment": "Codes: SDN:P01::CJDY1101 SDN:P06::UTAA"
-                    }
-                ],
-                "metadata_columns": [
-                    {
-                        "column_name": "EDMO_CODE"
-                    },
-                    {
-                        "column_name": "LOCAL_CDI_ID"
-                    }
-                ],
-                "qf_schema": "SEADATANET"
-            }
+                {
+                    "column_name": "TEMPERATURE_L05",
+                },
+                {
+                    "column_name": "TEMPERATURE_L22",
+                },
+                {
+                    "column_name": "TEMPERATURE_L35",
+                },
+                {
+                    "column_name": "SALINITY_P01",
+                },
+                {
+                    "column_name": "SALINITY_P06",
+                },
+                {
+                    "column_name": "SALINITY_L05",
+                },
+                {
+                    "column_name": "SALINITY_L22",
+                },
+                {
+                    "column_name": "SALINITY_L35",
+                },
+                {
+                    "column_name": "DEPTH_P01",
+                },
+                {
+                    "column_name": "DEPTH_P06",
+                },
+                {
+                    "column_name": "PLATFORM_L06",
+                },
+                {
+                    "column_name": "SOURCE_BDI",
+                },
+                {
+                    "column_name": "SOURCE_BDI_DATASET_ID",
+                },
+            ],
+            "qf_schema": "SEADATANET",
+            "key_column": "COMMON_ODV_TAG",
+            # With this line we are asking the zip file to be gzip compressed
+            "archiving": "zip_deflate",
         }
     }
 }
@@ -375,38 +460,4 @@ You can also specify the `metadata_columns` array to include additional metadata
 {
     "format": "ipc"
 }
-```
-
-## Union queries
-
-A union query is a query that combines the results of two or more queries into a single result set. This can be useful when you want to combine data from multiple sources or when you want to combine data from the same source but with different filters or query parameters.
-
-To create a union query, you need to specify the queries that you want to combine in the `queries` field of the query body. Each query should have its own `query_parameters`, `filters`, and `output` fields.
-
-```json
-    {
-        "union": [
-            {
-                "query_parameters": [
-                    {
-                        "column_name": "Temperature",
-                        "alias": "Temperature"
-                    },
-                ],
-                "filters": []
-            },
-            {
-                "query_parameters": [
-                    {
-                        "column_name": "Salinity",
-                        "alias": "Salinity"
-                    },
-                ],
-                "filters": []
-            }
-        ],
-        "output": {
-            "format": "csv"
-        }
-    }
 ```
