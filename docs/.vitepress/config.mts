@@ -296,6 +296,10 @@ export default defineConfig({
                       link: '/docs/1.0.1/query-docs/querying/json#query-parameters'
                     },
                     {
+                      text: 'From',
+                      link: '/docs/1.0.1/query-docs/querying/json#from'
+                    },
+                    {
                       text: 'Filtering',
                       link: '/docs/1.0.1/query-docs/querying/json#filters'
                     },

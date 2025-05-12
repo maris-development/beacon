@@ -122,14 +122,15 @@ curl --location --request GET 'https://beacon-{collection-name}.maris.nl/api/que
 
 You need to select an alias for the column name for the output response. This can be the same name as the original column name.
 
-#### Optional
+### From
 
-You can select whether you want to the column to be optional or not, by setting it to True or False. If the column is listed as optional, it is treated as an "OR" gate, this means that the rows of data that you will retrieve do not have to contain a value or string for this column. In the case that there is no value or string given for a column, but other columns do include a value/string the column cell would be empty.
+Beacon can host multiple collections and datasets at once. When no 'from' is specified, the default collection will be used. If you want to specify a different collection, you can do so by adding the `from` field to the query.
 
-#### Skip fill values
-
-If you want to skip any rows that have fill values in this column, you can set this to true. This is useful if you want to filter out rows that have missing data in this column.
-
+```json
+{
+    "from": "collection_name"
+}     
+```
 
 ### Filters
 
