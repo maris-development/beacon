@@ -349,78 +349,100 @@ For the data columns it is possible to specify a `qf_column` that will be used a
 
 You can also specify the `metadata_columns` array to include additional metadata columns in the ODV file.
 
+The `column_name` field in the `output` should be a reference name to the column you have selected in the `query_parameters` section or the alias of that query parameter.
+The `key_column` is used to identify unique profiles/timeseries or trajectories in the ODV file. This is used to determine whether a dataset is a profile or a time series.
+
 ```json
-"output": {
-    "format": {
-        "odv": {
-            "longitude_column": {"column_name": "LONGITUDE"},
-            "latitude_column": {"column_name": "LATITUDE"},
-            "time_column": {"column_name": "time_ISO8601 [yyyy-MM-ddTHH:mm:ss.SSS]"},
-            "depth_column": {
-                "column_name": "Depth [m]",
-                "qf_column": "DEPTH_QC",
-            },
-            "data_columns": [
-                {
-                    "column_name": "TEMPERATURE",
-                    "qf_column": "TEMPERATURE_QC",
+{
+    "query_parameters": [
+        {
+            "column_name": "TIME",
+            "alias": "time_ISO8601 [yyyy-MM-ddTHH:mm:ss.SSS]"
+        },
+        {
+            "column_name": "LONGITUDE",
+        },
+        {
+            "column_name": "DEPTH",
+            "alias": "Depth [m]"
+        },
+        ...
+    ],
+    "filters": [
+        ...
+    ],
+    "output": {
+        "format": {
+            "odv": {
+                "longitude_column": {"column_name": "LONGITUDE"},
+                "latitude_column": {"column_name": "LATITUDE"},
+                "time_column": {"column_name": "time_ISO8601 [yyyy-MM-ddTHH:mm:ss.SSS]"},
+                "depth_column": {
+                    "column_name": "Depth [m]",
+                    "qf_column": "DEPTH_QC",
                 },
-                {
-                    "column_name": "SALINITY",
-                    "qf_column": "SALINITY_QC",
-                },
-            ],
-            "metadata_columns": [
-                {
-                    "column_name": "TEMPERATURE_P01",
-                },
-                {
-                    "column_name": "TEMPERATURE_P06",
-                },
-                {
-                    "column_name": "TEMPERATURE_L05",
-                },
-                {
-                    "column_name": "TEMPERATURE_L22",
-                },
-                {
-                    "column_name": "TEMPERATURE_L35",
-                },
-                {
-                    "column_name": "SALINITY_P01",
-                },
-                {
-                    "column_name": "SALINITY_P06",
-                },
-                {
-                    "column_name": "SALINITY_L05",
-                },
-                {
-                    "column_name": "SALINITY_L22",
-                },
-                {
-                    "column_name": "SALINITY_L35",
-                },
-                {
-                    "column_name": "DEPTH_P01",
-                },
-                {
-                    "column_name": "DEPTH_P06",
-                },
-                {
-                    "column_name": "PLATFORM_L06",
-                },
-                {
-                    "column_name": "SOURCE_BDI",
-                },
-                {
-                    "column_name": "SOURCE_BDI_DATASET_ID",
-                },
-            ],
-            "qf_schema": "SEADATANET",
-            "key_column": "COMMON_ODV_TAG",
-            # With this line we are asking the zip file to be gzip compressed
-            "archiving": "zip_deflate",
+                "data_columns": [
+                    {
+                        "column_name": "TEMPERATURE",
+                        "qf_column": "TEMPERATURE_QC",
+                    },
+                    {
+                        "column_name": "SALINITY",
+                        "qf_column": "SALINITY_QC",
+                    },
+                ],
+                "metadata_columns": [
+                    {
+                        "column_name": "TEMPERATURE_P01",
+                    },
+                    {
+                        "column_name": "TEMPERATURE_P06",
+                    },
+                    {
+                        "column_name": "TEMPERATURE_L05",
+                    },
+                    {
+                        "column_name": "TEMPERATURE_L22",
+                    },
+                    {
+                        "column_name": "TEMPERATURE_L35",
+                    },
+                    {
+                        "column_name": "SALINITY_P01",
+                    },
+                    {
+                        "column_name": "SALINITY_P06",
+                    },
+                    {
+                        "column_name": "SALINITY_L05",
+                    },
+                    {
+                        "column_name": "SALINITY_L22",
+                    },
+                    {
+                        "column_name": "SALINITY_L35",
+                    },
+                    {
+                        "column_name": "DEPTH_P01",
+                    },
+                    {
+                        "column_name": "DEPTH_P06",
+                    },
+                    {
+                        "column_name": "PLATFORM_L06",
+                    },
+                    {
+                        "column_name": "SOURCE_BDI",
+                    },
+                    {
+                        "column_name": "SOURCE_BDI_DATASET_ID",
+                    },
+                ],
+                "qf_schema": "SEADATANET",
+                "key_column": "COMMON_ODV_TAG",
+                # With this line we are asking the zip file to be gzip compressed
+                "archiving": "zip_deflate",
+            }
         }
     }
 }
