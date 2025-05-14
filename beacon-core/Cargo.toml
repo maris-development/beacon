@@ -37,3 +37,4 @@ beacon-output = { path = "../beacon-output" }
 beacon-query = { path = "../beacon-query" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-tables = { path = "../beacon-tables" }
+beacon-planner = { path = "../beacon-planner" }

@@ -1,3 +1,4 @@
+use core::panic;
 use std::sync::Arc;
 
 use axum::{
@@ -9,7 +10,7 @@ use axum::{
 };
 use beacon_core::runtime::Runtime;
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_query::Query;
+use beacon_query::{output::QueryOutputBuffer, Query};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -40,31 +41,24 @@ pub(crate) async fn query(
     let result = state.run_client_query(query_obj).await;
 
     match result {
-        Ok(output) => match output.output_method {
-            beacon_output::OutputMethod::Stream(stream) => {
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, output.content_type),
-                        (header::CONTENT_DISPOSITION, output.content_disposition),
-                    ],
-                    inner_stream,
-                )
-                    .into_response())
-            }
-            beacon_output::OutputMethod::File(named_temp_file) => {
+        Ok(output) => match output {
+            QueryOutputBuffer::Csv(named_temp_file) => {
                 let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
                 let stream = tokio_util::io::ReaderStream::new(file);
                 let inner_stream = Body::from_stream(stream);
                 Ok((
                     [
-                        (header::CONTENT_TYPE, output.content_type),
-                        (header::CONTENT_DISPOSITION, output.content_disposition),
+                        (header::CONTENT_TYPE, "text/csv"),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            "attachment; filename=\"output.csv\"",
+                        ),
                     ],
                     inner_stream,
                 )
                     .into_response())
             }
+            _ => panic!("Unsupported output format"),
         },
         Err(err) => {
             tracing::error!("Error querying beacon: {}", err);

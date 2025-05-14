@@ -1,20 +1,38 @@
+use std::sync::Arc;
+
+use beacon_output::{Output, TempOutputFile};
 use datafusion::{
-    logical_expr::LogicalPlan,
+    datasource::file_format::{csv::CsvFormatFactory, format_as_file_type},
+    logical_expr::{Analyze, LogicalPlan, LogicalPlanBuilder},
     prelude::{SQLOptions, SessionContext},
 };
+use tempfile::NamedTempFile;
 
-use crate::{plan::BeaconQueryPlan, InnerQuery, QueryBody};
+use crate::{plan::ParsedPlan, InnerQuery, QueryBody};
 
 use super::Query;
 
 pub struct Parser;
 
 impl Parser {
-    pub async fn parse(session: &SessionContext, query: Query) -> anyhow::Result<BeaconQueryPlan> {
+    pub async fn parse(session: &SessionContext, query: Query) -> anyhow::Result<ParsedPlan> {
+        let temp_output = TempOutputFile::new("beacon", ".csv")?;
+
         let datafusion_logical_plan = Self::parse_to_logical_plan(session, query.inner).await?;
-        Ok(BeaconQueryPlan::new(
+        let final_plan = Self::parse_output(
             datafusion_logical_plan,
-            query.output.format,
+            query.output,
+            temp_output.object_store_path().as_str(),
+        )
+        .await?;
+
+        // //Wrap the plan in a analyze
+        let plan_builder = LogicalPlanBuilder::new(final_plan);
+        let final_plan = plan_builder.explain(true, true)?.build()?;
+
+        Ok(ParsedPlan::new(
+            final_plan,
+            crate::output::QueryOutputBuffer::Csv(temp_output.file),
         ))
     }
 
@@ -29,7 +47,6 @@ impl Parser {
                         .with_allow_ddl(false)
                         .with_allow_dml(false)
                         .with_allow_statements(false);
-
                     let logical_plan = session
                         .sql_with_options(&sql, sql_options)
                         .await?
@@ -60,6 +77,7 @@ impl Parser {
             .unwrap_or_default()
             .init_builder(&session)
             .await?;
+
         let session_state = session.state();
 
         builder = builder.project(
@@ -86,5 +104,33 @@ impl Parser {
 
         let plan = builder.build()?;
         Ok(plan)
+    }
+
+    pub async fn parse_output(
+        input_plan: LogicalPlan,
+        output: Output,
+        path: &str,
+    ) -> anyhow::Result<LogicalPlan> {
+        match output.format {
+            beacon_output::OutputFormat::Csv => {
+                let format = Arc::new(CsvFormatFactory::new());
+                let file_type = format_as_file_type(format);
+
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    path.to_string(),
+                    file_type,
+                    Default::default(),
+                    vec![],
+                )?;
+
+                Ok(plan.build()?)
+            }
+            beacon_output::OutputFormat::Ipc => todo!(),
+            beacon_output::OutputFormat::Parquet => todo!(),
+            beacon_output::OutputFormat::Json => todo!(),
+            beacon_output::OutputFormat::Odv(odv_options) => todo!(),
+            beacon_output::OutputFormat::NetCDF => todo!(),
+        }
     }
 }

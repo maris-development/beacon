@@ -595,6 +595,7 @@ dependencies = [
  "beacon-config",
  "beacon-functions",
  "beacon-output",
+ "beacon-planner",
  "beacon-query",
  "beacon-sources",
  "beacon-tables",
@@ -659,6 +660,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-planner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "beacon-config",
+ "beacon-functions",
+ "beacon-output",
+ "beacon-query",
+ "beacon-sources",
+ "chrono",
+ "datafusion",
+ "geojson",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "beacon-query"
 version = "0.1.0"
 dependencies = [
@@ -671,6 +694,7 @@ dependencies = [
  "datafusion",
  "geojson",
  "serde",
+ "tempfile",
  "tokio",
  "tracing",
  "utoipa",
@@ -4060,9 +4084,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.13.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c1f41ffb7cf259f1ecc2876861a17e7142e63ead296f671f81f6ae85903e0d6"
+checksum = "458f7a779bf54acc9f347480ac654f68407d3aab21269a6e3c9f922acd9e2da9"
 dependencies = [
  "getrandom 0.3.1",
 ]

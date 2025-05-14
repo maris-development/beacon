@@ -17,6 +17,7 @@ use beacon_sources::{
     parquet_format::SuperParquetFormat, DataSource,
 };
 
+pub mod output;
 pub mod parser;
 pub mod plan;
 

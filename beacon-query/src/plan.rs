@@ -1,15 +1,16 @@
-use beacon_output::OutputFormat;
 use datafusion::logical_expr::LogicalPlan;
 
-pub struct BeaconQueryPlan {
-    pub inner_datafusion_plan: LogicalPlan,
-    pub output: OutputFormat,
+use crate::output::QueryOutputBuffer;
+
+pub struct ParsedPlan {
+    pub datafusion_plan: LogicalPlan,
+    pub output: QueryOutputBuffer,
 }
 
-impl BeaconQueryPlan {
-    pub fn new(inner_datafusion_plan: LogicalPlan, output: OutputFormat) -> Self {
+impl ParsedPlan {
+    pub fn new(datafusion_plan: LogicalPlan, output: QueryOutputBuffer) -> Self {
         Self {
-            inner_datafusion_plan,
+            datafusion_plan,
             output,
         }
     }

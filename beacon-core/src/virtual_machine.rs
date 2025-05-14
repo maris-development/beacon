@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::{OutputFormat, OutputResponse};
+use beacon_planner::plan::BeaconQueryPlan;
 use beacon_sources::{
     formats_factory::Formats, netcdf_format::NetCDFFileFormatFactory,
     parquet_format::SuperParquetFormatFactory,
@@ -188,36 +189,16 @@ impl VirtualMachine {
         Ok(self.schema_provider.delete_table(table_name).await?)
     }
 
-    pub async fn run_client_sql(
-        &self,
-        sql: &str,
-        output: &OutputFormat,
-    ) -> anyhow::Result<OutputResponse> {
-        let sql_options = SQLOptions::new()
-            .with_allow_ddl(false)
-            .with_allow_dml(false)
-            .with_allow_statements(false);
-        let df = self.session_ctx.sql_with_options(sql, sql_options).await?;
-        output.output(self.session_ctx.clone(), df).await
-    }
+    pub async fn run_plan(&self, beacon_plan: &BeaconQueryPlan) -> anyhow::Result<()> {
+        let result = datafusion::physical_plan::collect(
+            beacon_plan.physical_plan.clone(),
+            self.session_ctx().task_ctx(),
+        )
+        .await?;
 
-    pub async fn run_plan(
-        &self,
-        plan: LogicalPlan,
-        output: &OutputFormat,
-    ) -> anyhow::Result<OutputResponse> {
-        let df = DataFrame::new(self.session_ctx.state(), plan);
-        output.output(self.session_ctx.clone(), df).await
-    }
+        println!("Res: {:?}", result);
 
-    pub async fn run_sql(
-        &self,
-        sql: &str,
-        output: &OutputFormat,
-    ) -> anyhow::Result<OutputResponse> {
-        let df = self.session_ctx.sql(sql).await?;
-
-        output.output(self.session_ctx.clone(), df).await
+        Ok(())
     }
 
     pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {

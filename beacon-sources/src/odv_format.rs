@@ -125,6 +125,10 @@ impl OdvExec {
         }
     }
 
+    pub fn file_scan_config(&self) -> &FileScanConfig {
+        &self.file_scan_config
+    }
+
     fn plan_properties(num_partitions: usize, schema: SchemaRef) -> PlanProperties {
         let schema = schema.clone();
 
