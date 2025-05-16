@@ -5,11 +5,9 @@ use arrow::{
     datatypes::{SchemaRef, UInt64Type},
 };
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_output::{OutputFormat, OutputResponse};
 use beacon_planner::plan::BeaconQueryPlan;
 use beacon_sources::{
-    formats_factory::Formats, netcdf_format::NetCDFFileFormatFactory,
-    parquet_format::SuperParquetFormatFactory,
+    netcdf_format::NetCDFFileFormatFactory, parquet_format::SuperParquetFormatFactory,
 };
 use beacon_tables::{schema_provider::BeaconSchemaProvider, table::Table};
 use datafusion::{
@@ -194,6 +192,7 @@ impl VirtualMachine {
         Ok(self.schema_provider.delete_table(table_name).await?)
     }
 
+    #[tracing::instrument(skip(self, beacon_plan))]
     pub async fn run_plan(&self, beacon_plan: &BeaconQueryPlan) -> anyhow::Result<()> {
         let result = datafusion::physical_plan::collect(
             beacon_plan.physical_plan.clone(),
@@ -201,9 +200,27 @@ impl VirtualMachine {
         )
         .await?;
 
+        match result
+            .get(0)
+            .map(|r| r.column(0).as_primitive_opt::<UInt64Type>())
+            .flatten()
+        {
+            Some(num_rows_arr) => {
+                if num_rows_arr.len() > 0 {
+                    let num_rows = num_rows_arr.value(0);
+                    beacon_plan.metrics_tracker.add_output_rows(num_rows);
+                    tracing::info!("Query Returned {} rows", num_rows);
+                }
+            }
+            None => {
+                tracing::error!("Error getting number of rows from plan");
+            }
+        }
         // Get the row count
-        let row_count = result[0].column(0).as_primitive::<UInt64Type>().value(0);
-        beacon_plan.metrics_tracker.add_output_rows(row_count);
+        tracing::info!(
+            "Query result size in bytes: {:?}",
+            beacon_plan.output_buffer.size()
+        );
         beacon_plan
             .metrics_tracker
             .add_output_bytes(beacon_plan.output_buffer.size()?);

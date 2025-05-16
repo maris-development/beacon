@@ -48,6 +48,7 @@ pub struct Output {
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     Csv,
+    #[serde(alias = "arrow")]
     Ipc,
     Parquet,
     Json,

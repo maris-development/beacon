@@ -6,17 +6,14 @@ use std::{
     sync::Arc,
 };
 
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::SchemaRef;
 use async_stream::try_stream;
 use beacon_arrow_odv::writer::{AsyncOdvWriter, OdvOptions};
 use beacon_common::super_typing;
 use datafusion::{
     common::{GetExt, Statistics},
     datasource::{
-        file_format::{
-            file_compression_type::FileCompressionType, FileFormat, FileFormatFactory,
-            FilePushdownSupport,
-        },
+        file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
         physical_plan::{FileScanConfig, FileSinkConfig},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
