@@ -3,6 +3,7 @@ use std::sync::Arc;
 use beacon_query::{Query, output::QueryOutputFile};
 use datafusion::{
     datasource::physical_plan::{CsvExec, ParquetExec},
+    physical_plan::filter::FilterExec,
     prelude::SessionContext,
 };
 
@@ -20,11 +21,12 @@ pub async fn plan_query(
     let physical_plan = state.create_physical_plan(&optimized_plan).await?;
     let metrics_tracker = MetricsTracker::new();
 
+    // FilterExec
     let tracked_physical_plan = wrap_file_scans(physical_plan.clone(), metrics_tracker.clone());
 
     metrics_tracker.set_logical_plan(&parsed_plan.datafusion_plan);
     metrics_tracker.set_optimized_logical_plan(&optimized_plan);
-    metrics_tracker.set_physical_plan(physical_plan);
+    metrics_tracker.set_physical_plan(tracked_physical_plan.clone());
 
     Ok(BeaconQueryPlan {
         query_id,
@@ -48,7 +50,7 @@ fn wrap_file_scans(
             .flat_map(|group| group.iter())
             .map(|f| f.object_meta.location.to_string())
             .collect::<Vec<_>>();
-        // Add the file paths to the tracker
+
         tracker.add_file_paths(files);
     } else if let Some(parquet) = plan.as_any().downcast_ref::<ParquetExec>() {
         let files = parquet

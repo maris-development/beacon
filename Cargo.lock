@@ -496,6 +496,7 @@ dependencies = [
  "beacon-core",
  "beacon-functions",
  "beacon-output",
+ "beacon-planner",
  "beacon-query",
  "beacon-sources",
  "beacon-tables",
@@ -512,6 +513,7 @@ dependencies = [
  "utoipa-axum",
  "utoipa-scalar",
  "utoipa-swagger-ui",
+ "uuid",
 ]
 
 [[package]]
@@ -617,6 +619,7 @@ dependencies = [
  "tracing",
  "typetag",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]

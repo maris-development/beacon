@@ -10,7 +10,7 @@ use datafusion::{
 };
 use parking_lot::{Mutex, RwLock};
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConsolidatedMetrics {
     pub input_rows: u64,
     pub input_bytes: u64,
@@ -120,7 +120,7 @@ impl MetricsTracker {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NodeMetrics {
     operator: String,
     metrics: HashMap<String, serde_json::Value>,
@@ -138,8 +138,6 @@ fn collect_metrics_json(plan: &dyn ExecutionPlan) -> NodeMetrics {
             );
         }
     }
-
-    println!("Plan {} metrics: {:?}", plan.name(), plan.metrics());
 
     let children = plan
         .children()
