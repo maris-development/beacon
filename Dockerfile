@@ -31,6 +31,7 @@ COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
 COPY beacon-functions/ /beacon-functions/
 COPY beacon-output/ /beacon-output/
+COPY beacon-planner/ /beacon-planner/
 COPY beacon-query/ /beacon-query/
 COPY beacon-sources/ /beacon-sources/
 COPY beacon-tables/ /beacon-tables/

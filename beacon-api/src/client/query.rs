@@ -69,7 +69,7 @@ pub(crate) async fn query(
                 let inner_stream = Body::from_stream(stream);
                 Ok((
                     [
-                        (header::CONTENT_TYPE, "application/octet-stream"),
+                        (header::CONTENT_TYPE, "application/vnd.apache.parquet"),
                         (
                             header::CONTENT_DISPOSITION,
                             "attachment; filename=\"output.parquet\"",
@@ -89,7 +89,7 @@ pub(crate) async fn query(
                 let inner_stream = Body::from_stream(stream);
                 Ok((
                     [
-                        (header::CONTENT_TYPE, "application/octet-stream"),
+                        (header::CONTENT_TYPE, "application/vnd.apache.arrow.file"),
                         (
                             header::CONTENT_DISPOSITION,
                             "attachment; filename=\"output.arrow\"",
@@ -129,7 +129,7 @@ pub(crate) async fn query(
                 let inner_stream = Body::from_stream(stream);
                 Ok((
                     [
-                        (header::CONTENT_TYPE, "application/octet-stream"),
+                        (header::CONTENT_TYPE, "application/zip"),
                         (
                             header::CONTENT_DISPOSITION,
                             "attachment; filename=\"output.zip\"",
