@@ -4,7 +4,7 @@ use crate::virtual_machine;
 use arrow::datatypes::SchemaRef;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::OutputResponse;
-use beacon_query::{output::QueryOutputBuffer, parser::Parser, Query};
+use beacon_query::{output::QueryOutputFile, parser::Parser, Query};
 use beacon_sources::formats_factory::Formats;
 use beacon_tables::table::Table;
 use datafusion::prelude::DataFrame;
@@ -19,7 +19,7 @@ impl Runtime {
         Ok(Self { virtual_machine })
     }
 
-    pub async fn run_client_query(&self, query: Query) -> anyhow::Result<QueryOutputBuffer> {
+    pub async fn run_client_query(&self, query: Query) -> anyhow::Result<QueryOutputFile> {
         let plan =
             beacon_planner::prelude::plan_query(self.virtual_machine.session_ctx(), query).await?;
 

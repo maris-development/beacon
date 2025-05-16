@@ -10,7 +10,7 @@ use axum::{
 };
 use beacon_core::runtime::Runtime;
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_query::{output::QueryOutputBuffer, Query};
+use beacon_query::{output::QueryOutputFile, Query};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -42,7 +42,7 @@ pub(crate) async fn query(
 
     match result {
         Ok(output) => match output {
-            QueryOutputBuffer::Csv(named_temp_file) => {
+            QueryOutputFile::Csv(named_temp_file) => {
                 let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
                 let stream = tokio_util::io::ReaderStream::new(file);
                 let inner_stream = Body::from_stream(stream);

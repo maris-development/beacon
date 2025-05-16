@@ -2,25 +2,74 @@ use std::{any::Any, fmt::Formatter, sync::Arc};
 
 use arrow::datatypes::{Schema, SchemaRef};
 use async_stream::try_stream;
+use beacon_arrow_odv::writer::OdvOptions;
 use beacon_common::super_typing;
 use datafusion::{
-    common::Statistics,
+    common::{GetExt, Statistics},
     datasource::{
         file_format::{
-            file_compression_type::FileCompressionType, FileFormat, FilePushdownSupport,
+            file_compression_type::FileCompressionType, FileFormat, FileFormatFactory,
+            FilePushdownSupport,
         },
         physical_plan::{FileScanConfig, FileSinkConfig},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
     execution::{SendableRecordBatchStream, SessionState, TaskContext},
-    physical_expr::{EquivalenceProperties, LexRequirement},
+    physical_expr::EquivalenceProperties,
     physical_plan::{
         stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan,
         PhysicalExpr, PlanProperties,
     },
-    prelude::Expr,
 };
 use object_store::{ObjectMeta, ObjectStore};
+
+#[derive(Debug)]
+pub struct OdvFileFormatFactory {
+    options: Option<OdvOptions>,
+}
+
+impl OdvFileFormatFactory {
+    pub fn new(options: Option<OdvOptions>) -> Self {
+        OdvFileFormatFactory { options }
+    }
+
+    pub fn options(&self) -> &Option<OdvOptions> {
+        &self.options
+    }
+
+    pub fn set_options(&mut self, options: OdvOptions) {
+        self.options = Some(options);
+    }
+
+    pub fn clear_options(&mut self) {
+        self.options = None;
+    }
+}
+
+impl GetExt for OdvFileFormatFactory {
+    fn get_ext(&self) -> String {
+        "txt".to_string()
+    }
+}
+
+impl FileFormatFactory for OdvFileFormatFactory {
+    fn create(
+        &self,
+        state: &SessionState,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        Ok(Arc::new(OdvFormat))
+    }
+
+    fn default(&self) -> Arc<dyn FileFormat> {
+        Arc::new(OdvFormat)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[derive(Debug)]
 pub struct OdvFormat;
 

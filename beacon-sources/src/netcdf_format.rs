@@ -1,21 +1,28 @@
-use std::{any::Any, fmt::Formatter, sync::Arc};
+use std::{
+    any::Any,
+    fmt::{Debug, Formatter},
+    sync::{atomic::AtomicU64, Arc},
+};
 
 use arrow::datatypes::SchemaRef;
 use async_stream::try_stream;
+use beacon_arrow_netcdf::{encoders::default::DefaultEncoder, writer::ArrowRecordBatchWriter};
 use datafusion::{
     common::{GetExt, Statistics},
     datasource::{
         file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
-        physical_plan::FileScanConfig,
+        physical_plan::{FileScanConfig, FileSinkConfig},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
     execution::{SendableRecordBatchStream, SessionState, TaskContext},
-    physical_expr::EquivalenceProperties,
+    physical_expr::{EquivalenceProperties, LexRequirement},
     physical_plan::{
-        stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan,
-        PhysicalExpr, PlanProperties,
+        insert::{DataSink, DataSinkExec},
+        stream::RecordBatchStreamAdapter,
+        DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
     },
 };
+use futures::StreamExt;
 use object_store::{ObjectMeta, ObjectStore};
 
 use beacon_common::super_typing;
@@ -120,6 +127,27 @@ impl FileFormat for NetCDFFormat {
         _filters: Option<&Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(NetCDFExec::new(conf)))
+    }
+
+    async fn create_writer_physical_plan(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        state: &SessionState,
+        conf: FileSinkConfig,
+        order_requirements: Option<LexRequirement>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let sink_schema = Arc::clone(conf.output_schema());
+        let sink = Arc::new(NetCDFSink {
+            input: Arc::clone(&input),
+            conf: conf,
+        });
+
+        Ok(Arc::new(DataSinkExec::new(
+            input,
+            sink,
+            sink_schema,
+            order_requirements,
+        )))
     }
 }
 
@@ -248,5 +276,74 @@ impl ExecutionPlan for NetCDFExec {
         _context: Arc<TaskContext>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         Ok(self.read_partition(partition))
+    }
+}
+
+pub struct NetCDFSink {
+    input: Arc<dyn ExecutionPlan>,
+    conf: FileSinkConfig,
+}
+
+impl Debug for NetCDFSink {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NetCDFSink")
+    }
+}
+
+impl DisplayAs for NetCDFSink {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "NetCDFSink")
+    }
+}
+
+#[async_trait::async_trait]
+impl DataSink for NetCDFSink {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
+        None
+    }
+
+    async fn write_all(
+        &self,
+        data: SendableRecordBatchStream,
+        context: &Arc<TaskContext>,
+    ) -> datafusion::error::Result<u64> {
+        let arrow_schema = self.conf.output_schema().clone();
+        let location = self.conf.object_store_url.as_str();
+        println!("Writing to NetCDF: {}", location);
+        let mut rows_written: u64 = 0;
+
+        let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::new(location, arrow_schema)
+            .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to create NetCDF ArrowRecordBatchWriter: {}",
+                e
+            ))
+        })?;
+
+        let mut pinned_steam = std::pin::pin!(data);
+
+        while let Some(batch) = pinned_steam.next().await {
+            let batch = batch?;
+            rows_written += batch.num_rows() as u64;
+            nc_writer.write_record_batch(batch).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to write record batch to NetCDF: {}",
+                    e
+                ))
+            })?;
+        }
+
+        nc_writer.finish().map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to finish writing NetCDF: {}",
+                e
+            ))
+        })?;
+
+        Ok(rows_written)
     }
 }

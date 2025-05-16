@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use beacon_query::{Query, output::QueryOutputBuffer};
+use beacon_query::{Query, output::QueryOutputFile};
 use datafusion::{
     datasource::physical_plan::{CsvExec, ParquetExec},
     prelude::SessionContext,
@@ -75,5 +75,5 @@ pub struct BeaconQueryPlan {
     pub query_id: uuid::Uuid,
     pub metrics_tracker: Arc<MetricsTracker>,
     pub physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
-    pub output_buffer: QueryOutputBuffer,
+    pub output_buffer: QueryOutputFile,
 }

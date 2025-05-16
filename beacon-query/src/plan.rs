@@ -1,14 +1,14 @@
 use datafusion::logical_expr::LogicalPlan;
 
-use crate::output::QueryOutputBuffer;
+use crate::output::QueryOutputFile;
 
 pub struct ParsedPlan {
     pub datafusion_plan: LogicalPlan,
-    pub output: QueryOutputBuffer,
+    pub output: QueryOutputFile,
 }
 
 impl ParsedPlan {
-    pub fn new(datafusion_plan: LogicalPlan, output: QueryOutputBuffer) -> Self {
+    pub fn new(datafusion_plan: LogicalPlan, output: QueryOutputFile) -> Self {
         Self {
             datafusion_plan,
             output,
