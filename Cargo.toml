@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-tables", "beacon-output", "beacon-query", "beacon-sources"]
+members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-tables", "beacon-output", "beacon-query", "beacon-sources", "beacon-planner"]
 
 [workspace.dependencies]
 tokio = { version = "1.43.0", features = ["full"] }
@@ -8,7 +8,7 @@ futures = "0.3.31"
 futures-util = "0.3.31"
 async-trait = "0.1.85"
 bytes = "1.9.0"
-parking_lot = { version = "0.12.3", features = ["send_guard"] }
+parking_lot = { version = "0.12.3", features = ["send_guard", "serde"] }
 
 
 utoipa = { version= "=5.3.1", features = ["chrono","preserve_order", "preserve_path_order","rc_schema", "axum_extras"] }

@@ -23,6 +23,7 @@ object_store = { workspace = true }
 async-stream = "0.3.6"
 parking_lot = { workspace = true}
 
+uuid = "1.16.0"
 inventory = "0.3.18"
 pathdiff = "0.2.3"
 
@@ -37,3 +38,4 @@ beacon-output = { path = "../beacon-output" }
 beacon-query = { path = "../beacon-query" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-tables = { path = "../beacon-tables" }
+beacon-planner = { path = "../beacon-planner" }

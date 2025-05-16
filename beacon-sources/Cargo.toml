@@ -19,6 +19,7 @@ nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", bran
 tracing = { workspace=true }
 serde = { workspace=true}
 utoipa = { workspace=true}
+tempfile = { workspace=true}
 regex = "1.11.1"
 
 # Local dependencies

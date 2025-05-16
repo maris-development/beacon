@@ -1,21 +1,25 @@
+use std::sync::Arc;
+
+use beacon_output::{Output, TempOutputFile};
+use beacon_sources::{netcdf_format::NetCDFFileFormatFactory, odv_format::OdvFormat};
 use datafusion::{
-    logical_expr::LogicalPlan,
+    datasource::file_format::{csv::CsvFormatFactory, format_as_file_type, FileFormat},
+    logical_expr::{Analyze, LogicalPlan, LogicalPlanBuilder},
     prelude::{SQLOptions, SessionContext},
 };
 
-use crate::{plan::BeaconQueryPlan, InnerQuery, QueryBody};
+use crate::{output::QueryOutputFile, plan::ParsedPlan, InnerQuery, QueryBody};
 
 use super::Query;
 
 pub struct Parser;
 
 impl Parser {
-    pub async fn parse(session: &SessionContext, query: Query) -> anyhow::Result<BeaconQueryPlan> {
+    pub async fn parse(session: &SessionContext, query: Query) -> anyhow::Result<ParsedPlan> {
         let datafusion_logical_plan = Self::parse_to_logical_plan(session, query.inner).await?;
-        Ok(BeaconQueryPlan::new(
-            datafusion_logical_plan,
-            query.output.format,
-        ))
+        let (plan, output_file) = Self::parse_output(datafusion_logical_plan, query.output).await?;
+
+        Ok(ParsedPlan::new(plan, output_file))
     }
 
     pub async fn parse_to_logical_plan(
@@ -29,7 +33,6 @@ impl Parser {
                         .with_allow_ddl(false)
                         .with_allow_dml(false)
                         .with_allow_statements(false);
-
                     let logical_plan = session
                         .sql_with_options(&sql, sql_options)
                         .await?
@@ -60,6 +63,7 @@ impl Parser {
             .unwrap_or_default()
             .init_builder(&session)
             .await?;
+
         let session_state = session.state();
 
         builder = builder.project(
@@ -86,5 +90,100 @@ impl Parser {
 
         let plan = builder.build()?;
         Ok(plan)
+    }
+
+    pub async fn parse_output(
+        input_plan: LogicalPlan,
+        output: Output,
+    ) -> anyhow::Result<(LogicalPlan, QueryOutputFile)> {
+        match output.format {
+            beacon_output::OutputFormat::Csv => {
+                let temp_output = TempOutputFile::new("beacon", ".csv")?;
+                let format = Arc::new(CsvFormatFactory::new());
+                let file_type = format_as_file_type(format);
+
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    temp_output.object_store_path().to_string(),
+                    file_type,
+                    Default::default(),
+                    vec![],
+                )?;
+
+                Ok((plan.build()?, QueryOutputFile::Csv(temp_output.file)))
+            }
+            beacon_output::OutputFormat::Ipc => {
+                let temp_output = TempOutputFile::new("beacon", ".arrow")?;
+                let format = Arc::new(
+                    datafusion::datasource::file_format::arrow::ArrowFormatFactory::default(),
+                );
+                let file_type = format_as_file_type(format);
+                let path = temp_output.object_store_path();
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    path.to_string(),
+                    file_type,
+                    Default::default(),
+                    vec![],
+                )?;
+
+                Ok((plan.build()?, QueryOutputFile::Ipc(temp_output.file)))
+            }
+            beacon_output::OutputFormat::Parquet => {
+                let temp_output = TempOutputFile::new("beacon", ".parquet")?;
+                let path = temp_output.object_store_path();
+                let format = Arc::new(
+                    datafusion::datasource::file_format::parquet::ParquetFormatFactory::default(),
+                );
+                let file_type = format_as_file_type(format);
+
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    path.to_string(),
+                    file_type,
+                    Default::default(),
+                    vec![],
+                )?;
+
+                Ok((plan.build()?, QueryOutputFile::Parquet(temp_output.file)))
+            }
+            beacon_output::OutputFormat::Json => {
+                let temp_output = TempOutputFile::new("beacon", ".json")?;
+                let path = temp_output.object_store_path();
+                let format = Arc::new(
+                    datafusion::datasource::file_format::json::JsonFormatFactory::default(),
+                );
+                let file_type = format_as_file_type(format);
+
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    path.to_string(),
+                    file_type,
+                    Default::default(),
+                    vec![],
+                )?;
+
+                Ok((plan.build()?, QueryOutputFile::Json(temp_output.file)))
+            }
+            beacon_output::OutputFormat::Odv(odv_options) => {
+                todo!()
+            }
+            beacon_output::OutputFormat::NetCDF => {
+                let temp_output = TempOutputFile::new("beacon", ".nc")?;
+                let path = temp_output.object_store_path();
+                let format = Arc::new(NetCDFFileFormatFactory);
+                let file_type = format_as_file_type(format);
+
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    path.to_string(),
+                    file_type,
+                    Default::default(),
+                    vec![],
+                )?;
+
+                Ok((plan.build()?, QueryOutputFile::NetCDF(temp_output.file)))
+            }
+        }
     }
 }

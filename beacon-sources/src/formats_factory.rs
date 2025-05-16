@@ -44,7 +44,7 @@ impl Formats {
                 infer_schema_records,
                 ..
             } => Arc::new(SuperCsvFormat::new(*delimiter, *infer_schema_records)),
-            Formats::Odv { .. } => Arc::new(OdvFormat),
+            Formats::Odv { .. } => Arc::new(OdvFormat::new()),
             Formats::NetCDF { .. } => Arc::new(NetCDFFormat::new()),
         }
     }

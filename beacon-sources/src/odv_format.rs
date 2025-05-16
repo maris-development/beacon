@@ -1,28 +1,103 @@
-use std::{any::Any, fmt::Formatter, sync::Arc};
+use std::{
+    any::Any,
+    fmt::{Debug, Formatter},
+    fs::File,
+    io::BufWriter,
+    sync::Arc,
+};
 
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::SchemaRef;
 use async_stream::try_stream;
+use beacon_arrow_odv::writer::{AsyncOdvWriter, OdvOptions};
 use beacon_common::super_typing;
 use datafusion::{
-    common::Statistics,
+    common::{GetExt, Statistics},
     datasource::{
-        file_format::{
-            file_compression_type::FileCompressionType, FileFormat, FilePushdownSupport,
-        },
+        file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
         physical_plan::{FileScanConfig, FileSinkConfig},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
     execution::{SendableRecordBatchStream, SessionState, TaskContext},
     physical_expr::{EquivalenceProperties, LexRequirement},
     physical_plan::{
-        stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan,
-        PhysicalExpr, PlanProperties,
+        insert::{DataSink, DataSinkExec},
+        stream::RecordBatchStreamAdapter,
+        DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
     },
-    prelude::Expr,
 };
+use futures::StreamExt;
 use object_store::{ObjectMeta, ObjectStore};
+
 #[derive(Debug)]
-pub struct OdvFormat;
+pub struct OdvFileFormatFactory {
+    options: Option<OdvOptions>,
+}
+
+impl OdvFileFormatFactory {
+    pub fn new(options: Option<OdvOptions>) -> Self {
+        OdvFileFormatFactory { options }
+    }
+
+    pub fn options(&self) -> &Option<OdvOptions> {
+        &self.options
+    }
+
+    pub fn set_options(&mut self, options: OdvOptions) {
+        self.options = Some(options);
+    }
+
+    pub fn clear_options(&mut self) {
+        self.options = None;
+    }
+}
+
+impl GetExt for OdvFileFormatFactory {
+    fn get_ext(&self) -> String {
+        "txt".to_string()
+    }
+}
+
+impl FileFormatFactory for OdvFileFormatFactory {
+    fn create(
+        &self,
+        state: &SessionState,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        match self.options {
+            Some(ref options) => {
+                let format = OdvFormat::new_with_options(options.clone());
+                return Ok(Arc::new(format) as Arc<dyn FileFormat>);
+            }
+            None => {
+                return Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>);
+            }
+        }
+    }
+
+    fn default(&self) -> Arc<dyn FileFormat> {
+        Arc::new(OdvFormat::new())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct OdvFormat {
+    options: Option<OdvOptions>,
+}
+
+impl OdvFormat {
+    pub fn new() -> Self {
+        OdvFormat { options: None }
+    }
+    pub fn new_with_options(options: OdvOptions) -> Self {
+        OdvFormat {
+            options: Some(options),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl FileFormat for OdvFormat {
@@ -94,6 +169,28 @@ impl FileFormat for OdvFormat {
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(OdvExec::new(conf)))
     }
+
+    async fn create_writer_physical_plan(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        state: &SessionState,
+        conf: FileSinkConfig,
+        order_requirements: Option<LexRequirement>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let sink_schema = Arc::clone(conf.output_schema());
+        let sink = Arc::new(OdvSink {
+            input: Arc::clone(&input),
+            config: conf,
+            odv_options: self.options.clone(),
+        });
+
+        Ok(Arc::new(DataSinkExec::new(
+            input,
+            sink,
+            sink_schema,
+            order_requirements,
+        )))
+    }
 }
 
 #[derive(Debug)]
@@ -123,6 +220,10 @@ impl OdvExec {
             table_schema: file_scan_conf.file_schema.clone(),
             file_scan_config: file_scan_conf,
         }
+    }
+
+    pub fn file_scan_config(&self) -> &FileScanConfig {
+        &self.file_scan_config
     }
 
     fn plan_properties(num_partitions: usize, schema: SchemaRef) -> PlanProperties {
@@ -221,5 +322,100 @@ impl ExecutionPlan for OdvExec {
         _context: Arc<TaskContext>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         Ok(self.read_partition(partition))
+    }
+}
+
+pub struct OdvSink {
+    input: Arc<dyn ExecutionPlan>,
+    config: FileSinkConfig,
+    odv_options: Option<OdvOptions>,
+}
+
+impl Debug for OdvSink {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "OdvSink")
+    }
+}
+
+impl DisplayAs for OdvSink {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "OdvSink")
+    }
+}
+
+#[async_trait::async_trait]
+impl DataSink for OdvSink {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
+        None
+    }
+
+    async fn write_all(
+        &self,
+        data: SendableRecordBatchStream,
+        context: &Arc<TaskContext>,
+    ) -> datafusion::error::Result<u64> {
+        let arrow_schema = self.config.output_schema().clone();
+
+        let mut rows_written: u64 = 0;
+
+        let odv_options = self.odv_options.clone().unwrap_or(
+            OdvOptions::try_from_arrow_schema(arrow_schema.clone()).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to implicitly define ODV settings: {}",
+                    e
+                ))
+            })?,
+        );
+        let temp_dir = tempfile::tempdir()?;
+        let mut odv_writer =
+            AsyncOdvWriter::new(odv_options, arrow_schema.clone(), temp_dir.path())
+                .await
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to create ODV writer: {}",
+                        e
+                    ))
+                })?;
+
+        let mut stream = std::pin::pin!(data);
+
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            rows_written += batch.num_rows() as u64;
+            odv_writer.write(batch).await.map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to write ODV batch: {}",
+                    e
+                ))
+            })?;
+        }
+
+        let output_path = format!(
+            "{}/{}",
+            beacon_config::DATA_DIR.to_string_lossy(),
+            self.config.table_paths[0].prefix().to_string()
+        );
+
+        let mut zip_file_writer = BufWriter::new(File::create(output_path).map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to create ODV zip file writer: {}",
+                e
+            ))
+        })?);
+
+        odv_writer
+            .finish_to_archive(&mut zip_file_writer)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to create ODV zip archive: {}",
+                    e
+                ))
+            })?;
+
+        Ok(rows_written)
     }
 }

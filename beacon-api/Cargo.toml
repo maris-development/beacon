@@ -22,7 +22,7 @@ serde = { workspace = true}
 anyhow = { workspace = true}
 arrow = { workspace = true}
 arrow-schema = { workspace = true}
-
+uuid = { version = "1.16.0" }
 tracing = { workspace = true}
 tracing-subscriber = { workspace = true}
 
@@ -32,5 +32,6 @@ beacon-core = { path = "../beacon-core" }
 beacon-query = { path = "../beacon-query" }
 beacon-sources = { path = "../beacon-sources" }
 beacon-output = { path = "../beacon-output" }
+beacon-planner = { path = "../beacon-planner" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-tables = { path = "../beacon-tables" }

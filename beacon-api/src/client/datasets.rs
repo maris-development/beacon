@@ -7,7 +7,6 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
-use beacon_sources::formats_factory::Formats;
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
