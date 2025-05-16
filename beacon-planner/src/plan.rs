@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use beacon_query::{Query, output::QueryOutputFile};
+use beacon_sources::{netcdf_format::NetCDFExec, odv_format::OdvExec};
 use datafusion::{
-    datasource::physical_plan::{CsvExec, ParquetExec},
+    datasource::physical_plan::{ArrowExec, CsvExec, ParquetExec},
     physical_plan::filter::FilterExec,
     prelude::SessionContext,
 };
@@ -57,6 +58,36 @@ fn wrap_file_scans(
     } else if let Some(parquet) = plan.as_any().downcast_ref::<ParquetExec>() {
         let files = parquet
             .base_config()
+            .file_groups
+            .iter()
+            .flat_map(|group| group.iter())
+            .map(|f| f.object_meta.location.to_string())
+            .collect::<Vec<_>>();
+
+        tracker.add_file_paths(files);
+    } else if let Some(arrow) = plan.as_any().downcast_ref::<ArrowExec>() {
+        let files = arrow
+            .base_config()
+            .file_groups
+            .iter()
+            .flat_map(|group| group.iter())
+            .map(|f| f.object_meta.location.to_string())
+            .collect::<Vec<_>>();
+
+        tracker.add_file_paths(files);
+    } else if let Some(odv) = plan.as_any().downcast_ref::<OdvExec>() {
+        let files = odv
+            .file_scan_config()
+            .file_groups
+            .iter()
+            .flat_map(|group| group.iter())
+            .map(|f| f.object_meta.location.to_string())
+            .collect::<Vec<_>>();
+
+        tracker.add_file_paths(files);
+    } else if let Some(netcdf) = plan.as_any().downcast_ref::<NetCDFExec>() {
+        let files = netcdf
+            .file_scan_config()
             .file_groups
             .iter()
             .flat_map(|group| group.iter())
