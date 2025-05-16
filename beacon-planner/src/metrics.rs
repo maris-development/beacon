@@ -14,10 +14,14 @@ use parking_lot::{Mutex, RwLock};
 pub struct ConsolidatedMetrics {
     pub input_rows: u64,
     pub input_bytes: u64,
-    pub output_rows: u64,
-    pub output_bytes: u64,
+    pub result_num_rows: u64,
+    pub result_size_in_bytes: u64,
     pub file_paths: Vec<String>,
-    pub logical_plan: serde_json::Value,
+
+    pub query: serde_json::Value,
+    pub query_id: uuid::Uuid,
+
+    pub parsed_logical_plan: serde_json::Value,
     pub optimized_logical_plan: serde_json::Value,
     pub node_metrics: NodeMetrics,
 }
@@ -26,10 +30,13 @@ pub struct ConsolidatedMetrics {
 pub struct MetricsTracker {
     pub input_rows: AtomicU64,
     pub input_bytes: AtomicU64,
-    pub output_rows: AtomicU64,
-    pub output_bytes: AtomicU64,
+    pub result_rows: AtomicU64,
+    pub result_size_in_bytes: AtomicU64,
 
-    pub logical_plan: Arc<Mutex<Option<LogicalPlan>>>,
+    pub query: serde_json::Value,
+    pub query_id: uuid::Uuid,
+
+    pub parsed_logical_plan: Arc<Mutex<Option<LogicalPlan>>>,
     pub optimized_logical_plan: Arc<Mutex<Option<LogicalPlan>>>,
 
     pub file_paths: Arc<Mutex<Vec<String>>>,
@@ -37,21 +44,23 @@ pub struct MetricsTracker {
 }
 
 impl MetricsTracker {
-    pub fn new() -> Arc<Self> {
+    pub fn new(input_query: serde_json::Value, query_id: uuid::Uuid) -> Arc<Self> {
         Arc::new(Self {
+            query: input_query,
+            query_id,
             input_rows: AtomicU64::new(0),
             input_bytes: AtomicU64::new(0),
-            output_rows: AtomicU64::new(0),
-            output_bytes: AtomicU64::new(0),
+            result_rows: AtomicU64::new(0),
+            result_size_in_bytes: AtomicU64::new(0),
             file_paths: Arc::new(Mutex::new(vec![])),
-            logical_plan: Arc::new(Mutex::new(None)),
+            parsed_logical_plan: Arc::new(Mutex::new(None)),
             optimized_logical_plan: Arc::new(Mutex::new(None)),
             physical_plan: Arc::new(RwLock::new(None)),
         })
     }
     pub fn set_logical_plan(&self, plan: &LogicalPlan) {
         // Use a Mutex to ensure thread safety when accessing the logical plan
-        let mut logical_plan = self.logical_plan.lock();
+        let mut logical_plan = self.parsed_logical_plan.lock();
         // Set the logical plan
         *logical_plan = Some(plan.clone());
     }
@@ -74,11 +83,11 @@ impl MetricsTracker {
             .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn add_output_rows(&self, rows: u64) {
-        self.output_rows
+        self.result_rows
             .fetch_add(rows, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn add_output_bytes(&self, bytes: u64) {
-        self.output_bytes
+        self.result_size_in_bytes
             .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn add_file_paths(&self, paths: Vec<String>) {
@@ -95,7 +104,7 @@ impl MetricsTracker {
         let physical_plan = physical_plan_opt.clone().unwrap();
 
         let logical_plan_json = self
-            .logical_plan
+            .parsed_logical_plan
             .lock()
             .as_ref()
             .map(|plan| serde_json::from_str(&format!("{}", plan.display_pg_json())).unwrap())
@@ -108,12 +117,16 @@ impl MetricsTracker {
             .unwrap_or_default();
 
         ConsolidatedMetrics {
+            query_id: self.query_id,
+            query: self.query.clone(),
             input_rows: self.input_rows.load(std::sync::atomic::Ordering::Relaxed),
             input_bytes: self.input_bytes.load(std::sync::atomic::Ordering::Relaxed),
-            output_rows: self.output_rows.load(std::sync::atomic::Ordering::Relaxed),
-            output_bytes: self.output_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            result_num_rows: self.result_rows.load(std::sync::atomic::Ordering::Relaxed),
+            result_size_in_bytes: self
+                .result_size_in_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
             file_paths: self.file_paths.lock().clone(),
-            logical_plan: logical_plan_json,
+            parsed_logical_plan: logical_plan_json,
             optimized_logical_plan: optimized_logical_plan_json,
             node_metrics: collect_metrics_json(physical_plan.as_ref()),
         }

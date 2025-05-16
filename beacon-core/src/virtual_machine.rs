@@ -204,7 +204,6 @@ impl VirtualMachine {
         // Get the row count
         let row_count = result[0].column(0).as_primitive::<UInt64Type>().value(0);
         beacon_plan.metrics_tracker.add_output_rows(row_count);
-        println!("Output size: {}", beacon_plan.output_buffer.size()?);
         beacon_plan
             .metrics_tracker
             .add_output_bytes(beacon_plan.output_buffer.size()?);

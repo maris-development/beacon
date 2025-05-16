@@ -16,10 +16,12 @@ pub async fn plan_query(
     let query_id = uuid::Uuid::new_v4();
     let state = session_ctx.state();
     // Parse the query to a logical plan
+    let query_json_value = serde_json::to_value(&query).unwrap();
+
     let parsed_plan = beacon_query::parser::Parser::parse(&session_ctx, query).await?;
     let optimized_plan = state.optimize(&parsed_plan.datafusion_plan)?;
     let physical_plan = state.create_physical_plan(&optimized_plan).await?;
-    let metrics_tracker = MetricsTracker::new();
+    let metrics_tracker = MetricsTracker::new(query_json_value, query_id);
 
     // FilterExec
     let tracked_physical_plan = wrap_file_scans(physical_plan.clone(), metrics_tracker.clone());

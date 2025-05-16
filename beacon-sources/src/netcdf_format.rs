@@ -312,17 +312,22 @@ impl DataSink for NetCDFSink {
         context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
         let arrow_schema = self.conf.output_schema().clone();
-        let location = self.conf.object_store_url.as_str();
-        println!("Writing to NetCDF: {}", location);
-        let mut rows_written: u64 = 0;
+        let output_path = format!(
+            "{}/{}",
+            beacon_config::DATA_DIR.to_string_lossy(),
+            self.conf.table_paths[0].prefix().to_string()
+        );
 
-        let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::new(location, arrow_schema)
-            .map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to create NetCDF ArrowRecordBatchWriter: {}",
-                e
-            ))
-        })?;
+        let mut rows_written: u64 = 0;
+        let mut nc_writer =
+            ArrowRecordBatchWriter::<DefaultEncoder>::new(output_path, arrow_schema).map_err(
+                |e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to create NetCDF ArrowRecordBatchWriter: {}",
+                        e
+                    ))
+                },
+            )?;
 
         let mut pinned_steam = std::pin::pin!(data);
 
