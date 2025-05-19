@@ -93,11 +93,7 @@ impl MetricsTracker {
     }
     pub fn add_file_paths(&self, paths: Vec<String>) {
         let mut file_paths = self.file_paths.lock();
-        for path in paths {
-            if !file_paths.contains(&path) {
-                file_paths.push(path);
-            }
-        }
+        file_paths.extend(paths);
     }
     pub fn get_consolidated_metrics(&self) -> ConsolidatedMetrics {
         // Get the metrics from the execution plan
