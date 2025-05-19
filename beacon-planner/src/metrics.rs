@@ -6,6 +6,7 @@ use std::{
 use datafusion::{
     datasource::file_format::csv::CsvSink,
     logical_expr::LogicalPlan,
+    physical_optimizer::pruning::PruningPredicate,
     physical_plan::{ExecutionPlan, filter::FilterExec, insert::DataSinkExec},
 };
 use parking_lot::{Mutex, RwLock};
