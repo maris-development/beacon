@@ -74,13 +74,15 @@ impl Parser {
                 .collect::<anyhow::Result<Vec<_>>>()?,
         )?;
 
+        let df_schema = builder.schema().clone();
+        let schema = df_schema.as_arrow();
         if let Some(filter) = query_body.filter {
-            builder = builder.filter(filter.to_expr(&session_state)?)?;
+            builder = builder.filter(filter.parse(&session_state, &schema)?)?;
         }
 
         if let Some(filters) = query_body.filters {
             for filter in filters {
-                builder = builder.filter(filter.to_expr(&session_state)?)?;
+                builder = builder.filter(filter.parse(&session_state, &schema)?)?;
             }
         }
 
