@@ -22,6 +22,7 @@ pub mod is_not_null;
 pub mod is_null;
 pub mod lt;
 pub mod lte;
+pub mod neq;
 pub mod or;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
@@ -43,6 +44,8 @@ pub enum Filter {
     Between(between::Between),
     #[serde(untagged)]
     Eq(eq::Eq),
+    #[serde(untagged)]
+    Neq(neq::Neq),
     #[serde(untagged)]
     Gt(Gt),
     #[serde(untagged)]
@@ -72,6 +75,7 @@ impl Filter {
             Filter::Lt(lt) => lt.parse(session_state, schema),
             Filter::Lteq(lteq) => lteq.parse(session_state, schema),
             Filter::Eq(eq) => eq.parse(session_state, schema),
+            Filter::Neq(neq) => neq.parse(session_state, schema),
             Filter::GeoJson(geo_json_filter) => geo_json_filter.parse(session_state, schema),
         }
     }
