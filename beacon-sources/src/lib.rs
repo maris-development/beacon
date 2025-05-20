@@ -55,7 +55,10 @@ impl DataSource {
                 .await?;
 
             schemas.push(schema.clone());
-            sanitized_schemas.push(Arc::new(Self::sanitize_schema(&schema)));
+            if beacon_config::CONFIG.sanitize_schema {
+                tracing::debug!("Sanitizing schema for table: {}", table_url);
+                sanitized_schemas.push(Arc::new(Self::sanitize_schema(&schema)));
+            }
         }
 
         let super_schema = Arc::new(
