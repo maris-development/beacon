@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use beacon_output::{Output, TempOutputFile};
-use beacon_sources::{netcdf_format::NetCDFFileFormatFactory, odv_format::OdvFormat};
+use beacon_sources::{
+    netcdf_format::NetCDFFileFormatFactory,
+    odv_format::{OdvFileFormatFactory, OdvFormat},
+};
 use datafusion::{
     datasource::file_format::{csv::CsvFormatFactory, format_as_file_type, FileFormat},
     logical_expr::{Analyze, LogicalPlan, LogicalPlanBuilder},
@@ -168,7 +171,19 @@ impl Parser {
                 Ok((plan.build()?, QueryOutputFile::Json(temp_output.file)))
             }
             beacon_output::OutputFormat::Odv(odv_options) => {
-                todo!()
+                let temp_output = TempOutputFile::new("beacon", ".zip")?;
+                let path = temp_output.object_store_path();
+                let format = Arc::new(OdvFileFormatFactory::new(Some(odv_options)));
+                let file_type = format_as_file_type(format);
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    path.to_string(),
+                    file_type,
+                    Default::default(),
+                    vec![],
+                )?;
+
+                Ok((plan.build()?, QueryOutputFile::Odv(temp_output.file)))
             }
             beacon_output::OutputFormat::NetCDF => {
                 let temp_output = TempOutputFile::new("beacon", ".nc")?;
