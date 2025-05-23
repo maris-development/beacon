@@ -335,9 +335,18 @@ export default defineConfig({
             {
               text: '1.0.1 (latest)',
               link: '/docs/changelog'
-            }
+            },
           ]
-        }
+        },
+        {
+          text: 'Blue Cloud Changelog',
+          items: [
+            {
+              text: '23-05-2025 (latest)',
+              link: '/docs/changelog/blue-cloud'
+            },
+          ]
+        },
       ]
     },
 
