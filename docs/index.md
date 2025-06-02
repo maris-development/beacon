@@ -9,10 +9,10 @@ hero:
   actions:
     - theme: brand
       text: Install your own node
-      link: /docs/1.0.0-install
+      link: /docs/1.0.1-install
     - theme: brand
       text: How to query
-      link: /docs/1.0.0/query-docs/
+      link: /docs/1.0.1/query-docs/
     - theme: alt
       text: Existing nodes
       link: /available-nodes/available-nodes
