@@ -31,10 +31,10 @@ COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
 COPY beacon-functions/ /beacon-functions/
 COPY beacon-output/ /beacon-output/
+COPY beacon-planner/ /beacon-planner/
 COPY beacon-query/ /beacon-query/
 COPY beacon-sources/ /beacon-sources/
 COPY beacon-tables/ /beacon-tables/
-COPY mappings/ /mappings/
 COPY Cargo.toml /
 COPY Cargo.lock /
 
@@ -44,7 +44,6 @@ RUN cargo build --release
 FROM ubuntu:latest AS node
 WORKDIR /beacon
 COPY --from=builder /target/release/beacon-api /beacon/
-COPY --from=builder /mappings/ /beacon/mappings/
 
 #Install Dependencies
 RUN apt-get update

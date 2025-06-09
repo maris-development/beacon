@@ -28,8 +28,11 @@ impl datafusion::catalog::TableFunctionImpl for OdvTableFunction {
         let session_state = self.session_ctx.state();
         let listing_table_urls = super::parse_exprs_to_urls(args)?;
 
-        let datasource =
-            super::create_datasource(&session_state, listing_table_urls, Arc::new(OdvFormat))?;
+        let datasource = super::create_datasource(
+            &session_state,
+            listing_table_urls,
+            Arc::new(OdvFormat::new()),
+        )?;
 
         // Create a new DataSource with the urls
         Ok(Arc::new(datasource))

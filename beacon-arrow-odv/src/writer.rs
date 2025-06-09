@@ -28,6 +28,7 @@ pub struct ColumnInfo {
     /// Name of an optional quality flag column associated with this data column
     pub qf_column: Option<String>,
     /// Physical units of the column values (e.g. "degrees_C", "PSU")
+    #[serde(alias = "unit")]
     pub units: Option<String>,
 }
 
@@ -603,7 +604,7 @@ impl<T: OdvType> OdvFile<T> {
         let mut file = std::fs::File::create(path)?;
         let schema_mapper =
             OdvBatchSchemaMapper::new(T::map_schema(input_schema.clone()), options.clone())?;
-        Self::write_header(&mut file, options, schema_mapper.output_schema())?;
+        Self::write_header(&mut file, options, &schema_mapper)?;
 
         Ok(Self {
             _type: std::marker::PhantomData,
@@ -628,8 +629,11 @@ impl<T: OdvType> OdvFile<T> {
     fn write_header<W: Write>(
         writer: &mut W,
         options: &OdvOptions,
-        output_schema: arrow::datatypes::SchemaRef,
+        schema_mapper: &OdvBatchSchemaMapper,
     ) -> anyhow::Result<()> {
+        let output_schema = schema_mapper.output_schema();
+        let input_schema = schema_mapper.input_schema();
+        let projection = schema_mapper.projection();
         writeln!(writer, "//<Encoding>UTF-8</Encoding>")?;
         writeln!(writer, "//<DataField>Ocean</DataField>")?;
         writeln!(writer, "{}", T::type_header())?;
@@ -698,8 +702,17 @@ impl<T: OdvType> OdvFile<T> {
 
         //Write all the metadata variables/columns
         for column in options.meta_columns.iter() {
+            // Get the index using the column name from the input schema
+            let (index, _) = input_schema
+                .column_with_name(&column.column_name)
+                .expect("Column not found in input schema.");
+            let inverse_proj_index = projection
+                .iter()
+                .position(|&i| i == index)
+                .expect("Column not found in projection.");
+
             let value_type = Self::arrow_to_value_type(
-                output_schema
+                input_schema
                     .field_with_name(&column.column_name)
                     .expect("Column not found in output schema.")
                     .data_type(),
@@ -709,7 +722,7 @@ impl<T: OdvType> OdvFile<T> {
                 writer,
                 "{}",
                 Self::meta_header(
-                    &column.column_name,
+                    &output_schema.field(inverse_proj_index).name(),
                     &options.qf_schema,
                     &value_type,
                     &column.comment.as_deref().unwrap_or("")
@@ -722,14 +735,22 @@ impl<T: OdvType> OdvFile<T> {
         match T::file_type() {
             OdvFileType::Profiles => {
                 //Write depth column
+                let (index, _) = input_schema
+                    .column_with_name(&options.depth_column.column_name)
+                    .expect("Column not found in input schema.");
+                let inverse_proj_index = projection
+                    .iter()
+                    .position(|&i| i == index)
+                    .expect("Column not found in projection.");
+
                 writeln!(
                     writer,
                     "{}",
                     Self::primary_data_header(
-                        &options.depth_column.column_name,
+                        &output_schema.field(inverse_proj_index).name(),
                         &options.qf_schema,
                         &Self::arrow_to_value_type(
-                            output_schema
+                            input_schema
                                 .field_with_name(&options.depth_column.column_name)
                                 .expect("")
                                 .data_type()
@@ -744,29 +765,37 @@ impl<T: OdvType> OdvFile<T> {
                     writer,
                     "{}",
                     Self::primary_data_header(
-                        &options.time_column.column_name,
+                        "time_ISO8601",
                         &options.qf_schema,
                         &Self::arrow_to_value_type(
-                            output_schema
+                            input_schema
                                 .field_with_name(&options.time_column.column_name)
                                 .expect("")
                                 .data_type()
                         )?,
-                        "",
+                        options.time_column.comment.as_deref().unwrap_or(""),
                         "F"
                     )
                 )?;
             }
             OdvFileType::TimeSeries | OdvFileType::Trajectories => {
                 //Write depth column
+                let (index, _) = input_schema
+                    .column_with_name(&options.depth_column.column_name)
+                    .expect("Column not found in input schema.");
+                let inverse_proj_index = projection
+                    .iter()
+                    .position(|&i| i == index)
+                    .expect("Column not found in projection.");
+
                 writeln!(
                     writer,
                     "{}",
                     Self::primary_data_header(
-                        &options.depth_column.column_name,
+                        &output_schema.field(inverse_proj_index).name(),
                         &options.qf_schema,
                         &Self::arrow_to_value_type(
-                            output_schema
+                            input_schema
                                 .field_with_name(&options.depth_column.column_name)
                                 .expect("")
                                 .data_type()
@@ -781,15 +810,15 @@ impl<T: OdvType> OdvFile<T> {
                     writer,
                     "{}",
                     Self::primary_data_header(
-                        &options.time_column.column_name,
+                        "time_ISO8601",
                         &options.qf_schema,
                         &Self::arrow_to_value_type(
-                            output_schema
+                            input_schema
                                 .field_with_name(&options.time_column.column_name)
                                 .expect("")
                                 .data_type()
                         )?,
-                        "",
+                        options.time_column.comment.as_deref().unwrap_or(""),
                         "T"
                     )
                 )?;
@@ -798,8 +827,16 @@ impl<T: OdvType> OdvFile<T> {
 
         //Write all the data variables/columns
         for column in options.data_columns.iter() {
+            let (index, _) = input_schema
+                .column_with_name(&column.column_name)
+                .expect("Column not found in input schema.");
+            let inverse_proj_index = projection
+                .iter()
+                .position(|&i| i == index)
+                .expect("Column not found in projection.");
+
             let value_type = Self::arrow_to_value_type(
-                output_schema
+                input_schema
                     .field_with_name(&column.column_name)
                     .expect("Column not found in output schema.")
                     .data_type(),
@@ -809,7 +846,7 @@ impl<T: OdvType> OdvFile<T> {
                 writer,
                 "{}",
                 Self::data_header(
-                    &column.column_name,
+                    &output_schema.field(inverse_proj_index).name(),
                     &options.qf_schema,
                     &value_type,
                     &column.comment.as_deref().unwrap_or("")
@@ -1169,7 +1206,7 @@ impl OdvBatchSchemaMapper {
             })?;
 
         projection.push(projection_idx);
-        output_fields.push(field.clone());
+        output_fields.push(field.clone().with_name("time_ISO8601"));
 
         if let Some(time_qc_col) = odv_options.time_column.qf_column {
             let (projection_idx, field) =
@@ -1195,9 +1232,12 @@ impl OdvBatchSchemaMapper {
                     odv_options.depth_column.column_name
                 )
             })?;
-
+        let depth_column_name = generate_column_name(
+            &odv_options.depth_column.column_name,
+            odv_options.depth_column.units.as_deref(),
+        );
         projection.push(projection_idx);
-        output_fields.push(field.clone());
+        output_fields.push(field.clone().with_name(depth_column_name));
 
         if let Some(depth_qc_col) = odv_options.depth_column.qf_column {
             let (projection_idx, field) =
@@ -1276,6 +1316,14 @@ impl OdvBatchSchemaMapper {
     /// A cloned reference to the output schema
     pub fn output_schema(&self) -> SchemaRef {
         self.output_schema.clone()
+    }
+
+    pub fn input_schema(&self) -> SchemaRef {
+        self.input_schema.clone()
+    }
+
+    pub fn projection(&self) -> Arc<[usize]> {
+        self.projection.clone()
     }
 
     /// Maps an input record batch to the ODV output format using the configured schema mapping.

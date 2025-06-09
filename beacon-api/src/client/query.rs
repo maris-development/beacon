@@ -1,15 +1,17 @@
+use core::panic;
 use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::State,
-    http::{header, StatusCode},
+    extract::{Path, State},
+    http::{header, HeaderName, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use beacon_core::runtime::Runtime;
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_query::Query;
+use beacon_planner::metrics::ConsolidatedMetrics;
+use beacon_query::{output::QueryOutputFile, Query};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -40,26 +42,122 @@ pub(crate) async fn query(
     let result = state.run_client_query(query_obj).await;
 
     match result {
-        Ok(output) => match output.output_method {
-            beacon_output::OutputMethod::Stream(stream) => {
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, output.content_type),
-                        (header::CONTENT_DISPOSITION, output.content_disposition),
-                    ],
-                    inner_stream,
-                )
-                    .into_response())
-            }
-            beacon_output::OutputMethod::File(named_temp_file) => {
+        Ok(output) => match output.output_buffer {
+            QueryOutputFile::Csv(named_temp_file) => {
                 let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
                 let stream = tokio_util::io::ReaderStream::new(file);
                 let inner_stream = Body::from_stream(stream);
                 Ok((
                     [
-                        (header::CONTENT_TYPE, output.content_type),
-                        (header::CONTENT_DISPOSITION, output.content_disposition),
+                        (header::CONTENT_TYPE, "text/csv"),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            "attachment; filename=\"output.csv\"",
+                        ),
+                        (
+                            HeaderName::from_static("x-beacon-query-id"),
+                            output.query_id.to_string().as_str(),
+                        ),
+                    ],
+                    inner_stream,
+                )
+                    .into_response())
+            }
+            QueryOutputFile::Parquet(named_temp_file) => {
+                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
+                let stream = tokio_util::io::ReaderStream::new(file);
+                let inner_stream = Body::from_stream(stream);
+                Ok((
+                    [
+                        (header::CONTENT_TYPE, "application/vnd.apache.parquet"),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            "attachment; filename=\"output.parquet\"",
+                        ),
+                        (
+                            HeaderName::from_static("x-beacon-query-id"),
+                            output.query_id.to_string().as_str(),
+                        ),
+                    ],
+                    inner_stream,
+                )
+                    .into_response())
+            }
+            QueryOutputFile::Ipc(named_temp_file) => {
+                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
+                let stream = tokio_util::io::ReaderStream::new(file);
+                let inner_stream = Body::from_stream(stream);
+                Ok((
+                    [
+                        (header::CONTENT_TYPE, "application/vnd.apache.arrow.file"),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            "attachment; filename=\"output.arrow\"",
+                        ),
+                        (
+                            HeaderName::from_static("x-beacon-query-id"),
+                            output.query_id.to_string().as_str(),
+                        ),
+                    ],
+                    inner_stream,
+                )
+                    .into_response())
+            }
+            QueryOutputFile::Json(named_temp_file) => {
+                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
+                let stream = tokio_util::io::ReaderStream::new(file);
+                let inner_stream = Body::from_stream(stream);
+                Ok((
+                    [
+                        (header::CONTENT_TYPE, "application/json"),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            "attachment; filename=\"output.json\"",
+                        ),
+                        (
+                            HeaderName::from_static("x-beacon-query-id"),
+                            output.query_id.to_string().as_str(),
+                        ),
+                    ],
+                    inner_stream,
+                )
+                    .into_response())
+            }
+            QueryOutputFile::Odv(named_temp_file) => {
+                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
+                let stream = tokio_util::io::ReaderStream::new(file);
+                let inner_stream = Body::from_stream(stream);
+                Ok((
+                    [
+                        (header::CONTENT_TYPE, "application/zip"),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            "attachment; filename=\"output.zip\"",
+                        ),
+                        (
+                            HeaderName::from_static("x-beacon-query-id"),
+                            output.query_id.to_string().as_str(),
+                        ),
+                    ],
+                    inner_stream,
+                )
+                    .into_response())
+            }
+            QueryOutputFile::NetCDF(named_temp_file) => {
+                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
+                let stream = tokio_util::io::ReaderStream::new(file);
+                let inner_stream = Body::from_stream(stream);
+                Ok((
+                    [
+                        (header::CONTENT_TYPE, "application/netcdf"),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            "attachment; filename=\"output.nc\"",
+                        ),
+                        (
+                            HeaderName::from_static("x-beacon-query-id"),
+                            output.query_id.to_string().as_str(),
+                        ),
                     ],
                     inner_stream,
                 )
@@ -71,6 +169,41 @@ pub(crate) async fn query(
             Err((StatusCode::BAD_REQUEST, Json(err.to_string())))
         }
     }
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "query",
+    get,
+    path = "/api/query/metrics/{query_id}",
+    responses(
+        (status=200, description="Response containing the query metrics"),
+    ),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn query_metrics(
+    State(state): State<Arc<Runtime>>,
+    Path(query_id): Path<String>,
+) -> Result<Json<ConsolidatedMetrics>, (StatusCode, Json<String>)> {
+    let query_id = uuid::Uuid::parse_str(&query_id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json("Invalid UUID format".to_string()),
+        )
+    })?;
+
+    let metrics = state.get_query_metrics(query_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json("Query ID not found".to_string()),
+        )
+    })?;
+
+    Ok(Json(metrics))
 }
 
 #[tracing::instrument(level = "info", skip(state))]

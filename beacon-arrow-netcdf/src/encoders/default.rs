@@ -30,7 +30,7 @@ macro_rules! downcast_and_put_values {
 
         let temp_buffer = array
             .iter()
-            .map(|x| x.unwrap_or(<$native_type>::MIN))
+            .map(|x| x.unwrap_or(<$native_type>::MAX))
             .collect::<Vec<_>>();
 
         $variable.put_values::<$native_type, _>(&temp_buffer, $extents)?;

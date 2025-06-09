@@ -10,7 +10,8 @@ tokio = { workspace = true }
 datafusion = { workspace=true}
 tracing = { workspace=true}
 anyhow = { workspace=true}
-
+tempfile = { workspace=true}
+cast = "0.3.0"
 geojson = "0.24.2"
 chrono = { version = "=0.4.38", features = ["serde"] }
 

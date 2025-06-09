@@ -49,6 +49,7 @@ pub struct Output {
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     Csv,
+    #[serde(alias = "arrow")]
     Ipc,
     Parquet,
     Json,
@@ -83,7 +84,6 @@ impl TempOutputFile {
         //Create the temp dir if it doesn't exist
         let tmp_dir_path = beacon_config::DATA_DIR.join("tmp");
         std::fs::create_dir_all(tmp_dir_path.as_path())?;
-
         Ok(Self {
             file: tempfile::Builder::new()
                 .prefix(prefix)

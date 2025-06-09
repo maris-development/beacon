@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
-use arrow::datatypes::SchemaRef;
+use arrow::{
+    array::AsArray,
+    datatypes::{SchemaRef, UInt64Type},
+};
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_output::{OutputFormat, OutputResponse};
+use beacon_planner::plan::BeaconQueryPlan;
 use beacon_sources::{
-    formats_factory::Formats, netcdf_format::NetCDFFileFormatFactory,
-    parquet_format::SuperParquetFormatFactory,
+    netcdf_format::NetCDFFileFormatFactory, parquet_format::SuperParquetFormatFactory,
 };
 use beacon_tables::{schema_provider::BeaconSchemaProvider, table::Table};
 use datafusion::{
@@ -22,6 +24,7 @@ use datafusion::{
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
     logical_expr::LogicalPlan,
+    physical_plan::{analyze::AnalyzeExec, filter::FilterExec},
     prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
 };
 use futures::StreamExt;
@@ -68,6 +71,13 @@ impl VirtualMachine {
         //Register format functions
         beacon_sources::sql::table_functions(session_ctx.clone());
 
+        //Register table extensions
+        let functions =
+            beacon_tables::table_extension::table_extension_functions(session_ctx.clone());
+        for function in functions {
+            session_ctx.register_udtf(function.name(), function.function().clone());
+        }
+
         Ok(Self {
             session_ctx,
             schema_provider: beacon_schema_provider,
@@ -78,7 +88,8 @@ impl VirtualMachine {
         let mut config = SessionConfig::new()
             .with_batch_size(1024 * 1024 * 4)
             .with_coalesce_batches(true)
-            .with_information_schema(true);
+            .with_information_schema(true)
+            .with_collect_statistics(true);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
         config
@@ -104,14 +115,14 @@ impl VirtualMachine {
         session_state.register_file_format(Arc::new(ArrowFormatFactory::new()), true)?;
         session_state.register_file_format(Arc::new(CsvFormatFactory::new()), true)?;
 
-        let session_context = SessionContext::new_with_state(session_state);
+        let session_context = Arc::new(SessionContext::new_with_state(session_state));
 
         session_context.register_object_store(
             ObjectStoreUrl::parse("file://").unwrap().as_ref(),
             beacon_config::OBJECT_STORE_LOCAL_FS.clone(),
         );
 
-        Ok(Arc::new(session_context))
+        Ok(session_context)
     }
 
     pub fn session_ctx(&self) -> Arc<SessionContext> {
@@ -145,6 +156,21 @@ impl VirtualMachine {
             .ok()
     }
 
+    pub async fn list_table_extensions(
+        &self,
+        table_name: String,
+    ) -> anyhow::Result<Vec<Arc<dyn beacon_tables::table_extension::TableExtension>>> {
+        let extensions =
+            self.schema_provider
+                .table_extensions(&table_name)
+                .ok_or(anyhow::anyhow!(
+                    "Error listing table extensions: table: {0} not found",
+                    table_name
+                ))?;
+
+        Ok(extensions)
+    }
+
     pub async fn list_default_table_schema(&self) -> SchemaRef {
         let table = self
             .session_ctx
@@ -166,36 +192,40 @@ impl VirtualMachine {
         Ok(self.schema_provider.delete_table(table_name).await?)
     }
 
-    pub async fn run_client_sql(
-        &self,
-        sql: &str,
-        output: &OutputFormat,
-    ) -> anyhow::Result<OutputResponse> {
-        let sql_options = SQLOptions::new()
-            .with_allow_ddl(false)
-            .with_allow_dml(false)
-            .with_allow_statements(false);
-        let df = self.session_ctx.sql_with_options(sql, sql_options).await?;
-        output.output(self.session_ctx.clone(), df).await
-    }
+    #[tracing::instrument(skip(self, beacon_plan))]
+    pub async fn run_plan(&self, beacon_plan: &BeaconQueryPlan) -> anyhow::Result<()> {
+        let result = datafusion::physical_plan::collect(
+            beacon_plan.physical_plan.clone(),
+            self.session_ctx().task_ctx(),
+        )
+        .await?;
 
-    pub async fn run_plan(
-        &self,
-        plan: LogicalPlan,
-        output: &OutputFormat,
-    ) -> anyhow::Result<OutputResponse> {
-        let df = DataFrame::new(self.session_ctx.state(), plan);
-        output.output(self.session_ctx.clone(), df).await
-    }
+        match result
+            .get(0)
+            .map(|r| r.column(0).as_primitive_opt::<UInt64Type>())
+            .flatten()
+        {
+            Some(num_rows_arr) => {
+                if num_rows_arr.len() > 0 {
+                    let num_rows = num_rows_arr.value(0);
+                    beacon_plan.metrics_tracker.add_output_rows(num_rows);
+                    tracing::info!("Query Returned {} rows", num_rows);
+                }
+            }
+            None => {
+                tracing::error!("Error getting number of rows from plan");
+            }
+        }
+        // Get the row count
+        tracing::info!(
+            "Query result size in bytes: {:?}",
+            beacon_plan.output_buffer.size()
+        );
+        beacon_plan
+            .metrics_tracker
+            .add_output_bytes(beacon_plan.output_buffer.size()?);
 
-    pub async fn run_sql(
-        &self,
-        sql: &str,
-        output: &OutputFormat,
-    ) -> anyhow::Result<OutputResponse> {
-        let df = self.session_ctx.sql(sql).await?;
-
-        output.output(self.session_ctx.clone(), df).await
+        Ok(())
     }
 
     pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {
