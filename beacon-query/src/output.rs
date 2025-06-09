@@ -8,6 +8,7 @@ pub enum QueryOutputFile {
     Parquet(NamedTempFile),
     NetCDF(NamedTempFile),
     Odv(NamedTempFile),
+    GeoParquet(NamedTempFile),
 }
 
 impl QueryOutputFile {
@@ -19,6 +20,7 @@ impl QueryOutputFile {
             QueryOutputFile::Parquet(file) => Ok(file.path().metadata()?.len()),
             QueryOutputFile::NetCDF(file) => Ok(file.path().metadata()?.len()),
             QueryOutputFile::Odv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
         }
     }
 }

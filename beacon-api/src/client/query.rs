@@ -163,6 +163,29 @@ pub(crate) async fn query(
                 )
                     .into_response())
             }
+            QueryOutputFile::GeoParquet(named_temp_file) => {
+                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
+                let stream = tokio_util::io::ReaderStream::new(file);
+                let inner_stream = Body::from_stream(stream);
+                Ok((
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/vnd.apache.arrow.geo+parquet",
+                        ),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            "attachment; filename=\"output.geoparquet\"",
+                        ),
+                        (
+                            HeaderName::from_static("x-beacon-query-id"),
+                            output.query_id.to_string().as_str(),
+                        ),
+                    ],
+                    inner_stream,
+                )
+                    .into_response())
+            }
         },
         Err(err) => {
             tracing::error!("Error querying beacon: {}", err);

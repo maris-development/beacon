@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use beacon_output::{Output, TempOutputFile};
 use beacon_sources::{
+    geo_parquet_format::GeoParquetOptions,
     netcdf_format::NetCDFFileFormatFactory,
     odv_format::{OdvFileFormatFactory, OdvFormat},
 };
@@ -200,6 +201,32 @@ impl Parser {
                 )?;
 
                 Ok((plan.build()?, QueryOutputFile::NetCDF(temp_output.file)))
+            }
+            beacon_output::OutputFormat::GeoParquet {
+                longitude_column,
+                latitude_column,
+            } => {
+                let temp_output = TempOutputFile::new("beacon", ".geoparquet")?;
+                let path = temp_output.object_store_path();
+                let format = Arc::new(
+                    beacon_sources::geo_parquet_format::GeoParquetFormatFactory::new(
+                        GeoParquetOptions {
+                            longitude_column,
+                            latitude_column,
+                        },
+                    ),
+                );
+                let file_type = format_as_file_type(format);
+
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    path.to_string(),
+                    file_type,
+                    Default::default(),
+                    vec![],
+                )?;
+
+                Ok((plan.build()?, QueryOutputFile::GeoParquet(temp_output.file)))
             }
         }
     }

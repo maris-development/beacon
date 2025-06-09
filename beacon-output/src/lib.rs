@@ -55,6 +55,10 @@ pub enum OutputFormat {
     Json,
     Odv(OdvOptions),
     NetCDF,
+    GeoParquet {
+        longitude_column: String,
+        latitude_column: String,
+    },
 }
 
 impl OutputFormat {
@@ -63,14 +67,7 @@ impl OutputFormat {
         ctx: Arc<SessionContext>,
         df: DataFrame,
     ) -> anyhow::Result<OutputResponse> {
-        match self {
-            OutputFormat::Csv => csv::output(df).await,
-            OutputFormat::Ipc => ipc::output(ctx, df).await,
-            OutputFormat::Parquet => parquet::output(df).await,
-            OutputFormat::Json => json::output(df).await,
-            OutputFormat::Odv(options) => odv::output(ctx.clone(), df, Some(options.clone())).await,
-            OutputFormat::NetCDF => netcdf::output(ctx.clone(), df).await,
-        }
+        unimplemented!("Output format {:?} is not implemented", self);
     }
 }
 
