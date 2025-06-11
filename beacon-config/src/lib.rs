@@ -25,6 +25,8 @@ pub struct Config {
     pub enable_sql: bool,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
     pub sanitize_schema: bool,
+    #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
+    pub st_within_point_cache_size: usize,
 }
 
 impl Config {

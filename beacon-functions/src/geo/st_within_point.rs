@@ -1,11 +1,12 @@
-use std::{str::FromStr, sync::Arc};
+use std::{cell::RefCell, num::NonZero, str::FromStr, sync::Arc};
 
 use arrow::{array::AsArray, datatypes::Float64Type};
 use datafusion::{
     logical_expr::{ColumnarValue, ScalarUDFImpl, Signature},
     scalar::ScalarValue,
 };
-use geo::{Contains, Geometry};
+use geo::{BoundingRect, Contains, Geometry, Point, Rect};
+use ordered_float::OrderedFloat;
 use wkt::Wkt;
 
 #[derive(Debug)]
@@ -52,27 +53,6 @@ impl ScalarUDFImpl for WithinPointUdf {
         &self,
         args: datafusion::logical_expr::ScalarFunctionArgs,
     ) -> datafusion::error::Result<datafusion::logical_expr::ColumnarValue> {
-        let mut geom_iter: Box<dyn Iterator<Item = Option<&str>>> = match &args.args[0] {
-            datafusion::logical_expr::ColumnarValue::Array(array) => {
-                if let Some(array) = array.as_string_opt::<i32>() {
-                    Box::new(array.iter())
-                } else {
-                    return Err(datafusion::error::DataFusionError::Internal(
-                        "st_within_point expects a string array as its first argument".to_string(),
-                    ));
-                }
-            }
-            datafusion::logical_expr::ColumnarValue::Scalar(scalar_value) => {
-                if let ScalarValue::Utf8(wkt) = scalar_value {
-                    Box::new(std::iter::repeat_n(wkt.as_deref(), args.number_rows))
-                } else {
-                    return Err(datafusion::error::DataFusionError::Internal(
-                        "st_within_point expects a string as its first argument".to_string(),
-                    ));
-                }
-            }
-        };
-
         let resized_lon_array = args.args[1].to_array(args.number_rows).unwrap();
         let mut lon_iter = resized_lon_array
             .as_primitive_opt::<Float64Type>()
@@ -88,6 +68,44 @@ impl ScalarUDFImpl for WithinPointUdf {
             .ok_or(datafusion::error::DataFusionError::Internal(
                 "st_within_point expects a float64 array as its third argument".to_string(),
             ))?;
+
+        let mut geom_iter: Box<dyn Iterator<Item = Option<&str>>> = match &args.args[0] {
+            datafusion::logical_expr::ColumnarValue::Array(array) => {
+                if let Some(array) = array.as_string_opt::<i32>() {
+                    Box::new(array.iter())
+                } else {
+                    return Err(datafusion::error::DataFusionError::Internal(
+                        "st_within_point expects a string array as its first argument".to_string(),
+                    ));
+                }
+            }
+            datafusion::logical_expr::ColumnarValue::Scalar(scalar_value) => {
+                if let ScalarValue::Utf8(wkt) = scalar_value {
+                    if let Some(wkt) = wkt {
+                        let wkt =
+                            Wkt::from_str(wkt)
+                                .map_err(|e| anyhow::anyhow!(e))
+                                .map_err(|e| {
+                                    datafusion::error::DataFusionError::Execution(e.to_string())
+                                })?;
+                        let geometry: Geometry = wkt.try_into().unwrap();
+                        let result = st_within_point_fast(geometry, &mut lon_iter, &mut lat_iter)
+                            .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(e.to_string())
+                        })?;
+                        return Ok(ColumnarValue::Array(Arc::new(
+                            arrow::array::BooleanArray::from(result),
+                        )));
+                    }
+                    // Fallback to repeating the WKT string
+                    Box::new(std::iter::repeat_n(wkt.as_deref(), args.number_rows))
+                } else {
+                    return Err(datafusion::error::DataFusionError::Internal(
+                        "st_within_point expects a string as its first argument".to_string(),
+                    ));
+                }
+            }
+        };
 
         let result = st_within_point(&mut geom_iter, &mut lon_iter, &mut lat_iter)
             .map_err(|e| datafusion::error::DataFusionError::Internal(e.to_string()))?;
@@ -118,8 +136,62 @@ fn st_within_point_impl(
             // ST_WithinPoint implementation
             let wkt = Wkt::from_str(geom).map_err(|e| anyhow::anyhow!(e))?;
             let geometry: Geometry = wkt.try_into().unwrap();
+
             let point = geo::Point::new(lon, lat);
             Ok(geometry.contains(&point))
+        }
+        _ => Ok(false),
+    }
+}
+
+fn st_within_point_fast(
+    geom: Geometry,
+    lon: &mut dyn Iterator<Item = Option<f64>>,
+    lat: &mut dyn Iterator<Item = Option<f64>>,
+) -> anyhow::Result<Vec<bool>> {
+    let mut cache: lru::LruCache<Point<OrderedFloat<f64>>, bool> = lru::LruCache::new(
+        NonZero::new(beacon_config::CONFIG.st_within_point_cache_size)
+            .expect("Cache size must be non-zero"),
+    );
+    let bounding_rect = geom.bounding_rect();
+    lon.zip(lat)
+        .map(|(lon, lat)| st_within_point_fast_impl(&geom, bounding_rect, &mut cache, lon, lat))
+        .collect()
+}
+
+fn st_within_point_fast_impl(
+    geometry: &Geometry,
+    bounding_rect: Option<Rect>,
+    cache: &mut lru::LruCache<Point<OrderedFloat<f64>>, bool>,
+    lon: Option<f64>,
+    lat: Option<f64>,
+) -> anyhow::Result<bool> {
+    match (geometry, lon, lat) {
+        (geometry, Some(lon), Some(lat)) => {
+            // ST_WithinPoint implementation
+            let point = geo::Point::new(lon, lat);
+            let ordered_point = geo::Point::new(OrderedFloat(lon), OrderedFloat(lat));
+
+            // If the point is outside the bounding rectangle, it cannot be within the geometry
+            if let Some(rect) = bounding_rect {
+                if !rect.contains(&point) {
+                    return Ok(false);
+                }
+            }
+
+            // If the bounding rectangle is not available, we proceed with the full geometry check
+            // First, check the cache
+            if let Some(result) = cache.get(&ordered_point) {
+                return Ok(*result);
+            }
+
+            // If not found in cache, perform the geometry check
+            let result = geometry.contains(&point);
+
+            // Store the result in the cache
+            cache.put(ordered_point, result);
+
+            Ok(result)
         }
         _ => Ok(false),
     }
