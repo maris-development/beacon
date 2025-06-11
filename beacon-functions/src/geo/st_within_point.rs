@@ -9,10 +9,6 @@ use geo::{BoundingRect, Contains, Geometry, Point, Rect};
 use ordered_float::OrderedFloat;
 use wkt::Wkt;
 
-thread_local! {
-    static POINT_LOOKUP_CACHE: RefCell<lru::LruCache<Point<OrderedFloat<f64>>, bool>> = RefCell::new(lru::LruCache::new(NonZero::new(beacon_config::CONFIG.st_within_point_cache_size).expect("Cache size must be non-zero")));
-}
-
 #[derive(Debug)]
 pub struct WithinPointUdf {
     signature: Signature,
@@ -85,23 +81,23 @@ impl ScalarUDFImpl for WithinPointUdf {
             }
             datafusion::logical_expr::ColumnarValue::Scalar(scalar_value) => {
                 if let ScalarValue::Utf8(wkt) = scalar_value {
-                    if true {
-                        if let Some(wkt) = wkt {
-                            let wkt = Wkt::from_str(wkt).map_err(|e| anyhow::anyhow!(e)).map_err(
-                                |e| datafusion::error::DataFusionError::Execution(e.to_string()),
-                            )?;
-                            let geometry: Geometry = wkt.try_into().unwrap();
-                            let result =
-                                st_within_point_fast(geometry, &mut lon_iter, &mut lat_iter)
-                                    .map_err(|e| {
-                                        datafusion::error::DataFusionError::Execution(e.to_string())
-                                    })?;
-                            return Ok(ColumnarValue::Array(Arc::new(
-                                arrow::array::BooleanArray::from(result),
-                            )));
-                        }
+                    if let Some(wkt) = wkt {
+                        let wkt =
+                            Wkt::from_str(wkt)
+                                .map_err(|e| anyhow::anyhow!(e))
+                                .map_err(|e| {
+                                    datafusion::error::DataFusionError::Execution(e.to_string())
+                                })?;
+                        let geometry: Geometry = wkt.try_into().unwrap();
+                        let result = st_within_point_fast(geometry, &mut lon_iter, &mut lat_iter)
+                            .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(e.to_string())
+                        })?;
+                        return Ok(ColumnarValue::Array(Arc::new(
+                            arrow::array::BooleanArray::from(result),
+                        )));
                     }
-
+                    // Fallback to repeating the WKT string
                     Box::new(std::iter::repeat_n(wkt.as_deref(), args.number_rows))
                 } else {
                     return Err(datafusion::error::DataFusionError::Internal(
@@ -153,15 +149,20 @@ fn st_within_point_fast(
     lon: &mut dyn Iterator<Item = Option<f64>>,
     lat: &mut dyn Iterator<Item = Option<f64>>,
 ) -> anyhow::Result<Vec<bool>> {
+    let mut cache: lru::LruCache<Point<OrderedFloat<f64>>, bool> = lru::LruCache::new(
+        NonZero::new(beacon_config::CONFIG.st_within_point_cache_size)
+            .expect("Cache size must be non-zero"),
+    );
     let bounding_rect = geom.bounding_rect();
     lon.zip(lat)
-        .map(|(lon, lat)| st_within_point_fast_impl(&geom, bounding_rect, lon, lat))
+        .map(|(lon, lat)| st_within_point_fast_impl(&geom, bounding_rect, &mut cache, lon, lat))
         .collect()
 }
 
 fn st_within_point_fast_impl(
     geometry: &Geometry,
     bounding_rect: Option<Rect>,
+    cache: &mut lru::LruCache<Point<OrderedFloat<f64>>, bool>,
     lon: Option<f64>,
     lat: Option<f64>,
 ) -> anyhow::Result<bool> {
@@ -180,24 +181,15 @@ fn st_within_point_fast_impl(
 
             // If the bounding rectangle is not available, we proceed with the full geometry check
             // First, check the cache
-            let result = POINT_LOOKUP_CACHE.with(|cache| {
-                if let Some(result) = cache.borrow_mut().get(&ordered_point) {
-                    return Some(*result);
-                }
-                None
-            });
-
-            if let Some(result) = result {
-                return Ok(result);
+            if let Some(result) = cache.get(&ordered_point) {
+                return Ok(*result);
             }
 
             // If not found in cache, perform the geometry check
             let result = geometry.contains(&point);
 
             // Store the result in the cache
-            POINT_LOOKUP_CACHE.with(|cache| {
-                cache.borrow_mut().put(ordered_point, result);
-            });
+            cache.put(ordered_point, result);
 
             Ok(result)
         }
