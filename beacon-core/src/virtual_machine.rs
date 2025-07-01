@@ -86,12 +86,14 @@ impl VirtualMachine {
 
     fn init_ctx(mem_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
         let mut config = SessionConfig::new()
-            .with_batch_size(1024 * 1024 * 4)
+            // .with_batch_size(32 * 1024)
             .with_coalesce_batches(true)
             .with_information_schema(true)
             .with_collect_statistics(true);
+        // .with_target_partitions();
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
+        // config.options_mut().execution.planning_concurrency = 4;
         config
             .options_mut()
             .execution
