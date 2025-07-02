@@ -6,8 +6,8 @@ use std::{
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 
 use crate::{
-    error::TableError, physical_table::PhysicalTableProvider, table_extension::TableExtension,
-    LogicalTableProvider,
+    error::TableError, physical_table::PhysicalTableProvider, preset_table::PresetTable,
+    table_extension::TableExtension, LogicalTableProvider,
 };
 
 #[derive(Debug)]
@@ -60,6 +60,7 @@ pub enum TableType {
     /// A logical table with its associated provider.
     Logical(Arc<dyn LogicalTableProvider>),
     Physical(Arc<dyn PhysicalTableProvider>),
+    PresetTable(PresetTable),
 }
 
 impl From<Arc<dyn LogicalTableProvider>> for TableType {
@@ -167,6 +168,11 @@ impl Table {
                 .create(table_directory.clone(), session_ctx)
                 .await
                 .unwrap(),
+            TableType::PresetTable(preset_table) => {
+                preset_table
+                    .create(table_directory.clone(), session_ctx)
+                    .await?
+            }
         };
 
         // Return the table information.
@@ -198,6 +204,9 @@ impl Table {
                 Ok(logical_table.table_provider(session_ctx).await?)
             }
             TableType::Physical(physical_table) => Ok(physical_table
+                .table_provider(table_directory, session_ctx)
+                .await?),
+            TableType::PresetTable(preset_table) => Ok(preset_table
                 .table_provider(table_directory, session_ctx)
                 .await?),
         }

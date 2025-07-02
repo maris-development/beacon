@@ -9,7 +9,6 @@ use datafusion::{
 use crate::schema_provider::BeaconSchemaProvider;
 
 pub mod description;
-pub mod preset;
 pub mod spatial_temporal;
 
 pub fn table_extension_functions(session_ctx: Arc<SessionContext>) -> Vec<TableFunction> {

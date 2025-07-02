@@ -36,4 +36,6 @@ pub enum TableError {
     PhysicalTableError(#[from] physical_table::error::PhysicalTableError),
     #[error("Invalid table name: {0}")]
     InvalidTableName(String),
+    #[error("Failed to create table provider: {0}")]
+    TableProviderCreationError(#[from] datafusion::error::DataFusionError),
 }

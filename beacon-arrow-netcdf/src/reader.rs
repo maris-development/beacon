@@ -27,6 +27,16 @@ impl NetCDFArrowReader {
         Ok(Self { file_schema, file })
     }
 
+    pub fn dimensions(&self) -> Vec<Dimension> {
+        self.file
+            .dimensions()
+            .map(|d| Dimension {
+                name: d.name().to_string(),
+                size: d.len(),
+            })
+            .collect()
+    }
+
     pub fn schema(&self) -> arrow::datatypes::SchemaRef {
         self.file_schema.clone()
     }
