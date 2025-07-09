@@ -121,7 +121,7 @@ impl TableProvider for PresetTableProvider {
     }
 
     fn table_type(&self) -> datafusion::datasource::TableType {
-        datafusion::datasource::TableType::View
+        datafusion::datasource::TableType::Base
     }
 
     async fn scan(
