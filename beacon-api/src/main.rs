@@ -4,12 +4,13 @@ use admin::setup_admin_router;
 use axum::{
     body::Bytes,
     extract::MatchedPath,
-    http::{HeaderMap, Request},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, Request},
     response::{Redirect, Response},
     routing::get,
     Router,
 };
 use client::setup_client_router;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{field::Empty, info_span, Level, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, FmtSubscriber};
@@ -59,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
             get(|| async { Response::new("Ok".to_string()) }),
         )
         .route("/", get(|| async { Redirect::to("/swagger") }))
+        .layer(build_cors_layer())
         .with_state::<_>(beacon_runtime.clone());
 
     let addr = std::net::SocketAddr::new(
@@ -183,4 +185,51 @@ where
     );
 
     router
+}
+
+fn build_cors_layer() -> CorsLayer {
+    let mut layer = CorsLayer::new();
+
+    // --- Origins ---
+    if beacon_config::CONFIG.allowed_origins.trim() == "*" {
+        layer = layer.allow_origin(Any);
+    } else {
+        let origins = beacon_config::CONFIG
+            .allowed_origins
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| HeaderValue::from_str(s).expect("invalid origin"))
+            .collect::<Vec<_>>();
+        layer = layer.allow_origin(AllowOrigin::list(origins)); // :contentReference[oaicite:0]{index=0}
+    }
+
+    // --- Methods ---
+    let methods = beacon_config::CONFIG
+        .allowed_methods
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| Method::from_str(s).expect("invalid method"))
+        .collect::<Vec<_>>();
+    layer = layer.allow_methods(methods); // :contentReference[oaicite:1]{index=1}
+
+    // --- Headers ---
+    let headers = beacon_config::CONFIG
+        .allowed_headers
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| HeaderName::from_str(s).expect("invalid header name"))
+        .collect::<Vec<_>>();
+    layer = layer.allow_headers(headers);
+
+    // --- Credentials & Max-Age ---
+    if beacon_config::CONFIG.allowed_credentials {
+        layer = layer.allow_credentials(true);
+    }
+
+    layer = layer.max_age(Duration::from_secs(beacon_config::CONFIG.max_age));
+
+    layer
 }
