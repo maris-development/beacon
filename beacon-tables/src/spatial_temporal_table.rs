@@ -10,22 +10,19 @@ use datafusion::{
 
 use crate::{error::TableError, table::TableType};
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(untagged)]
-pub enum PresetColumnMapping {
-    ColumnName(String),
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PresetTable {
+pub struct SpatialTemporalTable {
     #[serde(flatten)]
     pub table_engine: Arc<TableType>,
-    pub preset_filter_columns: Vec<String>,
-    pub data_columns: Vec<PresetColumnMapping>,
-    pub metadata_columns: Vec<PresetColumnMapping>,
+    pub longitude_column: String,
+    pub latitude_column: String,
+    pub time_column: String,
+    pub depth_column: Option<String>,
+    pub data_columns: Vec<String>,
+    pub metadata_columns: Vec<String>,
 }
 
-impl PresetTable {
+impl SpatialTemporalTable {
     pub async fn create(
         &self,
         table_directory: PathBuf,
