@@ -19,7 +19,7 @@ pub enum PresetColumnMapping {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PresetTable {
     #[serde(flatten)]
-    pub ref_table: Arc<TableType>,
+    pub table_engine: Arc<TableType>,
     pub preset_filter_columns: Vec<String>,
     pub data_columns: Vec<PresetColumnMapping>,
     pub metadata_columns: Vec<PresetColumnMapping>,
@@ -31,7 +31,7 @@ impl PresetTable {
         table_directory: PathBuf,
         session_ctx: Arc<SessionContext>,
     ) -> Result<(), TableError> {
-        match self.ref_table.as_ref() {
+        match self.table_engine.as_ref() {
             TableType::Logical(logical_table) => {
                 Box::pin(logical_table.create(table_directory, session_ctx)).await?
             }
@@ -50,7 +50,7 @@ impl PresetTable {
         table_directory: PathBuf,
         session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
-        let current_provider = match self.ref_table.as_ref() {
+        let current_provider = match self.table_engine.as_ref() {
             TableType::Logical(logical_table) => {
                 Box::pin(logical_table.table_provider(session_ctx)).await?
             }
