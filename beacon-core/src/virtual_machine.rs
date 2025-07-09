@@ -30,6 +30,8 @@ use datafusion::{
 use futures::StreamExt;
 use tracing::{event, Level};
 
+use crate::sys::{self, SystemInfo};
+
 pub struct VirtualMachine {
     session_ctx: Arc<SessionContext>,
     schema_provider: Arc<BeaconSchemaProvider>,

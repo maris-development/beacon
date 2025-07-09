@@ -9,6 +9,7 @@ use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod datasets;
+mod info;
 mod query;
 mod tables;
 
@@ -32,6 +33,7 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(tables::list_table_extensions))
         .routes(routes!(tables::list_table_config))
         .routes(routes!(tables::default_table_schema))
+        .routes(routes!(info::system_info))
         .split_for_parts();
 
     (client_router, client_api)
