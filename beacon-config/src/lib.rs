@@ -35,7 +35,7 @@ pub struct Config {
     pub allowed_origins: String,
     #[envconfig(from = "CORS_ALLOWED_HEADERS", default = "Content-Type,Authorization")]
     pub allowed_headers: String,
-    #[envconfig(from = "CORS_ALLOWED_CREDENTIALS", default = "true")]
+    #[envconfig(from = "CORS_ALLOWED_CREDENTIALS", default = "false")]
     pub allowed_credentials: bool,
     #[envconfig(from = "CORS_MAX_AGE", default = "3600")]
     pub max_age: u64,

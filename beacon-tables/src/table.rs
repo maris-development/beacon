@@ -60,6 +60,7 @@ pub enum TableType {
     /// A logical table with its associated provider.
     Logical(Arc<dyn LogicalTableProvider>),
     Physical(Arc<dyn PhysicalTableProvider>),
+    #[serde(rename = "preset")]
     PresetTable(PresetTable),
 }
 
