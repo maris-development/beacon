@@ -4,7 +4,7 @@ use arrow::datatypes::SchemaRef;
 use datafusion::{
     catalog::{Session, TableProvider},
     logical_expr::TableProviderFilterPushDown,
-    physical_plan::{projection::ProjectionExec, ExecutionPlan},
+    physical_plan::ExecutionPlan,
     prelude::{Expr, SessionContext},
 };
 
@@ -64,22 +64,21 @@ impl SpatialTemporalTable {
         let mut exposed_fields = Vec::new();
 
         for column in self.data_columns.iter() {
-            match column {
-                PresetColumnMapping::ColumnName(column_name) => {
-                    if let Some(field) = current_schema.field_with_name(column_name).ok() {
-                        exposed_fields.push(field.clone());
-                    }
-                }
+            if let Some(field) = current_schema.field_with_name(column).ok() {
+                exposed_fields.push(field.clone());
+            } else {
+                panic!("Data column '{}' not found in the current schema", column);
             }
         }
 
         for column in self.metadata_columns.iter() {
-            match column {
-                PresetColumnMapping::ColumnName(column_name) => {
-                    if let Some(field) = current_schema.field_with_name(column_name).ok() {
-                        exposed_fields.push(field.clone());
-                    }
-                }
+            if let Some(field) = current_schema.field_with_name(column).ok() {
+                exposed_fields.push(field.clone());
+            } else {
+                panic!(
+                    "Metadata column '{}' not found in the current schema",
+                    column
+                );
             }
         }
 

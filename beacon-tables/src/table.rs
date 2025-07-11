@@ -26,6 +26,8 @@ pub struct Table {
     /// A vector of table extensions that provide additional functionality.
     #[serde(default)]
     pub table_extensions: Vec<Arc<dyn TableExtension>>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl Table {
@@ -49,6 +51,7 @@ impl Table {
             table_name,
             table_type: table_type.into(),
             table_extensions,
+            description: None,
         }
     }
 }
