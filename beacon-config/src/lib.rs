@@ -29,6 +29,9 @@ pub struct Config {
     pub st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     pub worker_threads: usize,
+    #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
+    pub enable_sys_info: bool,
+
     /// CORS CONFIG
     #[envconfig(from = "CORS_ALLOWED_METHODS", default = "GET,POST,PUT,DELETE,OPTIONS")]
     pub allowed_methods: String,

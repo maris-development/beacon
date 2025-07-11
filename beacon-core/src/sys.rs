@@ -1,14 +1,20 @@
 #[derive(Debug, serde::Serialize)]
 pub struct SystemInfo {
-    pub version: String,
-    pub system_info: sysinfo::System,
+    pub beacon_version: String,
+    pub system_info: Option<sysinfo::System>,
 }
 
 impl SystemInfo {
     pub fn new() -> Self {
+        let sys_info = if beacon_config::CONFIG.enable_sys_info {
+            Some(sysinfo::System::new_all())
+        } else {
+            None
+        };
+
         Self {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            system_info: sysinfo::System::new_all(),
+            beacon_version: env!("CARGO_PKG_VERSION").to_string(),
+            system_info: sys_info,
         }
     }
 }
