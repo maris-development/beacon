@@ -1,6 +1,7 @@
 use std::{net::IpAddr, str::FromStr, sync::Arc, time::Duration};
 
 use admin::setup_admin_router;
+use anyhow::Context;
 use axum::{
     body::Bytes,
     extract::MatchedPath,
@@ -10,6 +11,7 @@ use axum::{
     Router,
 };
 use client::setup_client_router;
+use tokio::runtime::Builder;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{field::Empty, info_span, Level, Span};
@@ -37,8 +39,18 @@ fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::
     openapi
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let rt = Builder::new_multi_thread()
+        .worker_threads(beacon_config::CONFIG.worker_threads)
+        .enable_all()
+        .build()
+        .context("failed to build Tokio runtime")?;
+
+    // 3) drive your async main
+    rt.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     setup_tracing();
 
     tracing::info!("Beacon API v{}", BEACON_VERSION);
