@@ -58,13 +58,6 @@ pub struct QueryBody {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum Select {
-    TryCast {
-        #[serde(skip_serializing)]
-        #[serde(flatten)]
-        select: Box<Select>,
-        #[schema(value_type = String)]
-        try_cast: DataType,
-    },
     ColumnName(String),
     Column {
         #[serde(alias = "column_name")]
@@ -141,14 +134,6 @@ impl Select {
                     Some(alias) => Ok(expr.alias(alias)),
                     None => Ok(expr),
                 }
-            }
-            Select::TryCast {
-                select,
-                try_cast: cast_as,
-            } => {
-                let expr = select.to_expr(session_state)?;
-
-                Ok(try_cast(expr, cast_as.clone()))
             }
         }
     }

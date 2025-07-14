@@ -26,4 +26,3 @@ pub fn remap_filter(expr: Expr, rename_map: &HashMap<String, String>) -> Result<
     // Turn the Transformed<Expr> back into an Expr
     Ok(transformed.data)
 }
-
