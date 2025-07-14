@@ -1,6 +1,7 @@
 use std::{any::Any, collections::HashMap, path::PathBuf, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
+use chrono::NaiveDateTime;
 use datafusion::{
     catalog::{Session, TableProvider},
     common::DFSchema,
@@ -14,19 +15,64 @@ use datafusion::{
 use crate::{error::TableError, table::TableType, util::remap_filter};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PresetColumnMapping {
+    column_name: String,
+    alias: Option<String>,
+    description: Option<String>,
+    #[serde(flatten)]
+    #[serde(default)]
+    _metadata_fields: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(untagged)]
-pub enum PresetColumnMapping {
-    ColumnName(String),
-    ColumnAlias { column_name: String, alias: String },
+pub enum PresetFilterColumn {
+    Range {
+        column_name: String,
+        #[serde(flatten)]
+        range: Range,
+    },
+    Exact {
+        column_name: String,
+        options: Vec<Exact>,
+    },
+    Any {
+        column_name: String,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Range {
+    Number {
+        min: f64,
+        max: f64,
+    },
+    Text {
+        min: String,
+        max: String,
+    },
+    Timestamp {
+        min: NaiveDateTime,
+        max: NaiveDateTime,
+    },
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum Exact {
+    String(String),
+    Number(f64),
+    Timestamp(NaiveDateTime),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PresetTable {
     #[serde(flatten)]
     pub table_engine: Arc<TableType>,
-    pub preset_filter_columns: Vec<String>,
     pub data_columns: Vec<PresetColumnMapping>,
     pub metadata_columns: Vec<PresetColumnMapping>,
+    pub preset_filter_columns: Vec<PresetFilterColumn>,
 }
 
 impl PresetTable {
@@ -72,33 +118,23 @@ impl PresetTable {
         let mut renames = HashMap::new();
 
         for column in self.data_columns.iter() {
-            match column {
-                PresetColumnMapping::ColumnName(column_name) => {
-                    if let Some(field) = current_schema.field_with_name(column_name).ok() {
-                        exposed_fields.push(field.clone());
-                    }
-                }
-                PresetColumnMapping::ColumnAlias { column_name, alias } => {
-                    if let Some(field) = current_schema.field_with_name(column_name).ok() {
-                        exposed_fields.push(field.clone().with_name(alias));
-                        renames.insert(column_name.clone(), alias.clone());
-                    }
+            if let Some(field) = current_schema.field_with_name(&column.column_name).ok() {
+                if let Some(alias) = column.alias.as_ref() {
+                    exposed_fields.push(field.clone().with_name(alias));
+                    renames.insert(column.column_name.clone(), alias.clone());
+                } else {
+                    exposed_fields.push(field.clone());
                 }
             }
         }
 
         for column in self.metadata_columns.iter() {
-            match column {
-                PresetColumnMapping::ColumnName(column_name) => {
-                    if let Some(field) = current_schema.field_with_name(column_name).ok() {
-                        exposed_fields.push(field.clone());
-                    }
-                }
-                PresetColumnMapping::ColumnAlias { column_name, alias } => {
-                    if let Some(field) = current_schema.field_with_name(column_name).ok() {
-                        exposed_fields.push(field.clone().with_name(alias));
-                        renames.insert(column_name.clone(), alias.clone());
-                    }
+            if let Some(field) = current_schema.field_with_name(&column.column_name).ok() {
+                if let Some(alias) = column.alias.as_ref() {
+                    exposed_fields.push(field.clone().with_name(alias));
+                    renames.insert(column.column_name.clone(), alias.clone());
+                } else {
+                    exposed_fields.push(field.clone());
                 }
             }
         }

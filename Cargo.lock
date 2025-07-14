@@ -750,6 +750,7 @@ dependencies = [
  "beacon-config",
  "beacon-query",
  "beacon-sources",
+ "chrono",
  "datafusion",
  "indexmap",
  "parking_lot",
