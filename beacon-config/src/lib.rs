@@ -33,15 +33,21 @@ pub struct Config {
     pub enable_sys_info: bool,
 
     /// CORS CONFIG
-    #[envconfig(from = "CORS_ALLOWED_METHODS", default = "GET,POST,PUT,DELETE,OPTIONS")]
+    #[envconfig(
+        from = "BEACON_CORS_ALLOWED_METHODS",
+        default = "GET,POST,PUT,DELETE,OPTIONS"
+    )]
     pub allowed_methods: String,
-    #[envconfig(from = "CORS_ALLOWED_ORIGINS", default = "*")]
+    #[envconfig(from = "BEACON_CORS_ALLOWED_ORIGINS", default = "*")]
     pub allowed_origins: String,
-    #[envconfig(from = "CORS_ALLOWED_HEADERS", default = "Content-Type,Authorization")]
+    #[envconfig(
+        from = "BEACON_CORS_ALLOWED_HEADERS",
+        default = "Content-Type,Authorization"
+    )]
     pub allowed_headers: String,
-    #[envconfig(from = "CORS_ALLOWED_CREDENTIALS", default = "false")]
+    #[envconfig(from = "BEACON_CORS_ALLOWED_CREDENTIALS", default = "false")]
     pub allowed_credentials: bool,
-    #[envconfig(from = "CORS_MAX_AGE", default = "3600")]
+    #[envconfig(from = "BEACON_CORS_MAX_AGE", default = "3600")]
     pub max_age: u64,
 }
 
