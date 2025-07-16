@@ -191,9 +191,14 @@ impl TableProvider for PresetTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let inverted_renames: HashMap<_, _> = self
+            .renames
+            .iter()
+            .map(|(k, v)| (v.clone(), k.clone()))
+            .collect();
         let alias_exprs = filters
             .iter()
-            .map(|e| remap_filter(e.clone(), &self.renames))
+            .map(|e| remap_filter(e.clone(), &inverted_renames))
             .collect::<Result<Vec<_>, _>>()?;
 
         let scan = self
@@ -205,7 +210,7 @@ impl TableProvider for PresetTableProvider {
         let props = ExecutionProps::new();
 
         let mut proj_exprs = Vec::with_capacity(self.renames.len());
-        for (alias, real_name) in &self.renames {
+        for (real_name, alias) in &self.renames {
             // make a logical Expr::Column against the real name
             let log_expr: Expr = col(real_name);
             // plan it into a PhysicalExpr

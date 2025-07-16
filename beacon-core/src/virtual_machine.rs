@@ -13,24 +13,17 @@ use beacon_tables::{schema_provider::BeaconSchemaProvider, table::Table};
 use datafusion::{
     catalog::SchemaProvider,
     datasource::{
-        file_format::{
-            arrow::ArrowFormatFactory, csv::CsvFormatFactory, parquet::ParquetFormatFactory,
-            FileFormatFactory,
-        },
+        file_format::{arrow::ArrowFormatFactory, csv::CsvFormatFactory},
         listing::{ListingTableConfig, ListingTableUrl},
     },
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, object_store::ObjectStoreUrl,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
-    logical_expr::LogicalPlan,
-    physical_plan::{analyze::AnalyzeExec, filter::FilterExec},
-    prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
+    prelude::{SessionConfig, SessionContext},
 };
 use futures::StreamExt;
 use tracing::{event, Level};
-
-use crate::sys::{self, SystemInfo};
 
 pub struct VirtualMachine {
     session_ctx: Arc<SessionContext>,

@@ -38,4 +38,6 @@ pub enum TableError {
     InvalidTableName(String),
     #[error("Failed to create table provider: {0}")]
     TableProviderCreationError(#[from] datafusion::error::DataFusionError),
+    #[error("Table error: {0}")]
+    TableError(String),
 }

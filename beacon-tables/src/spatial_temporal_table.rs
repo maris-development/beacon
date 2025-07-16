@@ -67,7 +67,10 @@ impl SpatialTemporalTable {
             if let Some(field) = current_schema.field_with_name(column).ok() {
                 exposed_fields.push(field.clone());
             } else {
-                panic!("Data column '{}' not found in the current schema", column);
+                return Err(TableError::TableError(format!(
+                    "Data column '{}' not found in the current schema",
+                    column
+                )));
             }
         }
 
@@ -75,10 +78,10 @@ impl SpatialTemporalTable {
             if let Some(field) = current_schema.field_with_name(column).ok() {
                 exposed_fields.push(field.clone());
             } else {
-                panic!(
+                return Err(TableError::TableError(format!(
                     "Metadata column '{}' not found in the current schema",
                     column
-                );
+                )));
             }
         }
 
