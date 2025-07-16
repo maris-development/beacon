@@ -4,7 +4,7 @@ use arrow::datatypes::SchemaRef;
 use chrono::NaiveDateTime;
 use datafusion::{
     catalog::{Session, TableProvider},
-    common::DFSchema,
+    common::{Column, DFSchema},
     execution::context::ExecutionProps,
     logical_expr::TableProviderFilterPushDown,
     physical_expr::create_physical_expr,
@@ -196,6 +196,7 @@ impl TableProvider for PresetTableProvider {
             .iter()
             .map(|(k, v)| (v.clone(), k.clone()))
             .collect();
+
         let alias_exprs = filters
             .iter()
             .map(|e| remap_filter(e.clone(), &inverted_renames))
@@ -206,13 +207,13 @@ impl TableProvider for PresetTableProvider {
             .scan(state, projection, &alias_exprs, limit)
             .await?;
 
-        let df_schema = DFSchema::try_from(scan.schema().as_ref().clone())?;
+        let df_schema = DFSchema::try_from(scan.schema().as_ref().clone()).unwrap();
         let props = ExecutionProps::new();
 
         let mut proj_exprs = Vec::with_capacity(self.renames.len());
         for (real_name, alias) in &self.renames {
             // make a logical Expr::Column against the real name
-            let log_expr: Expr = col(real_name);
+            let log_expr: Expr = Expr::Column(Column::new_unqualified(real_name.clone()));
             // plan it into a PhysicalExpr
             let phys_expr = create_physical_expr(&log_expr, &df_schema, &props)?;
             // now alias it in the ProjectionExec
@@ -220,6 +221,7 @@ impl TableProvider for PresetTableProvider {
         }
 
         let with_aliases = ProjectionExec::try_new(proj_exprs, scan)?;
+
         Ok(Arc::new(with_aliases))
     }
 
