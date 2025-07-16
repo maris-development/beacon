@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{env, path::PathBuf, sync::Arc};
 
 use envconfig::Envconfig;
 use lazy_static::lazy_static;
@@ -27,6 +27,22 @@ pub struct Config {
     pub sanitize_schema: bool,
     #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
     pub st_within_point_cache_size: usize,
+    #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
+    pub worker_threads: usize,
+    #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
+    pub enable_sys_info: bool,
+
+    /// CORS CONFIG
+    #[envconfig(from = "CORS_ALLOWED_METHODS", default = "GET,POST,PUT,DELETE,OPTIONS")]
+    pub allowed_methods: String,
+    #[envconfig(from = "CORS_ALLOWED_ORIGINS", default = "*")]
+    pub allowed_origins: String,
+    #[envconfig(from = "CORS_ALLOWED_HEADERS", default = "Content-Type,Authorization")]
+    pub allowed_headers: String,
+    #[envconfig(from = "CORS_ALLOWED_CREDENTIALS", default = "false")]
+    pub allowed_credentials: bool,
+    #[envconfig(from = "CORS_MAX_AGE", default = "3600")]
+    pub max_age: u64,
 }
 
 impl Config {

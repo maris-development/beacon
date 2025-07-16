@@ -13,19 +13,14 @@ use beacon_tables::{schema_provider::BeaconSchemaProvider, table::Table};
 use datafusion::{
     catalog::SchemaProvider,
     datasource::{
-        file_format::{
-            arrow::ArrowFormatFactory, csv::CsvFormatFactory, parquet::ParquetFormatFactory,
-            FileFormatFactory,
-        },
+        file_format::{arrow::ArrowFormatFactory, csv::CsvFormatFactory},
         listing::{ListingTableConfig, ListingTableUrl},
     },
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, object_store::ObjectStoreUrl,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
-    logical_expr::LogicalPlan,
-    physical_plan::{analyze::AnalyzeExec, filter::FilterExec},
-    prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
+    prelude::{SessionConfig, SessionContext},
 };
 use futures::StreamExt;
 use tracing::{event, Level};
@@ -86,12 +81,14 @@ impl VirtualMachine {
 
     fn init_ctx(mem_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
         let mut config = SessionConfig::new()
-            .with_batch_size(1024 * 1024 * 4)
+            // .with_batch_size(32 * 1024)
             .with_coalesce_batches(true)
             .with_information_schema(true)
             .with_collect_statistics(true);
+        // .with_target_partitions();
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
+        // config.options_mut().execution.planning_concurrency = 4;
         config
             .options_mut()
             .execution

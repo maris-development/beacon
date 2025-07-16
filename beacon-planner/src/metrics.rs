@@ -18,7 +18,7 @@ pub struct ConsolidatedMetrics {
     pub result_num_rows: u64,
     pub result_size_in_bytes: u64,
     pub file_paths: Vec<String>,
-
+    pub execution_time_ms: u64,
     pub query: serde_json::Value,
     pub query_id: uuid::Uuid,
 
@@ -33,6 +33,7 @@ pub struct MetricsTracker {
     pub input_bytes: AtomicU64,
     pub result_rows: AtomicU64,
     pub result_size_in_bytes: AtomicU64,
+    pub start_time: std::time::Instant,
 
     pub query: serde_json::Value,
     pub query_id: uuid::Uuid,
@@ -47,6 +48,7 @@ pub struct MetricsTracker {
 impl MetricsTracker {
     pub fn new(input_query: serde_json::Value, query_id: uuid::Uuid) -> Arc<Self> {
         Arc::new(Self {
+            start_time: std::time::Instant::now(),
             query: input_query,
             query_id,
             input_rows: AtomicU64::new(0),
@@ -126,6 +128,7 @@ impl MetricsTracker {
             parsed_logical_plan: logical_plan_json,
             optimized_logical_plan: optimized_logical_plan_json,
             node_metrics: collect_metrics_json(physical_plan.as_ref()),
+            execution_time_ms: self.start_time.elapsed().as_millis() as u64,
         }
     }
 }

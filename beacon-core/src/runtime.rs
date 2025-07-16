@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use crate::{query_result::QueryResult, virtual_machine};
+use crate::{
+    query_result::QueryResult,
+    sys::{self, SystemInfo},
+    virtual_machine,
+};
 use arrow::datatypes::SchemaRef;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_output::OutputResponse;
@@ -40,6 +44,10 @@ impl Runtime {
             output_buffer: plan.output_buffer,
             query_id: plan.query_id,
         })
+    }
+
+    pub fn system_info(&self) -> SystemInfo {
+        sys::SystemInfo::new()
     }
 
     pub fn get_query_metrics(&self, query_id: uuid::Uuid) -> Option<ConsolidatedMetrics> {
