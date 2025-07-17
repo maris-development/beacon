@@ -1,7 +1,7 @@
 use datafusion::common::tree_node::{Transformed, TreeNode};
+use datafusion::common::Column;
 use datafusion::error::Result;
 use datafusion::logical_expr::Expr;
-use datafusion::prelude::col;
 use std::collections::HashMap;
 
 pub fn remap_filter(expr: Expr, rename_map: &HashMap<String, String>) -> Result<Expr> {
@@ -13,7 +13,7 @@ pub fn remap_filter(expr: Expr, rename_map: &HashMap<String, String>) -> Result<
                 // look up the real name
                 if let Some(real) = rename_map.get(c.name()) {
                     // yes, replace this Expr with col(real)
-                    Transformed::yes(col(real))
+                    Transformed::yes(Expr::Column(Column::new_unqualified(real.clone())))
                 } else {
                     // no change
                     Transformed::no(e.clone())
