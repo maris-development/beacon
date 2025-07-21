@@ -6,7 +6,10 @@ use std::{
 };
 
 use arrow::{
-    array::{Array, RecordBatch},
+    array::{
+        Array, ArrayRef, ArrowPrimitiveType, AsArray, PrimitiveArray, RecordBatch, StringArray,
+        StringBuilder,
+    },
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
 use serde::{Deserialize, Serialize};
@@ -57,6 +60,8 @@ pub struct OdvOptions {
     pub meta_columns: Vec<ColumnInfo>,
     #[serde(default)]
     pub archiving: ArchivingMethod,
+    #[serde(default)]
+    pub feature_type_column: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -258,6 +263,7 @@ impl Default for OdvOptions {
             data_columns: vec![],
             meta_columns: vec![],
             archiving: ArchivingMethod::default(),
+            feature_type_column: None,
         }
     }
 }
@@ -382,6 +388,16 @@ impl AsyncOdvWriter {
                 OdvBatchType::Trajectory(batch) => {
                     self.trajectory_file.write_batch(batch)?;
                 }
+                OdvBatchType::TrajectoryProfile(batches) => {
+                    for batch in batches {
+                        self.profile_file.write_batch(batch)?;
+                    }
+                }
+                OdvBatchType::TimeSeriesProfile(batches) => {
+                    for batch in batches {
+                        self.profile_file.write_batch(batch)?;
+                    }
+                }
             }
         }
 
@@ -487,16 +503,24 @@ impl AsyncOdvWriter {
                 )
             })?;
 
+        if let Some(feature_type_column) = &odv_options.feature_type_column {
+            if let Some(feature_type) = Self::classify_batch_feature_type(
+                batch.clone(),
+                feature_type_column,
+                &odv_options.longitude_column.column_name,
+                &odv_options.latitude_column.column_name,
+                &odv_options.time_column.column_name,
+                &odv_options.key_column,
+            )? {
+                return Ok(feature_type);
+            }
+        }
+
         let has_moving_position = Self::has_changes(lon_col) || Self::has_changes(lat_col);
         let has_changing_time = Self::has_changes(time_col);
         let has_changing_depth = Self::has_changes(depth_col);
 
         let mut types = vec![];
-
-        // println!(
-        //     "Batch classification: moving_position={}, changing_time={}, changing_depth={}",
-        //     has_moving_position, has_changing_time, has_changing_depth
-        // );
 
         if has_moving_position && has_changing_time && !has_changing_depth {
             types.push(OdvBatchType::Trajectory(batch.clone()));
@@ -513,6 +537,167 @@ impl AsyncOdvWriter {
         }
 
         Ok(types.pop().unwrap_or(OdvBatchType::Profile(batch))) // Default to Profile
+    }
+
+    fn classify_batch_feature_type(
+        batch: RecordBatch,
+        feature_type_columns: &str,
+        longitude_column: &str,
+        latitude_column: &str,
+        time_column: &str,
+        key_column: &str,
+    ) -> anyhow::Result<Option<OdvBatchType>> {
+        let feature_array = batch.column_by_name(feature_type_columns).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Feature type column '{}' not found in batch.",
+                feature_type_columns
+            )
+        })?;
+        let feature_type_str_array = feature_array
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Feature type column '{}' is not a String.",
+                    feature_type_columns
+                )
+            })?;
+
+        if feature_type_str_array.is_null(0) {
+            return Ok(None); // No feature type specified
+        }
+
+        let feature_type = feature_type_str_array.value(0);
+
+        match feature_type {
+            "profile" => Ok(Some(OdvBatchType::Profile(batch))),
+            "timeSeries" => Ok(Some(OdvBatchType::TimeSeries(batch))),
+            "trajectory" => Ok(Some(OdvBatchType::Trajectory(batch))),
+            "trajectoryProfile" => {
+                let longitude_column = batch
+                    .column_by_name(longitude_column)
+                    .expect("Longitude column not found")
+                    .clone();
+                let latitude_column = batch
+                    .column_by_name(latitude_column)
+                    .expect("Latitude column not found")
+                    .clone();
+                let time_column = batch
+                    .column_by_name(time_column)
+                    .expect("Time column not found")
+                    .clone();
+
+                // Partition the batch into trajectory profiles
+                let partitions = arrow::compute::kernels::partition::partition(&[
+                    longitude_column,
+                    latitude_column,
+                    time_column,
+                ])
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to partition trajectory profile batch: {:?}", e)
+                })?
+                .ranges();
+
+                let mut trajectory_profiles = vec![];
+                for (i, range) in partitions.iter().enumerate() {
+                    let profile = batch.slice(range.start, range.end - range.start);
+
+                    // Map the key column of the profile record batch to the key_name[+i] format
+                    let key_column_array = profile
+                        .column_by_name(key_column)
+                        .expect("Key column not found")
+                        .as_string::<i32>();
+
+                    let updated_key_column =
+                        Arc::new(Self::append_suffix(key_column_array, &format!("[+{}]", i)));
+
+                    // Update the record batch key column
+                    let profile =
+                        Self::replace_column(&profile, key_column, updated_key_column).unwrap();
+
+                    trajectory_profiles.push(profile);
+                }
+
+                Ok(Some(OdvBatchType::TrajectoryProfile(trajectory_profiles)))
+            }
+            "timeSeriesProfile" => {
+                let time_column = batch
+                    .column_by_name(time_column)
+                    .expect("Time column not found")
+                    .clone();
+
+                let partitions = arrow::compute::kernels::partition::partition(&[time_column])
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to partition time series profile batch: {:?}", e)
+                    })?
+                    .ranges();
+
+                let mut time_series_profiles = vec![];
+                for (i, range) in partitions.iter().enumerate() {
+                    let profile = batch.slice(range.start, range.end - range.start);
+
+                    // Map the key column of the profile record batch to the key_name[+i] format
+                    let key_column_array = profile
+                        .column_by_name(key_column)
+                        .expect("Key column not found")
+                        .as_string::<i32>();
+
+                    let updated_key_column =
+                        Arc::new(Self::append_suffix(key_column_array, &format!("[+{}]", i)));
+
+                    // Update the record batch key column
+                    let profile =
+                        Self::replace_column(&profile, key_column, updated_key_column).unwrap();
+
+                    time_series_profiles.push(profile);
+                }
+                Ok(Some(OdvBatchType::TimeSeriesProfile(time_series_profiles)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn append_suffix(arr: &StringArray, suffix: &str) -> StringArray {
+        let len = arr.len();
+        let mut builder = StringBuilder::new();
+
+        for i in 0..len {
+            if arr.is_null(i) {
+                builder.append_null();
+            } else {
+                // arr.value(i) is &str
+                let new_val = arr.value(i).to_string() + suffix;
+                builder.append_value(&new_val);
+            }
+        }
+
+        builder.finish()
+    }
+
+    fn replace_column(
+        batch: &RecordBatch,
+        col_name: &str,
+        new_col: ArrayRef,
+    ) -> anyhow::Result<RecordBatch> {
+        let col_index = batch.schema().index_of(col_name)?;
+
+        let mut new_fields = batch.schema().fields().to_vec();
+        let old_field = batch.schema().field(col_index).clone();
+        let new_field = Field::new(
+            old_field.name(),
+            new_col.data_type().clone(),
+            old_field.is_nullable(),
+        );
+        new_fields[col_index] = new_field.into();
+
+        let new_schema: SchemaRef = Arc::new(Schema::new(new_fields));
+
+        // 2) Build new columns Vec<ArrayRef>, swapping in new_col at position col_index.
+        let mut new_columns = batch.columns().to_vec();
+        new_columns[col_index] = new_col;
+
+        // 3) Construct the new RecordBatch
+        Ok(RecordBatch::try_new(new_schema, new_columns)?)
     }
 
     /// Checks if an array contains varying values
@@ -572,6 +757,10 @@ pub enum OdvBatchType {
     Profile(RecordBatch),
     /// Moving trajectory data with changing positions and times
     Trajectory(RecordBatch),
+    /// Trajectory with profile data
+    TrajectoryProfile(Vec<RecordBatch>),
+    /// Timeseries Profile
+    TimeSeriesProfile(Vec<RecordBatch>),
 }
 
 /// File handler for writing ODV formatted data
