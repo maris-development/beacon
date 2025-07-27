@@ -9,7 +9,7 @@ use datafusion::{
     logical_expr::TableProviderFilterPushDown,
     physical_expr::create_physical_expr,
     physical_plan::{projection::ProjectionExec, ExecutionPlan},
-    prelude::{col, Expr, SessionContext},
+    prelude::{Expr, SessionContext},
 };
 
 use crate::{error::TableError, table::TableType, util::remap_filter};
@@ -19,6 +19,7 @@ pub struct PresetColumnMapping {
     column_name: String,
     alias: Option<String>,
     description: Option<String>,
+    filter: Option<PresetFilterColumn>,
     #[serde(flatten)]
     #[serde(default)]
     _metadata_fields: HashMap<String, serde_json::Value>,
@@ -27,18 +28,14 @@ pub struct PresetColumnMapping {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(untagged)]
 pub enum PresetFilterColumn {
+    Exact {
+        options: Vec<Exact>,
+    },
     Range {
-        column_name: String,
         #[serde(flatten)]
         range: Range,
     },
-    Exact {
-        column_name: String,
-        options: Vec<Exact>,
-    },
-    Any {
-        column_name: String,
-    },
+    Any {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -64,6 +61,7 @@ pub enum Exact {
     String(String),
     Number(f64),
     Timestamp(NaiveDateTime),
+    Boolean(bool),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -72,7 +70,6 @@ pub struct PresetTable {
     pub table_engine: Arc<TableType>,
     pub data_columns: Vec<PresetColumnMapping>,
     pub metadata_columns: Vec<PresetColumnMapping>,
-    pub preset_filter_columns: Vec<PresetFilterColumn>,
 }
 
 impl PresetTable {
@@ -212,12 +209,14 @@ impl TableProvider for PresetTableProvider {
 
         let mut proj_exprs = Vec::with_capacity(self.renames.len());
         for (real_name, alias) in &self.renames {
-            // make a logical Expr::Column against the real name
-            let log_expr: Expr = Expr::Column(Column::new_unqualified(real_name.clone()));
-            // plan it into a PhysicalExpr
-            let phys_expr = create_physical_expr(&log_expr, &df_schema, &props)?;
-            // now alias it in the ProjectionExec
-            proj_exprs.push((phys_expr, alias.clone()));
+            if df_schema.has_column_with_unqualified_name(real_name) {
+                // make a logical Expr::Column against the real name
+                let log_expr: Expr = Expr::Column(Column::new_unqualified(real_name.clone()));
+                // plan it into a PhysicalExpr
+                let phys_expr = create_physical_expr(&log_expr, &df_schema, &props).unwrap();
+                // now alias it in the ProjectionExec
+                proj_exprs.push((phys_expr, alias.clone()));
+            }
         }
 
         let with_aliases = ProjectionExec::try_new(proj_exprs, scan)?;
