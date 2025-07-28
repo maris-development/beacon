@@ -122,6 +122,11 @@ impl PresetTable {
                 } else {
                     exposed_fields.push(field.clone());
                 }
+            } else {
+                panic!(
+                    "Column '{}' not found in the current schema",
+                    column.column_name
+                );
             }
         }
 
@@ -133,6 +138,11 @@ impl PresetTable {
                 } else {
                     exposed_fields.push(field.clone());
                 }
+            } else {
+                panic!(
+                    "Metadata column '{}' not found in the current schema",
+                    column.column_name
+                );
             }
         }
 
@@ -199,12 +209,38 @@ impl TableProvider for PresetTableProvider {
             .map(|e| remap_filter(e.clone(), &inverted_renames))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Translate the projection indices to the actual column names
+        let corrected_projection: Option<Vec<usize>> = if let Some(projection) = projection {
+            let mut corrected_projection = Vec::with_capacity(projection.len());
+            let source_schema = self.inner.schema();
+            for column_index in projection {
+                let exposed_column_name = self.exposed_schema.field(*column_index).name();
+                let actual_name = inverted_renames
+                    .get(exposed_column_name)
+                    .unwrap_or(&exposed_column_name);
+                if let Ok(source_column_index) = source_schema.index_of(&actual_name) {
+                    corrected_projection.push(source_column_index);
+                } else {
+                    panic!(
+                        "Column '{}' not found in the source schema",
+                        exposed_column_name
+                    );
+                }
+            }
+            Some(corrected_projection)
+        } else {
+            None
+        };
+
         let scan = self
             .inner
-            .scan(state, projection, &alias_exprs, limit)
+            .scan(state, corrected_projection.as_ref(), &alias_exprs, limit)
             .await?;
 
         let df_schema = DFSchema::try_from(scan.schema().as_ref().clone()).unwrap();
+
+        println!("DFSchema: {:?}", df_schema);
+
         let props = ExecutionProps::new();
 
         let mut proj_exprs = Vec::with_capacity(self.renames.len());
