@@ -11,6 +11,7 @@ use datafusion::{
     physical_plan::{projection::ProjectionExec, ExecutionPlan},
     prelude::{Expr, SessionContext},
 };
+use indexmap::IndexMap;
 
 use crate::{error::TableError, table::TableType, util::remap_filter};
 
@@ -112,7 +113,7 @@ impl PresetTable {
         let current_schema = current_provider.schema();
 
         let mut exposed_fields = Vec::new();
-        let mut renames = HashMap::new();
+        let mut renames = IndexMap::new();
 
         for column in self.data_columns.iter() {
             if let Some(field) = current_schema.field_with_name(&column.column_name).ok() {
@@ -122,6 +123,11 @@ impl PresetTable {
                 } else {
                     exposed_fields.push(field.clone());
                 }
+            } else {
+                return Err(TableError::TableError(format!(
+                    "Data column '{}' not found in the current schema",
+                    column.column_name
+                )));
             }
         }
 
@@ -133,6 +139,11 @@ impl PresetTable {
                 } else {
                     exposed_fields.push(field.clone());
                 }
+            } else {
+                return Err(TableError::TableError(format!(
+                    "Metadata column '{}' not found in the current schema",
+                    column.column_name
+                )));
             }
         }
 
@@ -149,14 +160,14 @@ impl PresetTable {
 struct PresetTableProvider {
     inner: Arc<dyn TableProvider>,
     exposed_schema: SchemaRef,
-    renames: HashMap<String, String>,
+    renames: IndexMap<String, String>,
 }
 
 impl PresetTableProvider {
     pub fn new(
         inner: Arc<dyn TableProvider>,
         exposed_schema: SchemaRef,
-        renames: HashMap<String, String>,
+        renames: IndexMap<String, String>,
     ) -> Self {
         Self {
             inner,
@@ -199,23 +210,57 @@ impl TableProvider for PresetTableProvider {
             .map(|e| remap_filter(e.clone(), &inverted_renames))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let projection = projection
+            .cloned()
+            .unwrap_or_else(|| (0..self.exposed_schema.fields().len()).collect::<Vec<_>>());
+
+        let mut source_projection = Vec::with_capacity(projection.len());
+
+        // Translate the projection indices to the actual column names
+        let source_schema = self.inner.schema();
+
+        for column_index in projection {
+            let exposed_column_name = self.exposed_schema.field(column_index).name();
+            let source_name = inverted_renames
+                .get(exposed_column_name)
+                .unwrap_or(&exposed_column_name);
+            if let Ok(source_column_index) = source_schema.index_of(&source_name) {
+                source_projection.push(source_column_index);
+            } else {
+                return Err(datafusion::error::DataFusionError::Configuration(format!(
+                    "Column '{}' not found in the source schema",
+                    exposed_column_name
+                )));
+            }
+        }
+
         let scan = self
             .inner
-            .scan(state, projection, &alias_exprs, limit)
+            .scan(state, Some(source_projection.as_ref()), &alias_exprs, limit)
             .await?;
 
-        let df_schema = DFSchema::try_from(scan.schema().as_ref().clone()).unwrap();
-        let props = ExecutionProps::new();
+        let scan_schema = scan.schema();
+        let df_schema = DFSchema::try_from(scan_schema.clone()).unwrap();
+
+        let props = state.execution_props();
 
         let mut proj_exprs = Vec::with_capacity(self.renames.len());
-        for (real_name, alias) in &self.renames {
-            if df_schema.has_column_with_unqualified_name(real_name) {
-                // make a logical Expr::Column against the real name
-                let log_expr: Expr = Expr::Column(Column::new_unqualified(real_name.clone()));
-                // plan it into a PhysicalExpr
+
+        for field in df_schema.fields() {
+            // Check if the field is in the renames map
+            if let Some(alias) = self.renames.get(field.name()) {
+                // Make a logical Expr::Column against the real name
+                let log_expr: Expr = Expr::Column(Column::new_unqualified(field.name().clone()));
+                // Plan it into a PhysicalExpr
                 let phys_expr = create_physical_expr(&log_expr, &df_schema, &props).unwrap();
-                // now alias it in the ProjectionExec
+                // Now alias it in the ProjectionExec
                 proj_exprs.push((phys_expr, alias.clone()));
+
+                tracing::debug!(
+                    "Adding projection for column '{}' with alias '{}'",
+                    field.name(),
+                    alias
+                );
             }
         }
 
