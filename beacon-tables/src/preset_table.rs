@@ -124,10 +124,10 @@ impl PresetTable {
                     exposed_fields.push(field.clone());
                 }
             } else {
-                panic!(
-                    "Column '{}' not found in the current schema",
+                return Err(TableError::TableError(format!(
+                    "Data column '{}' not found in the current schema",
                     column.column_name
-                );
+                )));
             }
         }
 
@@ -140,10 +140,10 @@ impl PresetTable {
                     exposed_fields.push(field.clone());
                 }
             } else {
-                panic!(
+                return Err(TableError::TableError(format!(
                     "Metadata column '{}' not found in the current schema",
                     column.column_name
-                );
+                )));
             }
         }
 
