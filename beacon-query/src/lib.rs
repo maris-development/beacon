@@ -53,6 +53,8 @@ pub struct QueryBody {
     from: Option<From>,
     sort_by: Option<Vec<Sort>>,
     distinct: Option<Vec<String>>,
+    offset: Option<usize>,
+    limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
