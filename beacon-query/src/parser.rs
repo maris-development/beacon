@@ -94,6 +94,9 @@ impl Parser {
             builder = builder.sort(sort_by.iter().map(|s| s.to_expr()))?;
         }
 
+        let offset = query_body.offset.unwrap_or(0);
+        builder = builder.limit(offset, query_body.limit)?;
+
         let plan = builder.build()?;
         Ok(plan)
     }
