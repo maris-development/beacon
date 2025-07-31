@@ -31,7 +31,8 @@ pub struct Config {
     pub worker_threads: usize,
     #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
     pub enable_sys_info: bool,
-
+    #[envconfig(from = "BEACON_AUTO_CAST_PARQUET", default = "false")]
+    pub auto_cast_parquet: bool,
     /// CORS CONFIG
     #[envconfig(
         from = "BEACON_CORS_ALLOWED_METHODS",

@@ -7,9 +7,10 @@ use beacon_sources::{
     odv_format::{OdvFileFormatFactory, OdvFormat},
 };
 use datafusion::{
+    arrow::datatypes::{DataType, TimeUnit},
     datasource::file_format::{csv::CsvFormatFactory, format_as_file_type, FileFormat},
-    logical_expr::{Analyze, LogicalPlan, LogicalPlanBuilder},
-    prelude::{SQLOptions, SessionContext},
+    logical_expr::{Analyze, ExprSchemable, LogicalPlan, LogicalPlanBuilder},
+    prelude::{col, Expr, SQLOptions, SessionContext},
 };
 
 use crate::{output::QueryOutputFile, plan::ParsedPlan, InnerQuery, QueryBody};
@@ -139,6 +140,36 @@ impl Parser {
                 Ok((plan.build()?, QueryOutputFile::Ipc(temp_output.file)))
             }
             beacon_output::OutputFormat::Parquet => {
+                let mut logical_plan = input_plan;
+                if beacon_config::CONFIG.auto_cast_parquet {
+                    // If auto_cast_parquet is enabled, we will cast the plan to Parquet
+                    let schema = logical_plan.schema().clone();
+                    let df_schema = schema.as_ref();
+
+                    let plan_builder = LogicalPlanBuilder::from(logical_plan);
+
+                    // Build an Expr for each field: if it's Timestamp(Second, tz), cast it
+                    let exprs: Vec<Expr> = df_schema
+                        .fields()
+                        .iter()
+                        .map(|field| match field.data_type() {
+                            DataType::Timestamp(TimeUnit::Second, tz) => {
+                                // reinterpret (no rescale) to nanoseconds
+                                col(field.name())
+                                    .cast_to(
+                                        &DataType::Timestamp(TimeUnit::Nanosecond, tz.clone()),
+                                        df_schema,
+                                    )
+                                    .unwrap()
+                                    .alias(field.name())
+                            }
+                            _ => col(field.name()),
+                        })
+                        .collect();
+
+                    logical_plan = plan_builder.project(exprs)?.build()?;
+                }
+
                 let temp_output = TempOutputFile::new("beacon", ".parquet")?;
                 let path = temp_output.object_store_path();
                 let format = Arc::new(
@@ -147,7 +178,7 @@ impl Parser {
                 let file_type = format_as_file_type(format);
 
                 let plan = LogicalPlanBuilder::copy_to(
-                    input_plan,
+                    logical_plan,
                     path.to_string(),
                     file_type,
                     Default::default(),
