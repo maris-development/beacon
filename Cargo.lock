@@ -625,6 +625,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-data-lake"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "datafusion",
+ "object_store",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+ "typetag",
+]
+
+[[package]]
 name = "beacon-functions"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,14 @@
+[package]
+name = "beacon-data-lake"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+object_store = { workspace = true }
+datafusion = { workspace = true }
+typetag =  { workspace=true}
+async-trait = { workspace=true}
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true}
+thiserror = { workspace = true }
