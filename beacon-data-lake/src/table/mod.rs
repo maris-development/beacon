@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use datafusion::catalog::TableProvider;
-use object_store::ObjectStore;
+use datafusion::{catalog::TableProvider, prelude::SessionContext};
+use geoarrow::table;
+use object_store::{ObjectStore, PutPayload};
 
 use crate::table::{_type::TableType, error::TableError};
 
@@ -25,26 +26,36 @@ pub struct Table {
 }
 
 impl Table {
-    pub fn new(
-        path: object_store::path::Path,
+    pub async fn new(
+        table_directory: object_store::path::Path,
+        object_store: Arc<dyn ObjectStore>,
         table_name: String,
         table_type: impl Into<TableType>,
         description: Option<String>,
     ) -> Self {
-        Self {
-            object_path: path,
+        let table = Self {
+            object_path: table_directory.clone(),
             table_name,
             description,
             table_type: table_type.into(),
-        }
+        };
+        //  Write self as json to 'table.json'
+        let json = serde_json::to_string(&table).unwrap();
+        let payload = PutPayload::from_bytes(json.into_bytes().into());
+        object_store
+            .put(&table_directory.child("table.json"), payload)
+            .await
+            .unwrap();
+
+        table
     }
 
     pub async fn open(
         store: Arc<dyn ObjectStore>,
-        path: object_store::path::Path,
+        table_directory: object_store::path::Path,
     ) -> Result<Self, TableError> {
         // Read the table config
-        let config_json_path = path.child("table.json");
+        let config_json_path = table_directory.child("table.json");
         let json_bytes = store
             .get(&config_json_path)
             .await
@@ -55,17 +66,21 @@ impl Table {
 
         let mut table: Table =
             serde_json::from_slice(&json_bytes).map_err(TableError::InvalidTableConfig)?;
-        table.object_path = path;
+        table.object_path = table_directory;
 
         Ok(table)
     }
 
     pub async fn table_provider(
         &self,
+        session_ctx: Arc<SessionContext>,
         object_store: Arc<dyn ObjectStore>,
+        data_directory: object_store::path::Path,
+        table_directory: object_store::path::Path,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         self.table_type
-            .table_provider(object_store, self.object_path.clone())
+            .table_provider(session_ctx, object_store, table_directory, data_directory)
+            .await
     }
 
     pub fn table_name(&self) -> &str {

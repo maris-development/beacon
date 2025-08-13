@@ -32,7 +32,7 @@ impl LogicalTable {
     /// Returns an `Arc` to a `TableProvider` if successful.
     pub async fn table_provider(
         &self,
-        base_path: &object_store::path::Path,
+        data_directory_path: &object_store::path::Path,
         session_context: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         // Retrieve the session state from the session context.
@@ -42,8 +42,8 @@ impl LogicalTable {
 
         // Construct table URLs based on the paths provided in the logical table.
         for path in &self.glob_paths {
-            let table_url =
-                ListingTableUrl::parse(base_path.child(path.as_str())).map_err(|e| {
+            let table_url = ListingTableUrl::parse(data_directory_path.child(path.as_str()))
+                .map_err(|e| {
                     TableError::GenericTableError(format!("Failed to parse table URL: {}", e))
                 })?;
             table_urls.push(table_url);

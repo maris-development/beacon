@@ -31,6 +31,6 @@ indexmap = "2.7.1"
 chrono = { version = "=0.4.38", features = ["serde"] }
 
 datafusion = "44.0.0"
-object_store = "0.11.2"
+object_store = { version ="0.11.2", features = ["aws"] }
 arrow = { version = "=53.3.0" }
 arrow-schema = { version = "=53.3.0", features = ["serde"] }

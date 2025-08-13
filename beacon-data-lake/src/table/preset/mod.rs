@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, path::PathBuf, sync::Arc};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use chrono::NaiveDateTime;
@@ -11,6 +11,7 @@ use datafusion::{
     prelude::{Expr, SessionContext},
 };
 use indexmap::IndexMap;
+use object_store::ObjectStore;
 
 use crate::{
     table::{TableType, error::TableError},
@@ -96,16 +97,14 @@ impl PresetTable {
     pub async fn table_provider(
         &self,
         table_directory: object_store::path::Path,
+        data_directory: object_store::path::Path,
+        object_store: Arc<dyn ObjectStore>,
         session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
-        let current_provider = match self.table_engine.as_ref() {
-            TableType::Logical(logical_table) => {
-                Box::pin(logical_table.table_provider(&table_directory, session_ctx)).await?
-            }
-            TableType::Preset(preset_table) => {
-                Box::pin(preset_table.table_provider(table_directory, session_ctx)).await?
-            }
-        };
+        let current_provider = self
+            .table_engine
+            .table_provider(session_ctx, object_store, table_directory, data_directory)
+            .await?;
 
         let current_schema = current_provider.schema();
 
@@ -113,7 +112,7 @@ impl PresetTable {
         let mut renames = IndexMap::new();
 
         for column in self.data_columns.iter() {
-            if let Some(field) = current_schema.field_with_name(&column.column_name).ok() {
+            if let Ok(field) = current_schema.field_with_name(&column.column_name) {
                 if let Some(alias) = column.alias.as_ref() {
                     exposed_fields.push(field.clone().with_name(alias));
                     renames.insert(column.column_name.clone(), alias.clone());
@@ -129,7 +128,7 @@ impl PresetTable {
         }
 
         for column in self.metadata_columns.iter() {
-            if let Some(field) = current_schema.field_with_name(&column.column_name).ok() {
+            if let Ok(field) = current_schema.field_with_name(&column.column_name) {
                 if let Some(alias) = column.alias.as_ref() {
                     exposed_fields.push(field.clone().with_name(alias));
                     renames.insert(column.column_name.clone(), alias.clone());
@@ -220,8 +219,8 @@ impl TableProvider for PresetTableProvider {
             let exposed_column_name = self.exposed_schema.field(column_index).name();
             let source_name = inverted_renames
                 .get(exposed_column_name)
-                .unwrap_or(&exposed_column_name);
-            if let Ok(source_column_index) = source_schema.index_of(&source_name) {
+                .unwrap_or(exposed_column_name);
+            if let Ok(source_column_index) = source_schema.index_of(source_name) {
                 source_projection.push(source_column_index);
             } else {
                 return Err(datafusion::error::DataFusionError::Configuration(format!(
@@ -249,7 +248,7 @@ impl TableProvider for PresetTableProvider {
                 // Make a logical Expr::Column against the real name
                 let log_expr: Expr = Expr::Column(Column::new_unqualified(field.name().clone()));
                 // Plan it into a PhysicalExpr
-                let phys_expr = create_physical_expr(&log_expr, &df_schema, &props).unwrap();
+                let phys_expr = create_physical_expr(&log_expr, &df_schema, props).unwrap();
                 // Now alias it in the ProjectionExec
                 proj_exprs.push((phys_expr, alias.clone()));
 

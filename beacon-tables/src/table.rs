@@ -152,14 +152,13 @@ impl Table {
 
         // Write the table configuration as a JSON file to the directory.
         let table_config_path = table_directory.join("table.json");
-        std::fs::File::create(&table_config_path)
-            .map_err(|e| TableError::TableConfigWriteError(e))?;
+        std::fs::File::create(&table_config_path).map_err(TableError::TableConfigWriteError)?;
 
         // Serialize the table into pretty JSON format.
         let table_json = serde_json::to_string_pretty(&self)
-            .map_err(|e| TableError::TableConfigSerializationError(e))?;
+            .map_err(TableError::TableConfigSerializationError)?;
         std::fs::write(&table_config_path, table_json)
-            .map_err(|e| TableError::TableConfigWriteError(e))?;
+            .map_err(TableError::TableConfigWriteError)?;
 
         // Initialize the table using its logical table provider.
         match &self.table_type {
