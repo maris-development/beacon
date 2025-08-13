@@ -176,7 +176,6 @@ impl TableProvider for DataSource {
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // Apply the projection to the current schema and add is_not_null filters for every column
-
         if let Some(sanitized_schema) = &self.sanitized_schema {
             //Traverse filter columns and rename columns from sanitized to original
             let transformed_filters: Vec<Expr> = filters

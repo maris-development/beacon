@@ -6,7 +6,9 @@ use datafusion::{
 };
 use object_store::{ObjectStore, local::LocalFileSystem};
 
+pub mod files;
 pub mod table;
+pub mod util;
 
 #[derive(Debug)]
 pub struct Config {

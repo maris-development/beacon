@@ -628,14 +628,21 @@ dependencies = [
 name = "beacon-data-lake"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "async-trait",
+ "beacon-config",
  "datafusion",
+ "futures",
+ "geoarrow",
+ "indexmap",
  "object_store",
  "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.12",
+ "tracing",
  "typetag",
+ "utoipa",
 ]
 
 [[package]]

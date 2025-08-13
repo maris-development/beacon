@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use datafusion::catalog::TableProvider;
 use object_store::ObjectStore;
 
-use crate::table::{self, _type::TableType, error::TableError};
+use crate::table::{_type::TableType, error::TableError};
 
 pub mod _type;
 pub mod error;
+pub mod logical;
+pub mod preset;
 
 /// Represents a table configuration along with its associated provider.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -44,15 +47,27 @@ impl Table {
         let json_bytes = store
             .get(&config_json_path)
             .await
-            .unwrap()
+            .map_err(TableError::FailedToReadTableConfig)?
             .bytes()
             .await
-            .unwrap();
+            .map_err(TableError::FailedToReadTableConfig)?;
 
         let mut table: Table =
             serde_json::from_slice(&json_bytes).map_err(TableError::InvalidTableConfig)?;
         table.object_path = path;
 
         Ok(table)
+    }
+
+    pub async fn table_provider(
+        &self,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> Result<Arc<dyn TableProvider>, TableError> {
+        self.table_type
+            .table_provider(object_store, self.object_path.clone())
+    }
+
+    pub fn table_name(&self) -> &str {
+        &self.table_name
     }
 }
