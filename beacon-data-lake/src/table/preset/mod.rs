@@ -5,7 +5,6 @@ use chrono::NaiveDateTime;
 use datafusion::{
     catalog::{Session, TableProvider},
     common::{Column, DFSchema},
-    execution::context::ExecutionProps,
     logical_expr::TableProviderFilterPushDown,
     physical_expr::create_physical_expr,
     physical_plan::{ExecutionPlan, projection::ProjectionExec},
@@ -13,7 +12,10 @@ use datafusion::{
 };
 use indexmap::IndexMap;
 
-use crate::{error::TableError, table::TableType, util::remap_filter};
+use crate::{
+    table::{TableType, error::TableError},
+    util::remap_filter,
+};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PresetColumnMapping {
@@ -76,17 +78,15 @@ pub struct PresetTable {
 impl PresetTable {
     pub async fn create(
         &self,
-        table_directory: PathBuf,
+        table_directory: object_store::path::Path,
         session_ctx: Arc<SessionContext>,
     ) -> Result<(), TableError> {
         match self.table_engine.as_ref() {
-            TableType::Logical(logical_table) => {
-                Box::pin(logical_table.create(table_directory, session_ctx)).await?
-            }
-            TableType::Physical(physical_table) => {
-                Box::pin(physical_table.create(table_directory, session_ctx)).await?
-            }
-            TableType::PresetTable(preset_table) => {
+            TableType::Logical(_) => {}
+            // TableType::Physical(physical_table) => {
+            //     Box::pin(physical_table.create(table_directory, session_ctx)).await?
+            // }
+            TableType::Preset(preset_table) => {
                 Box::pin(preset_table.create(table_directory, session_ctx)).await?
             }
         }
@@ -95,17 +95,14 @@ impl PresetTable {
 
     pub async fn table_provider(
         &self,
-        table_directory: PathBuf,
+        table_directory: object_store::path::Path,
         session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         let current_provider = match self.table_engine.as_ref() {
             TableType::Logical(logical_table) => {
-                Box::pin(logical_table.table_provider(session_ctx)).await?
+                Box::pin(logical_table.table_provider(&table_directory, session_ctx)).await?
             }
-            TableType::Physical(physical_table) => {
-                Box::pin(physical_table.table_provider(table_directory, session_ctx)).await?
-            }
-            TableType::PresetTable(preset_table) => {
+            TableType::Preset(preset_table) => {
                 Box::pin(preset_table.table_provider(table_directory, session_ctx)).await?
             }
         };
@@ -124,7 +121,7 @@ impl PresetTable {
                     exposed_fields.push(field.clone());
                 }
             } else {
-                return Err(TableError::TableError(format!(
+                return Err(TableError::GenericTableError(format!(
                     "Data column '{}' not found in the current schema",
                     column.column_name
                 )));
@@ -140,7 +137,7 @@ impl PresetTable {
                     exposed_fields.push(field.clone());
                 }
             } else {
-                return Err(TableError::TableError(format!(
+                return Err(TableError::GenericTableError(format!(
                     "Metadata column '{}' not found in the current schema",
                     column.column_name
                 )));

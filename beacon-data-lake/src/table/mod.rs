@@ -9,6 +9,7 @@ pub mod _type;
 pub mod error;
 pub mod logical;
 pub mod preset;
+pub mod table_formats;
 
 /// Represents a table configuration along with its associated provider.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

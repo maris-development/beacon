@@ -1,4 +1,13 @@
+use std::collections::HashMap;
+
 use arrow::datatypes::{DataType, Fields, Schema, TimeUnit};
+use datafusion::{
+    common::{
+        Column,
+        tree_node::{Transformed, TreeNode},
+    },
+    prelude::Expr,
+};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SuperTypeError {
@@ -253,4 +262,30 @@ pub fn super_type_arrow(left: &DataType, right: &DataType) -> Option<DataType> {
     };
 
     Some(super_type)
+}
+
+pub fn remap_filter(
+    expr: Expr,
+    rename_map: &HashMap<String, String>,
+) -> datafusion::error::Result<Expr> {
+    // expr.transform returns Result<Transformed<Expr>, DataFusionError>
+    let transformed: Transformed<Expr> = expr.transform(&|e| {
+        Ok(match e {
+            // For any column reference...
+            Expr::Column(ref c) => {
+                // look up the real name
+                if let Some(real) = rename_map.get(c.name()) {
+                    // yes, replace this Expr with col(real)
+                    Transformed::yes(Expr::Column(Column::new_unqualified(real.clone())))
+                } else {
+                    // no change
+                    Transformed::no(e.clone())
+                }
+            }
+            // leave everything else alone
+            _ => Transformed::no(e.clone()),
+        })
+    })?;
+    // Turn the Transformed<Expr> back into an Expr
+    Ok(transformed.data)
 }

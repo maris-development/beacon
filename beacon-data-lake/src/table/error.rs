@@ -4,4 +4,6 @@ pub enum TableError {
     FailedToReadTableConfig(object_store::Error),
     #[error("Invalid table configuration: {0}")]
     InvalidTableConfig(serde_json::Error),
+    #[error("Table error: {0}")]
+    GenericTableError(String),
 }

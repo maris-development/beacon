@@ -631,6 +631,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-config",
+ "chrono",
  "datafusion",
  "futures",
  "geoarrow",
