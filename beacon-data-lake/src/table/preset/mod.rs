@@ -5,6 +5,7 @@ use chrono::NaiveDateTime;
 use datafusion::{
     catalog::{Session, TableProvider},
     common::{Column, DFSchema},
+    execution::object_store::ObjectStoreUrl,
     logical_expr::TableProviderFilterPushDown,
     physical_expr::create_physical_expr,
     physical_plan::{ExecutionPlan, projection::ProjectionExec},
@@ -96,14 +97,21 @@ impl PresetTable {
 
     pub async fn table_provider(
         &self,
+        table_directory_store_url: ObjectStoreUrl,
         table_directory: object_store::path::Path,
+        data_directory_store_url: ObjectStoreUrl,
         data_directory: object_store::path::Path,
-        object_store: Arc<dyn ObjectStore>,
         session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         let current_provider = self
             .table_engine
-            .table_provider(session_ctx, object_store, table_directory, data_directory)
+            .table_provider(
+                session_ctx,
+                table_directory_store_url,
+                table_directory,
+                data_directory_store_url,
+                data_directory,
+            )
             .await?;
 
         let current_schema = current_provider.schema();

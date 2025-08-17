@@ -2,13 +2,11 @@ use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::{
+    catalog::Session,
     common::{GetExt, Statistics},
     datasource::{
-        file_format::{
-            FileFormat, FileFormatFactory, FilePushdownSupport,
-            file_compression_type::FileCompressionType,
-        },
-        physical_plan::FileScanConfig,
+        file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
+        physical_plan::{FileScanConfig, FileSource},
     },
     execution::SessionState,
     physical_plan::{ExecutionPlan, PhysicalExpr},
@@ -31,7 +29,7 @@ impl GetExt for ParquetFormatFactory {
 impl FileFormatFactory for ParquetFormatFactory {
     fn create(
         &self,
-        _state: &SessionState,
+        _state: &dyn Session,
         _format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         Ok(Arc::new(ParquetFormat::new()))
@@ -74,6 +72,11 @@ impl FileFormat for ParquetFormat {
         self
     }
 
+    /// Returns whether this instance uses compression if applicable
+    fn compression_type(&self) -> Option<FileCompressionType> {
+        None
+    }
+
     fn get_ext(&self) -> String {
         self.inner.get_ext()
     }
@@ -87,7 +90,7 @@ impl FileFormat for ParquetFormat {
 
     async fn infer_schema(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
@@ -95,7 +98,7 @@ impl FileFormat for ParquetFormat {
             let state = state.clone();
             let store = Arc::clone(store);
             let object = object.clone();
-            async move { self.inner.infer_schema(&state, &store, &[object]).await }
+            async move { self.inner.infer_schema(state, &store, &[object]).await }
         });
 
         let schemas = try_join_all(schema_futures).await?;
@@ -110,7 +113,7 @@ impl FileFormat for ParquetFormat {
 
     async fn infer_stats(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
         object: &ObjectMeta,
@@ -124,20 +127,13 @@ impl FileFormat for ParquetFormat {
     /// according to this file format.
     async fn create_physical_plan(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         conf: FileScanConfig,
-        filters: Option<&Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        self.inner.create_physical_plan(state, conf, filters).await
+        self.inner.create_physical_plan(state, conf).await
     }
 
-    fn supports_filters_pushdown(
-        &self,
-        file_schema: &Schema,
-        table_schema: &Schema,
-        filters: &[&Expr],
-    ) -> datafusion::error::Result<FilePushdownSupport> {
-        self.inner
-            .supports_filters_pushdown(file_schema, table_schema, filters)
+    fn file_source(&self) -> Arc<dyn FileSource> {
+        self.inner.file_source()
     }
 }

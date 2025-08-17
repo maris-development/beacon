@@ -14,7 +14,7 @@ anyhow = { workspace=true}
 parking_lot = { workspace = true}
 geojson = "0.24.2"
 uuid = { version = "1.16.0", features = ["serde"] }
-chrono = { version = "=0.4.38", features = ["serde"] }
+chrono = { workspace = true}
 
 beacon-sources = { path = "../beacon-sources" }
 beacon-output = { path = "../beacon-output" }

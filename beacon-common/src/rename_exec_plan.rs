@@ -59,6 +59,9 @@ impl DisplayAs for RenameExec {
             datafusion::physical_plan::DisplayFormatType::Verbose => {
                 write!(f, "RenameExec: {}", self.input_plan.name())
             }
+            datafusion::physical_plan::DisplayFormatType::TreeRender => {
+                write!(f, "RenameExec: {}", self.input_plan.name())
+            }
         }
     }
 }

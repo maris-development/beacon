@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use datafusion::{
-    catalog::TableProvider, datasource::listing::ListingTableUrl, prelude::SessionContext,
+    catalog::TableProvider, datasource::listing::ListingTableUrl,
+    execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
+use object_store::path::PathPart;
+use url::Url;
 
 use crate::{
     files::collection::FileCollection,
@@ -32,22 +35,59 @@ impl LogicalTable {
     /// Returns an `Arc` to a `TableProvider` if successful.
     pub async fn table_provider(
         &self,
-        data_directory_path: &object_store::path::Path,
+        data_directory_store_url: &ObjectStoreUrl,
+        data_directory_prefix: &object_store::path::Path,
         session_context: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         // Retrieve the session state from the session context.
         let session_state = session_context.state();
 
         let mut table_urls = Vec::new();
+        let parts: Vec<PathPart<'static>> = data_directory_prefix
+            .parts()
+            .map(|part| part.as_ref().to_string().into())
+            .collect::<Vec<_>>();
 
+        println!(
+            "Object Store Before GLOB: {:?}",
+            session_state
+                .runtime_env()
+                .object_store(data_directory_store_url)
+        );
         // Construct table URLs based on the paths provided in the logical table.
         for path in &self.glob_paths {
-            let table_url = ListingTableUrl::parse(data_directory_path.child(path.as_str()))
-                .map_err(|e| {
-                    TableError::GenericTableError(format!("Failed to parse table URL: {}", e))
-                })?;
+            let mut glob_path_parts = parts.clone();
+            glob_path_parts.push(path.as_str().into());
+
+            // println!("Constructing table URL with parts: {:?}", glob_path_parts);
+            // let full_path = format!(
+            //     "{}{}",
+            //     data_directory_store_url,
+            //     object_store::path::Path::from_iter(glob_path_parts)
+            // );
+            // println!("Full path for logical table: {}", full_path);
+            // ListingTableUrl::
+            let url = Url::parse("file:///datasets/bgc/").unwrap();
+            // ListingTableUrl::try_new(url, glob)
+            let table_url =
+                ListingTableUrl::try_new(url, Some(glob::Pattern::new("*.parquet").unwrap()))
+                    .map_err(|e| {
+                        TableError::GenericTableError(format!("Failed to parse table URL: {}", e))
+                    })?;
             table_urls.push(table_url);
         }
+
+        println!(
+            "Creating file collection for logical table with URLs: {:?}",
+            table_urls
+        );
+
+        println!(
+            "Object Store Before FileCollection: {:?}",
+            session_state
+                .runtime_env()
+                .object_store(data_directory_store_url)
+        );
 
         // Create the data source with the given file format and table URLs.
         let source =

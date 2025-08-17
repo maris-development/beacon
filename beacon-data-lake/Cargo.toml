@@ -5,26 +5,27 @@ edition = "2024"
 
 [dependencies]
 arrow = {workspace = true}
-datafusion = { workspace = true }
-object_store = { workspace = true }
+datafusion = { version = "49.0.0" }
+object_store = { version = "0.12.3", features = ["aws"] }
 url = "2.5.4"
+glob = "0.3.3"
 
 typetag =  { workspace=true}
 async-trait = { workspace=true}
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-parking_lot = { workspace = true}
+parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
 
 indexmap = { workspace = true }
-chrono = { workspace = true }
+chrono = { version = "0.4.41"}
 
 utoipa = { workspace=true}
-geoarrow = { version = "=0.4.0-beta.3", features = ["parquet"] }
+geoarrow = { version = "=0.4.0-beta.4", features = ["parquet"] }
 
 
 beacon-config = { path = "../beacon-config" }

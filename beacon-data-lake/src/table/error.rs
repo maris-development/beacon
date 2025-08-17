@@ -6,4 +6,6 @@ pub enum TableError {
     InvalidTableConfig(serde_json::Error),
     #[error("Table error: {0}")]
     GenericTableError(String),
+    #[error("Table already exists: {0}")]
+    TableAlreadyExists(String),
 }

@@ -8,7 +8,7 @@ serde = { workspace=true}
 tokio = { workspace = true }
 indexmap = { workspace = true }
 arrow = { workspace=true}
-arrow-csv = "53.3.0"
+arrow-csv = "^55.2.0"
 anyhow = { workspace=true}
 async-trait = { workspace=true}
 futures = { workspace=true}

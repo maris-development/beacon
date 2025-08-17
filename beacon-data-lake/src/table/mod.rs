@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
-use datafusion::{catalog::TableProvider, prelude::SessionContext};
-use geoarrow::table;
-use object_store::{ObjectStore, PutPayload};
+use datafusion::{
+    catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
+};
+use object_store::{
+    ObjectStore, PutPayload,
+    path::{Path, PathPart},
+};
 
 use crate::table::{_type::TableType, error::TableError};
 
@@ -16,7 +20,7 @@ pub mod table_formats;
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Table {
     #[serde(skip)]
-    pub object_path: object_store::path::Path,
+    pub table_directory: Vec<object_store::path::PathPart<'static>>,
     /// The name of the table.
     pub table_name: String,
     /// The type of the table which determines its behavior.
@@ -26,38 +30,38 @@ pub struct Table {
 }
 
 impl Table {
-    pub async fn new(
-        table_directory: object_store::path::Path,
-        object_store: Arc<dyn ObjectStore>,
-        table_name: String,
-        table_type: impl Into<TableType>,
-        description: Option<String>,
-    ) -> Self {
-        let table = Self {
-            object_path: table_directory.clone(),
-            table_name,
-            description,
-            table_type: table_type.into(),
-        };
+    pub async fn save(
+        &mut self,
+        table_object_store: Arc<dyn ObjectStore>,
+        mut table_directory: Vec<object_store::path::PathPart<'static>>,
+    ) {
+        // Create table.json in the specified directory
+        table_directory.push("table.json".into());
+        let table_directory_path: object_store::path::Path =
+            Path::from_iter(table_directory.clone());
+
         //  Write self as json to 'table.json'
-        let json = serde_json::to_string(&table).unwrap();
+        let json = serde_json::to_string(&self).unwrap();
         let payload = PutPayload::from_bytes(json.into_bytes().into());
-        object_store
-            .put(&table_directory.child("table.json"), payload)
+        table_object_store
+            .put(&table_directory_path, payload)
             .await
             .unwrap();
 
-        table
+        self.table_directory = table_directory;
     }
 
     pub async fn open(
         store: Arc<dyn ObjectStore>,
-        table_directory: object_store::path::Path,
+        mut table_directory: Vec<PathPart<'static>>,
     ) -> Result<Self, TableError> {
+        table_directory.push("table.json".into());
+        let table_directory_path: object_store::path::Path =
+            Path::from_iter(table_directory.clone());
+
         // Read the table config
-        let config_json_path = table_directory.child("table.json");
         let json_bytes = store
-            .get(&config_json_path)
+            .get(&table_directory_path)
             .await
             .map_err(TableError::FailedToReadTableConfig)?
             .bytes()
@@ -66,7 +70,7 @@ impl Table {
 
         let mut table: Table =
             serde_json::from_slice(&json_bytes).map_err(TableError::InvalidTableConfig)?;
-        table.object_path = table_directory;
+        table.table_directory = table_directory;
 
         Ok(table)
     }
@@ -74,12 +78,27 @@ impl Table {
     pub async fn table_provider(
         &self,
         session_ctx: Arc<SessionContext>,
-        object_store: Arc<dyn ObjectStore>,
-        data_directory: object_store::path::Path,
-        table_directory: object_store::path::Path,
+        data_directory_store_url: ObjectStoreUrl,
+        data_directory_prefix: object_store::path::Path,
+        table_directory_store_url: ObjectStoreUrl,
+        table_directory_prefix: object_store::path::Path,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
+        println!(
+            "Object store before table provider: {:?}",
+            session_ctx
+                .runtime_env()
+                .object_store(&data_directory_store_url)
+                .unwrap()
+        );
+
         self.table_type
-            .table_provider(session_ctx, object_store, table_directory, data_directory)
+            .table_provider(
+                session_ctx,
+                table_directory_store_url,
+                table_directory_prefix,
+                data_directory_store_url,
+                data_directory_prefix,
+            )
             .await
     }
 

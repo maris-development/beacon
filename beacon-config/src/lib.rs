@@ -33,18 +33,8 @@ pub struct Config {
     pub worker_threads: usize,
 
     // S3 Settings
-    #[envconfig(from = "BEACON_S3_ENDPOINT")]
-    pub s3_endpoint: Option<String>,
-    #[envconfig(from = "BEACON_S3_ACCESS_KEY")]
-    pub s3_access_key: Option<String>,
-    #[envconfig(from = "BEACON_S3_SECRET_KEY")]
-    pub s3_secret_key: Option<String>,
-    #[envconfig(from = "BEACON_S3_BUCKET")]
-    pub s3_bucket: Option<String>,
-    #[envconfig(from = "BEACON_S3_REGION")]
-    pub s3_region: Option<String>,
-    #[envconfig(from = "BEACON_S3_ALLOW_HTTP")]
-    pub s3_allow_http: Option<bool>,
+    #[envconfig(from = "BEACON_S3_URL")]
+    pub s3_url: Option<String>,
     #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
     pub s3_data_lake: bool,
 
