@@ -54,25 +54,6 @@ impl DataLake {
         let (tables_url, tables_prefix) = Self::tables_url_with_prefix(session_context.clone());
         let config = Self::read_config();
 
-        println!(
-            "Object Store for datasets: {:?}",
-            session_context
-                .runtime_env()
-                .object_store(&datasets_url)
-                .unwrap()
-        );
-        println!("Object Store URL: {:?}", datasets_url);
-
-        println!(
-            "Object Store Registry: {:?}",
-            session_context.runtime_env().object_store_registry
-        );
-
-        println!(
-            "Object Store retrieved: {:?}",
-            session_context.runtime_env().object_store(&datasets_url)
-        );
-
         let tables = Self::init_tables(
             tables_url.clone(),
             tables_prefix.clone(),
@@ -125,21 +106,43 @@ impl DataLake {
     ) -> (ObjectStoreUrl, object_store::path::Path) {
         if beacon_config::CONFIG.s3_data_lake {
             // Fetch the s3 settings from the config
-            let s3_url = beacon_config::CONFIG
-                .s3_url
+            let mut s3_object_store_builder = AmazonS3Builder::new()
+                .with_allow_http(true)
+                .with_virtual_hosted_style_request(false);
+
+            let endpoint = beacon_config::CONFIG
+                .s3_endpoint
                 .clone()
-                .expect("S3 URL not set");
+                .expect("S3 endpoint not set");
+            s3_object_store_builder = s3_object_store_builder.with_endpoint(endpoint);
+            let bucket = beacon_config::CONFIG
+                .s3_bucket
+                .clone()
+                .expect("S3 bucket not set");
+            s3_object_store_builder = s3_object_store_builder.with_bucket_name(bucket.clone());
 
-            let s3_object_store = AmazonS3Builder::from_env()
-                .with_url(s3_url.clone())
-                .build()
-                .unwrap();
+            if let Some(region) = beacon_config::CONFIG.s3_region.clone() {
+                s3_object_store_builder = s3_object_store_builder.with_region(region);
+            }
 
-            let object_store_url = ObjectStoreUrl::parse(s3_url).expect("Failed to parse S3 URL");
+            if let Some(access_key_id) = beacon_config::CONFIG.s3_access_key_id.clone() {
+                s3_object_store_builder = s3_object_store_builder.with_access_key_id(access_key_id);
+            }
 
+            if let Some(secret_access_key) = beacon_config::CONFIG.s3_secret_access_key.clone() {
+                s3_object_store_builder =
+                    s3_object_store_builder.with_secret_access_key(secret_access_key);
+            } else {
+                s3_object_store_builder = s3_object_store_builder.with_skip_signature(true);
+            }
+
+            let s3_object_store = s3_object_store_builder.build().unwrap();
+
+            let object_store_url =
+                ObjectStoreUrl::parse("http://datasets").expect("Failed to parse S3 URL");
             context.register_object_store(object_store_url.as_ref(), Arc::new(s3_object_store));
 
-            (object_store_url, object_store::path::Path::from("/"))
+            (object_store_url, object_store::path::Path::from(""))
         } else {
             let base_path = PathBuf::from("./data");
             let dataset_directory = base_path.join("datasets");
@@ -172,58 +175,45 @@ impl DataLake {
 
         let mut tables = HashMap::new();
         // Iterate through the table directory for each 'table.json'
-        // println!(
-        //     "Listing tables in {} with prefix {}",
-        //     tables_object_store_url, tables_prefix
-        // );
-
-        println!(
-            "Object store before init: {:?}",
-            session_context
-                .runtime_env()
-                .object_store(&data_directory_store_url)
-                .unwrap()
-        );
-
         let mut entry_stream = tables_object_store.list(Some(&tables_prefix));
         while let Some(entry) = entry_stream.next().await {
-            if let Ok(entry) = entry {
-                if entry.location.to_string().ends_with("table.json") {
-                    // Extract the table name from the path
-                    let mut table_directory: Vec<PathPart<'static>> = entry
-                        .location
-                        .parts()
-                        .map(|part| part.as_ref().to_string().into())
-                        .collect();
-                    // Pop the last part which is "table.json"
-                    table_directory.pop();
+            if let Ok(entry) = entry
+                && entry.location.to_string().ends_with("table.json")
+            {
+                // Extract the table name from the path
+                let mut table_directory: Vec<PathPart<'static>> = entry
+                    .location
+                    .parts()
+                    .map(|part| part.as_ref().to_string().into())
+                    .collect();
+                // Pop the last part which is "table.json"
+                table_directory.pop();
 
-                    // Open the table
-                    match Table::open(tables_object_store.clone(), table_directory).await {
-                        Ok(table) => {
-                            let provider = table
-                                .table_provider(
-                                    session_context.clone(),
-                                    data_directory_store_url.clone(),
-                                    data_directory_prefix.clone(),
-                                    tables_object_store_url.clone(),
-                                    tables_prefix.clone(),
-                                )
-                                .await;
+                // Open the table
+                match Table::open(tables_object_store.clone(), table_directory).await {
+                    Ok(table) => {
+                        let provider = table
+                            .table_provider(
+                                session_context.clone(),
+                                data_directory_store_url.clone(),
+                                data_directory_prefix.clone(),
+                                tables_object_store_url.clone(),
+                                tables_prefix.clone(),
+                            )
+                            .await;
 
-                            if let Ok(provider) = provider {
-                                tables.insert(table.table_name, provider);
-                            } else {
-                                eprintln!(
-                                    "Failed to create table provider for {}: {}",
-                                    table.table_name,
-                                    provider.unwrap_err()
-                                );
-                            }
+                        if let Ok(provider) = provider {
+                            tables.insert(table.table_name, provider);
+                        } else {
+                            tracing::error!(
+                                "Failed to create table provider for {}: {}",
+                                table.table_name,
+                                provider.unwrap_err()
+                            );
                         }
-                        Err(e) => {
-                            eprintln!("Failed to open table: {}", e);
-                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to open table: {}", e);
                     }
                 }
             }
@@ -303,42 +293,59 @@ mod tests {
         datasource::listing::ListingTableUrl, execution::object_store::ObjectStoreUrl,
     };
     use futures::StreamExt;
-    use object_store::{parse_url, path::PathPart};
+    use object_store::{aws::AmazonS3, parse_url, path::PathPart};
     use url::Url;
 
     use super::*;
 
     #[tokio::test]
-    async fn test_data_lake_initialization() {
-        let pattern = "*.parquet";
-        let listing_url = ListingTableUrl::try_new(
-            Url::parse("file:///datasets/bgc/").unwrap(),
-            Some(glob::Pattern::new(pattern).unwrap()),
-        )
-        .expect("Failed to create ListingTableUrl");
-        println!("Listing Table URL: {:?}", listing_url);
+    async fn test_object_store() {
+        let aws = Arc::new(
+            AmazonS3Builder::new()
+                .with_endpoint("http://localhost:8000")
+                .with_bucket_name("era5")
+                .with_allow_http(true)
+                .with_skip_signature(true)
+                .build()
+                .unwrap(),
+        ) as Arc<dyn ObjectStore>;
 
+        let object_store_url = ObjectStoreUrl::parse("http://datasets").unwrap();
+
+        let session = SessionContext::new();
+        session.register_object_store(object_store_url.as_ref(), aws.clone());
+
+        let mut files = aws.list(None);
+        while let Some(file) = files.next().await {
+            match file {
+                Ok(file) => println!("Found file: {:?}", file),
+                Err(e) => eprintln!("Error listing files: {}", e),
+            }
+        }
+
+        let pattern = glob::Pattern::new("*.parquet").unwrap();
+        let listing_url =
+            ListingTableUrl::try_new(Url::parse("http://datasets/").unwrap(), Some(pattern))
+                .unwrap();
+
+        println!("Listing URL: {:?}", listing_url);
+
+        let state = session.state();
+        let mut stream = listing_url.list_all_files(&state, &aws, "").await.unwrap();
+
+        while let Some(file) = stream.next().await {
+            println!("Found file: {:?}", file);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_data_lake_initialization() {
         let session_context = Arc::new(SessionContext::new());
         let data_lake = DataLake::new(session_context.clone()).await;
-        let state = session_context.state();
-        let object_store = session_context
-            .runtime_env()
-            .object_store(&data_lake.data_directory_store_url)
-            .unwrap();
 
-        println!("Object Store: {:?}", object_store);
+        println!("Data Lake Initialization {:?}", data_lake);
 
-        let stream = listing_url
-            .list_all_files(&state, &object_store, "")
-            .await
-            .unwrap();
-
-        let files: Vec<_> = stream.collect().await;
-        println!("Files in listing: {:?}", files);
-
-        println!("Data Lake Initialized: {:?}", data_lake);
-
-        // // List tables
+        // List tables
         // let tables = data_lake.table_names();
         // println!("Tables in Data Lake: {:?}", tables);
 
@@ -348,14 +355,18 @@ mod tests {
         //     .object_store(&data_lake.data_directory_store_url)
         //     .unwrap();
 
-        // let mut entry_stream = store.list(Some(&data_lake.data_directory_prefix));
+        // println!(
+        //     "Data Directory Store URL: {:?}, Prefix: {:?}",
+        //     data_lake.data_directory_store_url, data_lake.data_directory_prefix
+        // );
+        // println!("Store: {:?}", store);
+
+        // let mut entry_stream = store.list(None);
         // while let Some(entry) = entry_stream.next().await {
-        //     if let Ok(entry) = entry {
-        //         println!("Found entry: {:?}", entry);
-        //     } else {
-        //         eprintln!("Error listing entries: {:?}", entry.unwrap_err());
-        //     }
+        //     println!("Found entry: {:?}", entry);
         // }
+
+        panic!("")
     }
 
     #[tokio::test]

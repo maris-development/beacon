@@ -34,3 +34,6 @@ datafusion = "49.0.0"
 object_store = { version ="0.11.2", features = ["aws"] }
 arrow = { version = "^55.2.0" }
 arrow-schema = { version = "^55.2.0", features = ["serde"] }
+geoarrow = { version = "=0.4.0" }
+geoarrow-array = "=0.4.0"
+geoparquet = "0.4.0"

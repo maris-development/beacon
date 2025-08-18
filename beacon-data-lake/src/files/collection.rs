@@ -10,13 +10,11 @@ use datafusion::{
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
     },
     error::DataFusionError,
-    execution::{SessionState, object_store::ObjectStoreUrl},
+    execution::SessionState,
     logical_expr::{LogicalPlan, TableProviderFilterPushDown, dml::InsertOp},
     physical_plan::ExecutionPlan,
     prelude::Expr,
 };
-use futures::StreamExt;
-use url::Url;
 
 use crate::util::super_type_schema;
 
@@ -32,31 +30,9 @@ impl FileCollection {
         table_urls: Vec<ListingTableUrl>,
     ) -> Result<Self, DataFusionError> {
         let listing_options = ListingOptions::new(file_format).with_file_extension("");
-        println!(
-            "Session Object Store: {:?}",
-            session_state
-                .runtime_env()
-                .object_store(ObjectStoreUrl::parse("file://").unwrap())
-        );
         let mut schemas = vec![];
 
         for table_url in &table_urls {
-            // println!("Infer schema for table: {:?}", table_url);
-            // println!("Using store: {:?}", table_url.object_store());
-            // let store = session_state
-            //     .runtime_env()
-            //     .object_store(&table_url.object_store())
-            //     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            // println!("Using for new store: {:?}", store);
-
-            // let mut stream = table_url
-            //     .list_all_files(session_state, &store, "")
-            //     .await
-            //     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-            // let found = stream.next().await;
-            // println!("Found files: {:?}", found);
-
             tracing::debug!("Infer schema for table: {}", table_url);
             let schema = listing_options
                 .infer_schema(session_state, table_url)

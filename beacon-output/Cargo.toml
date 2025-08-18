@@ -18,7 +18,7 @@ bytes = { workspace=true}
 object_store = { workspace = true }
 zip = "2.2.3"
 walkdir = "2.5.0"
-geoarrow = "=0.4.0-beta.4"
+geoarrow = { workspace = true }
 geo = "0.29.3"
 
 beacon-config = { path = "../beacon-config" }

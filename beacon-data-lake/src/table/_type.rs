@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
+use crate::table::{error::TableError, logical::LogicalTable, preset::PresetTable};
 use datafusion::{
     catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
-use object_store::ObjectStore;
-
-use crate::table::{error::TableError, logical::LogicalTable, preset::PresetTable};
 
 /// Enum representing different types of tables.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

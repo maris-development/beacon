@@ -83,14 +83,6 @@ impl Table {
         table_directory_store_url: ObjectStoreUrl,
         table_directory_prefix: object_store::path::Path,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
-        println!(
-            "Object store before table provider: {:?}",
-            session_ctx
-                .runtime_env()
-                .object_store(&data_directory_store_url)
-                .unwrap()
-        );
-
         self.table_type
             .table_provider(
                 session_ctx,

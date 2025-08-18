@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use arrow::datatypes::{DataType, Fields, Schema, TimeUnit};
 use datafusion::{
@@ -288,4 +291,19 @@ pub fn remap_filter(
     })?;
     // Turn the Transformed<Expr> back into an Expr
     Ok(transformed.data)
+}
+
+pub fn split_glob(path: &str) -> Option<(PathBuf, String)> {
+    let p = Path::new(path);
+
+    // Get the last component (file name or pattern)
+    if let Some(last) = p.file_name().and_then(|os| os.to_str()) {
+        // Does it look like a glob?
+        if last.contains('*') || last.contains('?') || last.contains('[') {
+            // Base path = everything before the last component
+            let base = p.parent().unwrap_or(Path::new("")).to_path_buf();
+            return Some((base, last.to_string()));
+        }
+    }
+    None
 }

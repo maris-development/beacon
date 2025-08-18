@@ -10,25 +10,25 @@ use arrow::{
     datatypes::{Float64Type, Schema, SchemaRef},
 };
 use datafusion::{
+    catalog::Session,
     common::{GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
-        physical_plan::{FileScanConfig, FileSinkConfig},
+        physical_plan::{FileScanConfig, FileSinkConfig, FileSource},
+        sink::{DataSink, DataSinkExec},
     },
-    execution::{SendableRecordBatchStream, SessionState, TaskContext},
+    execution::{SendableRecordBatchStream, TaskContext},
     physical_expr::LexRequirement,
-    physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr,
-        insert::{DataSink, DataSinkExec},
-    },
+    physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan},
 };
 use futures::StreamExt;
-use geoarrow::{
-    ArrayBase,
-    datatypes::NativeType,
-    io::parquet::{GeoParquetWriter, GeoParquetWriterOptions},
-};
+
+use geoarrow::array::AsGeoArrowArray;
+use geoarrow::datatypes::{Dimension, Metadata, PointType};
+use geoarrow_array::GeoArrowArray;
+use geoparquet::writer::{GeoParquetRecordBatchEncoder, GeoParquetWriterOptions};
 use object_store::{ObjectMeta, ObjectStore};
+use parquet::arrow::{async_writer::ParquetObjectWriter, AsyncArrowWriter};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct GeoParquetOptions {
@@ -50,7 +50,7 @@ impl GeoParquetFormatFactory {
 impl FileFormatFactory for GeoParquetFormatFactory {
     fn create(
         &self,
-        _state: &SessionState,
+        _state: &dyn Session,
         _format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         Ok(Arc::new(GeoParquetFormat::new(self.options.clone())))
@@ -88,6 +88,10 @@ impl FileFormat for GeoParquetFormat {
         self
     }
 
+    fn compression_type(&self) -> Option<FileCompressionType> {
+        None
+    }
+
     fn get_ext(&self) -> String {
         "geo_parquet".to_string()
     }
@@ -101,7 +105,7 @@ impl FileFormat for GeoParquetFormat {
 
     async fn infer_schema(
         &self,
-        _state: &SessionState,
+        _state: &dyn Session,
         _store: &Arc<dyn ObjectStore>,
         _objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
@@ -112,7 +116,7 @@ impl FileFormat for GeoParquetFormat {
 
     async fn infer_stats(
         &self,
-        _state: &SessionState,
+        _state: &dyn Session,
         _store: &Arc<dyn ObjectStore>,
         _table_schema: SchemaRef,
         _object: &ObjectMeta,
@@ -124,9 +128,8 @@ impl FileFormat for GeoParquetFormat {
 
     async fn create_physical_plan(
         &self,
-        _state: &SessionState,
+        _state: &dyn Session,
         _conf: FileScanConfig,
-        _filters: Option<&Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         return Err(datafusion::error::DataFusionError::NotImplemented(
             "GeoParquet format does not support physical plan creation yet".to_string(),
@@ -136,23 +139,21 @@ impl FileFormat for GeoParquetFormat {
     async fn create_writer_physical_plan(
         &self,
         input: Arc<dyn ExecutionPlan>,
-        _state: &SessionState,
+        _state: &dyn Session,
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let sink_schema = Arc::clone(conf.output_schema());
         let sink = Arc::new(GeoParquetSink::new(
             input.clone(),
             conf,
             self.options.clone(),
         ));
 
-        Ok(Arc::new(DataSinkExec::new(
-            input,
-            sink,
-            sink_schema,
-            order_requirements,
-        )))
+        Ok(Arc::new(DataSinkExec::new(input, sink, order_requirements)))
+    }
+
+    fn file_source(&self) -> Arc<dyn FileSource> {
+        panic!("GeoParquetFormat does not support file source");
     }
 }
 
@@ -174,9 +175,9 @@ impl GeoMapper {
         // Create a new schema with the geometry field added
         let mut fields = input_schema.fields().clone().to_vec();
 
-        let point_type = NativeType::Point(
-            geoarrow::array::CoordType::Interleaved,
+        let point_type = PointType::new(
             geoarrow::datatypes::Dimension::XY,
+            Arc::new(Metadata::default()),
         );
         let point_field = point_type.to_field("geometry", true);
         fields.push(Arc::new(point_field));
@@ -197,8 +198,10 @@ impl GeoMapper {
         let longitude_array = batch.column(self.longitude_idx);
         let latitude_array = batch.column(self.latitude_idx);
 
-        let mut point_builder =
-            geoarrow::array::PointBuilder::new(geoarrow::datatypes::Dimension::XY);
+        let mut point_builder = geoarrow::array::PointBuilder::new(PointType::new(
+            geoarrow::datatypes::Dimension::XY,
+            Arc::new(Metadata::default()),
+        ));
 
         // Cast the longitude and latitude arrays to Float64Array
         let casted_longitude = arrow::compute::cast_with_options(
@@ -238,18 +241,19 @@ impl GeoMapper {
 
         let point_array = point_builder.finish();
         let arrow_point_array = point_array.to_array_ref();
-
         let mut current_columns = batch.columns().to_vec();
         current_columns.push(arrow_point_array);
 
         arrow::record_batch::RecordBatch::try_new(self.output_schema.clone(), current_columns)
-            .expect("Failed to create new RecordBatch")
+            .expect("Failed to create Geo Arrow RecordBatch")
     }
 }
 
 struct GeoParquetSink {
     input: Arc<dyn ExecutionPlan>,
     file_sink_config: FileSinkConfig,
+    object_store: Arc<dyn ObjectStore>,
+    output_path: object_store::path::Path,
     mapper: GeoMapper,
 }
 
@@ -272,6 +276,8 @@ impl GeoParquetSink {
         let file = std::fs::File::create(output_path)
             .map_err(datafusion::error::DataFusionError::IoError)
             .unwrap();
+
+        parquet::arrow::AsyncArrowWriter::
 
         let buf_writer = std::io::BufWriter::new(file);
 
@@ -307,6 +313,11 @@ impl DataSink for GeoParquetSink {
         self
     }
 
+    /// Returns the sink schema
+    fn schema(&self) -> &SchemaRef {
+        &self.mapper.output_schema
+    }
+
     fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
         None
     }
@@ -321,6 +332,10 @@ impl DataSink for GeoParquetSink {
             beacon_config::DATA_DIR.to_string_lossy(),
             self.file_sink_config.table_paths[0].prefix()
         );
+        let object_writer = ParquetObjectWriter::new(self.file_sink_config.object_store_url)
+        let mut parquet_options = GeoParquetWriterOptions::default();
+        let encoder = GeoParquetRecordBatchEncoder::try_new(&self.mapper.output_schema, &parquet_options).unwrap();
+        let arrow_writer = AsyncArrowWriter::try_new(file, encoder.target_schema(), None).unwrap();
 
         let mut writer = self.create_writer(&output_path);
 

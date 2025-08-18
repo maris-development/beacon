@@ -95,7 +95,6 @@ impl FileFormat for ParquetFormat {
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
         let schema_futures = objects.iter().map(|object| {
-            let state = state.clone();
             let store = Arc::clone(store);
             let object = object.clone();
             async move { self.inner.infer_schema(state, &store, &[object]).await }
