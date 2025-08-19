@@ -15,7 +15,6 @@ cast = "0.3.0"
 geojson = "0.24.2"
 chrono = { workspace = true }
 
-beacon-sources = { path = "../beacon-sources" }
-beacon-output = { path = "../beacon-output" }
 beacon-config = { path = "../beacon-config" }
 beacon-functions = { path = "../beacon-functions" }
+beacon-data-lake = { path = "../beacon-data-lake" }

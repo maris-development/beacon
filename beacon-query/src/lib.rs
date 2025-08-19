@@ -1,6 +1,5 @@
 use std::{path::Path, sync::Arc};
 
-use beacon_output::{Output, OutputFormat};
 use datafusion::{
     arrow::datatypes::DataType,
     common::Column,
@@ -13,10 +12,7 @@ use datafusion::{
 use filter::Filter;
 use utoipa::ToSchema;
 
-use beacon_sources::{
-    arrow_format::SuperArrowFormat, formats_factory::Formats, odv_format::OdvFormat,
-    parquet_format::SuperParquetFormat, DataSource,
-};
+use crate::output::Output;
 
 pub mod filter;
 pub mod output;

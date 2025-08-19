@@ -85,7 +85,6 @@ impl VirtualMachine {
             .with_coalesce_batches(true)
             .with_information_schema(true)
             .with_collect_statistics(true);
-        // .with_target_partitions();
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
         // config.options_mut().execution.planning_concurrency = 4;
@@ -107,10 +106,7 @@ impl VirtualMachine {
             .with_default_features()
             .build();
 
-        session_state.register_file_format(Arc::new(NetCDFFileFormatFactory), true)?;
-        session_state.register_file_format(Arc::new(SuperParquetFormatFactory), true)?;
-        session_state.register_file_format(Arc::new(ArrowFormatFactory::new()), true)?;
-        session_state.register_file_format(Arc::new(CsvFormatFactory::new()), true)?;
+        beacon_data_lake::prelude::register_file_formats(session_state);
 
         let session_context = Arc::new(SessionContext::new_with_state(session_state));
 

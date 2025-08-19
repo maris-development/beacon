@@ -30,8 +30,5 @@ tracing-subscriber = { workspace = true}
 beacon-config = { path = "../beacon-config" }
 beacon-core = { path = "../beacon-core" }
 beacon-query = { path = "../beacon-query" }
-beacon-sources = { path = "../beacon-sources" }
-beacon-output = { path = "../beacon-output" }
 beacon-planner = { path = "../beacon-planner" }
 beacon-functions = { path = "../beacon-functions" }
-beacon-tables = { path = "../beacon-tables" }

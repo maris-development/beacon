@@ -1,5 +1,21 @@
-// pub mod arrow;
-// pub mod csv;
+use std::sync::Arc;
+
+use datafusion::execution::SessionState;
+
+use crate::files::formats::{
+    arrow::ArrowFormatFactory, csv::CsvFormatFactory, parquet::ParquetFormatFactory,
+};
+
+pub mod arrow;
+pub mod csv;
 pub mod geoparquet;
-// pub mod netcdf;
+pub mod netcdf;
 pub mod parquet;
+
+/// Register file formats with the session state that can be used for reading
+pub fn register_file_formats(session_state: &mut SessionState) -> datafusion::error::Result<()> {
+    session_state.register_file_format(Arc::new(ParquetFormatFactory), true)?;
+    session_state.register_file_format(Arc::new(CsvFormatFactory), true)?;
+    session_state.register_file_format(Arc::new(ArrowFormatFactory), true)?;
+    Ok(())
+}

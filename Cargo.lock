@@ -496,11 +496,8 @@ dependencies = [
  "beacon-config",
  "beacon-core",
  "beacon-functions",
- "beacon-output",
  "beacon-planner",
  "beacon-query",
- "beacon-sources",
- "beacon-tables",
  "futures",
  "futures-util",
  "serde",
@@ -596,12 +593,10 @@ dependencies = [
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
  "beacon-config",
+ "beacon-data-lake",
  "beacon-functions",
- "beacon-output",
  "beacon-planner",
  "beacon-query",
- "beacon-sources",
- "beacon-tables",
  "bytes",
  "datafusion",
  "futures",
@@ -673,40 +668,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-output"
-version = "1.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "beacon-arrow-netcdf",
- "beacon-arrow-odv",
- "beacon-config",
- "bytes",
- "datafusion",
- "futures",
- "futures-util",
- "geo",
- "geoarrow",
- "indexmap 2.10.0",
- "object_store 0.11.2",
- "serde",
- "tempfile",
- "tokio",
- "utoipa",
- "walkdir",
- "zip 2.4.2",
-]
-
-[[package]]
 name = "beacon-planner"
 version = "1.1.0"
 dependencies = [
  "anyhow",
  "beacon-config",
  "beacon-functions",
- "beacon-output",
  "beacon-query",
- "beacon-sources",
  "chrono",
  "datafusion",
  "geojson",
@@ -725,9 +693,8 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "beacon-config",
+ "beacon-data-lake",
  "beacon-functions",
- "beacon-output",
- "beacon-sources",
  "cast",
  "chrono",
  "datafusion",
@@ -737,57 +704,6 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
-]
-
-[[package]]
-name = "beacon-sources"
-version = "1.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "async-stream",
- "async-trait",
- "beacon-arrow-netcdf",
- "beacon-arrow-odv",
- "beacon-common",
- "beacon-config",
- "datafusion",
- "futures",
- "futures-util",
- "geoarrow",
- "glob",
- "indexmap 2.10.0",
- "nd-arrow-array",
- "object_store 0.11.2",
- "regex",
- "serde",
- "tempfile",
- "tokio",
- "tracing",
- "utoipa",
-]
-
-[[package]]
-name = "beacon-tables"
-version = "1.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "async-trait",
- "beacon-common",
- "beacon-config",
- "beacon-query",
- "beacon-sources",
- "chrono",
- "datafusion",
- "indexmap 2.10.0",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.15",
- "tokio",
- "tracing",
- "typetag",
 ]
 
 [[package]]

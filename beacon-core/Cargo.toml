@@ -33,9 +33,7 @@ tracing = { workspace=true}
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
-beacon-sources = { path = "../beacon-sources" }
-beacon-output = { path = "../beacon-output" }
 beacon-query = { path = "../beacon-query" }
 beacon-functions = { path = "../beacon-functions" }
-beacon-tables = { path = "../beacon-tables" }
 beacon-planner = { path = "../beacon-planner" }
+beacon-data-lake = { path = "../beacon-data-lake" }

@@ -2,18 +2,28 @@ use std::{any::Any, collections::HashMap, fmt::Debug, path::PathBuf, sync::Arc};
 
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
+    datasource::listing::ListingTableUrl,
     error::DataFusionError,
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
 use futures::StreamExt;
 use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
+use url::Url;
 
-use crate::table::{Table, error::TableError};
+use crate::{
+    table::{Table, error::TableError},
+    util::split_glob,
+};
 
 pub mod files;
 pub mod table;
 pub mod util;
+
+pub mod prelude {
+    pub use super::DataLake;
+    pub use super::files::formats::*;
+}
 
 #[derive(Debug)]
 pub struct Config {
@@ -47,6 +57,49 @@ impl Debug for DataLake {
 }
 
 impl DataLake {
+    pub fn create_listing_url(&self, path: String) -> datafusion::error::Result<ListingTableUrl> {
+        let parts = self.data_directory_prefix.parts().collect::<Vec<_>>();
+        if let Some((base, pattern)) = split_glob(&path) {
+            let pattern = glob::Pattern::new(&pattern).unwrap();
+            let mut full_path = format!(
+                "{}{}",
+                self.data_directory_store_url,
+                object_store::path::Path::from_iter(parts.clone().into_iter()),
+            );
+            if base.components().next().is_some() {
+                full_path.push_str(format!("/{}", base.as_os_str().to_string_lossy()).as_str());
+            }
+            if !full_path.ends_with('/') {
+                full_path.push('/');
+            }
+
+            let url = Url::parse(&full_path).unwrap();
+
+            let table_url = ListingTableUrl::try_new(url, Some(pattern))?;
+
+            Ok(table_url)
+        } else {
+            let mut full_path = format!(
+                "{}{}",
+                self.data_directory_store_url,
+                object_store::path::Path::from_iter(parts.clone().into_iter()),
+            );
+
+            // If full path ends with '/' then just append the path, otherwise append without a '/'
+            if full_path.ends_with('/') {
+                full_path.push_str(&path);
+            } else {
+                full_path.push_str(format!("/{}", path).as_str());
+            }
+
+            let url = Url::parse(&full_path).unwrap();
+
+            let table_url = ListingTableUrl::try_new(url, None)?;
+
+            Ok(table_url)
+        }
+    }
+
     pub async fn new(session_context: Arc<SessionContext>) -> Self {
         // Create tmp object store for storing temp files.
         let (datasets_url, datasets_prefix) =

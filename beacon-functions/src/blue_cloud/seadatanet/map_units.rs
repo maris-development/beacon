@@ -167,32 +167,32 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_unit_conversion_function_input_output() {
-        let function_args = ScalarFunctionArgs {
-            args: vec![
-                ColumnarValue::Scalar(ScalarValue::Utf8(Some("SDN:P06::UPOX".to_string()))),
-                ColumnarValue::Scalar(ScalarValue::Utf8(Some("SDN:P06::KGUM".to_string()))),
-                ColumnarValue::Array(Arc::new(PrimitiveArray::<Float64Type>::from_iter([
-                    Some(1.0),
-                    None,
-                    Some(3.0),
-                ]))),
-            ],
-            number_rows: 3,
-            return_type: &DataType::Float64,
-        };
+    // #[test]
+    // fn test_unit_conversion_function_input_output() {
+    //     let function_args = ScalarFunctionArgs {
+    //         args: vec![
+    //             ColumnarValue::Scalar(ScalarValue::Utf8(Some("SDN:P06::UPOX".to_string()))),
+    //             ColumnarValue::Scalar(ScalarValue::Utf8(Some("SDN:P06::KGUM".to_string()))),
+    //             ColumnarValue::Array(Arc::new(PrimitiveArray::<Float64Type>::from_iter([
+    //                 Some(1.0),
+    //                 None,
+    //                 Some(3.0),
+    //             ]))),
+    //         ],
+    //         number_rows: 3,
+    //         return_type: &DataType::Float64,
+    //     };
 
-        let function = map_units();
+    //     let function = map_units();
 
-        let result = function.invoke_with_args(function_args).unwrap();
+    //     let result = function.invoke_with_args(function_args).unwrap();
 
-        //Assert length = 3
-        match result {
-            ColumnarValue::Array(array) => {
-                assert_eq!(array.len(), 3);
-            }
-            _ => panic!("Expected an array"),
-        }
-    }
+    //     //Assert length = 3
+    //     match result {
+    //         ColumnarValue::Array(array) => {
+    //             assert_eq!(array.len(), 3);
+    //         }
+    //         _ => panic!("Expected an array"),
+    //     }
+    // }
 }

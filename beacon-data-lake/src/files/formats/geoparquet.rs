@@ -28,7 +28,7 @@ use geoarrow::datatypes::{Dimension, Metadata, PointType};
 use geoarrow_array::GeoArrowArray;
 use geoparquet::writer::{GeoParquetRecordBatchEncoder, GeoParquetWriterOptions};
 use object_store::{ObjectMeta, ObjectStore};
-use parquet::arrow::{async_writer::ParquetObjectWriter, AsyncArrowWriter};
+use parquet::arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct GeoParquetOptions {
@@ -139,15 +139,17 @@ impl FileFormat for GeoParquetFormat {
     async fn create_writer_physical_plan(
         &self,
         input: Arc<dyn ExecutionPlan>,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let object_store = state.runtime_env().object_store(&conf.object_store_url)?;
         let sink = Arc::new(GeoParquetSink::new(
             input.clone(),
             conf,
+            object_store,
             self.options.clone(),
-        ));
+        )) as Arc<dyn DataSink>;
 
         Ok(Arc::new(DataSinkExec::new(input, sink, order_requirements)))
     }
@@ -253,7 +255,6 @@ struct GeoParquetSink {
     input: Arc<dyn ExecutionPlan>,
     file_sink_config: FileSinkConfig,
     object_store: Arc<dyn ObjectStore>,
-    output_path: object_store::path::Path,
     mapper: GeoMapper,
 }
 
@@ -261,6 +262,7 @@ impl GeoParquetSink {
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         file_sink_config: FileSinkConfig,
+        object_store: Arc<dyn ObjectStore>,
         options: GeoParquetOptions,
     ) -> Self {
         let mapper = GeoMapper::new(input.schema().as_ref(), &options);
@@ -269,29 +271,8 @@ impl GeoParquetSink {
             input,
             file_sink_config,
             mapper,
+            object_store,
         }
-    }
-
-    fn create_writer(&self, output_path: &str) -> GeoParquetWriter<BufWriter<std::fs::File>> {
-        let file = std::fs::File::create(output_path)
-            .map_err(datafusion::error::DataFusionError::IoError)
-            .unwrap();
-
-        parquet::arrow::AsyncArrowWriter::
-
-        let buf_writer = std::io::BufWriter::new(file);
-
-        let options = GeoParquetWriterOptions {
-            encoding: geoarrow::io::parquet::GeoParquetWriterEncoding::Native,
-            ..Default::default()
-        };
-
-        geoarrow::io::parquet::GeoParquetWriter::try_new(
-            buf_writer,
-            &self.mapper.output_schema,
-            &options,
-        )
-        .unwrap()
     }
 }
 
@@ -327,17 +308,19 @@ impl DataSink for GeoParquetSink {
         data: SendableRecordBatchStream,
         _context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
-        let output_path = format!(
-            "{}/{}",
-            beacon_config::DATA_DIR.to_string_lossy(),
-            self.file_sink_config.table_paths[0].prefix()
-        );
-        let object_writer = ParquetObjectWriter::new(self.file_sink_config.object_store_url)
-        let mut parquet_options = GeoParquetWriterOptions::default();
-        let encoder = GeoParquetRecordBatchEncoder::try_new(&self.mapper.output_schema, &parquet_options).unwrap();
-        let arrow_writer = AsyncArrowWriter::try_new(file, encoder.target_schema(), None).unwrap();
+        let output_path = self.file_sink_config.table_paths[0].prefix();
+        let mut encoder = {
+            let parquet_options = GeoParquetWriterOptions::default();
+            let encoder =
+                GeoParquetRecordBatchEncoder::try_new(&self.mapper.output_schema, &parquet_options)
+                    .unwrap();
+            encoder
+        };
+        let object_writer =
+            ParquetObjectWriter::new(self.object_store.clone(), output_path.clone());
 
-        let mut writer = self.create_writer(&output_path);
+        let mut arrow_writer =
+            AsyncArrowWriter::try_new(object_writer, encoder.target_schema(), None).unwrap();
 
         let mut rows_written: u64 = 0;
 
@@ -346,11 +329,12 @@ impl DataSink for GeoParquetSink {
         while let Some(batch) = pinned_steam.next().await {
             let batch = batch?;
             let mapped_batch = self.mapper.map(&batch);
-            writer.write_batch(&mapped_batch).unwrap();
+            let encoded_batch = encoder.encode_record_batch(&mapped_batch).unwrap();
+            arrow_writer.write(&encoded_batch).await.unwrap();
             rows_written += mapped_batch.num_rows() as u64;
         }
 
-        writer.finish().unwrap();
+        arrow_writer.finish().await.unwrap();
 
         Ok(rows_written)
     }

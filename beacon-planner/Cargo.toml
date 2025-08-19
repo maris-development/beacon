@@ -16,8 +16,6 @@ geojson = "0.24.2"
 uuid = { version = "1.16.0", features = ["serde"] }
 chrono = { workspace = true}
 
-beacon-sources = { path = "../beacon-sources" }
-beacon-output = { path = "../beacon-output" }
 beacon-config = { path = "../beacon-config" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-query = { path = "../beacon-query" }

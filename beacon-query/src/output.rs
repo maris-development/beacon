@@ -1,4 +1,26 @@
 use tempfile::NamedTempFile;
+use utoipa::ToSchema;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct Output {
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    Csv,
+    #[serde(alias = "arrow")]
+    Ipc,
+    Parquet,
+    Json,
+    // Odv(OdvOptions),
+    NetCDF,
+    GeoParquet {
+        longitude_column: String,
+        latitude_column: String,
+    },
+}
 
 #[derive(Debug)]
 pub enum QueryOutputFile {

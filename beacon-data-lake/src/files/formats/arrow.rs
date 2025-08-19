@@ -1,18 +1,14 @@
 use std::{any::Any, sync::Arc};
 
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::SchemaRef;
 use datafusion::{
+    catalog::Session,
     common::{GetExt, Statistics},
     datasource::{
-        file_format::{
-            FileFormat, FileFormatFactory, FilePushdownSupport,
-            file_compression_type::FileCompressionType,
-        },
-        physical_plan::FileScanConfig,
+        file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
+        physical_plan::{FileScanConfig, FileSource},
     },
-    execution::SessionState,
-    physical_plan::{ExecutionPlan, PhysicalExpr},
-    prelude::Expr,
+    physical_plan::ExecutionPlan,
 };
 use object_store::{ObjectMeta, ObjectStore};
 
@@ -25,7 +21,7 @@ pub struct ArrowFormatFactory;
 impl FileFormatFactory for ArrowFormatFactory {
     fn create(
         &self,
-        _state: &SessionState,
+        _state: &dyn Session,
         _format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         Ok(Arc::new(ArrowFormat::new()))
@@ -71,6 +67,10 @@ impl FileFormat for ArrowFormat {
         self.inner_format.as_any()
     }
 
+    fn compression_type(&self) -> Option<FileCompressionType> {
+        self.inner_format.compression_type()
+    }
+
     fn get_ext(&self) -> String {
         self.inner_format.get_ext()
     }
@@ -85,18 +85,17 @@ impl FileFormat for ArrowFormat {
 
     async fn infer_schema(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
         //Retrieve the schema for each object
         let schemas = try_join_all(objects.iter().map(|object| {
-            let state = state.clone();
             let store = Arc::clone(store);
             let object = object.clone();
             async move {
                 self.inner_format
-                    .infer_schema(&state, &store, &[object])
+                    .infer_schema(state, &store, &[object])
                     .await
             }
         }))
@@ -111,7 +110,7 @@ impl FileFormat for ArrowFormat {
 
     async fn infer_stats(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
         object: &ObjectMeta,
@@ -123,22 +122,13 @@ impl FileFormat for ArrowFormat {
 
     async fn create_physical_plan(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         conf: FileScanConfig,
-        filters: Option<&Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        self.inner_format
-            .create_physical_plan(state, conf, filters)
-            .await
+        self.inner_format.create_physical_plan(state, conf).await
     }
 
-    fn supports_filters_pushdown(
-        &self,
-        file_schema: &Schema,
-        table_schema: &Schema,
-        filters: &[&Expr],
-    ) -> datafusion::error::Result<FilePushdownSupport> {
-        self.inner_format
-            .supports_filters_pushdown(file_schema, table_schema, filters)
+    fn file_source(&self) -> Arc<dyn FileSource> {
+        self.inner_format.file_source()
     }
 }

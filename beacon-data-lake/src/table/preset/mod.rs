@@ -12,7 +12,6 @@ use datafusion::{
     prelude::{Expr, SessionContext},
 };
 use indexmap::IndexMap;
-use object_store::ObjectStore;
 
 use crate::{
     table::{TableType, error::TableError},
