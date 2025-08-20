@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt::Debug, path::PathBuf, sync::Arc};
+use std::{any::Any, collections::HashMap, f64::consts::E, fmt::Debug, path::PathBuf, sync::Arc};
 
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
@@ -12,6 +12,7 @@ use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, pa
 use url::Url;
 
 use crate::{
+    files::temp_output_file::TempOutputFile,
     table::{Table, error::TableError},
     util::split_glob,
 };
@@ -35,6 +36,10 @@ pub struct DataLake {
     data_directory_prefix: object_store::path::Path,
     table_directory_store_url: ObjectStoreUrl,
     table_directory_prefix: object_store::path::Path,
+
+    tmp_directory_object_store: Arc<LocalFileSystem>,
+    tmp_directory_store_url: ObjectStoreUrl,
+    tmp_directory_prefix: object_store::path::Path,
     /// The session context used for executing queries and managing the session state.
     session_context: Arc<SessionContext>,
 
@@ -57,7 +62,10 @@ impl Debug for DataLake {
 }
 
 impl DataLake {
-    pub fn create_listing_url(&self, path: String) -> datafusion::error::Result<ListingTableUrl> {
+    pub fn try_create_listing_url(
+        &self,
+        path: String,
+    ) -> datafusion::error::Result<ListingTableUrl> {
         let parts = self.data_directory_prefix.parts().collect::<Vec<_>>();
         if let Some((base, pattern)) = split_glob(&path) {
             let pattern = glob::Pattern::new(&pattern).unwrap();
@@ -100,11 +108,18 @@ impl DataLake {
         }
     }
 
+    pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {
+        TempOutputFile::new(self, extension)
+    }
+
     pub async fn new(session_context: Arc<SessionContext>) -> Self {
         // Create tmp object store for storing temp files.
         let (datasets_url, datasets_prefix) =
             Self::datasets_url_with_prefix(session_context.clone());
         let (tables_url, tables_prefix) = Self::tables_url_with_prefix(session_context.clone());
+        let (tmp_directory_object_store, tmp_directory_store_url, tmp_directory_prefix) =
+            Self::tmp_url_with_prefix(session_context.clone());
+
         let config = Self::read_config();
 
         let tables = Self::init_tables(
@@ -121,6 +136,9 @@ impl DataLake {
             data_directory_prefix: datasets_prefix,
             table_directory_store_url: tables_url,
             table_directory_prefix: tables_prefix,
+            tmp_directory_object_store,
+            tmp_directory_store_url,
+            tmp_directory_prefix,
             session_context,
             config,
             tables: parking_lot::Mutex::new(tables),
@@ -132,6 +150,30 @@ impl DataLake {
         Config {
             read_only: false, // Example value, replace with actual logic
         }
+    }
+
+    fn tmp_url_with_prefix(
+        context: Arc<SessionContext>,
+    ) -> (
+        Arc<LocalFileSystem>,
+        ObjectStoreUrl,
+        object_store::path::Path,
+    ) {
+        let base_path = PathBuf::from("./data");
+        let tmp_directory = base_path.join("tmp");
+
+        // Create directories if they do not exist
+        std::fs::create_dir_all(&tmp_directory).expect("Failed to create tmp directory");
+
+        // Configure the object store using LOCAL FS
+        let tmp_url = ObjectStoreUrl::parse("file://").expect("Failed to parse file URL");
+        let tmp_fs = LocalFileSystem::new_with_prefix("./data").unwrap();
+        let tmp_fs_arc = Arc::new(tmp_fs);
+        context.register_object_store(tmp_url.as_ref(), tmp_fs_arc.clone());
+
+        let path_prefix = object_store::path::Path::from("tmp/");
+
+        (tmp_fs_arc, tmp_url, path_prefix)
     }
 
     fn tables_url_with_prefix(

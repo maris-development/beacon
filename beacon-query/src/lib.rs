@@ -143,11 +143,11 @@ impl Select {
 pub enum From {
     #[serde(untagged)]
     Table(String),
-    #[serde(untagged)]
-    Format {
-        #[serde(flatten)]
-        format: Formats,
-    },
+    // #[serde(untagged)]
+    // Format {
+    //     #[serde(flatten)]
+    //     format: Formats,
+    // },
 }
 
 impl Default for From {
@@ -156,46 +156,46 @@ impl Default for From {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-#[serde(untagged)]
-#[serde(deny_unknown_fields)]
-pub enum FileSystemPath {
-    ManyPaths(Vec<String>),
-    Path(String),
-}
+// #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+// #[serde(untagged)]
+// #[serde(deny_unknown_fields)]
+// pub enum FileSystemPath {
+//     ManyPaths(Vec<String>),
+//     Path(String),
+// }
 
-impl FileSystemPath {
-    pub fn parse_to_url<P: AsRef<Path>>(path: P) -> anyhow::Result<ListingTableUrl> {
-        let table_url =
-            ListingTableUrl::parse(&format!("/datasets/{}", path.as_ref().to_string_lossy()))?;
-        if table_url
-            .prefix()
-            .prefix_matches(&beacon_config::DATASETS_DIR_PREFIX)
-        {
-            Ok(table_url)
-        } else {
-            Err(anyhow::anyhow!(
-                "Path {} is not within the datasets directory.",
-                table_url.as_str()
-            ))
-        }
-    }
-}
+// impl FileSystemPath {
+//     pub fn parse_to_url<P: AsRef<Path>>(path: P) -> anyhow::Result<ListingTableUrl> {
+//         let table_url =
+//             ListingTableUrl::parse(&format!("/datasets/{}", path.as_ref().to_string_lossy()))?;
+//         if table_url
+//             .prefix()
+//             .prefix_matches(&beacon_config::DATASETS_DIR_PREFIX)
+//         {
+//             Ok(table_url)
+//         } else {
+//             Err(anyhow::anyhow!(
+//                 "Path {} is not within the datasets directory.",
+//                 table_url.as_str()
+//             ))
+//         }
+//     }
+// }
 
-impl TryInto<Vec<ListingTableUrl>> for &FileSystemPath {
-    type Error = anyhow::Error;
+// impl TryInto<Vec<ListingTableUrl>> for &FileSystemPath {
+//     type Error = anyhow::Error;
 
-    fn try_into(self) -> Result<Vec<ListingTableUrl>, Self::Error> {
-        match self {
-            FileSystemPath::ManyPaths(items) => Ok(items
-                .into_iter()
-                .map(|path| FileSystemPath::parse_to_url(path))
-                .collect::<anyhow::Result<_>>()?),
-            FileSystemPath::Path(path) => Ok(vec![FileSystemPath::parse_to_url(path)
-                .map_err(|e| anyhow::anyhow!("Failed to parse path: {}", e))?]),
-        }
-    }
-}
+//     fn try_into(self) -> Result<Vec<ListingTableUrl>, Self::Error> {
+//         match self {
+//             FileSystemPath::ManyPaths(items) => Ok(items
+//                 .into_iter()
+//                 .map(|path| FileSystemPath::parse_to_url(path))
+//                 .collect::<anyhow::Result<_>>()?),
+//             FileSystemPath::Path(path) => Ok(vec![FileSystemPath::parse_to_url(path)
+//                 .map_err(|e| anyhow::anyhow!("Failed to parse path: {}", e))?]),
+//         }
+//     }
+// }
 
 impl From {
     pub async fn init_builder(
@@ -214,7 +214,7 @@ impl From {
                         e
                     )
                 }),
-            From::Format { format } => format.create_plan_builder(&session_ctx.state()).await,
+            // From::Format { format } => format.create_plan_builder(&session_ctx.state()).await,
         }
     }
 }
