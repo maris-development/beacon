@@ -3,9 +3,9 @@ use std::{path::Path, sync::Arc};
 use datafusion::{
     arrow::datatypes::DataType,
     common::Column,
-    datasource::{listing::ListingTableUrl, provider_as_source},
+    datasource::{listing::ListingTableUrl, provider_as_source, DefaultTableSource},
     execution::SessionState,
-    logical_expr::{expr, ExprSchemable, LogicalPlanBuilder, SortExpr},
+    logical_expr::{expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, SortExpr, TableSource},
     prelude::{col, lit, lit_timestamp_nano, try_cast, CsvReadOptions, Expr, SessionContext},
     scalar::ScalarValue,
 };
@@ -15,6 +15,7 @@ use utoipa::ToSchema;
 use crate::output::Output;
 
 pub mod filter;
+pub mod from;
 pub mod output;
 pub mod parser;
 pub mod plan;
