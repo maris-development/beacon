@@ -90,6 +90,9 @@ impl PresetTable {
             TableType::Preset(preset_table) => {
                 Box::pin(preset_table.create(table_directory, session_ctx)).await?
             }
+            TableType::GeoSpatial(geo_spatial_table) => {
+                Box::pin(geo_spatial_table.create(table_directory, session_ctx)).await?
+            }
         }
         Ok(())
     }

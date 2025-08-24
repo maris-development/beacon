@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::table::{error::TableError, logical::LogicalTable, preset::PresetTable};
+use crate::table::{
+    error::TableError, geospatial::GeoSpatialTable, logical::LogicalTable, preset::PresetTable,
+};
 use datafusion::{
     catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
@@ -11,6 +13,7 @@ use datafusion::{
 pub enum TableType {
     Logical(LogicalTable),
     Preset(PresetTable),
+    GeoSpatial(GeoSpatialTable),
 }
 
 impl TableType {
@@ -33,6 +36,16 @@ impl TableType {
             }
             TableType::Preset(preset_table) => {
                 Box::pin(preset_table.table_provider(
+                    table_directory_store_url,
+                    table_directory_prefix,
+                    data_directory_store_url,
+                    data_directory_prefix,
+                    session_ctx,
+                ))
+                .await
+            }
+            TableType::GeoSpatial(geo_spatial_table) => {
+                Box::pin(geo_spatial_table.table_provider(
                     table_directory_store_url,
                     table_directory_prefix,
                     data_directory_store_url,
