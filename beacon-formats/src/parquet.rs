@@ -1,16 +1,17 @@
 use std::{any::Any, sync::Arc};
 
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::{DataType, Schema, SchemaRef, TimeUnit};
 use datafusion::{
     catalog::Session,
-    common::{GetExt, Statistics},
+    common::{Column, DFSchema, GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
-        physical_plan::{FileScanConfig, FileSource},
+        physical_plan::{FileScanConfig, FileSinkConfig, FileSource},
     },
     execution::SessionState,
-    physical_plan::{ExecutionPlan, PhysicalExpr},
-    prelude::Expr,
+    physical_expr::{LexRequirement, create_physical_expr},
+    physical_plan::{ExecutionPlan, PhysicalExpr, projection::ProjectionExec},
+    prelude::{Expr, cast, col},
 };
 use object_store::{ObjectMeta, ObjectStore};
 
@@ -132,7 +133,54 @@ impl FileFormat for ParquetFormat {
         self.inner.create_physical_plan(state, conf).await
     }
 
+    async fn create_writer_physical_plan(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        state: &dyn Session,
+        conf: FileSinkConfig,
+        order_requirements: Option<LexRequirement>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // ensure all Timestamp(Second) columns are cast to Timestamp(Millisecond)
+        let adjusted_input = cast_ts_seconds_to_ms(input, state)?;
+        self.inner
+            .create_writer_physical_plan(adjusted_input, state, conf, order_requirements)
+            .await
+    }
+
     fn file_source(&self) -> Arc<dyn FileSource> {
         self.inner.file_source()
     }
+}
+
+fn cast_ts_seconds_to_ms(
+    input: Arc<dyn ExecutionPlan>,
+    session: &dyn Session,
+) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    let schema = input.schema();
+    let df_schema: DFSchema = DFSchema::try_from(schema.clone()).unwrap();
+
+    // Build a projection: cast SECOND -> MILLISECOND; keep everything else as-is
+    let exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let name = f.name().to_string();
+            let expr: Arc<dyn PhysicalExpr> = match f.data_type() {
+                DataType::Timestamp(TimeUnit::Second, tz) => {
+                    // keep timezone if present
+                    let target = DataType::Timestamp(TimeUnit::Millisecond, tz.clone());
+                    let expr = cast(Expr::Column(Column::new_unqualified(&name)), target);
+                    session.create_physical_expr(expr, &df_schema).unwrap()
+                }
+                _ => session
+                    .create_physical_expr(Expr::Column(Column::new_unqualified(&name)), &df_schema)
+                    .unwrap(),
+            };
+            (expr, name)
+        })
+        .collect();
+
+    // Wrap the input with the projection so downstream sees the casted schema
+    let projected = Arc::new(ProjectionExec::try_new(exprs, input)?);
+    Ok(projected)
 }

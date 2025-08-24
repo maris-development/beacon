@@ -6,9 +6,10 @@ use datafusion::{
     common::{GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
-        physical_plan::{FileScanConfig, FileSource},
+        physical_plan::{FileScanConfig, FileSinkConfig, FileSource},
     },
     execution::SessionState,
+    physical_expr::LexRequirement,
     physical_plan::{ExecutionPlan, PhysicalExpr},
     prelude::Expr,
 };
@@ -125,6 +126,18 @@ impl FileFormat for CsvFormat {
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         self.inner_format.create_physical_plan(state, conf).await
+    }
+
+    async fn create_writer_physical_plan(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        state: &dyn Session,
+        conf: FileSinkConfig,
+        order_requirements: Option<LexRequirement>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        self.inner_format
+            .create_writer_physical_plan(input, state, conf, order_requirements)
+            .await
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
