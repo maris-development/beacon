@@ -495,6 +495,7 @@ dependencies = [
  "base64",
  "beacon-config",
  "beacon-core",
+ "beacon-data-lake",
  "beacon-functions",
  "beacon-planner",
  "beacon-query",
@@ -516,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-netcdf"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -533,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-odv"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -559,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -575,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "envconfig",
  "lazy_static",
@@ -584,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -594,6 +595,7 @@ dependencies = [
  "beacon-arrow-odv",
  "beacon-config",
  "beacon-data-lake",
+ "beacon-formats",
  "beacon-functions",
  "beacon-planner",
  "beacon-query",
@@ -621,11 +623,12 @@ dependencies = [
 
 [[package]]
 name = "beacon-data-lake"
-version = "0.1.0"
+version = "1.2.0"
 dependencies = [
  "arrow",
  "async-trait",
  "beacon-config",
+ "beacon-formats",
  "chrono",
  "datafusion",
  "futures",
@@ -650,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-formats"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -674,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-functions"
-version = "0.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -694,10 +697,11 @@ dependencies = [
 
 [[package]]
 name = "beacon-planner"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "beacon-config",
+ "beacon-data-lake",
  "beacon-functions",
  "beacon-query",
  "chrono",
@@ -714,11 +718,12 @@ dependencies = [
 
 [[package]]
 name = "beacon-query"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "beacon-config",
  "beacon-data-lake",
+ "beacon-formats",
  "beacon-functions",
  "cast",
  "chrono",

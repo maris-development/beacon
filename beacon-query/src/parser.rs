@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use beacon_data_lake::{
-    prelude::geoparquet::{GeoParquetFormatFactory, GeoParquetOptions},
-    DataLake,
-};
+use beacon_data_lake::DataLake;
 use datafusion::{
     datasource::file_format::{csv::CsvFormatFactory, format_as_file_type, FileFormat},
     logical_expr::{Analyze, LogicalPlan, LogicalPlanBuilder},
@@ -23,18 +20,23 @@ pub struct Parser;
 impl Parser {
     pub async fn parse(
         session: &SessionContext,
-        datalake: &DataLake,
+        data_lake: &DataLake,
         query: Query,
     ) -> anyhow::Result<ParsedPlan> {
-        let datafusion_logical_plan = Self::parse_to_logical_plan(session, query.inner).await?;
-        let (plan, output_file) =
-            Self::parse_output(datalake, datafusion_logical_plan, query.output).await?;
+        let datafusion_logical_plan =
+            Self::parse_to_logical_plan(session, data_lake, query.inner).await?;
+
+        let (plan, output_file) = query
+            .output
+            .parse(session, data_lake, datafusion_logical_plan)
+            .await?;
 
         Ok(ParsedPlan::new(plan, output_file))
     }
 
     pub async fn parse_to_logical_plan(
         session: &SessionContext,
+        data_lake: &DataLake,
         inner_query: InnerQuery,
     ) -> anyhow::Result<LogicalPlan> {
         let datafusion_logical_plan = match inner_query {
@@ -57,7 +59,8 @@ impl Parser {
                 }
             }
             InnerQuery::Json(query_body) => {
-                let datafusion_plan = Self::parse_json_query(query_body, session).await?;
+                let datafusion_plan =
+                    Self::parse_json_query(query_body, session, data_lake).await?;
                 datafusion_plan
             }
         };
@@ -68,11 +71,12 @@ impl Parser {
     pub async fn parse_json_query(
         query_body: QueryBody,
         session: &SessionContext,
+        data_lake: &DataLake,
     ) -> anyhow::Result<LogicalPlan> {
         let mut builder = query_body
             .from
             .unwrap_or_default()
-            .init_builder(&session)
+            .init_builder(&session, data_lake)
             .await?;
 
         let session_state = session.state();
@@ -106,130 +110,5 @@ impl Parser {
 
         let plan = builder.build()?;
         Ok(plan)
-    }
-
-    pub async fn parse_output(
-        datalake: &DataLake,
-        input_plan: LogicalPlan,
-        output: Output,
-    ) -> anyhow::Result<(LogicalPlan, QueryOutputFile)> {
-        match output.format {
-            OutputFormat::Csv => {
-                let temp_output = datalake.try_create_temp_output_file("csv");
-                let format = Arc::new(CsvFormatFactory::new());
-                let file_type = format_as_file_type(format);
-
-                let plan = LogicalPlanBuilder::copy_to(
-                    input_plan,
-                    temp_output.get_object_path().to_string(),
-                    file_type,
-                    Default::default(),
-                    vec![],
-                )?;
-
-                Ok((
-                    plan.build()?,
-                    QueryOutputFile::Csv(temp_output.into_temp_file()),
-                ))
-            }
-            OutputFormat::Ipc => {
-                let temp_output = datalake.try_create_temp_output_file("arrow");
-                let format = Arc::new(
-                    datafusion::datasource::file_format::arrow::ArrowFormatFactory::default(),
-                );
-                let file_type = format_as_file_type(format);
-                let plan = LogicalPlanBuilder::copy_to(
-                    input_plan,
-                    temp_output.get_object_path().to_string(),
-                    file_type,
-                    Default::default(),
-                    vec![],
-                )?;
-
-                Ok((
-                    plan.build()?,
-                    QueryOutputFile::Ipc(temp_output.into_temp_file()),
-                ))
-            }
-            OutputFormat::Parquet => {
-                let temp_output = datalake.try_create_temp_output_file("parquet");
-                let format = Arc::new(
-                    datafusion::datasource::file_format::parquet::ParquetFormatFactory::default(),
-                );
-                let file_type = format_as_file_type(format);
-
-                let plan = LogicalPlanBuilder::copy_to(
-                    input_plan,
-                    temp_output.get_object_path().to_string(),
-                    file_type,
-                    Default::default(),
-                    vec![],
-                )?;
-
-                Ok((
-                    plan.build()?,
-                    QueryOutputFile::Parquet(temp_output.into_temp_file()),
-                ))
-            }
-            OutputFormat::Json => {
-                todo!()
-            }
-            // OutputFormat::Odv(odv_options) => {
-            //     let temp_output = TempOutputFile::new("beacon", ".zip")?;
-            //     let path = temp_output.object_store_path();
-            //     let format = Arc::new(OdvFileFormatFactory::new(Some(odv_options)));
-            //     let file_type = format_as_file_type(format);
-            //     let plan = LogicalPlanBuilder::copy_to(
-            //         input_plan,
-            //         path.to_string(),
-            //         file_type,
-            //         Default::default(),
-            //         vec![],
-            //     )?;
-
-            //     Ok((plan.build()?, QueryOutputFile::Odv(temp_output.file)))
-            // }
-            OutputFormat::NetCDF => {
-                // let temp_output = datalake.try_create_temp_output_file("nc");
-                // let path = temp_output.get_object_path();
-                // let format = Arc::new(NetCDFFileFormatFactory);
-                // let file_type = format_as_file_type(format);
-
-                // let plan = LogicalPlanBuilder::copy_to(
-                //     input_plan,
-                //     path.to_string(),
-                //     file_type,
-                //     Default::default(),
-                //     vec![],
-                // )?;
-
-                // Ok((plan.build()?, QueryOutputFile::NetCDF(temp_output.file)))
-                todo!()
-            }
-            OutputFormat::GeoParquet {
-                longitude_column,
-                latitude_column,
-            } => {
-                let temp_output = datalake.try_create_temp_output_file("parquet");
-                let format = Arc::new(GeoParquetFormatFactory::new(GeoParquetOptions {
-                    longitude_column,
-                    latitude_column,
-                }));
-                let file_type = format_as_file_type(format);
-
-                let plan = LogicalPlanBuilder::copy_to(
-                    input_plan,
-                    temp_output.get_object_path().to_string(),
-                    file_type,
-                    Default::default(),
-                    vec![],
-                )?;
-
-                Ok((
-                    plan.build()?,
-                    QueryOutputFile::GeoParquet(temp_output.into_temp_file()),
-                ))
-            }
-        }
     }
 }

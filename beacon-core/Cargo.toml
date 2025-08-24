@@ -1,6 +1,6 @@
 [package]
 name = "beacon-core"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 
 [dependencies]
@@ -37,3 +37,4 @@ beacon-query = { path = "../beacon-query" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-planner = { path = "../beacon-planner" }
 beacon-data-lake = { path = "../beacon-data-lake" }
+beacon-formats = { path = "../beacon-formats" }

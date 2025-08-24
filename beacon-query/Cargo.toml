@@ -1,6 +1,6 @@
 [package]
 name = "beacon-query"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 
 [dependencies]
@@ -18,3 +18,4 @@ chrono = { workspace = true }
 beacon-config = { path = "../beacon-config" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-data-lake = { path = "../beacon-data-lake" }
+beacon-formats = { path = "../beacon-formats" }

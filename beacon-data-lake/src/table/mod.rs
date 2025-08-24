@@ -12,6 +12,7 @@ use crate::table::{_type::TableType, error::TableError};
 
 pub mod _type;
 pub mod error;
+pub mod geospatial;
 pub mod logical;
 pub mod preset;
 pub mod table_formats;

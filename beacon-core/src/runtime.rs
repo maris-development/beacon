@@ -1,18 +1,14 @@
-use std::sync::Arc;
-
 use crate::{
     query_result::QueryResult,
     sys::{self, SystemInfo},
     virtual_machine,
 };
 use arrow::datatypes::SchemaRef;
+use beacon_data_lake::table::Table;
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_output::OutputResponse;
-use beacon_planner::{metrics::ConsolidatedMetrics, prelude::MetricsTracker};
-use beacon_query::{output::QueryOutputFile, parser::Parser, Query};
-use beacon_sources::formats_factory::Formats;
-use beacon_tables::table::Table;
-use datafusion::{common::HashMap, prelude::DataFrame};
+use beacon_planner::metrics::ConsolidatedMetrics;
+use beacon_query::{parser::Parser, Query};
+use datafusion::common::HashMap;
 use parking_lot::Mutex;
 
 pub struct Runtime {
@@ -30,8 +26,13 @@ impl Runtime {
     }
 
     pub async fn run_client_query(&self, query: Query) -> anyhow::Result<QueryResult> {
-        let plan =
-            beacon_planner::prelude::plan_query(self.virtual_machine.session_ctx(), query).await?;
+        let data_lake = self.virtual_machine.data_lake();
+        let plan = beacon_planner::prelude::plan_query(
+            self.virtual_machine.session_ctx(),
+            &data_lake,
+            query,
+        )
+        .await?;
 
         self.virtual_machine.run_plan(&plan).await?;
 
@@ -55,7 +56,13 @@ impl Runtime {
     }
 
     pub async fn explain_client_query(&self, query: Query) -> anyhow::Result<String> {
-        let plan = Parser::parse(self.virtual_machine.session_ctx().as_ref(), query).await?;
+        let data_lake = self.virtual_machine.data_lake();
+        let plan = Parser::parse(
+            self.virtual_machine.session_ctx().as_ref(),
+            &data_lake,
+            query,
+        )
+        .await?;
         let json = plan.datafusion_plan.display_pg_json().to_string();
         Ok(json)
     }
@@ -69,7 +76,7 @@ impl Runtime {
     }
 
     pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
-        self.virtual_machine.delete_table(table_name).await
+        self.virtual_machine.delete_table(table_name)
     }
 
     pub fn list_tables(&self) -> Vec<String> {
@@ -80,19 +87,12 @@ impl Runtime {
         self.virtual_machine.default_table()
     }
 
-    pub async fn list_table_config(&self, table_name: String) -> anyhow::Result<Table> {
+    pub async fn list_table_config(&self, table_name: String) -> Option<Table> {
         self.virtual_machine.list_table_config(table_name).await
     }
 
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
         self.virtual_machine.list_table_schema(table_name).await
-    }
-
-    pub async fn list_table_extensions(
-        &self,
-        table_name: String,
-    ) -> anyhow::Result<Vec<Arc<dyn beacon_tables::table_extension::TableExtension>>> {
-        self.virtual_machine.list_table_extensions(table_name).await
     }
 
     pub async fn list_default_table_schema(&self) -> SchemaRef {

@@ -4,30 +4,21 @@ use arrow::{
     array::AsArray,
     datatypes::{SchemaRef, UInt64Type},
 };
+use beacon_data_lake::{table::Table, DataLake};
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::plan::BeaconQueryPlan;
-use beacon_sources::{
-    netcdf_format::NetCDFFileFormatFactory, parquet_format::SuperParquetFormatFactory,
-};
-use beacon_tables::{schema_provider::BeaconSchemaProvider, table::Table};
 use datafusion::{
     catalog::SchemaProvider,
-    datasource::{
-        file_format::{arrow::ArrowFormatFactory, csv::CsvFormatFactory},
-        listing::{ListingTableConfig, ListingTableUrl},
-    },
     execution::{
-        disk_manager::DiskManagerConfig, memory_pool::FairSpillPool, object_store::ObjectStoreUrl,
+        disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
     prelude::{SessionConfig, SessionContext},
 };
-use futures::StreamExt;
-use tracing::{event, Level};
 
 pub struct VirtualMachine {
     session_ctx: Arc<SessionContext>,
-    schema_provider: Arc<BeaconSchemaProvider>,
+    data_lake: Arc<DataLake>,
 }
 
 impl VirtualMachine {
@@ -37,14 +28,12 @@ impl VirtualMachine {
         ));
 
         let session_ctx = Self::init_ctx(memory_pool.clone())?;
-
-        let beacon_schema_provider =
-            Arc::new(BeaconSchemaProvider::new(session_ctx.clone()).await?);
+        let data_lake = Arc::new(DataLake::new(session_ctx.clone()).await);
 
         session_ctx
             .catalog("datafusion")
             .unwrap()
-            .register_schema("public", beacon_schema_provider.clone())?;
+            .register_schema("public", data_lake.clone())?;
 
         //INIT FUNCTIONS FROM beacon-functions module
         let geo_udfs = beacon_functions::geo::geo_udfs();
@@ -62,32 +51,19 @@ impl VirtualMachine {
             session_ctx.register_udf(udf);
         }
         //FINISH INIT FUNCTIONS FROM beacon-functions module
-
-        //Register format functions
-        beacon_sources::sql::table_functions(session_ctx.clone());
-
-        //Register table extensions
-        let functions =
-            beacon_tables::table_extension::table_extension_functions(session_ctx.clone());
-        for function in functions {
-            session_ctx.register_udtf(function.name(), function.function().clone());
-        }
-
         Ok(Self {
             session_ctx,
-            schema_provider: beacon_schema_provider,
+            data_lake,
         })
     }
 
     fn init_ctx(mem_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
         let mut config = SessionConfig::new()
-            // .with_batch_size(32 * 1024)
             .with_coalesce_batches(true)
             .with_information_schema(true)
             .with_collect_statistics(true);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
-        // config.options_mut().execution.planning_concurrency = 4;
         config
             .options_mut()
             .execution
@@ -106,20 +82,19 @@ impl VirtualMachine {
             .with_default_features()
             .build();
 
-        beacon_data_lake::prelude::register_file_formats(session_state);
+        beacon_formats::register_file_formats(&mut session_state)?;
 
         let session_context = Arc::new(SessionContext::new_with_state(session_state));
-
-        session_context.register_object_store(
-            ObjectStoreUrl::parse("file://").unwrap().as_ref(),
-            beacon_config::OBJECT_STORE_LOCAL_FS.clone(),
-        );
 
         Ok(session_context)
     }
 
     pub fn session_ctx(&self) -> Arc<SessionContext> {
         self.session_ctx.clone()
+    }
+
+    pub fn data_lake(&self) -> Arc<DataLake> {
+        self.data_lake.clone()
     }
 
     pub fn list_functions(&self) -> Vec<FunctionDoc> {
@@ -138,7 +113,7 @@ impl VirtualMachine {
     }
 
     pub fn list_tables(&self) -> Vec<String> {
-        self.schema_provider.table_names()
+        self.data_lake.table_names()
     }
 
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
@@ -147,21 +122,6 @@ impl VirtualMachine {
             .await
             .map(|t| Arc::new(t.schema().as_arrow().to_owned()))
             .ok()
-    }
-
-    pub async fn list_table_extensions(
-        &self,
-        table_name: String,
-    ) -> anyhow::Result<Vec<Arc<dyn beacon_tables::table_extension::TableExtension>>> {
-        let extensions =
-            self.schema_provider
-                .table_extensions(&table_name)
-                .ok_or(anyhow::anyhow!(
-                    "Error listing table extensions: table: {0} not found",
-                    table_name
-                ))?;
-
-        Ok(extensions)
     }
 
     pub async fn list_default_table_schema(&self) -> SchemaRef {
@@ -178,11 +138,14 @@ impl VirtualMachine {
     }
 
     pub async fn add_table(&self, table: Table) -> anyhow::Result<()> {
-        Ok(self.schema_provider.add_table(table).await?)
+        Ok(self.data_lake.create_table(table).await?)
     }
 
-    pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
-        Ok(self.schema_provider.delete_table(table_name).await?)
+    pub fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
+        self.data_lake
+            .deregister_table(table_name)?
+            .ok_or(anyhow::anyhow!("Table not found"))?;
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, beacon_plan))]
@@ -221,30 +184,8 @@ impl VirtualMachine {
         Ok(())
     }
 
-    pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {
-        let dataset_schema_path = format!(
-            "file:///{}/{}",
-            beacon_config::DATASETS_DIR_PREFIX.to_string(),
-            file
-        );
-        let state = self.session_ctx.state();
-
-        let table_url = ListingTableUrl::parse(&dataset_schema_path).map_err(|e| {
-            anyhow::anyhow!(
-                "Error parsing dataset path: {:?} - {:?}",
-                dataset_schema_path,
-                e
-            )
-        })?;
-        let table_config = ListingTableConfig::new(table_url)
-            .infer_options(&state)
-            .await?
-            .infer_schema(&state)
-            .await?;
-
-        let schema = table_config.file_schema.unwrap();
-
-        Ok(schema)
+    pub async fn list_dataset_schema(&self, dataset: String) -> anyhow::Result<SchemaRef> {
+        Ok(self.data_lake.list_dataset_schema(&dataset).await?)
     }
 
     pub async fn list_datasets(
@@ -253,102 +194,14 @@ impl VirtualMachine {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<String>> {
-        let discovery_path = format!(
-            "/{}/{}",
-            beacon_config::DATASETS_DIR_PREFIX.to_string(),
-            pattern.unwrap_or("*".to_string())
-        );
-
-        let state = self.session_ctx.state();
-
-        let object_store = beacon_config::OBJECT_STORE_LOCAL_FS.clone();
-        let table_url = ListingTableUrl::parse(&discovery_path).map_err(|e| {
-            anyhow::anyhow!(
-                "Error parsing discovery path: {:?} - {:?}",
-                discovery_path,
-                e
-            )
-        })?;
-
-        tracing::debug!("Listing datasets from: {:?}", table_url);
-
-        let mut datasets = Vec::new();
-        let mut stream = table_url
-            .list_all_files(&state, object_store.as_ref(), "")
-            .await
-            .map_err(|e| anyhow::anyhow!("Error listing datasets: {:?}", e))?;
-
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(item) => {
-                    datasets.push(item.location.to_string());
-                }
-                Err(e) => {
-                    event!(Level::ERROR, "Error listing datasets: {:?}", e);
-                }
-            }
-        }
-        datasets.sort();
-
-        Ok(datasets
-            .iter()
-            .skip(offset.unwrap_or(0))
-            .take(limit.unwrap_or(datasets.len()))
-            .cloned()
-            .map(|s| {
-                //Remove the prefix from the file path
-                s.replace(
-                    &format!("{}/", beacon_config::DATASETS_DIR_PREFIX.to_string()),
-                    "",
-                )
-            })
-            .collect())
+        Ok(self.data_lake.list_datasets(offset, limit, pattern).await?)
     }
 
     pub async fn total_datasets(&self) -> anyhow::Result<usize> {
-        let discovery_path = format!("/{}/*", beacon_config::DATASETS_DIR_PREFIX.to_string());
-
-        let state = self.session_ctx.state();
-
-        let object_store = beacon_config::OBJECT_STORE_LOCAL_FS.clone();
-        let table_url = ListingTableUrl::parse(&discovery_path).map_err(|e| {
-            anyhow::anyhow!(
-                "Error parsing discovery path: {:?} - {:?}",
-                discovery_path,
-                e
-            )
-        })?;
-
-        let mut count = 0;
-        let mut stream = table_url
-            .list_all_files(&state, object_store.as_ref(), "")
-            .await
-            .map_err(|e| anyhow::anyhow!("Error listing datasets: {:?}", e))?;
-
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(_) => {
-                    count += 1;
-                }
-                Err(e) => {
-                    event!(Level::ERROR, "Error listing datasets: {:?}", e);
-                }
-            }
-        }
-
-        Ok(count)
+        self.list_datasets(None, None, None).await.map(|v| v.len())
     }
 
-    pub(crate) async fn list_table_config(
-        &self,
-        table_name: String,
-    ) -> Result<Table, anyhow::Error> {
-        let result = self
-            .schema_provider
-            .list_table_config(table_name)
-            .await
-            .map_err(|e| anyhow::anyhow!("Error listing table config: {:?}", e));
-
-        Ok(result?)
+    pub(crate) async fn list_table_config(&self, table_name: String) -> Option<Table> {
+        self.data_lake.list_table(&table_name)
     }
 }

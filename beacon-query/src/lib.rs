@@ -47,7 +47,7 @@ pub struct QueryBody {
     #[schema(ignore)]
     filters: Option<Vec<Filter>>,
     #[serde(default)]
-    from: Option<From>,
+    from: Option<crate::from::From>,
     sort_by: Option<Vec<Sort>>,
     distinct: Option<Vec<String>>,
     offset: Option<usize>,
@@ -134,88 +134,6 @@ impl Select {
                     None => Ok(expr),
                 }
             }
-        }
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
-#[serde(deny_unknown_fields)]
-pub enum From {
-    #[serde(untagged)]
-    Table(String),
-    // #[serde(untagged)]
-    // Format {
-    //     #[serde(flatten)]
-    //     format: Formats,
-    // },
-}
-
-impl Default for From {
-    fn default() -> Self {
-        From::Table(beacon_config::CONFIG.default_table.clone())
-    }
-}
-
-// #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-// #[serde(untagged)]
-// #[serde(deny_unknown_fields)]
-// pub enum FileSystemPath {
-//     ManyPaths(Vec<String>),
-//     Path(String),
-// }
-
-// impl FileSystemPath {
-//     pub fn parse_to_url<P: AsRef<Path>>(path: P) -> anyhow::Result<ListingTableUrl> {
-//         let table_url =
-//             ListingTableUrl::parse(&format!("/datasets/{}", path.as_ref().to_string_lossy()))?;
-//         if table_url
-//             .prefix()
-//             .prefix_matches(&beacon_config::DATASETS_DIR_PREFIX)
-//         {
-//             Ok(table_url)
-//         } else {
-//             Err(anyhow::anyhow!(
-//                 "Path {} is not within the datasets directory.",
-//                 table_url.as_str()
-//             ))
-//         }
-//     }
-// }
-
-// impl TryInto<Vec<ListingTableUrl>> for &FileSystemPath {
-//     type Error = anyhow::Error;
-
-//     fn try_into(self) -> Result<Vec<ListingTableUrl>, Self::Error> {
-//         match self {
-//             FileSystemPath::ManyPaths(items) => Ok(items
-//                 .into_iter()
-//                 .map(|path| FileSystemPath::parse_to_url(path))
-//                 .collect::<anyhow::Result<_>>()?),
-//             FileSystemPath::Path(path) => Ok(vec![FileSystemPath::parse_to_url(path)
-//                 .map_err(|e| anyhow::anyhow!("Failed to parse path: {}", e))?]),
-//         }
-//     }
-// }
-
-impl From {
-    pub async fn init_builder(
-        &self,
-        session_ctx: &SessionContext,
-    ) -> anyhow::Result<LogicalPlanBuilder> {
-        match self {
-            From::Table(table) => session_ctx
-                .table(table)
-                .await
-                .map(|table| LogicalPlanBuilder::new(table.into_unoptimized_plan()))
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to create logical plan builder for table {}: {}",
-                        table,
-                        e
-                    )
-                }),
-            // From::Format { format } => format.create_plan_builder(&session_ctx.state()).await,
         }
     }
 }

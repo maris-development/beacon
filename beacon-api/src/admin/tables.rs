@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use beacon_core::{runtime::Runtime};
-use beacon_tables::table::Table;
+use beacon_data_lake::table::Table;
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]

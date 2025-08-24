@@ -32,3 +32,4 @@ beacon-core = { path = "../beacon-core" }
 beacon-query = { path = "../beacon-query" }
 beacon-planner = { path = "../beacon-planner" }
 beacon-functions = { path = "../beacon-functions" }
+beacon-data-lake = { path = "../beacon-data-lake" }

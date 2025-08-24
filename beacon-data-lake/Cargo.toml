@@ -1,6 +1,6 @@
 [package]
 name = "beacon-data-lake"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2024"
 
 [dependencies]
@@ -35,3 +35,4 @@ utoipa = { workspace=true}
 
 
 beacon-config = { path = "../beacon-config" }
+beacon-formats = { path = "../beacon-formats" }

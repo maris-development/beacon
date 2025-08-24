@@ -36,6 +36,17 @@ impl GeoParquetFormatFactory {
     }
 }
 
+impl Default for GeoParquetFormatFactory {
+    fn default() -> Self {
+        Self {
+            options: GeoParquetOptions {
+                longitude_column: None,
+                latitude_column: None,
+            },
+        }
+    }
+}
+
 impl FileFormatFactory for GeoParquetFormatFactory {
     fn create(
         &self,

@@ -18,3 +18,9 @@ impl SystemInfo {
         }
     }
 }
+
+impl Default for SystemInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}

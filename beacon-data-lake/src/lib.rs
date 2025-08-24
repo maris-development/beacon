@@ -1,5 +1,13 @@
-use std::{any::Any, collections::HashMap, f64::consts::E, fmt::Debug, path::PathBuf, sync::Arc};
+use std::{
+    any::Any,
+    collections::HashMap,
+    f64::consts::E,
+    fmt::Debug,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use arrow::datatypes::SchemaRef;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     datasource::listing::ListingTableUrl,
@@ -12,7 +20,7 @@ use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, pa
 use url::Url;
 
 use crate::{
-    files::temp_output_file::TempOutputFile,
+    files::{collection::FileCollection, temp_output_file::TempOutputFile},
     table::{Table, error::TableError},
     util::split_glob,
 };
@@ -23,7 +31,7 @@ pub mod util;
 
 pub mod prelude {
     pub use super::DataLake;
-    pub use super::files::formats::*;
+    pub use super::files::*;
 }
 
 #[derive(Debug)]
@@ -45,7 +53,8 @@ pub struct DataLake {
 
     config: Config,
     // Map of tables
-    tables: parking_lot::Mutex<HashMap<String, Arc<dyn TableProvider>>>,
+    tables: parking_lot::Mutex<HashMap<String, Table>>,
+    table_providers: parking_lot::Mutex<HashMap<String, Arc<dyn TableProvider>>>,
 }
 
 impl Debug for DataLake {
@@ -122,12 +131,17 @@ impl DataLake {
 
         let config = Self::read_config();
 
-        let tables = Self::init_tables(
+        let mut table_providers = HashMap::new();
+        let mut tables = HashMap::new();
+
+        Self::init_tables(
             tables_url.clone(),
             tables_prefix.clone(),
             datasets_url.clone(),
             datasets_prefix.clone(),
             session_context.clone(),
+            &mut table_providers,
+            &mut tables,
         )
         .await;
 
@@ -141,6 +155,7 @@ impl DataLake {
             tmp_directory_prefix,
             session_context,
             config,
+            table_providers: parking_lot::Mutex::new(table_providers),
             tables: parking_lot::Mutex::new(tables),
         }
     }
@@ -262,14 +277,14 @@ impl DataLake {
         data_directory_store_url: ObjectStoreUrl,
         data_directory_prefix: object_store::path::Path,
         session_context: Arc<SessionContext>,
-    ) -> HashMap<String, Arc<dyn TableProvider>> {
+        table_providers: &mut HashMap<String, Arc<dyn TableProvider>>,
+        tables: &mut HashMap<String, Table>,
+    ) {
         let tables_object_store = session_context
             .runtime_env()
             .object_store(&tables_object_store_url)
             .unwrap();
 
-        let mut tables = HashMap::new();
-        // Iterate through the table directory for each 'table.json'
         let mut entry_stream = tables_object_store.list(Some(&tables_prefix));
         while let Some(entry) = entry_stream.next().await {
             if let Ok(entry) = entry
@@ -298,7 +313,8 @@ impl DataLake {
                             .await;
 
                         if let Ok(provider) = provider {
-                            tables.insert(table.table_name, provider);
+                            table_providers.insert(table.table_name.clone(), provider);
+                            tables.insert(table.table_name.clone(), table);
                         } else {
                             tracing::error!(
                                 "Failed to create table provider for {}: {}",
@@ -313,8 +329,103 @@ impl DataLake {
                 }
             }
         }
+    }
 
-        tables
+    pub async fn list_datasets(
+        &self,
+        offset: Option<usize>,
+        limit: Option<usize>,
+        pattern: Option<String>,
+    ) -> datafusion::error::Result<Vec<String>> {
+        let state = self.session_context.state();
+        let object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(self.data_directory_store_url.clone())?;
+
+        let listing_url =
+            self.try_create_listing_url(pattern.unwrap_or_else(|| "*".to_string()))?;
+
+        let mut datasets = Vec::new();
+        let mut entry_stream = listing_url
+            .list_all_files(&state, &object_store, "")
+            .await?;
+
+        while let Some(entry) = entry_stream.next().await {
+            if let Ok(entry) = entry {
+                datasets.push(entry.location.to_string());
+            }
+        }
+
+        datasets.sort();
+
+        if let Some(offset) = offset {
+            datasets = datasets.into_iter().skip(offset).collect();
+        }
+
+        if let Some(limit) = limit {
+            datasets = datasets.into_iter().take(limit).collect();
+        }
+
+        // For each dataset, remove the prefix if the file starts with that prefix
+        let mut prefix = self.data_directory_prefix.clone().to_string();
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+
+        datasets = datasets
+            .into_iter()
+            .map(|d| {
+                if d.starts_with(&prefix) {
+                    d.strip_prefix(&prefix).unwrap().to_string()
+                } else {
+                    d
+                }
+            })
+            .collect();
+
+        Ok(datasets)
+    }
+
+    pub async fn list_dataset_schema(
+        &self,
+        file_pattern: &str,
+    ) -> datafusion::error::Result<SchemaRef> {
+        let session_state = self.session_context.state();
+        let extension = match Path::new(file_pattern).extension() {
+            Some(ext) => ext.to_string_lossy().to_string(),
+            None => {
+                return Err(DataFusionError::Plan(format!(
+                    "No file extension found for {}. No file type information available.",
+                    file_pattern
+                )));
+            }
+        };
+
+        let listing_url = self.try_create_listing_url(file_pattern.to_string())?;
+
+        let file_format_factory = session_state
+            .get_file_format_factory(&extension)
+            .ok_or_else(|| {
+                DataFusionError::Plan(format!("No file format reader found for {}", extension))
+            })?;
+
+        let file_format = file_format_factory.create(&session_state, &HashMap::new())?;
+
+        let file_collection =
+            FileCollection::new(&session_state, file_format, vec![listing_url]).await?;
+
+        Ok(file_collection.schema())
+    }
+
+    pub fn list_table_schema(&self, table_name: &str) -> Option<SchemaRef> {
+        let table_providers = self.table_providers.lock();
+        table_providers.get(table_name).map(|t| t.schema())
+    }
+
+    pub fn list_table(&self, table_name: &str) -> Option<Table> {
+        let tables = self.tables.lock();
+        tables.get(table_name).cloned()
     }
 
     pub async fn create_table(&self, mut table: Table) -> Result<(), TableError> {
@@ -349,8 +460,21 @@ impl DataLake {
             .await?;
         // Re-acquire the lock to insert the table
         tables = self.tables.lock();
-        tables.insert(table.table_name.clone(), table_provider);
+        let mut table_providers = self.table_providers.lock();
+        table_providers.insert(table.table_name.clone(), table_provider);
+        tables.insert(table.table_name.clone(), table);
         Ok(())
+    }
+
+    pub fn remove_table(&self, table_name: &str) -> bool {
+        let mut tables = self.tables.lock();
+        if tables.remove(table_name).is_some() {
+            let mut table_providers = self.table_providers.lock();
+            table_providers.remove(table_name);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -377,8 +501,8 @@ impl SchemaProvider for DataLake {
     /// Retrieves a specific table from the schema by name, if it exists,
     /// otherwise returns `None`.
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
-        let tables = self.tables.lock();
-        Ok(tables.get(name).cloned())
+        let table_providers = self.table_providers.lock();
+        Ok(table_providers.get(name).cloned())
     }
 }
 
