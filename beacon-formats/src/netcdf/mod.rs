@@ -6,14 +6,8 @@ use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
     datasource::{
-        file_format::{
-            FileFormat, FileFormatFactory, file_compression_type::FileCompressionType,
-            parquet::ParquetFormat,
-        },
-        physical_plan::{
-            FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource, ParquetSource,
-        },
-        sink::{DataSink, DataSinkExec},
+        file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
+        physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
     },
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,

@@ -474,3 +474,19 @@ pub fn attribute_to_nd_array(attribute: &Attribute) -> NcResult<NetCDFNdArray> {
         attr_value => Err(ArrowNetCDFError::UnsupportedAttributeValueType(attr_value)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use netcdf::Options;
+
+    use super::*;
+
+    #[test]
+    fn test_name() {
+        let path = Path::new("https://argo-gdac-sandbox.s3.eu-west-3.amazonaws.com/pub/dac/aoml/13857/13857_prof.nc#mode=bytes");
+        println!("{:?}", path);
+        let ds = netcdf::open_with(path, Options::NETCDF4).unwrap();
+
+        println!("{:?}", ds.dimensions().collect::<Vec<_>>());
+    }
+}
