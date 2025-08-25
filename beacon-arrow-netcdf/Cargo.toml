@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["static", "ndarray"] }
-nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main" }
+nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main" }
+
 arrow = { workspace=true }
 anyhow = { workspace=true }
 tempfile = { workspace=true}

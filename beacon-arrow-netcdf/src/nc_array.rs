@@ -5,7 +5,7 @@ use arrow::array::{
     StringBuilder, TimestampMillisecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
     UInt64Array, UInt8Array,
 };
-use nd_arrow_array::{shape::Shape, NdArrowArray};
+use nd_arrow_array::{dimensions::Dimensions, NdArrowArray};
 use ndarray::{ArrayBase, ArrayViewD, Axis, Dim, IxDynImpl, OwnedRepr};
 
 use crate::NcChar;
@@ -50,13 +50,13 @@ impl NetCDFNdArray {
         Self { dims, array }
     }
 
-    pub fn into_nd_arrow_array(self) -> NdArrowArray {
+    pub fn into_nd_arrow_array(self) -> Result<NdArrowArray, nd_arrow_array::error::NdArrayError> {
         NdArrowArray::new(
             self.build_arrow(),
-            Shape::new_inferred(
+            Dimensions::new(
                 self.dims
                     .iter()
-                    .map(|d| (d.name.as_ref(), d.size))
+                    .map(|d| (d.name.as_ref(), d.size).into())
                     .collect::<Vec<_>>(),
             ),
         )

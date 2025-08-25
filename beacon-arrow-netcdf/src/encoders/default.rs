@@ -1,11 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, ffi::CString, rc::Rc, str::FromStr};
+use std::collections::HashMap;
 
 use arrow::{
-    array::{self, ArrayRef, Int16Array, RecordBatch},
+    array::{self, ArrayRef},
     datatypes::{DataType, Field, SchemaRef},
 };
 use ndarray::ArrayView;
-use netcdf::{types::NcVariableType, FileMut};
+use netcdf::FileMut;
 
 use crate::{NcChar, NcString};
 
@@ -295,7 +295,9 @@ impl Encoder for DefaultEncoder {
 
         self.write_array_chunk(name, array.clone(), offset)?;
 
-        self.offsets.get_mut(name).map(|x| *x += array.len());
+        if let Some(x) = self.offsets.get_mut(name) {
+            *x += array.len();
+        }
 
         Ok(())
     }

@@ -52,8 +52,8 @@ fn is_cf_time_variable_impl(variable: &Variable) -> Option<(Unit, Epoch)> {
             let epoch = extract_epoch(units_l.as_str());
 
             match (units, epoch) {
-                (Some(units), Some(epoch)) => return Some((units, epoch)),
-                _ => return None,
+                (Some(units), Some(epoch)) => Some((units, epoch)),
+                _ => None,
             }
         }
         _ => None,
@@ -217,7 +217,7 @@ fn convert_nd_array<T: num_traits::cast::AsPrimitive<f64>>(
 fn extract_units(input: &str) -> Option<hifitime::Unit> {
     let re = Regex::new(r"^(?P<units>\w+) since").unwrap();
     re.captures(input)
-        .map(|caps| match caps["units"].to_string().as_str() {
+        .and_then(|caps| match caps["units"].to_string().as_str() {
             "seconds" => Some(hifitime::Unit::Second),
             "milliseconds" => Some(hifitime::Unit::Millisecond),
             "microseconds" => Some(hifitime::Unit::Microsecond),
@@ -226,27 +226,21 @@ fn extract_units(input: &str) -> Option<hifitime::Unit> {
             "weeks" => Some(hifitime::Unit::Week),
             _ => None,
         })
-        .flatten()
 }
 
 /// Extracts the epoch date from a string like "days since -4713-11-24"
 fn extract_epoch(input: &str) -> Option<Epoch> {
     let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})").unwrap();
-    let result = re
-        .captures(input)
-        .map(|caps| {
-            let epoch_str = caps["epoch"].to_string();
-            let mut epoch = Epoch::from_str(&epoch_str).ok();
+    let result = re.captures(input).and_then(|caps| {
+        let epoch_str = caps["epoch"].to_string();
+        let mut epoch = Epoch::from_str(&epoch_str).ok();
 
-            if epoch.is_none() {
-                if epoch_str == "-4713-01-01" {
-                    epoch = Some(Epoch::from_jde_utc(0.0));
-                }
-            }
+        if epoch.is_none() && epoch_str == "-4713-01-01" {
+            epoch = Some(Epoch::from_jde_utc(0.0));
+        }
 
-            epoch
-        })
-        .flatten();
+        epoch
+    });
 
     result
 }

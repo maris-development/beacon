@@ -606,7 +606,6 @@ dependencies = [
  "glob",
  "indexmap 2.10.0",
  "inventory",
- "nd-arrow-array",
  "object_store 0.12.3",
  "parking_lot",
  "pathdiff",
@@ -3074,20 +3073,11 @@ dependencies = [
 
 [[package]]
 name = "nd-arrow-array"
-version = "0.4.6"
-source = "git+https://github.com/robinskil/nd-arrow-array.git?branch=main#4fc639d838beda02f98fab7af0923f0549d2f893"
+version = "1.2.0"
+source = "git+https://github.com/maris-development/nd-arrow-array.git?branch=main#e0cfdf85f8c60dbd1295805773a61fdfa6382e72"
 dependencies = [
- "anyhow",
  "arrow",
- "arrow-ipc",
- "bytes",
- "chrono",
- "futures",
- "indexmap 2.10.0",
- "ndarray",
- "parquet",
  "thiserror 2.0.15",
- "tokio",
 ]
 
 [[package]]

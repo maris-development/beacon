@@ -1,4 +1,4 @@
-use arrow::error::{self, ArrowError};
+use arrow::error::ArrowError;
 use ndarray::ShapeError;
 use netcdf::{types::NcVariableType, AttributeValue};
 
