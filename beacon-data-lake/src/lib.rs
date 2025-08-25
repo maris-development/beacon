@@ -280,6 +280,7 @@ impl DataLake {
         table_providers: &mut HashMap<String, Arc<dyn TableProvider>>,
         tables: &mut HashMap<String, Table>,
     ) {
+        tracing::info!("Initializing tables from object store");
         let tables_object_store = session_context
             .runtime_env()
             .object_store(&tables_object_store_url)
@@ -287,6 +288,7 @@ impl DataLake {
 
         let mut entry_stream = tables_object_store.list(Some(&tables_prefix));
         while let Some(entry) = entry_stream.next().await {
+            tracing::info!("Found table entry: {:?}", entry);
             if let Ok(entry) = entry
                 && entry.location.to_string().ends_with("table.json")
             {

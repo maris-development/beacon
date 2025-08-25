@@ -19,6 +19,7 @@ pub struct ClientApiDoc;
 pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     let (client_router, client_api) = OpenApiRouter::with_openapi(ClientApiDoc::openapi())
         .routes(routes!(query::query))
+        .routes(routes!(query::parse_query))
         .routes(routes!(query::query_metrics))
         .routes(routes!(query::explain_query))
         .routes(routes!(query::available_columns))

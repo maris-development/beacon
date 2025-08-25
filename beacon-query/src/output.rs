@@ -45,10 +45,10 @@ impl Output {
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
         let file_type = self.format.file_type();
-        let temp_output = data_lake.try_create_temp_output_file("tmp");
+        let temp_output = data_lake.try_create_temp_output_file(".tmp");
         let plan = LogicalPlanBuilder::copy_to(
             input_plan,
-            temp_output.get_object_path().to_string(),
+            temp_output.output_url(),
             file_type,
             Default::default(),
             vec![],
@@ -135,13 +135,25 @@ impl QueryOutputFile {
     /// Returns the size of the output file in bytes.
     pub fn size(&self) -> anyhow::Result<u64> {
         match self {
-            QueryOutputFile::Csv(file)
-            | QueryOutputFile::Ipc(file)
-            | QueryOutputFile::Json(file)
-            | QueryOutputFile::Parquet(file)
-            | QueryOutputFile::NetCDF(file)
-            | QueryOutputFile::Odv(file)
-            | QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::Csv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::Ipc(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::Json(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::Parquet(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::NetCDF(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::Odv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
+        }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            QueryOutputFile::Csv(file) => file.path(),
+            QueryOutputFile::Ipc(file) => file.path(),
+            QueryOutputFile::Json(file) => file.path(),
+            QueryOutputFile::Parquet(file) => file.path(),
+            QueryOutputFile::NetCDF(file) => file.path(),
+            QueryOutputFile::Odv(file) => file.path(),
+            QueryOutputFile::GeoParquet(file) => file.path(),
         }
     }
 }

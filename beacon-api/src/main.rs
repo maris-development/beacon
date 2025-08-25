@@ -103,7 +103,7 @@ fn setup_tracing() {
                 // axum logs rejections from built-in extractors with the `axum::rejection`
                 // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
                 format!(
-                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_tables=debug,beacon_api=debug,beacon_sources=debug",
+                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug",
                     env!("CARGO_CRATE_NAME")
                 )
                 .into()
