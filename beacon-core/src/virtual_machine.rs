@@ -82,7 +82,10 @@ impl VirtualMachine {
             .with_default_features()
             .build();
 
-        beacon_formats::register_file_formats(&mut session_state)?;
+        beacon_formats::register_file_formats(
+            &mut session_state,
+            DataLake::netcdf_object_resolver(),
+        )?;
 
         let session_context = Arc::new(SessionContext::new_with_state(session_state));
 

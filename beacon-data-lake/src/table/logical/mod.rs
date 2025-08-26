@@ -108,16 +108,20 @@ impl LogicalTable {
             table_urls
         );
 
+        let file_ext = self.file_format.file_ext();
+        let file_format_factory = session_state.get_file_format_factory(&file_ext).ok_or(
+            TableError::GenericTableError(format!(
+                "Encountered unsupported file format: {} while creating table.",
+                file_ext
+            )),
+        )?;
+
         // Create the data source with the given file format and table URLs.
-        let source =
-            FileCollection::new(&session_state, self.file_format.file_format(), table_urls)
-                .await
-                .map_err(|e| {
-                    TableError::GenericTableError(format!(
-                        "Failed to create file collection: {}",
-                        e
-                    ))
-                })?;
+        let source = FileCollection::new(&session_state, file_format_factory.default(), table_urls)
+            .await
+            .map_err(|e| {
+                TableError::GenericTableError(format!("Failed to create file collection: {}", e))
+            })?;
 
         Ok(Arc::new(source))
     }

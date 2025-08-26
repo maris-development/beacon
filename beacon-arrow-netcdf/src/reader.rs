@@ -483,9 +483,9 @@ mod tests {
 
     #[test]
     fn test_name() {
-        let path = Path::new("https://argo-gdac-sandbox.s3.eu-west-3.amazonaws.com/pub/dac/aoml/13857/13857_prof.nc#mode=bytes");
+        let path = Path::new("https://s3.eu-west-3.amazonaws.com/argo-gdac-sandbox/pub/dac/aoml/13857/13857_prof.nc#mode=bytes");
         println!("{:?}", path);
-        let ds = netcdf::open_with(path, Options::NETCDF4).unwrap();
+        let ds = netcdf::open(path).unwrap();
 
         println!("{:?}", ds.dimensions().collect::<Vec<_>>());
     }

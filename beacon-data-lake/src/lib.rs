@@ -1,13 +1,13 @@
 use std::{
     any::Any,
     collections::HashMap,
-    f64::consts::E,
     fmt::Debug,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use arrow::datatypes::SchemaRef;
+use beacon_formats::netcdf::object_resolver::NetCDFObjectResolver;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     datasource::listing::ListingTableUrl,
@@ -42,6 +42,7 @@ pub struct Config {
 pub struct DataLake {
     data_directory_store_url: ObjectStoreUrl,
     data_directory_prefix: object_store::path::Path,
+
     table_directory_store_url: ObjectStoreUrl,
     table_directory_prefix: object_store::path::Path,
 
@@ -114,6 +115,35 @@ impl DataLake {
             let table_url = ListingTableUrl::try_new(url, None)?;
 
             Ok(table_url)
+        }
+    }
+
+    pub fn netcdf_object_resolver() -> Arc<NetCDFObjectResolver> {
+        if beacon_config::CONFIG.s3_data_lake {
+            let endpoint = beacon_config::CONFIG
+                .s3_endpoint
+                .clone()
+                .expect("S3 endpoint not set");
+            let bucket = beacon_config::CONFIG
+                .s3_bucket
+                .clone()
+                .expect("S3 bucket not set");
+            Arc::new(NetCDFObjectResolver::new(endpoint, Some(bucket), None))
+        } else {
+            let base_path = PathBuf::from("./data");
+            let absolute_path = base_path.canonicalize().unwrap();
+
+            // Create directories if they do not exist
+            std::fs::create_dir_all(&absolute_path).expect("Failed to create datasets directory");
+            println!(
+                "Using local NetCDF datasets path: {}",
+                absolute_path.display()
+            );
+            Arc::new(NetCDFObjectResolver::new(
+                "file://".to_string(),
+                None,
+                Some(absolute_path.to_string_lossy().to_string()),
+            ))
         }
     }
 

@@ -20,17 +20,16 @@ use datafusion::{
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
 use futures::{StreamExt, stream::BoxStream};
-use object_store::{ObjectStore, local::LocalFileSystem};
+use object_store::{ObjectMeta, ObjectStore, local::LocalFileSystem};
+
+use crate::netcdf::object_resolver::NetCDFObjectResolver;
 
 /// File source for NetCDF files, supporting local file system access.
 ///
 /// Implements [`FileSource`] for integration with DataFusion's physical plan.
 #[derive(Debug, Clone)]
 pub struct NetCDFFileSource {
-    /// Local file system store for datasets.
-    local_datasets_file_store: Arc<LocalFileSystem>,
-    /// Prefix path for datasets.
-    dataset_prefix: object_store::path::Path,
+    object_resolver: Arc<NetCDFObjectResolver>,
     /// Optional schema adapter factory.
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     /// Optional schema override.
@@ -40,7 +39,7 @@ pub struct NetCDFFileSource {
     /// Execution plan metrics.
     execution_plan_metrics: ExecutionPlanMetricsSet,
     /// Projected statistics.
-    projected_statistics: Statistics,
+    projected_statistics: Option<Statistics>,
 }
 
 impl NetCDFFileSource {
@@ -49,17 +48,13 @@ impl NetCDFFileSource {
     /// # Arguments
     /// * `dataset_prefix` - Prefix path for datasets.
     /// * `local_datasets_file_store` - Local file system store.
-    pub fn new(
-        dataset_prefix: object_store::path::Path,
-        local_datasets_file_store: Arc<LocalFileSystem>,
-    ) -> Self {
+    pub fn new(object_resolver: Arc<NetCDFObjectResolver>) -> Self {
         Self {
-            dataset_prefix,
-            local_datasets_file_store,
+            object_resolver,
             override_schema: None,
             projection: None,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
-            projected_statistics: Statistics::default(),
+            projected_statistics: None,
             schema_adapter_factory: None,
         }
     }
@@ -73,26 +68,22 @@ impl FileSource for NetCDFFileSource {
         base_config: &FileScanConfig,
         _partition: usize,
     ) -> Arc<dyn FileOpener> {
-        if base_config.object_store_url.as_str().starts_with("file://") {
-            let table_schema = self
-                .override_schema
-                .clone()
-                .unwrap_or_else(|| base_config.file_schema.clone());
-            let projected_schema = base_config.projected_schema();
-            let schema_adapter_factory = self
-                .schema_adapter_factory
-                .clone()
-                .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory::default()));
-            let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
-            let arc_schema_adapter: Arc<dyn SchemaAdapter> = Arc::from(schema_adapter);
+        let table_schema = self
+            .override_schema
+            .clone()
+            .unwrap_or_else(|| base_config.file_schema.clone());
+        let projected_schema = base_config.projected_schema();
+        let schema_adapter_factory = self
+            .schema_adapter_factory
+            .clone()
+            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory::default()));
+        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
+        let arc_schema_adapter: Arc<dyn SchemaAdapter> = Arc::from(schema_adapter);
 
-            Arc::new(NetCDFLocalFileOpener {
-                store: self.local_datasets_file_store.clone(),
-                schema_adapter: arc_schema_adapter,
-            })
-        } else {
-            todo!("Implement remote file opener")
-        }
+        Arc::new(NetCDFLocalFileOpener {
+            resolver: self.object_resolver.clone(),
+            schema_adapter: arc_schema_adapter,
+        })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -105,8 +96,7 @@ impl FileSource for NetCDFFileSource {
 
     fn with_schema(&self, schema: SchemaRef) -> Arc<dyn FileSource> {
         Arc::new(Self {
-            dataset_prefix: self.dataset_prefix.clone(),
-            local_datasets_file_store: self.local_datasets_file_store.clone(),
+            object_resolver: self.object_resolver.clone(),
             override_schema: Some(schema),
             projection: self.projection.clone(),
             execution_plan_metrics: self.execution_plan_metrics.clone(),
@@ -117,8 +107,7 @@ impl FileSource for NetCDFFileSource {
 
     fn with_projection(&self, config: &FileScanConfig) -> Arc<dyn FileSource> {
         Arc::new(Self {
-            dataset_prefix: self.dataset_prefix.clone(),
-            local_datasets_file_store: self.local_datasets_file_store.clone(),
+            object_resolver: self.object_resolver.clone(),
             override_schema: self.override_schema.clone(),
             projection: config.projection.clone(),
             execution_plan_metrics: self.execution_plan_metrics.clone(),
@@ -129,12 +118,11 @@ impl FileSource for NetCDFFileSource {
 
     fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
         Arc::new(Self {
-            dataset_prefix: self.dataset_prefix.clone(),
-            local_datasets_file_store: self.local_datasets_file_store.clone(),
+            object_resolver: self.object_resolver.clone(),
             override_schema: self.override_schema.clone(),
             projection: self.projection.clone(),
             execution_plan_metrics: self.execution_plan_metrics.clone(),
-            projected_statistics: statistics,
+            projected_statistics: Some(statistics),
             schema_adapter_factory: self.schema_adapter_factory.clone(),
         })
     }
@@ -144,7 +132,15 @@ impl FileSource for NetCDFFileSource {
     }
 
     fn statistics(&self) -> Result<Statistics> {
-        Ok(Statistics::default())
+        if let Some(statistics) = &self.projected_statistics {
+            Ok(statistics.clone())
+        } else if let Some(schema) = self.override_schema.as_ref() {
+            Ok(Statistics::new_unknown(schema))
+        } else {
+            Err(datafusion::error::DataFusionError::Execution(
+                "Schema must be set to compute statistics".to_string(),
+            ))
+        }
     }
 
     fn file_type(&self) -> &str {
@@ -156,8 +152,7 @@ impl FileSource for NetCDFFileSource {
         factory: Arc<dyn SchemaAdapterFactory>,
     ) -> Result<Arc<dyn FileSource>> {
         Ok(Arc::new(Self {
-            dataset_prefix: self.dataset_prefix.clone(),
-            local_datasets_file_store: self.local_datasets_file_store.clone(),
+            object_resolver: self.object_resolver.clone(),
             override_schema: self.override_schema.clone(),
             projection: self.projection.clone(),
             execution_plan_metrics: self.execution_plan_metrics.clone(),
@@ -176,27 +171,17 @@ impl FileSource for NetCDFFileSource {
 /// Converts NetCDF files to Arrow [`RecordBatch`]es using a schema adapter.
 pub struct NetCDFLocalFileOpener {
     /// Local file system store.
-    store: Arc<LocalFileSystem>,
+    resolver: Arc<NetCDFObjectResolver>,
     /// Schema adapter for mapping NetCDF schema to Arrow schema.
     schema_adapter: Arc<dyn SchemaAdapter>,
-}
-
-impl NetCDFLocalFileOpener {
-    /// Converts an object store path to a local filesystem path.
-    pub fn path_to_pathbuf(
-        &self,
-        path: &object_store::path::Path,
-    ) -> Result<std::path::PathBuf, object_store::Error> {
-        self.store.path_to_filesystem(path)
-    }
 }
 
 impl FileOpener for NetCDFLocalFileOpener {
     /// Opens a NetCDF file and returns a stream of Arrow [`RecordBatch`]es.
     fn open(&self, file_meta: FileMeta, _file: PartitionedFile) -> Result<FileOpenFuture> {
-        let path = self.path_to_pathbuf(file_meta.location())?;
+        let path = self.resolver.resolve_object_meta(file_meta.object_meta);
         let file = beacon_arrow_netcdf::reader::NetCDFArrowReader::new(path)
-            .expect("Failed to create NetCDFArrowReader");
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         let file_schema = file.schema();
         let schema_adapter = self.schema_adapter.clone();
 
@@ -218,4 +203,13 @@ impl FileOpener for NetCDFLocalFileOpener {
             Ok(stream.boxed())
         }))
     }
+}
+
+pub fn fetch_schema(resolver: &NetCDFObjectResolver, object_meta: ObjectMeta) -> Result<SchemaRef> {
+    let path = resolver.resolve_object_meta(object_meta);
+    println!("Fetching schema from path: {:?}", path);
+    let file = beacon_arrow_netcdf::reader::NetCDFArrowReader::new(path)
+        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+    let file_schema = file.schema();
+    Ok(file_schema)
 }

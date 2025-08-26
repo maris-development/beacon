@@ -526,6 +526,7 @@ dependencies = [
  "nd-arrow-array",
  "ndarray",
  "netcdf",
+ "netcdf-sys",
  "num-traits",
  "regex",
  "tempfile",
@@ -917,15 +918,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cmake"
-version = "0.1.54"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7caa3f9de89ddbe2c607f4101924c5abec803763ae9534e4f4d7d8f84aa81f0"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "comfy-table"
 version = "7.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1070,21 +1062,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d02f3b0da4c6504f86e9cd789d8dbafab48c2321be74e9987593de5a894d93d"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "curl-sys"
-version = "0.4.83+curl-8.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5830daf304027db10c82632a464879d46a3f7c4ba17a31592657ad16c719b483"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "openssl-sys",
- "pkg-config",
- "vcpkg",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2292,25 +2269,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "hdf5-metno-src"
-version = "0.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "956b57b8b4e133bcfbc874a2c9c6d4020e0da420dcfa05aea79091888f2b0763"
-dependencies = [
- "cmake",
- "libz-sys",
-]
-
-[[package]]
 name = "hdf5-metno-sys"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e7be8ee30e5034ee48dd30bc85a2fdde6e1ec0e5e19598409e8e9955eab14af"
 dependencies = [
- "hdf5-metno-src",
  "libc",
  "libloading",
- "libz-sys",
  "parking_lot",
  "pkg-config",
  "regex",
@@ -3108,24 +3073,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "netcdf-src"
-version = "0.4.1"
-source = "git+https://github.com/robinskil/netcdf.git#4e003679930b9160734d4cf2dbdb8ef35bd8e616"
-dependencies = [
- "cmake",
- "hdf5-metno-sys",
- "libz-sys",
-]
-
-[[package]]
 name = "netcdf-sys"
 version = "0.8.1"
 source = "git+https://github.com/robinskil/netcdf.git#4e003679930b9160734d4cf2dbdb8ef35bd8e616"
 dependencies = [
- "curl-sys",
  "hdf5-metno-sys",
  "libz-sys",
- "netcdf-src",
  "parking_lot",
  "semver",
 ]
@@ -3347,28 +3300,6 @@ name = "openssl-probe"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
-
-[[package]]
-name = "openssl-src"
-version = "300.5.2+3.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d270b79e2926f5150189d475bc7e9d2c69f9c4697b185fa917d5a32b792d21b4"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "openssl-sys"
-version = "0.9.109"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90096e2e47630d78b7d1c20952dc621f957103f8bc2c8359ec81290d75238571"
-dependencies = [
- "cc",
- "libc",
- "openssl-src",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "ordered-float"
