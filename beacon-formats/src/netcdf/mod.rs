@@ -15,7 +15,7 @@ use datafusion::{
 use object_store::{ObjectMeta, ObjectStore, local::LocalFileSystem};
 
 use crate::netcdf::{
-    object_resolver::NetCDFObjectResolver,
+    object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
     source::{NetCDFFileSource, fetch_schema},
 };
 
@@ -35,13 +35,19 @@ pub struct NetcdfOptions {
 pub struct NetcdfFormatFactory {
     pub options: NetcdfOptions,
     pub object_resolver: Arc<NetCDFObjectResolver>,
+    pub sink_resolver: Arc<NetCDFSinkResolver>,
 }
 
 impl NetcdfFormatFactory {
-    pub fn new(options: NetcdfOptions, object_resolver: Arc<NetCDFObjectResolver>) -> Self {
+    pub fn new(
+        options: NetcdfOptions,
+        object_resolver: Arc<NetCDFObjectResolver>,
+        sink_resolver: Arc<NetCDFSinkResolver>,
+    ) -> Self {
         Self {
             options,
             object_resolver,
+            sink_resolver,
         }
     }
 }

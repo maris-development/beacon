@@ -46,3 +46,18 @@ impl NetCDFObjectResolver {
         PathBuf::from(path_builder)
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct NetCDFSinkResolver {
+    data_directory: PathBuf,
+}
+
+impl NetCDFSinkResolver {
+    pub fn new(data_directory: PathBuf) -> Self {
+        Self { data_directory }
+    }
+
+    pub fn resolve_output_path(&self, path: &object_store::path::Path) -> PathBuf {
+        self.data_directory.join(path.to_string())
+    }
+}

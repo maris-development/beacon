@@ -6,7 +6,10 @@ use crate::{
     arrow::ArrowFormatFactory,
     csv::CsvFormatFactory,
     geo_parquet::GeoParquetFormatFactory,
-    netcdf::{NetcdfFormatFactory, NetcdfOptions, object_resolver::NetCDFObjectResolver},
+    netcdf::{
+        NetcdfFormatFactory, NetcdfOptions,
+        object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
+    },
     parquet::ParquetFormatFactory,
 };
 
@@ -21,6 +24,7 @@ pub mod parquet;
 pub fn register_file_formats(
     session_state: &mut SessionState,
     netcdf_object_resolver: Arc<NetCDFObjectResolver>,
+    netcdf_sink_resolver: Arc<NetCDFSinkResolver>,
 ) -> datafusion::error::Result<()> {
     session_state.register_file_format(Arc::new(ParquetFormatFactory), true)?;
     session_state.register_file_format(Arc::new(CsvFormatFactory), true)?;
@@ -30,6 +34,7 @@ pub fn register_file_formats(
         Arc::new(NetcdfFormatFactory::new(
             NetcdfOptions::default(),
             netcdf_object_resolver,
+            netcdf_sink_resolver,
         )),
         true,
     )?;

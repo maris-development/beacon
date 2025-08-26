@@ -7,7 +7,7 @@ use std::{
 };
 
 use arrow::datatypes::SchemaRef;
-use beacon_formats::netcdf::object_resolver::NetCDFObjectResolver;
+use beacon_formats::netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver};
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     datasource::listing::ListingTableUrl,
@@ -145,6 +145,15 @@ impl DataLake {
                 Some(absolute_path.to_string_lossy().to_string()),
             ))
         }
+    }
+
+    pub fn netcdf_sink_resolver() -> Arc<NetCDFSinkResolver> {
+        let base_path = PathBuf::from("./data");
+        let absolute_path = base_path.canonicalize().unwrap();
+
+        // Create directories if they do not exist
+        std::fs::create_dir_all(&absolute_path).expect("Failed to create datasets directory");
+        Arc::new(NetCDFSinkResolver::new(absolute_path))
     }
 
     pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {

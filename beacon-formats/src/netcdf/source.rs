@@ -207,7 +207,6 @@ impl FileOpener for NetCDFLocalFileOpener {
 
 pub fn fetch_schema(resolver: &NetCDFObjectResolver, object_meta: ObjectMeta) -> Result<SchemaRef> {
     let path = resolver.resolve_object_meta(object_meta);
-    println!("Fetching schema from path: {:?}", path);
     let file = beacon_arrow_netcdf::reader::NetCDFArrowReader::new(path)
         .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
     let file_schema = file.schema();

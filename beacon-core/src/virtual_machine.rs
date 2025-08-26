@@ -85,6 +85,7 @@ impl VirtualMachine {
         beacon_formats::register_file_formats(
             &mut session_state,
             DataLake::netcdf_object_resolver(),
+            DataLake::netcdf_sink_resolver(),
         )?;
 
         let session_context = Arc::new(SessionContext::new_with_state(session_state));
