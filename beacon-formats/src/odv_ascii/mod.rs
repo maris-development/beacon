@@ -7,26 +7,33 @@ use std::{
 };
 
 use arrow::datatypes::SchemaRef;
+use async_zip::{ZipEntry, ZipEntryBuilder, tokio::write::ZipFileWriter};
 use beacon_arrow_odv::writer::{AsyncOdvWriter, OdvOptions};
 use beacon_common::super_typing;
 use datafusion::{
     catalog::Session,
     common::{GetExt, Statistics},
     datasource::{
-        file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
-        physical_plan::{FileScanConfig, FileSinkConfig},
+        file_format::{
+            FileFormat, FileFormatFactory, file_compression_type::FileCompressionType,
+            write::ObjectWriterBuilder,
+        },
+        physical_plan::{FileScanConfig, FileSinkConfig, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
+        sink::DataSink,
     },
     execution::{SendableRecordBatchStream, SessionState, TaskContext},
     physical_expr::{EquivalenceProperties, LexRequirement},
     physical_plan::{
         DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
-        insert::{DataSink, DataSinkExec},
         stream::RecordBatchStreamAdapter,
     },
 };
-use futures::StreamExt;
+use futures::{AsyncWrite, AsyncWriteExt, StreamExt};
 use object_store::{ObjectMeta, ObjectStore};
+use parquet::arrow::async_writer::AsyncFileWriter;
+use tokio::io::AsyncWriteExt as _;
+use tokio_util::compat::{FuturesAsyncWriteCompatExt, TokioAsyncWriteCompatExt};
 
 #[derive(Debug)]
 pub struct OdvFileFormatFactory {
@@ -105,10 +112,7 @@ impl FileFormat for OdvFormat {
         self
     }
 
-    fn get_ext(&self) -> String {
-        "txt".to_string()
-    }
-
+    /// Returns the extension for this FileFormat when compressed, e.g. "file.csv.gz" -> csv
     fn get_ext_with_compression(
         &self,
         _file_compression_type: &FileCompressionType,
@@ -116,44 +120,54 @@ impl FileFormat for OdvFormat {
         Ok("txt".to_string())
     }
 
+    /// Returns whether this instance uses compression if applicable
+    fn compression_type(&self) -> Option<FileCompressionType> {
+        None
+    }
+
+    fn get_ext(&self) -> String {
+        "txt".to_string()
+    }
+
     async fn infer_schema(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let schemas = objects
-            .iter()
-            .map(|object| object.location.clone())
-            .map(|p| {
-                let reader = beacon_arrow_odv::reader::OdvReader::new(
-                    format!(
-                        "{}/{}",
-                        beacon_config::DATA_DIR.to_string_lossy(),
-                        p.to_string()
-                    ),
-                    4096,
-                )
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to create ODV reader: {}",
-                        e
-                    ))
-                })?;
-                Ok(reader.schema())
-            })
-            .collect::<anyhow::Result<Vec<_>>>()
-            .map_err(|e| datafusion::error::DataFusionError::Internal(e.to_string()))?;
-        let super_schema = super_typing::super_type_schema(&schemas).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
-        })?;
+        // let schemas = objects
+        //     .iter()
+        //     .map(|object| object.location.clone())
+        //     .map(|p| {
+        //         let reader = beacon_arrow_odv::reader::OdvReader::new(
+        //             format!(
+        //                 "{}/{}",
+        //                 beacon_config::DATA_DIR.to_string_lossy(),
+        //                 p.to_string()
+        //             ),
+        //             4096,
+        //         )
+        //         .map_err(|e| {
+        //             datafusion::error::DataFusionError::Execution(format!(
+        //                 "Failed to create ODV reader: {}",
+        //                 e
+        //             ))
+        //         })?;
+        //         Ok(reader.schema())
+        //     })
+        //     .collect::<anyhow::Result<Vec<_>>>()
+        //     .map_err(|e| datafusion::error::DataFusionError::Internal(e.to_string()))?;
+        // let super_schema = super_typing::super_type_schema(&schemas).map_err(|e| {
+        //     datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
+        // })?;
 
-        Ok(Arc::new(super_schema))
+        // Ok(Arc::new(super_schema))
+        todo!()
     }
 
     async fn infer_stats(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
         object: &ObjectMeta,
@@ -163,9 +177,8 @@ impl FileFormat for OdvFormat {
 
     async fn create_physical_plan(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         conf: FileScanConfig,
-        filters: Option<&Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(OdvExec::new(conf)))
     }
@@ -173,23 +186,28 @@ impl FileFormat for OdvFormat {
     async fn create_writer_physical_plan(
         &self,
         input: Arc<dyn ExecutionPlan>,
-        state: &SessionState,
+        state: &dyn Session,
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let sink_schema = Arc::clone(conf.output_schema());
-        let sink = Arc::new(OdvSink {
-            input: Arc::clone(&input),
-            config: conf,
-            odv_options: self.options.clone(),
-        });
+        // let sink_schema = Arc::clone(conf.output_schema());
+        // let sink = Arc::new(OdvSink {
+        //     input: Arc::clone(&input),
+        //     config: conf,
+        //     odv_options: self.options.clone(),
+        // });
 
-        Ok(Arc::new(DataSinkExec::new(
-            input,
-            sink,
-            sink_schema,
-            order_requirements,
-        )))
+        // Ok(Arc::new(DataSinkExec::new(
+        //     input,
+        //     sink,
+        //     sink_schema,
+        //     order_requirements,
+        // )))
+        todo!()
+    }
+
+    fn file_source(&self) -> Arc<dyn FileSource> {
+        todo!()
     }
 }
 
@@ -251,38 +269,39 @@ impl OdvExec {
             .schema_adapter_factory
             .create(projected_table_schema.clone(), self.table_schema.clone());
 
-        let stream = try_stream! {
-            for sub_partition in partition {
-                let file_path = sub_partition.path().to_string();
-                let mut reader = beacon_arrow_odv::reader::OdvReader::new(format!(
-                    "{}/{}",
-                    beacon_config::DATA_DIR.to_string_lossy(),
-                    file_path
-                ), 4096).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!("Failed to create ODV reader: {}", e))
-                })?;
+        // let stream = try_stream! {
+        //     for sub_partition in partition {
+        //         let file_path = sub_partition.path().to_string();
+        //         let mut reader = beacon_arrow_odv::reader::OdvReader::new(format!(
+        //             "{}/{}",
+        //             beacon_config::DATA_DIR.to_string_lossy(),
+        //             file_path
+        //         ), 4096).map_err(|e| {
+        //             datafusion::error::DataFusionError::Execution(format!("Failed to create ODV reader: {}", e))
+        //         })?;
 
-                let file_schema = reader.schema().clone();
+        //         let file_schema = reader.schema().clone();
 
-                let (schema_mapper, adapted_projection) = schema_adapter
-                    .map_schema(&file_schema)
-                    .expect("map_schema failed");
+        //         let (schema_mapper, adapted_projection) = schema_adapter
+        //             .map_schema(&file_schema)
+        //             .expect("map_schema failed");
 
-                while let Some(batch)= reader.read(Some(&adapted_projection)) {
-                    let batch = batch.map_err(|e| {
-                        datafusion::error::DataFusionError::Execution(format!("Failed to read ODV batch: {}", e))
-                    })?;
+        //         while let Some(batch)= reader.read(Some(&adapted_projection)) {
+        //             let batch = batch.map_err(|e| {
+        //                 datafusion::error::DataFusionError::Execution(format!("Failed to read ODV batch: {}", e))
+        //             })?;
 
-                    let mapped_batch = schema_mapper.map_batch(batch).unwrap();
+        //             let mapped_batch = schema_mapper.map_batch(batch).unwrap();
 
-                    yield mapped_batch;
-                }
-            }
-        };
+        //             yield mapped_batch;
+        //         }
+        //     }
+        // };
 
-        let adapter = RecordBatchStreamAdapter::new(self.schema(), stream);
+        // let adapter = RecordBatchStreamAdapter::new(self.schema(), stream);
 
-        Box::pin(adapter)
+        // Box::pin(adapter)
+        todo!()
     }
 }
 
@@ -329,6 +348,7 @@ pub struct OdvSink {
     input: Arc<dyn ExecutionPlan>,
     config: FileSinkConfig,
     odv_options: Option<OdvOptions>,
+    object_store: Arc<dyn ObjectStore>,
 }
 
 impl Debug for OdvSink {
@@ -349,6 +369,10 @@ impl DataSink for OdvSink {
         self
     }
 
+    fn schema(&self) -> &SchemaRef {
+        self.config.output_schema()
+    }
+
     fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
         None
     }
@@ -365,21 +389,46 @@ impl DataSink for OdvSink {
         let odv_options = self.odv_options.clone().unwrap_or(
             OdvOptions::try_from_arrow_schema(arrow_schema.clone()).map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to implicitly define ODV settings: {}",
+                    "Failed to implicitly define ODV output options: {}",
                     e
                 ))
             })?,
         );
-        let temp_dir = tempfile::tempdir()?;
-        let mut odv_writer =
-            AsyncOdvWriter::new(odv_options, arrow_schema.clone(), temp_dir.path())
-                .await
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to create ODV writer: {}",
-                        e
-                    ))
-                })?;
+
+        let output_path = self.config.table_paths[0].prefix();
+
+        let object_writer = ObjectWriterBuilder::new(
+            FileCompressionType::UNCOMPRESSED,
+            output_path,
+            self.object_store.clone(),
+        )
+        .build()
+        .unwrap()
+        .compat_write();
+
+        let mut odv_writer = AsyncOdvWriter::new_from_dyn(
+            Box::new(object_writer),
+            arrow_schema.clone(),
+            odv_options,
+        )
+        .await
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to create ODV writer: {}",
+                e
+            ))
+        })?;
+
+        // let temp_dir = tempfile::tempdir()?;
+        // let mut odv_writer =
+        //     AsyncOdvWriter::new(odv_options, arrow_schema.clone(), temp_dir.path())
+        //         .await
+        //         .map_err(|e| {
+        //             datafusion::error::DataFusionError::Execution(format!(
+        //                 "Failed to create ODV writer: {}",
+        //                 e
+        //             ))
+        //         })?;
 
         let mut stream = std::pin::pin!(data);
 
@@ -394,28 +443,62 @@ impl DataSink for OdvSink {
             })?;
         }
 
-        let output_path = format!(
-            "{}/{}",
-            beacon_config::DATA_DIR.to_string_lossy(),
-            self.config.table_paths[0].prefix().to_string()
-        );
-
-        let mut zip_file_writer = BufWriter::new(File::create(output_path).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to create ODV zip file writer: {}",
-                e
-            ))
-        })?);
-
-        odv_writer
-            .finish_to_archive(&mut zip_file_writer)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to create ODV zip archive: {}",
-                    e
-                ))
-            })?;
+        let mut object_writer = odv_writer.finish().await.unwrap().into_inner();
+        object_writer.flush().await.unwrap();
+        object_writer.shutdown().await.unwrap();
 
         Ok(rows_written)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_zip::ZipFileBuilder;
+    use futures::AsyncWriteExt;
+    use parquet::arrow::async_writer::AsyncFileWriter;
+    use tokio::io::AsyncWriteExt as TokioAsyncWriteCompatExt;
+    use tokio_util::compat::TokioAsyncWriteCompatExt as _;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_name() {
+        let object_store =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix("./data").unwrap());
+        let fs_path = object_store.path_to_filesystem(&object_store::path::Path::from("test.zip"));
+        println!("fs_path: {:?}", fs_path);
+
+        let mut writer = ObjectWriterBuilder::new(
+            FileCompressionType::UNCOMPRESSED,
+            &object_store::path::Path::from("test.zip"),
+            object_store.clone(),
+        )
+        .build()
+        .unwrap()
+        .compat_write();
+
+        // let mut writer = object_store::buffered::BufWriter::new(
+        //     object_store.clone(),
+        //     object_store::path::Path::from("test.txt"),
+        // );
+
+        // let mut zip_writer = ZipFileWriter::new(writer);
+
+        // let entry = ZipEntryBuilder::new("file.txt".into(), async_zip::Compression::Stored).build();
+        // let mut x = zip_writer.write_entry_stream(entry).await.unwrap();
+
+        // let z = x.write_all(b"hello").await.unwrap();
+
+        // x.flush().await.unwrap();
+        // x.close().await.unwrap();
+
+        // let mut writer = zip_writer.close().await.unwrap();
+
+        // let writer = AsyncOdvWriter::new_from_dyn(writer, ).await;
+
+        // writer.flush().await.unwrap();
+
+        // writer.write_all(b"hello").await.unwrap();
+        // writer.into_inner().complete().await.unwrap();
     }
 }
