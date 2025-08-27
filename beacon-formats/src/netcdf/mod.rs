@@ -32,13 +32,13 @@ pub struct NetcdfOptions {
 }
 
 #[derive(Debug, Clone)]
-pub struct NetcdfFormatFactory {
+pub struct NetCDFFormatFactory {
     pub options: NetcdfOptions,
     pub object_resolver: Arc<NetCDFObjectResolver>,
     pub sink_resolver: Arc<NetCDFSinkResolver>,
 }
 
-impl NetcdfFormatFactory {
+impl NetCDFFormatFactory {
     pub fn new(
         options: NetcdfOptions,
         object_resolver: Arc<NetCDFObjectResolver>,
@@ -52,7 +52,7 @@ impl NetcdfFormatFactory {
     }
 }
 
-impl FileFormatFactory for NetcdfFormatFactory {
+impl FileFormatFactory for NetCDFFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
@@ -76,7 +76,7 @@ impl FileFormatFactory for NetcdfFormatFactory {
     }
 }
 
-impl GetExt for NetcdfFormatFactory {
+impl GetExt for NetCDFFormatFactory {
     fn get_ext(&self) -> String {
         NETCDF_EXTENSION.to_string()
     }

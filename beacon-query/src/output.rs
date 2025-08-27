@@ -10,6 +10,7 @@ use beacon_formats::{
     arrow::ArrowFormatFactory,
     csv::CsvFormatFactory,
     geo_parquet::{GeoParquetFormatFactory, GeoParquetOptions},
+    netcdf::{NetCDFFormatFactory, NetcdfOptions},
     parquet::ParquetFormatFactory,
 };
 use datafusion::{
@@ -74,7 +75,7 @@ pub enum OutputFormat {
     Parquet,
     // Json,
     // Odv(OdvOptions),
-    // NetCDF,
+    NetCDF,
     /// GeoParquet format with optional longitude/latitude columns.
     GeoParquet {
         /// Name of the longitude column, if any.
@@ -92,13 +93,14 @@ impl OutputFormat {
             OutputFormat::Ipc => QueryOutputFile::Ipc(temp_file),
             OutputFormat::Parquet => QueryOutputFile::Parquet(temp_file),
             OutputFormat::GeoParquet { .. } => QueryOutputFile::GeoParquet(temp_file),
+            OutputFormat::NetCDF => QueryOutputFile::NetCDF(temp_file),
         }
     }
 
     /// Returns the DataFusion file type for this output format.
     pub fn file_type(&self) -> Arc<dyn FileType> {
         match self {
-            OutputFormat::Csv => format_as_file_type(Arc::new(CsvFormatFactory::default())),
+            OutputFormat::Csv => format_as_file_type(Arc::new(CsvFormatFactory)),
             OutputFormat::Ipc => format_as_file_type(Arc::new(ArrowFormatFactory)),
             OutputFormat::Parquet => format_as_file_type(Arc::new(ParquetFormatFactory)),
             OutputFormat::GeoParquet {
@@ -108,6 +110,17 @@ impl OutputFormat {
                 longitude_column: longitude_column.clone(),
                 latitude_column: latitude_column.clone(),
             }))),
+            OutputFormat::NetCDF => {
+                let options = NetcdfOptions::default();
+                let object_resolver = DataLake::netcdf_object_resolver();
+                let sink_resolver = DataLake::netcdf_sink_resolver();
+
+                format_as_file_type(Arc::new(NetCDFFormatFactory::new(
+                    options,
+                    object_resolver,
+                    sink_resolver,
+                )))
+            }
         }
     }
 }

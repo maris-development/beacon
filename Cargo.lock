@@ -658,6 +658,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-arrow-netcdf",
+ "beacon-arrow-odv",
  "beacon-common",
  "datafusion",
  "futures",

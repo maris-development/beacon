@@ -27,3 +27,4 @@ tokio = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
+beacon-arrow-odv = { path = "../beacon-arrow-odv" }

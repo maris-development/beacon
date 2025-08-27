@@ -7,7 +7,7 @@ use crate::{
     csv::CsvFormatFactory,
     geo_parquet::GeoParquetFormatFactory,
     netcdf::{
-        NetcdfFormatFactory, NetcdfOptions,
+        NetCDFFormatFactory, NetcdfOptions,
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
     },
     parquet::ParquetFormatFactory,
@@ -31,7 +31,7 @@ pub fn register_file_formats(
     session_state.register_file_format(Arc::new(ArrowFormatFactory), true)?;
     session_state.register_file_format(Arc::new(GeoParquetFormatFactory::default()), true)?;
     session_state.register_file_format(
-        Arc::new(NetcdfFormatFactory::new(
+        Arc::new(NetCDFFormatFactory::new(
             NetcdfOptions::default(),
             netcdf_object_resolver,
             netcdf_sink_resolver,
