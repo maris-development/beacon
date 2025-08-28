@@ -26,3 +26,5 @@ walkdir = "2.5.0"
 regex = "1.11.1"
 quick-xml = "0.37.2"
 thiserror = {workspace=true}
+bytes = { workspace = true}
+object_store = { workspace = true}

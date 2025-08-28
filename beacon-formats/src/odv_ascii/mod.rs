@@ -455,6 +455,7 @@ impl DataSink for OdvSink {
 mod tests {
     use async_zip::ZipFileBuilder;
     use futures::AsyncWriteExt;
+    use object_store::GetOptions;
     use parquet::arrow::async_writer::AsyncFileWriter;
     use tokio::io::AsyncWriteExt as TokioAsyncWriteCompatExt;
     use tokio_util::compat::TokioAsyncWriteCompatExt as _;
@@ -476,6 +477,10 @@ mod tests {
         .build()
         .unwrap()
         .compat_write();
+
+        // object_store.get_opts(location, GetOptions::)
+
+        // let reader = object_store::buffered::BufReader::new();
 
         // let mut writer = object_store::buffered::BufWriter::new(
         //     object_store.clone(),
