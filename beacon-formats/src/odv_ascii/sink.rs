@@ -9,7 +9,7 @@ use datafusion::{
         sink::DataSink,
     },
     execution::{SendableRecordBatchStream, TaskContext},
-    physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan},
+    physical_plan::{DisplayAs, DisplayFormatType},
 };
 use futures::StreamExt;
 use object_store::ObjectStore;

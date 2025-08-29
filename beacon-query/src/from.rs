@@ -4,8 +4,12 @@
 
 use std::sync::Arc;
 
-use beacon_data_lake::{files::collection::FileCollection, DataLake};
-use beacon_formats::{arrow::ArrowFormat, csv::CsvFormat, parquet::ParquetFormat};
+use beacon_data_lake::{
+    files::collection::FileCollection, table::table_formats::NetCDFFileFormat, DataLake,
+};
+use beacon_formats::{
+    arrow::ArrowFormat, csv::CsvFormat, odv_ascii::OdvFormat, parquet::ParquetFormat,
+};
 use datafusion::{
     datasource::{file_format::FileFormat, listing::ListingTableUrl, provider_as_source},
     logical_expr::{LogicalPlanBuilder, TableSource},
@@ -89,6 +93,8 @@ pub enum FromFormat {
     /// NetCDF format with file paths (not yet implemented).
     #[serde(rename = "netcdf")]
     NetCDF { paths: Vec<String> },
+    #[serde(rename = "odv")]
+    Odv { paths: Vec<String> },
 }
 
 impl FromFormat {
@@ -127,9 +133,11 @@ impl FromFormat {
             ))),
             FromFormat::Parquet { .. } => Ok(Arc::new(ParquetFormat::new())),
             FromFormat::Arrow { .. } => Ok(Arc::new(ArrowFormat::new())),
-            FromFormat::NetCDF { .. } => Err(datafusion::error::DataFusionError::NotImplemented(
-                "NetCDF format is not yet implemented".to_string(),
-            )),
+            FromFormat::NetCDF { .. } => Ok(Arc::new(beacon_formats::netcdf::NetcdfFormat::new(
+                Default::default(),
+                DataLake::netcdf_object_resolver(),
+            ))),
+            FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new())),
         }
     }
 
@@ -142,7 +150,8 @@ impl FromFormat {
             FromFormat::Csv { paths, .. }
             | FromFormat::Parquet { paths }
             | FromFormat::Arrow { paths }
-            | FromFormat::NetCDF { paths } => paths,
+            | FromFormat::NetCDF { paths }
+            | FromFormat::Odv { paths } => paths,
         };
 
         let mut listing_table_urls = Vec::with_capacity(paths.len());

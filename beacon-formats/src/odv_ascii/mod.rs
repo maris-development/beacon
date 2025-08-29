@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::odv_ascii::sink::OdvSink;
+use crate::odv_ascii::{sink::OdvSink, source::OdvSource};
 use arrow::datatypes::SchemaRef;
 use async_zip::{ZipEntry, ZipEntryBuilder, tokio::write::ZipFileWriter};
 use beacon_arrow_odv::{
@@ -242,7 +242,7 @@ impl FileFormat for OdvFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        todo!()
+        Arc::new(OdvSource::new())
     }
 }
 

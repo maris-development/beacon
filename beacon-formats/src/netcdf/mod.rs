@@ -12,7 +12,7 @@ use datafusion::{
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
 };
-use object_store::{ObjectMeta, ObjectStore, local::LocalFileSystem};
+use object_store::{ObjectMeta, ObjectStore};
 
 use crate::netcdf::{
     object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
