@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    io::{BufRead, BufReader, Read, Seek},
-    path::Path,
-    sync::Arc,
-    task::Poll,
-};
+use std::{collections::HashMap, io::Read, sync::Arc, task::Poll};
 
 use arrow::{
     array::{RecordBatch, StringArray},
@@ -12,8 +6,8 @@ use arrow::{
     error::ArrowError,
 };
 use bytes::{Buf, Bytes};
-use csv::{ByteRecord, StringRecord};
-use futures::{Stream, StreamExt, TryStreamExt};
+use csv::StringRecord;
+use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 use object_store::ObjectStore;
 use regex::Regex;
@@ -36,60 +30,129 @@ impl Default for OdvReaderOptions {
 pub struct OdvObjectReader {
     store: Arc<dyn object_store::ObjectStore>,
     path: object_store::path::Path,
+    schema_mapper: Arc<OdvSchemaMapper>,
 }
 
 impl OdvObjectReader {
-    pub fn new(store: Arc<dyn object_store::ObjectStore>, path: object_store::path::Path) -> Self {
-        Self { store, path }
+    pub async fn try_new(
+        store: Arc<dyn object_store::ObjectStore>,
+        path: object_store::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let byte_stream = store.get(&path).await?.into_stream().map_err(Into::into);
+        let schema_mapper = AsyncOdvDecoder::decode_schema_mapper(byte_stream).await?;
+        Ok(Self {
+            store,
+            path,
+            schema_mapper: Arc::new(schema_mapper),
+        })
     }
 
-    async fn read_odv_header(
-        store: Arc<dyn ObjectStore>,
-        path: object_store::path::Path,
-    ) -> OdvHeader {
-        let mut header_lines = Vec::new();
+    pub fn schema(&self) -> SchemaRef {
+        self.schema_mapper.output_schema.clone()
+    }
 
-        // Read the header lines
-        let mut reader = object_store::buffered::BufReader::new(store, path);
-        while let Some(line) = reader.next_line().await {
+    pub async fn read_async(
+        &self,
+        projection: Option<Vec<usize>>,
+    ) -> impl Stream<Item = Result<RecordBatch, ArrowError>> {
+        let object = self.store.get(&self.path).await.unwrap();
+        let stream = object.into_stream().map_err(Into::into);
+
+        AsyncOdvDecoder::decode(stream, projection, self.schema_mapper.clone()).await
+    }
+}
+
+pub struct OdvSchemaMapper {
+    input_schema: SchemaRef,
+    output_schema: SchemaRef,
+    metadata_fields: indexmap::IndexMap<String, String>,
+}
+
+impl OdvSchemaMapper {
+    pub fn output_schema(&self) -> SchemaRef {
+        self.output_schema.clone()
+    }
+
+    pub fn new(input_schema: SchemaRef) -> Self {
+        let mut fields = vec![];
+        let mut metadata_fields = indexmap::IndexMap::new();
+        for field in input_schema.fields() {
+            fields.push(field.as_ref().clone());
+        }
+
+        for field in input_schema.fields() {
+            for (k, v) in field.metadata() {
+                fields.push(Field::new(
+                    format!("{}.{}", field.name(), k),
+                    DataType::Utf8,
+                    true,
+                ));
+
+                metadata_fields.insert(format!("{}.{}", field.name(), k), v.clone());
+            }
+        }
+
+        Self {
+            output_schema: Arc::new(arrow::datatypes::Schema::new(fields)),
+            metadata_fields,
+            input_schema,
+        }
+    }
+
+    pub fn map_batch(
+        &self,
+        batch: RecordBatch,
+        projection: Option<Arc<[usize]>>,
+    ) -> Result<RecordBatch, ArrowError> {
+        let mut schema = self.output_schema.clone();
+        let mut arrays = batch.columns().to_vec();
+        for (_, value) in self.metadata_fields.iter() {
+            let array = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                value.clone(),
+                batch.num_rows(),
+            )));
+
+            arrays.push(array);
+        }
+
+        //Apply the projection
+        if let Some(projection) = projection {
+            let projection = projection.as_ref();
+            arrays = projection
+                .iter()
+                .map(|&idx| arrays[idx].clone())
+                .collect::<Vec<_>>();
+            schema = Arc::new(schema.project(projection)?);
+        }
+
+        RecordBatch::try_new(schema, arrays)
+    }
+}
+
+pub struct AsyncOdvDecoder;
+
+impl AsyncOdvDecoder {
+    pub async fn decode_schema_mapper<S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin>(
+        input: S,
+    ) -> Result<OdvSchemaMapper, ArrowError> {
+        let mut header_lines = Vec::new();
+        let mut header_row = None;
+
+        let stream_reader = tokio_util::io::StreamReader::new(input);
+        let mut lines = FramedRead::new(stream_reader, tokio_util::codec::LinesCodec::new());
+
+        while let Some(line) = lines.next().await.transpose().unwrap() {
+            if !line.starts_with("//") {
+                // Parse as header row
+                header_row = Some(line);
+                break;
+            }
             header_lines.push(line);
         }
 
-        todo!()
-    }
-}
-
-struct OdvHeader {
-    schema: SchemaRef,
-}
-
-pub struct AsyncOdvDecoder {
-    header: OdvHeader,
-}
-
-impl AsyncOdvDecoder {
-    pub fn new(header: OdvHeader) -> Self {
-        Self { header }
-    }
-
-    pub async fn decode<S: Stream<Item = Result<Bytes, object_store::Error>> + Unpin>(
-        &self,
-        input: S,
-        projection: Option<Vec<usize>>,
-    ) -> impl Stream<Item = Result<RecordBatch, ArrowError>> {
-        let mut header_decoded_bytes = Vec::new();
-        //Read the header lines to get the schema
-
-        let input_stream = input.map(|maybe| maybe.map_err(std::io::Error::other));
-        let stream_reader = tokio_util::io::StreamReader::new(input_stream.map(|maybe_batch| {
-            maybe_batch.inspect(|batch| {
-                header_decoded_bytes.push(Ok(batch.clone()));
-            })
-        }));
-        let mut lines = FramedRead::new(stream_reader, tokio_util::codec::LinesCodec::new());
-
         let mut fields = indexmap::IndexMap::new();
 
+        // Insert default fields that should always be there
         fields.insert(
             "Cruise".to_string(),
             Field::new("Cruise", DataType::Utf8, true),
@@ -108,30 +171,28 @@ impl AsyncOdvDecoder {
             ),
         );
 
-        let mut odv_schema = None;
-        while let Some(line) = lines.next().await.transpose().unwrap() {
-            if !line.starts_with("//") {
-                // Parse as header row
-                let header_row =
-                    Self::header_row(&mut std::io::Cursor::new(line.as_bytes())).unwrap();
-                odv_schema = Some(
-                    Self::parse_header_row_with_metadata_to_schema(&header_row, fields).unwrap(),
-                );
-                break;
-            }
-            Self::odv_field_from_header(&line).map(|f| fields.insert(f.name().to_string(), f));
+        // Parse each header line
+        for line in header_lines {
+            AsyncOdvDecoder::odv_field_from_header(&line)
+                .map(|f| fields.insert(f.name().to_string(), f));
         }
 
-        //Create the body decoder
-        let body_decoder = AsyncOdvBodyDecoder::new(odv_schema.unwrap());
+        // Parse header row
+        let header_row = header_row.unwrap();
+        let header_row =
+            AsyncOdvDecoder::header_row(&mut std::io::Cursor::new(header_row.as_bytes())).unwrap();
+        let odv_schema =
+            AsyncOdvDecoder::parse_header_row_with_metadata_to_schema(&header_row, fields).unwrap();
 
-        let following_stream = lines.into_inner().into_inner().into_inner();
-        let stream = futures::stream::iter(header_decoded_bytes.into_iter());
+        Ok(OdvSchemaMapper::new(odv_schema))
+    }
 
-        let input_stream = stream.chain(following_stream);
-
-        //Decode the body
-        body_decoder.decode_odv_body(input_stream, projection.map(|p| p.into()))
+    pub async fn decode<S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin>(
+        input: S,
+        projection: Option<Vec<usize>>,
+        schema_mapper: Arc<OdvSchemaMapper>,
+    ) -> impl Stream<Item = Result<RecordBatch, ArrowError>> {
+        Self::decode_odv_body(input, projection.map(Into::into), schema_mapper)
     }
 
     fn odv_field_from_header(line: &str) -> Option<Field> {
@@ -266,55 +327,21 @@ impl AsyncOdvDecoder {
         let header_row = csv_reader.headers().unwrap().clone();
         Ok(header_row)
     }
-}
 
-struct AsyncOdvBodyDecoder {
-    output_schema: SchemaRef,
-    input_schema: SchemaRef,
-    metadata_fields: indexmap::IndexMap<String, String>,
-}
-
-impl AsyncOdvBodyDecoder {
-    pub fn new(input_schema: SchemaRef) -> Self {
-        let mut fields = vec![];
-        let mut metadata_fields = indexmap::IndexMap::new();
-        for field in input_schema.fields() {
-            fields.push(field.as_ref().clone());
-        }
-
-        for field in input_schema.fields() {
-            for (k, v) in field.metadata() {
-                fields.push(Field::new(
-                    format!("{}.{}", field.name(), k),
-                    DataType::Utf8,
-                    true,
-                ));
-
-                metadata_fields.insert(format!("{}.{}", field.name(), k), v.clone());
-            }
-        }
-
-        Self {
-            output_schema: Arc::new(arrow::datatypes::Schema::new(fields)),
-            metadata_fields,
-            input_schema,
-        }
-    }
-
-    pub fn decode_odv_body<S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin>(
-        &self,
+    fn decode_odv_body<S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin>(
         input: S,
         projection: Option<Arc<[usize]>>,
+        schema_mapper: Arc<OdvSchemaMapper>,
     ) -> impl Stream<Item = Result<RecordBatch, ArrowError>> {
-        let decoder = arrow::csv::reader::ReaderBuilder::new(self.input_schema.clone())
+        let decoder = arrow::csv::reader::ReaderBuilder::new(schema_mapper.input_schema.clone())
             .with_batch_size(64 * 1024)
             .with_comment(b'/')
             .with_delimiter(b'\t')
             .with_header(true)
             .build_decoder();
 
-        let metadata_fields = Arc::new(self.metadata_fields.clone());
-        let output_schema = self.output_schema.clone();
+        let metadata_fields = Arc::new(schema_mapper.metadata_fields.clone());
+        let output_schema = schema_mapper.output_schema.clone();
 
         Self::decode_byte_stream(decoder, input).map(move |maybe_batch| {
             let output_schema = output_schema.clone();
@@ -387,10 +414,11 @@ impl AsyncOdvBodyDecoder {
 
 #[cfg(test)]
 mod tests {
-    use futures::StreamExt;
-    use object_store::ObjectStore;
+    use std::sync::Arc;
 
-    use crate::reader::AsyncOdvDecoder;
+    use futures::StreamExt;
+
+    use crate::reader::OdvObjectReader;
 
     #[tokio::test]
     async fn test_full_file() {
@@ -398,15 +426,15 @@ mod tests {
             object_store::local::LocalFileSystem::new_with_prefix("./test-data/").unwrap();
         let path = object_store::path::Path::from("test_file.txt");
 
-        let stream = object_store.get(&path).await.unwrap().into_stream();
-
-        let decoder = AsyncOdvDecoder::new();
-        let mut async_reader = decoder.decode(stream, None).await;
+        let reader = OdvObjectReader::try_new(Arc::new(object_store), path)
+            .await
+            .unwrap();
+        let mut async_stream = reader.read_async(None).await;
 
         let output_file = std::fs::File::create("./test-data/test_output.csv").unwrap();
         let mut writer = arrow::csv::Writer::new(output_file);
 
-        while let Some(batch) = async_reader.next().await {
+        while let Some(batch) = async_stream.next().await {
             let batch = batch.unwrap();
             writer.write(&batch).unwrap();
         }
