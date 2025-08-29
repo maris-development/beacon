@@ -43,8 +43,18 @@ impl OdvObjectReader {
         Self { store, path }
     }
 
-    fn read_odv_header(store: &dyn ObjectStore, path: object_store::path::Path) -> OdvHeader {
-        // Implementation goes here
+    async fn read_odv_header(
+        store: Arc<dyn ObjectStore>,
+        path: object_store::path::Path,
+    ) -> OdvHeader {
+        let mut header_lines = Vec::new();
+
+        // Read the header lines
+        let mut reader = object_store::buffered::BufReader::new(store, path);
+        while let Some(line) = reader.next_line().await {
+            header_lines.push(line);
+        }
+
         todo!()
     }
 }
@@ -59,7 +69,6 @@ pub struct AsyncOdvDecoder {
 
 impl AsyncOdvDecoder {
     pub fn new(header: OdvHeader) -> Self {
-object_store::buffered::BufReader::new(store, meta).
         Self { header }
     }
 
