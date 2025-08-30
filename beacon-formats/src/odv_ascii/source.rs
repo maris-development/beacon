@@ -20,6 +20,8 @@ use datafusion::{
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 
+use crate::odv_ascii::OdvFormat;
+
 /// [`OdvSource`] implements [`FileSource`] for ODV ASCII files.
 ///
 /// It supports schema overrides, column projection, statistics, and metrics.
@@ -82,7 +84,6 @@ impl FileSource for OdvSource {
         Arc::new(OdvOpener {
             schema_adapter: Arc::from(schema_adapter),
             object_store,
-            file_compression: base_config.file_compression_type,
         })
     }
 
@@ -171,8 +172,6 @@ struct OdvOpener {
     schema_adapter: Arc<dyn SchemaAdapter>,
     /// Object store for file access.
     object_store: Arc<dyn ObjectStore>,
-    /// Compression type for files.
-    file_compression: FileCompressionType,
 }
 
 impl FileOpener for OdvOpener {
@@ -184,13 +183,13 @@ impl FileOpener for OdvOpener {
     ) -> datafusion::error::Result<FileOpenFuture> {
         let schema_adapter = self.schema_adapter.clone();
         let object_store = self.object_store.clone();
-        let compression = self.file_compression;
+        let compression = OdvFormat::infer_compression(&file_meta.object_meta);
 
         Ok(Box::pin(async move {
             // Open and decode the schema from the file
             let input_stream = object_store.get(file_meta.location()).await?.into_stream();
-            let uncompressed_stream = compression
-                .convert_to_compress_stream(Box::pin(input_stream.map_err(Into::into)))?;
+            let uncompressed_stream =
+                compression.convert_stream(Box::pin(input_stream.map_err(Into::into)))?;
             let odv_schema_mapper =
                 AsyncOdvDecoder::decode_schema_mapper(uncompressed_stream.map_err(Into::into))
                     .await?;
@@ -204,8 +203,8 @@ impl FileOpener for OdvOpener {
 
             // Open and decode the file body
             let body_stream = object_store.get(file_meta.location()).await?.into_stream();
-            let uncompressed_body_stream = compression
-                .convert_to_compress_stream(Box::pin(body_stream.map_err(Into::into)))?;
+            let uncompressed_body_stream =
+                compression.convert_stream(Box::pin(body_stream.map_err(Into::into)))?;
 
             // Decode batches and apply schema mapping
             let batch_stream = AsyncOdvDecoder::decode(

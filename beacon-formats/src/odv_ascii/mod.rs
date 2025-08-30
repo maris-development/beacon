@@ -15,14 +15,16 @@ use beacon_arrow_odv::{
 };
 use beacon_common::super_typing;
 use datafusion::{
-    catalog::Session,
+    catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
     datasource::{
         file_format::{
             FileFormat, FileFormatFactory, csv::CsvFormat,
             file_compression_type::FileCompressionType, write::ObjectWriterBuilder,
         },
-        physical_plan::{CsvSource, FileScanConfig, FileSinkConfig, FileSource},
+        physical_plan::{
+            CsvSource, FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource,
+        },
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
         sink::{DataSink, DataSinkExec},
     },
@@ -75,17 +77,15 @@ impl GetExt for OdvFileFormatFactory {
 impl FileFormatFactory for OdvFileFormatFactory {
     fn create(
         &self,
-        state: &dyn Session,
-        format_options: &std::collections::HashMap<String, String>,
+        _state: &dyn Session,
+        _format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         match self.options {
             Some(ref options) => {
                 let format = OdvFormat::new_with_options(options.clone());
-                return Ok(Arc::new(format) as Arc<dyn FileFormat>);
+                Ok(Arc::new(format) as Arc<dyn FileFormat>)
             }
-            None => {
-                return Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>);
-            }
+            None => Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>),
         }
     }
 
@@ -130,6 +130,7 @@ impl OdvFormat {
                 "bz2" => FileCompressionType::BZIP2,
                 "xz" => FileCompressionType::XZ,
                 "zstd" => FileCompressionType::ZSTD,
+                "zst" => FileCompressionType::ZSTD,
                 _ => FileCompressionType::UNCOMPRESSED,
             }
         } else {
@@ -173,7 +174,6 @@ impl FileFormat for OdvFormat {
             let object = object.clone();
 
             let compression = Self::infer_compression(&object);
-
             async move {
                 let stream = store
                     .get(&object.location)
@@ -218,10 +218,14 @@ impl FileFormat for OdvFormat {
 
     async fn create_physical_plan(
         &self,
-        state: &dyn Session,
+        _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(OdvExec::new(conf)))
+        let source = OdvSource::new();
+        let conf = FileScanConfigBuilder::from(conf)
+            .with_source(Arc::new(source))
+            .build();
+        Ok(DataSourceExec::from_data_source(conf))
     }
 
     async fn create_writer_physical_plan(
