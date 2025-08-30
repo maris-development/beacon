@@ -8,6 +8,7 @@ use datafusion::{
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
+        sink::DataSinkExec,
     },
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
@@ -16,6 +17,7 @@ use object_store::{ObjectMeta, ObjectStore};
 
 use crate::netcdf::{
     object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
+    sink::NetCDFSink,
     source::{NetCDFFileSource, fetch_schema},
 };
 
@@ -61,6 +63,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
         Ok(Arc::new(NetcdfFormat::new(
             self.options.clone(),
             self.object_resolver.clone(),
+            self.sink_resolver.clone(),
         )))
     }
 
@@ -68,6 +71,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
         Arc::new(NetcdfFormat::new(
             self.options.clone(),
             self.object_resolver.clone(),
+            self.sink_resolver.clone(),
         ))
     }
 
@@ -86,13 +90,19 @@ impl GetExt for NetCDFFormatFactory {
 pub struct NetcdfFormat {
     pub options: NetcdfOptions,
     pub object_resolver: Arc<NetCDFObjectResolver>,
+    pub sink_resolver: Arc<NetCDFSinkResolver>,
 }
 
 impl NetcdfFormat {
-    pub fn new(options: NetcdfOptions, object_resolver: Arc<NetCDFObjectResolver>) -> Self {
+    pub fn new(
+        options: NetcdfOptions,
+        object_resolver: Arc<NetCDFObjectResolver>,
+        sink_resolver: Arc<NetCDFSinkResolver>,
+    ) -> Self {
         Self {
             options,
             object_resolver,
+            sink_resolver,
         }
     }
 }
@@ -157,14 +167,17 @@ impl FileFormat for NetcdfFormat {
 
     async fn create_writer_physical_plan(
         &self,
-        _input: Arc<dyn ExecutionPlan>,
+        input: Arc<dyn ExecutionPlan>,
         _state: &dyn Session,
-        _conf: FileSinkConfig,
-        _order_requirements: Option<LexRequirement>,
+        conf: FileSinkConfig,
+        order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        Err(datafusion::error::DataFusionError::NotImplemented(
-            "NetCDF format does not support writing yet".to_string(),
-        ))
+        let netcdf_sink = Arc::new(NetCDFSink::new(self.sink_resolver.clone(), conf));
+        Ok(Arc::new(DataSinkExec::new(
+            input,
+            netcdf_sink,
+            order_requirements,
+        )))
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {

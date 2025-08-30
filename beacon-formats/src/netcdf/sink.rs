@@ -17,6 +17,15 @@ pub struct NetCDFSink {
     path_resolver: NetCDFSinkResolver,
 }
 
+impl NetCDFSink {
+    pub fn new(path_resolver: Arc<NetCDFSinkResolver>, sink_config: FileSinkConfig) -> Self {
+        Self {
+            sink_config,
+            path_resolver: (*path_resolver).clone(),
+        }
+    }
+}
+
 impl DisplayAs for NetCDFSink {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
         write!(f, "NetCDFSink")

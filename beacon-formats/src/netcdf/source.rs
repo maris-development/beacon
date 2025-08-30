@@ -76,7 +76,7 @@ impl FileSource for NetCDFFileSource {
         let schema_adapter_factory = self
             .schema_adapter_factory
             .clone()
-            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory::default()));
+            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
         let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
         let arc_schema_adapter: Arc<dyn SchemaAdapter> = Arc::from(schema_adapter);
 

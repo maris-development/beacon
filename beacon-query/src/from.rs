@@ -136,6 +136,7 @@ impl FromFormat {
             FromFormat::NetCDF { .. } => Ok(Arc::new(beacon_formats::netcdf::NetcdfFormat::new(
                 Default::default(),
                 DataLake::netcdf_object_resolver(),
+                DataLake::netcdf_sink_resolver(),
             ))),
             FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new())),
         }
