@@ -1,6 +1,7 @@
 use std::{path::Path, sync::Arc};
 
-use arrow::array::RecordBatch;
+use arrow::{array::RecordBatch, error::ArrowError};
+use nd_arrow_array::NdArrowArray;
 use ndarray::{ArrayBase, ArrayD};
 use netcdf::{
     types::{FloatType, IntType},
@@ -101,6 +102,46 @@ impl NetCDFArrowReader {
         let record_batch = nd_batch.to_arrow_record_batch().unwrap();
 
         Ok(record_batch)
+    }
+
+    pub fn read_column(&self, column_name: &str) -> NcResult<NdArrowArray> {
+        self.file_schema.field_with_name(column_name).map_err(|_| {
+            ArrowNetCDFError::ArrowSchemaError(Box::new(ArrowNetCDFError::InvalidFieldName(
+                column_name.to_string(),
+            )))
+        })?;
+
+        if column_name.contains('.') {
+            let parts = column_name.split('.').collect::<Vec<_>>();
+            if parts.len() != 2 {
+                return Err(ArrowNetCDFError::InvalidFieldName(column_name.to_string()));
+            }
+            if parts[0].is_empty() {
+                //Global attribute
+                let attr_name = parts[1];
+                let attr_value = global_attribute(&self.file, attr_name)?
+                    .expect("Attribute not found but was in schema.");
+                Ok(attr_value.into_nd_arrow_array().unwrap())
+            } else {
+                //Variable attribute
+                let variable = self
+                    .file
+                    .variable(parts[0])
+                    .expect("Variable not found but was in schema.");
+                Ok(variable_attribute(&variable, parts[1])?
+                    .expect("Attribute not found but was in schema.")
+                    .into_nd_arrow_array()
+                    .unwrap())
+            }
+        } else {
+            let variable = self
+                .file
+                .variable(column_name)
+                .expect("Variable not found but was in schema.");
+            let array = read_variable(&variable)
+                .map_err(|e| ArrowNetCDFError::VariableReadError(Box::new(e)))?;
+            Ok(array.into_nd_arrow_array().unwrap())
+        }
     }
 }
 
