@@ -29,12 +29,11 @@ COPY beacon-arrow-odv/ /beacon-arrow-odv/
 COPY beacon-common/ /beacon-common/
 COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
+COPY beacon-data-lake/ /beacon-data-lake/
+COPY beacon-formats/ /beacon-formats/
 COPY beacon-functions/ /beacon-functions/
-COPY beacon-output/ /beacon-output/
 COPY beacon-planner/ /beacon-planner/
 COPY beacon-query/ /beacon-query/
-COPY beacon-sources/ /beacon-sources/
-COPY beacon-tables/ /beacon-tables/
 COPY Cargo.toml /
 COPY Cargo.lock /
 
@@ -47,7 +46,9 @@ COPY --from=builder /target/release/beacon-api /beacon/
 
 #Install Dependencies
 RUN apt-get update
+RUN apt-get install -y curl
 RUN apt-get install -y netcdf-bin
+RUN apt-get install -y libnetcdf-dev
 
 EXPOSE 5001
 

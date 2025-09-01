@@ -131,11 +131,14 @@ impl DataLake {
             Arc::new(NetCDFObjectResolver::new(endpoint, Some(bucket), None))
         } else {
             let base_path = PathBuf::from("./data");
+
+            std::fs::create_dir_all(&base_path).expect("Failed to create datasets directory");
+
             let absolute_path = base_path.canonicalize().unwrap();
 
             // Create directories if they do not exist
             std::fs::create_dir_all(&absolute_path).expect("Failed to create datasets directory");
-            println!(
+            tracing::debug!(
                 "Using local NetCDF datasets path: {}",
                 absolute_path.display()
             );
@@ -149,10 +152,12 @@ impl DataLake {
 
     pub fn netcdf_sink_resolver() -> Arc<NetCDFSinkResolver> {
         let base_path = PathBuf::from("./data");
+        std::fs::create_dir_all(&base_path).expect("Failed to create datasets directory");
         let absolute_path = base_path.canonicalize().unwrap();
 
+        tracing::debug!("Using local NetCDF sink path: {}", absolute_path.display());
+
         // Create directories if they do not exist
-        std::fs::create_dir_all(&absolute_path).expect("Failed to create datasets directory");
         Arc::new(NetCDFSinkResolver::new(absolute_path))
     }
 
