@@ -84,14 +84,14 @@ impl PresetTable {
     ) -> Result<(), TableError> {
         match self.table_engine.as_ref() {
             TableType::Logical(_) => {}
-            // TableType::Physical(physical_table) => {
-            //     Box::pin(physical_table.create(table_directory, session_ctx)).await?
-            // }
             TableType::Preset(preset_table) => {
                 Box::pin(preset_table.create(table_directory, session_ctx)).await?
             }
             TableType::GeoSpatial(geo_spatial_table) => {
                 Box::pin(geo_spatial_table.create(table_directory, session_ctx)).await?
+            }
+            TableType::Default(default_table) => {
+                Box::pin(default_table.create(table_directory, session_ctx)).await?
             }
         }
         Ok(())

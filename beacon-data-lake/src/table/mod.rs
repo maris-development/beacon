@@ -11,6 +11,7 @@ use object_store::{
 use crate::table::{_type::TableType, error::TableError};
 
 pub mod _type;
+pub mod default;
 pub mod error;
 pub mod geospatial;
 pub mod logical;
@@ -42,7 +43,7 @@ impl Table {
             Path::from_iter(table_directory.clone());
 
         //  Write self as json to 'table.json'
-        let json = serde_json::to_string(&self).unwrap();
+        let json = serde_json::to_string_pretty(&self).unwrap();
         let payload = PutPayload::from_bytes(json.into_bytes().into());
         table_object_store
             .put(&table_directory_path, payload)
