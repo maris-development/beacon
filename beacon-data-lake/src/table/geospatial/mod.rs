@@ -37,6 +37,9 @@ impl GeoSpatialTable {
             TableType::GeoSpatial(geo_spatial_table) => {
                 Box::pin(geo_spatial_table.create(table_directory, session_ctx)).await?
             }
+            TableType::Empty(default_table) => {
+                Box::pin(default_table.create(table_directory, session_ctx)).await?
+            }
         }
         Ok(())
     }

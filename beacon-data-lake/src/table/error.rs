@@ -8,4 +8,6 @@ pub enum TableError {
     GenericTableError(String),
     #[error("Table already exists: {0}")]
     TableAlreadyExists(String),
+    #[error("Table not found: {0}")]
+    TableNotFound(String),
 }

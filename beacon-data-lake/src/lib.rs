@@ -21,7 +21,7 @@ use url::Url;
 
 use crate::{
     files::{collection::FileCollection, temp_output_file::TempOutputFile},
-    table::{Table, error::TableError},
+    table::{Table, empty::EmptyTable, error::TableError},
     util::split_glob,
 };
 
@@ -189,7 +189,7 @@ impl DataLake {
         )
         .await;
 
-        Self {
+        let data_lake = Self {
             data_directory_store_url: datasets_url,
             data_directory_prefix: datasets_prefix,
             table_directory_store_url: tables_url,
@@ -201,7 +201,23 @@ impl DataLake {
             config,
             table_providers: parking_lot::Mutex::new(table_providers),
             tables: parking_lot::Mutex::new(tables),
+        };
+
+        if !data_lake.table_exist("default") {
+            let default_table_type = EmptyTable::new();
+            let table = Table {
+                table_directory: vec![],
+                table_name: "default".to_string(),
+                table_type: table::_type::TableType::Empty(default_table_type),
+                description: Some("Default Table.".to_string()),
+            };
+            data_lake
+                .create_table(table)
+                .await
+                .expect("Failed to create default table.");
         }
+
+        data_lake
     }
 
     fn read_config() -> Config {
@@ -472,6 +488,11 @@ impl DataLake {
     pub fn list_table(&self, table_name: &str) -> Option<Table> {
         let tables = self.tables.lock();
         tables.get(table_name).cloned()
+    }
+
+    pub async fn update_table(&self, mut table: Table) -> Result<(), TableError> {
+        self.remove_table(&table.table_name);
+        self.create_table(table).await
     }
 
     pub async fn create_table(&self, mut table: Table) -> Result<(), TableError> {
