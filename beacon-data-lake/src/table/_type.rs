@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::table::{
-    default::DefaultTable, error::TableError, geospatial::GeoSpatialTable, logical::LogicalTable,
+    empty::EmptyTable, error::TableError, geospatial::GeoSpatialTable, logical::LogicalTable,
     preset::PresetTable,
 };
 use datafusion::{
@@ -15,7 +15,7 @@ pub enum TableType {
     Logical(LogicalTable),
     Preset(PresetTable),
     GeoSpatial(GeoSpatialTable),
-    Default(DefaultTable),
+    Empty(EmptyTable),
 }
 
 impl TableType {
@@ -56,7 +56,7 @@ impl TableType {
                 ))
                 .await
             }
-            TableType::Default(default_table) => {
+            TableType::Empty(default_table) => {
                 Box::pin(default_table.table_provider(
                     table_directory_store_url,
                     table_directory_prefix,

@@ -21,7 +21,7 @@ use url::Url;
 
 use crate::{
     files::{collection::FileCollection, temp_output_file::TempOutputFile},
-    table::{Table, default::DefaultTable, error::TableError},
+    table::{Table, empty::EmptyTable, error::TableError},
     util::split_glob,
 };
 
@@ -204,11 +204,11 @@ impl DataLake {
         };
 
         if !data_lake.table_exist("default") {
-            let default_table_type = DefaultTable::new();
+            let default_table_type = EmptyTable::new();
             let table = Table {
                 table_directory: vec![],
                 table_name: "default".to_string(),
-                table_type: table::_type::TableType::Default(default_table_type),
+                table_type: table::_type::TableType::Empty(default_table_type),
                 description: Some("Default Table.".to_string()),
             };
             data_lake

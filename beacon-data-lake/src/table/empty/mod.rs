@@ -1,20 +1,20 @@
 use std::{any::Any, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::{
     catalog::{Session, TableProvider},
     execution::object_store::ObjectStoreUrl,
     logical_expr::TableProviderFilterPushDown,
-    physical_plan::ExecutionPlan,
+    physical_plan::{ExecutionPlan, empty::EmptyExec},
     prelude::{Expr, SessionContext},
 };
 
 use crate::table::error::TableError;
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct DefaultTable;
+pub struct EmptyTable;
 
-impl DefaultTable {
+impl EmptyTable {
     pub fn new() -> Self {
         Self
     }
@@ -35,15 +35,21 @@ impl DefaultTable {
         _data_directory: object_store::path::Path,
         _session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
-        Ok(Arc::new(DefaultTableProvider))
+        Ok(Arc::new(EmptyTableProvider))
+    }
+}
+
+impl Default for EmptyTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[derive(Debug)]
-struct DefaultTableProvider;
+struct EmptyTableProvider;
 
 #[async_trait::async_trait]
-impl TableProvider for DefaultTableProvider {
+impl TableProvider for EmptyTableProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -59,23 +65,21 @@ impl TableProvider for DefaultTableProvider {
 
     async fn scan(
         &self,
-        state: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
+        _state: &dyn Session,
+        _projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        return Err(datafusion::error::DataFusionError::NotImplemented(
-            "Reading default table is not supported. Default tables are stubs that contain zero data.".to_string(),
-        ));
+        return Ok(Arc::new(EmptyExec::new(Arc::new(Schema::empty()))));
     }
 
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
-        return Ok(vec![
+        Ok(vec![
             TableProviderFilterPushDown::Unsupported;
             filters.len()
-        ]);
+        ])
     }
 }
