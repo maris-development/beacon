@@ -1,0 +1,31 @@
+[package]
+name = "beacon-formats"
+version = "1.2.0"
+edition = "2024"
+
+[dependencies]
+arrow = { workspace = true }
+object_store = { workspace = true }
+datafusion = { workspace = true }
+geoarrow = { workspace = true }
+geoarrow-array = { workspace = true }
+geoparquet = { workspace = true }
+parquet = { workspace = true }
+
+typetag =  { workspace=true}
+async-trait = { workspace=true}
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+
+async_zip = { version = "0.0.18", features = ["tokio", "zstd", "deflate"] }
+tokio-util = "0.7.16"
+
+beacon-common = { path = "../beacon-common" }
+beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
+beacon-arrow-odv = { path = "../beacon-arrow-odv" }

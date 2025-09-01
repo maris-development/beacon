@@ -1,11 +1,12 @@
 [package]
 name = "beacon-arrow-netcdf"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
 
 [dependencies]
-netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["static", "ndarray"] }
-nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main" }
+netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["ndarray"] }
+netcdf-sys = { git ="https://github.com/robinskil/netcdf.git", package = "netcdf-sys" }
+nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main" }
 arrow = { workspace=true }
 anyhow = { workspace=true }
 tempfile = { workspace=true}

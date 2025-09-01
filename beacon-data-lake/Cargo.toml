@@ -1,0 +1,38 @@
+[package]
+name = "beacon-data-lake"
+version = "1.2.0"
+edition = "2024"
+
+[dependencies]
+arrow = { workspace = true }
+datafusion = { version = "49.0.0" }
+geoarrow = { workspace = true }
+geoarrow-array = { workspace = true }
+geoparquet = { workspace = true }
+parquet = { version = "^55"}
+
+object_store = { version = "0.12.3", features = ["aws"] }
+url = "2.5.4"
+glob = "0.3.3"
+chrono = { version = "0.4.41"}
+tempfile = "3.15.0"
+
+
+typetag =  { workspace=true}
+async-trait = { workspace=true}
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+
+indexmap = { workspace = true }
+
+utoipa = { workspace=true}
+
+
+beacon-config = { path = "../beacon-config" }
+beacon-formats = { path = "../beacon-formats" }

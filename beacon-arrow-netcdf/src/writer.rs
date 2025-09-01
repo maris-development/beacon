@@ -1,9 +1,7 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     marker::PhantomData,
     path::{Path, PathBuf},
-    rc::Rc,
     sync::Arc,
 };
 
@@ -16,11 +14,7 @@ use arrow::{
 };
 use tempfile::SpooledTempFile;
 
-use crate::{
-    encoders::{Encoder, EncoderError},
-    error::ArrowNetCDFError,
-    NcResult,
-};
+use crate::{encoders::Encoder, error::ArrowNetCDFError, NcResult};
 
 pub struct Writer<E: Encoder> {
     encoder: E,
@@ -45,7 +39,7 @@ impl<E: Encoder> Writer<E> {
     ) -> NcResult<()> {
         self.encoder
             .write_record_batch(record_batch)
-            .map_err(|e| ArrowNetCDFError::EncoderError(e))?;
+            .map_err(ArrowNetCDFError::EncoderError)?;
 
         Ok(())
     }
@@ -71,7 +65,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         Ok(Self {
             path,
             writer,
-            fixed_string_sizes: fixed_string_sizes,
+            fixed_string_sizes,
             encoder: PhantomData,
         })
     }
@@ -177,8 +171,7 @@ fn string_array_to_fixed_binary(
 
 #[cfg(test)]
 mod tests {
-    use arrow::{array::Int32Array, datatypes::Schema};
-    use tempfile::{tempfile, NamedTempFile};
+    use arrow::datatypes::Schema;
 
     use super::*;
 

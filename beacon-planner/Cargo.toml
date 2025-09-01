@@ -1,6 +1,6 @@
 [package]
 name = "beacon-planner"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 
 [dependencies]
@@ -14,10 +14,9 @@ anyhow = { workspace=true}
 parking_lot = { workspace = true}
 geojson = "0.24.2"
 uuid = { version = "1.16.0", features = ["serde"] }
-chrono = { version = "=0.4.38", features = ["serde"] }
+chrono = { workspace = true}
 
-beacon-sources = { path = "../beacon-sources" }
-beacon-output = { path = "../beacon-output" }
 beacon-config = { path = "../beacon-config" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-query = { path = "../beacon-query" }
+beacon-data-lake = { path = "../beacon-data-lake" }

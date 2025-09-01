@@ -1,6 +1,6 @@
 [package]
 name = "beacon-core"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 
 [dependencies]
@@ -27,15 +27,13 @@ uuid = "1.16.0"
 inventory = "0.3.18"
 pathdiff = "0.2.3"
 
-nd-arrow-array = { git = "https://github.com/robinskil/nd-arrow-array.git", branch = "main" }
 tracing = { workspace=true}
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
-beacon-sources = { path = "../beacon-sources" }
-beacon-output = { path = "../beacon-output" }
 beacon-query = { path = "../beacon-query" }
 beacon-functions = { path = "../beacon-functions" }
-beacon-tables = { path = "../beacon-tables" }
 beacon-planner = { path = "../beacon-planner" }
+beacon-data-lake = { path = "../beacon-data-lake" }
+beacon-formats = { path = "../beacon-formats" }

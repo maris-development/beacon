@@ -1,5 +1,5 @@
 use core::panic;
-use std::sync::Arc;
+use std::{sync::Arc, thread::sleep};
 
 use axum::{
     body::Body,
@@ -192,6 +192,24 @@ pub(crate) async fn query(
             Err((StatusCode::BAD_REQUEST, Json(err.to_string())))
         }
     }
+}
+
+#[tracing::instrument(level = "info")]
+#[utoipa::path(
+    tag = "query",
+    post,
+    path = "/api/parse-query",
+    responses(
+        (status=200, description="Valid Query"),
+    ),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn parse_query(Json(query_obj): Json<Query>) -> StatusCode {
+    StatusCode::OK
 }
 
 #[tracing::instrument(level = "info", skip(state))]

@@ -6,6 +6,7 @@ use object_store::local::LocalFileSystem;
 
 #[derive(Debug, Envconfig)]
 pub struct Config {
+    // Server settings
     #[envconfig(from = "BEACON_ADMIN_USERNAME", default = "beacon-admin")]
     pub admin_username: String,
     #[envconfig(from = "BEACON_ADMIN_PASSWORD", default = "beacon-password")]
@@ -16,7 +17,8 @@ pub struct Config {
     pub host: String,
     #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
     pub log_level: String,
-    //Memory size in MB
+
+    //VM Settings
     #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "4096")]
     pub vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
@@ -29,9 +31,24 @@ pub struct Config {
     pub st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     pub worker_threads: usize,
+
+    // S3 Settings
+    #[envconfig(from = "BEACON_S3_ENDPOINT")]
+    pub s3_endpoint: Option<String>,
+    #[envconfig(from = "BEACON_S3_REGION")]
+    pub s3_region: Option<String>,
+    #[envconfig(from = "BEACON_S3_BUCKET")]
+    pub s3_bucket: Option<String>,
+    #[envconfig(from = "BEACON_S3_ACCESS_KEY_ID")]
+    pub s3_access_key_id: Option<String>,
+    #[envconfig(from = "BEACON_S3_SECRET_ACCESS_KEY")]
+    pub s3_secret_access_key: Option<String>,
+    #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
+    pub s3_data_lake: bool,
+
+    // Others
     #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
     pub enable_sys_info: bool,
-
     /// CORS CONFIG
     #[envconfig(
         from = "BEACON_CORS_ALLOWED_METHODS",
