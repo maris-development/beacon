@@ -146,7 +146,7 @@ impl NetCDFArrowReader {
 }
 
 macro_rules! create_netcdf_ndarray {
-    ($var:ident, $t:ty, $inner_variant:ident) => {{
+    ($var:ident, $t:ty, $inner_variant:ident, $as_ref:ident) => {{
         let array = $var.get::<$t, _>(Extents::All)?;
         let dims = $var
             .dimensions()
@@ -156,7 +156,12 @@ macro_rules! create_netcdf_ndarray {
                 size: d.len(),
             })
             .collect::<Vec<_>>();
-        let fill_value = $var.fill_value::<$t>()?;
+        let mut fill_value = $var.fill_value::<$t>()?;
+
+        if fill_value.is_none() {
+            fill_value = read_fill_value_attribute(&$var)?.and_then(|fv| fv.$as_ref())
+        }
+
         let base = NetCDFNdArrayBase::<$t> {
             inner: array,
             fill_value,
@@ -181,34 +186,34 @@ pub fn read_variable(variable: &Variable) -> NcResult<NetCDFNdArray> {
 
     match variable.vartype() {
         netcdf::types::NcVariableType::Int(IntType::I8) => {
-            create_netcdf_ndarray!(variable, i8, I8)
+            create_netcdf_ndarray!(variable, i8, I8, as_i8)
         }
         netcdf::types::NcVariableType::Int(IntType::I16) => {
-            create_netcdf_ndarray!(variable, i16, I16)
+            create_netcdf_ndarray!(variable, i16, I16, as_i16)
         }
         netcdf::types::NcVariableType::Int(IntType::I32) => {
-            create_netcdf_ndarray!(variable, i32, I32)
+            create_netcdf_ndarray!(variable, i32, I32, as_i32)
         }
         netcdf::types::NcVariableType::Int(IntType::I64) => {
-            create_netcdf_ndarray!(variable, i64, I64)
+            create_netcdf_ndarray!(variable, i64, I64, as_i64)
         }
         netcdf::types::NcVariableType::Int(IntType::U8) => {
-            create_netcdf_ndarray!(variable, u8, U8)
+            create_netcdf_ndarray!(variable, u8, U8, as_u8)
         }
         netcdf::types::NcVariableType::Int(IntType::U16) => {
-            create_netcdf_ndarray!(variable, u16, U16)
+            create_netcdf_ndarray!(variable, u16, U16, as_u16)
         }
         netcdf::types::NcVariableType::Int(IntType::U32) => {
-            create_netcdf_ndarray!(variable, u32, U32)
+            create_netcdf_ndarray!(variable, u32, U32, as_u32)
         }
         netcdf::types::NcVariableType::Int(IntType::U64) => {
-            create_netcdf_ndarray!(variable, u64, U64)
+            create_netcdf_ndarray!(variable, u64, U64, as_u64)
         }
         netcdf::types::NcVariableType::Float(FloatType::F32) => {
-            create_netcdf_ndarray!(variable, f32, F32)
+            create_netcdf_ndarray!(variable, f32, F32, as_f32)
         }
         netcdf::types::NcVariableType::Float(FloatType::F64) => {
-            create_netcdf_ndarray!(variable, f64, F64)
+            create_netcdf_ndarray!(variable, f64, F64, as_f64)
         }
         netcdf::types::NcVariableType::Char => {
             // NcChar is both a value itself or possibly a fixed size string
@@ -245,7 +250,7 @@ pub fn read_variable(variable: &Variable) -> NcResult<NetCDFNdArray> {
                     });
                 }
             }
-            create_netcdf_ndarray!(variable, NcChar, Char)
+            create_netcdf_ndarray!(variable, NcChar, Char, as_nc_char)
         }
         nctype => Err(ArrowNetCDFError::UnsupportedNetCDFDataType(nctype)),
     }
@@ -362,6 +367,121 @@ pub fn variable_attribute(
     let attr = variable.attribute(attribute_name);
     match attr {
         Some(attr) => attribute_to_nd_array(&attr).map(Some),
+        None => Ok(None),
+    }
+}
+
+enum FillValueAttr {
+    I8(i8),
+    U8(u8),
+    I16(i16),
+    U16(u16),
+    I32(i32),
+    U32(u32),
+    I64(i64),
+    U64(u64),
+    F32(f32),
+    F64(f64),
+    String(String),
+}
+
+impl FillValueAttr {
+    fn as_nc_char(&self) -> Option<NcChar> {
+        match self {
+            FillValueAttr::U8(value) => Some(NcChar(*value)),
+            FillValueAttr::String(value) if value.len() == 1 => Some(NcChar(value.as_bytes()[0])),
+            _ => None,
+        }
+    }
+
+    fn as_i8(&self) -> Option<i8> {
+        match self {
+            FillValueAttr::I8(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_u8(&self) -> Option<u8> {
+        match self {
+            FillValueAttr::U8(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_i16(&self) -> Option<i16> {
+        match self {
+            FillValueAttr::I16(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_u16(&self) -> Option<u16> {
+        match self {
+            FillValueAttr::U16(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_i32(&self) -> Option<i32> {
+        match self {
+            FillValueAttr::I32(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_u32(&self) -> Option<u32> {
+        match self {
+            FillValueAttr::U32(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            FillValueAttr::I64(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_u64(&self) -> Option<u64> {
+        match self {
+            FillValueAttr::U64(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_f32(&self) -> Option<f32> {
+        match self {
+            FillValueAttr::F32(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            FillValueAttr::F64(value) => Some(*value),
+            _ => None,
+        }
+    }
+    fn as_string(&self) -> Option<&str> {
+        match self {
+            FillValueAttr::String(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+}
+
+pub fn read_fill_value_attribute(variable: &Variable) -> NcResult<Option<FillValueAttr>> {
+    let attr = variable.attribute("_FillValue");
+    match attr {
+        Some(attr) => {
+            let value = attr.value()?;
+            match value {
+                netcdf::AttributeValue::Uchar(u8) => Ok(Some(FillValueAttr::U8(u8))),
+                netcdf::AttributeValue::Schar(i8) => Ok(Some(FillValueAttr::I8(i8))),
+                netcdf::AttributeValue::Ushort(u16) => Ok(Some(FillValueAttr::U16(u16))),
+                netcdf::AttributeValue::Short(i16) => Ok(Some(FillValueAttr::I16(i16))),
+                netcdf::AttributeValue::Uint(u32) => Ok(Some(FillValueAttr::U32(u32))),
+                netcdf::AttributeValue::Int(i32) => Ok(Some(FillValueAttr::I32(i32))),
+                netcdf::AttributeValue::Ulonglong(u64) => Ok(Some(FillValueAttr::U64(u64))),
+                netcdf::AttributeValue::Longlong(i64) => Ok(Some(FillValueAttr::I64(i64))),
+                netcdf::AttributeValue::Float(f32) => Ok(Some(FillValueAttr::F32(f32))),
+                netcdf::AttributeValue::Double(f64) => Ok(Some(FillValueAttr::F64(f64))),
+                netcdf::AttributeValue::Str(string) => Ok(Some(FillValueAttr::String(string))),
+                _type => panic!("Unsupported _FillValue type: {_type:?}"),
+            }
+        }
         None => Ok(None),
     }
 }
