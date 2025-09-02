@@ -107,7 +107,11 @@ impl NetCDFNdArray {
             }
             NetCDFNdArrayInner::FixedStringSize(array_base) => {
                 let mut builder = StringBuilder::new();
-                fixed_sized_string_ndarray_to_arrow(array_base.inner.view(), &mut builder);
+                fixed_sized_string_ndarray_to_arrow(
+                    array_base.inner.view(),
+                    &mut builder,
+                    array_base.fill_value,
+                );
                 Arc::new(builder.finish())
             }
             NetCDFNdArrayInner::String(array_base) => {
@@ -134,7 +138,14 @@ fn char_to_arrow<'a>(
         if *c == fill_value.unwrap_or(NcChar(0)) {
             builder.append_null();
         } else {
-            builder.append_value(String::from_utf8_lossy(&[c.0]));
+            let buffer = &[c.0];
+            let value = String::from_utf8_lossy(buffer);
+            if let Some(fill_value) = fill_value {
+                // Remove the u8 from the value
+                builder.append_value(value.trim_end_matches(fill_value.0 as char));
+            } else {
+                builder.append_value(value);
+            }
         }
     });
 }
@@ -142,6 +153,7 @@ fn char_to_arrow<'a>(
 fn fixed_sized_string_ndarray_to_arrow<'a>(
     array: ArrayViewD<'a, NcChar>,
     builder: &mut StringBuilder,
+    fill_value: Option<NcChar>,
 ) {
     let ndim = array.ndim();
 
@@ -155,7 +167,13 @@ fn fixed_sized_string_ndarray_to_arrow<'a>(
         if string.is_empty() {
             builder.append_null();
         } else {
-            builder.append_value(string); // Zero-copy string slice
+            // Remove trailing white space from string
+            let string = string.trim_end();
+            if let Some(fill_value) = fill_value {
+                builder.append_value(string.trim_end_matches(fill_value.0 as char));
+            } else {
+                builder.append_value(string); // Zero-copy string slice
+            }
         }
         return;
     }
@@ -172,7 +190,13 @@ fn fixed_sized_string_ndarray_to_arrow<'a>(
             if string.is_empty() {
                 builder.append_null();
             } else {
-                builder.append_value(string); // Zero-copy string slice
+                // Remove trailing white space from string
+                let string = string.trim_end();
+                if let Some(fill_value) = fill_value {
+                    builder.append_value(string.trim_end_matches(fill_value.0 as char));
+                } else {
+                    builder.append_value(string); // Zero-copy string slice
+                }
             }
         }
         return;
@@ -180,7 +204,7 @@ fn fixed_sized_string_ndarray_to_arrow<'a>(
 
     // Recursive case: Process higher dimensions
     for sub_array in array.axis_iter(Axis(0)) {
-        fixed_sized_string_ndarray_to_arrow(sub_array, builder);
+        fixed_sized_string_ndarray_to_arrow(sub_array, builder, fill_value);
     }
 }
 
