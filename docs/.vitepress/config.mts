@@ -599,7 +599,7 @@ export default defineConfig({
               link: '/docs/changelog'
             },
             {
-              text: '1.2.0 (latest)',
+              text: '1.0.1',
               link: '/docs/changelog'
             },
           ]
