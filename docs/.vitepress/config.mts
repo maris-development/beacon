@@ -392,7 +392,7 @@ export default defineConfig({
                   link: '/docs/1.2.0-install/beacon-binary-format/',
                 },
                 {
-                  text: 'How to use',
+                  text: 'How to use (toolbox)',
                   link: '/docs/1.2.0-install/beacon-binary-format/how-to-use',
                 },
               ]
@@ -550,10 +550,6 @@ export default defineConfig({
                   link: '/docs/1.2.0/query-docs/querying/introduction'
                 },
                 {
-                  text: 'Querying with SQL',
-                  link: '/docs/1.2.0/query-docs/querying/sql'
-                },
-                {
                   text: 'Querying with JSON',
                   link: '/docs/1.2.0/query-docs/querying/json',
                   items: [
@@ -603,7 +599,7 @@ export default defineConfig({
               link: '/docs/changelog'
             },
             {
-              text: '1.0.1',
+              text: '1.2.0 (latest)',
               link: '/docs/changelog'
             },
           ]
