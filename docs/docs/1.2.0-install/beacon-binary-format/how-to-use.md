@@ -5,6 +5,10 @@ The easiest way to use the Beacon Binary Format is to leverage the provided comm
 To get started, you can download the beacon-binary-format-toolbox from the official repository.
 This is a command-line tool that simplifies the process of working with the Beacon Binary Format and is supported on Windows and Linux.
 
+Once you have created a .bbf (binary binary format) file, just simply store it inside the datasets directory (or s3 bucket when using cloud storage) and beacon can use it for various operations immediately.
+
+BBF files can also be used when creating data collections just as any other supported data format by Beacon. This means you can combine different .bbf files to create one huge data collection which can be queried seamlessly via a single table name.
+
 ## Installation
 
 To install the `beacon-binary-format-toolbox`, follow these steps:
