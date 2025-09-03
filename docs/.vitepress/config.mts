@@ -20,7 +20,12 @@ export default defineConfig({
       {
         text: 'How to install', items: [
           {
-            text: '1.0.1 (latest)',
+            text: '1.2.0 (latest)',
+            link: '/docs/1.2.0-install/',
+            activeMatch: '/docs/1.2.0-install/'
+          },
+          {
+            text: '1.0.1',
             link: '/docs/1.0.1-install/',
             activeMatch: '/docs/1.0.1-install/'
           },
@@ -29,7 +34,12 @@ export default defineConfig({
       {
         text: 'Query docs', items: [
           {
-            text: '1.0.1 (latest)',
+            text: '1.2.0 (latest)',
+            link: '/docs/1.2.0/query-docs/data-lake',
+            activeMatch: '/docs/1.2.0/query-docs/'
+          },
+          {
+            text: '1.0.1',
             link: '/docs/1.0.1/query-docs/data-lake',
             activeMatch: '/docs/1.0.1/query-docs/'
           }
@@ -242,6 +252,166 @@ export default defineConfig({
           ]
         }
       ],
+      '/docs/1.2.0-install': [
+        {
+          text: 'Installation Docs (1.2.0)',
+          items: [
+            {
+              text: 'Installation',
+              link: '/docs/1.2.0-install/',
+              collapsed: true,
+              items: [
+                {
+                  text: 'Docker',
+                  link: '/docs/1.2.0-install#deploy-using-docker-compose'
+                },
+                {
+                  text: 'Verify the installation',
+                  link: '/docs/1.2.0-install#verify-the-installation'
+                },
+                {
+                  text: 'Troubleshooting',
+                  link: '/docs/1.2.0-install#troubleshooting'
+                },
+              ]
+            },
+            {
+              text: 'Getting started',
+              link: '/docs/1.2.0-install/getting-started',
+              items: [
+                {
+                  text: 'Local File System',
+                  link: '/docs/1.2.0-install/getting-started#local-file-system-example',
+                },
+                {
+                  text: 'Cloud Storage (MinIO)',
+                  link: '/docs/1.2.0-install/getting-started#cloud-storage-example-minio',
+                },
+              ]
+            },
+            {
+              text: 'Configuration',
+              link: '/docs/1.2.0-install/configuration'
+            },
+            {
+              text: 'Data Lake Setup',
+              link: '/docs/1.2.0-install/data-lake/introduction',
+              items: [
+                {
+                  text: 'Introduction',
+                  link: '/docs/1.2.0-install/data-lake/introduction',
+                },
+                {
+                  text: 'Datasets',
+                  link: '/docs/1.2.0-install/data-lake/datasets',
+                  collapsed: true,
+                  items: [
+                    {
+                      text: 'File Formats',
+                      collapsed: true,
+                      items: [
+                        {
+                          text: 'NetCDF',
+                          link: '/docs/1.2.0-install/data-lake/datasets#netcdf'
+                        },
+                        {
+                          text: 'ODV ASCII',
+                          link: '/docs/1.2.0-install/data-lake/datasets#odv-ascii'
+                        },
+                        {
+                          text: 'Parquet',
+                          link: '/docs/1.2.0-install/data-lake/datasets#parquet'
+                        },
+                        {
+                          text: 'CSV',
+                          link: '/docs/1.2.0-install/data-lake/datasets#csv'
+                        },
+                        {
+                          text: 'Arrow IPC',
+                          link: '/docs/1.2.0-install/data-lake/datasets#arrow-ipc'
+                        },
+                        {
+                          text: 'Beacon Binary Format',
+                          link: '/docs/1.2.0-install/data-lake/datasets#beacon-binary-format'
+                        },
+                      ]
+                    },
+                    {
+                      text: 'Managing Datasets',
+                      link: '/docs/1.2.0-install/data-lake/datasets#managing-datasets',
+                    },
+                    {
+                      text: 'Exploring Datasets',
+                      link: '/docs/1.2.0-install/data-lake/datasets#exploring-datasets',
+                    }
+                  ]
+                },
+                {
+                  text: 'Data Tables',
+                  link: '/docs/1.2.0-install/data-lake/data-tables',
+                  collapsed: true,
+                  items: [
+                    {
+                      text: 'Logical Data Tables',
+                      link: '/docs/1.2.0-install/data-lake/data-tables#logical-data-tables'
+                    },
+                    {
+                      text: 'Preset Data Tables',
+                      link: '/docs/1.2.0-install/data-lake/data-tables#preset-data-tables'
+                    },
+                    {
+                      text: 'Geo-Spatial Data Tables',
+                      link: '/docs/1.2.0-install/data-lake/data-tables#geo-spatial-data-tables'
+                    }
+                  ]
+                },
+              ]
+            },
+            {
+              text: 'Tuning for performance',
+              link: '/docs/1.2.0-install/performance',
+              collapsed: true,
+              items: [
+                {
+                  text: 'NetCDF',
+                  link: '/docs/1.2.0-install/performance/netcdf'
+                },
+                {
+                  text: 'Analyze Query Plan',
+                  link: '/docs/1.2.0-install/performance/analyze-query'
+                }
+              ]
+            },
+            {
+              text: 'Beacon Binary Format',
+              link: '/docs/1.2.0-install/beacon-binary-format/',
+              collapsed: true,
+              items: [
+                {
+                  text: 'About',
+                  link: '/docs/1.2.0-install/beacon-binary-format/',
+                },
+                {
+                  text: 'How to use',
+                  link: '/docs/1.2.0-install/beacon-binary-format/how-to-use',
+                },
+              ]
+            },
+            {
+              text: 'Releases',
+              link: '/docs/1.2.0-install/releases'
+            },
+            {
+              text: 'Hardware Recommendations',
+              link: '/docs/1.2.0-install/recommendations/hardware'
+            },
+            {
+              text: 'Support',
+              link: '/docs/1.2.0-install/support'
+            }
+          ]
+        }
+      ],
       '/docs/1.0.1/query-docs/': [
         {
           text: 'Query Docs (1.0.1)',
@@ -328,12 +498,112 @@ export default defineConfig({
           ]
         }
       ],
+      '/docs/1.2.0/query-docs/': [
+        {
+          text: 'Query Docs (1.2.0)',
+          items: [
+            {
+              text: 'Data Lake',
+              link: '/docs/1.2.0/query-docs/data-lake#introduction-beacon-data-lake',
+              items: [
+                {
+                  text: 'Introduction',
+                  link: '/docs/1.2.0/query-docs/data-lake#introduction-beacon-data-lake',
+                },
+                {
+                  text: 'Datasets',
+                  link: '/docs/1.2.0/query-docs/data-lake#datasets'
+                },
+                {
+                  text: 'Data Tables',
+                  link: '/docs/1.2.0/query-docs/data-lake#data-tables'
+                }
+              ]
+            },
+            {
+              text: 'Getting Started',
+              link: '/docs/1.2.0/query-docs/getting-started#python',
+              items: [
+                {
+                  text: 'Python',
+                  link: '/docs/1.2.0/query-docs/getting-started#python'
+                },
+                {
+                  text: 'Rest API',
+                  link: '/docs/1.2.0/query-docs/getting-started#rest-api'
+                },
+              ]
+            },
+            {
+              text: 'Exploring the Data Lake',
+              link: '/docs/1.2.0/query-docs/exploring-data-lake',
+              items: [
+
+              ]
+            },
+            {
+              text: 'Querying API',
+              link: '/docs/1.2.0/query-docs/querying/introduction',
+              items: [
+                {
+                  text: 'Introduction',
+                  link: '/docs/1.2.0/query-docs/querying/introduction'
+                },
+                {
+                  text: 'Querying with SQL',
+                  link: '/docs/1.2.0/query-docs/querying/sql'
+                },
+                {
+                  text: 'Querying with JSON',
+                  link: '/docs/1.2.0/query-docs/querying/json',
+                  items: [
+                    {
+                      text: 'Selecting Columns',
+                      link: '/docs/1.2.0/query-docs/querying/json#query-parameters'
+                    },
+                    {
+                      text: 'From',
+                      link: '/docs/1.2.0/query-docs/querying/json#from'
+                    },
+                    {
+                      text: 'Filtering',
+                      link: '/docs/1.2.0/query-docs/querying/json#filters'
+                    },
+                    {
+                      text: 'Output',
+                      link: '/docs/1.2.0/query-docs/querying/json#output-format'
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              text: 'Query Libraries',
+              link: '/docs/1.2.0/query-docs/libraries/python',
+              items: [
+                {
+                  text: 'Python',
+                  link: '/docs/1.2.0/query-docs/libraries/python'
+                }
+              ]
+            },
+            {
+              text: 'Studio (Web UI)',
+              link: '/docs/1.2.0/query-docs/web-ui',
+            },
+          ]
+        }
+      ],
       '/docs/changelog': [
         {
           text: 'Changelog',
           items: [
             {
-              text: '1.0.1 (latest)',
+              text: '1.2.0 (latest)',
+              link: '/docs/changelog'
+            },
+            {
+              text: '1.0.1',
               link: '/docs/changelog'
             },
           ]
