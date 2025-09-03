@@ -1,1 +1,1 @@
-# Beacon 1.0.0
+# Beacon 1.2.0
