@@ -16,3 +16,4 @@ ndarray = "0.16.1"
 hifitime = "4.0.2"
 regex = "1.11.1"
 num-traits = "0.2.19"
+tracing = { workspace = true }

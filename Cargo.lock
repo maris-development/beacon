@@ -547,6 +547,7 @@ dependencies = [
  "regex",
  "tempfile",
  "thiserror 2.0.15",
+ "tracing",
 ]
 
 [[package]]

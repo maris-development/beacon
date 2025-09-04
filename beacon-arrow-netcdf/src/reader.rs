@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use arrow::{array::RecordBatch, error::ArrowError};
+use arrow::array::RecordBatch;
 use nd_arrow_array::NdArrowArray;
 use ndarray::{ArrayBase, ArrayD};
 use netcdf::{
@@ -65,7 +65,12 @@ impl NetCDFArrowReader {
                     let attr_name = parts[1];
                     let attr_value = global_attribute(&self.file, attr_name)?
                         .expect("Attribute not found but was in schema.");
-                    columns.insert(field.clone(), attr_value.into_nd_arrow_array().unwrap());
+                    columns.insert(
+                        field.clone(),
+                        attr_value
+                            .into_nd_arrow_array()
+                            .map_err(ArrowNetCDFError::NdArrowError)?,
+                    );
                 } else {
                     //Variable attribute
                     let variable = self
@@ -77,7 +82,7 @@ impl NetCDFArrowReader {
                         variable_attribute(&variable, parts[1])?
                             .expect("Attribute not found but was in schema.")
                             .into_nd_arrow_array()
-                            .unwrap(),
+                            .map_err(ArrowNetCDFError::NdArrowError)?,
                     );
                 }
             } else {
@@ -87,7 +92,12 @@ impl NetCDFArrowReader {
                     .expect("Variable not found but was in schema.");
                 let array = read_variable(&variable)
                     .map_err(|e| ArrowNetCDFError::VariableReadError(Box::new(e)))?;
-                columns.insert(field.clone(), array.into_nd_arrow_array().unwrap());
+                columns.insert(
+                    field.clone(),
+                    array
+                        .into_nd_arrow_array()
+                        .map_err(ArrowNetCDFError::NdArrowError)?,
+                );
             }
         }
 
@@ -99,7 +109,9 @@ impl NetCDFArrowReader {
         }
 
         let nd_batch = nd_arrow_array::batch::NdRecordBatch::new(fields, arrays).unwrap();
-        let record_batch = nd_batch.to_arrow_record_batch().unwrap();
+        let record_batch = nd_batch
+            .to_arrow_record_batch()
+            .map_err(ArrowNetCDFError::NdArrowError)?;
 
         Ok(record_batch)
     }
@@ -270,11 +282,20 @@ pub fn global_attribute(
 pub fn arrow_schema(nc_file: &netcdf::File) -> NcResult<arrow::datatypes::Schema> {
     let mut fields = vec![];
     for variable in nc_file.variables() {
-        let field = variable_as_arrow_field(&variable)?;
-        fields.push(field);
-
-        let attr_fields = variable_attributes_as_arrow_fields(&variable);
-        fields.extend(attr_fields);
+        match variable_as_arrow_field(&variable) {
+            Ok(field) => {
+                fields.push(field);
+                let attr_fields = variable_attributes_as_arrow_fields(&variable);
+                fields.extend(attr_fields);
+            }
+            Err(err) => {
+                tracing::debug!(
+                    "Skipping unsupported variable '{}': {}",
+                    variable.name(),
+                    err
+                );
+            }
+        }
     }
 
     let global_attr_fields = global_attributes_as_arrow_fields(nc_file);
@@ -462,7 +483,7 @@ impl FillValueAttr {
     }
 }
 
-pub fn read_fill_value_attribute(variable: &Variable) -> NcResult<Option<FillValueAttr>> {
+fn read_fill_value_attribute(variable: &Variable) -> NcResult<Option<FillValueAttr>> {
     let attr = variable.attribute("_FillValue");
     match attr {
         Some(attr) => {
@@ -479,7 +500,7 @@ pub fn read_fill_value_attribute(variable: &Variable) -> NcResult<Option<FillVal
                 netcdf::AttributeValue::Float(f32) => Ok(Some(FillValueAttr::F32(f32))),
                 netcdf::AttributeValue::Double(f64) => Ok(Some(FillValueAttr::F64(f64))),
                 netcdf::AttributeValue::Str(string) => Ok(Some(FillValueAttr::String(string))),
-                _type => panic!("Unsupported _FillValue type: {_type:?}"),
+                _type => Err(ArrowNetCDFError::UnsupportedAttributeValueType(_type)),
             }
         }
         None => Ok(None),

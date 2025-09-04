@@ -6,6 +6,8 @@ use crate::encoders::EncoderError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArrowNetCDFError {
+    #[error("Nd Arrow error: {0}")]
+    NdArrowError(nd_arrow_array::error::NdArrayError),
     #[error("Internal NetCDF error: {0}")]
     NetCDFError(#[from] netcdf::Error),
     #[error("Failed to translate NetCDF to Arrow Schema: {0}")]
