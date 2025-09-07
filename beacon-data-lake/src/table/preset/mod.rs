@@ -3,11 +3,11 @@ use std::{any::Any, collections::HashMap, sync::Arc};
 use arrow::datatypes::SchemaRef;
 use chrono::NaiveDateTime;
 use datafusion::{
-    catalog::{Session, TableProvider},
+    catalog::{Session, TableProvider, memory::DataSourceExec},
     common::{Column, DFSchema},
     execution::object_store::ObjectStoreUrl,
     logical_expr::TableProviderFilterPushDown,
-    physical_expr::create_physical_expr,
+    physical_expr::{create_physical_expr, create_physical_exprs},
     physical_plan::{ExecutionPlan, projection::ProjectionExec},
     prelude::{Expr, SessionContext},
 };
@@ -270,9 +270,46 @@ impl TableProvider for PresetTableProvider {
             }
         }
 
-        let with_aliases = ProjectionExec::try_new(proj_exprs, scan)?;
+        let phys_pushdown_filters = create_physical_exprs(alias_exprs.iter(), &df_schema, props);
 
-        Ok(Arc::new(with_aliases))
+        match phys_pushdown_filters {
+            Ok(exprs) if !exprs.is_empty() => {
+                tracing::debug!("Pushdown filters: {:?}", exprs);
+
+                if let Some(dse) = scan.as_any().downcast_ref::<DataSourceExec>() {
+                    let file_source = dse.data_source().clone();
+                    match file_source.try_pushdown_filters(exprs, state.config_options()) {
+                        Ok(pushdown_res) => {
+                            if let Some(updated_node) = pushdown_res.updated_node {
+                                tracing::debug!(
+                                    "Pushdown filters updated node: {:?}",
+                                    updated_node
+                                );
+                                return Ok(Arc::new(ProjectionExec::try_new(
+                                    proj_exprs,
+                                    Arc::new(dse.clone().with_data_source(updated_node)),
+                                )?));
+                            }
+                            tracing::debug!("Pushdown filters did not update the node");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Error during pushdown filter: {}", e);
+                        }
+                    }
+                }
+
+                Ok(Arc::new(ProjectionExec::try_new(proj_exprs, scan)?))
+            }
+            Ok(_) | Err(_) => {
+                if let Err(e) = &phys_pushdown_filters {
+                    tracing::warn!(
+                        "Error creating physical expressions for pushdown filters: {}",
+                        e
+                    );
+                }
+                Ok(Arc::new(ProjectionExec::try_new(proj_exprs, scan)?))
+            }
+        }
     }
 
     fn supports_filters_pushdown(
