@@ -66,6 +66,16 @@ pub struct OdvOptions {
     pub archiving: ArchivingMethod,
     #[serde(default)]
     pub feature_type_column: Option<String>,
+    #[serde(default)]
+    pub compression: CompressionType,
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub enum CompressionType {
+    Stored,
+    #[default]
+    Deflate,
+    Zstd,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -268,6 +278,7 @@ impl Default for OdvOptions {
             meta_columns: vec![],
             archiving: ArchivingMethod::default(),
             feature_type_column: None,
+            compression: CompressionType::default(),
         }
     }
 }
@@ -279,6 +290,8 @@ impl Default for OdvOptions {
 pub struct AsyncOdvWriter<W: AsyncWrite + Unpin + Send> {
     /// Configuration options for ODV output
     options: OdvOptions,
+    /// Compression settings for ODV output
+    compression: async_zip::Compression,
     /// File for writing records that cannot be clearly classified
     error_file: OdvFile<Error, File>,
     /// File for writing time series data
@@ -317,6 +330,12 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
             input_schema.clone(),
         )?;
 
+        let compression = match options.compression {
+            CompressionType::Stored => async_zip::Compression::Stored,
+            CompressionType::Deflate => async_zip::Compression::Deflate,
+            CompressionType::Zstd => async_zip::Compression::Zstd,
+        };
+
         Ok(Self {
             options,
             error_file,
@@ -324,6 +343,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
             profile_file,
             trajectory_file,
             zip_file_writer,
+            compression,
         })
     }
 
@@ -344,10 +364,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
 
         let mut profile_writer = self
             .zip_file_writer
-            .write_entry_stream(ZipEntryBuilder::new(
-                "profile.txt".into(),
-                async_zip::Compression::Zstd,
-            ))
+            .write_entry_stream(ZipEntryBuilder::new("profile.txt".into(), self.compression))
             .await?;
         futures::io::copy(profiles, &mut profile_writer).await?;
         profile_writer.close().await?;
@@ -356,7 +373,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
             .zip_file_writer
             .write_entry_stream(ZipEntryBuilder::new(
                 "timeseries.txt".into(),
-                async_zip::Compression::Zstd,
+                self.compression,
             ))
             .await?;
         futures::io::copy(timeseries, &mut timeseries_writer).await?;
@@ -366,7 +383,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
             .zip_file_writer
             .write_entry_stream(ZipEntryBuilder::new(
                 "trajectories.txt".into(),
-                async_zip::Compression::Zstd,
+                self.compression,
             ))
             .await?;
         futures::io::copy(trajectories, &mut trajectories_writer).await?;
@@ -374,10 +391,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
 
         let mut errors_writer = self
             .zip_file_writer
-            .write_entry_stream(ZipEntryBuilder::new(
-                "errors.txt".into(),
-                async_zip::Compression::Zstd,
-            ))
+            .write_entry_stream(ZipEntryBuilder::new("errors.txt".into(), self.compression))
             .await?;
         futures::io::copy(errors, &mut errors_writer).await?;
         errors_writer.close().await?;
