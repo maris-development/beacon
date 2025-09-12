@@ -1006,12 +1006,7 @@ impl<T: OdvType, W: Write> OdvFile<T, W> {
                     Self::primary_data_header(
                         "time_ISO8601",
                         &options.qf_schema,
-                        &Self::arrow_to_value_type(
-                            input_schema
-                                .field_with_name(&options.time_column.column_name)
-                                .expect("")
-                                .data_type()
-                        )?,
+                        &Self::arrow_to_value_type(&arrow::datatypes::DataType::Float64)?,
                         options.time_column.comment.as_deref().unwrap_or(""),
                         "F"
                     )
@@ -1051,12 +1046,7 @@ impl<T: OdvType, W: Write> OdvFile<T, W> {
                     Self::primary_data_header(
                         "time_ISO8601",
                         &options.qf_schema,
-                        &Self::arrow_to_value_type(
-                            input_schema
-                                .field_with_name(&options.time_column.column_name)
-                                .expect("")
-                                .data_type()
-                        )?,
+                        &Self::arrow_to_value_type(&arrow::datatypes::DataType::Float64)?,
                         options.time_column.comment.as_deref().unwrap_or(""),
                         "T"
                     )
