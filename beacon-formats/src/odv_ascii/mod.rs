@@ -16,7 +16,7 @@ use beacon_arrow_odv::{
 use beacon_common::super_typing;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
-    common::{GetExt, Statistics},
+    common::{Column, DFSchema, GetExt, Statistics},
     datasource::{
         file_format::{
             FileFormat, FileFormatFactory, csv::CsvFormat,
@@ -29,11 +29,16 @@ use datafusion::{
         sink::{DataSink, DataSinkExec},
     },
     execution::{SendableRecordBatchStream, SessionState, TaskContext},
-    physical_expr::{EquivalenceProperties, LexRequirement},
+    logical_expr::SortExpr,
+    physical_expr::{
+        EquivalenceProperties, LexOrdering, LexRequirement, PhysicalSortExpr,
+        create_physical_sort_exprs,
+    },
     physical_plan::{
         DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
-        stream::RecordBatchStreamAdapter,
+        sorts::sort::SortExec, stream::RecordBatchStreamAdapter,
     },
+    prelude::Expr,
 };
 use futures::TryStreamExt;
 use futures::{AsyncWrite, AsyncWriteExt, StreamExt, future::try_join_all};
@@ -230,11 +235,35 @@ impl FileFormat for OdvFormat {
 
     async fn create_writer_physical_plan(
         &self,
-        input: Arc<dyn ExecutionPlan>,
+        mut input: Arc<dyn ExecutionPlan>,
         state: &dyn Session,
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let odv_options = self.options.clone().unwrap_or_default();
+        let entry_sort_col = odv_options.key_column.clone();
+        let time_sort_col = odv_options.time_column.column_name.clone();
+        let depth_sort_col = odv_options.depth_column.column_name.clone();
+        // Create sort exec by the sort key
+        let key_sort_expr = Expr::Column(Column::from_name(entry_sort_col)).sort(true, false);
+        let time_sort_expr = Expr::Column(Column::from_name(time_sort_col)).sort(true, false);
+        let depth_sort_expr = Expr::Column(Column::from_name(depth_sort_col)).sort(true, false);
+
+        let physical_sort_exprs = create_physical_sort_exprs(
+            &[key_sort_expr, time_sort_expr, depth_sort_expr],
+            &DFSchema::try_from(input.schema()).unwrap(),
+            state.execution_props(),
+        )?;
+
+        let lex_ordering = LexOrdering::new(physical_sort_exprs);
+        if let Some(lex_ordering) = lex_ordering {
+            input = Arc::new(SortExec::new(lex_ordering, input));
+        } else {
+            tracing::warn!(
+                "No valid sort expressions could be created for OdvSink. Data will be written in the order it is received."
+            );
+        }
+
         let object_store = state.runtime_env().object_store(&conf.object_store_url)?;
 
         let odv_sink = Arc::new(OdvSink::new(conf, self.options.clone(), object_store));
