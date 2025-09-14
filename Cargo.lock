@@ -3075,8 +3075,8 @@ dependencies = [
 
 [[package]]
 name = "nd-arrow-array"
-version = "1.2.0"
-source = "git+https://github.com/maris-development/nd-arrow-array.git?branch=main#e0cfdf85f8c60dbd1295805773a61fdfa6382e72"
+version = "1.2.2"
+source = "git+https://github.com/maris-development/nd-arrow-array.git?branch=main#ddb6a3898990771bd922d4af35cd4e4871f60b8e"
 dependencies = [
  "arrow",
  "thiserror 2.0.15",
