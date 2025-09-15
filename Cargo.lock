@@ -745,6 +745,7 @@ name = "beacon-query"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "beacon-arrow-odv",
  "beacon-config",
  "beacon-data-lake",
  "beacon-formats",
