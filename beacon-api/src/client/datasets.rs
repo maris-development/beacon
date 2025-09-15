@@ -78,8 +78,8 @@ pub(crate) async fn list_dataset_schema(
         Err(err) => {
             tracing::error!("Error listing dataset schema: {:?}", err);
             Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Error listing dataset schema".to_string(),
+                StatusCode::BAD_REQUEST,
+                err.to_string(),
             ))
         }
     }

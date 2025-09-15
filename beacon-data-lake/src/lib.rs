@@ -454,6 +454,10 @@ impl DataLake {
         file_pattern: &str,
     ) -> datafusion::error::Result<SchemaRef> {
         let session_state = self.session_context.state();
+        let object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(self.data_directory_store_url.clone())?;
         let extension = match Path::new(file_pattern).extension() {
             Some(ext) => ext.to_string_lossy().to_string(),
             None => {
@@ -465,6 +469,36 @@ impl DataLake {
         };
 
         let listing_url = self.try_create_listing_url(file_pattern.to_string())?;
+
+        let mut stream = listing_url
+            .list_all_files(&session_state, &object_store, "")
+            .await?;
+
+        if let Some(entry) = stream.next().await {
+            // Just checking for existence
+            if matches!(
+                entry,
+                Err(DataFusionError::ObjectStore(ref e))
+                    if matches!(**e, object_store::Error::NotFound { .. })
+            ) {
+                if let Err(DataFusionError::ObjectStore(ref e)) = entry {
+                    tracing::warn!("No files found for pattern: {}", file_pattern);
+                    return Err(DataFusionError::Plan(format!(
+                        "No files found for pattern: {}",
+                        file_pattern
+                    )));
+                }
+            } else if let Err(e) = entry {
+                tracing::error!("Error listing files for pattern: {} => {}", file_pattern, e);
+                return Err(DataFusionError::Plan("Error listing files".to_string()));
+            }
+        } else {
+            return Err(DataFusionError::Plan(format!(
+                "No files found for pattern: {}",
+                file_pattern
+            )));
+        }
+        drop(stream); // Drop the stream as we only wanted to check if there were any files.
 
         let file_format_factory = session_state
             .get_file_format_factory(&extension)

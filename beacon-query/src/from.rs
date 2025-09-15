@@ -24,6 +24,8 @@ use utoipa::ToSchema;
 #[serde(rename_all = "lowercase")]
 #[serde(deny_unknown_fields)]
 pub enum From {
+    #[serde(untagged)]
+    Name(String),
     /// Reference to a registered table by name.
     #[serde(untagged)]
     Table(String),
@@ -57,6 +59,47 @@ impl From {
         data_lake: &DataLake,
     ) -> datafusion::error::Result<LogicalPlanBuilder> {
         match self {
+            From::Name(name) => {
+                if session_context.table_exist(name)? {
+                    // Use a table from the data lake.
+                    tracing::info!("Using table {} from data lake", name);
+                    let table = session_context.table(name).await?;
+                    Ok(LogicalPlanBuilder::new(table.into_parts().1))
+                } else {
+                    // Table doesn't exist. So maybe it is a file path.
+                    tracing::info!("Table {} not found, trying as file path", name);
+
+                    // Try to find the file format extension from the name.
+                    let file_extension = name
+                        .rsplit('.')
+                        .next()
+                        .and_then(|ext| session_context.state().get_file_format_factory(ext));
+                    match file_extension {
+                        Some(format_factory) => {
+                            let file_format = format_factory.default();
+                            let listing_url = data_lake.try_create_listing_url(name.clone())?;
+                            let table = Arc::new(
+                                FileCollection::new(
+                                    &session_context.state(),
+                                    file_format,
+                                    vec![listing_url],
+                                )
+                                .await?,
+                            );
+
+                            Ok(LogicalPlanBuilder::scan(
+                                "tmp",
+                                provider_as_source(table),
+                                None,
+                            )?)
+                        }
+                        None => Err(datafusion::error::DataFusionError::Plan(format!(
+                            "Table {} not found and no file extension to determine format",
+                            name
+                        ))),
+                    }
+                }
+            }
             From::Table(name) => {
                 // Use a registered table.
                 let table = session_context.table(name).await?;
