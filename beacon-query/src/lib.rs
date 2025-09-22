@@ -94,6 +94,23 @@ impl Literal {
 }
 
 impl Select {
+    pub fn collect_columns(&self, columns: &mut Vec<String>) {
+        match self {
+            Select::ColumnName(name) => {
+                columns.push(name.clone());
+            }
+            Select::Column { column, .. } => {
+                columns.push(column.clone());
+            }
+            Select::Literal { .. } => {}
+            Select::Function { args, .. } => {
+                for arg in args {
+                    arg.collect_columns(columns);
+                }
+            }
+        }
+    }
+
     pub fn to_expr(&self, session_state: &SessionState) -> anyhow::Result<Expr> {
         match self {
             Select::ColumnName(name) => Ok(column_name(name)),

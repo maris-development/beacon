@@ -1,6 +1,6 @@
-use std::{any::Any, borrow::Cow, sync::Arc};
+use std::{any::Any, borrow::Cow, collections::HashSet, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::{
     catalog::{Session, TableProvider},
     common::{Constraints, Statistics},
@@ -48,6 +48,39 @@ impl FileCollection {
             .with_listing_options(listing_options)
             .with_schema(super_schema.into());
         let table = ListingTable::try_new(config)?;
+
+        Ok(Self { inner_table: table })
+    }
+
+    pub fn with_pushdown_projection(
+        &self,
+        projection: Vec<String>,
+    ) -> Result<Self, DataFusionError> {
+        let mut schema = self.inner_table.schema();
+        let options = self.inner_table.options().clone();
+        let table_paths = self.inner_table.table_paths().to_vec();
+
+        let maybe_set_projection: HashSet<String> = HashSet::from_iter(projection.iter().cloned());
+
+        if !maybe_set_projection.is_empty() {
+            // Only keep fields that are in the projection
+            let filtered_fields = schema
+                .fields()
+                .iter()
+                .filter(|f| projection.contains(f.name()))
+                .map(|f| f.as_ref().clone())
+                .collect::<Vec<_>>();
+
+            if !filtered_fields.is_empty() {
+                schema = Arc::new(Schema::new(filtered_fields));
+            }
+        }
+
+        let table_config = ListingTableConfig::new_with_multi_paths(table_paths)
+            .with_listing_options(options)
+            .with_schema(schema);
+
+        let table = ListingTable::try_new(table_config)?;
 
         Ok(Self { inner_table: table })
     }
