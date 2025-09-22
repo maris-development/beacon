@@ -10,6 +10,7 @@ use beacon_data_lake::{
 use beacon_formats::{
     arrow::ArrowFormat, csv::CsvFormat, odv_ascii::OdvFormat, parquet::ParquetFormat,
 };
+use datafusion::catalog::SchemaProvider;
 use datafusion::{
     datasource::{file_format::FileFormat, listing::ListingTableUrl, provider_as_source},
     logical_expr::{LogicalPlanBuilder, TableSource},
@@ -55,10 +56,25 @@ impl From {
         &self,
         session_context: &SessionContext,
         data_lake: &DataLake,
+        projection: Option<&Vec<String>>,
     ) -> datafusion::error::Result<LogicalPlanBuilder> {
         match self {
             From::Table(name) => {
                 // Use a registered table.
+                let table = data_lake.table(name).await?;
+                if let Some(mut table) = table {
+                    if let (Some(projection), Some(file_collection)) =
+                        (projection, table.as_any().downcast_ref::<FileCollection>())
+                    {
+                        let projected_table =
+                            file_collection.with_pushdown_projection(projection.clone())?;
+                        table = Arc::new(projected_table);
+                    }
+                    let source = provider_as_source(table);
+
+                    return LogicalPlanBuilder::scan(name, source, None);
+                }
+
                 let table = session_context.table(name).await?;
                 Ok(LogicalPlanBuilder::new(table.into_parts().1))
             }

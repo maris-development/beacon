@@ -73,11 +73,26 @@ impl Parser {
         session: &SessionContext,
         data_lake: &DataLake,
     ) -> anyhow::Result<LogicalPlan> {
-        let mut builder = query_body
-            .from
-            .unwrap_or_default()
-            .init_builder(&session, data_lake)
-            .await?;
+        let mut builder = if beacon_config::CONFIG.enable_pushdown_projection {
+            let mut all_columns = vec![];
+            for select in &query_body.select {
+                let mut select_cols = vec![];
+                select.collect_columns(&mut select_cols);
+                all_columns.extend(select_cols);
+            }
+
+            query_body
+                .from
+                .unwrap_or_default()
+                .init_builder(session, data_lake, Some(&all_columns))
+                .await?
+        } else {
+            query_body
+                .from
+                .unwrap_or_default()
+                .init_builder(session, data_lake, None)
+                .await?
+        };
 
         let session_state = session.state();
 
