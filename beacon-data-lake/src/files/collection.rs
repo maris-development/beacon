@@ -89,7 +89,7 @@ impl FileCollection {
 #[async_trait::async_trait]
 impl TableProvider for FileCollection {
     fn as_any(&self) -> &dyn Any {
-        self.inner_table.as_any()
+        self
     }
 
     fn schema(&self) -> SchemaRef {
