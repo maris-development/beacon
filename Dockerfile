@@ -36,6 +36,7 @@ COPY beacon-planner/ /beacon-planner/
 COPY beacon-query/ /beacon-query/
 COPY Cargo.toml /
 COPY Cargo.lock /
+COPY rust-toolchain /
 
 #Build the project
 RUN cargo build --release
