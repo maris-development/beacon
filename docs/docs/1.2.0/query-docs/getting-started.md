@@ -11,10 +11,15 @@ We recommend using the Beacon Python Client for interacting with the Beacon Data
 
 You can use the Beacon Python API Client to interact with the Beacon Data Lake API using Python.
 
+::: tip Documentation
+
 The documentation for the Beacon Python API Client can be found at: [https://maris-development.github.io/beacon-py/](https://maris-development.github.io/beacon-py/)
+:::
+
+::: tip Source Code
 
 The source code for the Beacon Python API Client is available on GitHub: [https://github.com/maris-development/beacon-py](https://github.com/maris-development/beacon-py)
-
+:::
 The Beacon Python API Client can be installed using pip:
 
 ```bash
