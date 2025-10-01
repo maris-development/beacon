@@ -90,7 +90,7 @@ impl NetCDFArrowReader {
                     .file
                     .variable(name)
                     .expect("Variable not found but was in schema.");
-                let array = read_variable(&variable)
+                let array = read_variable(&variable, None)
                     .map_err(|e| ArrowNetCDFError::VariableReadError(Box::new(e)))?;
                 columns.insert(
                     field.clone(),
@@ -150,7 +150,7 @@ impl NetCDFArrowReader {
                 .file
                 .variable(column_name)
                 .expect("Variable not found but was in schema.");
-            let array = read_variable(&variable)
+            let array = read_variable(&variable, None)
                 .map_err(|e| ArrowNetCDFError::VariableReadError(Box::new(e)))?;
             Ok(array.into_nd_arrow_array().unwrap())
         }
@@ -158,16 +158,19 @@ impl NetCDFArrowReader {
 }
 
 macro_rules! create_netcdf_ndarray {
-    ($var:ident, $t:ty, $inner_variant:ident, $as_ref:ident) => {{
-        let array = $var.get::<$t, _>(Extents::All)?;
-        let dims = $var
-            .dimensions()
-            .iter()
-            .map(|d| Dimension {
-                name: d.name().to_string(),
-                size: d.len(),
-            })
-            .collect::<Vec<_>>();
+    ($var:ident, $t:ty, $inner_variant:ident, $as_ref:ident, $dims:expr, $extents:expr) => {{
+        let array = $var.get::<$t, _>($extents)?;
+        let dims = if let Some(dims) = $dims {
+            dims
+        } else {
+            $var.dimensions()
+                .iter()
+                .map(|d| Dimension {
+                    name: d.name().to_string(),
+                    size: d.len(),
+                })
+                .collect::<Vec<_>>()
+        };
         let mut fill_value = $var.fill_value::<$t>()?;
 
         if fill_value.is_none() {
@@ -187,7 +190,10 @@ macro_rules! create_netcdf_ndarray {
     }};
 }
 
-pub fn read_variable(variable: &Variable) -> NcResult<NetCDFNdArray> {
+pub fn read_variable(
+    variable: &Variable,
+    mut extents_start_count: Option<(Vec<usize>, Vec<usize>)>,
+) -> NcResult<NetCDFNdArray> {
     if is_cf_time_variable(variable) {
         if let Some(array) = decode_cf_time_variable(variable)
             .map_err(|e| ArrowNetCDFError::TimeVariableReadError(Box::new(e)))?
@@ -196,41 +202,56 @@ pub fn read_variable(variable: &Variable) -> NcResult<NetCDFNdArray> {
         }
     }
 
+    let mut extents = extents_start_count
+        .clone()
+        .map(|e| e.try_into())
+        .unwrap_or(Ok(Extents::All))
+        .unwrap();
+    let mut dims = vec![];
+    for (i, dim) in variable.dimensions().iter().enumerate() {
+        match extents_start_count.as_ref() {
+            Some((_, count)) => {
+                dims.push(Dimension::new(dim.name(), count[i]));
+            }
+            None => {
+                dims.push(Dimension::new(dim.name(), dim.len()));
+            }
+        }
+    }
+
     match variable.vartype() {
         netcdf::types::NcVariableType::Int(IntType::I8) => {
-            create_netcdf_ndarray!(variable, i8, I8, as_i8)
+            create_netcdf_ndarray!(variable, i8, I8, as_i8, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Int(IntType::I16) => {
-            create_netcdf_ndarray!(variable, i16, I16, as_i16)
+            create_netcdf_ndarray!(variable, i16, I16, as_i16, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Int(IntType::I32) => {
-            create_netcdf_ndarray!(variable, i32, I32, as_i32)
+            create_netcdf_ndarray!(variable, i32, I32, as_i32, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Int(IntType::I64) => {
-            create_netcdf_ndarray!(variable, i64, I64, as_i64)
+            create_netcdf_ndarray!(variable, i64, I64, as_i64, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Int(IntType::U8) => {
-            create_netcdf_ndarray!(variable, u8, U8, as_u8)
+            create_netcdf_ndarray!(variable, u8, U8, as_u8, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Int(IntType::U16) => {
-            create_netcdf_ndarray!(variable, u16, U16, as_u16)
+            create_netcdf_ndarray!(variable, u16, U16, as_u16, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Int(IntType::U32) => {
-            create_netcdf_ndarray!(variable, u32, U32, as_u32)
+            create_netcdf_ndarray!(variable, u32, U32, as_u32, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Int(IntType::U64) => {
-            create_netcdf_ndarray!(variable, u64, U64, as_u64)
+            create_netcdf_ndarray!(variable, u64, U64, as_u64, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Float(FloatType::F32) => {
-            create_netcdf_ndarray!(variable, f32, F32, as_f32)
+            create_netcdf_ndarray!(variable, f32, F32, as_f32, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Float(FloatType::F64) => {
-            create_netcdf_ndarray!(variable, f64, F64, as_f64)
+            create_netcdf_ndarray!(variable, f64, F64, as_f64, Some(dims), extents)
         }
         netcdf::types::NcVariableType::Char => {
             // NcChar is both a value itself or possibly a fixed size string
-            let array = variable.get::<NcChar, _>(Extents::All)?;
-
             //Get the last dimension of the variable
             if let Some(dim) = variable.dimensions().last() {
                 //Check if the dimensions starts with string** or strlen**
@@ -239,6 +260,25 @@ pub fn read_variable(variable: &Variable) -> NcResult<NetCDFNdArray> {
                     || dim_name.starts_with("strlen")
                     || dim_name.starts_with("strnlen")
                 {
+                    // Append the dimension and extents
+                    dims.push(Dimension {
+                        name: dim.name().to_string(),
+                        size: dim.len(),
+                    });
+
+                    extents_start_count.as_mut().map(|ex| {
+                        ex.0.push(0);
+                        ex.1.push(dim.len());
+                    });
+
+                    extents = extents_start_count
+                        .clone()
+                        .map(|e| e.try_into())
+                        .unwrap_or(Ok(Extents::All))
+                        .unwrap();
+
+                    let array = variable.get::<NcChar, _>(&extents)?;
+
                     let dims = variable
                         .dimensions()
                         .iter()
@@ -262,7 +302,7 @@ pub fn read_variable(variable: &Variable) -> NcResult<NetCDFNdArray> {
                     });
                 }
             }
-            create_netcdf_ndarray!(variable, NcChar, Char, as_nc_char)
+            create_netcdf_ndarray!(variable, NcChar, Char, as_nc_char, Some(dims), extents)
         }
         nctype => Err(ArrowNetCDFError::UnsupportedNetCDFDataType(nctype)),
     }
