@@ -3,7 +3,7 @@ use std::ffi::CString;
 use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
 pub mod cf_time;
-pub mod chunked_reader;
+pub mod chunked_stream;
 pub mod encoders;
 pub mod error;
 pub mod nc_array;
