@@ -14,6 +14,7 @@ use utoipa::{
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+mod file;
 mod tables;
 
 #[derive(OpenApi)]
@@ -59,6 +60,7 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
     let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
         .routes(routes!(tables::create_table))
         .routes(routes!(tables::delete_table))
+        .routes(routes!(file::upload_file))
         .layer(axum::middleware::from_fn(basic_auth))
         .split_for_parts();
 

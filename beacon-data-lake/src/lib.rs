@@ -15,7 +15,7 @@ use datafusion::{
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
-use futures::StreamExt;
+use futures::{StreamExt, stream::BoxStream};
 use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
 use url::Url;
 
@@ -530,6 +530,94 @@ impl DataLake {
         let mut table_providers = self.table_providers.lock();
         table_providers.insert(table.table_name.clone(), table_provider);
         tables.insert(table.table_name.clone(), table);
+        Ok(())
+    }
+
+    pub async fn upload_file<S>(
+        &self,
+        file_name: &str,
+        mut stream: S,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        S: futures::Stream<Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>
+            + Unpin,
+    {
+        let object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(&self.data_directory_store_url)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let object_path = self.data_directory_prefix.child(file_name);
+
+        let mut writer = object_store
+            .put_multipart(&object_path)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            writer
+                .put_part(bytes.into())
+                .await
+                .map_err(|e: object_store::Error| Box::new(e))?;
+        }
+
+        // Finalize the upload
+        writer
+            .complete()
+            .await
+            .map_err(|e: object_store::Error| Box::new(e))?;
+
+        Ok(())
+    }
+
+    pub async fn download_file(
+        &self,
+        file_name: &str,
+    ) -> Result<
+        BoxStream<'static, Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(&self.data_directory_store_url)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let object_path = self.data_directory_prefix.child(file_name);
+
+        let get_result = object_store
+            .get(&object_path)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let stream = get_result.into_stream();
+
+        let file_stream = Box::pin(stream.map(|result| {
+            result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        }));
+
+        Ok(file_stream)
+    }
+
+    pub async fn delete_file(
+        &self,
+        file_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(&self.data_directory_store_url)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let object_path = self.data_directory_prefix.child(file_name);
+
+        object_store
+            .delete(&object_path)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
         Ok(())
     }
 
