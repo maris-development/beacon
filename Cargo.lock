@@ -537,6 +537,7 @@ version = "1.2.1"
 dependencies = [
  "anyhow",
  "arrow",
+ "futures",
  "hifitime",
  "indexmap 2.10.0",
  "nd-arrow-array",
@@ -545,6 +546,7 @@ dependencies = [
  "netcdf-sys",
  "num-traits",
  "regex",
+ "serde",
  "tempfile",
  "thiserror 2.0.15",
  "tracing",
