@@ -62,6 +62,20 @@ impl Stream {
         let mut dimensions: Vec<(String, usize)> = Vec::new();
         let mut dim_set: HashMap<String, usize> = HashMap::new();
 
+        if let Chunking::ChunkSizes(map) = &chunking {
+            // Validate that all dimensions in hash_map are in variables
+            for (dim_name, chunk_size) in map {
+                let file_dim = file.dimension(dim_name).ok_or_else(|| {
+                    ArrowNetCDFError::Stream(format!(
+                        "Chunk size specified for dimension {} which is not in the variable dimensions.",
+                        dim_name
+                    ))
+                })?;
+                dimensions.push((dim_name.clone(), file_dim.len()));
+                dim_set.insert(dim_name.clone(), file_dim.len());
+            }
+        }
+
         for variable in &variables {
             let var_dims = variable.dimensions();
             for (i, dim) in var_dims.iter().enumerate() {
@@ -313,11 +327,11 @@ impl Iterator for Stream {
                             Self::read_variable_scalar(&variable)
                         } else {
                             let hyper_slab = self.generate_hyper_slab(&var_dims);
-                            println!(
-                                "Reading variable {} with hyper slab: {:?}",
-                                variable.name(),
-                                hyper_slab
-                            );
+                            // println!(
+                            //     "Reading variable {} with hyper slab: {:?}",
+                            //     variable.name(),
+                            //     hyper_slab
+                            // );
                             Self::read_variable_hyper_slab(&variable, &hyper_slab)
                         }
                     }
@@ -496,11 +510,7 @@ mod tests {
 
     #[test]
     fn test_chunked_column_read() {
-        let reader = NetCDFArrowReader::new_with_aligned_dimensions(
-            "test_files/gridded-example.nc",
-            vec!["time".to_string(), "lat".to_string(), "lon".to_string()],
-        )
-        .unwrap();
+        let reader = NetCDFArrowReader::new("test_files/gridded-example.nc").unwrap();
 
         let chunking = Chunking::ChunkSizes(
             [("lat".to_string(), 500), ("lon".to_string(), 500)]
@@ -508,10 +518,25 @@ mod tests {
                 .collect(),
         );
         let mut temp_chunked_column = reader
-            .read_column_as_stream("analysed_sst", Some(chunking))
+            .read_column_as_stream("analysed_sst", Some(chunking.clone()))
             .unwrap();
 
         while let Some(batch_result) = temp_chunked_column.next() {
+            match batch_result {
+                Ok(batch) => {
+                    let batch = batch.to_arrow_record_batch().unwrap();
+                    // println!("Batch: {:?}", batch);
+                    println!("Batch rows: {}", batch.num_rows());
+                }
+                Err(e) => {
+                    eprintln!("Error reading batch: {}", e);
+                }
+            }
+        }
+
+        let mut lon_chunked_column = reader.read_column_as_stream("lon", Some(chunking)).unwrap();
+
+        while let Some(batch_result) = lon_chunked_column.next() {
             match batch_result {
                 Ok(batch) => {
                     let batch = batch.to_arrow_record_batch().unwrap();
