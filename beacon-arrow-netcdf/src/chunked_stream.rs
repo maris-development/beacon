@@ -1,4 +1,4 @@
-use std::{collections::HashMap, panic, pin::Pin, sync::Arc};
+use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use indexmap::IndexMap;
@@ -27,19 +27,19 @@ pub struct Stream {
     is_done: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub enum Chunking {
     Auto {
         target_chunk_size: usize,
     },
-    ChunkSizes(HashMap<String, usize>),
+    ChunkSizes(IndexMap<String, usize>),
     #[default]
     None,
 }
 
 impl Stream {
     pub fn new(
-        file: netcdf::File,
+        file: Arc<netcdf::File>,
         chunking: Option<Chunking>,
         projected_schema: SchemaRef,
     ) -> NcResult<Self> {
@@ -69,6 +69,9 @@ impl Stream {
                 let dim_len = dim.len();
                 if i == var_dims.len() - 1 && is_string_dimension(&dim_name) {
                     // Skip string length dimensions at the end
+                    continue;
+                }
+                if dim_set.contains_key(&dim_name) {
                     continue;
                 }
                 dimensions.push((dim_name.clone(), dim_len));
@@ -115,9 +118,9 @@ impl Stream {
             Chunking::Auto { target_chunk_size } => {
                 Self::balanced_chunk_sizes(&dimensions, target_chunk_size)
             }
-            Chunking::ChunkSizes(hash_map) => {
+            Chunking::ChunkSizes(map) => {
                 // Validate that all dimensions in hash_map are in dimensions
-                for dim_name in hash_map.keys() {
+                for dim_name in map.keys() {
                     if !dim_set.contains_key(dim_name) {
                         return Err(ArrowNetCDFError::Stream(format!(
                             "Chunk size specified for dimension {} which is not in the dimension list.",
@@ -125,14 +128,14 @@ impl Stream {
                         )));
                     }
                 }
-                hash_map
+                map
             }
             Chunking::None => {
                 // By default, set chunk size to full dimension length
                 dimensions
                     .iter()
                     .map(|(n, l)| (n.clone(), *l))
-                    .collect::<HashMap<String, usize>>()
+                    .collect::<IndexMap<String, usize>>()
             }
         };
 
@@ -140,7 +143,7 @@ impl Stream {
             chunk_step_state: chunk_sizes.keys().map(|n| (n.clone(), 0)).collect(),
             chunk_sizes: IndexMap::from_iter(chunk_sizes),
             dimension_lengths: IndexMap::from_iter(dimensions),
-            file: Arc::new(file),
+            file: file.clone(),
             projected_schema,
             is_done: false,
         })
@@ -149,7 +152,7 @@ impl Stream {
     fn balanced_chunk_sizes(
         dimensions: &[(String, usize)],
         target_chunk_size: usize,
-    ) -> HashMap<String, usize> {
+    ) -> IndexMap<String, usize> {
         let total_volume: usize = dimensions.iter().map(|(_, len)| *len).product();
         if total_volume == 0 {
             return dimensions.iter().map(|(d, _)| (d.clone(), 0)).collect();
@@ -161,7 +164,7 @@ impl Stream {
         // Scale factor for balancing
         let scale = (target_chunk_size as f64 / total_volume as f64).powf(1.0 / n_active as f64);
 
-        let mut chunk_sizes = HashMap::new();
+        let mut chunk_sizes = IndexMap::new();
         for (dim_name, len) in dimensions {
             let chunk_size = if *len <= 1 {
                 1
@@ -198,8 +201,10 @@ impl Stream {
     fn generate_hyper_slab(&self, dimensions: &[String]) -> Vec<DimensionHyperSlab> {
         let mut hyper_slab = Vec::new();
         for dim in dimensions {
-            let chunk_count = self.chunk_sizes[dim];
-            let step = self.chunk_step_state[dim];
+            let chunk_count = self.chunk_sizes.get(dim).cloned().unwrap_or_else(|| {
+                self.dimension_lengths.get(dim).cloned().unwrap() // Default to full length
+            });
+            let step = self.chunk_step_state.get(dim).cloned().unwrap_or(0);
             let min_chunk_count = self.dimension_lengths[dim]
                 .saturating_sub(step)
                 .min(chunk_count);
@@ -265,6 +270,7 @@ impl Stream {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 struct DimensionHyperSlab {
     start: usize,
     count: usize,
@@ -278,75 +284,66 @@ impl Iterator for Stream {
             return None;
         }
 
-        let mut fields = Vec::new();
         let mut arrays = Vec::new();
+        let mut fields = Vec::new();
 
         for field in self.projected_schema.fields() {
-            // Check if field is an attribute (contains a dot)
-            if field.name().contains('.') {
-                // It is a attribute
-                let parts = field.name().split('.').collect::<Vec<_>>();
-                if parts.len() != 2 {
-                    return Some(Err(ArrowNetCDFError::InvalidFieldName(
-                        field.name().to_string(),
-                    )));
-                }
-                if parts[0].is_empty() {
-                    //Global attribute
-                    let attr_name = parts[1];
-                    let attr_value = global_attribute(&self.file, attr_name)
-                        .unwrap()
-                        .expect("Attribute not found but was in schema.");
-
-                    fields.push(field.clone());
-                    arrays.push(attr_value.into_nd_arrow_array().unwrap());
+            fields.push(field.clone());
+            let array_result = if let Some((var_name, attr_name)) = field.name().split_once('.') {
+                if var_name.is_empty() {
+                    // Global attribute
+                    Self::read_global_attribute(&self.file, attr_name)
                 } else {
-                    //Variable attribute
-                    let variable = self
-                        .file
-                        .variable(parts[0])
-                        .expect("Variable not found but was in schema.");
-                    let nd_array = variable_attribute(&variable, parts[1])
-                        .unwrap()
-                        .expect("Attribute not found but was in schema.")
-                        .into_nd_arrow_array()
-                        .unwrap();
-                    fields.push(field.clone());
-                    arrays.push(nd_array);
+                    // Variable attribute
+                    match self.file.variable(var_name) {
+                        Some(variable) => Self::read_variable_attribute(&variable, attr_name),
+                        None => {
+                            return Some(Err(ArrowNetCDFError::InvalidFieldName(
+                                field.name().to_string(),
+                            )))
+                        }
+                    }
                 }
             } else {
-                let var = self.file.variable(field.name()).unwrap();
-                // Build start/count slices for hyper_slab
-                let mut start: Vec<usize> = Vec::new();
-                let mut count: Vec<usize> = Vec::new();
-
-                let var_dims = var
-                    .dimensions()
-                    .iter()
-                    .map(|d| d.name())
-                    .collect::<Vec<_>>();
-                let hyper_slab = self.generate_hyper_slab(&var_dims);
-                for dim_slab in hyper_slab {
-                    start.push(dim_slab.start);
-                    count.push(dim_slab.count);
+                match self.file.variable(field.name()) {
+                    Some(variable) => {
+                        let var_dims: Vec<_> =
+                            variable.dimensions().iter().map(|d| d.name()).collect();
+                        if var_dims.is_empty() {
+                            Self::read_variable_scalar(&variable)
+                        } else {
+                            let hyper_slab = self.generate_hyper_slab(&var_dims);
+                            println!(
+                                "Reading variable {} with hyper slab: {:?}",
+                                variable.name(),
+                                hyper_slab
+                            );
+                            Self::read_variable_hyper_slab(&variable, &hyper_slab)
+                        }
+                    }
+                    None => {
+                        return Some(Err(ArrowNetCDFError::InvalidFieldName(
+                            field.name().to_string(),
+                        )))
+                    }
                 }
+            };
 
-                let values = read_variable(&var, Some((start, count))).unwrap();
-                let array = values.into_nd_arrow_array().unwrap();
-                fields.push(field.clone());
-                arrays.push(array);
+            match array_result {
+                Ok(array) => arrays.push(array),
+                Err(e) => return Some(Err(e)),
             }
         }
 
         self.advance_chunk_state();
 
-        let nd_batch = nd_arrow_array::batch::NdRecordBatch::new(
+        let maybe_nd_batch = nd_arrow_array::batch::NdRecordBatch::new(
             fields.into_iter().map(|f| f.as_ref().clone()).collect(),
             arrays,
         )
-        .unwrap();
+        .map_err(|e| ArrowNetCDFError::Stream(format!("Failed to create NdRecordBatch: {}", e)));
 
-        Some(Ok(nd_batch))
+        Some(maybe_nd_batch)
     }
 }
 
@@ -355,7 +352,7 @@ impl futures::Stream for Stream {
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = Pin::get_mut(self);
         std::task::Poll::Ready(this.next())
@@ -364,78 +361,167 @@ impl futures::Stream for Stream {
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::Schema;
+    use std::vec;
+
+    use crate::reader::NetCDFArrowReader;
 
     use super::*;
 
     #[test]
-    fn test_auto_chunk() {
-        let chunks = ChunkedNetCDFArrowReader::balanced_chunk_sizes(
-            &[("lat".to_string(), 500), ("lon".to_string(), 1280000)],
-            128000,
-        );
-        println!("Chunk sizes: {:?}", chunks);
+    fn test_auto_chunk_with_aligned_dimensions() {
+        let reader = NetCDFArrowReader::new_with_aligned_dimensions(
+            "test_files/gridded-example.nc",
+            vec!["time".to_string(), "lat".to_string(), "lon".to_string()],
+        )
+        .unwrap();
+
+        let stream = reader.read_as_stream::<Vec<_>>(None, None);
+        assert!(stream.is_ok());
     }
 
     #[test]
-    fn test_stream_advance() {
-        let file = netcdf::open("test_files/gridded-example.nc").unwrap();
-        let mut chunk_sizes = IndexMap::new();
+    fn test_stream_read_auto_chunk() {
+        let reader = NetCDFArrowReader::new("test_files/gridded-example.nc").unwrap();
 
-        chunk_sizes.insert("time".to_string(), 1);
-        chunk_sizes.insert("lat".to_string(), 400);
-        chunk_sizes.insert("lon".to_string(), 400);
+        let temp_idx = reader.schema().index_of("analysed_sst").unwrap();
+        let lat = reader.schema().index_of("lat").unwrap();
+        let lon = reader.schema().index_of("lon").unwrap();
 
-        // let mut reader = Stream::new(file, Arc::new(Schema::empty()), chunk_sizes);
+        let mut stream = reader
+            .read_as_stream::<Vec<_>>(
+                Some(vec![temp_idx, lat, lon]),
+                Some(Chunking::Auto {
+                    target_chunk_size: 128000,
+                }),
+            )
+            .unwrap();
 
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // println!("Is done: {}", reader.is_done());
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // reader.advance_state();
-        // println!("State: {:?}", reader.chunk_step_state);
-        // println!("Is done: {}", reader.is_done());
+        let mut total_rows = 0;
+        while let Some(batch_result) = stream.next() {
+            match batch_result {
+                Ok(batch) => {
+                    let batch = batch.to_arrow_record_batch().unwrap();
+                    println!("Batch: {:?}", batch);
+                    total_rows += batch.num_rows();
+                }
+                Err(e) => {
+                    eprintln!("Error reading batch: {}", e);
+                }
+            }
+        }
+        println!("Total rows read: {}", total_rows);
+    }
+
+    #[test]
+    fn test_stream_read_no_chunking() {
+        let reader = NetCDFArrowReader::new("test_files/gridded-example.nc").unwrap();
+
+        let temp_idx = reader.schema().index_of("analysed_sst").unwrap();
+        let lat = reader.schema().index_of("lat").unwrap();
+        let lon = reader.schema().index_of("lon").unwrap();
+
+        let mut stream = reader
+            .read_as_stream::<Vec<_>>(Some(vec![temp_idx, lat, lon]), Some(Chunking::None))
+            .unwrap();
+
+        let mut total_rows = 0;
+        while let Some(batch_result) = stream.next() {
+            match batch_result {
+                Ok(batch) => {
+                    let batch = batch.to_arrow_record_batch().unwrap();
+                    println!("Batch: {:?}", batch);
+                    total_rows += batch.num_rows();
+                }
+                Err(e) => {
+                    eprintln!("Error reading batch: {}", e);
+                }
+            }
+        }
+        println!("Total rows read: {}", total_rows);
+    }
+
+    #[test]
+    fn test_stream_read_custom_chunking() {
+        let reader = NetCDFArrowReader::new("test_files/gridded-example.nc").unwrap();
+
+        let temp = reader.schema().index_of("analysed_sst").unwrap();
+        let temp_units = reader.schema().index_of("analysed_sst.units").unwrap();
+        let lat = reader.schema().index_of("lat").unwrap();
+        let lon = reader.schema().index_of("lon").unwrap();
+        let processing_level = reader.schema().index_of(".processing_level").unwrap();
+
+        let mut stream = reader
+            .read_as_stream::<Vec<_>>(
+                Some(vec![temp, temp_units, lat, lon, processing_level]),
+                Some(Chunking::ChunkSizes(
+                    [("lat".to_string(), 500), ("lon".to_string(), 500)]
+                        .into_iter()
+                        .collect(),
+                )),
+            )
+            .unwrap();
+
+        let mut total_rows = 0;
+        while let Some(batch_result) = stream.next() {
+            match batch_result {
+                Ok(batch) => {
+                    let batch = batch.to_arrow_record_batch().unwrap();
+                    println!("Batch: {:?}", batch);
+                    total_rows += batch.num_rows();
+                }
+                Err(e) => {
+                    eprintln!("Error reading batch: {}", e);
+                }
+            }
+        }
+        println!("Total rows read: {}", total_rows);
+    }
+
+    #[test]
+    fn test_flat_read() {
+        let reader = NetCDFArrowReader::new("test_files/gridded-example.nc").unwrap();
+
+        let temp = reader.schema().index_of("analysed_sst").unwrap();
+        let temp_units = reader.schema().index_of("analysed_sst.units").unwrap();
+        let lat = reader.schema().index_of("lat").unwrap();
+        let lon = reader.schema().index_of("lon").unwrap();
+        let processing_level = reader.schema().index_of(".processing_level").unwrap();
+
+        let mut batch = reader
+            .read_as_batch::<Vec<_>>(Some(vec![temp, temp_units, lat, lon, processing_level]))
+            .unwrap();
+
+        println!("Total rows read: {}", batch.num_rows());
+    }
+
+    #[test]
+    fn test_chunked_column_read() {
+        let reader = NetCDFArrowReader::new_with_aligned_dimensions(
+            "test_files/gridded-example.nc",
+            vec!["time".to_string(), "lat".to_string(), "lon".to_string()],
+        )
+        .unwrap();
+
+        let chunking = Chunking::ChunkSizes(
+            [("lat".to_string(), 500), ("lon".to_string(), 500)]
+                .into_iter()
+                .collect(),
+        );
+        let mut temp_chunked_column = reader
+            .read_column_as_stream("analysed_sst", Some(chunking))
+            .unwrap();
+
+        while let Some(batch_result) = temp_chunked_column.next() {
+            match batch_result {
+                Ok(batch) => {
+                    let batch = batch.to_arrow_record_batch().unwrap();
+                    // println!("Batch: {:?}", batch);
+                    println!("Batch rows: {}", batch.num_rows());
+                }
+                Err(e) => {
+                    eprintln!("Error reading batch: {}", e);
+                }
+            }
+        }
     }
 }

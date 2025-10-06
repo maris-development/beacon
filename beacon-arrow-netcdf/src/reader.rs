@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use arrow::array::RecordBatch;
+use arrow::{array::RecordBatch, datatypes::Schema};
 use nd_arrow_array::NdArrowArray;
 use ndarray::{ArrayBase, ArrayD};
 use netcdf::{
@@ -10,6 +10,7 @@ use netcdf::{
 
 use crate::{
     cf_time::{decode_cf_time_variable, is_cf_time_variable},
+    chunked_stream::{Chunking, Stream},
     error::ArrowNetCDFError,
     nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner},
     NcChar, NcResult,
@@ -17,14 +18,82 @@ use crate::{
 
 pub struct NetCDFArrowReader {
     file_schema: arrow::datatypes::SchemaRef,
-    file: netcdf::File,
+    file: Arc<netcdf::File>,
 }
 
 impl NetCDFArrowReader {
     pub fn new<P: AsRef<Path>>(path: P) -> NcResult<Self> {
         let file = netcdf::open(path)?;
         let file_schema = Arc::new(arrow_schema(&file)?);
-        Ok(Self { file_schema, file })
+        Ok(Self {
+            file_schema,
+            file: Arc::new(file),
+        })
+    }
+
+    pub fn new_with_aligned_dimensions<P: AsRef<Path>>(
+        path: P,
+        dimensions: Vec<String>,
+    ) -> NcResult<Self> {
+        let file = netcdf::open(path)?;
+        let file_schema = arrow_schema(&file)?;
+
+        // Align dimensions
+        file.dimensions().try_for_each(|dim| {
+            if dimensions.contains(&dim.name().to_string()) {
+                Ok(())
+            } else {
+                Err(ArrowNetCDFError::Reader(format!(
+                    "Dimension '{}' not found in NetCDF file.",
+                    dim.name()
+                )))
+            }
+        })?;
+
+        // Check all the variables, and keep only the variables which have one of the specified dimensions or all of them
+        // Scalars (0D variables) are always kept
+        let mut removable_variables = vec![];
+        for variable in file.variables() {
+            let variable_dimensions = variable.dimensions();
+
+            if variable_dimensions.is_empty() {
+                continue; // Scalar variable, keep it
+            }
+            if variable.dimensions().len() == 1 {
+                let dimension_name = variable_dimensions[0].name();
+                if !dimensions.contains(&dimension_name) {
+                    removable_variables.push(variable.name().to_string());
+                }
+            } else if !variable
+                .dimensions()
+                .iter()
+                .all(|d| dimensions.contains(&d.name().to_string()))
+            {
+                removable_variables.push(variable.name().to_string());
+            }
+        }
+
+        // Create a new schema excluding the removable variables
+        let fields: Vec<arrow::datatypes::Field> = file_schema
+            .fields()
+            .iter()
+            .filter(|field| {
+                let field_name = field.name();
+                // Remove the field if in the removable variables list
+                !removable_variables.contains(field_name)
+                    // Also remove variable attributes if the parent variable is removed
+                    || (field_name.contains('.') && {
+                        let parts: Vec<&str> = field_name.split('.').collect();
+                        parts.len() == 2 && !removable_variables.contains(&parts[0].to_string())
+                    })
+            })
+            .map(|f| f.as_ref().clone())
+            .collect::<Vec<_>>();
+
+        Ok(Self {
+            file_schema: Arc::new(Schema::new(fields)),
+            file: Arc::new(file),
+        })
     }
 
     pub fn dimensions(&self) -> Vec<Dimension> {
@@ -51,69 +120,44 @@ impl NetCDFArrowReader {
         } else {
             self.file_schema.clone()
         };
+        let mut stream = Stream::new(self.file.clone(), None, projected_schema)?;
+        let batch = stream.next().transpose().unwrap().ok_or_else(|| {
+            ArrowNetCDFError::Stream("No data available in the NetCDF file.".to_string())
+        })?;
+        batch.to_arrow_record_batch().map_err(|e| {
+            ArrowNetCDFError::Stream(format!("Failed to flatten to RecordBatch: {}", e))
+        })
+    }
 
-        let mut columns = indexmap::IndexMap::new();
-        for field in projected_schema.fields() {
-            let name = field.name();
-            if name.contains('.') {
-                let parts = name.split('.').collect::<Vec<_>>();
-                if parts.len() != 2 {
-                    return Err(ArrowNetCDFError::InvalidFieldName(name.to_string()));
-                }
-                if parts[0].is_empty() {
-                    //Global attribute
-                    let attr_name = parts[1];
-                    let attr_value = global_attribute(&self.file, attr_name)?
-                        .expect("Attribute not found but was in schema.");
-                    columns.insert(
-                        field.clone(),
-                        attr_value
-                            .into_nd_arrow_array()
-                            .map_err(ArrowNetCDFError::NdArrowError)?,
-                    );
-                } else {
-                    //Variable attribute
-                    let variable = self
-                        .file
-                        .variable(parts[0])
-                        .expect("Variable not found but was in schema.");
-                    columns.insert(
-                        field.clone(),
-                        variable_attribute(&variable, parts[1])?
-                            .expect("Attribute not found but was in schema.")
-                            .into_nd_arrow_array()
-                            .map_err(ArrowNetCDFError::NdArrowError)?,
-                    );
-                }
-            } else {
-                let variable = self
-                    .file
-                    .variable(name)
-                    .expect("Variable not found but was in schema.");
-                let array = read_variable(&variable, None)
-                    .map_err(|e| ArrowNetCDFError::VariableReadError(Box::new(e)))?;
-                columns.insert(
-                    field.clone(),
-                    array
-                        .into_nd_arrow_array()
-                        .map_err(ArrowNetCDFError::NdArrowError)?,
-                );
-            }
-        }
+    pub fn read_as_stream<P: AsRef<[usize]>>(
+        &self,
+        projection: Option<P>,
+        chunking: Option<Chunking>,
+    ) -> NcResult<Stream> {
+        let projected_schema = if let Some(projection) = projection {
+            Arc::new(
+                self.file_schema
+                    .project(projection.as_ref())
+                    .map_err(ArrowNetCDFError::ArrowSchemaProjectionError)?,
+            )
+        } else {
+            self.file_schema.clone()
+        };
+        Stream::new(self.file.clone(), chunking, projected_schema)
+    }
 
-        let mut fields = vec![];
-        let mut arrays = vec![];
-        for (field, array) in columns {
-            fields.push(field.as_ref().clone());
-            arrays.push(array);
-        }
+    pub fn read_column_as_stream<P: AsRef<str>>(
+        &self,
+        column_name: P,
+        chunking: Option<Chunking>,
+    ) -> NcResult<Stream> {
+        let column_name = column_name.as_ref();
+        let column_index = self
+            .file_schema
+            .index_of(column_name)
+            .map_err(|_| ArrowNetCDFError::InvalidFieldName(column_name.to_string()))?;
 
-        let nd_batch = nd_arrow_array::batch::NdRecordBatch::new(fields, arrays).unwrap();
-        let record_batch = nd_batch
-            .to_arrow_record_batch()
-            .map_err(ArrowNetCDFError::NdArrowError)?;
-
-        Ok(record_batch)
+        self.read_as_stream(Some(&[column_index]), chunking)
     }
 
     pub fn read_column(&self, column_name: &str) -> NcResult<NdArrowArray> {
@@ -173,7 +217,7 @@ macro_rules! create_netcdf_ndarray {
         };
         let mut fill_value = $var.fill_value::<$t>()?;
 
-        if fill_value.is_none() {
+        {
             fill_value = read_fill_value_attribute(&$var)?.and_then(|fv| fv.$as_ref())
         }
 

@@ -546,6 +546,7 @@ dependencies = [
  "netcdf-sys",
  "num-traits",
  "regex",
+ "serde",
  "tempfile",
  "thiserror 2.0.15",
  "tracing",
