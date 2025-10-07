@@ -35,7 +35,10 @@ pub async fn upload_file(
         // Convert Axum field into a stream of Bytes
         let stream = futures::stream::unfold(field, |mut f| async {
             match f.chunk().await {
-                Ok(Some(chunk)) => Some((Ok::<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>(chunk), f)),
+                Ok(Some(chunk)) => {
+                    tracing::debug!("Read {} bytes for file `{}`", chunk.len(), file_name);
+                    Some((Ok::<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>(chunk), f))
+                },
                 Ok(None) => None,
                 Err(e) => Some((Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>), f)),
             }

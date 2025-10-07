@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::Request,
+    extract::{DefaultBodyLimit, Request},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
@@ -62,6 +62,7 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
         .routes(routes!(tables::delete_table))
         .routes(routes!(file::upload_file))
         .layer(axum::middleware::from_fn(basic_auth))
+        .layer(DefaultBodyLimit::disable())
         .split_for_parts();
 
     (admin_router, admin_api)
