@@ -18,6 +18,14 @@ impl AttributeValue {
         }
     }
 
+    pub fn arrow_data_type(&self) -> arrow::datatypes::DataType {
+        match self {
+            AttributeValue::String(_) => arrow::datatypes::DataType::Utf8,
+            AttributeValue::Float64(_) => arrow::datatypes::DataType::Float64,
+            AttributeValue::Bool(_) => arrow::datatypes::DataType::Boolean,
+        }
+    }
+
     pub fn as_nd_arrow_array(&self) -> NdArrowArray {
         match self {
             AttributeValue::String(s) => {

@@ -3,14 +3,10 @@ pub fn try_zarrs_dtype_to_arrow(
 ) -> Result<arrow::datatypes::DataType, String> {
     match data_type {
         zarrs::array::DataType::Bool => Ok(arrow::datatypes::DataType::Boolean),
-        zarrs::array::DataType::Int2 => Ok(arrow::datatypes::DataType::Int16),
-        zarrs::array::DataType::Int4 => Ok(arrow::datatypes::DataType::Int32),
         zarrs::array::DataType::Int8 => Ok(arrow::datatypes::DataType::Int8),
         zarrs::array::DataType::Int16 => Ok(arrow::datatypes::DataType::Int16),
         zarrs::array::DataType::Int32 => Ok(arrow::datatypes::DataType::Int32),
         zarrs::array::DataType::Int64 => Ok(arrow::datatypes::DataType::Int64),
-        zarrs::array::DataType::UInt2 => Ok(arrow::datatypes::DataType::UInt16),
-        zarrs::array::DataType::UInt4 => Ok(arrow::datatypes::DataType::UInt32),
         zarrs::array::DataType::UInt8 => Ok(arrow::datatypes::DataType::UInt8),
         zarrs::array::DataType::UInt16 => Ok(arrow::datatypes::DataType::UInt16),
         zarrs::array::DataType::UInt32 => Ok(arrow::datatypes::DataType::UInt32),
