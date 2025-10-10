@@ -6,10 +6,10 @@ use arrow::{
 };
 use hifitime::Epoch;
 use indexmap::IndexMap;
-use nd_arrow_array::NdArrowArray;
+use nd_arrow_array::{NdArrowArray, batch::NdRecordBatch};
 use regex::Regex;
 
-pub trait Decoder {
+pub trait Decoder: Send + Sync {
     fn create(
         group_reader: &crate::reader::ArrowGroupReader,
         input_schema: SchemaRef,
@@ -17,10 +17,45 @@ pub trait Decoder {
     where
         Self: Sized;
     fn decoded_schema(&self) -> SchemaRef;
-    fn decoding_pipeline(&self, array_name: &str) -> Option<Vec<Arc<dyn DecodingPipelineStep>>>;
+    fn decoding_array_pipeline(
+        &self,
+        array_name: &str,
+    ) -> Option<Vec<Arc<dyn DecodingPipelineStep>>>;
+    fn decode_batch(&self, batch: NdRecordBatch) -> Result<NdRecordBatch, String> {
+        let mut arrays = Vec::new();
+        let mut fields = Vec::new();
+        for (field, array) in batch.schema().fields().iter().zip(batch.arrays()) {
+            if let Some(pipeline) = self.decoding_array_pipeline(field.name()) {
+                let mut decoded_array = array.clone();
+                for step in &pipeline {
+                    decoded_array = step.decode(decoded_array)?;
+                }
+                arrays.push(decoded_array);
+                fields.push(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(pipeline.last().unwrap().output_data_type()),
+                );
+            } else {
+                arrays.push(array.clone());
+                fields.push(field.as_ref().clone());
+            }
+        }
+
+        let decoded_batch = NdRecordBatch::new(fields, arrays).unwrap();
+        // Ensure the schema is the same as decoded_schema
+        assert_eq!(
+            decoded_batch.schema(),
+            self.decoded_schema(),
+            "Decoded batch schema does not match decoder's decoded schema"
+        );
+
+        Ok(decoded_batch)
+    }
 }
 
-pub trait DecodingPipelineStep {
+pub trait DecodingPipelineStep: Send + Sync {
     fn output_data_type(&self) -> arrow::datatypes::DataType;
     fn decode(&self, array: NdArrowArray) -> Result<NdArrowArray, String>;
 }
@@ -87,13 +122,17 @@ impl Decoder for CFDecoder {
 
             let decoding_pipeline = match (scale_factor, offset) {
                 (Some(scale), Some(offset)) => {
-                    Some(Arc::new(ScaleFactorOffsetDecoder::new(scale, offset))
+                    Some(Arc::new(ScaleFactorOffsetDecodingStep::new(scale, offset))
                         as Arc<dyn DecodingPipelineStep>)
                 }
-                (Some(scale), None) => Some(Arc::new(ScaleFactorOffsetDecoder::new(scale, 0.0))
-                    as Arc<dyn DecodingPipelineStep>),
-                (None, Some(offset)) => Some(Arc::new(ScaleFactorOffsetDecoder::new(1.0, offset))
-                    as Arc<dyn DecodingPipelineStep>),
+                (Some(scale), None) => {
+                    Some(Arc::new(ScaleFactorOffsetDecodingStep::new(scale, 0.0))
+                        as Arc<dyn DecodingPipelineStep>)
+                }
+                (None, Some(offset)) => {
+                    Some(Arc::new(ScaleFactorOffsetDecodingStep::new(1.0, offset))
+                        as Arc<dyn DecodingPipelineStep>)
+                }
                 _ => None,
             };
 
@@ -121,7 +160,7 @@ impl Decoder for CFDecoder {
                         || value.starts_with("months since")
                         || value.starts_with("years since")
                     {
-                        match TimeUnitsDecoder::new(value.clone()) {
+                        match TimeUnitsDecodingStep::new(value.clone()) {
                             Ok(decoder) => {
                                 let decoder = Arc::new(decoder) as Arc<dyn DecodingPipelineStep>;
                                 array_decoders.insert(array_name.to_string(), decoder.clone());
@@ -159,23 +198,26 @@ impl Decoder for CFDecoder {
         self.decoded_schema.clone()
     }
 
-    fn decoding_pipeline(&self, array_name: &str) -> Option<Vec<Arc<dyn DecodingPipelineStep>>> {
+    fn decoding_array_pipeline(
+        &self,
+        array_name: &str,
+    ) -> Option<Vec<Arc<dyn DecodingPipelineStep>>> {
         self.array_decoders.get(array_name).cloned()
     }
 }
 
-pub struct ScaleFactorOffsetDecoder {
+pub struct ScaleFactorOffsetDecodingStep {
     scale: f64,
     offset: f64,
 }
 
-impl ScaleFactorOffsetDecoder {
+impl ScaleFactorOffsetDecodingStep {
     pub fn new(scale: f64, offset: f64) -> Self {
-        ScaleFactorOffsetDecoder { scale, offset }
+        ScaleFactorOffsetDecodingStep { scale, offset }
     }
 }
 
-impl DecodingPipelineStep for ScaleFactorOffsetDecoder {
+impl DecodingPipelineStep for ScaleFactorOffsetDecodingStep {
     fn decode(&self, array: NdArrowArray) -> Result<NdArrowArray, String> {
         let arrow_array = array.as_arrow_array();
 
@@ -200,12 +242,12 @@ impl DecodingPipelineStep for ScaleFactorOffsetDecoder {
     }
 }
 
-pub struct TimeUnitsDecoder {
+pub struct TimeUnitsDecodingStep {
     unit: hifitime::Unit,
     epoch: Epoch,
 }
 
-impl TimeUnitsDecoder {
+impl TimeUnitsDecodingStep {
     pub fn new(units_str: String) -> Result<Self, String> {
         let unit = Self::extract_units(&units_str)
             .ok_or(format!("Unsupported CF time units: {}", units_str))?;
@@ -213,7 +255,7 @@ impl TimeUnitsDecoder {
             "Could not extract epoch from CF time units: {}",
             units_str
         ))?;
-        Ok(TimeUnitsDecoder { unit, epoch })
+        Ok(TimeUnitsDecodingStep { unit, epoch })
     }
 
     fn convert_array(
@@ -261,7 +303,7 @@ impl TimeUnitsDecoder {
     }
 }
 
-impl DecodingPipelineStep for TimeUnitsDecoder {
+impl DecodingPipelineStep for TimeUnitsDecodingStep {
     fn output_data_type(&self) -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None)
     }
