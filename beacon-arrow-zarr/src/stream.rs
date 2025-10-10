@@ -8,11 +8,12 @@ use nd_arrow_array::{
 };
 use zarrs::array_subset::ArraySubset;
 
-use crate::reader::ArrowGroupReader;
+use crate::{decoder::Decoder, reader::ArrowGroupReader};
 
 pub struct ArrowZarrStream {
     group_reader: Arc<crate::reader::ArrowGroupReader>,
     projected_schema: arrow::datatypes::SchemaRef,
+    decoders: Vec<Arc<dyn Decoder>>,
 
     // Streaming State
     is_done: bool,
@@ -25,6 +26,7 @@ impl ArrowZarrStream {
     pub fn new(
         group_reader: Arc<ArrowGroupReader>,
         projected_schema: arrow::datatypes::SchemaRef,
+        decoders: Vec<Arc<dyn Decoder>>,
     ) -> Result<Self, String> {
         // Get all the variables
         let variables = projected_schema
@@ -77,6 +79,7 @@ impl ArrowZarrStream {
         }
 
         Ok(Self {
+            decoders,
             group_reader,
             projected_schema,
             is_done: false,
@@ -159,23 +162,167 @@ impl ArrowZarrStream {
 
                 let arrow_boolean_array = BooleanArray::from(array.into_raw_vec_and_offset().0);
 
-                NdArrowArray::new(Arc::new(arrow_boolean_array), dimensions);
-
-                todo!()
+                let nd_array = NdArrowArray::new(Arc::new(arrow_boolean_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
             }
-            zarrs::array::DataType::Int8 => todo!(),
-            zarrs::array::DataType::Int16 => todo!(),
-            zarrs::array::DataType::Int32 => todo!(),
-            zarrs::array::DataType::Int64 => todo!(),
-            zarrs::array::DataType::UInt8 => todo!(),
-            zarrs::array::DataType::UInt16 => todo!(),
-            zarrs::array::DataType::UInt32 => todo!(),
-            zarrs::array::DataType::UInt64 => todo!(),
-            zarrs::array::DataType::Float32 => todo!(),
-            zarrs::array::DataType::Float64 => todo!(),
-            zarrs::array::DataType::String => todo!(),
-            zarrs::array::DataType::Bytes => todo!(),
-            _ => todo!(),
+            zarrs::array::DataType::Int8 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<i8>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_int8_array =
+                    arrow::array::Int8Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_int8_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::Int16 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<i16>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_int16_array =
+                    arrow::array::Int16Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_int16_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::Int32 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<i32>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_int32_array =
+                    arrow::array::Int32Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_int32_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::Int64 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<i64>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_int64_array =
+                    arrow::array::Int64Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_int64_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::UInt8 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<u8>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_uint8_array =
+                    arrow::array::UInt8Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_uint8_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::UInt16 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<u16>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_uint16_array =
+                    arrow::array::UInt16Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_uint16_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::UInt32 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<u32>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_uint32_array =
+                    arrow::array::UInt32Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_uint32_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::UInt64 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<u64>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_uint64_array =
+                    arrow::array::UInt64Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_uint64_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::Float32 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<f32>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_float32_array =
+                    arrow::array::Float32Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_float32_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::Float64 => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<f64>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_float64_array =
+                    arrow::array::Float64Array::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_float64_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::String => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<String>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_string_array =
+                    arrow::array::StringArray::from(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_string_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarrs::array::DataType::Bytes => {
+                let array = array_reader
+                    .async_retrieve_array_subset_ndarray::<Vec<u8>>(&subset)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let arrow_binary_array =
+                    arrow::array::BinaryArray::from_iter_values(array.into_raw_vec_and_offset().0);
+
+                let nd_array = NdArrowArray::new(Arc::new(arrow_binary_array), dimensions)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(nd_array))
+            }
+            zarr_data_type => Err(format!("Unsupported Zarrs data type: {:?}", zarr_data_type)),
         }
     }
 }

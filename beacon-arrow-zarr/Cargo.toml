@@ -14,3 +14,5 @@ nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.gi
 serde_json = { workspace = true }
 indexmap = { workspace = true }
 tracing = { workspace = true }
+hifitime = "4.0.2"
+regex = "1.11.1"

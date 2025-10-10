@@ -620,9 +620,11 @@ name = "beacon-arrow-zarr"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "hifitime",
  "indexmap 2.10.0",
  "nd-arrow-array",
  "object_store 0.12.3",
+ "regex",
  "serde_json",
  "tokio",
  "tracing",
