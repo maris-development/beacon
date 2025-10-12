@@ -19,3 +19,4 @@ regex = "1.11.1"
 futures = { workspace = true }
 pin-project = "1.1.10"
 parking_lot = { workspace = true }
+crossbeam = { workspace = true }

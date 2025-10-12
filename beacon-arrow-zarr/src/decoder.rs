@@ -1,8 +1,14 @@
 use std::{str::FromStr, sync::Arc};
 
 use arrow::{
-    array::{AsArray, PrimitiveArray, TimestampMillisecondArray},
-    datatypes::{Float64Type, Int64Type, SchemaRef, TimestampMillisecondType},
+    array::{
+        ArrayRef, AsArray, BinaryArray, BooleanArray, PrimitiveArray, StringArray,
+        TimestampMillisecondArray,
+    },
+    datatypes::{
+        Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, SchemaRef,
+        TimestampMillisecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    },
 };
 use hifitime::Epoch;
 use indexmap::IndexMap;
@@ -11,7 +17,7 @@ use regex::Regex;
 
 pub trait Decoder: Send + Sync {
     fn create(
-        group_reader: &crate::reader::ArrowGroupReader,
+        group_reader: &crate::reader::AsyncArrowZarrGroupReader,
         input_schema: SchemaRef,
     ) -> Result<Self, String>
     where
@@ -21,43 +27,356 @@ pub trait Decoder: Send + Sync {
         &self,
         array_name: &str,
     ) -> Option<Vec<Arc<dyn DecodingPipelineStep>>>;
-    fn decode_batch(&self, batch: NdRecordBatch) -> Result<NdRecordBatch, String> {
-        let mut arrays = Vec::new();
-        let mut fields = Vec::new();
-        for (field, array) in batch.schema().fields().iter().zip(batch.arrays()) {
-            if let Some(pipeline) = self.decoding_array_pipeline(field.name()) {
-                let mut decoded_array = array.clone();
-                for step in &pipeline {
-                    decoded_array = step.decode(decoded_array)?;
-                }
-                arrays.push(decoded_array);
-                fields.push(
-                    field
-                        .as_ref()
-                        .clone()
-                        .with_data_type(pipeline.last().unwrap().output_data_type()),
-                );
-            } else {
-                arrays.push(array.clone());
-                fields.push(field.as_ref().clone());
-            }
+    fn decode_array(&self, array_name: &str, array: NdArrowArray) -> Result<NdArrowArray, String> {
+        if let Some(pipeline) = self.decoding_array_pipeline(array_name) {
+            pipeline.iter().fold(Ok(array), |maybe_array, step| {
+                maybe_array.and_then(|array| step.decode(array))
+            })
+        } else {
+            Ok(array)
         }
-
-        let decoded_batch = NdRecordBatch::new(fields, arrays).unwrap();
-        // Ensure the schema is the same as decoded_schema
-        assert_eq!(
-            decoded_batch.schema(),
-            self.decoded_schema(),
-            "Decoded batch schema does not match decoder's decoded schema"
-        );
-
-        Ok(decoded_batch)
     }
 }
 
 pub trait DecodingPipelineStep: Send + Sync {
-    fn output_data_type(&self) -> arrow::datatypes::DataType;
+    fn output_data_type(
+        &self,
+        input_data_type: arrow::datatypes::DataType,
+    ) -> arrow::datatypes::DataType {
+        input_data_type
+    }
     fn decode(&self, array: NdArrowArray) -> Result<NdArrowArray, String>;
+}
+
+pub struct FillValueDecoder {
+    // Array decoders to apply per array name
+    array_fill_decoders: std::collections::HashMap<String, Arc<dyn DecodingPipelineStep>>,
+    decoded_schema: SchemaRef,
+}
+
+impl Decoder for FillValueDecoder {
+    fn create(
+        group_reader: &crate::reader::AsyncArrowZarrGroupReader,
+        input_schema: SchemaRef,
+    ) -> Result<Self, String>
+    where
+        Self: Sized,
+    {
+        let mut array_fill_decoders = std::collections::HashMap::new();
+        for (array_name, array_reader) in group_reader.arrays() {
+            // Add a FillValueDecodingStep if the array has a fill value
+            if let Some(arrow_fill_value) = ArrowFillValue::from_zarrs_fill_value(
+                array_reader.data_type(),
+                array_reader.fill_value(),
+            ) {
+                let fill_value_decoder = FillValueDecodingStep {
+                    fill_value: arrow_fill_value,
+                };
+                array_fill_decoders.insert(
+                    array_name.to_string(),
+                    Arc::new(fill_value_decoder) as Arc<dyn DecodingPipelineStep>,
+                );
+            }
+        }
+        Ok(Self {
+            array_fill_decoders,
+            decoded_schema: input_schema,
+        })
+    }
+
+    fn decoded_schema(&self) -> SchemaRef {
+        self.decoded_schema.clone()
+    }
+
+    fn decoding_array_pipeline(
+        &self,
+        array_name: &str,
+    ) -> Option<Vec<Arc<dyn DecodingPipelineStep>>> {
+        self.array_fill_decoders
+            .get(array_name)
+            .map(|decoder| vec![decoder.clone()])
+    }
+}
+
+pub struct FillValueDecodingStep {
+    fill_value: ArrowFillValue,
+}
+
+pub enum ArrowFillValue {
+    Bool(bool),
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    UInt8(u8),
+    UInt16(u16),
+    UInt32(u32),
+    UInt64(u64),
+    Float32(f32),
+    Float64(f64),
+    String(String),
+    Bytes(Vec<u8>),
+}
+
+impl ArrowFillValue {
+    pub fn from_zarrs_fill_value(
+        array_data_type: &zarrs::array::DataType,
+        fill_bytes: &zarrs::array::FillValue,
+    ) -> Option<Self> {
+        match (array_data_type) {
+            zarrs::array::DataType::Bool => {
+                if fill_bytes.as_ne_bytes().len() == 1 {
+                    Some(ArrowFillValue::Bool(fill_bytes.as_ne_bytes()[0] != 0))
+                } else {
+                    None
+                }
+            }
+            zarrs::array::DataType::Int8 => {
+                if fill_bytes.as_ne_bytes().len() == 1 {
+                    Some(ArrowFillValue::Int8(fill_bytes.as_ne_bytes()[0] as i8))
+                } else {
+                    None
+                }
+            }
+            zarrs::array::DataType::Int16 => {
+                if fill_bytes.as_ne_bytes().len() == 2 {
+                    let bytes = fill_bytes.as_ne_bytes()[0..2]
+                        .try_into()
+                        .expect("slice with incorrect length");
+                    Some(ArrowFillValue::Int16(i16::from_ne_bytes(bytes)))
+                } else {
+                    None
+                }
+            }
+            zarrs::array::DataType::Int32 => {
+                if fill_bytes.as_ne_bytes().len() == 4 {
+                    let bytes = fill_bytes.as_ne_bytes()[0..4]
+                        .try_into()
+                        .expect("slice with incorrect length");
+                    Some(ArrowFillValue::Int32(i32::from_ne_bytes(bytes)))
+                } else {
+                    None
+                }
+            }
+            zarrs::array::DataType::Int64 => {
+                if fill_bytes.as_ne_bytes().len() == 8 {
+                    let bytes = fill_bytes.as_ne_bytes()[0..8]
+                        .try_into()
+                        .expect("slice with incorrect length");
+                    Some(ArrowFillValue::Int64(i64::from_ne_bytes(bytes)))
+                } else {
+                    None
+                }
+            }
+            zarrs::array::DataType::UInt8 => {
+                if fill_bytes.as_ne_bytes().len() == 1 {
+                    Some(ArrowFillValue::UInt8(fill_bytes.as_ne_bytes()[0]))
+                } else {
+                    None
+                }
+            }
+            zarrs::array::DataType::UInt16 => {
+                if fill_bytes.as_ne_bytes().len() == 2 {
+                    let bytes = fill_bytes.as_ne_bytes()[0..2]
+                        .try_into()
+                        .expect("slice with incorrect length");
+                    Some(ArrowFillValue::UInt16(u16::from_ne_bytes(bytes)))
+                } else {
+                    None
+                }
+            }
+            zarrs::array::DataType::UInt32 => {
+                if fill_bytes.as_ne_bytes().len() == 4 {
+                    let bytes = fill_bytes.as_ne_bytes()[0..4]
+                        .try_into()
+                        .expect("slice with incorrect length");
+                    Some(ArrowFillValue::UInt32(u32::from_ne_bytes(bytes)))
+                } else {
+                    None
+                }
+            }
+
+            zarrs::array::DataType::UInt64 => {
+                if fill_bytes.as_ne_bytes().len() == 8 {
+                    let bytes = fill_bytes.as_ne_bytes()[0..8]
+                        .try_into()
+                        .expect("slice with incorrect length");
+                    Some(ArrowFillValue::UInt64(u64::from_ne_bytes(bytes)))
+                } else {
+                    None
+                }
+            }
+
+            zarrs::array::DataType::Float32 => {
+                if fill_bytes.as_ne_bytes().len() == 4 {
+                    let bytes = fill_bytes.as_ne_bytes()[0..4]
+                        .try_into()
+                        .expect("slice with incorrect length");
+                    Some(ArrowFillValue::Float32(f32::from_ne_bytes(bytes)))
+                } else {
+                    None
+                }
+            }
+
+            zarrs::array::DataType::Float64 => {
+                if fill_bytes.as_ne_bytes().len() == 8 {
+                    let bytes = fill_bytes.as_ne_bytes()[0..8]
+                        .try_into()
+                        .expect("slice with incorrect length");
+                    Some(ArrowFillValue::Float64(f64::from_ne_bytes(bytes)))
+                } else {
+                    None
+                }
+            }
+
+            zarrs::array::DataType::String => {
+                // Interpret fill_bytes as UTF-8 string
+                match std::str::from_utf8(fill_bytes.as_ne_bytes()) {
+                    Ok(s) => Some(ArrowFillValue::String(s.to_string())),
+                    Err(_) => None,
+                }
+            }
+
+            zarrs::array::DataType::Bytes => {
+                // Interpret fill_bytes as raw bytes
+                Some(ArrowFillValue::Bytes(fill_bytes.as_ne_bytes().to_vec()))
+            }
+
+            _ => None,
+        }
+    }
+}
+
+impl DecodingPipelineStep for FillValueDecodingStep {
+    fn output_data_type(
+        &self,
+        input_data_type: arrow::datatypes::DataType,
+    ) -> arrow::datatypes::DataType {
+        input_data_type
+    }
+
+    fn decode(&self, array: NdArrowArray) -> Result<NdArrowArray, String> {
+        let arrow_array = array.as_arrow_array();
+        let nullable_array: ArrayRef = match (arrow_array.data_type(), &self.fill_value) {
+            (arrow::datatypes::DataType::Null, _) => return Ok(array.clone()),
+            (arrow::datatypes::DataType::Boolean, ArrowFillValue::Bool(fill_value)) => {
+                let bool_array = array.as_boolean();
+                let filled_array: BooleanArray = bool_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::Int8, ArrowFillValue::Int8(fill_value)) => {
+                let int_array = array.as_primitive::<arrow::datatypes::Int8Type>();
+                let filled_array: PrimitiveArray<Int8Type> = int_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::Int16, ArrowFillValue::Int16(fill_value)) => {
+                let int_array = array.as_primitive::<arrow::datatypes::Int16Type>();
+                let filled_array: PrimitiveArray<Int16Type> = int_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::Int32, ArrowFillValue::Int32(fill_value)) => {
+                let int_array = array.as_primitive::<arrow::datatypes::Int32Type>();
+                let filled_array: PrimitiveArray<Int32Type> = int_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::Int64, ArrowFillValue::Int64(fill_value)) => {
+                let int_array = array.as_primitive::<arrow::datatypes::Int64Type>();
+                let filled_array: PrimitiveArray<Int64Type> = int_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::UInt8, ArrowFillValue::UInt8(fill_value)) => {
+                let int_array = array.as_primitive::<arrow::datatypes::UInt8Type>();
+                let filled_array: PrimitiveArray<UInt8Type> = int_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::UInt16, ArrowFillValue::UInt16(fill_value)) => {
+                let int_array = array.as_primitive::<arrow::datatypes::UInt16Type>();
+                let filled_array: PrimitiveArray<UInt16Type> = int_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+
+            (arrow::datatypes::DataType::UInt32, ArrowFillValue::UInt32(fill_value)) => {
+                let int_array = array.as_primitive::<arrow::datatypes::UInt32Type>();
+                let filled_array: PrimitiveArray<UInt32Type> = int_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+
+            (arrow::datatypes::DataType::UInt64, ArrowFillValue::UInt64(fill_value)) => {
+                let int_array = array.as_primitive::<arrow::datatypes::UInt64Type>();
+                let filled_array: PrimitiveArray<UInt64Type> = int_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != *fill_value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+
+            (arrow::datatypes::DataType::Float32, ArrowFillValue::Float32(value)) => {
+                let float_array = array.as_primitive::<arrow::datatypes::Float32Type>();
+                let filled_array: PrimitiveArray<Float32Type> = float_array
+                    .iter()
+                    .map(|v| v.filter(|&v| v != *value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::Float64, ArrowFillValue::Float64(value)) => {
+                let float_array = array.as_primitive::<arrow::datatypes::Float64Type>();
+                let filled_array: PrimitiveArray<Float64Type> = float_array
+                    .iter()
+                    .map(|v| v.filter(|&v| v != *value))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::Binary, ArrowFillValue::Bytes(fill_value)) => {
+                let binary_array = array.as_binary::<i32>();
+                let filled_array: BinaryArray = binary_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != fill_value.as_slice()))
+                    .collect();
+                Arc::new(filled_array)
+            }
+            (arrow::datatypes::DataType::Utf8, ArrowFillValue::String(fill_value)) => {
+                let string_array = array.as_string::<i32>();
+                let filled_array: StringArray = string_array
+                    .iter()
+                    .map(|v| v.filter(|&value| value != fill_value))
+                    .collect();
+
+                Arc::new(filled_array)
+            }
+            _ => {
+                return Err(format!(
+                    "FillValueDecodingStep does not support data type: {:?}",
+                    array.data_type()
+                ));
+            }
+        };
+
+        Ok(NdArrowArray::new(nullable_array, array.dimensions().clone()).unwrap())
+    }
 }
 
 pub struct CFDecoder {
@@ -68,17 +387,34 @@ pub struct CFDecoder {
 
 impl Decoder for CFDecoder {
     fn create(
-        group_reader: &crate::reader::ArrowGroupReader,
+        group_reader: &crate::reader::AsyncArrowZarrGroupReader,
         input_schema: SchemaRef,
     ) -> Result<Self, String> {
-        let mut array_decoders: std::collections::HashMap<String, Arc<dyn DecodingPipelineStep>> =
-            std::collections::HashMap::new();
+        let mut array_decoders: std::collections::HashMap<
+            String,
+            Vec<Arc<dyn DecodingPipelineStep>>,
+        > = std::collections::HashMap::new();
         let mut fields = IndexMap::new();
         for field in input_schema.fields() {
             fields.insert(field.name().clone(), field.as_ref().clone());
         }
 
-        for (array_name, _) in group_reader.arrays() {
+        for (array_name, array_reader) in group_reader.arrays() {
+            // Add a FillValueDecodingStep if the array has a fill value
+            if let Some(arrow_fill_value) = ArrowFillValue::from_zarrs_fill_value(
+                array_reader.data_type(),
+                array_reader.fill_value(),
+            ) {
+                let fill_value_decoder = FillValueDecodingStep {
+                    fill_value: arrow_fill_value,
+                };
+
+                array_decoders
+                    .entry(array_name.to_string())
+                    .or_default()
+                    .push(Arc::new(fill_value_decoder));
+            }
+
             // Get all the attributes that start with array_name + "."
             let prefix = format!("{}.", array_name);
             let array_attribute: Vec<_> = group_reader
@@ -137,12 +473,15 @@ impl Decoder for CFDecoder {
             };
 
             if let Some(decoding_pipeline) = decoding_pipeline {
-                array_decoders.insert(array_name.to_string(), decoding_pipeline.clone());
+                array_decoders
+                    .entry(array_name.to_string())
+                    .or_default()
+                    .push(decoding_pipeline.clone());
                 // Update the field data type to Float64
                 let array_field = fields.get_mut(array_name).unwrap();
-                *array_field = array_field
-                    .clone()
-                    .with_data_type(decoding_pipeline.output_data_type());
+                *array_field = array_field.clone().with_data_type(
+                    decoding_pipeline.output_data_type(array_field.data_type().clone()),
+                );
             }
 
             // Check for cf time attributes (units)
@@ -163,12 +502,15 @@ impl Decoder for CFDecoder {
                         match TimeUnitsDecodingStep::new(value.clone()) {
                             Ok(decoder) => {
                                 let decoder = Arc::new(decoder) as Arc<dyn DecodingPipelineStep>;
-                                array_decoders.insert(array_name.to_string(), decoder.clone());
+                                array_decoders
+                                    .entry(array_name.to_string())
+                                    .or_default()
+                                    .push(decoder.clone());
                                 // Update the field data type to Int64 (Arrow timestamp in milliseconds)
                                 let array_field = fields.get_mut(array_name).unwrap();
-                                *array_field = array_field
-                                    .clone()
-                                    .with_data_type(decoder.output_data_type());
+                                *array_field = array_field.clone().with_data_type(
+                                    decoder.output_data_type(array_field.data_type().clone()),
+                                );
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -184,10 +526,7 @@ impl Decoder for CFDecoder {
         }
 
         Ok(Self {
-            array_decoders: array_decoders
-                .into_iter()
-                .map(|(k, v)| (k, vec![v]))
-                .collect(),
+            array_decoders,
             decoded_schema: Arc::new(arrow::datatypes::Schema::new(
                 fields.into_values().collect::<Vec<_>>(),
             )),
@@ -237,7 +576,10 @@ impl DecodingPipelineStep for ScaleFactorOffsetDecodingStep {
         .unwrap())
     }
 
-    fn output_data_type(&self) -> arrow::datatypes::DataType {
+    fn output_data_type(
+        &self,
+        _input_data_type: arrow::datatypes::DataType,
+    ) -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Float64
     }
 }
@@ -304,7 +646,10 @@ impl TimeUnitsDecodingStep {
 }
 
 impl DecodingPipelineStep for TimeUnitsDecodingStep {
-    fn output_data_type(&self) -> arrow::datatypes::DataType {
+    fn output_data_type(
+        &self,
+        _input_data_type: arrow::datatypes::DataType,
+    ) -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None)
     }
 
