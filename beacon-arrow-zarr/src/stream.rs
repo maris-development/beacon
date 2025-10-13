@@ -3,10 +3,7 @@ use std::{pin::Pin, sync::Arc, task::Poll};
 use futures::{Future, Stream};
 use indexmap::IndexMap;
 use nd_arrow_array::batch::NdRecordBatch;
-use zarrs::{
-    array::{ArrayShardedExt, ChunkGrid},
-    array_subset::ArraySubset,
-};
+use zarrs::{array::ChunkGrid, array_subset::ArraySubset};
 
 use crate::reader::AsyncArrowZarrGroupReader;
 
@@ -96,7 +93,7 @@ impl ArrowZarrStreamComposer {
         }
     }
 
-    pub fn stream(self: &Arc<Self>) -> ArrowZarrStream {
+    pub fn pollable_shared_stream(self: &Arc<Self>) -> ArrowZarrStream {
         ArrowZarrStream {
             composer: self.clone(),
             ongoing: None,

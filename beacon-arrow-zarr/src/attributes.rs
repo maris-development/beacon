@@ -18,6 +18,27 @@ impl AttributeValue {
         }
     }
 
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            AttributeValue::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            AttributeValue::Float64(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            AttributeValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
     pub fn arrow_data_type(&self) -> arrow::datatypes::DataType {
         match self {
             AttributeValue::String(_) => arrow::datatypes::DataType::Utf8,

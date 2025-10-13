@@ -337,22 +337,10 @@ impl AsyncArrowZarrGroupReader {
             zarr_data_type => Err(format!("Unsupported Zarrs data type: {:?}", zarr_data_type)),
         };
 
-        // let res = maybe_nd_array.and_then(|nd_array_opt| {
-        //     nd_array_opt.map(|nd_array| {
-        //         // Apply decoders
-        //         self.decoders
-        //             .iter()
-        //             .fold(Ok(nd_array), |maybe_array, decoder| {
-        //                 maybe_array.and_then(|array| decoder.decode(array))
-        //             })
-        //             .unwrap()
-        //     })
-        // });
-
-        maybe_nd_array = if let Ok(Some(nd_array)) = maybe_nd_array {
+        maybe_nd_array = if let Ok(Some(mut nd_array)) = maybe_nd_array {
             // Apply decoders
             for decoder in &self.decoders {
-                maybe_nd_array = decoder.decode_array(array_name, &nd_array);
+                nd_array = decoder.decode_array(array_name, nd_array)?;
             }
 
             Ok(Some(nd_array))
@@ -371,11 +359,7 @@ mod tests {
 
     use futures::StreamExt;
     use object_store::local::LocalFileSystem;
-    use zarrs::{
-        array::{Array, ChunkGrid},
-        array_subset::ArraySubset,
-        group::Group,
-    };
+    use zarrs::{array::Array, array_subset::ArraySubset, group::Group};
     use zarrs_object_store::AsyncObjectStore;
     use zarrs_storage::AsyncReadableListableStorage;
 
@@ -406,6 +390,8 @@ mod tests {
                 .iter_chunk_indices()
                 .collect::<Vec<_>>()
         );
+
+        println!("SST attrs: {:?}", sst_arr.attributes());
 
         let y = sst_arr
             .chunk_grid()
@@ -490,7 +476,7 @@ mod tests {
         let mut stream = reader
             .into_parallel_stream_composer(Some(&[longitude_idx, latitude_idx, analysed_sst_idx]))
             .unwrap()
-            .stream();
+            .pollable_shared_stream();
 
         let next_batch = stream.next().await;
 

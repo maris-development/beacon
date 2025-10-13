@@ -19,6 +19,7 @@ pub mod geo_parquet;
 pub mod netcdf;
 pub mod odv_ascii;
 pub mod parquet;
+pub mod zarr;
 
 /// Register file formats with the session state that can be used for reading
 pub fn register_file_formats(

@@ -738,12 +738,14 @@ dependencies = [
  "async_zip",
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
+ "beacon-arrow-zarr",
  "beacon-common",
  "datafusion",
  "futures",
  "geoarrow",
  "geoarrow-array",
  "geoparquet",
+ "glob",
  "object_store 0.12.3",
  "parking_lot",
  "parquet",
@@ -754,6 +756,8 @@ dependencies = [
  "tokio-util",
  "tracing",
  "typetag",
+ "url",
+ "zarrs_object_store",
 ]
 
 [[package]]

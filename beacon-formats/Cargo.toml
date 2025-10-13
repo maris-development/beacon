@@ -25,7 +25,11 @@ tokio = { workspace = true }
 
 async_zip = { version = "0.0.18", features = ["tokio", "zstd", "deflate"] }
 tokio-util = "0.7.16"
+zarrs_object_store = "0.5.0"
+url = "2.5.4"
+glob = "0.3.3"
 
 beacon-common = { path = "../beacon-common" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
+beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }

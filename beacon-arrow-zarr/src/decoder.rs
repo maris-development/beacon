@@ -15,6 +15,8 @@ use indexmap::IndexMap;
 use nd_arrow_array::{NdArrowArray, batch::NdRecordBatch};
 use regex::Regex;
 
+use crate::attributes::AttributeValue;
+
 pub trait Decoder: Send + Sync {
     fn create(
         group_reader: &crate::reader::AsyncArrowZarrGroupReader,
@@ -65,9 +67,12 @@ impl Decoder for FillValueDecoder {
         let mut array_fill_decoders = std::collections::HashMap::new();
         for (array_name, array_reader) in group_reader.arrays() {
             // Add a FillValueDecodingStep if the array has a fill value
+            let fill_value_attr = array_reader.attributes().get("_FillValue");
             if let Some(arrow_fill_value) = ArrowFillValue::from_zarrs_fill_value(
                 array_reader.data_type(),
-                array_reader.fill_value(),
+                fill_value_attr
+                    .and_then(AttributeValue::from_json_value)
+                    .as_ref(),
             ) {
                 let fill_value_decoder = FillValueDecodingStep {
                     fill_value: arrow_fill_value,
@@ -121,125 +126,51 @@ pub enum ArrowFillValue {
 impl ArrowFillValue {
     pub fn from_zarrs_fill_value(
         array_data_type: &zarrs::array::DataType,
-        fill_bytes: &zarrs::array::FillValue,
+        fill_value_attr: Option<&AttributeValue>,
     ) -> Option<Self> {
-        match (array_data_type) {
-            zarrs::array::DataType::Bool => {
-                if fill_bytes.as_ne_bytes().len() == 1 {
-                    Some(ArrowFillValue::Bool(fill_bytes.as_ne_bytes()[0] != 0))
-                } else {
-                    None
-                }
-            }
-            zarrs::array::DataType::Int8 => {
-                if fill_bytes.as_ne_bytes().len() == 1 {
-                    Some(ArrowFillValue::Int8(fill_bytes.as_ne_bytes()[0] as i8))
-                } else {
-                    None
-                }
-            }
-            zarrs::array::DataType::Int16 => {
-                if fill_bytes.as_ne_bytes().len() == 2 {
-                    let bytes = fill_bytes.as_ne_bytes()[0..2]
-                        .try_into()
-                        .expect("slice with incorrect length");
-                    Some(ArrowFillValue::Int16(i16::from_ne_bytes(bytes)))
-                } else {
-                    None
-                }
-            }
-            zarrs::array::DataType::Int32 => {
-                if fill_bytes.as_ne_bytes().len() == 4 {
-                    let bytes = fill_bytes.as_ne_bytes()[0..4]
-                        .try_into()
-                        .expect("slice with incorrect length");
-                    Some(ArrowFillValue::Int32(i32::from_ne_bytes(bytes)))
-                } else {
-                    None
-                }
-            }
-            zarrs::array::DataType::Int64 => {
-                if fill_bytes.as_ne_bytes().len() == 8 {
-                    let bytes = fill_bytes.as_ne_bytes()[0..8]
-                        .try_into()
-                        .expect("slice with incorrect length");
-                    Some(ArrowFillValue::Int64(i64::from_ne_bytes(bytes)))
-                } else {
-                    None
-                }
-            }
-            zarrs::array::DataType::UInt8 => {
-                if fill_bytes.as_ne_bytes().len() == 1 {
-                    Some(ArrowFillValue::UInt8(fill_bytes.as_ne_bytes()[0]))
-                } else {
-                    None
-                }
-            }
-            zarrs::array::DataType::UInt16 => {
-                if fill_bytes.as_ne_bytes().len() == 2 {
-                    let bytes = fill_bytes.as_ne_bytes()[0..2]
-                        .try_into()
-                        .expect("slice with incorrect length");
-                    Some(ArrowFillValue::UInt16(u16::from_ne_bytes(bytes)))
-                } else {
-                    None
-                }
-            }
-            zarrs::array::DataType::UInt32 => {
-                if fill_bytes.as_ne_bytes().len() == 4 {
-                    let bytes = fill_bytes.as_ne_bytes()[0..4]
-                        .try_into()
-                        .expect("slice with incorrect length");
-                    Some(ArrowFillValue::UInt32(u32::from_ne_bytes(bytes)))
-                } else {
-                    None
-                }
-            }
+        match array_data_type {
+            zarrs::array::DataType::Bool => fill_value_attr
+                .and_then(|attr| attr.as_bool())
+                .map(ArrowFillValue::Bool),
+            zarrs::array::DataType::Int8 => fill_value_attr
+                .and_then(|attr| attr.as_f64().and_then(|v| i8::try_from(v as i64).ok()))
+                .map(ArrowFillValue::Int8),
+            zarrs::array::DataType::Int16 => fill_value_attr
+                .and_then(|attr| attr.as_f64().and_then(|v| i16::try_from(v as i64).ok()))
+                .map(ArrowFillValue::Int16),
+            zarrs::array::DataType::Int32 => fill_value_attr
+                .and_then(|attr| attr.as_f64().and_then(|v| i32::try_from(v as i64).ok()))
+                .map(ArrowFillValue::Int32),
+            zarrs::array::DataType::Int64 => fill_value_attr
+                .and_then(|attr| attr.as_f64().map(|v| v as i64).or(None))
+                .map(ArrowFillValue::Int64),
+            zarrs::array::DataType::UInt8 => fill_value_attr
+                .and_then(|attr| attr.as_f64().and_then(|v| u8::try_from(v as u64).ok()))
+                .map(ArrowFillValue::UInt8),
+            zarrs::array::DataType::UInt16 => fill_value_attr
+                .and_then(|attr| attr.as_f64().and_then(|v| u16::try_from(v as u64).ok()))
+                .map(ArrowFillValue::UInt16),
+            zarrs::array::DataType::UInt32 => fill_value_attr
+                .and_then(|attr| attr.as_f64().and_then(|v| u32::try_from(v as u64).ok()))
+                .map(ArrowFillValue::UInt32),
 
-            zarrs::array::DataType::UInt64 => {
-                if fill_bytes.as_ne_bytes().len() == 8 {
-                    let bytes = fill_bytes.as_ne_bytes()[0..8]
-                        .try_into()
-                        .expect("slice with incorrect length");
-                    Some(ArrowFillValue::UInt64(u64::from_ne_bytes(bytes)))
-                } else {
-                    None
-                }
-            }
+            zarrs::array::DataType::UInt64 => fill_value_attr
+                .and_then(|attr| attr.as_f64().map(|v| v as u64).or(None))
+                .map(ArrowFillValue::UInt64),
 
-            zarrs::array::DataType::Float32 => {
-                if fill_bytes.as_ne_bytes().len() == 4 {
-                    let bytes = fill_bytes.as_ne_bytes()[0..4]
-                        .try_into()
-                        .expect("slice with incorrect length");
-                    Some(ArrowFillValue::Float32(f32::from_ne_bytes(bytes)))
-                } else {
-                    None
-                }
-            }
+            zarrs::array::DataType::Float32 => fill_value_attr
+                .and_then(|attr| attr.as_f64().map(|v| v as f32).or(None))
+                .map(ArrowFillValue::Float32),
 
-            zarrs::array::DataType::Float64 => {
-                if fill_bytes.as_ne_bytes().len() == 8 {
-                    let bytes = fill_bytes.as_ne_bytes()[0..8]
-                        .try_into()
-                        .expect("slice with incorrect length");
-                    Some(ArrowFillValue::Float64(f64::from_ne_bytes(bytes)))
-                } else {
-                    None
-                }
-            }
+            zarrs::array::DataType::Float64 => fill_value_attr
+                .and_then(|attr| attr.as_f64())
+                .map(ArrowFillValue::Float64),
 
             zarrs::array::DataType::String => {
                 // Interpret fill_bytes as UTF-8 string
-                match std::str::from_utf8(fill_bytes.as_ne_bytes()) {
-                    Ok(s) => Some(ArrowFillValue::String(s.to_string())),
-                    Err(_) => None,
-                }
-            }
-
-            zarrs::array::DataType::Bytes => {
-                // Interpret fill_bytes as raw bytes
-                Some(ArrowFillValue::Bytes(fill_bytes.as_ne_bytes().to_vec()))
+                fill_value_attr
+                    .and_then(|attr| attr.as_str().map(|s| s.to_string()))
+                    .map(ArrowFillValue::String)
             }
 
             _ => None,
@@ -400,21 +331,6 @@ impl Decoder for CFDecoder {
         }
 
         for (array_name, array_reader) in group_reader.arrays() {
-            // Add a FillValueDecodingStep if the array has a fill value
-            if let Some(arrow_fill_value) = ArrowFillValue::from_zarrs_fill_value(
-                array_reader.data_type(),
-                array_reader.fill_value(),
-            ) {
-                let fill_value_decoder = FillValueDecodingStep {
-                    fill_value: arrow_fill_value,
-                };
-
-                array_decoders
-                    .entry(array_name.to_string())
-                    .or_default()
-                    .push(Arc::new(fill_value_decoder));
-            }
-
             // Get all the attributes that start with array_name + "."
             let prefix = format!("{}.", array_name);
             let array_attribute: Vec<_> = group_reader
