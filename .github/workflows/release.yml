@@ -1,14 +1,17 @@
-name: "Weekly Build (Wednesday)"
+name: "Release Build"
 
 on:
-    schedule:
-    - cron: "0 0 * * 3"   # Runs weekly at 00:00 UTC on Wednesday
+    # Trigger ONLY when a tag is pushed (e.g., v1.2.3)
+    push:
+        tags:
+            - "v*"
+    # Optional: also allow manual trigger
     workflow_dispatch:
-    
+
 permissions:
-  packages: write
-  contents: write
-  
+    packages: write
+    contents: write
+
 jobs:
     build:
         runs-on: ubuntu-latest
@@ -29,12 +32,15 @@ jobs:
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
 
-            - name: Generate date tag
+            - name: Extract tag name (version)
               id: tag
-              run: echo "DATE_TAG=$(date +'%Y%m%d')" >> $GITHUB_ENV
+              run: |
+                  VERSION=${GITHUB_REF#refs/tags/}
+                  echo "VERSION_TAG=${VERSION}" >> $GITHUB_ENV
 
-            - name: Log Nightly Tag
-              run: echo ${{ env.DATE_TAG }}
+            - name: Log version tag
+              run: |
+                  echo "Building release version: ${{ env.VERSION_TAG }}"
 
             - name: Build and Push Docker Image
               uses: docker/build-push-action@v3
@@ -43,5 +49,5 @@ jobs:
                   push: true
                   platforms: linux/amd64
                   tags: |
-                      ghcr.io/${{ github.repository_owner }}/beacon:community-nightly-${{ env.DATE_TAG }}
-                      ghcr.io/${{ github.repository_owner }}/beacon:community-nightly-latest
+                      ghcr.io/${{ github.repository_owner }}/beacon:community-${{ env.VERSION_TAG }}
+                      ghcr.io/${{ github.repository_owner }}/beacon:community-latest
