@@ -5,12 +5,14 @@
 
 use std::sync::Arc;
 
+use beacon_arrow_odv::writer::OdvOptions;
 use beacon_data_lake::DataLake;
 use beacon_formats::{
     arrow::ArrowFormatFactory,
     csv::CsvFormatFactory,
     geo_parquet::{GeoParquetFormatFactory, GeoParquetOptions},
     netcdf::{NetCDFFormatFactory, NetcdfOptions},
+    odv_ascii::OdvFileFormatFactory,
     parquet::ParquetFormatFactory,
 };
 use datafusion::{
@@ -83,6 +85,7 @@ pub enum OutputFormat {
         /// Name of the latitude column, if any.
         latitude_column: Option<String>,
     },
+    Odv(OdvOptions),
 }
 
 impl OutputFormat {
@@ -94,6 +97,7 @@ impl OutputFormat {
             OutputFormat::Parquet => QueryOutputFile::Parquet(temp_file),
             OutputFormat::GeoParquet { .. } => QueryOutputFile::GeoParquet(temp_file),
             OutputFormat::NetCDF => QueryOutputFile::NetCDF(temp_file),
+            OutputFormat::Odv(_) => QueryOutputFile::Odv(temp_file),
         }
     }
 
@@ -120,6 +124,9 @@ impl OutputFormat {
                     object_resolver,
                     sink_resolver,
                 )))
+            }
+            OutputFormat::Odv(options) => {
+                format_as_file_type(Arc::new(OdvFileFormatFactory::new(Some(options.clone()))))
             }
         }
     }

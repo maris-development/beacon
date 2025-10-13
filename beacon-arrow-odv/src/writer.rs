@@ -13,7 +13,7 @@ use arrow::{
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
 use async_zip::{base::write::ZipFileWriter, ZipEntryBuilder};
-use futures::{AsyncWrite, AsyncWriteExt};
+use futures::{AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -357,10 +357,16 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
     /// Result containing path to created archive or error if archival fails
     pub async fn finish(mut self) -> anyhow::Result<W> {
         // Process each odv into the zip file by copying over the bytes
-        let profiles = tokio::fs::File::from_std(self.profile_file.finish()?).compat();
-        let timeseries = tokio::fs::File::from_std(self.timeseries_file.finish()?).compat();
-        let trajectories = tokio::fs::File::from_std(self.trajectory_file.finish()?).compat();
-        let errors = tokio::fs::File::from_std(self.error_file.finish()?).compat();
+        let mut profiles = tokio::fs::File::from_std(self.profile_file.finish()?).compat();
+        let mut timeseries = tokio::fs::File::from_std(self.timeseries_file.finish()?).compat();
+        let mut trajectories = tokio::fs::File::from_std(self.trajectory_file.finish()?).compat();
+        let mut errors = tokio::fs::File::from_std(self.error_file.finish()?).compat();
+
+        // Move back file pointers to start
+        profiles.seek(std::io::SeekFrom::Start(0)).await?;
+        timeseries.seek(std::io::SeekFrom::Start(0)).await?;
+        trajectories.seek(std::io::SeekFrom::Start(0)).await?;
+        errors.seek(std::io::SeekFrom::Start(0)).await?;
 
         let mut profile_writer = self
             .zip_file_writer
@@ -1006,7 +1012,12 @@ impl<T: OdvType, W: Write> OdvFile<T, W> {
                     Self::primary_data_header(
                         "time_ISO8601",
                         &options.qf_schema,
-                        &Self::arrow_to_value_type(&arrow::datatypes::DataType::Float64)?,
+                        &Self::arrow_to_value_type(
+                            input_schema
+                                .field_with_name(&options.time_column.column_name)
+                                .expect("Time column not found in input schema.")
+                                .data_type()
+                        )?,
                         options.time_column.comment.as_deref().unwrap_or(""),
                         "F"
                     )
@@ -1046,7 +1057,12 @@ impl<T: OdvType, W: Write> OdvFile<T, W> {
                     Self::primary_data_header(
                         "time_ISO8601",
                         &options.qf_schema,
-                        &Self::arrow_to_value_type(&arrow::datatypes::DataType::Float64)?,
+                        &Self::arrow_to_value_type(
+                            input_schema
+                                .field_with_name(&options.time_column.column_name)
+                                .expect("Time column not found in input schema.")
+                                .data_type()
+                        )?,
                         options.time_column.comment.as_deref().unwrap_or(""),
                         "T"
                     )
@@ -1109,7 +1125,7 @@ impl<T: OdvType, W: Write> OdvFile<T, W> {
             DataType::UInt64 => Ok("INTEGER".to_string()),
             DataType::Float32 => Ok("FLOAT".to_string()),
             DataType::Float64 => Ok("FLOAT".to_string()),
-            DataType::Timestamp(_, _) => Ok("INDEXED_TEXT".to_string()),
+            DataType::Timestamp(_, _) => Ok("DOUBLE".to_string()),
             DataType::Utf8 => Ok("INDEXED_TEXT".to_string()),
             dtype => anyhow::bail!("Unsupported data type for ODV export: {:?}", dtype),
         }

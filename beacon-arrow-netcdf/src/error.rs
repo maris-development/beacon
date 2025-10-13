@@ -50,4 +50,8 @@ pub enum ArrowNetCDFError {
     IpcBufferCloseError(ArrowError),
     #[error("Ipc Buffer Failed to Open for reading: {0}")]
     IpcBufferOpenError(ArrowError),
+    #[error("Stream Error: {0}")]
+    Stream(String),
+    #[error("Reader Error: {0}")]
+    Reader(String),
 }

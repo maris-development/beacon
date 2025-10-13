@@ -137,11 +137,14 @@ impl FileFormat for ParquetFormat {
         &self,
         input: Arc<dyn ExecutionPlan>,
         state: &dyn Session,
-        conf: FileSinkConfig,
+        mut conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // ensure all Timestamp(Second) columns are cast to Timestamp(Millisecond)
         let adjusted_input = cast_ts_seconds_to_ms(input, state)?;
+        let output_schema = adjusted_input.schema();
+        conf.output_schema = output_schema;
+
         self.inner
             .create_writer_physical_plan(adjusted_input, state, conf, order_requirements)
             .await
@@ -156,6 +159,7 @@ fn cast_ts_seconds_to_ms(
     input: Arc<dyn ExecutionPlan>,
     session: &dyn Session,
 ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    println!("Casting Time[s] to Time[ms]");
     let schema = input.schema();
     let df_schema: DFSchema = DFSchema::try_from(schema.clone()).unwrap();
 

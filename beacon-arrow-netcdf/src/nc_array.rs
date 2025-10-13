@@ -22,6 +22,12 @@ pub struct Dimension {
     pub size: usize,
 }
 
+impl Dimension {
+    pub fn new(name: String, size: usize) -> Self {
+        Self { name, size }
+    }
+}
+
 pub struct NetCDFNdArray {
     pub dims: Vec<Dimension>,
     pub array: NetCDFNdArrayInner,

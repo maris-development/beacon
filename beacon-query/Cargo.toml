@@ -19,3 +19,4 @@ beacon-config = { path = "../beacon-config" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-data-lake = { path = "../beacon-data-lake" }
 beacon-formats = { path = "../beacon-formats" }
+beacon-arrow-odv = { path = "../beacon-arrow-odv" }

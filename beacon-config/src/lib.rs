@@ -66,6 +66,8 @@ pub struct Config {
     pub allowed_credentials: bool,
     #[envconfig(from = "BEACON_CORS_MAX_AGE", default = "3600")]
     pub max_age: u64,
+    #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "false")]
+    pub enable_pushdown_projection: bool,
 }
 
 impl Config {
