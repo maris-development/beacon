@@ -22,11 +22,11 @@ pub fn map_l22_l05() -> ScalarUDF {
         vec![datafusion::arrow::datatypes::DataType::Utf8],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
-        Arc::new(map_c17_l06_impl),
+        Arc::new(map_l22_l05_impl),
     )
 }
 
-fn map_c17_l06_impl(parameters: &[ColumnarValue]) -> datafusion::error::Result<ColumnarValue> {
+fn map_l22_l05_impl(parameters: &[ColumnarValue]) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
             let flag_array = flag
