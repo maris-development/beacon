@@ -1,11 +1,11 @@
-use std::{pin::Pin, sync::Arc, task::Poll};
+use std::{collections::HashMap, pin::Pin, sync::Arc, task::Poll};
 
 use futures::{Future, Stream};
 use indexmap::IndexMap;
-use nd_arrow_array::batch::NdRecordBatch;
+use nd_arrow_array::{NdArrowArray, batch::NdRecordBatch};
 use zarrs::{array::ChunkGrid, array_subset::ArraySubset};
 
-use crate::reader::AsyncArrowZarrGroupReader;
+use crate::{array_slice_pushdown::ArraySlicePushDown, reader::AsyncArrowZarrGroupReader};
 
 pub type ArrowZarrStreamComposerRef = Arc<ArrowZarrStreamComposer>;
 
@@ -17,12 +17,14 @@ pub struct ArrowZarrStreamComposer {
     dimension_names: Vec<String>,
     dimension_sizes: Vec<u64>,
     readable_chunks: crossbeam::queue::SegQueue<ChunkIndices>,
+    array_slice_pushdowns: Option<HashMap<String, ArraySlicePushDown>>,
 }
 
 impl ArrowZarrStreamComposer {
     pub fn new(
         group_reader: AsyncArrowZarrGroupReader,
         projected_schema: arrow::datatypes::SchemaRef,
+        array_slice_pushdowns: Option<HashMap<String, ArraySlicePushDown>>,
     ) -> Result<ArrowZarrStreamComposerRef, String> {
         // Get all the variables
         let variables = projected_schema
@@ -87,6 +89,7 @@ impl ArrowZarrStreamComposer {
             dimension_names,
             dimension_sizes,
             readable_chunks: queue,
+            array_slice_pushdowns,
         }))
     }
 
@@ -129,7 +132,7 @@ impl ArrowZarrStream {
         let array_subset = composer.generate_array_subset(&chunk_indices);
 
         // Blend dimension_names and array_subset ranges into a map (this will wrap ranges that exceed dimension sizes)
-        let dimension_subset_ranges: IndexMap<String, std::ops::Range<u64>> = composer
+        let mut dimension_subset_ranges: IndexMap<String, std::ops::Range<u64>> = composer
             .dimension_names
             .iter()
             .zip(array_subset.to_ranges())
@@ -142,7 +145,46 @@ impl ArrowZarrStream {
                 }
             })
             .collect();
+        // println!(
+        //     "Array slice pushdowns: {:?}",
+        //     composer.array_slice_pushdowns
+        // );
+        if let Some(pushdowns) = &composer.array_slice_pushdowns {
+            // Apply array slice pushdowns
+            for (dim_name, pushdown) in pushdowns.iter() {
+                if let Some(range) = dimension_subset_ranges.get_mut(dim_name) {
+                    if let Some(overlap) =
+                        pushdown.overlapping_range(range.start as usize..range.end as usize)
+                    {
+                        *range = overlap.start as u64..overlap.end as u64;
+                        // println!("Applying pushdown on dimension {}: {:?}", dim_name, range);
+                    } else {
+                        // No overlap, return empty batch
+                        // println!(
+                        //     "Skipping chunk {:?} due to no overlap with pushdown on dimension {}",
+                        //     chunk_indices, dim_name
+                        // );
+                        let mut arrays = vec![];
+                        let mut fields = vec![];
+                        for field in composer.projected_schema.fields() {
+                            fields.push(field.as_ref().clone());
+                            arrays.push(NdArrowArray::new_null_scalar(Some(
+                                field.data_type().clone(),
+                            )));
+                        }
 
+                        let empty_batch =
+                            NdRecordBatch::new(fields, arrays).map_err(|e| e.to_string());
+                        return Some(empty_batch);
+                    }
+                }
+            }
+        }
+        tracing::debug!(
+            "Reading chunk {:?} with subset ranges: {:?}",
+            chunk_indices,
+            dimension_subset_ranges
+        );
         let mut arrays = vec![];
         let mut fields = vec![];
         for column in composer.projected_schema.fields().iter() {

@@ -36,3 +36,4 @@ utoipa = { workspace=true}
 
 beacon-config = { path = "../beacon-config" }
 beacon-formats = { path = "../beacon-formats" }
+beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }

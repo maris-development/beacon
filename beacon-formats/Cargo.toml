@@ -31,6 +31,7 @@ zarrs = {"version" = "0.22.2", features = ["async"]}
 
 url = "2.5.4"
 glob = "0.3.3"
+chrono = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }

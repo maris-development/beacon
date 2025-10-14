@@ -1,10 +1,14 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use beacon_formats::{arrow::ArrowFormat, csv::CsvFormat, parquet::ParquetFormat};
+use beacon_formats::zarr::{ZarrFormat, array_step_span::NumericArrayStepSpan};
+use datafusion::datasource::file_format::FileFormat;
 
 #[typetag::serde(tag = "file_format")]
 pub trait TableFileFormat: std::fmt::Debug + Send + Sync {
     fn file_ext(&self) -> String;
+    fn file_format(&self) -> Option<Arc<dyn FileFormat>> {
+        None
+    }
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -50,11 +54,20 @@ impl TableFileFormat for NetCDFFileFormat {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct ZarrFileFormat;
+pub struct ZarrFileFormat {
+    #[serde(default)]
+    pub global_array_steps: HashMap<String, NumericArrayStepSpan>,
+}
 
 #[typetag::serde(name = "zarr")]
 impl TableFileFormat for ZarrFileFormat {
     fn file_ext(&self) -> String {
         "zarr".to_string()
+    }
+
+    fn file_format(&self) -> Option<Arc<dyn FileFormat>> {
+        Some(Arc::new(
+            ZarrFormat::default().with_array_steps(self.global_array_steps.clone()),
+        ))
     }
 }

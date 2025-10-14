@@ -13,6 +13,7 @@ use zarrs::{array::Array, array_subset::ArraySubset, group::Group};
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::{
+    array_slice_pushdown::ArraySlicePushDown,
     attributes::AttributeValue,
     decoder::{self, Decoder},
     stream::{ArrowZarrStreamComposer, ArrowZarrStreamComposerRef},
@@ -126,13 +127,14 @@ impl AsyncArrowZarrGroupReader {
     pub fn into_parallel_stream_composer<P: AsRef<[usize]>>(
         self,
         projection: Option<P>,
+        array_slice_pushdowns: Option<HashMap<String, ArraySlicePushDown>>,
     ) -> Result<ArrowZarrStreamComposerRef, String> {
         let projected_schema = match projection {
             Some(p) => Arc::new(self.schema.project(p.as_ref()).map_err(|e| e.to_string())?),
             None => self.schema.clone(),
         };
 
-        ArrowZarrStreamComposer::new(self, projected_schema)
+        ArrowZarrStreamComposer::new(self, projected_schema, array_slice_pushdowns)
     }
 
     pub fn read_attribute(&self, attribute_name: &str) -> Option<NdArrowArray> {
@@ -392,6 +394,7 @@ mod tests {
         );
 
         println!("SST attrs: {:?}", sst_arr.attributes());
+        println!("SST dims: {:?}", sst_arr.dimension_names());
 
         let y = sst_arr
             .chunk_grid()
@@ -474,7 +477,10 @@ mod tests {
             .expect("analysed_sst field not found in schema");
 
         let mut stream = reader
-            .into_parallel_stream_composer(Some(&[longitude_idx, latitude_idx, analysed_sst_idx]))
+            .into_parallel_stream_composer(
+                Some(&[longitude_idx, latitude_idx, analysed_sst_idx]),
+                None,
+            )
             .unwrap()
             .pollable_shared_stream();
 

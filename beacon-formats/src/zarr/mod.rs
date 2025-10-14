@@ -20,8 +20,13 @@ use datafusion::{
 use object_store::{ObjectMeta, ObjectStore};
 use zarrs_object_store::AsyncObjectStore;
 
-use crate::zarr::source::{ZarrSource, fetch_schema};
+use crate::zarr::{
+    array_step_span::NumericArrayStepSpan,
+    source::{ZarrSource, fetch_schema},
+};
 
+pub mod array_step_span;
+pub mod expr_util;
 mod source;
 mod stream_share;
 
@@ -58,11 +63,11 @@ impl FileFormatFactory for ZarrFormatFactory {
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<std::sync::Arc<dyn FileFormat>> {
         // Here you can use `state` and `format_options` to customize the creation of the FileFormat
-        Ok(Arc::new(ZarrFormat))
+        Ok(Arc::new(ZarrFormat::default()))
     }
 
     fn default(&self) -> std::sync::Arc<dyn FileFormat> {
-        Arc::new(ZarrFormat)
+        Arc::new(ZarrFormat::default())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -70,8 +75,17 @@ impl FileFormatFactory for ZarrFormatFactory {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ZarrFormat;
+#[derive(Debug, Clone, Default)]
+pub struct ZarrFormat {
+    array_steps: HashMap<String, NumericArrayStepSpan>,
+}
+
+impl ZarrFormat {
+    pub fn with_array_steps(mut self, array_steps: HashMap<String, NumericArrayStepSpan>) -> Self {
+        self.array_steps = array_steps;
+        self
+    }
+}
 
 #[async_trait::async_trait]
 impl FileFormat for ZarrFormat {
@@ -144,7 +158,7 @@ impl FileFormat for ZarrFormat {
             })
             .collect();
 
-        let source = ZarrSource::default();
+        let source = ZarrSource::default().with_array_steps(self.array_steps.clone());
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -153,7 +167,7 @@ impl FileFormat for ZarrFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(ZarrSource::default())
+        Arc::new(ZarrSource::default().with_array_steps(self.array_steps.clone()))
     }
 }
 
