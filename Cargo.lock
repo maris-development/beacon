@@ -535,7 +535,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beacon-api"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-netcdf"
-version = "1.2.2"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-odv"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-config"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "envconfig",
  "lazy_static",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-data-lake"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-formats"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-functions"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-planner"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "beacon-config",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-query"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "beacon-arrow-odv",
