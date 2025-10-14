@@ -48,3 +48,13 @@ impl TableFileFormat for NetCDFFileFormat {
         "nc".to_string()
     }
 }
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct ZarrFileFormat;
+
+#[typetag::serde(name = "zarr")]
+impl TableFileFormat for ZarrFileFormat {
+    fn file_ext(&self) -> String {
+        "zarr".to_string()
+    }
+}

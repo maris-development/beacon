@@ -11,6 +11,7 @@ use crate::{
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
     },
     parquet::ParquetFormatFactory,
+    zarr::ZarrFormatFactory,
 };
 
 pub mod arrow;
@@ -39,5 +40,6 @@ pub fn register_file_formats(
         )),
         true,
     )?;
+    session_state.register_file_format(Arc::new(ZarrFormatFactory), true)?;
     Ok(())
 }

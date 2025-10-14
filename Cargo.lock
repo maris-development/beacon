@@ -746,6 +746,7 @@ dependencies = [
  "geoarrow-array",
  "geoparquet",
  "glob",
+ "nd-arrow-array",
  "object_store 0.12.3",
  "parking_lot",
  "parquet",
@@ -757,7 +758,9 @@ dependencies = [
  "tracing",
  "typetag",
  "url",
+ "zarrs",
  "zarrs_object_store",
+ "zarrs_storage",
 ]
 
 [[package]]
