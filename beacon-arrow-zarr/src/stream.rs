@@ -15,6 +15,7 @@ pub struct ArrowZarrStreamComposer {
     // Streaming State
     chunk_grid: Option<ChunkGrid>,
     dimension_names: Vec<String>,
+    dimension_sizes: Vec<u64>,
     readable_chunks: crossbeam::queue::SegQueue<ChunkIndices>,
 }
 
@@ -50,6 +51,7 @@ impl ArrowZarrStreamComposer {
 
         let mut chunk_grid = None;
         let mut dimension_names = vec![];
+        let mut dimension_sizes = vec![];
         let queue = crossbeam::queue::SegQueue::new();
 
         if let Some(var_name) = max_dims_var {
@@ -65,6 +67,7 @@ impl ArrowZarrStreamComposer {
 
             chunk_grid = Some(chunk_shape.clone());
             dimension_names = var_dimension_names;
+            dimension_sizes = var.shape().to_vec();
         }
 
         if let Some(chunk_grid) = &chunk_grid {
@@ -82,6 +85,7 @@ impl ArrowZarrStreamComposer {
             projected_schema,
             chunk_grid,
             dimension_names,
+            dimension_sizes,
             readable_chunks: queue,
         }))
     }
@@ -123,12 +127,20 @@ impl ArrowZarrStream {
             None => return None, // Queue is empty
         };
         let array_subset = composer.generate_array_subset(&chunk_indices);
-        // Blend dimension_names and array_subset ranges into a map
+
+        // Blend dimension_names and array_subset ranges into a map (this will wrap ranges that exceed dimension sizes)
         let dimension_subset_ranges: IndexMap<String, std::ops::Range<u64>> = composer
             .dimension_names
             .iter()
             .zip(array_subset.to_ranges())
-            .map(|(name, range)| (name.clone(), range))
+            .zip(composer.dimension_sizes.iter())
+            .map(|((name, range), dim_size)| {
+                if range.end > *dim_size {
+                    (name.clone(), range.start..*dim_size)
+                } else {
+                    (name.clone(), range)
+                }
+            })
             .collect();
 
         let mut arrays = vec![];
@@ -167,7 +179,6 @@ impl ArrowZarrStream {
                     // Scalar array
                     ArraySubset::new_empty(0)
                 };
-
                 let array = composer
                     .group_reader
                     .read_array(array_name, &subset)
