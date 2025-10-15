@@ -145,10 +145,6 @@ impl ArrowZarrStream {
                 }
             })
             .collect();
-        // println!(
-        //     "Array slice pushdowns: {:?}",
-        //     composer.array_slice_pushdowns
-        // );
         if let Some(pushdowns) = &composer.array_slice_pushdowns {
             // Apply array slice pushdowns
             for (dim_name, pushdown) in pushdowns.iter() {

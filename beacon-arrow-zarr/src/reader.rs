@@ -20,7 +20,7 @@ use crate::{
 };
 
 pub struct AsyncArrowZarrGroupReader {
-    group: Group<dyn AsyncReadableListableStorageTraits>,
+    group: Arc<Group<dyn AsyncReadableListableStorageTraits>>,
     decoders: Vec<Arc<dyn Decoder>>,
     schema: arrow::datatypes::SchemaRef,
     arrays: IndexMap<String, Array<dyn AsyncReadableListableStorageTraits>>,
@@ -28,7 +28,9 @@ pub struct AsyncArrowZarrGroupReader {
 }
 
 impl AsyncArrowZarrGroupReader {
-    pub async fn new(group: Group<dyn AsyncReadableListableStorageTraits>) -> Result<Self, String> {
+    pub async fn new(
+        group: Arc<Group<dyn AsyncReadableListableStorageTraits>>,
+    ) -> Result<Self, String> {
         let mut fields = Vec::new();
 
         let mut attributes = IndexMap::new();
@@ -141,6 +143,16 @@ impl AsyncArrowZarrGroupReader {
         self.attributes()
             .get(attribute_name)
             .map(|attr| attr.as_nd_arrow_array())
+    }
+
+    pub async fn read_array_full(&self, array_name: &str) -> Result<Option<NdArrowArray>, String> {
+        match self.arrays.get(array_name) {
+            Some(v) => {
+                let subset = v.subset_all();
+                self.read_array(array_name, &subset).await
+            }
+            None => Ok(None),
+        }
     }
 
     pub async fn read_array(
@@ -440,7 +452,9 @@ mod tests {
             .await
             .unwrap();
 
-        let reader = super::AsyncArrowZarrGroupReader::new(group).await.unwrap();
+        let reader = super::AsyncArrowZarrGroupReader::new(Arc::new(group))
+            .await
+            .unwrap();
 
         let schema = reader.arrow_schema();
         for field in schema.fields() {
@@ -460,7 +474,9 @@ mod tests {
             .await
             .unwrap();
 
-        let reader = super::AsyncArrowZarrGroupReader::new(group).await.unwrap();
+        let reader = super::AsyncArrowZarrGroupReader::new(Arc::new(group))
+            .await
+            .unwrap();
 
         let longitude_idx = reader
             .schema

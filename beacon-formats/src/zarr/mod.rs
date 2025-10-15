@@ -5,9 +5,10 @@ use std::{
 };
 
 use arrow::datatypes::SchemaRef;
+use beacon_arrow_zarr::reader::AsyncArrowZarrGroupReader;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
-    common::{GetExt, Statistics},
+    common::{ColumnStatistics, GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         listing::PartitionedFile,
@@ -18,15 +19,19 @@ use datafusion::{
     physical_plan::ExecutionPlan,
 };
 use object_store::{ObjectMeta, ObjectStore};
+use zarrs::group::Group;
 use zarrs_object_store::AsyncObjectStore;
+use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::zarr::{
     array_step_span::NumericArrayStepSpan,
+    pushdown_statistics::PushDownZarrStatistics,
     source::{ZarrSource, fetch_schema},
 };
 
 pub mod array_step_span;
 pub mod expr_util;
+pub mod pushdown_statistics;
 mod source;
 mod stream_share;
 
@@ -78,6 +83,7 @@ impl FileFormatFactory for ZarrFormatFactory {
 #[derive(Debug, Clone, Default)]
 pub struct ZarrFormat {
     array_steps: HashMap<String, NumericArrayStepSpan>,
+    zarr_pushdown_statistics: PushDownZarrStatistics,
 }
 
 impl ZarrFormat {
@@ -168,6 +174,93 @@ impl FileFormat for ZarrFormat {
 
     fn file_source(&self) -> Arc<dyn FileSource> {
         Arc::new(ZarrSource::default().with_array_steps(self.array_steps.clone()))
+    }
+}
+
+impl ZarrFormat {
+    async fn partition_zarr_group(
+        &self,
+        object: &ObjectMeta,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> datafusion::error::Result<FileGroup> {
+        // The object can be assumed to be a top-level zarr.json file.
+        let zarr_store = Arc::new(AsyncObjectStore::new(object_store));
+        let group = Group::async_open(Arc::new(zarr_store), object.location.to_string().as_str())
+            .await
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to open Zarr group at {}: {}",
+                    object.location, e
+                ))
+            })?;
+
+        match Self::find_partitioned_files(&group).await {
+            Some(groups) => {
+                // Means it is a partitioned zarr group with sub-groups
+                // Each sub-group is a partition
+                // Create a FileGroup for each sub-group
+                // Each FileGroup contains a single PartitionedFile pointing to the zarr.json of the sub-group
+
+                for group in groups {
+                    let path = group.path();
+
+                    // let partioned_file = PartitionedFile::from()
+                }
+            }
+            None => {
+                // Means it is a single zarr group with no sub-groups
+            }
+        }
+
+        todo!()
+    }
+
+    async fn generate_statistics_for_partitioned_file(
+        &self,
+        table_schema: &SchemaRef,
+        group: Arc<Group<dyn AsyncReadableListableStorageTraits>>,
+    ) -> Option<Statistics> {
+        let reader = AsyncArrowZarrGroupReader::new(group.clone()).await.ok()?;
+
+        let mut statistics = Statistics::default();
+        for field in table_schema.fields() {
+            if self.zarr_pushdown_statistics.has_array(field.name()) {
+                // Read the full array
+                if let Ok(Some(array)) = reader.read_array_full(field.name()).await {
+                    statistics = statistics.add_column_statistics(array_stats);
+                } else {
+                    statistics = statistics.add_column_statistics(ColumnStatistics::new_unknown());
+                }
+            } else {
+                statistics = statistics.add_column_statistics(ColumnStatistics::new_unknown());
+            }
+        }
+
+        todo!()
+    }
+
+    async fn find_partitioned_files<
+        S: AsyncReadableListableStorageTraits + Sized + Clone + 'static,
+    >(
+        group: &Group<S>,
+    ) -> Option<Vec<Group<S>>> {
+        match group.async_child_groups().await {
+            Ok(children) => {
+                // Find recursively all child groups that contain groups aswell
+                let mut result = Vec::new();
+                for child in children {
+                    if let Some(mut sub_children) =
+                        Box::pin(Self::find_partitioned_files(&child)).await
+                    {
+                        result.append(&mut sub_children);
+                    } else {
+                        result.push(child);
+                    }
+                }
+                Some(result)
+            }
+            Err(_) => None,
+        }
     }
 }
 

@@ -19,6 +19,7 @@ use datafusion::{
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
     },
     physical_expr::conjunction,
+    physical_optimizer::pruning::PruningPredicate,
     physical_plan::{
         PhysicalExpr,
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
@@ -34,7 +35,7 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::zarr::{
     array_step_span::NumericArrayStepSpan, expr_util::extract_range_from_physical_filters,
-    path_parent, stream_share::ZarrStreamShare,
+    path_parent, pushdown_statistics::PushDownZarrStatistics, stream_share::ZarrStreamShare,
 };
 
 pub async fn fetch_schema(
@@ -77,10 +78,13 @@ pub struct ZarrSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     /// Projected statistics.
     projected_statistics: Option<Statistics>,
+
     /// Stream Partition Share
     stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<ZarrStreamShare>>>>,
     /// Array Steps for slicing arrays based on step spans. This is utilized by the pruning predicate pushdown.
     array_steps: Arc<HashMap<String, NumericArrayStepSpan>>,
+    /// Zarr Statistics
+    pushdown_zarr_statistics: PushDownZarrStatistics,
     /// Pruning Predicate
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
@@ -88,6 +92,14 @@ pub struct ZarrSource {
 impl ZarrSource {
     pub fn with_array_steps(mut self, array_steps: HashMap<String, NumericArrayStepSpan>) -> Self {
         self.array_steps = Arc::new(array_steps);
+        self
+    }
+
+    pub fn with_pushdown_zarr_statistics(
+        mut self,
+        pushdown_zarr_statistics: PushDownZarrStatistics,
+    ) -> Self {
+        self.pushdown_zarr_statistics = pushdown_zarr_statistics;
         self
     }
 }
@@ -118,6 +130,7 @@ impl FileSource for ZarrSource {
             stream_partition_shares: self.stream_partition_shares.clone(),
             array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
+            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
         })
     }
 
@@ -139,6 +152,7 @@ impl FileSource for ZarrSource {
             stream_partition_shares: self.stream_partition_shares.clone(),
             array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
+            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
         })
     }
 
@@ -152,6 +166,7 @@ impl FileSource for ZarrSource {
             stream_partition_shares: self.stream_partition_shares.clone(),
             array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
+            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
         })
     }
 
@@ -165,6 +180,7 @@ impl FileSource for ZarrSource {
             stream_partition_shares: self.stream_partition_shares.clone(),
             array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
+            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
         })
     }
 
@@ -201,6 +217,7 @@ impl FileSource for ZarrSource {
             stream_partition_shares: self.stream_partition_shares.clone(),
             array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
+            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
         }))
     }
 
@@ -217,11 +234,6 @@ impl FileSource for ZarrSource {
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
         // Repartion by duplicating the file groups to reach the target number of partitions.
         let file_groups = config.file_groups.clone();
-
-        if file_groups.len() >= target_partitions {
-            // No need to repartition
-            return Ok(None);
-        }
 
         let repartitioned: Vec<FileGroup> = file_groups
             .iter()
@@ -270,6 +282,8 @@ pub struct ZarrFileOpener {
     stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<ZarrStreamShare>>>>,
     /// Array Steps for slicing arrays based on step spans. This is utilized by the pruning predicate pushdown.
     array_steps: Arc<HashMap<String, NumericArrayStepSpan>>,
+    /// Pushdown Zarr Statistics
+    pushdown_zarr_statistics: PushDownZarrStatistics,
     /// Pruning Predicate
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
@@ -297,6 +311,9 @@ impl FileOpener for ZarrFileOpener {
         };
         let pruning_predicate = self.predicate.clone();
         let array_steps = self.array_steps.clone();
+        let pushdown_zarr_statistics = self.pushdown_zarr_statistics.clone();
+
+        // Check if the pruning predicate references any arrays in the pushdown statistics
 
         let fut = async move {
             let (stream, schema_mapper, file_schema) = stream_partition_share
