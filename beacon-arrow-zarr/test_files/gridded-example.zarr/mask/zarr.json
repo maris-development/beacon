@@ -1,0 +1,60 @@
+{
+  "shape": [
+    1,
+    1208,
+    1920
+  ],
+  "data_type": "int8",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        1,
+        302,
+        960
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0,
+  "codecs": [
+    {
+      "name": "bytes"
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 0,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "long_name": "sea/land/lake/ice field composite mask",
+    "flag_values": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "flag_meanings": "sea land lake ice",
+    "valid_min": 1,
+    "valid_max": 4,
+    "source_mask": "----",
+    "comment": "b0:1= sea; b1:1= land; b2:1= lake; b3:1= sea ice; b4-7: reserved for grid mask",
+    "_FillValue": -128
+  },
+  "dimension_names": [
+    "time",
+    "lat",
+    "lon"
+  ],
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

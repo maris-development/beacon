@@ -1,0 +1,454 @@
+{
+  "attributes": {
+    "Conventions": "CF-1.4",
+    "title": "Black Sea SST Analysis, L4, 1km daily (SST_BS_SST_L4_NRT_OBSERVATIONS_010_006_c_V2)",
+    "summary": "Daily gap-free maps (L4) at 0.01deg. x 0.01deg. horizontal resolution over the Black Sea. The data (for day=dd) are obtained from infra-red measurements collected [since 7pm of day=dd-1 to 7am of day=dd] by satellite radiometers and statistical interpolation.It is the Copernicus sea surface temperature nominal operational product for the Black Sea in DT mode.",
+    "references": "Buongiorno Nardelli, B., C. Tronconi, a. Pisano, and R. Santoleri, 2013: High and Ultra-High resolution processing of satellite Sea Surface Temperature data over Southern European Seas in the framework of MyOcean project. /Remote Sens. Environ./, *129*, 1-16, doi:10.1016/j.rse.2012.10.012. AND Buongiorno Nardelli, B., a. Pisano, C. Tronconi, and R. Santoleri, 2015: Evaluation of different covariance models for the operational interpolation of high resolution satellite Sea Surface Temperature data over the Mediterranean Sea. /Remote Sens. Environ./, doi:10.1016/j.rse.2015.04.025.",
+    "institution": "GOS (Global Ocean Satellite monitoring and marine ecosystem study)",
+    "history": "GOS-MYO processor V1",
+    "comment": "WARNING: some applications are unable to properly handle byte values. If Values >127 are encounterd, please subtract 256",
+    "license": "free registration at Copernicus Marine Service (http://marine.copernicus.eu/web/56-user-registration-form.php)",
+    "id": "OISST_UHR_NRT-GOS-L4-BLK-v3.0",
+    "naming_authority": "org.ghrsst",
+    "product_version": "1.1",
+    "uuid": "f3079d2c-7d0f-11ee-8b9f-005056be6f27",
+    "gds_version_id": "v2.0.5",
+    "netcdf_version_id": "4.7.1, Build Date: OCT  6 2022",
+    "date_created": "20231107T014955Z",
+    "file_quality_level": 0,
+    "spatial_resolution": "0.01 degree",
+    "start_time": "20130228T190000Z",
+    "time_coverage_start": "20130228T190000Z",
+    "stop_time": "20130301T060000Z",
+    "time_coverage_end": "20130301T060000Z",
+    "software_version": "Copernicus Marine Service UHR L4 Processor V.1.0",
+    "westernmost_longitude": 26.379167556762695,
+    "easternmost_longitude": 42.37083435058594,
+    "southernmost_latitude": 38.75416564941406,
+    "northernmost_latitude": 48.8125,
+    "Scaling_Equation": "(scale_factor*data) + add_offset",
+    "source": "EUR-L2P-ATS_NR_2P, UPA-L2P-ATS_NR_2P, JPL-L2P-MODIS_A, JPL-L2P-MODIS_T, EUR-L2P-NAR17_SST, EUR-L2P-NAR18_SST, EUR-L2P-SEVIRI_SST, EUR-L2P-AVHRR_METOP_A, EUR-L2P-AVHRR_METOP_B, NAVO-L2P-VIIRS_NPP, EUR-L2P-SEVIRI_SST_Meteosat11, MAR-L2P-SLSTR_S3A, MAR-L2P-SLSTR_S3B, STAR-L2P-VIIRS_N20-ACSPO_V2.80",
+    "platform": "Envisat, NOAA-18, MetOpA, Aqua, Terra, MSG1, MetOpB, SUOMI-NPP, Meteosat_11, Sentinel 3A, Sentinel 3B, NOAA-20",
+    "sensor": "AATSR, SEVIRI, AVHRR, MODIS, VIIRS, SLSTR",
+    "Metadata_Conventions": "Unidata Dataset Discovery v1.0",
+    "metadata_link": "Link to collection metadata record at archive",
+    "keywords": "Oceans > Ocean Temperature > Sea Surface Temperature",
+    "keywords_vocabulary": "NASA Global Change Master Directory (GCMD) Science Keywords",
+    "standard_name_vocabulary": "NetCDF Climate and Forecast (CF) Metadata Convention",
+    "geospatial_lat_units": "degrees_north",
+    "geospatial_lat_resolution": 0.009999999776482582,
+    "geospatial_lon_units": "degrees_east",
+    "geospatial_lon_resolution": 0.009999999776482582,
+    "acknowledgment": "Please acknowledge the use of these data with the following statement: Generated/provided by Copernicus Marine Service and CNR - ISMAR ROME. We would also appreciate being informed of any publications.",
+    "creator_name": "ISMAR - Institute of Marine Sciences (CNR - Rome)",
+    "creator_email": "gsdk@artov.ismar.cnr.it",
+    "creator_url": "http://gosweb.artov.isac.cnr.it/",
+    "project": "Copernicus Marine Environment Monitoring Service (CMEMS)",
+    "publisher_name": "CNR ISMAR GOS - CMEMS SST-TAC",
+    "publisher_url": "http://marine.copernicus.eu/",
+    "publisher_email": "servicedesk.cmems@mercator-ocean.eu, gsdk@artov.ismar.cnr.it",
+    "processing_level": "L4",
+    "cdm_data_type": "grid"
+  },
+  "zarr_format": 3,
+  "consolidated_metadata": {
+    "kind": "inline",
+    "must_understand": false,
+    "metadata": {
+      "time": {
+        "shape": [
+          1
+        ],
+        "data_type": "int32",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": [
+              1
+            ]
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0,
+        "codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "attributes": {
+          "long_name": "reference time of sst field",
+          "standard_name": "time",
+          "axis": "T",
+          "comment": "Nominal time of Level 4 analysis",
+          "units": "seconds since 1981-01-01",
+          "calendar": "Gregorian"
+        },
+        "dimension_names": [
+          "time"
+        ],
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      },
+      "mask": {
+        "shape": [
+          1,
+          1208,
+          1920
+        ],
+        "data_type": "int8",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": [
+              1,
+              302,
+              960
+            ]
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0,
+        "codecs": [
+          {
+            "name": "bytes"
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "attributes": {
+          "long_name": "sea/land/lake/ice field composite mask",
+          "flag_values": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "flag_meanings": "sea land lake ice",
+          "valid_min": 1,
+          "valid_max": 4,
+          "source_mask": "----",
+          "comment": "b0:1= sea; b1:1= land; b2:1= lake; b3:1= sea ice; b4-7: reserved for grid mask",
+          "_FillValue": -128
+        },
+        "dimension_names": [
+          "time",
+          "lat",
+          "lon"
+        ],
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      },
+      "sea_ice_fraction": {
+        "shape": [
+          1,
+          1208,
+          1920
+        ],
+        "data_type": "int8",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": [
+              1,
+              302,
+              960
+            ]
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0,
+        "codecs": [
+          {
+            "name": "bytes"
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "attributes": {
+          "standard_name": "sea_ice_area_fraction",
+          "long_name": "sea ice area fraction",
+          "units": "1",
+          "valid_min": 0,
+          "valid_max": 100,
+          "source_ice": "Not applicabile for Black sea",
+          "comment_ice": "Not applicabile for Black sea",
+          "source": "Not applicabile for Black sea",
+          "comment": "Not applicabile for Black sea",
+          "add_offset": 0.0,
+          "scale_factor": 0.009999999776482582,
+          "_FillValue": -128
+        },
+        "dimension_names": [
+          "time",
+          "lat",
+          "lon"
+        ],
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      },
+      "lon": {
+        "shape": [
+          1920
+        ],
+        "data_type": "float32",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": [
+              1920
+            ]
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0.0,
+        "codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "attributes": {
+          "long_name": "longitude",
+          "standard_name": "longitude",
+          "axis": "X",
+          "units": "degrees_east",
+          "comment": "geographical coordinates, WGS84 projection",
+          "valid_min": 25.0,
+          "valid_max": 43.0,
+          "_FillValue": "AAAAAAAA+H8="
+        },
+        "dimension_names": [
+          "lon"
+        ],
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      },
+      "analysed_sst": {
+        "shape": [
+          1,
+          1208,
+          1920
+        ],
+        "data_type": "int16",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": [
+              1,
+              302,
+              960
+            ]
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0,
+        "codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "attributes": {
+          "long_name": "analysed sea surface temperature",
+          "standard_name": "sea_surface_foundation_temperature",
+          "type": "foundation",
+          "units": "kelvin",
+          "valid_min": -300,
+          "valid_max": 4500,
+          "source": "EUR-L2P-ATS_NR_2P,UPA-L2P-ATS_NR_2P,JPL-L2P-MODIS_A,JPL-L2P-MODIS_T,EUR-L2P-NAR17_SST,EUR-L2P-NAR18_SST,EUR-L2P-SEVIRI_SST,EUR-L2P-AVHRR_METOP_A,EUR-L2P-AVHRR_METOP_B,NAVO-L2P-VIIRS_NPP,EUR-L2P-SEVIRI_SST_Meteosat11,MAR-L2P-SLSTR_S3A,MAR-L2P-SLSTR_S3B,STAR-L2P-VIIRS_N20-ACSPO_V2.80",
+          "comment": "Optimal interpolation (OI) at Ultrahigh resolution of sst measurements from infrared sensors",
+          "add_offset": 273.1499938964844,
+          "scale_factor": 0.009999999776482582,
+          "_FillValue": -32768
+        },
+        "dimension_names": [
+          "time",
+          "lat",
+          "lon"
+        ],
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      },
+      "lat": {
+        "shape": [
+          1208
+        ],
+        "data_type": "float32",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": [
+              1208
+            ]
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0.0,
+        "codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "attributes": {
+          "long_name": "latitude",
+          "standard_name": "latitude",
+          "axis": "Y",
+          "units": "degrees_north",
+          "comment": "geographical coordinates, WGS84 projection",
+          "valid_min": 37.0,
+          "valid_max": 49.0,
+          "_FillValue": "AAAAAAAA+H8="
+        },
+        "dimension_names": [
+          "lat"
+        ],
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      },
+      "analysis_error": {
+        "shape": [
+          1,
+          1208,
+          1920
+        ],
+        "data_type": "int16",
+        "chunk_grid": {
+          "name": "regular",
+          "configuration": {
+            "chunk_shape": [
+              1,
+              302,
+              960
+            ]
+          }
+        },
+        "chunk_key_encoding": {
+          "name": "default",
+          "configuration": {
+            "separator": "/"
+          }
+        },
+        "fill_value": 0,
+        "codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "zstd",
+            "configuration": {
+              "level": 0,
+              "checksum": false
+            }
+          }
+        ],
+        "attributes": {
+          "long_name": "estimated error standard deviation of analysed_sst",
+          "units": "kelvin",
+          "valid_min": 0,
+          "valid_max": 10000,
+          "source": "EUR-L2P-ATS_NR_2P,UPA-L2P-ATS_NR_2P,JPL-L2P-MODIS_A,JPL-L2P-MODIS_T,EUR-L2P-NAR17_SST,EUR-L2P-NAR18_SST,EUR-L2P-SEVIRI_SST,EUR-L2P-AVHRR_METOP_A,EUR-L2P-AVHRR_METOP_B,NAVO-L2P-VIIRS_NPP,EUR-L2P-SEVIRI_SST_Meteosat11,MAR-L2P-SLSTR_S3A,MAR-L2P-SLSTR_S3B,STAR-L2P-VIIRS_N20-ACSPO_V2.80",
+          "comment": "Error obtained by Optimal interpolation (OI) at Ultrahigh resolution of sst measurements from infrared sensors",
+          "add_offset": 0.0,
+          "scale_factor": 0.009999999776482582,
+          "_FillValue": -32768
+        },
+        "dimension_names": [
+          "time",
+          "lat",
+          "lon"
+        ],
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": []
+      }
+    }
+  },
+  "node_type": "group"
+}
