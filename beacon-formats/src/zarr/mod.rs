@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use arrow::datatypes::SchemaRef;
+use arrow::{compute::kernels::partition, datatypes::SchemaRef};
 use beacon_arrow_zarr::reader::AsyncArrowZarrGroupReader;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
@@ -91,6 +91,14 @@ impl ZarrFormat {
         self.array_steps = array_steps;
         self
     }
+
+    pub fn with_pushdown_statistics(
+        mut self,
+        zarr_pushdown_statistics: PushDownZarrStatistics,
+    ) -> Self {
+        self.zarr_pushdown_statistics = zarr_pushdown_statistics;
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -142,7 +150,7 @@ impl FileFormat for ZarrFormat {
 
     async fn create_physical_plan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // Recreate file groups here. Only maintain top-level groups.
@@ -152,19 +160,23 @@ impl FileFormat for ZarrFormat {
                 object_metas.push(file.object_meta.clone());
             }
         }
+        let object_store = state
+            .runtime_env()
+            .object_store(conf.object_store_url.clone())?;
 
         // Recreate file groups with only top-level Zarr groups.
         let top_level_metas = top_level_zarr_meta_v3(&object_metas);
-        let file_groups: Vec<FileGroup> = top_level_metas
-            .into_iter()
-            .map(|meta| {
-                FileGroup::new(vec![
-                    PartitionedFile::from(meta.clone()).with_range(0, meta.size as i64),
-                ])
-            })
-            .collect();
+        let mut file_groups: Vec<FileGroup> = vec![];
+        for meta in top_level_metas {
+            let file = self
+                .partition_zarr_group(&conf.file_schema, &meta, object_store.clone())
+                .await?;
+            file_groups.push(file);
+        }
 
-        let source = ZarrSource::default().with_array_steps(self.array_steps.clone());
+        let source = ZarrSource::default()
+            .with_array_steps(self.array_steps.clone())
+            .with_pushdown_zarr_statistics(self.zarr_pushdown_statistics.clone());
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -173,19 +185,31 @@ impl FileFormat for ZarrFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(ZarrSource::default().with_array_steps(self.array_steps.clone()))
+        Arc::new(
+            ZarrSource::default()
+                .with_array_steps(self.array_steps.clone())
+                .with_pushdown_zarr_statistics(self.zarr_pushdown_statistics.clone()),
+        )
     }
 }
 
 impl ZarrFormat {
     async fn partition_zarr_group(
         &self,
+        table_schema: &SchemaRef,
         object: &ObjectMeta,
         object_store: Arc<dyn ObjectStore>,
     ) -> datafusion::error::Result<FileGroup> {
         // The object can be assumed to be a top-level zarr.json file.
-        let zarr_store = Arc::new(AsyncObjectStore::new(object_store));
-        let group = Group::async_open(Arc::new(zarr_store), object.location.to_string().as_str())
+        let zarr_store = Arc::new(AsyncObjectStore::new(object_store))
+            as Arc<dyn AsyncReadableListableStorageTraits>;
+        let group_path = path_parent(&object.location).ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Could not determine parent path of object: {}",
+                object.location
+            ))
+        })?;
+        let group = Group::async_open(zarr_store, &format!("/{}", group_path))
             .await
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -195,55 +219,59 @@ impl ZarrFormat {
             })?;
 
         match Self::find_partitioned_files(&group).await {
-            Some(groups) => {
-                // Means it is a partitioned zarr group with sub-groups
-                // Each sub-group is a partition
-                // Create a FileGroup for each sub-group
-                // Each FileGroup contains a single PartitionedFile pointing to the zarr.json of the sub-group
+            Some(partition_groups) => {
+                if partition_groups.is_empty() {
+                    // No sub-groups found, treat as single group
+                    let statistics = pushdown_statistics::generate_statistics_from_zarr_group(
+                        table_schema,
+                        &self.zarr_pushdown_statistics,
+                        Arc::new(group),
+                    )
+                    .await
+                    .unwrap_or(Statistics::new_unknown(table_schema));
 
-                for group in groups {
-                    let path = group.path();
+                    Ok(FileGroup::new(vec![
+                        PartitionedFile::new(format!("{}/zarr.json", group_path), 0)
+                            .with_statistics(Arc::new(statistics)),
+                    ]))
+                } else {
+                    // Multiple sub-groups found, treat each as a partition
+                    let mut files = Vec::new();
+                    for group in partition_groups {
+                        let group = Arc::new(group);
+                        let partition_path = group.path().to_string();
+                        let statistics = pushdown_statistics::generate_statistics_from_zarr_group(
+                            table_schema,
+                            &self.zarr_pushdown_statistics,
+                            group.clone(),
+                        )
+                        .await
+                        .unwrap_or(Statistics::new_unknown(table_schema));
+                        println!("SUB Group Path: {:?}", group.path());
 
-                    // let partioned_file = PartitionedFile::from()
+                        // Create a PartitionedFile for the sub-group
+                        let partitioned_file =
+                            PartitionedFile::new(format!("{}/zarr.json", partition_path), 0)
+                                .with_statistics(Arc::new(statistics));
+                        files.push(partitioned_file);
+                    }
+                    Ok(FileGroup::new(files))
                 }
             }
             None => {
                 // Means it is a single zarr group with no sub-groups
+                println!("Group Path: {:?}", group.path());
+                panic!(
+                    "Failed to list child groups of Zarr group at {}",
+                    group_path
+                );
             }
         }
-
-        todo!()
     }
 
-    async fn generate_statistics_for_partitioned_file(
-        &self,
-        table_schema: &SchemaRef,
-        group: Arc<Group<dyn AsyncReadableListableStorageTraits>>,
-    ) -> Option<Statistics> {
-        let reader = AsyncArrowZarrGroupReader::new(group.clone()).await.ok()?;
-
-        let mut statistics = Statistics::default();
-        for field in table_schema.fields() {
-            if self.zarr_pushdown_statistics.has_array(field.name()) {
-                // Read the full array
-                if let Ok(Some(array)) = reader.read_array_full(field.name()).await {
-                    statistics = statistics.add_column_statistics(array_stats);
-                } else {
-                    statistics = statistics.add_column_statistics(ColumnStatistics::new_unknown());
-                }
-            } else {
-                statistics = statistics.add_column_statistics(ColumnStatistics::new_unknown());
-            }
-        }
-
-        todo!()
-    }
-
-    async fn find_partitioned_files<
-        S: AsyncReadableListableStorageTraits + Sized + Clone + 'static,
-    >(
-        group: &Group<S>,
-    ) -> Option<Vec<Group<S>>> {
+    async fn find_partitioned_files(
+        group: &Group<dyn AsyncReadableListableStorageTraits>,
+    ) -> Option<Vec<Group<dyn AsyncReadableListableStorageTraits>>> {
         match group.async_child_groups().await {
             Ok(children) => {
                 // Find recursively all child groups that contain groups aswell

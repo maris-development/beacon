@@ -57,7 +57,7 @@ pub async fn fetch_schema(
         .await
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
-    let reader = AsyncArrowZarrGroupReader::new(group)
+    let reader = AsyncArrowZarrGroupReader::new(Arc::new(group))
         .await
         .map_err(datafusion::error::DataFusionError::Execution)?;
 
@@ -112,6 +112,8 @@ impl FileSource for ZarrSource {
         base_config: &FileScanConfig,
         _partition: usize,
     ) -> Arc<dyn FileOpener> {
+        println!("Partition: {}", _partition);
+
         let table_schema = self
             .override_schema
             .clone()
@@ -314,7 +316,6 @@ impl FileOpener for ZarrFileOpener {
         let pushdown_zarr_statistics = self.pushdown_zarr_statistics.clone();
 
         // Check if the pruning predicate references any arrays in the pushdown statistics
-
         let fut = async move {
             let (stream, schema_mapper, file_schema) = stream_partition_share
                 .get_or_try_init(|| async move {
@@ -336,9 +337,11 @@ impl FileOpener for ZarrFileOpener {
                     .await
                     .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
-                    let reader = AsyncArrowZarrGroupReader::new(group).await.map_err(|e| {
-                        datafusion::error::DataFusionError::Execution(e.to_string())
-                    })?;
+                    let reader = AsyncArrowZarrGroupReader::new(Arc::new(group))
+                        .await
+                        .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(e.to_string())
+                        })?;
 
                     let file_schema = reader.arrow_schema();
 
