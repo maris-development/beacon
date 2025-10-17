@@ -49,9 +49,15 @@ pub struct QueryBody {
     #[serde(default)]
     from: Option<crate::from::From>,
     sort_by: Option<Vec<Sort>>,
-    distinct: Option<Vec<String>>,
+    distinct: Option<Distinct>,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct Distinct {
+    pub on: Vec<Select>,
+    pub select: Vec<Select>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
