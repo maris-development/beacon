@@ -35,20 +35,22 @@ impl NetCDFArrowReader {
         path: P,
         dimensions: Vec<String>,
     ) -> NcResult<Self> {
-        let file = netcdf::open(path)?;
+        let file = netcdf::open(path.as_ref())?;
         let file_schema = arrow_schema(&file)?;
+        let file_dimensions = file
+            .dimensions()
+            .map(|d| d.name().to_string())
+            .collect::<Vec<_>>();
 
-        // Align dimensions
-        file.dimensions().try_for_each(|dim| {
-            if dimensions.contains(&dim.name().to_string()) {
-                Ok(())
-            } else {
-                Err(ArrowNetCDFError::Reader(format!(
-                    "Dimension '{}' not found in NetCDF file.",
-                    dim.name()
-                )))
-            }
-        })?;
+        // Check if all specified dimensions are present in the file
+        if !dimensions.iter().all(|d| file_dimensions.contains(d)) {
+            return Err(ArrowNetCDFError::Reader(format!(
+                "Not all specified dimensions: {:?} are present in the NetCDF dimensions: {:?} for file: {:?}.",
+                dimensions,
+                file_dimensions,
+                path.as_ref()
+            )));
+        }
 
         // Check all the variables, and keep only the variables which have one of the specified dimensions or all of them
         // Scalars (0D variables) are always kept
