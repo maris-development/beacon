@@ -1,4 +1,6 @@
+use core::time;
 use std::{
+    collections::HashMap,
     fs::File,
     io::{Read, Seek, Write},
     path::{Path, PathBuf},
@@ -7,8 +9,8 @@ use std::{
 
 use arrow::{
     array::{
-        Array, ArrayRef, ArrowPrimitiveType, AsArray, PrimitiveArray, RecordBatch, StringArray,
-        StringBuilder,
+        Array, ArrayRef, ArrowPrimitiveType, AsArray, PrimitiveArray, RecordBatch, Scalar,
+        StringArray, StringBuilder,
     },
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
@@ -302,6 +304,93 @@ pub struct AsyncOdvWriter<W: AsyncWrite + Unpin + Send> {
     trajectory_file: OdvFile<Trajectories, File>,
 
     zip_file_writer: ZipFileWriter<W>,
+
+    /// Key entry cache
+    trajectory_profile_key_entry_state: Option<FileWriterState>,
+    trajectory_time_series_key_entry_state: Option<FileWriterState>,
+}
+
+struct FileWriterState {
+    entry_key: Scalar<ArrayRef>,
+    key_state: KeyEntryState,
+}
+
+impl FileWriterState {
+    fn is_equal_entry_key(&self, other_key: &Scalar<ArrayRef>) -> bool {
+        let eq_array = arrow::compute::kernels::cmp::eq(&self.entry_key, other_key).unwrap();
+        eq_array
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap()
+            .value(0)
+    }
+
+    fn is_equal_key_state(&self, other_state: &KeyEntryState) -> bool {
+        self.key_state == *other_state
+    }
+}
+
+#[derive(Default, Clone)]
+struct KeyEntryState {
+    key: Vec<Scalar<ArrayRef>>,
+    count: usize,
+}
+
+impl KeyEntryState {
+    fn new(key: Vec<Scalar<ArrayRef>>) -> Self {
+        Self { key, count: 0 }
+    }
+}
+
+impl PartialEq for KeyEntryState {
+    fn eq(&self, other: &Self) -> bool {
+        if self.key.len() != other.key.len() {
+            return false;
+        }
+
+        for (a, b) in self.key.iter().zip(other.key.iter()) {
+            let eq_array = arrow::compute::kernels::cmp::eq(a, b).unwrap();
+            if eq_array
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .unwrap()
+                .value(0)
+                == false
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl PartialOrd for KeyEntryState {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        for (a, b) in self.key.iter().zip(other.key.iter()) {
+            let lt_array = arrow::compute::kernels::cmp::lt(a, b).unwrap();
+            if lt_array
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .unwrap()
+                .value(0)
+            {
+                return Some(std::cmp::Ordering::Less);
+            }
+
+            let gt_array = arrow::compute::kernels::cmp::gt(a, b).unwrap();
+            if gt_array
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .unwrap()
+                .value(0)
+            {
+                return Some(std::cmp::Ordering::Greater);
+            }
+        }
+
+        Some(std::cmp::Ordering::Equal)
+    }
 }
 
 impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
@@ -344,6 +433,8 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
             trajectory_file,
             zip_file_writer,
             compression,
+            trajectory_profile_key_entry_state: None,
+            trajectory_time_series_key_entry_state: None,
         })
     }
 
@@ -425,7 +516,12 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
         let key_batches = Self::key_batches(record_batch, &self.options)?;
         let mut classified_batches = vec![];
         for batch in key_batches {
-            let batch_type = Self::classify_batch(batch, &self.options)?;
+            let batch_type = Self::classify_batch(
+                batch,
+                &self.options,
+                &mut self.trajectory_profile_key_entry_state,
+                &mut self.trajectory_time_series_key_entry_state,
+            )?;
             classified_batches.push(batch_type);
         }
 
@@ -524,6 +620,8 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
     fn classify_batch(
         batch: RecordBatch,
         odv_options: &OdvOptions,
+        profile_file_state: &mut Option<FileWriterState>,
+        time_series_file_state: &mut Option<FileWriterState>,
     ) -> anyhow::Result<OdvBatchType> {
         let lon_col = batch
             .column_by_name(&odv_options.longitude_column.column_name)
@@ -566,6 +664,8 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
                 &odv_options.latitude_column.column_name,
                 &odv_options.time_column.column_name,
                 &odv_options.key_column,
+                profile_file_state,
+                time_series_file_state,
             )? {
                 return Ok(feature_type);
             }
@@ -599,8 +699,10 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
         feature_type_columns: &str,
         longitude_column: &str,
         latitude_column: &str,
-        time_column: &str,
+        time_column_name: &str,
         key_column: &str,
+        profile_file_state: &mut Option<FileWriterState>,
+        time_series_file_state: &mut Option<FileWriterState>,
     ) -> anyhow::Result<Option<OdvBatchType>> {
         let feature_array = batch.column_by_name(feature_type_columns).ok_or_else(|| {
             anyhow::anyhow!(
@@ -638,7 +740,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
                     .expect("Latitude column not found")
                     .clone();
                 let time_column = batch
-                    .column_by_name(time_column)
+                    .column_by_name(time_column_name)
                     .expect("Time column not found")
                     .clone();
 
@@ -663,9 +765,47 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
                         .expect("Key column not found")
                         .as_string::<i32>();
 
-                    let updated_key_column =
-                        Arc::new(Self::append_suffix(key_column_array, &format!("[+{}]", i)));
+                    let timestamp_scalar = Scalar::new(
+                        profile
+                            .column_by_name(time_column_name)
+                            .unwrap()
+                            .slice(0, 1),
+                    );
+                    let current_entry_key_state =
+                        KeyEntryState::new(vec![timestamp_scalar.clone()]);
+                    let entry_key_scalar =
+                        Scalar::new(profile.column_by_name(key_column).unwrap().slice(0, 1));
 
+                    if profile_file_state.is_none() {
+                        *profile_file_state = Some(FileWriterState {
+                            entry_key: entry_key_scalar.clone(),
+                            key_state: current_entry_key_state.clone(),
+                        });
+                    }
+
+                    let count = match profile_file_state.as_mut() {
+                        Some(state) => {
+                            if state.is_equal_entry_key(&entry_key_scalar) {
+                                if state.is_equal_key_state(&current_entry_key_state) {
+                                    state.key_state.count
+                                } else {
+                                    state.key_state.count += 1;
+                                    state.key_state.count
+                                }
+                            } else {
+                                state.entry_key = entry_key_scalar;
+                                state.key_state =
+                                    KeyEntryState::new(vec![timestamp_scalar.clone()]);
+                                state.key_state.count
+                            }
+                        }
+                        None => 0,
+                    };
+
+                    let updated_key_column = Arc::new(Self::append_suffix(
+                        key_column_array,
+                        &format!("[+{}]", count),
+                    ));
                     // Update the record batch key column
                     let profile =
                         Self::replace_column(&profile, key_column, updated_key_column).unwrap();
@@ -677,7 +817,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
             }
             "timeSeriesProfile" => {
                 let time_column = batch
-                    .column_by_name(time_column)
+                    .column_by_name(time_column_name)
                     .expect("Time column not found")
                     .clone();
 
