@@ -19,7 +19,6 @@ use datafusion::{
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
     },
     physical_expr::conjunction,
-    physical_optimizer::pruning::PruningPredicate,
     physical_plan::{
         PhysicalExpr,
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
@@ -35,7 +34,7 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::zarr::{
     array_step_span::NumericArrayStepSpan, expr_util::extract_range_from_physical_filters,
-    path_parent, pushdown_statistics::PushDownZarrStatistics, stream_share::ZarrStreamShare,
+    pushdown_statistics::PushDownZarrStatistics, stream_share::ZarrStreamShare, util::path_parent,
 };
 
 pub async fn fetch_schema(
