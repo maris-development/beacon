@@ -24,13 +24,18 @@ impl FunctionDoc {
             .get_example_types()
             .iter()
             .map(|data_types| {
+                let return_type = scalar.return_type(data_types);
+                let return_type_str = return_type
+                    .map(|dt| format!("{dt}"))
+                    .unwrap_or_else(|_| "unknown".to_string());
+                let mut function_doc = FunctionDoc {
+                    function_name: scalar.name().to_string(),
+                    description: "No documentation available".to_string(),
+                    return_type: return_type_str,
+                    params: vec![],
+                };
                 if let Some(doc) = documentation {
-                    let function_doc = FunctionDoc {
-                        function_name: scalar.name().to_string(),
-                        description: doc.description.clone(),
-                        return_type: "unknown".to_string(),
-                        params: vec![],
-                    };
+                    function_doc.description = doc.description.clone();
                     if let Some(arguments) = doc.arguments.as_ref() {
                         let params = arguments
                             .iter()
@@ -62,12 +67,7 @@ impl FunctionDoc {
                         }
                     }
                 } else {
-                    FunctionDoc {
-                        function_name: scalar.name().to_string(),
-                        description: "No documentation available".to_string(),
-                        return_type: "unknown".to_string(),
-                        params: vec![],
-                    }
+                    function_doc
                 }
             })
             .collect()
