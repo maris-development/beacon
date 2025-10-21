@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{Schema, SchemaRef};
+use arrow_schema::Field;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -24,6 +25,38 @@ use utoipa::{IntoParams, ToSchema};
 )]
 pub(crate) async fn list_tables(State(state): State<Arc<Runtime>>) -> Json<Vec<String>> {
     let result = state.list_tables();
+    Json(result)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TableWithSchema {
+    table_name: String,
+    columns: Vec<Field>,
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "tables",
+    get, 
+    path = "/api/tables-with-schema", 
+    responses((status = 200, description = "List of tables with schema")),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn list_tables_with_schema(
+    State(state): State<Arc<Runtime>>,
+) -> Json<Vec<TableWithSchema>> {
+    let table_names = state.list_tables();
+    let mut result = Vec::new();
+    for table_name in table_names {
+        if let Some(schema) = state.list_table_schema(table_name.clone()).await {
+            result.push(TableWithSchema { table_name, columns: schema.fields().iter().map(|f| f.as_ref().clone()).collect() });
+        }
+    }
+
     Json(result)
 }
 

@@ -107,7 +107,7 @@ impl VirtualMachine {
             .state()
             .scalar_functions()
             .values()
-            .map(|f| FunctionDoc::from_scalar(f))
+            .flat_map(|f| FunctionDoc::from_scalar(f))
             .collect();
 
         functions.sort_by(|a, b| a.function_name.cmp(&b.function_name));

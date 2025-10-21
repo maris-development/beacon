@@ -24,6 +24,7 @@ pub struct PresetColumnMapping {
     alias: Option<String>,
     description: Option<String>,
     filter: Option<PresetFilterColumn>,
+    column_metadata_columns: Option<Vec<PresetColumnMapping>>,
     #[serde(flatten)]
     #[serde(default)]
     _metadata_fields: HashMap<String, serde_json::Value>,
@@ -128,6 +129,29 @@ impl PresetTable {
                     renames.insert(column.column_name.clone(), alias.clone());
                 } else {
                     exposed_fields.push(field.clone());
+                }
+
+                if let Some(nested_metadata_columns) = column.column_metadata_columns.as_ref() {
+                    for nested_column in nested_metadata_columns.iter() {
+                        if let Ok(nested_field) =
+                            current_schema.field_with_name(&nested_column.column_name)
+                        {
+                            if let Some(nested_alias) = nested_column.alias.as_ref() {
+                                exposed_fields.push(nested_field.clone().with_name(nested_alias));
+                                renames.insert(
+                                    nested_column.column_name.clone(),
+                                    nested_alias.clone(),
+                                );
+                            } else {
+                                exposed_fields.push(nested_field.clone());
+                            }
+                        } else {
+                            return Err(TableError::GenericTableError(format!(
+                                "Nested metadata column '{}' not found in the current schema",
+                                nested_column.column_name
+                            )));
+                        }
+                    }
                 }
             } else {
                 return Err(TableError::GenericTableError(format!(
