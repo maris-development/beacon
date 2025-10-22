@@ -1,6 +1,6 @@
 # Beacon ARCO Data lake Platform (1.3.0)
 
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/beacon-development/beacon)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/maris-development/beacon)
 
 What is Beacon?
 
