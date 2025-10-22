@@ -1,0 +1,22 @@
+[package]
+name = "beacon-arrow-zarr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+zarrs = {"version" = "0.22.2", features = ["async"]}
+zarrs_object_store = "0.5.0"
+zarrs_storage = "0.4.0"
+object_store = { workspace = true }
+tokio = { workspace = true }
+arrow = { workspace = true }
+nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main", version = "1.2.2" }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+tracing = { workspace = true }
+hifitime = "4.0.2"
+regex = "1.11.1"
+futures = { workspace = true }
+pin-project = "1.1.10"
+parking_lot = { workspace = true }
+crossbeam = { workspace = true }

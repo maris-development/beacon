@@ -117,11 +117,17 @@ impl LogicalTable {
         )?;
 
         // Create the data source with the given file format and table URLs.
-        let source = FileCollection::new(&session_state, file_format_factory.default(), table_urls)
-            .await
-            .map_err(|e| {
-                TableError::GenericTableError(format!("Failed to create file collection: {}", e))
-            })?;
+        let source = FileCollection::new(
+            &session_state,
+            self.file_format
+                .file_format()
+                .unwrap_or(file_format_factory.default()),
+            table_urls,
+        )
+        .await
+        .map_err(|e| {
+            TableError::GenericTableError(format!("Failed to create file collection: {}", e))
+        })?;
 
         Ok(Arc::new(source))
     }
