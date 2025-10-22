@@ -1,17 +1,10 @@
-use std::sync::Arc;
-
 use beacon_data_lake::DataLake;
 use datafusion::{
-    datasource::file_format::{csv::CsvFormatFactory, format_as_file_type, FileFormat},
-    logical_expr::{Analyze, LogicalPlan, LogicalPlanBuilder},
+    logical_expr::LogicalPlan,
     prelude::{SQLOptions, SessionContext},
 };
 
-use crate::{
-    output::{Output, OutputFormat, QueryOutputFile},
-    plan::ParsedPlan,
-    InnerQuery, QueryBody,
-};
+use crate::{plan::ParsedPlan, InnerQuery, QueryBody};
 
 use super::Query;
 
@@ -107,17 +100,33 @@ impl Parser {
         let df_schema = builder.schema().clone();
         let schema = df_schema.as_arrow();
         if let Some(filter) = query_body.filter {
-            builder = builder.filter(filter.parse(&session_state, &schema)?)?;
+            builder = builder.filter(filter.parse(&session_state, schema)?)?;
         }
 
         if let Some(filters) = query_body.filters {
             for filter in filters {
-                builder = builder.filter(filter.parse(&session_state, &schema)?)?;
+                builder = builder.filter(filter.parse(&session_state, schema)?)?;
             }
         }
 
         if let Some(sort_by) = query_body.sort_by {
             builder = builder.sort(sort_by.iter().map(|s| s.to_expr()))?;
+        }
+
+        if let Some(distinct) = query_body.distinct {
+            let on_exprs = distinct
+                .on
+                .iter()
+                .map(|s| s.to_expr(&session.state()))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+
+            let select_exprs = distinct
+                .select
+                .iter()
+                .map(|s| s.to_expr(&session.state()))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+
+            builder = builder.distinct_on(on_exprs, select_exprs, None)?;
         }
 
         let offset = query_body.offset.unwrap_or(0);
