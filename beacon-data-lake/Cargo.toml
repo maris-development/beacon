@@ -10,6 +10,8 @@ geoarrow = { workspace = true }
 geoarrow-array = { workspace = true }
 geoparquet = { workspace = true }
 parquet = { version = "^55"}
+iceberg = { workspace = true}
+iceberg-datafusion = {workspace = true }
 
 object_store = { version = "0.12.3", features = ["aws"] }
 url = "2.5.4"
