@@ -27,6 +27,7 @@ arrow-schema = { workspace = true}
 uuid = { version = "1.16.0" }
 tracing = { workspace = true}
 tracing-subscriber = { workspace = true}
+pprof = { workspace = true }
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
