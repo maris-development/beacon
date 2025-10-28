@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use arrow::{compute::kernels::partition, datatypes::SchemaRef};
+use arrow::datatypes::SchemaRef;
 use beacon_arrow_zarr::reader::AsyncArrowZarrGroupReader;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
@@ -25,13 +25,14 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::zarr::{
     array_step_span::NumericArrayStepSpan,
-    pushdown_statistics::PushDownZarrStatistics,
+    pushdown_statistics::ZarrPushDownStatistics,
     source::{ZarrSource, fetch_schema},
     util::{ZarrPath, path_parent, top_level_zarr_meta_v3},
 };
 
 pub mod array_step_span;
 pub mod expr_util;
+mod partition;
 pub mod pushdown_statistics;
 mod source;
 mod stream_share;
@@ -85,7 +86,7 @@ impl FileFormatFactory for ZarrFormatFactory {
 #[derive(Debug, Clone, Default)]
 pub struct ZarrFormat {
     array_steps: HashMap<String, NumericArrayStepSpan>,
-    zarr_pushdown_statistics: PushDownZarrStatistics,
+    zarr_pushdown_statistics: ZarrPushDownStatistics,
 }
 
 impl ZarrFormat {
@@ -96,7 +97,7 @@ impl ZarrFormat {
 
     pub fn with_pushdown_statistics(
         mut self,
-        zarr_pushdown_statistics: PushDownZarrStatistics,
+        zarr_pushdown_statistics: ZarrPushDownStatistics,
     ) -> Self {
         self.zarr_pushdown_statistics = zarr_pushdown_statistics;
         self

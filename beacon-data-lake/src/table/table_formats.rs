@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use beacon_formats::zarr::{
-    ZarrFormat, array_step_span::NumericArrayStepSpan, pushdown_statistics::PushDownZarrStatistics,
+    ZarrFormat, array_step_span::NumericArrayStepSpan, pushdown_statistics::ZarrPushDownStatistics,
 };
 use datafusion::datasource::file_format::FileFormat;
 
@@ -60,7 +60,7 @@ pub struct ZarrFileFormat {
     #[serde(default)]
     pub global_array_steps: HashMap<String, NumericArrayStepSpan>,
     #[serde(default)]
-    pub pushdown_statistics: PushDownZarrStatistics,
+    pub pushdown_statistics: ZarrPushDownStatistics,
 }
 
 #[typetag::serde(name = "zarr")]

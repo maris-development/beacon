@@ -13,11 +13,11 @@ use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PushDownZarrStatistics {
+pub struct ZarrPushDownStatistics {
     pub arrays: Vec<String>,
 }
 
-impl PushDownZarrStatistics {
+impl ZarrPushDownStatistics {
     pub fn has_array(&self, array_name: &str) -> bool {
         self.arrays.contains(&array_name.to_string())
     }
@@ -25,7 +25,7 @@ impl PushDownZarrStatistics {
 
 pub async fn generate_statistics_from_zarr_group(
     schema: &SchemaRef,
-    pushdown: &PushDownZarrStatistics,
+    pushdown: &ZarrPushDownStatistics,
     zarr_group: Arc<Group<dyn AsyncReadableListableStorageTraits>>,
 ) -> Option<Statistics> {
     let zarr_reader = AsyncArrowZarrGroupReader::new(zarr_group.clone())

@@ -34,7 +34,7 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::zarr::{
     array_step_span::NumericArrayStepSpan, expr_util::extract_range_from_physical_filters,
-    pushdown_statistics::PushDownZarrStatistics, stream_share::ZarrStreamShare, util::path_parent,
+    pushdown_statistics::ZarrPushDownStatistics, stream_share::ZarrStreamShare, util::path_parent,
 };
 
 pub async fn fetch_schema(
@@ -83,7 +83,7 @@ pub struct ZarrSource {
     /// Array Steps for slicing arrays based on step spans. This is utilized by the pruning predicate pushdown.
     array_steps: Arc<HashMap<String, NumericArrayStepSpan>>,
     /// Zarr Statistics
-    pushdown_zarr_statistics: PushDownZarrStatistics,
+    pushdown_zarr_statistics: ZarrPushDownStatistics,
     /// Pruning Predicate
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
@@ -96,7 +96,7 @@ impl ZarrSource {
 
     pub fn with_pushdown_zarr_statistics(
         mut self,
-        pushdown_zarr_statistics: PushDownZarrStatistics,
+        pushdown_zarr_statistics: ZarrPushDownStatistics,
     ) -> Self {
         self.pushdown_zarr_statistics = pushdown_zarr_statistics;
         self
@@ -284,7 +284,7 @@ pub struct ZarrFileOpener {
     /// Array Steps for slicing arrays based on step spans. This is utilized by the pruning predicate pushdown.
     array_steps: Arc<HashMap<String, NumericArrayStepSpan>>,
     /// Pushdown Zarr Statistics
-    pushdown_zarr_statistics: PushDownZarrStatistics,
+    pushdown_zarr_statistics: ZarrPushDownStatistics,
     /// Pruning Predicate
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
