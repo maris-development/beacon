@@ -29,6 +29,41 @@ use crate::zarr::{
     util::ZarrPath,
 };
 
+/// Open a Zarr object and produce a future that yields a stream proxy for its partitions.
+///
+/// This implements FileOpener for ZarrFileOpener and performs the following steps:
+/// - Converts the provided FileMeta's ObjectMeta into a ZarrPath, returning a DataFusion
+///   Execution error if parsing fails.
+/// - Uses an internal, shared map of stream shares keyed by object path to obtain an
+///   Arc<ZarrStreamShare>. The map access is protected by a lock; if a share for the
+///   path does not exist it is created lazily. This ensures concurrent open requests
+///   for the same path share initialization work and the resulting streams.
+/// - Builds and returns a boxed asynchronous future. When polled, that future:
+///     - Calls get_or_try_init on the ZarrStreamShare to initialize or reuse the
+///       partitioned streams for the object. Initialization is performed by
+///       fetch_partitioned_streams which may access the object store, apply pruning
+///       using pushdown statistics/predicates, and consider array step configuration.
+///     - Flattens the resulting partitioned streams into a single stream proxy suitable
+///       for DataFusion consumption and returns it.
+///
+/// Parameters:
+/// - file_meta: Metadata for the file to open; its ObjectMeta is used to construct
+///   the ZarrPath and to key the stream-share cache.
+/// - _file: A PartitionedFile value that is unused by this opener (present to match
+///   the trait signature).
+///
+/// Return:
+/// - On success: Ok(BoxFuture) that resolves to a stream proxy of the opened file's
+///   partitions.
+/// - On error: DataFusionError::Execution with a descriptive message (e.g., failed
+///   ZarrPath creation or stream initialization).
+///
+/// Additional notes:
+/// - The method clones necessary handles (object store, schema adapter, predicate,
+///   array steps) so the returned future is self-contained and safe to run later.
+/// - Debug tracing is emitted for path creation and file open operations to aid
+///   diagnosis.
+/// - IO and heavy work are deferred until the returned future is awaited/polled.
 pub struct ZarrFileOpener {
     pub zarr_object_store: Arc<AsyncObjectStore<Arc<dyn ObjectStore>>>,
     /// Schema adapter for mapping NetCDF schema to Arrow schema.
@@ -201,6 +236,31 @@ impl FileOpener for ZarrFileOpener {
     }
 }
 
+/// Result of translating the current physical pruning predicate(s) into a
+/// concrete range for the provided column span.
+///
+/// This value is produced by `extract_range_from_physical_filters` and
+/// captures the contiguous interval of physical values (or row positions)
+/// that are guaranteed to satisfy the pruning predicate applied to
+/// `span.column`. The computed range is intended for chunk/block-level
+/// pruning so that downstream I/O or scanning can skip data that falls
+/// outside the returned interval.
+///
+/// Behavior notes:
+/// - When the predicate can be mapped to a simple interval, `r` holds that
+///   interval (e.g., an inclusive/exclusive min..max). Consumers can use it
+///   to restrict reads to the overlap with a chunk's bounds.
+/// - If the predicate cannot be expressed as a single contiguous range, or
+///   if it is contradictory, the function will indicate that no safe range
+///   can be derived (typically via `None` or an empty/invalid range), and
+///   no pruning should be applied.
+/// - The pruning predicate is provided as a slice here to allow the same
+///   translation logic to accept zero, one, or multiple physical filters;
+///   callers intentionally pass a one-element slice when converting a single
+///   predicate.
+///
+/// Callers should always check the returned value before using it to avoid
+/// incorrect data exclusion when translation fails or is inexact.
 fn generate_numeric_span_slice_pushdown(
     pruning_predicate: &Arc<dyn PhysicalExpr>,
     span: &NumericArrayStepSpan,
