@@ -33,36 +33,65 @@ use zarrs_object_store::AsyncObjectStore;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::zarr::{
-    array_step_span::NumericArrayStepSpan, expr_util::extract_range_from_physical_filters,
-    pushdown_statistics::ZarrPushDownStatistics, stream_share::ZarrStreamShare, util::path_parent,
+    array_step_span::NumericArrayStepSpan,
+    expr_util::extract_range_from_physical_filters,
+    opener::ZarrFileOpener,
+    pushdown_statistics::ZarrPushDownStatistics,
+    stream_share::ZarrStreamShare,
+    util::{ZarrPath, path_parent},
 };
 
 pub async fn fetch_schema(
     object_store: Arc<dyn ObjectStore>,
-    object_meta: &ObjectMeta,
+    zarr_path: &ZarrPath,
 ) -> datafusion::error::Result<SchemaRef> {
     let zarr_store = Arc::new(AsyncObjectStore::new(object_store))
         as Arc<dyn AsyncReadableListableStorageTraits>;
 
-    // The object meta reprensents the zarr.json file in the root of the zarr group. We need to open the group at the parent directory of this file.
-    let parent_path = path_parent(&object_meta.location).ok_or_else(|| {
+    let group = Group::async_open(zarr_store.clone(), &zarr_path.as_zarr_path())
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    let mut zarr_groups = Vec::new();
+    recursive_groups(Arc::new(group), &mut zarr_groups).await?;
+
+    // For each zarr group, fetch its schema and merge them.
+    let mut schemas = Vec::new();
+    for zarr_group in zarr_groups {
+        let reader = AsyncArrowZarrGroupReader::new(zarr_group.clone())
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+        let schema = reader.arrow_schema();
+        schemas.push(schema);
+    }
+
+    let super_schema = beacon_common::super_typing::super_type_schema(&schemas).map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
-            "Could not determine parent path of object: {}",
-            object_meta.location
+            "Failed to compute super schema for Zarr groups at {}: {}",
+            zarr_path.as_zarr_path(),
+            e
         ))
     })?;
 
-    let group = Group::async_open(zarr_store.clone(), &format!("/{}", parent_path))
-        .await
-        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    Ok(Arc::new(super_schema))
+}
 
-    let reader = AsyncArrowZarrGroupReader::new(Arc::new(group))
-        .await
-        .map_err(datafusion::error::DataFusionError::Execution)?;
+pub async fn recursive_groups(
+    top_level_group: Arc<Group<dyn AsyncReadableListableStorageTraits>>,
+    zarr_groups: &mut Vec<Arc<Group<dyn AsyncReadableListableStorageTraits>>>,
+) -> datafusion::error::Result<()> {
+    let child_groups = top_level_group.async_child_groups().await.map_err(|e| {
+        datafusion::error::DataFusionError::Execution(format!("Failed to list child groups: {}", e))
+    })?;
 
-    let schema = reader.arrow_schema();
-
-    Ok(schema)
+    if child_groups.is_empty() {
+        // Add the top-level group itself if it has no child groups.
+        zarr_groups.push(top_level_group.clone());
+    } else {
+        for child_group in child_groups {
+            Box::pin(recursive_groups(Arc::new(child_group), zarr_groups)).await?;
+        }
+    }
+    return Ok(());
 }
 
 #[derive(Default, Clone)]
@@ -272,202 +301,5 @@ impl FileSource for ZarrSource {
             filters.len()
         ])
         .with_updated_node(Arc::new(source)))
-    }
-}
-
-pub struct ZarrFileOpener {
-    zarr_object_store: Arc<AsyncObjectStore<Arc<dyn ObjectStore>>>,
-    /// Schema adapter for mapping NetCDF schema to Arrow schema.
-    schema_adapter: Arc<dyn SchemaAdapter>,
-    /// Stream partition shares for the Zarr file.
-    stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<ZarrStreamShare>>>>,
-    /// Array Steps for slicing arrays based on step spans. This is utilized by the pruning predicate pushdown.
-    array_steps: Arc<HashMap<String, NumericArrayStepSpan>>,
-    /// Pushdown Zarr Statistics
-    pushdown_zarr_statistics: ZarrPushDownStatistics,
-    /// Pruning Predicate
-    predicate: Option<Arc<dyn PhysicalExpr>>,
-}
-
-impl FileOpener for ZarrFileOpener {
-    fn open(
-        &self,
-        file_meta: FileMeta,
-        _file: PartitionedFile,
-    ) -> datafusion::error::Result<FileOpenFuture> {
-        let zarr_object_store = self.zarr_object_store.clone();
-        let adapter = self.schema_adapter.clone();
-        let stream_partition_shares = self.stream_partition_shares.clone();
-        let stream_partition_share = {
-            let mut stream_partition_share_map = stream_partition_shares.lock();
-            let object_path = file_meta.object_meta.location.clone();
-            tracing::debug!(
-                "Getting or creating ZarrStreamShare for path: {}",
-                object_path
-            );
-            stream_partition_share_map
-                .entry(object_path)
-                .or_insert_with(|| Arc::new(ZarrStreamShare::new()))
-                .clone()
-        };
-        let pruning_predicate = self.predicate.clone();
-        let array_steps = self.array_steps.clone();
-        let pushdown_zarr_statistics = self.pushdown_zarr_statistics.clone();
-
-        // Check if the pruning predicate references any arrays in the pushdown statistics
-        let fut = async move {
-            let (stream, schema_mapper, file_schema) = stream_partition_share
-                .get_or_try_init(|| async move {
-                    tracing::debug!("Opening file: {:?}", file_meta.object_meta.location);
-
-                    let parent_path =
-                        path_parent(&file_meta.object_meta.location).ok_or_else(|| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Could not determine parent path of object: {}",
-                                file_meta.object_meta.location
-                            ))
-                        })?;
-
-                    // Open the zarr group
-                    let group = Group::async_open(
-                        zarr_object_store.clone() as Arc<dyn AsyncReadableListableStorageTraits>,
-                        &format!("/{}", parent_path),
-                    )
-                    .await
-                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-
-                    let reader = AsyncArrowZarrGroupReader::new(Arc::new(group))
-                        .await
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(e.to_string())
-                        })?;
-
-                    let file_schema = reader.arrow_schema();
-
-                    let (schema_mapper, projection) = adapter
-                        .map_schema(&file_schema)
-                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-
-                    // Generate ArraySlicePushDown based on the predicate and array steps
-                    let array_slice_pushdowns = if let Some(pruning_predicate) = &pruning_predicate
-                    {
-                        array_steps
-                            .values()
-                            .filter_map(|span| {
-                                generate_numeric_span_slice_pushdown(pruning_predicate, span)
-                            })
-                            .map(|pd| (pd.dimension().to_string(), pd))
-                            .collect()
-                    } else {
-                        HashMap::new()
-                    };
-
-                    tracing::debug!("Array Slice Pushdowns: {:?}", array_slice_pushdowns);
-
-                    let stream_producer = reader
-                        .into_parallel_stream_composer(
-                            Some(projection),
-                            Some(array_slice_pushdowns),
-                        )
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(e.to_string())
-                        })?;
-
-                    Ok::<_, datafusion::error::DataFusionError>((
-                        stream_producer,
-                        schema_mapper,
-                        file_schema,
-                    ))
-                })
-                .await?
-                .clone();
-            let producer = stream.pollable_shared_stream();
-
-            let stream_proxy = producer
-                .map(
-                    move |nd_batch| -> Result<arrow::array::RecordBatch, arrow::error::ArrowError> {
-                        let schema_mapper = schema_mapper.clone();
-                        let arrow_batch = nd_batch
-                            .map_err(|e| {
-                                tracing::error!(
-                                    "Error reading NdRecordBatch from Zarr stream: {:?}",
-                                    e
-                                );
-                                ArrowError::IoError(
-                                    "Error reading NdRecordBatch from Zarr stream".to_string(),
-                                    std::io::Error::other(e),
-                                )
-                            })?
-                            .to_arrow_record_batch()
-                            .unwrap_or_else(|e| {
-                                tracing::error!(
-                                    "Error converting NdRecordBatch to Arrow RecordBatch: {:?}",
-                                    e
-                                );
-                                RecordBatch::new_empty(file_schema.clone())
-                            });
-                        let mapped_batch = schema_mapper
-                            .map_batch(arrow_batch)
-                            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-                        Ok(mapped_batch)
-                    },
-                )
-                .boxed();
-            Ok(stream_proxy)
-        };
-
-        Ok(fut.boxed())
-    }
-}
-
-fn generate_numeric_span_slice_pushdown(
-    pruning_predicate: &Arc<dyn PhysicalExpr>,
-    span: &NumericArrayStepSpan,
-) -> Option<ArraySlicePushDown> {
-    let r =
-        extract_range_from_physical_filters(std::slice::from_ref(pruning_predicate), &span.column);
-    let mut min_step = None;
-    let mut max_step = None;
-    if let Some(min) = r.as_ref().and_then(|r| r.as_f64_min()) {
-        // Calculate start index based on step
-        let start_index = lower_index(span.start, span.step, min);
-        min_step = Some(if start_index < 0 { 0 } else { start_index });
-    }
-    if let Some(max) = r.as_ref().and_then(|r| r.as_f64_max()) {
-        // Calculate end index based on step
-        let end_index = upper_index(span.start, span.step, max);
-        max_step = Some(if end_index < 0 { 0 } else { end_index });
-    }
-
-    // If min_step > max_step, then swap them
-    if let (Some(min), Some(max)) = (min_step, max_step)
-        && min > max
-    {
-        min_step = Some(max);
-        max_step = Some(min);
-    }
-
-    Some(ArraySlicePushDown::new(
-        span.dimension.clone(),
-        min_step.map(|v| v as usize),
-        max_step.map(|v| v as usize),
-    ))
-}
-
-fn lower_index(start: f64, step: f64, value: f64) -> i64 {
-    let raw = (value - start) / step;
-    if step >= 0.0 {
-        raw.floor() as i64 // ascending: lower = floor
-    } else {
-        raw.ceil() as i64 // descending: lower = ceil
-    }
-}
-
-fn upper_index(start: f64, step: f64, value: f64) -> i64 {
-    let raw = (value - start) / step;
-    if step >= 0.0 {
-        raw.ceil() as i64 // ascending: upper = ceil
-    } else {
-        raw.floor() as i64 // descending: upper = floor
     }
 }

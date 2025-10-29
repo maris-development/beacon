@@ -1,39 +1,35 @@
 use std::{future::Future, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_arrow_zarr::stream::ArrowZarrStreamComposerRef;
 use datafusion::datasource::schema_adapter::SchemaMapper;
+use futures::FutureExt;
+
+pub struct PartitionedZarrStreamShare {
+    pub stream_share: Arc<ZarrStreamShare>,
+    pub schema_mapper: Arc<dyn SchemaMapper>,
+    pub schema: SchemaRef,
+}
 
 pub struct ZarrStreamShare {
-    inner: tokio::sync::OnceCell<(ArrowZarrStreamComposerRef, Arc<dyn SchemaMapper>, SchemaRef)>,
+    partitions: tokio::sync::OnceCell<Arc<[PartitionedZarrStreamShare]>>,
 }
 
 impl ZarrStreamShare {
     pub fn new() -> Self {
         Self {
-            inner: tokio::sync::OnceCell::new(),
+            partitions: tokio::sync::OnceCell::new(),
         }
     }
 
-    pub fn get_or_try_init<F, Fut>(
-        &self,
-        f: F,
-    ) -> impl Future<
-        Output = Result<
-            &(ArrowZarrStreamComposerRef, Arc<dyn SchemaMapper>, SchemaRef),
-            datafusion::error::DataFusionError,
-        >,
-    >
+    pub fn get_or_try_init<F, Fut>(&self, f: F) -> impl Future<Output = Fut::Output>
     where
         F: FnOnce() -> Fut,
         Fut: Future<
-            Output = Result<
-                (ArrowZarrStreamComposerRef, Arc<dyn SchemaMapper>, SchemaRef),
-                datafusion::error::DataFusionError,
-            >,
+            Output = Result<Arc<[PartitionedZarrStreamShare]>, datafusion::error::DataFusionError>,
         >,
     {
-        self.inner.get_or_try_init(f)
+        // Clone the Arc inside the OnceCell to return it.
+        self.partitions.get_or_try_init(f).map(|f| f.cloned())
     }
 }
 

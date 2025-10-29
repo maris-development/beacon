@@ -27,11 +27,12 @@ use crate::zarr::{
     array_step_span::NumericArrayStepSpan,
     pushdown_statistics::ZarrPushDownStatistics,
     source::{ZarrSource, fetch_schema},
-    util::{ZarrPath, path_parent, top_level_zarr_meta_v3},
+    util::{ZarrPath, is_zarr_v3_metadata, path_parent, top_level_zarr_meta_v3},
 };
 
 pub mod array_step_span;
 pub mod expr_util;
+pub mod opener;
 mod partition;
 pub mod pushdown_statistics;
 mod source;
@@ -127,15 +128,31 @@ impl FileFormat for ZarrFormat {
 
     async fn infer_schema(
         &self,
-        state: &dyn Session,
+        _state: &dyn Session,
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let objects = top_level_zarr_meta_v3(objects);
-        tracing::debug!("Top-level Zarr v3 groups: {:?}", objects);
-        let mut schema = None;
+        // Ensure every group is a zarr.json file.
         for object in objects {
-            let object_schema = fetch_schema(store.clone(), &object.clone()).await?;
+            if !is_zarr_v3_metadata(object) {
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "Object at location '{}' is not a Zarr v3 metadata file (zarr.json)",
+                    object.location.as_ref()
+                )));
+            }
+        }
+        // Collect only top-level zarr.json files.
+        let verified_objects = top_level_zarr_meta_v3(objects);
+        tracing::debug!("Top-level Zarr v3 groups: {:?}", verified_objects);
+        let mut schema = None;
+        for object in verified_objects {
+            let zarr_path = ZarrPath::new_from_object_meta(object.clone()).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to create ZarrPath from ObjectMeta at {}: {}",
+                    object.location, e
+                ))
+            })?;
+            let object_schema = fetch_schema(store.clone(), &zarr_path).await?;
             schema = Some(object_schema);
         }
         Ok(schema.unwrap())
