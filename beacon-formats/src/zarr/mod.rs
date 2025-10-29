@@ -251,7 +251,7 @@ impl ZarrFormat {
                     .unwrap_or(Statistics::new_unknown(table_schema));
 
                     Ok(FileGroup::new(vec![
-                        PartitionedFile::new(group_path.as_zarr_path(), 0)
+                        PartitionedFile::new(group_path.as_zarr_json_path(), 0)
                             .with_statistics(Arc::new(statistics)),
                     ]))
                 } else {
@@ -267,7 +267,6 @@ impl ZarrFormat {
                         )
                         .await
                         .unwrap_or(Statistics::new_unknown(table_schema));
-                        println!("SUB Group Path: {:?}", group.path());
 
                         // Create a PartitionedFile for the sub-group
                         let partitioned_file =
@@ -278,14 +277,7 @@ impl ZarrFormat {
                     Ok(FileGroup::new(files))
                 }
             }
-            None => {
-                // Means it is a single zarr group with no sub-groups
-                println!("Group Path: {:?}", group.path());
-                panic!(
-                    "Failed to list child groups of Zarr group at {:?}",
-                    group_path
-                );
-            }
+            None => Ok(FileGroup::new(vec![])),
         }
     }
 

@@ -26,6 +26,16 @@ impl ZarrPath {
         format!("/{}", p_str)
     }
 
+    pub fn as_zarr_json_path(&self) -> String {
+        match self {
+            ZarrPath::ObjectMeta(meta) => meta.location.as_ref().to_string(),
+            ZarrPath::DirPath(path) => {
+                let zarr_json_path = path.child("zarr.json");
+                zarr_json_path.as_ref().to_string()
+            }
+        }
+    }
+
     pub fn new_from_object_meta(meta: object_store::ObjectMeta) -> Result<Self, String> {
         // Ensure this is a zarr.json file?
         if !is_zarr_v3_metadata(&meta) {

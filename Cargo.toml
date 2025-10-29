@@ -39,4 +39,3 @@ parquet = { version = "^55.2.0", features = ["async"] }
 geoarrow = { version = "=0.4.0" }
 geoarrow-array = "=0.4.0"
 geoparquet = "0.4.0"
-pprof = { version = "0.15", features = ["flamegraph"] }

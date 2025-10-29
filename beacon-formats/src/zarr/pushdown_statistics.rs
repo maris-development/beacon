@@ -38,7 +38,7 @@ pub async fn generate_statistics_from_zarr_group(
             if let Ok(Some(array)) = zarr_reader.read_array_full(field.name()).await {
                 // Compute statistics for the array
                 if let Some(array_stats) = compute_statistics_for_array(&array) {
-                    statistics = statistics.add_column_statistics(array_stats);
+                    statistics = statistics.add_column_statistics(array_stats.clone());
                 } else {
                     statistics = statistics.add_column_statistics(ColumnStatistics::new_unknown());
                 }

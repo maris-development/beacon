@@ -1,16 +1,18 @@
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 
-use arrow::error::ArrowError;
+use arrow::{datatypes::SchemaRef, error::ArrowError};
 use beacon_arrow_zarr::{
     array_slice_pushdown::ArraySlicePushDown, reader::AsyncArrowZarrGroupReader,
     stream::ArrowZarrStream,
 };
 use datafusion::{
+    common::pruning::PrunableStatistics,
     datasource::{
         listing::PartitionedFile,
-        physical_plan::{FileMeta, FileOpenFuture, FileOpener},
+        physical_plan::{FileMeta, FileOpenFuture, FileOpener, ParquetSource},
         schema_adapter::SchemaAdapter,
     },
+    physical_optimizer::pruning::{FilePruner, PruningPredicate},
     physical_plan::PhysicalExpr,
 };
 use futures::{FutureExt, StreamExt};
@@ -65,6 +67,8 @@ use crate::zarr::{
 ///   diagnosis.
 /// - IO and heavy work are deferred until the returned future is awaited/polled.
 pub struct ZarrFileOpener {
+    pub table_schema: SchemaRef,
+    /// Underlying object store for accessing Zarr data.
     pub zarr_object_store: Arc<AsyncObjectStore<Arc<dyn ObjectStore>>>,
     /// Schema adapter for mapping Zarr schema to Arrow schema.
     pub schema_adapter: Arc<dyn SchemaAdapter>,
@@ -180,17 +184,29 @@ impl FileOpener for ZarrFileOpener {
     fn open(
         &self,
         file_meta: FileMeta,
-        _file: PartitionedFile,
+        file: PartitionedFile,
     ) -> datafusion::error::Result<FileOpenFuture> {
-        // Parse file meta as ZarrFile
+        if let (Some(statistics), Some(predicate)) = (file.statistics, self.predicate.as_ref()) {
+            let prunable_stats =
+                PrunableStatistics::new(vec![statistics.clone()], self.table_schema.clone());
+            let pruning_predicate =
+                PruningPredicate::try_new(predicate.clone(), self.table_schema.clone())?;
 
-        let zarr_path =
-            ZarrPath::new_from_object_meta(file_meta.object_meta.clone()).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to create ZarrPath from ObjectMeta: {}",
-                    e
-                ))
-            })?;
+            let pruning_result = pruning_predicate.prune(&prunable_stats)?;
+
+            // If the file can be pruned, return an empty stream
+            if pruning_result.iter().all(|&v| !v) {
+                let empty_stream = futures::stream::empty().boxed();
+                return Ok(Box::pin(async move { Ok(empty_stream) }));
+            }
+        }
+
+        let zarr_path = ZarrPath::new_from_object_meta(file.object_meta.clone()).map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to create ZarrPath from ObjectMeta: {}",
+                e
+            ))
+        })?;
 
         let zarr_object_store = self.zarr_object_store.clone();
         let adapter = self.schema_adapter.clone();
@@ -212,6 +228,8 @@ impl FileOpener for ZarrFileOpener {
 
         // Check if the pruning predicate references any arrays in the pushdown statistics
         let fut = async move {
+            // Determine based on statistics and predicate which arrays to pushdown
+
             let partitioned_streams = stream_partition_share
                 .get_or_try_init(|| async move {
                     tracing::debug!("Opening file: {:?}", file_meta.object_meta.location);

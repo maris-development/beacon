@@ -149,10 +149,11 @@ impl FileSource for ZarrSource {
             .schema_adapter_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
+        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema.clone());
         let arc_schema_adapter: Arc<dyn SchemaAdapter> = Arc::from(schema_adapter);
 
         Arc::new(ZarrFileOpener {
+            table_schema,
             zarr_object_store: Arc::new(AsyncObjectStore::new(object_store)),
             schema_adapter: arc_schema_adapter,
             stream_partition_shares: self.stream_partition_shares.clone(),
