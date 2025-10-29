@@ -1,13 +1,28 @@
 use std::{future::Future, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
+use beacon_arrow_zarr::stream::ArrowZarrStreamComposerRef;
 use datafusion::datasource::schema_adapter::SchemaMapper;
 use futures::FutureExt;
 
 pub struct PartitionedZarrStreamShare {
-    pub stream_share: Arc<ZarrStreamShare>,
-    pub schema_mapper: Arc<dyn SchemaMapper>,
-    pub schema: SchemaRef,
+    pub stream_composer: ArrowZarrStreamComposerRef,
+    pub table_schema_mapper: Arc<dyn SchemaMapper>,
+    pub partition_file_schema: SchemaRef,
+}
+
+impl PartitionedZarrStreamShare {
+    pub fn new(
+        stream_share: ArrowZarrStreamComposerRef,
+        table_schema_mapper: Arc<dyn SchemaMapper>,
+        partition_file_schema: SchemaRef,
+    ) -> Self {
+        Self {
+            stream_composer: stream_share,
+            table_schema_mapper,
+            partition_file_schema,
+        }
+    }
 }
 
 pub struct ZarrStreamShare {

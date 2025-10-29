@@ -1,8 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, pin::Pin, sync::Arc};
 
-use arrow::{array::RecordBatch, error::ArrowError};
+use arrow::error::ArrowError;
 use beacon_arrow_zarr::{
     array_slice_pushdown::ArraySlicePushDown, reader::AsyncArrowZarrGroupReader,
+    stream::ArrowZarrStream,
 };
 use datafusion::{
     datasource::{
@@ -23,8 +24,9 @@ use crate::zarr::{
     array_step_span::NumericArrayStepSpan,
     expr_util::extract_range_from_physical_filters,
     pushdown_statistics::ZarrPushDownStatistics,
+    source::recursive_groups,
     stream_share::{PartitionedZarrStreamShare, ZarrStreamShare},
-    util::{ZarrPath, path_parent},
+    util::ZarrPath,
 };
 
 pub struct ZarrFileOpener {
@@ -44,24 +46,116 @@ pub struct ZarrFileOpener {
 
 async fn fetch_partitioned_streams(
     zarr_path: ZarrPath,
+    zarr_object_store: Arc<AsyncObjectStore<Arc<dyn ObjectStore>>>,
+    array_steps: Arc<HashMap<String, NumericArrayStepSpan>>,
+    pruning_predicate: Option<Arc<dyn PhysicalExpr>>,
+    table_schema_adapter: Arc<dyn SchemaAdapter>,
 ) -> datafusion::error::Result<Arc<[PartitionedZarrStreamShare]>> {
-    todo!()
+    let base_group = Group::async_open(
+        zarr_object_store.clone() as Arc<dyn AsyncReadableListableStorageTraits>,
+        &zarr_path.as_zarr_path(),
+    )
+    .await
+    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+    let mut partitioned_groups = Vec::new();
+    recursive_groups(Arc::new(base_group), &mut partitioned_groups).await?;
+    // Iterate over arrays in the group and open them as partitioned groups
+
+    let mut partitioned_streams = Vec::new();
+    for group_partition in partitioned_groups {
+        let reader = AsyncArrowZarrGroupReader::new(group_partition)
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+        let file_schema = reader.arrow_schema();
+
+        let (table_mapper, projection) = table_schema_adapter.map_schema(&file_schema)?;
+        let partition_file_schema = file_schema
+            .project(&projection)
+            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+        // Generate ArraySlicePushDown based on the predicate and array steps
+        let array_slice_pushdowns = if let Some(pruning_predicate) = &pruning_predicate {
+            array_steps
+                .values()
+                .filter_map(|span| generate_numeric_span_slice_pushdown(pruning_predicate, span))
+                .map(|pd| (pd.dimension().to_string(), pd))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        let stream = reader
+            .into_parallel_stream_composer(Some(projection), Some(array_slice_pushdowns))
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+        let partition_stream =
+            PartitionedZarrStreamShare::new(stream, table_mapper, Arc::new(partition_file_schema));
+        partitioned_streams.push(partition_stream);
+    }
+
+    Ok(Arc::from(partitioned_streams))
+}
+
+async fn flatten_partitioned_streams(
+    partitioned_streams: Arc<[PartitionedZarrStreamShare]>,
+) -> Pin<
+    Box<
+        dyn futures::Stream<Item = Result<arrow::array::RecordBatch, arrow::error::ArrowError>>
+            + Send,
+    >,
+> {
+    let mut all_streams = Vec::new();
+    for partition in partitioned_streams.iter() {
+        let stream = flatten_batch_stream(partition.stream_composer.pollable_shared_stream());
+        all_streams.push(stream);
+    }
+    let combined_stream = futures::stream::iter(all_streams).flatten();
+    combined_stream.boxed()
+}
+
+fn flatten_batch_stream(
+    stream: ArrowZarrStream,
+) -> Pin<
+    Box<
+        dyn futures::Stream<Item = Result<arrow::array::RecordBatch, arrow::error::ArrowError>>
+            + Send,
+    >,
+> {
+    (stream
+        .map(|res_nd_batch| {
+            let nd_batch = res_nd_batch.map_err(|e| {
+                ArrowError::IoError(
+                    "Error reading NdRecordBatch from Zarr stream".to_string(),
+                    std::io::Error::other(e),
+                )
+            })?;
+
+            let arrow_batch = nd_batch
+                .to_arrow_record_batch()
+                .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+
+            Ok(arrow_batch)
+        })
+        .boxed()) as _
 }
 
 impl FileOpener for ZarrFileOpener {
     fn open(
         &self,
         file_meta: FileMeta,
-        file: PartitionedFile,
+        _file: PartitionedFile,
     ) -> datafusion::error::Result<FileOpenFuture> {
         // Parse file meta as ZarrFile
 
-        let zarr_path = ZarrPath::new_from_object_meta(file_meta.object_meta).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to create ZarrPath from ObjectMeta: {}",
-                e
-            ))
-        })?;
+        let zarr_path =
+            ZarrPath::new_from_object_meta(file_meta.object_meta.clone()).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to create ZarrPath from ObjectMeta: {}",
+                    e
+                ))
+            })?;
 
         let zarr_object_store = self.zarr_object_store.clone();
         let adapter = self.schema_adapter.clone();
@@ -80,107 +174,26 @@ impl FileOpener for ZarrFileOpener {
         };
         let pruning_predicate = self.predicate.clone();
         let array_steps = self.array_steps.clone();
-        let pushdown_zarr_statistics = self.pushdown_zarr_statistics.clone();
 
         // Check if the pruning predicate references any arrays in the pushdown statistics
         let fut = async move {
-            let (stream, schema_mapper, file_schema) = stream_partition_share
+            let partitioned_streams = stream_partition_share
                 .get_or_try_init(|| async move {
                     tracing::debug!("Opening file: {:?}", file_meta.object_meta.location);
 
-                    let parent_path =
-                        path_parent(&file_meta.object_meta.location).ok_or_else(|| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Could not determine parent path of object: {}",
-                                file_meta.object_meta.location
-                            ))
-                        })?;
-
-                    // Open the zarr group
-                    let group = Group::async_open(
-                        zarr_object_store.clone() as Arc<dyn AsyncReadableListableStorageTraits>,
-                        &format!("/{}", parent_path),
+                    fetch_partitioned_streams(
+                        zarr_path,
+                        zarr_object_store,
+                        array_steps,
+                        pruning_predicate,
+                        adapter,
                     )
                     .await
-                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-
-                    let reader = AsyncArrowZarrGroupReader::new(Arc::new(group))
-                        .await
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(e.to_string())
-                        })?;
-
-                    let file_schema = reader.arrow_schema();
-
-                    let (schema_mapper, projection) = adapter
-                        .map_schema(&file_schema)
-                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-
-                    // Generate ArraySlicePushDown based on the predicate and array steps
-                    let array_slice_pushdowns = if let Some(pruning_predicate) = &pruning_predicate
-                    {
-                        array_steps
-                            .values()
-                            .filter_map(|span| {
-                                generate_numeric_span_slice_pushdown(pruning_predicate, span)
-                            })
-                            .map(|pd| (pd.dimension().to_string(), pd))
-                            .collect()
-                    } else {
-                        HashMap::new()
-                    };
-
-                    tracing::debug!("Array Slice Pushdowns: {:?}", array_slice_pushdowns);
-
-                    let stream_producer = reader
-                        .into_parallel_stream_composer(
-                            Some(projection),
-                            Some(array_slice_pushdowns),
-                        )
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(e.to_string())
-                        })?;
-
-                    Ok::<_, datafusion::error::DataFusionError>((
-                        stream_producer,
-                        schema_mapper,
-                        file_schema,
-                    ))
                 })
                 .await?
                 .clone();
-            let producer = stream.pollable_shared_stream();
 
-            let stream_proxy = producer
-                .map(
-                    move |nd_batch| -> Result<arrow::array::RecordBatch, arrow::error::ArrowError> {
-                        let schema_mapper = schema_mapper.clone();
-                        let arrow_batch = nd_batch
-                            .map_err(|e| {
-                                tracing::error!(
-                                    "Error reading NdRecordBatch from Zarr stream: {:?}",
-                                    e
-                                );
-                                ArrowError::IoError(
-                                    "Error reading NdRecordBatch from Zarr stream".to_string(),
-                                    std::io::Error::other(e),
-                                )
-                            })?
-                            .to_arrow_record_batch()
-                            .unwrap_or_else(|e| {
-                                tracing::error!(
-                                    "Error converting NdRecordBatch to Arrow RecordBatch: {:?}",
-                                    e
-                                );
-                                RecordBatch::new_empty(file_schema.clone())
-                            });
-                        let mapped_batch = schema_mapper
-                            .map_batch(arrow_batch)
-                            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-                        Ok(mapped_batch)
-                    },
-                )
-                .boxed();
+            let stream_proxy = flatten_partitioned_streams(partitioned_streams).await;
             Ok(stream_proxy)
         };
 
