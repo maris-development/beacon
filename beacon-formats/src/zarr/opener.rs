@@ -66,7 +66,7 @@ use crate::zarr::{
 /// - IO and heavy work are deferred until the returned future is awaited/polled.
 pub struct ZarrFileOpener {
     pub zarr_object_store: Arc<AsyncObjectStore<Arc<dyn ObjectStore>>>,
-    /// Schema adapter for mapping NetCDF schema to Arrow schema.
+    /// Schema adapter for mapping Zarr schema to Arrow schema.
     pub schema_adapter: Arc<dyn SchemaAdapter>,
     /// Stream partition shares for the Zarr file.
     pub stream_partition_shares:

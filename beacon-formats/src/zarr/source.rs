@@ -140,8 +140,6 @@ impl FileSource for ZarrSource {
         base_config: &FileScanConfig,
         _partition: usize,
     ) -> Arc<dyn FileOpener> {
-        println!("Partition: {}", _partition);
-
         let table_schema = self
             .override_schema
             .clone()
@@ -262,7 +260,7 @@ impl FileSource for ZarrSource {
         output_ordering: Option<datafusion::physical_expr::LexOrdering>,
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        // Repartion by duplicating the file groups to reach the target number of partitions.
+        // Repartition by duplicating the file groups to reach the target number of partitions.
         let file_groups = config.file_groups.clone();
 
         let repartitioned: Vec<FileGroup> = file_groups

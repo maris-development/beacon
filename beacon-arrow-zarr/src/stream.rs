@@ -153,13 +153,8 @@ impl ArrowZarrStream {
                         pushdown.overlapping_range(range.start as usize..range.end as usize)
                     {
                         *range = overlap.start as u64..overlap.end as u64;
-                        // println!("Applying pushdown on dimension {}: {:?}", dim_name, range);
                     } else {
                         // No overlap, return empty batch
-                        // println!(
-                        //     "Skipping chunk {:?} due to no overlap with pushdown on dimension {}",
-                        //     chunk_indices, dim_name
-                        // );
                         let mut arrays = vec![];
                         let mut fields = vec![];
                         for field in composer.projected_schema.fields() {
