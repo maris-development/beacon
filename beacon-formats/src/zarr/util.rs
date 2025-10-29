@@ -11,7 +11,7 @@ pub enum ZarrPath {
 
 impl ZarrPath {
     pub fn as_zarr_path(&self) -> String {
-        match self {
+        let directory_path = match self {
             ZarrPath::ObjectMeta(meta) => {
                 // Strip the trailing "zarr.json" to get the group path.
                 let loc = meta.location.as_ref();
@@ -19,14 +19,11 @@ impl ZarrPath {
             }
             ZarrPath::DirPath(path) => {
                 // Check if ends with '/' and return as is or add it.
-                let p_str = path.as_ref();
-                if p_str.ends_with('/') {
-                    p_str.to_string()
-                } else {
-                    format!("{}/", p_str)
-                }
+                path.as_ref().to_string()
             }
-        }
+        };
+        let p_str = directory_path.trim_end_matches('/');
+        format!("/{}", p_str)
     }
 
     pub fn new_from_object_meta(meta: object_store::ObjectMeta) -> Result<Self, String> {
