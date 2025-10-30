@@ -286,24 +286,6 @@ pub(crate) async fn explain_query(
 #[utoipa::path(
     tag = "query",
     get,
-    path = "/api/query/functions",
-    responses(
-        (status=200, description="Response containing all the available functions"),
-    ),
-    security(
-        (),
-        ("basic-auth" = []),
-        ("bearer" = [])
-    )
-)]
-pub(crate) async fn list_functions(State(state): State<Arc<Runtime>>) -> Json<Vec<FunctionDoc>> {
-    Json(state.list_functions())
-}
-
-#[tracing::instrument(level = "info", skip(state))]
-#[utoipa::path(
-    tag = "query",
-    get,
     path = "/api/query/available-columns",
     responses(
         (status=200, description="Response containing the available columns in the default table schema"),

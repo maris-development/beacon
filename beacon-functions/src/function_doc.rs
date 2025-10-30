@@ -1,5 +1,7 @@
 use datafusion::{functions::core::coalesce::CoalesceFunc, logical_expr::ScalarUDF};
 
+use crate::file_formats::BeaconTableFunctionImpl;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FunctionDoc {
     pub function_name: String,
@@ -16,6 +18,26 @@ pub struct FunctionParameter {
 }
 
 impl FunctionDoc {
+    pub fn from_beacon_table_function(func: &dyn BeaconTableFunctionImpl) -> Self {
+        let mut params = vec![];
+        if let Some(arguments) = func.arguments() {
+            for arg in arguments {
+                params.push(FunctionParameter {
+                    name: arg.name().to_string(),
+                    description: "No description available".to_string(),
+                    data_type: format!("{}", arg.data_type()),
+                });
+            }
+        }
+
+        FunctionDoc {
+            function_name: func.name(),
+            description: "No documentation available".to_string(),
+            return_type: "TABLE".to_string(),
+            params,
+        }
+    }
+
     pub fn from_scalar(scalar: &ScalarUDF) -> Vec<Self> {
         let documentation = scalar.documentation();
         let signature = scalar.signature();

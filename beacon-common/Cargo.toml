@@ -12,5 +12,10 @@ thiserror = { workspace=true }
 async-trait = { workspace=true }
 async-stream = "0.3.6"
 regex = "1.11.1"
+glob = "0.3.3"
+url = "2.5.4"
+object_store = { version = "0.12.3", features = ["aws"] }
+
 futures = { workspace=true}
 futures-util = { workspace=true}
+tracing = { workspace = true }

@@ -71,6 +71,10 @@ impl Runtime {
         self.virtual_machine.list_functions()
     }
 
+    pub fn list_table_functions(&self) -> Vec<FunctionDoc> {
+        self.virtual_machine.list_table_functions()
+    }
+
     pub async fn add_table(&self, table: Table) -> anyhow::Result<()> {
         self.virtual_machine.add_table(table).await
     }
