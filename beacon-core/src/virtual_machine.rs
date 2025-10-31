@@ -6,15 +6,18 @@ use arrow::{
 };
 use beacon_data_lake::{table::Table, DataLake};
 use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
-use beacon_planner::plan::BeaconQueryPlan;
+use beacon_planner::{plan::BeaconQueryPlan, prelude::MetricsTracker};
+use beacon_query::output::QueryOutputFile;
 use datafusion::{
     catalog::{SchemaProvider, TableFunctionImpl},
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
-        runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
+        runtime_env::RuntimeEnvBuilder, SendableRecordBatchStream, SessionStateBuilder,
     },
+    physical_plan::ExecutionPlan,
     prelude::{SessionConfig, SessionContext},
 };
+use either::Either;
 
 pub struct VirtualMachine {
     table_functions: Vec<Arc<dyn BeaconTableFunctionImpl>>,
@@ -185,40 +188,49 @@ impl VirtualMachine {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, beacon_plan))]
-    pub async fn run_plan(&self, beacon_plan: &BeaconQueryPlan) -> anyhow::Result<()> {
-        let result = datafusion::physical_plan::collect(
-            beacon_plan.physical_plan.clone(),
-            self.session_ctx().task_ctx(),
-        )
-        .await?;
+    #[tracing::instrument(skip(self))]
+    pub async fn run_plan(
+        &self,
+        physical_plan: Arc<dyn ExecutionPlan>,
+        metrics_tracker: Arc<MetricsTracker>,
+        selected_output: Option<QueryOutputFile>,
+    ) -> anyhow::Result<Either<QueryOutputFile, SendableRecordBatchStream>> {
+        if let Some(output) = selected_output {
+            let result = datafusion::physical_plan::collect(
+                physical_plan.clone(),
+                self.session_ctx().task_ctx(),
+            )
+            .await?;
 
-        match result
-            .get(0)
-            .map(|r| r.column(0).as_primitive_opt::<UInt64Type>())
-            .flatten()
-        {
-            Some(num_rows_arr) => {
-                if num_rows_arr.len() > 0 {
-                    let num_rows = num_rows_arr.value(0);
-                    beacon_plan.metrics_tracker.add_output_rows(num_rows);
-                    tracing::info!("Query Returned {} rows", num_rows);
+            match result
+                .get(0)
+                .map(|r| r.column(0).as_primitive_opt::<UInt64Type>())
+                .flatten()
+            {
+                Some(num_rows_arr) => {
+                    if num_rows_arr.len() > 0 {
+                        let num_rows = num_rows_arr.value(0);
+                        metrics_tracker.add_output_rows(num_rows);
+                        tracing::info!("Query Returned {} rows", num_rows);
+                    }
+                }
+                None => {
+                    tracing::error!("Error getting number of rows from plan");
                 }
             }
-            None => {
-                tracing::error!("Error getting number of rows from plan");
-            }
-        }
-        // Get the row count
-        tracing::info!(
-            "Query result size in bytes: {:?}",
-            beacon_plan.output_buffer.size()
-        );
-        beacon_plan
-            .metrics_tracker
-            .add_output_bytes(beacon_plan.output_buffer.size()?);
+            // Get the row count
+            tracing::info!("Query result size in bytes: {:?}", output.size());
+            metrics_tracker.add_output_bytes(output.size()?);
 
-        Ok(())
+            Ok(Either::Left(output))
+        } else {
+            // Run plan without output file
+            let stream = datafusion::physical_plan::execute_stream(
+                physical_plan,
+                self.session_ctx().task_ctx(),
+            )?;
+            return Ok(Either::Right(stream));
+        }
     }
 
     pub async fn list_dataset_schema(&self, dataset: String) -> anyhow::Result<SchemaRef> {

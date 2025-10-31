@@ -12,6 +12,8 @@ use beacon_core::runtime::Runtime;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
 use beacon_query::{output::QueryOutputFile, Query};
+use either::Either;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -41,157 +43,120 @@ pub(crate) async fn query(
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
     let result = state.run_client_query(query_obj).await;
 
-    match result {
-        Ok(output) => match output.output_buffer {
-            QueryOutputFile::Csv(named_temp_file) => {
-                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
-                let stream = tokio_util::io::ReaderStream::new(file);
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, "text/csv"),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            "attachment; filename=\"output.csv\"",
-                        ),
-                        (
-                            HeaderName::from_static("x-beacon-query-id"),
-                            output.query_id.to_string().as_str(),
-                        ),
-                    ],
-                    inner_stream,
+    let query_result = if let Err(err) = &result {
+        tracing::error!("Error running beacon query: {}", err);
+        return Err((StatusCode::BAD_REQUEST, Json(err.to_string())));
+    } else {
+        result.unwrap()
+    };
+
+    match query_result.output_buffer {
+        Either::Left(output_file) => match output_file {
+            QueryOutputFile::Csv(temp_file) => {
+                handle_output_file_stream(
+                    temp_file.path(),
+                    "text/csv",
+                    "csv",
+                    &query_result.query_id,
                 )
-                    .into_response())
+                .await
             }
-            QueryOutputFile::Parquet(named_temp_file) => {
-                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
-                let stream = tokio_util::io::ReaderStream::new(file);
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, "application/vnd.apache.parquet"),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            "attachment; filename=\"output.parquet\"",
-                        ),
-                        (
-                            HeaderName::from_static("x-beacon-query-id"),
-                            output.query_id.to_string().as_str(),
-                        ),
-                    ],
-                    inner_stream,
+            QueryOutputFile::Parquet(temp_file) => {
+                handle_output_file_stream(
+                    temp_file.path(),
+                    "application/vnd.apache.parquet",
+                    "parquet",
+                    &query_result.query_id,
                 )
-                    .into_response())
+                .await
             }
-            QueryOutputFile::Ipc(named_temp_file) => {
-                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
-                let stream = tokio_util::io::ReaderStream::new(file);
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, "application/vnd.apache.arrow.file"),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            "attachment; filename=\"output.arrow\"",
-                        ),
-                        (
-                            HeaderName::from_static("x-beacon-query-id"),
-                            output.query_id.to_string().as_str(),
-                        ),
-                    ],
-                    inner_stream,
+            QueryOutputFile::Ipc(temp_file) => {
+                handle_output_file_stream(
+                    temp_file.path(),
+                    "application/vnd.apache.arrow.file",
+                    "arrow",
+                    &query_result.query_id,
                 )
-                    .into_response())
+                .await
             }
-            QueryOutputFile::Json(named_temp_file) => {
-                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
-                let stream = tokio_util::io::ReaderStream::new(file);
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, "application/json"),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            "attachment; filename=\"output.json\"",
-                        ),
-                        (
-                            HeaderName::from_static("x-beacon-query-id"),
-                            output.query_id.to_string().as_str(),
-                        ),
-                    ],
-                    inner_stream,
+            QueryOutputFile::Json(temp_file) => {
+                handle_output_file_stream(
+                    temp_file.path(),
+                    "application/json",
+                    "json",
+                    &query_result.query_id,
                 )
-                    .into_response())
+                .await
             }
-            QueryOutputFile::Odv(named_temp_file) => {
-                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
-                let stream = tokio_util::io::ReaderStream::new(file);
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, "application/zip"),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            "attachment; filename=\"output.zip\"",
-                        ),
-                        (
-                            HeaderName::from_static("x-beacon-query-id"),
-                            output.query_id.to_string().as_str(),
-                        ),
-                    ],
-                    inner_stream,
+            QueryOutputFile::Odv(temp_file) => {
+                handle_output_file_stream(
+                    temp_file.path(),
+                    "application/zip",
+                    "zip",
+                    &query_result.query_id,
                 )
-                    .into_response())
+                .await
             }
-            QueryOutputFile::NetCDF(named_temp_file) => {
-                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
-                let stream = tokio_util::io::ReaderStream::new(file);
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (header::CONTENT_TYPE, "application/netcdf"),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            "attachment; filename=\"output.nc\"",
-                        ),
-                        (
-                            HeaderName::from_static("x-beacon-query-id"),
-                            output.query_id.to_string().as_str(),
-                        ),
-                    ],
-                    inner_stream,
+            QueryOutputFile::NetCDF(temp_file) => {
+                handle_output_file_stream(
+                    temp_file.path(),
+                    "application/netcdf",
+                    "nc",
+                    &query_result.query_id,
                 )
-                    .into_response())
+                .await
             }
-            QueryOutputFile::GeoParquet(named_temp_file) => {
-                let file = tokio::fs::File::open(named_temp_file.path()).await.unwrap();
-                let stream = tokio_util::io::ReaderStream::new(file);
-                let inner_stream = Body::from_stream(stream);
-                Ok((
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/vnd.apache.arrow.geo+parquet",
-                        ),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            "attachment; filename=\"output.geoparquet\"",
-                        ),
-                        (
-                            HeaderName::from_static("x-beacon-query-id"),
-                            output.query_id.to_string().as_str(),
-                        ),
-                    ],
-                    inner_stream,
+            QueryOutputFile::GeoParquet(temp_file) => {
+                handle_output_file_stream(
+                    temp_file.path(),
+                    "application/vnd.apache.arrow.geo+parquet",
+                    "geoparquet",
+                    &query_result.query_id,
                 )
-                    .into_response())
+                .await
             }
         },
-        Err(err) => {
-            tracing::error!("Error querying beacon: {}", err);
-            Err((StatusCode::BAD_REQUEST, Json(err.to_string())))
+        Either::Right(ipc_stream) => {
+            // Create axum stream from ipc_stream
+            let axum_stream = axum_streams::StreamBodyAs::arrow_ipc_with_errors(
+                ipc_stream.schema(),
+                ipc_stream.map_err(|e| axum::Error::new(Box::new(e))),
+            );
+            return Ok(axum_stream.into_response());
         }
     }
+}
+
+async fn handle_output_file_stream(
+    file_path: &std::path::Path,
+    content_type: &str,
+    file_ext: &str,
+    query_id: &uuid::Uuid,
+) -> Result<Response<Body>, (StatusCode, Json<String>)> {
+    let file = tokio::fs::File::open(file_path).await.map_err(|err| {
+        tracing::error!("Error opening output file: {}", err);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json("Error opening output file".to_string()),
+        )
+    })?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let inner_stream = Body::from_stream(stream);
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"output.{}\"", file_ext),
+            ),
+            (
+                HeaderName::from_static("x-beacon-query-id"),
+                query_id.to_string().as_str(),
+            ),
+        ],
+        inner_stream,
+    )
+        .into_response())
 }
 
 #[tracing::instrument(level = "info")]

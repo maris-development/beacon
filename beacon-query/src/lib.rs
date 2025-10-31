@@ -26,7 +26,7 @@ pub struct Query {
     #[serde(flatten)]
     pub inner: InnerQuery,
     #[schema(value_type = Object)]
-    pub output: Output,
+    pub output: Option<Output>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
