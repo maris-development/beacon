@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
-use datafusion::execution::SessionState;
+use ::arrow::datatypes::{DataType, Field};
+use datafusion::{
+    execution::SessionState,
+    functions::core::arrow_cast::ArrowCastFunc,
+    logical_expr::{Documentation, Signature},
+};
 
 use crate::{
     arrow::ArrowFormatFactory,
@@ -11,6 +16,7 @@ use crate::{
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
     },
     parquet::ParquetFormatFactory,
+    zarr::ZarrFormatFactory,
 };
 
 pub mod arrow;
@@ -19,6 +25,7 @@ pub mod geo_parquet;
 pub mod netcdf;
 pub mod odv_ascii;
 pub mod parquet;
+pub mod zarr;
 
 /// Register file formats with the session state that can be used for reading
 pub fn register_file_formats(
@@ -38,5 +45,6 @@ pub fn register_file_formats(
         )),
         true,
     )?;
+    session_state.register_file_format(Arc::new(ZarrFormatFactory), true)?;
     Ok(())
 }

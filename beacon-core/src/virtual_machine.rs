@@ -5,10 +5,10 @@ use arrow::{
     datatypes::{SchemaRef, UInt64Type},
 };
 use beacon_data_lake::{table::Table, DataLake};
-use beacon_functions::function_doc::FunctionDoc;
+use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
 use beacon_planner::plan::BeaconQueryPlan;
 use datafusion::{
-    catalog::SchemaProvider,
+    catalog::{SchemaProvider, TableFunctionImpl},
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
@@ -17,6 +17,7 @@ use datafusion::{
 };
 
 pub struct VirtualMachine {
+    table_functions: Vec<Arc<dyn BeaconTableFunctionImpl>>,
     session_ctx: Arc<SessionContext>,
     data_lake: Arc<DataLake>,
 }
@@ -50,8 +51,27 @@ impl VirtualMachine {
         for udf in blue_cloud_udfs {
             session_ctx.register_udf(udf);
         }
+
+        // Register table functions
+        let table_functions = beacon_functions::file_formats::register_table_functions(
+            tokio::runtime::Handle::current(),
+            session_ctx.clone(),
+            data_lake.data_object_store_url(),
+            data_lake.data_object_store_prefix(),
+            DataLake::netcdf_object_resolver(),
+            DataLake::netcdf_sink_resolver(),
+        );
+
+        for tf in table_functions.iter() {
+            session_ctx.register_udtf(
+                tf.name().as_str(),
+                Arc::clone(tf) as Arc<dyn TableFunctionImpl>,
+            );
+        }
+
         //FINISH INIT FUNCTIONS FROM beacon-functions module
         Ok(Self {
+            table_functions,
             session_ctx,
             data_lake,
         })
@@ -114,6 +134,19 @@ impl VirtualMachine {
         functions.dedup_by(|a, b| a.function_name == b.function_name);
 
         functions
+    }
+
+    pub fn list_table_functions(&self) -> Vec<FunctionDoc> {
+        let mut table_functions: Vec<FunctionDoc> = self
+            .table_functions
+            .iter()
+            .map(|tf| FunctionDoc::from_beacon_table_function(tf.as_ref()))
+            .collect();
+
+        table_functions.sort_by(|a, b| a.function_name.cmp(&b.function_name));
+        table_functions.dedup_by(|a, b| a.function_name == b.function_name);
+
+        table_functions
     }
 
     pub fn list_tables(&self) -> Vec<String> {

@@ -330,7 +330,7 @@ impl FileWriterState {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct KeyEntryState {
     key: Vec<Scalar<ArrayRef>>,
     count: usize,
@@ -350,46 +350,17 @@ impl PartialEq for KeyEntryState {
 
         for (a, b) in self.key.iter().zip(other.key.iter()) {
             let eq_array = arrow::compute::kernels::cmp::eq(a, b).unwrap();
-            if eq_array
+            if !eq_array
                 .as_any()
                 .downcast_ref::<arrow::array::BooleanArray>()
                 .unwrap()
                 .value(0)
-                == false
             {
                 return false;
             }
         }
 
         true
-    }
-}
-
-impl PartialOrd for KeyEntryState {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        for (a, b) in self.key.iter().zip(other.key.iter()) {
-            let lt_array = arrow::compute::kernels::cmp::lt(a, b).unwrap();
-            if lt_array
-                .as_any()
-                .downcast_ref::<arrow::array::BooleanArray>()
-                .unwrap()
-                .value(0)
-            {
-                return Some(std::cmp::Ordering::Less);
-            }
-
-            let gt_array = arrow::compute::kernels::cmp::gt(a, b).unwrap();
-            if gt_array
-                .as_any()
-                .downcast_ref::<arrow::array::BooleanArray>()
-                .unwrap()
-                .value(0)
-            {
-                return Some(std::cmp::Ordering::Greater);
-            }
-        }
-
-        Some(std::cmp::Ordering::Equal)
     }
 }
 
@@ -789,6 +760,7 @@ impl<W: AsyncWrite + Unpin + Send> AsyncOdvWriter<W> {
                                 if state.is_equal_key_state(&current_entry_key_state) {
                                     state.key_state.count
                                 } else {
+                                    state.key_state.key = current_entry_key_state.key.clone();
                                     state.key_state.count += 1;
                                     state.key_state.count
                                 }
