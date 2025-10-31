@@ -1,6 +1,7 @@
 use core::panic;
 use std::{sync::Arc, thread::sleep};
 
+use arrow::ipc::{writer::IpcWriteOptions, CompressionType};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -118,9 +119,13 @@ pub(crate) async fn query(
         },
         Either::Right(ipc_stream) => {
             // Create axum stream from ipc_stream
-            let axum_stream = axum_streams::StreamBodyAs::arrow_ipc_with_errors(
+            let ipc_options = IpcWriteOptions::default()
+                .try_with_compression(Some(CompressionType::ZSTD))
+                .unwrap();
+            let axum_stream = axum_streams::StreamBodyAs::arrow_ipc_with_options_errors(
                 ipc_stream.schema(),
                 ipc_stream.map_err(|e| axum::Error::new(Box::new(e))),
+                ipc_options,
             );
             return Ok(axum_stream.into_response());
         }
