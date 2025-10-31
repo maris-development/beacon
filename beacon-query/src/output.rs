@@ -28,7 +28,43 @@ use utoipa::ToSchema;
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct Output {
     /// The desired output format.
-    pub format: OutputFormat,
+    #[serde(flatten)]
+    #[serde(default)]
+    pub inner: OutputType,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub enum OutputType {
+    #[serde(untagged)]
+    FileFormat {
+        #[serde(alias = "file_format")]
+        format: OutputFormat,
+    },
+    #[serde(untagged)]
+    Streaming { streaming_format: StreamingFormat },
+}
+
+impl Default for OutputType {
+    fn default() -> Self {
+        OutputType::Streaming {
+            streaming_format: StreamingFormat::default(),
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub enum StreamingFormat {
+    Arrow,
+    GeoArrow {
+        longitude_column: Option<String>,
+        latitude_column: Option<String>,
+    },
+}
+
+impl Default for StreamingFormat {
+    fn default() -> Self {
+        StreamingFormat::Arrow
+    }
 }
 
 impl Output {
