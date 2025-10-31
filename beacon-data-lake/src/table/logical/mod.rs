@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use beacon_common::listing_url::parse_listing_table_url;
 use datafusion::{
     catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
@@ -7,7 +8,6 @@ use datafusion::{
 use crate::{
     files::collection::FileCollection,
     table::{error::TableError, table_formats::TableFileFormat},
-    util::parse_listing_table_url,
 };
 
 /// A representation of a logical table configuration.

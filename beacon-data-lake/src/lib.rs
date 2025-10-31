@@ -7,6 +7,7 @@ use std::{
 };
 
 use arrow::datatypes::SchemaRef;
+use beacon_common::listing_url::parse_listing_table_url;
 use beacon_formats::netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver};
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
@@ -21,7 +22,6 @@ use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, pa
 use crate::{
     files::{collection::FileCollection, temp_output_file::TempOutputFile},
     table::{Table, empty::EmptyTable, error::TableError},
-    util::parse_listing_table_url,
 };
 
 pub mod files;
@@ -124,6 +124,14 @@ impl DataLake {
 
         // Create directories if they do not exist
         Arc::new(NetCDFSinkResolver::new(absolute_path))
+    }
+
+    pub fn data_object_store_url(&self) -> ObjectStoreUrl {
+        self.data_directory_store_url.clone()
+    }
+
+    pub fn data_object_store_prefix(&self) -> object_store::path::Path {
+        self.data_directory_prefix.clone()
     }
 
     pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {

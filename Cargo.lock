@@ -658,9 +658,13 @@ dependencies = [
  "datafusion",
  "futures",
  "futures-util",
+ "glob",
  "indexmap 2.10.0",
+ "object_store 0.12.3",
  "regex",
  "thiserror 2.0.15",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -716,6 +720,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-arrow-zarr",
+ "beacon-common",
  "beacon-config",
  "beacon-formats",
  "chrono",
@@ -781,7 +786,9 @@ version = "1.3.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "beacon-common",
  "beacon-config",
+ "beacon-formats",
  "csv",
  "datafusion",
  "geo",
@@ -790,8 +797,11 @@ dependencies = [
  "inventory",
  "lazy_static",
  "lru 0.14.0",
+ "object_store 0.12.3",
  "ordered-float 5.0.0",
  "serde",
+ "tokio",
+ "tracing",
  "wkt 0.12.0",
 ]
 

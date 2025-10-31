@@ -3,27 +3,27 @@ use std::{any::Any, borrow::Cow, collections::HashSet, sync::Arc};
 use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::{
     catalog::{Session, TableProvider},
-    common::{Constraints, Statistics},
+    common::{plan_datafusion_err, Constraints, Statistics},
     datasource::{
-        TableType,
         file_format::FileFormat,
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
+        TableType,
     },
     error::DataFusionError,
     execution::SessionState,
-    logical_expr::{LogicalPlan, TableProviderFilterPushDown, dml::InsertOp},
+    logical_expr::{dml::InsertOp, LogicalPlan, TableProviderFilterPushDown},
     physical_plan::ExecutionPlan,
     prelude::Expr,
 };
 
-use crate::util::super_type_schema;
+use crate::super_typing::super_type_schema;
 
 #[derive(Debug)]
-pub struct FileCollection {
+pub struct SuperListingTable {
     inner_table: ListingTable,
 }
 
-impl FileCollection {
+impl SuperListingTable {
     pub async fn new(
         session_state: &SessionState,
         file_format: Arc<dyn FileFormat>,
@@ -36,16 +36,17 @@ impl FileCollection {
         let mut schemas = vec![];
 
         for table_url in &table_urls {
-            tracing::debug!("Infer schema for table: {}", table_url);
+            tracing::debug!("Infer schema for table/file url: {}", table_url);
             let schema = listing_options
                 .infer_schema(session_state, table_url)
-                .await
-                .unwrap();
+                .await?;
 
             schemas.push(schema.clone());
         }
 
-        let super_schema = super_type_schema(&schemas).unwrap();
+        let super_schema = super_type_schema(&schemas).map_err(|e| {
+            plan_datafusion_err!("Failed to compute super schema for listing table: {}", e)
+        })?;
 
         let config = ListingTableConfig::new_with_multi_paths(table_urls)
             .with_listing_options(listing_options)
@@ -90,7 +91,7 @@ impl FileCollection {
 }
 
 #[async_trait::async_trait]
-impl TableProvider for FileCollection {
+impl TableProvider for SuperListingTable {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -111,7 +112,7 @@ impl TableProvider for FileCollection {
         self.inner_table.get_table_definition()
     }
 
-    fn get_logical_plan(&self) -> Option<Cow<LogicalPlan>> {
+    fn get_logical_plan(&'_ self) -> Option<Cow<'_, LogicalPlan>> {
         self.inner_table.get_logical_plan()
     }
 
@@ -148,12 +149,10 @@ impl TableProvider for FileCollection {
 
     async fn insert_into(
         &self,
-        _state: &dyn Session,
-        _input: Arc<dyn ExecutionPlan>,
-        _insert_op: InsertOp,
+        state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        self.inner_table
-            .insert_into(_state, _input, _insert_op)
-            .await
+        self.inner_table.insert_into(state, input, insert_op).await
     }
 }

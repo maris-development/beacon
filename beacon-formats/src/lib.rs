@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
-use datafusion::execution::SessionState;
+use ::arrow::datatypes::{DataType, Field};
+use datafusion::{
+    execution::SessionState,
+    functions::core::arrow_cast::ArrowCastFunc,
+    logical_expr::{Documentation, Signature},
+};
 
 use crate::{
     arrow::ArrowFormatFactory,

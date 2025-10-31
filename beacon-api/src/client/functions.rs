@@ -22,3 +22,22 @@ pub(crate) async fn list_functions(
     let functions = state.list_functions();
     Json(functions)
 }
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "functions",
+    get, 
+    path = "/api/table-functions", 
+    responses((status = 200, description = "List of available table functions with documentation")),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn list_table_functions(
+    State(state): State<Arc<Runtime>>,
+) -> Json<Vec<FunctionDoc>> {
+    let functions = state.list_table_functions();
+    Json(functions)
+}
