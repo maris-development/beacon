@@ -56,7 +56,7 @@ impl BeaconTableFunctionImpl for ReadZarrFunc {
     }
 
     fn name(&self) -> String {
-        "read_gridded_zarr".to_string()
+        "read_zarr".to_string()
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
@@ -98,21 +98,19 @@ impl TableFunctionImpl for ReadZarrFunc {
                         }
                         None => {
                             return plan_err!(
-                                "read_gridded_zarr first argument must be a List<Utf8> of glob paths"
+                                "read_zarr first argument must be a List<Utf8> of glob paths"
                             );
                         }
                     }
                 }
                 _ => {
                     return plan_err!(
-                        "read_gridded_zarr first argument must be a List<Utf8> of glob paths"
+                        "read_zarr first argument must be a List<Utf8> of glob paths"
                     );
                 }
             }
         } else {
-            return plan_err!(
-                "read_gridded_zarr requires at least 1 argument: glob_paths : List<Utf8>"
-            );
+            return plan_err!("read_zarr requires at least 1 argument: glob_paths : List<Utf8>");
         }
 
         tracing::debug!("read_zarr glob paths: {:?}", glob_paths);

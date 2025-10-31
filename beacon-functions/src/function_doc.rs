@@ -1,4 +1,5 @@
-use datafusion::{functions::core::coalesce::CoalesceFunc, logical_expr::ScalarUDF};
+use arrow::datatypes::DataType;
+use datafusion::logical_expr::ScalarUDF;
 
 use crate::file_formats::BeaconTableFunctionImpl;
 
@@ -18,6 +19,31 @@ pub struct FunctionParameter {
 }
 
 impl FunctionDoc {
+    fn parse_data_type_to_string(data_type: &DataType) -> String {
+        match data_type {
+            DataType::List(field) => {
+                format!(
+                    "List<{}>",
+                    Self::parse_data_type_to_string(field.data_type())
+                )
+            }
+            DataType::Struct(fields) => {
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "{}: {}",
+                            f.name(),
+                            Self::parse_data_type_to_string(f.data_type())
+                        )
+                    })
+                    .collect();
+                format!("Struct<{}>", field_strs.join(", "))
+            }
+            _ => format!("{}", data_type),
+        }
+    }
+
     pub fn from_beacon_table_function(func: &dyn BeaconTableFunctionImpl) -> Self {
         let mut params = vec![];
         if let Some(arguments) = func.arguments() {
@@ -25,7 +51,7 @@ impl FunctionDoc {
                 params.push(FunctionParameter {
                     name: arg.name().to_string(),
                     description: "No description available".to_string(),
-                    data_type: format!("{}", arg.data_type()),
+                    data_type: Self::parse_data_type_to_string(arg.data_type()),
                 });
             }
         }
@@ -49,7 +75,7 @@ impl FunctionDoc {
                 .map(|data_types| {
                     let return_type = scalar.return_type(data_types);
                     let return_type_str = return_type
-                        .map(|dt| format!("{dt}"))
+                        .map(|dt| Self::parse_data_type_to_string(&dt))
                         .unwrap_or_else(|_| "unknown".to_string());
                     let mut function_doc = FunctionDoc {
                         function_name: scalar.name().to_string(),
@@ -81,7 +107,7 @@ impl FunctionDoc {
                                 .map(|(i, data_type)| FunctionParameter {
                                     name: format!("arg{}", i + 1),
                                     description: "No description available".to_string(),
-                                    data_type: format!("{data_type}"),
+                                    data_type: Self::parse_data_type_to_string(data_type),
                                 })
                                 .collect();
                             FunctionDoc {
