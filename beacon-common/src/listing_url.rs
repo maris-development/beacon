@@ -17,11 +17,11 @@ pub fn parse_listing_table_url(
     if path.components().next().is_some() {
         full_path.push_str(format!("/{}", path.as_os_str().to_string_lossy()).as_str());
     }
-    if !full_path.ends_with('/') {
-        full_path.push('/');
-    }
 
     let glob_pattern_parsed = if let Some(pattern) = glob_pattern {
+        if !full_path.ends_with('/') {
+            full_path.push('/');
+        }
         Some(
             glob::Pattern::new(&pattern)
                 .map_err(|e| exec_datafusion_err!("Failed to parse glob pattern: {}", e))?,

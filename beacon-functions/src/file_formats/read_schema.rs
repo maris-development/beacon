@@ -163,7 +163,6 @@ impl TableFunctionImpl for ReadSchemaFunc {
         } else {
             return plan_err!("read_schema requires at least 2 arguments: glob_paths : List<Utf8>, file_format: Utf8");
         };
-
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_schema processing path: {}", path);
@@ -173,9 +172,10 @@ impl TableFunctionImpl for ReadSchemaFunc {
                 path,
             )?);
         }
-        // self.session_ctx
-        let super_listing_table = self.runtime_handle.block_on(async move {
-            SuperListingTable::new(&self.session_ctx.state(), file_format, listing_urls).await
+        let super_listing_table = tokio::task::block_in_place(|| {
+            self.runtime_handle.block_on(async move {
+                SuperListingTable::new(&self.session_ctx.state(), file_format, listing_urls).await
+            })
         })?;
 
         let schema_table_provider = SchemaTableProvider::new(super_listing_table);

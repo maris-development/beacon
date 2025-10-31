@@ -8,7 +8,7 @@ use beacon_data_lake::{table::Table, DataLake};
 use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
 use beacon_planner::plan::BeaconQueryPlan;
 use datafusion::{
-    catalog::SchemaProvider,
+    catalog::{SchemaProvider, TableFunctionImpl},
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
@@ -61,6 +61,13 @@ impl VirtualMachine {
             DataLake::netcdf_object_resolver(),
             DataLake::netcdf_sink_resolver(),
         );
+
+        for tf in table_functions.iter() {
+            session_ctx.register_udtf(
+                tf.name().as_str(),
+                Arc::clone(tf) as Arc<dyn TableFunctionImpl>,
+            );
+        }
 
         //FINISH INIT FUNCTIONS FROM beacon-functions module
         Ok(Self {

@@ -148,13 +148,15 @@ impl TableFunctionImpl for ReadCsvFunc {
         }
 
         let file_format = CsvFormat::new(delimeter, infer_records);
-        let super_listing_table = self.runtime_handle.block_on(async move {
-            SuperListingTable::new(
-                &self.session_ctx.state(),
-                Arc::new(file_format),
-                listing_urls,
-            )
-            .await
+        let super_listing_table = tokio::task::block_in_place(|| {
+            self.runtime_handle.block_on(async move {
+                SuperListingTable::new(
+                    &self.session_ctx.state(),
+                    Arc::new(file_format),
+                    listing_urls,
+                )
+                .await
+            })
         })?;
 
         Ok(Arc::new(super_listing_table))
