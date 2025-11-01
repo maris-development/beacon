@@ -5,10 +5,12 @@ use arrow::{
     datatypes::{SchemaRef, UInt64Type},
 };
 use beacon_data_lake::{table::Table, DataLake};
+use beacon_formats::{Dataset, FileFormatFactoryExt};
 use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
 use beacon_planner::plan::BeaconQueryPlan;
 use datafusion::{
     catalog::{SchemaProvider, TableFunctionImpl},
+    datasource::listing::ListingTableUrl,
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
@@ -96,17 +98,11 @@ impl VirtualMachine {
             .with_memory_pool(mem_pool)
             .build_arc()?;
 
-        let mut session_state = SessionStateBuilder::new()
+        let session_state = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(runtime_env)
             .with_default_features()
             .build();
-
-        beacon_formats::register_file_formats(
-            &mut session_state,
-            DataLake::netcdf_object_resolver(),
-            DataLake::netcdf_sink_resolver(),
-        )?;
 
         let session_context = Arc::new(SessionContext::new_with_state(session_state));
 
@@ -230,7 +226,7 @@ impl VirtualMachine {
         pattern: Option<String>,
         offset: Option<usize>,
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<Vec<Dataset>> {
         Ok(self.data_lake.list_datasets(offset, limit, pattern).await?)
     }
 

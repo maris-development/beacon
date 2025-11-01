@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
+use beacon_formats::Dataset;
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
@@ -32,7 +33,7 @@ pub struct ListDatasetsQuery {
 pub(crate) async fn list_datasets(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListDatasetsQuery>,
-) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+) -> Result<Json<Vec<Dataset>>, (StatusCode, String)> {
     let result = state
         .list_datasets(query.pattern, query.offset, query.limit)
         .await;
