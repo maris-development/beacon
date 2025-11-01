@@ -16,6 +16,8 @@ use object_store::{ObjectMeta, ObjectStore};
 use beacon_common::super_typing::super_type_schema;
 use futures::future::try_join_all;
 
+use crate::{Dataset, DatasetFormat, FileFormatFactoryExt};
+
 #[derive(Debug)]
 pub struct ArrowFormatFactory;
 
@@ -40,6 +42,28 @@ impl FileFormatFactory for ArrowFormatFactory {
 impl GetExt for ArrowFormatFactory {
     fn get_ext(&self) -> String {
         "arrow".to_string()
+    }
+}
+
+impl FileFormatFactoryExt for ArrowFormatFactory {
+    fn discover_datasets(
+        &self,
+        objects: &[ObjectMeta],
+    ) -> datafusion::error::Result<Vec<crate::Dataset>> {
+        let datasets = objects
+            .iter()
+            .filter(|obj| {
+                obj.location
+                    .extension()
+                    .map(|ext| ext == "arrow" || ext == "feather")
+                    .unwrap_or(false)
+            })
+            .map(|obj| Dataset {
+                file_path: obj.location.to_string(),
+                format: DatasetFormat::Arrow,
+            })
+            .collect();
+        Ok(datasets)
     }
 }
 

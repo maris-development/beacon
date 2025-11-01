@@ -23,11 +23,14 @@ use zarrs::group::Group;
 use zarrs_object_store::AsyncObjectStore;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
-use crate::zarr::{
-    array_step_span::NumericArrayStepSpan,
-    pushdown_statistics::ZarrPushDownStatistics,
-    source::{ZarrSource, fetch_schema},
-    util::{ZarrPath, is_zarr_v3_metadata, path_parent, top_level_zarr_meta_v3},
+use crate::{
+    Dataset, DatasetFormat, FileFormatFactoryExt,
+    zarr::{
+        array_step_span::NumericArrayStepSpan,
+        pushdown_statistics::ZarrPushDownStatistics,
+        source::{ZarrSource, fetch_schema},
+        util::{ZarrPath, is_zarr_v3_metadata, path_parent, top_level_zarr_meta_v3},
+    },
 };
 
 pub mod array_step_span;
@@ -81,6 +84,41 @@ impl FileFormatFactory for ZarrFormatFactory {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl FileFormatFactoryExt for ZarrFormatFactory {
+    fn discover_datasets(
+        &self,
+        objects: &[ObjectMeta],
+    ) -> datafusion::error::Result<Vec<crate::Dataset>> {
+        let datasets: Vec<ObjectMeta> = objects
+            .iter()
+            .filter(|obj| {
+                obj.location
+                    .extension()
+                    .map(|ext| ext == "json")
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        // Now find all the top-level zarr.json files
+        let top_level_datasets = top_level_zarr_meta_v3(&datasets);
+        let zarr_paths: Vec<ZarrPath> = top_level_datasets
+            .into_iter()
+            .map(|path| ZarrPath::new_from_object_meta(path).unwrap())
+            .collect();
+
+        // Now we can use the ZarrPath objects to create the datasets
+        let datasets: Vec<Dataset> = zarr_paths
+            .into_iter()
+            .map(|path| Dataset {
+                file_path: path.as_zarr_json_path(),
+                format: DatasetFormat::Zarr,
+            })
+            .collect();
+        Ok(datasets)
     }
 }
 
