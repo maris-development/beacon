@@ -29,6 +29,7 @@ typetag = "0.2.19"
 indexmap = { version = "2.7.1", features = ["serde"]}
 chrono = { version = "0.4.41", features = ["serde"] }
 crossbeam = "0.8.4"
+flume = { version = "0.11.1", features = ["async"] }
 
 datafusion = "49.0.0"
 object_store = { version = "0.12.3", features = ["aws"] }

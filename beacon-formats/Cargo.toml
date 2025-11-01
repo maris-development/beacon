@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
+flume = { workspace = true }
 
 async_zip = { version = "0.0.18", features = ["tokio", "zstd", "deflate"] }
 tokio-util = "0.7.16"

@@ -780,6 +780,7 @@ dependencies = [
  "beacon-common",
  "chrono",
  "datafusion",
+ "flume",
  "futures",
  "geoarrow",
  "geoarrow-array",
@@ -2214,6 +2215,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
 
 [[package]]
+name = "flume"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "nanorand",
+ "spin 0.9.8",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3485,6 +3498,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanorand"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
+dependencies = [
+ "getrandom 0.2.16",
+]
+
+[[package]]
 name = "nd-arrow-array"
 version = "1.2.2"
 source = "git+https://github.com/maris-development/nd-arrow-array.git?branch=main#ddb6a3898990771bd922d4af35cd4e4871f60b8e"
@@ -4013,7 +4035,7 @@ dependencies = [
  "nix",
  "once_cell",
  "smallvec",
- "spin",
+ "spin 0.10.0",
  "symbolic-demangle",
  "tempfile",
  "thiserror 2.0.15",
@@ -4819,6 +4841,15 @@ dependencies = [
  "num-traits",
  "robust",
  "smallvec",
+]
+
+[[package]]
+name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]
