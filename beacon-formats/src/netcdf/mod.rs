@@ -15,10 +15,13 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::netcdf::{
-    object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
-    sink::NetCDFSink,
-    source::{NetCDFFileSource, fetch_schema},
+use crate::{
+    Dataset, DatasetFormat, FileFormatFactoryExt,
+    netcdf::{
+        object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
+        sink::NetCDFSink,
+        source::{NetCDFFileSource, fetch_schema},
+    },
 };
 
 pub mod object_resolver;
@@ -83,6 +86,28 @@ impl FileFormatFactory for NetCDFFormatFactory {
 impl GetExt for NetCDFFormatFactory {
     fn get_ext(&self) -> String {
         NETCDF_EXTENSION.to_string()
+    }
+}
+
+impl FileFormatFactoryExt for NetCDFFormatFactory {
+    fn discover_datasets(
+        &self,
+        objects: &[ObjectMeta],
+    ) -> datafusion::error::Result<Vec<crate::Dataset>> {
+        let datasets = objects
+            .iter()
+            .filter(|obj| {
+                obj.location
+                    .extension()
+                    .map(|ext| ext == NETCDF_EXTENSION)
+                    .unwrap_or(false)
+            })
+            .map(|obj| Dataset {
+                file_path: obj.location.to_string(),
+                format: DatasetFormat::NetCDF,
+            })
+            .collect();
+        Ok(datasets)
     }
 }
 

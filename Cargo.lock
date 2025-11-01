@@ -573,6 +573,7 @@ dependencies = [
  "beacon-config",
  "beacon-core",
  "beacon-data-lake",
+ "beacon-formats",
  "beacon-functions",
  "beacon-planner",
  "beacon-query",

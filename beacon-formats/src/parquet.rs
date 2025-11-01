@@ -18,6 +18,8 @@ use object_store::{ObjectMeta, ObjectStore};
 use beacon_common::super_typing::super_type_schema;
 use futures::future::try_join_all;
 
+use crate::{Dataset, DatasetFormat, FileFormatFactoryExt};
+
 #[derive(Debug)]
 pub struct ParquetFormatFactory;
 
@@ -42,6 +44,28 @@ impl FileFormatFactory for ParquetFormatFactory {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl FileFormatFactoryExt for ParquetFormatFactory {
+    fn discover_datasets(
+        &self,
+        objects: &[ObjectMeta],
+    ) -> datafusion::error::Result<Vec<crate::Dataset>> {
+        let datasets = objects
+            .iter()
+            .filter(|obj| {
+                obj.location
+                    .extension()
+                    .map(|ext| ext == "parquet")
+                    .unwrap_or(false)
+            })
+            .map(|obj| Dataset {
+                file_path: obj.location.to_string(),
+                format: DatasetFormat::Parquet,
+            })
+            .collect();
+        Ok(datasets)
     }
 }
 

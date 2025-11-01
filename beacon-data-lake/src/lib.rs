@@ -8,7 +8,10 @@ use std::{
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::listing_url::parse_listing_table_url;
-use beacon_formats::netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver};
+use beacon_formats::{
+    Dataset, FileFormatFactoryExt, file_formats,
+    netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
+};
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     datasource::listing::ListingTableUrl,
@@ -55,6 +58,9 @@ pub struct DataLake {
     // Map of tables
     tables: parking_lot::Mutex<HashMap<String, Table>>,
     table_providers: parking_lot::Mutex<HashMap<String, Arc<dyn TableProvider>>>,
+
+    // File formats
+    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 }
 
 impl Debug for DataLake {
@@ -151,6 +157,13 @@ impl DataLake {
         let mut table_providers = HashMap::new();
         let mut tables = HashMap::new();
 
+        let file_formats = file_formats(
+            session_context.clone(),
+            DataLake::netcdf_object_resolver(),
+            DataLake::netcdf_sink_resolver(),
+        )
+        .unwrap();
+
         Self::init_tables(
             tables_url.clone(),
             tables_prefix.clone(),
@@ -172,6 +185,7 @@ impl DataLake {
             tmp_directory_prefix,
             session_context,
             config,
+            file_formats,
             table_providers: parking_lot::Mutex::new(table_providers),
             tables: parking_lot::Mutex::new(tables),
         };
@@ -371,7 +385,7 @@ impl DataLake {
         offset: Option<usize>,
         limit: Option<usize>,
         pattern: Option<String>,
-    ) -> datafusion::error::Result<Vec<String>> {
+    ) -> datafusion::error::Result<Vec<Dataset>> {
         let state = self.session_context.state();
         let object_store = self
             .session_context
@@ -381,43 +395,44 @@ impl DataLake {
         let listing_url =
             self.try_create_listing_url(pattern.unwrap_or_else(|| "*".to_string()))?;
 
-        let mut datasets = Vec::new();
+        let mut objects = Vec::new();
         let mut entry_stream = listing_url
             .list_all_files(&state, &object_store, "")
             .await?;
 
         while let Some(entry) = entry_stream.next().await {
             if let Ok(entry) = entry {
-                datasets.push(entry.location.to_string());
+                objects.push(entry);
             }
         }
 
-        datasets.sort();
+        let mut datasets = vec![];
 
-        if let Some(offset) = offset {
-            datasets = datasets.into_iter().skip(offset).collect();
+        for file_format in self.file_formats.iter() {
+            let format_datasets = file_format.discover_datasets(&objects)?;
+            datasets.extend(format_datasets);
         }
 
-        if let Some(limit) = limit {
-            datasets = datasets.into_iter().take(limit).collect();
-        }
-
-        // For each dataset, remove the prefix if the file starts with that prefix
-        let mut prefix = self.data_directory_prefix.clone().to_string();
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-
-        datasets = datasets
+        // From each dataset, remove the dataset prefix path.
+        let datasets: Vec<Dataset> = datasets
             .into_iter()
-            .map(|d| {
-                if d.starts_with(&prefix) {
-                    d.strip_prefix(&prefix).unwrap().to_string()
-                } else {
-                    d
+            .map(|mut dataset| {
+                let updated_file_path = dataset
+                    .file_path()
+                    .strip_prefix(&format!("{}/", self.data_directory_prefix.as_ref()));
+
+                if let Some(stripped_path) = updated_file_path {
+                    dataset.update_file_path(stripped_path.to_string());
                 }
+
+                dataset
             })
             .collect();
+
+        // Apply offset and limit
+        let start = offset.unwrap_or(0);
+        let end = limit.map(|l| start + l).unwrap_or(datasets.len());
+        let datasets = datasets.into_iter().skip(start).take(end - start).collect();
 
         Ok(datasets)
     }
