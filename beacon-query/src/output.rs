@@ -9,6 +9,7 @@ use beacon_arrow_odv::writer::OdvOptions;
 use beacon_data_lake::DataLake;
 use beacon_formats::{
     arrow::ArrowFormatFactory,
+    arrow_stream::stream::DeferredBatchStream,
     csv::CsvFormatFactory,
     geo_parquet::{GeoParquetFormatFactory, GeoParquetOptions},
     netcdf::{NetCDFFormatFactory, NetcdfOptions},
@@ -30,41 +31,7 @@ pub struct Output {
     /// The desired output format.
     #[serde(flatten)]
     #[serde(default)]
-    pub inner: OutputType,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-pub enum OutputType {
-    #[serde(untagged)]
-    FileFormat {
-        #[serde(alias = "file_format")]
-        format: OutputFormat,
-    },
-    #[serde(untagged)]
-    Streaming { streaming_format: StreamingFormat },
-}
-
-impl Default for OutputType {
-    fn default() -> Self {
-        OutputType::Streaming {
-            streaming_format: StreamingFormat::default(),
-        }
-    }
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
-pub enum StreamingFormat {
-    Arrow,
-    GeoArrow {
-        longitude_column: Option<String>,
-        latitude_column: Option<String>,
-    },
-}
-
-impl Default for StreamingFormat {
-    fn default() -> Self {
-        StreamingFormat::Arrow
-    }
+    pub format: OutputFormat,
 }
 
 impl Output {
@@ -82,7 +49,7 @@ impl Output {
         _session_context: &SessionContext,
         data_lake: &DataLake,
         input_plan: LogicalPlan,
-    ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
+    ) -> datafusion::error::Result<(LogicalPlan, QueryOutput)> {
         let file_type = self.format.file_type();
         let temp_output = data_lake.try_create_temp_output_file(".tmp");
         let plan = LogicalPlanBuilder::copy_to(
@@ -122,18 +89,27 @@ pub enum OutputFormat {
         latitude_column: Option<String>,
     },
     Odv(OdvOptions),
+    /// Default arrow stream
+    #[serde(alias = "arrow_stream")]
+    ArrowStream,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        OutputFormat::ArrowStream
+    }
 }
 
 impl OutputFormat {
     /// Wraps a temporary file in the appropriate output file enum variant.
-    pub fn output_file(&self, temp_file: NamedTempFile) -> QueryOutputFile {
+    pub fn output_file(&self, temp_file: NamedTempFile) -> QueryOutput {
         match self {
-            OutputFormat::Csv => QueryOutputFile::Csv(temp_file),
-            OutputFormat::Ipc => QueryOutputFile::Ipc(temp_file),
-            OutputFormat::Parquet => QueryOutputFile::Parquet(temp_file),
-            OutputFormat::GeoParquet { .. } => QueryOutputFile::GeoParquet(temp_file),
-            OutputFormat::NetCDF => QueryOutputFile::NetCDF(temp_file),
-            OutputFormat::Odv(_) => QueryOutputFile::Odv(temp_file),
+            OutputFormat::Csv => QueryOutput::Csv(temp_file),
+            OutputFormat::Ipc => QueryOutput::Ipc(temp_file),
+            OutputFormat::Parquet => QueryOutput::Parquet(temp_file),
+            OutputFormat::GeoParquet { .. } => QueryOutput::GeoParquet(temp_file),
+            OutputFormat::NetCDF => QueryOutput::NetCDF(temp_file),
+            OutputFormat::Odv(_) => QueryOutput::Odv(temp_file),
         }
     }
 
@@ -170,7 +146,7 @@ impl OutputFormat {
 
 /// Wrapper for temporary output files in various formats.
 #[derive(Debug)]
-pub enum QueryOutputFile {
+pub enum QueryOutput {
     /// CSV output file.
     Csv(NamedTempFile),
     /// Arrow IPC output file.
@@ -185,31 +161,23 @@ pub enum QueryOutputFile {
     Odv(NamedTempFile),
     /// GeoParquet output file.
     GeoParquet(NamedTempFile),
+    /// Default arrow stream
+    ArrowStream(DeferredBatchStream),
 }
 
-impl QueryOutputFile {
+impl QueryOutput {
     /// Returns the size of the output file in bytes.
     pub fn size(&self) -> anyhow::Result<u64> {
         match self {
-            QueryOutputFile::Csv(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Ipc(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Json(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Parquet(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::NetCDF(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Odv(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
-        }
-    }
-
-    pub fn path(&self) -> &std::path::Path {
-        match self {
-            QueryOutputFile::Csv(file) => file.path(),
-            QueryOutputFile::Ipc(file) => file.path(),
-            QueryOutputFile::Json(file) => file.path(),
-            QueryOutputFile::Parquet(file) => file.path(),
-            QueryOutputFile::NetCDF(file) => file.path(),
-            QueryOutputFile::Odv(file) => file.path(),
-            QueryOutputFile::GeoParquet(file) => file.path(),
+            QueryOutput::Csv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::Ipc(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::Json(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::Parquet(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::NetCDF(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::Odv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::GeoParquet(file) => Ok(file.path().metadata()?.len()),
+            // ToDo: implement size calculation for ArrowStream
+            QueryOutput::ArrowStream(_) => Ok(0),
         }
     }
 }

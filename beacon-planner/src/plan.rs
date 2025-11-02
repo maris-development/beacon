@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use beacon_query::{Query, output::QueryOutputFile};
+use beacon_query::{Query, output::QueryOutput};
 use datafusion::{
     catalog::memory::DataSourceExec, datasource::physical_plan::FileScanConfig,
     prelude::SessionContext,
@@ -17,7 +17,7 @@ pub struct BeaconQueryPlan {
     /// The physical execution plan for the query.
     pub physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
     /// Output buffer for the query results.
-    pub output_buffer: Option<QueryOutputFile>,
+    pub output_buffer: Option<QueryOutput>,
 }
 
 /// Plans a query by parsing, optimizing, and generating a physical plan.

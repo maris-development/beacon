@@ -12,7 +12,7 @@ use axum::{
 use beacon_core::runtime::Runtime;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
-use beacon_query::{output::QueryOutputFile, Query};
+use beacon_query::{output::QueryOutput, Query};
 use either::Either;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,7 @@ pub(crate) async fn query(
 
     match query_result.output_buffer {
         Either::Left(output_file) => match output_file {
-            QueryOutputFile::Csv(temp_file) => {
+            QueryOutput::Csv(temp_file) => {
                 handle_output_file_stream(
                     temp_file.path(),
                     "text/csv",
@@ -62,7 +62,7 @@ pub(crate) async fn query(
                 )
                 .await
             }
-            QueryOutputFile::Parquet(temp_file) => {
+            QueryOutput::Parquet(temp_file) => {
                 handle_output_file_stream(
                     temp_file.path(),
                     "application/vnd.apache.parquet",
@@ -71,7 +71,7 @@ pub(crate) async fn query(
                 )
                 .await
             }
-            QueryOutputFile::Ipc(temp_file) => {
+            QueryOutput::Ipc(temp_file) => {
                 handle_output_file_stream(
                     temp_file.path(),
                     "application/vnd.apache.arrow.file",
@@ -80,7 +80,7 @@ pub(crate) async fn query(
                 )
                 .await
             }
-            QueryOutputFile::Json(temp_file) => {
+            QueryOutput::Json(temp_file) => {
                 handle_output_file_stream(
                     temp_file.path(),
                     "application/json",
@@ -89,7 +89,7 @@ pub(crate) async fn query(
                 )
                 .await
             }
-            QueryOutputFile::Odv(temp_file) => {
+            QueryOutput::Odv(temp_file) => {
                 handle_output_file_stream(
                     temp_file.path(),
                     "application/zip",
@@ -98,7 +98,7 @@ pub(crate) async fn query(
                 )
                 .await
             }
-            QueryOutputFile::NetCDF(temp_file) => {
+            QueryOutput::NetCDF(temp_file) => {
                 handle_output_file_stream(
                     temp_file.path(),
                     "application/netcdf",
@@ -107,7 +107,7 @@ pub(crate) async fn query(
                 )
                 .await
             }
-            QueryOutputFile::GeoParquet(temp_file) => {
+            QueryOutput::GeoParquet(temp_file) => {
                 handle_output_file_stream(
                     temp_file.path(),
                     "application/vnd.apache.arrow.geo+parquet",

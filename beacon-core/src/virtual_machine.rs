@@ -8,7 +8,7 @@ use beacon_data_lake::{table::Table, DataLake};
 use beacon_formats::{Dataset, FileFormatFactoryExt};
 use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
 use beacon_planner::{plan::BeaconQueryPlan, prelude::MetricsTracker};
-use beacon_query::output::QueryOutputFile;
+use beacon_query::output::QueryOutput;
 use datafusion::{
     catalog::{SchemaProvider, TableFunctionImpl},
     datasource::listing::ListingTableUrl,
@@ -17,7 +17,7 @@ use datafusion::{
         runtime_env::RuntimeEnvBuilder, SendableRecordBatchStream, SessionStateBuilder,
     },
     physical_plan::ExecutionPlan,
-    prelude::{SessionConfig, SessionContext},
+    prelude::{DataFrame, SessionConfig, SessionContext},
 };
 use either::Either;
 
@@ -189,8 +189,8 @@ impl VirtualMachine {
         &self,
         physical_plan: Arc<dyn ExecutionPlan>,
         metrics_tracker: Arc<MetricsTracker>,
-        selected_output: Option<QueryOutputFile>,
-    ) -> anyhow::Result<Either<QueryOutputFile, SendableRecordBatchStream>> {
+        selected_output: Option<QueryOutput>,
+    ) -> anyhow::Result<Either<QueryOutput, SendableRecordBatchStream>> {
         if let Some(output) = selected_output {
             let result = datafusion::physical_plan::collect(
                 physical_plan.clone(),

@@ -684,6 +684,7 @@ dependencies = [
  "object_store 0.12.3",
  "regex",
  "thiserror 2.0.15",
+ "tokio",
  "tracing",
  "url",
 ]
@@ -778,6 +779,7 @@ dependencies = [
  "beacon-arrow-odv",
  "beacon-arrow-zarr",
  "beacon-common",
+ "beacon-config",
  "chrono",
  "datafusion",
  "flume",
