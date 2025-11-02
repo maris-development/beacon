@@ -1,16 +1,16 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::PathBuf};
 
 use arrow::datatypes::{DataType, Fields, Schema, TimeUnit};
 use datafusion::{
     common::{
-        Column,
+        Column, exec_datafusion_err,
         tree_node::{Transformed, TreeNode},
     },
+    datasource::listing::ListingTableUrl,
+    execution::object_store::ObjectStoreUrl,
     prelude::Expr,
 };
+use url::Url;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SuperTypeError {
@@ -291,19 +291,4 @@ pub fn remap_filter(
     })?;
     // Turn the Transformed<Expr> back into an Expr
     Ok(transformed.data)
-}
-
-pub fn split_glob(path: &str) -> Option<(PathBuf, String)> {
-    let p = Path::new(path);
-
-    // Get the last component (file name or pattern)
-    if let Some(last) = p.file_name().and_then(|os| os.to_str()) {
-        // Does it look like a glob?
-        if last.contains('*') || last.contains('?') || last.contains('[') {
-            // Base path = everything before the last component
-            let base = p.parent().unwrap_or(Path::new("")).to_path_buf();
-            return Some((base, last.to_string()));
-        }
-    }
-    None
 }

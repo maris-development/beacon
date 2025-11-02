@@ -24,7 +24,6 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(query::query_metrics))
         .routes(routes!(query::explain_query))
         .routes(routes!(query::available_columns))
-        .routes(routes!(query::list_functions))
         .routes(routes!(datasets::list_datasets))
         .routes(routes!(datasets::list_dataset_schema))
         .routes(routes!(datasets::total_datasets))
@@ -35,6 +34,7 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(tables::list_table_config))
         .routes(routes!(tables::default_table_schema))
         .routes(routes!(functions::list_functions))
+        .routes(routes!(functions::list_table_functions))
         .routes(routes!(info::system_info))
         .split_for_parts();
 

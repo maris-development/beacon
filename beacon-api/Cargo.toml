@@ -5,6 +5,7 @@ edition = "2021"
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.6.0"
+pprof = { version = "0.15", features = ["flamegraph"] }
 
 [dependencies]
 axum = { version = "0.8.1", features = ["tracing"] }
@@ -34,4 +35,5 @@ beacon-core = { path = "../beacon-core" }
 beacon-query = { path = "../beacon-query" }
 beacon-planner = { path = "../beacon-planner" }
 beacon-functions = { path = "../beacon-functions" }
+beacon-formats = { path = "../beacon-formats" }
 beacon-data-lake = { path = "../beacon-data-lake" }
