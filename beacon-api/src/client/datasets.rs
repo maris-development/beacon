@@ -30,6 +30,40 @@ pub struct ListDatasetsQuery {
         ("bearer" = [])
     )
 )]
+#[deprecated = "Use /api/list-datasets instead"]
+pub(crate) async fn datasets(
+    State(state): State<Arc<Runtime>>,
+    Query(query): Query<ListDatasetsQuery>,
+) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let result = state
+        .list_datasets(query.pattern, query.offset, query.limit)
+        .await;
+
+    match result {
+        Ok(datasets) => Ok(Json(datasets.into_iter().map(|d| d.file_path).collect())),
+        Err(err) => {
+            tracing::error!("Error listing datasets: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Error listing datasets".to_string(),
+            ))
+        }
+    }
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "datasets",
+    get, 
+    path = "/api/list-datasets", 
+    params(ListDatasetsQuery),
+    responses((status = 200, description = "List of datasets including interpreted file format")),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
 pub(crate) async fn list_datasets(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListDatasetsQuery>,
