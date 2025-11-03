@@ -1,3 +1,4 @@
+use arrow::array::{ArrayRef, Scalar};
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::{BinaryExpr, CastExpr, Column, Literal};
@@ -6,12 +7,12 @@ use std::sync::Arc;
 
 /// A single interval: (value, inclusive?)
 #[derive(Debug, Clone, Default)]
-pub struct Range {
+pub struct ZarrFilterRange {
     pub min: Option<(ScalarValue, bool)>,
     pub max: Option<(ScalarValue, bool)>,
 }
 
-impl Range {
+impl ZarrFilterRange {
     pub fn as_f64_max(&self) -> Option<f64> {
         self.max.as_ref().and_then(|(v, _)| {
             if let ScalarValue::Float64(Some(f)) = v {
@@ -68,6 +69,22 @@ impl Range {
         })
     }
 
+    pub fn max_value_as_arrow_scalar(&self) -> Option<Scalar<ArrayRef>> {
+        self.max.as_ref().and_then(|(v, _)| v.to_scalar().ok())
+    }
+
+    pub fn min_value_as_arrow_scalar(&self) -> Option<Scalar<ArrayRef>> {
+        self.min.as_ref().and_then(|(v, _)| v.to_scalar().ok())
+    }
+
+    pub fn min_value(&self) -> Option<&ScalarValue> {
+        self.min.as_ref().map(|(v, _)| v)
+    }
+
+    pub fn max_value(&self) -> Option<&ScalarValue> {
+        self.max.as_ref().map(|(v, _)| v)
+    }
+
     pub fn is_max_inclusive(&self) -> Option<bool> {
         self.max.as_ref().map(|(_, inc)| *inc)
     }
@@ -112,8 +129,8 @@ impl Range {
 pub fn extract_range_from_physical_filters(
     filters: &[Arc<dyn PhysicalExpr>],
     target_col: &str,
-) -> Option<Range> {
-    let mut out = Range::default();
+) -> Option<ZarrFilterRange> {
+    let mut out = ZarrFilterRange::default();
     for f in filters {
         walk_physical_expr(f, target_col, &mut out);
     }
@@ -125,7 +142,7 @@ pub fn extract_range_from_physical_filters(
     }
 }
 
-fn walk_physical_expr(node: &Arc<dyn PhysicalExpr>, target_col: &str, out: &mut Range) {
+fn walk_physical_expr(node: &Arc<dyn PhysicalExpr>, target_col: &str, out: &mut ZarrFilterRange) {
     if let Some(bin) = downcast::<BinaryExpr>(node) {
         let op = bin.op();
 
@@ -164,7 +181,7 @@ fn walk_physical_expr(node: &Arc<dyn PhysicalExpr>, target_col: &str, out: &mut 
     }
 }
 
-fn apply_cmp(out: &mut Range, op: Operator, lit: &ScalarValue) {
+fn apply_cmp(out: &mut ZarrFilterRange, op: Operator, lit: &ScalarValue) {
     match op {
         Operator::Gt => out.tighten_lower(lit.clone(), false),
         Operator::GtEq => out.tighten_lower(lit.clone(), true),

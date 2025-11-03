@@ -1,16 +1,23 @@
-use std::sync::Arc;
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use arrow::{
-    array::AsArray,
+    array::{Array, ArrayRef, AsArray, PrimitiveArray, Scalar, StringArray},
+    compute::CastOptions,
     datatypes::{Int8Type, SchemaRef},
+    util::display::FormatOptions,
 };
-use beacon_arrow_zarr::reader::AsyncArrowZarrGroupReader;
+use beacon_arrow_zarr::{
+    array_slice_pushdown::ArraySlicePushDown, reader::AsyncArrowZarrGroupReader,
+};
 use datafusion::{
     common::{ColumnStatistics, Statistics, stats::Precision},
     scalar::ScalarValue,
 };
+use nd_arrow_array::NdArrowArray;
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
+
+use crate::zarr::expr_util::ZarrFilterRange;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ZarrPushDownStatistics {
@@ -216,4 +223,211 @@ fn compute_statistics_for_array(array: &arrow::array::ArrayRef) -> Option<Column
     }
 
     Some(statistics)
+}
+
+pub struct ZarrStatistics {
+    arrays: HashMap<String, ZarrArrayStatistics>,
+}
+
+pub struct ZarrArrayStatistics {
+    column_statistics: ColumnStatistics,
+    array_ref: NdArrowArray,
+}
+
+impl ZarrArrayStatistics {
+    pub fn column_statistics(&self) -> &ColumnStatistics {
+        &self.column_statistics
+    }
+
+    pub fn get_slice_pushdown(&self, value_range: ZarrFilterRange) -> Option<ArraySlicePushDown> {
+        if self.array_ref.dimensions().num_dims() > 1 {
+            return None;
+        }
+
+        let cast_options = CastOptions {
+            safe: true,
+            format_options: FormatOptions::default(),
+        };
+
+        let target_data_type = self.array_ref.data_type();
+
+        let min_value = value_range
+            .min_value()
+            .map(|s| s.cast_to_with_options(target_data_type, &cast_options).ok())
+            .flatten();
+
+        let max_value = value_range
+            .max_value()
+            .map(|s| s.cast_to_with_options(target_data_type, &cast_options).ok())
+            .flatten();
+
+        todo!()
+    }
+
+    fn find_flattened_min_index(array: ArrayRef, min_value: &ScalarValue) -> Option<usize> {
+        assert_eq!(array.data_type(), &min_value.data_type());
+        todo!()
+    }
+}
+
+/// Find a single range [start..end) covering all indices that are in [min, max].
+pub fn arrow_value_range(
+    values: &ArrayRef,
+    min: Option<Scalar<ArrayRef>>,
+    max: Option<Scalar<ArrayRef>>,
+    min_inclusive: bool,
+    max_inclusive: bool,
+) -> Option<Range<usize>> {
+    match values.data_type() {
+        // ---- Numeric types ----
+        DataType::Int8 => typed_range::<Int8Type>(values, min, max, min_inclusive, max_inclusive),
+        DataType::Int16 => typed_range::<Int16Type>(values, min, max, min_inclusive, max_inclusive),
+        DataType::Int32 => typed_range::<Int32Type>(values, min, max, min_inclusive, max_inclusive),
+        DataType::Int64 => typed_range::<Int64Type>(values, min, max, min_inclusive, max_inclusive),
+        DataType::UInt8 => typed_range::<UInt8Type>(values, min, max, min_inclusive, max_inclusive),
+        DataType::UInt16 => {
+            typed_range::<UInt16Type>(values, min, max, min_inclusive, max_inclusive)
+        }
+        DataType::UInt32 => {
+            typed_range::<UInt32Type>(values, min, max, min_inclusive, max_inclusive)
+        }
+        DataType::UInt64 => {
+            typed_range::<UInt64Type>(values, min, max, min_inclusive, max_inclusive)
+        }
+        DataType::Float32 => {
+            typed_range::<Float32Type>(values, min, max, min_inclusive, max_inclusive)
+        }
+        DataType::Float64 => {
+            typed_range::<Float64Type>(values, min, max, min_inclusive, max_inclusive)
+        }
+
+        // ---- Timestamp types ----
+        DataType::Timestamp(unit, _) => match unit {
+            TimeUnit::Second => {
+                typed_range::<TimestampSecondType>(values, min, max, min_inclusive, max_inclusive)
+            }
+            TimeUnit::Millisecond => typed_range::<TimestampMillisecondType>(
+                values,
+                min,
+                max,
+                min_inclusive,
+                max_inclusive,
+            ),
+            TimeUnit::Microsecond => typed_range::<TimestampMicrosecondType>(
+                values,
+                min,
+                max,
+                min_inclusive,
+                max_inclusive,
+            ),
+            TimeUnit::Nanosecond => typed_range::<TimestampNanosecondType>(
+                values,
+                min,
+                max,
+                min_inclusive,
+                max_inclusive,
+            ),
+        },
+
+        _ => None,
+    }
+}
+
+/// Generic typed implementation for any PrimitiveArray<T>
+fn typed_range<T>(
+    values: &ArrayRef,
+    min: Scalar<ArrayRef>,
+    max: Scalar<ArrayRef>,
+) -> Option<Vec<Range<usize>>>
+where
+    T: arrow::datatypes::ArrowNumericType,
+    T::Native: PartialOrd + Copy,
+{
+    let arr = values.as_any().downcast_ref::<PrimitiveArray<T>>()?;
+    let min = min
+        .into_inner()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()?
+        .value(0);
+    let max = max
+        .into_inner()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()?
+        .value(0);
+
+    Some(value_ranges_arrow(arr, min, max))
+}
+
+/// Helper for numeric/temporal arrays
+fn value_ranges_arrow<T>(
+    arr: &arrow::array::PrimitiveArray<T>,
+    min: T::Native,
+    max: T::Native,
+) -> Vec<Range<usize>>
+where
+    T: arrow::datatypes::ArrowNumericType,
+    T::Native: PartialOrd + Copy,
+{
+    let mut ranges = Vec::new();
+    let mut start: Option<usize> = None;
+
+    for i in 0..arr.len() {
+        if arr.is_null(i) {
+            if let Some(s) = start.take() {
+                ranges.push(s..i);
+            }
+            continue;
+        }
+
+        let v = arr.value(i);
+        let in_range = v >= min && v <= max;
+
+        match (in_range, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                ranges.push(s..i);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(s) = start {
+        ranges.push(s..arr.len());
+    }
+
+    ranges
+}
+
+/// Helper for string arrays
+fn value_ranges_arrow_str(arr: &StringArray, min: &str, max: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start: Option<usize> = None;
+
+    for i in 0..arr.len() {
+        if arr.is_null(i) {
+            if let Some(s) = start.take() {
+                ranges.push(s..i);
+            }
+            continue;
+        }
+
+        let v = arr.value(i);
+        let in_range = v >= min && v <= max;
+
+        match (in_range, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                ranges.push(s..i);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(s) = start {
+        ranges.push(s..arr.len());
+    }
+
+    ranges
 }
