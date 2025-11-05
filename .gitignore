@@ -27,3 +27,4 @@ node_modules/
 /docs/.vitepress/dist/
 test-datasets/GL_TS_MO_ooi-gs-gs01sumo_1.nc
 benchmarks/
+test.ipynb
