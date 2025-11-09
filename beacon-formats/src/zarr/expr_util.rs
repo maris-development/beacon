@@ -13,6 +13,10 @@ pub struct ZarrFilterRange {
 }
 
 impl ZarrFilterRange {
+    pub fn new(min: Option<(ScalarValue, bool)>, max: Option<(ScalarValue, bool)>) -> Self {
+        Self { min, max }
+    }
+
     pub fn as_f64_max(&self) -> Option<f64> {
         self.max.as_ref().and_then(|(v, _)| {
             if let ScalarValue::Float64(Some(f)) = v {
@@ -126,6 +130,7 @@ impl ZarrFilterRange {
 
 /// Entry point: extract tightest range for `target_col` from a set of
 /// physical filter expressions (possibly complex AND trees).
+/// Returns None if no constraints found.
 pub fn extract_range_from_physical_filters(
     filters: &[Arc<dyn PhysicalExpr>],
     target_col: &str,

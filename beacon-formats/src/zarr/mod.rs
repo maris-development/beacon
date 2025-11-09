@@ -1,20 +1,13 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_arrow_zarr::reader::AsyncArrowZarrGroupReader;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
-    common::{ColumnStatistics, GetExt, Statistics},
+    common::{GetExt, Statistics},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         listing::PartitionedFile,
-        physical_plan::{
-            FileGroup, FileGroupPartitioner, FileScanConfig, FileScanConfigBuilder, FileSource,
-        },
+        physical_plan::{FileGroup, FileScanConfig, FileScanConfigBuilder, FileSource},
     },
     physical_plan::ExecutionPlan,
 };
@@ -29,7 +22,7 @@ use crate::{
         array_step_span::NumericArrayStepSpan,
         pushdown_statistics::ZarrPushDownStatistics,
         source::{ZarrSource, fetch_schema},
-        util::{ZarrPath, is_zarr_v3_metadata, path_parent, top_level_zarr_meta_v3},
+        util::{ZarrPath, is_zarr_v3_metadata, top_level_zarr_meta_v3},
     },
 };
 
@@ -39,6 +32,7 @@ pub mod opener;
 mod partition;
 pub mod pushdown_statistics;
 mod source;
+pub mod statistics;
 mod stream_share;
 pub mod util;
 
@@ -279,37 +273,19 @@ impl ZarrFormat {
         match Self::find_partitioned_files(&group).await {
             Some(partition_groups) => {
                 if partition_groups.is_empty() {
-                    // No sub-groups found, treat as single group
-                    let statistics = pushdown_statistics::generate_statistics_from_zarr_group(
-                        table_schema,
-                        &self.zarr_pushdown_statistics,
-                        Arc::new(group),
-                    )
-                    .await
-                    .unwrap_or(Statistics::new_unknown(table_schema));
-
-                    Ok(FileGroup::new(vec![
-                        PartitionedFile::new(group_path.as_zarr_json_path(), 0)
-                            .with_statistics(Arc::new(statistics)),
-                    ]))
+                    Ok(FileGroup::new(vec![PartitionedFile::new(
+                        group_path.as_zarr_json_path(),
+                        0,
+                    )]))
                 } else {
                     // Multiple sub-groups found, treat each as a partition
                     let mut files = Vec::new();
                     for group in partition_groups {
                         let group = Arc::new(group);
                         let partition_path = group.path().to_string();
-                        let statistics = pushdown_statistics::generate_statistics_from_zarr_group(
-                            table_schema,
-                            &self.zarr_pushdown_statistics,
-                            group.clone(),
-                        )
-                        .await
-                        .unwrap_or(Statistics::new_unknown(table_schema));
-
                         // Create a PartitionedFile for the sub-group
                         let partitioned_file =
-                            PartitionedFile::new(format!("{}/zarr.json", partition_path), 0)
-                                .with_statistics(Arc::new(statistics));
+                            PartitionedFile::new(format!("{}/zarr.json", partition_path), 0);
                         files.push(partitioned_file);
                     }
                     Ok(FileGroup::new(files))

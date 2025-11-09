@@ -25,7 +25,9 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 use crate::zarr::{
     array_step_span::NumericArrayStepSpan,
     expr_util::extract_range_from_physical_filters,
-    pushdown_statistics::ZarrPushDownStatistics,
+    pushdown_statistics::{
+        ZarrPushDownStatistics, ZarrStatistics, generate_zarr_statistics_from_zarr_group,
+    },
     source::recursive_groups,
     stream_share::{PartitionedZarrStreamShare, ZarrStreamShare},
     util::ZarrPath,
@@ -88,7 +90,9 @@ async fn fetch_partitioned_streams(
     zarr_object_store: Arc<AsyncObjectStore<Arc<dyn ObjectStore>>>,
     array_steps: Arc<HashMap<String, NumericArrayStepSpan>>,
     pruning_predicate: Option<Arc<dyn PhysicalExpr>>,
+    table_schema: SchemaRef,
     table_schema_adapter: Arc<dyn SchemaAdapter>,
+    zarr_pushdown_statistics: ZarrPushDownStatistics,
 ) -> datafusion::error::Result<Arc<[PartitionedZarrStreamShare]>> {
     let base_group = Group::async_open(
         zarr_object_store.clone() as Arc<dyn AsyncReadableListableStorageTraits>,
@@ -103,7 +107,7 @@ async fn fetch_partitioned_streams(
 
     let mut partitioned_streams = Vec::new();
     for group_partition in partitioned_groups {
-        let reader = AsyncArrowZarrGroupReader::new(group_partition)
+        let reader = AsyncArrowZarrGroupReader::new(group_partition.clone())
             .await
             .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
@@ -114,13 +118,39 @@ async fn fetch_partitioned_streams(
             .project(&projection)
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
+        let arc_partition_file_schema = Arc::new(partition_file_schema);
+
+        // Generate statistics for the partitioned file
+        let statistics = generate_zarr_statistics_from_zarr_group(
+            &table_schema,
+            &zarr_pushdown_statistics,
+            group_partition.clone(),
+        )
+        .await;
+
+        if let Some(pruning_predicate_expr) = pruning_predicate.clone()
+            && let Some(statistics) = &statistics
+        {
+            let prunable_stats = PrunableStatistics::new(
+                vec![Arc::new(statistics.statistics())],
+                table_schema.clone(),
+            );
+            let pruning_predicate =
+                PruningPredicate::try_new(pruning_predicate_expr.clone(), table_schema.clone())?;
+
+            let pruning_result = pruning_predicate.prune(&prunable_stats)?;
+
+            // If the file can be pruned, return an empty stream
+            if pruning_result.iter().all(|&v| !v) {
+                return Ok(Arc::from(vec![])); // early return with empty streams
+            }
+
+            // else continue to generate slice pushdowns based on the predicate
+        }
+
         // Generate ArraySlicePushDown based on the predicate and array steps
         let array_slice_pushdowns = if let Some(pruning_predicate) = &pruning_predicate {
-            array_steps
-                .values()
-                .filter_map(|span| generate_numeric_span_slice_pushdown(pruning_predicate, span))
-                .map(|pd| (pd.dimension().to_string(), pd))
-                .collect()
+            todo!()
         } else {
             HashMap::new()
         };
@@ -129,8 +159,11 @@ async fn fetch_partitioned_streams(
             .into_parallel_stream_composer(Some(projection), Some(array_slice_pushdowns))
             .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
-        let partition_stream =
-            PartitionedZarrStreamShare::new(stream, table_mapper, Arc::new(partition_file_schema));
+        let partition_stream = PartitionedZarrStreamShare::new(
+            stream,
+            table_mapper,
+            arc_partition_file_schema.clone(),
+        );
         partitioned_streams.push(partition_stream);
     }
 
@@ -225,11 +258,11 @@ impl FileOpener for ZarrFileOpener {
         };
         let pruning_predicate = self.predicate.clone();
         let array_steps = self.array_steps.clone();
+        let pushdown_statistics = self.pushdown_zarr_statistics.clone();
 
         // Check if the pruning predicate references any arrays in the pushdown statistics
         let fut = async move {
             // Determine based on statistics and predicate which arrays to pushdown
-
             let partitioned_streams = stream_partition_share
                 .get_or_try_init(|| async move {
                     tracing::debug!("Opening file: {:?}", file_meta.object_meta.location);
@@ -240,6 +273,7 @@ impl FileOpener for ZarrFileOpener {
                         array_steps,
                         pruning_predicate,
                         adapter,
+                        pushdown_statistics,
                     )
                     .await
                 })
@@ -252,6 +286,12 @@ impl FileOpener for ZarrFileOpener {
 
         Ok(fut.boxed())
     }
+}
+
+pub enum PushDownResult {
+    Prune,
+    PushDown(Vec<ArraySlicePushDown>),
+    Retain,
 }
 
 /// Result of translating the current physical pruning predicate(s) into a
@@ -279,54 +319,24 @@ impl FileOpener for ZarrFileOpener {
 ///
 /// Callers should always check the returned value before using it to avoid
 /// incorrect data exclusion when translation fails or is inexact.
-fn generate_numeric_span_slice_pushdown(
+fn generate_array_slice_pushdowns(
     pruning_predicate: &Arc<dyn PhysicalExpr>,
-    span: &NumericArrayStepSpan,
-) -> Option<ArraySlicePushDown> {
-    let r =
-        extract_range_from_physical_filters(std::slice::from_ref(pruning_predicate), &span.column);
-    let mut min_step = None;
-    let mut max_step = None;
-    if let Some(min) = r.as_ref().and_then(|r| r.as_f64_min()) {
-        // Calculate start index based on step
-        let start_index = lower_index(span.start, span.step, min);
-        min_step = Some(if start_index < 0 { 0 } else { start_index });
-    }
-    if let Some(max) = r.as_ref().and_then(|r| r.as_f64_max()) {
-        // Calculate end index based on step
-        let end_index = upper_index(span.start, span.step, max);
-        max_step = Some(if end_index < 0 { 0 } else { end_index });
+    statistics: &ZarrStatistics,
+) -> PushDownResult {
+    let mut pushdown_filters = HashMap::new();
+    for column in statistics.statistics_columns() {
+        let zarr_range_filter =
+            extract_range_from_physical_filters(std::slice::from_ref(pruning_predicate), &column);
+        if let Some(zarr_range_filter) = zarr_range_filter {
+            pushdown_filters.insert(column, zarr_range_filter);
+        }
     }
 
-    // If min_step > max_step, then swap them
-    if let (Some(min), Some(max)) = (min_step, max_step)
-        && min > max
-    {
-        min_step = Some(max);
-        max_step = Some(min);
-    }
+    let array_slice_pushdowns = statistics.dimension_slice_pushdown(pushdown_filters);
 
-    Some(ArraySlicePushDown::new(
-        span.dimension.clone(),
-        min_step.map(|v| v as usize),
-        max_step.map(|v| v as usize),
-    ))
-}
+    // Some(array_slice_pushdowns.values().cloned().collect::<Vec<_>>())
 
-fn lower_index(start: f64, step: f64, value: f64) -> i64 {
-    let raw = (value - start) / step;
-    if step >= 0.0 {
-        raw.floor() as i64 // ascending: lower = floor
-    } else {
-        raw.ceil() as i64 // descending: lower = ceil
-    }
-}
+    if !array_slice_pushdowns.is_empty() {}
 
-fn upper_index(start: f64, step: f64, value: f64) -> i64 {
-    let raw = (value - start) / step;
-    if step >= 0.0 {
-        raw.ceil() as i64 // ascending: upper = ceil
-    } else {
-        raw.floor() as i64 // descending: upper = floor
-    }
+    PushDownResult::Retain
 }

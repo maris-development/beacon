@@ -1,0 +1,61 @@
+{
+  "shape": [
+    1,
+    1208,
+    1920
+  ],
+  "data_type": "int16",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        1,
+        302,
+        960
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 0,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "long_name": "analysed sea surface temperature",
+    "standard_name": "sea_surface_foundation_temperature",
+    "type": "foundation",
+    "units": "kelvin",
+    "valid_min": -300,
+    "valid_max": 4500,
+    "source": "EUR-L2P-ATS_NR_2P,UPA-L2P-ATS_NR_2P,JPL-L2P-MODIS_A,JPL-L2P-MODIS_T,EUR-L2P-NAR17_SST,EUR-L2P-NAR18_SST,EUR-L2P-SEVIRI_SST,EUR-L2P-AVHRR_METOP_A,EUR-L2P-AVHRR_METOP_B,NAVO-L2P-VIIRS_NPP,EUR-L2P-SEVIRI_SST_Meteosat11,MAR-L2P-SLSTR_S3A,MAR-L2P-SLSTR_S3B,STAR-L2P-VIIRS_N20-ACSPO_V2.80",
+    "comment": "Optimal interpolation (OI) at Ultrahigh resolution of sst measurements from infrared sensors",
+    "add_offset": 273.1499938964844,
+    "scale_factor": 0.009999999776482582,
+    "_FillValue": -32768
+  },
+  "dimension_names": [
+    "time",
+    "lat",
+    "lon"
+  ],
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}
