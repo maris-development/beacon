@@ -19,6 +19,7 @@ use datafusion::{
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
     },
     physical_expr::conjunction,
+    physical_optimizer::pruning::PruningPredicate,
     physical_plan::{
         PhysicalExpr,
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
@@ -33,12 +34,9 @@ use zarrs_object_store::AsyncObjectStore;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::zarr::{
-    array_step_span::NumericArrayStepSpan,
-    expr_util::extract_range_from_physical_filters,
-    opener::ZarrFileOpener,
-    pushdown_statistics::ZarrPushDownStatistics,
-    stream_share::ZarrStreamShare,
-    util::{ZarrPath, path_parent},
+    opener::{ZarrFileOpener, stream_share::ZarrStreamShare},
+    statistics::ZarrStatisticsSelection,
+    util::ZarrPath,
 };
 
 pub async fn fetch_schema(
@@ -106,28 +104,21 @@ pub struct ZarrSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     /// Projected statistics.
     projected_statistics: Option<Statistics>,
-
     /// Stream Partition Share
     stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<ZarrStreamShare>>>>,
     /// Array Steps for slicing arrays based on step spans. This is utilized by the pruning predicate pushdown.
-    array_steps: Arc<HashMap<String, NumericArrayStepSpan>>,
-    /// Zarr Statistics
-    pushdown_zarr_statistics: ZarrPushDownStatistics,
+    zarr_selection_statistics: Option<Arc<ZarrStatisticsSelection>>,
     /// Pruning Predicate
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl ZarrSource {
-    pub fn with_array_steps(mut self, array_steps: HashMap<String, NumericArrayStepSpan>) -> Self {
-        self.array_steps = Arc::new(array_steps);
-        self
-    }
-
-    pub fn with_pushdown_zarr_statistics(
+    /// Sets the pushdown Zarr statistics selection.
+    pub fn with_zarr_statistics(
         mut self,
-        pushdown_zarr_statistics: ZarrPushDownStatistics,
+        zarr_statistics: Option<Arc<ZarrStatisticsSelection>>,
     ) -> Self {
-        self.pushdown_zarr_statistics = pushdown_zarr_statistics;
+        self.zarr_selection_statistics = zarr_statistics;
         self
     }
 }
@@ -149,17 +140,17 @@ impl FileSource for ZarrSource {
             .schema_adapter_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema.clone());
+        let schema_adapter =
+            schema_adapter_factory.create(projected_schema.clone(), table_schema.clone());
         let arc_schema_adapter: Arc<dyn SchemaAdapter> = Arc::from(schema_adapter);
 
         Arc::new(ZarrFileOpener {
             table_schema,
-            zarr_object_store: Arc::new(AsyncObjectStore::new(object_store)),
+            zarr_object_store: object_store.clone(),
             schema_adapter: arc_schema_adapter,
             stream_partition_shares: self.stream_partition_shares.clone(),
-            array_steps: self.array_steps.clone(),
-            predicate: self.predicate.clone(),
-            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
+            pushdown_predicate_expr: self.predicate.clone(),
+            pushdown_statistics: self.zarr_selection_statistics.clone(),
         })
     }
 
@@ -179,9 +170,8 @@ impl FileSource for ZarrSource {
             projected_statistics: self.projected_statistics.clone(),
             schema_adapter_factory: self.schema_adapter_factory.clone(),
             stream_partition_shares: self.stream_partition_shares.clone(),
-            array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
-            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
+            zarr_selection_statistics: self.zarr_selection_statistics.clone(),
         })
     }
 
@@ -193,9 +183,8 @@ impl FileSource for ZarrSource {
             projected_statistics: self.projected_statistics.clone(),
             schema_adapter_factory: self.schema_adapter_factory.clone(),
             stream_partition_shares: self.stream_partition_shares.clone(),
-            array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
-            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
+            zarr_selection_statistics: self.zarr_selection_statistics.clone(),
         })
     }
 
@@ -207,9 +196,8 @@ impl FileSource for ZarrSource {
             projected_statistics: Some(statistics),
             schema_adapter_factory: self.schema_adapter_factory.clone(),
             stream_partition_shares: self.stream_partition_shares.clone(),
-            array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
-            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
+            zarr_selection_statistics: self.zarr_selection_statistics.clone(),
         })
     }
 
@@ -244,9 +232,8 @@ impl FileSource for ZarrSource {
             projected_statistics: self.projected_statistics.clone(),
             schema_adapter_factory: Some(factory),
             stream_partition_shares: self.stream_partition_shares.clone(),
-            array_steps: self.array_steps.clone(),
             predicate: self.predicate.clone(),
-            pushdown_zarr_statistics: self.pushdown_zarr_statistics.clone(),
+            zarr_selection_statistics: self.zarr_selection_statistics.clone(),
         }))
     }
 

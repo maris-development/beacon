@@ -9,11 +9,12 @@ use beacon_arrow_zarr::reader::AsyncArrowZarrGroupReader;
 use datafusion::common::{ColumnStatistics, Statistics};
 
 use crate::zarr::{
-    expr_util::ZarrFilterRange, pushdown_statistics::ArraySlicePushDownResult,
-    statistics::array::ZarrArrayStatistics,
+    expr_util::ZarrFilterRange,
+    statistics::{array::ZarrArrayStatistics, pushdown::ArraySlicePushDownResult},
 };
 
 pub mod array;
+pub mod pushdown;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ZarrStatisticsSelection {
@@ -69,11 +70,9 @@ impl ZarrStatistics {
         array_name: &str,
         range: ZarrFilterRange,
     ) -> Option<ArraySlicePushDownResult> {
-        if let Some(array_stats) = self.arrays.get(array_name) {
-            Some(array_stats.get_slice_pushdown(range))
-        } else {
-            None
-        }
+        self.arrays
+            .get(array_name)
+            .map(|array_stats| array_stats.get_slice_pushdown(range))
     }
 
     pub fn get_statistics(&self) -> Statistics {

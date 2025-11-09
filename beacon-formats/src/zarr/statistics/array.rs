@@ -17,7 +17,7 @@ use datafusion::{
 };
 use nd_arrow_array::NdArrowArray;
 
-use crate::zarr::{expr_util::ZarrFilterRange, pushdown_statistics::ArraySlicePushDownResult};
+use crate::zarr::{expr_util::ZarrFilterRange, statistics::pushdown::ArraySlicePushDownResult};
 
 #[derive(Debug, Clone)]
 pub struct ZarrArrayStatistics {

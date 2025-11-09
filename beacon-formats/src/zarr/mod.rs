@@ -19,21 +19,17 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 use crate::{
     Dataset, DatasetFormat, FileFormatFactoryExt,
     zarr::{
-        array_step_span::NumericArrayStepSpan,
-        pushdown_statistics::ZarrPushDownStatistics,
         source::{ZarrSource, fetch_schema},
+        statistics::ZarrStatisticsSelection,
         util::{ZarrPath, is_zarr_v3_metadata, top_level_zarr_meta_v3},
     },
 };
 
-pub mod array_step_span;
 pub mod expr_util;
 pub mod opener;
-mod partition;
 pub mod pushdown_statistics;
 mod source;
 pub mod statistics;
-mod stream_share;
 pub mod util;
 
 pub struct ZarrFormatFactory;
@@ -118,21 +114,15 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
 
 #[derive(Debug, Clone, Default)]
 pub struct ZarrFormat {
-    array_steps: HashMap<String, NumericArrayStepSpan>,
-    zarr_pushdown_statistics: ZarrPushDownStatistics,
+    zarr_statistics: Option<Arc<ZarrStatisticsSelection>>,
 }
 
 impl ZarrFormat {
-    pub fn with_array_steps(mut self, array_steps: HashMap<String, NumericArrayStepSpan>) -> Self {
-        self.array_steps = array_steps;
-        self
-    }
-
-    pub fn with_pushdown_statistics(
+    pub fn with_zarr_statistics(
         mut self,
-        zarr_pushdown_statistics: ZarrPushDownStatistics,
+        zarr_statistics: Option<Arc<ZarrStatisticsSelection>>,
     ) -> Self {
-        self.zarr_pushdown_statistics = zarr_pushdown_statistics;
+        self.zarr_statistics = zarr_statistics;
         self
     }
 }
@@ -226,9 +216,7 @@ impl FileFormat for ZarrFormat {
             file_groups.push(file);
         }
 
-        let source = ZarrSource::default()
-            .with_array_steps(self.array_steps.clone())
-            .with_pushdown_zarr_statistics(self.zarr_pushdown_statistics.clone());
+        let source = ZarrSource::default().with_zarr_statistics(self.zarr_statistics.clone());
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -237,11 +225,7 @@ impl FileFormat for ZarrFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(
-            ZarrSource::default()
-                .with_array_steps(self.array_steps.clone())
-                .with_pushdown_zarr_statistics(self.zarr_pushdown_statistics.clone()),
-        )
+        Arc::new(ZarrSource::default().with_zarr_statistics(self.zarr_statistics.clone()))
     }
 }
 

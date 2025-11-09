@@ -5,7 +5,7 @@ use arrow::{
     datatypes::{DataType, Field},
 };
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_formats::zarr::{pushdown_statistics::ZarrPushDownStatistics, ZarrFormat};
+use beacon_formats::zarr::{statistics::ZarrStatisticsSelection, ZarrFormat};
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
@@ -161,14 +161,15 @@ impl TableFunctionImpl for ReadZarrFunc {
 
         let pushdown_statistics = match statistics_columns {
             Some(cols) => {
-                let mut stats = ZarrPushDownStatistics::default();
-                stats.arrays = cols;
+                let mut stats = ZarrStatisticsSelection::default();
+                stats.columns = cols;
                 stats
             }
-            None => ZarrPushDownStatistics::default(),
+            None => ZarrStatisticsSelection::default(),
         };
 
-        let file_format = ZarrFormat::default().with_pushdown_statistics(pushdown_statistics);
+        let file_format =
+            ZarrFormat::default().with_zarr_statistics(Some(Arc::new(pushdown_statistics)));
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(
