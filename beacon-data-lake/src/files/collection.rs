@@ -39,8 +39,7 @@ impl FileCollection {
             tracing::debug!("Infer schema for table: {}", table_url);
             let schema = listing_options
                 .infer_schema(session_state, table_url)
-                .await
-                .unwrap();
+                .await?;
 
             schemas.push(schema.clone());
         }

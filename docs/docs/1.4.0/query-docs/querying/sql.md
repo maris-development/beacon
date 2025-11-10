@@ -33,7 +33,7 @@ POST {beacon-host}/api/query
 
 Content-Type: application/json
 {
-    "sql": "SELECT TEMP,PSAL,LONGITUDE,LATITUDE FROM read_zarr('datasets.zarr/zarr.json')",
+    "sql": "SELECT TEMP,PSAL,LONGITUDE,LATITUDE FROM read_zarr(['datasets.zarr/zarr.json'])",
     "output": {
         "format": "parquet"
     }
@@ -48,7 +48,7 @@ Content-Type: application/json
 > Content-Type: application/json
 > {
 >     "sql": "SELECT TEMP,PSAL,LONGITUDE,LATITUDE FROM 
->             read_zarr('datasets.zarr/zarr.json', ['LONGITUDE', 'LATITUDE']) 
+>             read_zarr(['datasets.zarr/zarr.json'], ['LONGITUDE', 'LATITUDE']) 
 >             WHERE LONGITUDE > 10 AND LATITUDE < 50",
 >     "output": {
 >         "format": "parquet"
@@ -67,7 +67,7 @@ Global attributes and variable attributes can be accessed using a column name li
 POST {beacon-host}/api/query
 Content-Type: application/json
 {
-    "sql": "SELECT TEMP,PSAL,LONGITUDE,LATITUDE FROM read_netcdf('dataset.nc')",
+    "sql": "SELECT TEMP,PSAL,LONGITUDE,LATITUDE FROM read_netcdf(['dataset.nc'])",
     "output": {
         "format": "parquet"
     }
@@ -84,7 +84,7 @@ POST {beacon-host}/api/query
 
 Content-Type: application/json
 {
-    "sql": "SELECT TEMP,PSAL,LONGITUDE,LATITUDE FROM read_parquet('dataset.parquet')",
+    "sql": "SELECT TEMP,PSAL,LONGITUDE,LATITUDE FROM read_parquet(['dataset.parquet'])",
     "output": {
         "format": "parquet"
     }
