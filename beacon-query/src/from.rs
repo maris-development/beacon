@@ -7,6 +7,7 @@ use std::sync::Arc;
 use beacon_data_lake::{
     files::collection::FileCollection, table::table_formats::NetCDFFileFormat, DataLake,
 };
+use beacon_formats::zarr::statistics::ZarrStatisticsSelection;
 use beacon_formats::{
     arrow::ArrowFormat, csv::CsvFormat, odv_ascii::OdvFormat, parquet::ParquetFormat,
 };
@@ -111,6 +112,11 @@ pub enum FromFormat {
     NetCDF { paths: Vec<String> },
     #[serde(rename = "odv")]
     Odv { paths: Vec<String> },
+    #[serde(rename = "zarr")]
+    Zarr {
+        paths: Vec<String>,
+        statistics_columns: Option<Vec<String>>,
+    },
 }
 
 impl FromFormat {
@@ -155,6 +161,17 @@ impl FromFormat {
                 DataLake::netcdf_sink_resolver(),
             ))),
             FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new())),
+            FromFormat::Zarr {
+                statistics_columns, ..
+            } => {
+                let zarr_selections = statistics_columns
+                    .clone()
+                    .map(|columns| Arc::new(ZarrStatisticsSelection { columns }));
+                let zarr_format = beacon_formats::zarr::ZarrFormat::default()
+                    .with_zarr_statistics(zarr_selections);
+
+                Ok(Arc::new(zarr_format))
+            }
         }
     }
 
@@ -168,7 +185,8 @@ impl FromFormat {
             | FromFormat::Parquet { paths }
             | FromFormat::Arrow { paths }
             | FromFormat::NetCDF { paths }
-            | FromFormat::Odv { paths } => paths,
+            | FromFormat::Odv { paths }
+            | FromFormat::Zarr { paths, .. } => paths,
         };
 
         let mut listing_table_urls = Vec::with_capacity(paths.len());
