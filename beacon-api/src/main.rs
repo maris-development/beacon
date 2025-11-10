@@ -169,29 +169,36 @@ where
             )
             .on_failure(
                 |error: ServerErrorsFailureClass, latency: Duration, span: &Span| {
-                    let method = span
-                        .metadata()
-                        .and_then(|m| m.fields().field("method"))
-                        .unwrap();
-                    let path = span
-                        .metadata()
-                        .and_then(|m| m.fields().field("path"))
-                        .unwrap();
+                    let method = span.metadata().and_then(|m| m.fields().field("method"));
+                    let path = span.metadata().and_then(|m| m.fields().field("path"));
 
                     let status_code = match &error {
                         ServerErrorsFailureClass::StatusCode(status) => status.as_u16(),
                         _ => 0, // Unknown or internal failure
                     };
 
-                    tracing::error!(
-                        parent: span,
-                        method = %method,
-                        path = %path,
-                        status = status_code,
-                        error = ?error,
-                        latency = ?latency,
-                        "Request failed"
-                    );
+                    match (method, path) {
+                        (Some(m), Some(p)) => {
+                            tracing::error!(
+                                parent: span,
+                                method = %m,
+                                path = %p,
+                                status = status_code,
+                                error = ?error,
+                                latency = ?latency,
+                                "Request failed"
+                            );
+                        }
+                        _ => {
+                            tracing::error!(
+                                parent: span,
+                                status = status_code,
+                                error = ?error,
+                                latency = ?latency,
+                                "Request failed"
+                            );
+                        }
+                    }
                 },
             ),
     );
