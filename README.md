@@ -1,8 +1,8 @@
-# Beacon ARCO Data lake Platform (1.3.0)
+# Beacon ARCO Data lake Platform (1.4.0)
 
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/maris-development/beacon)
 
-What is Beacon?
+## What is Beacon?
 
 Beacon is a lightweight, high-performance ARCO data lake platform for discovering, reading, transforming, and serving scientific array and tabular datasets. It focuses on interoperability with Arrow and DataFusion, and supports common scientific storage formats (Parquet, NetCDF, Zarr, ODV, CSV, and others). Beacon is designed for:
 
@@ -21,6 +21,26 @@ The repository is organized as a Cargo workspace containing multiple crates that
 
 This README gives a short overview of the repository layout, descriptions of the main crates, how to build and run tests, and suggested next steps for contributors.
 
+## Documentation
+
+The documentation for Beacon is hosted on GitHub Pages: https://maris-development.github.io/beacon/
+It includes guides on setting up datasets, using the API, and details on the architecture and design.
+
+## Getting started
+
+To get started with Beacon, clone the beacon-example repository, which contains an example setup for both local and S3, along with example queries and scripts:
+
+```powershell
+git clone https://github.com/maris-development/beacon-example.git
+```
+
+Follow the instructions in the `beacon-example/README.md` to set up datasets, run the Beacon API server, and execute example queries.
+
+## Support
+
+For questions, issues, or feature requests, please open an issue on the GitHub repository: https://github.com/maris-development/beacon/issues
+We also have a dedicated slack channel for discussions: https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg 
+
 ## Workspace overview
 
 Location: repository root (this README)
@@ -33,6 +53,7 @@ Key workspace members (see `Cargo.toml`):
 - `beacon-config` — Configuration and environment handling.
 - `beacon-formats` — File format adapters (Parquet, CSV, Arrow, NetCDF, Zarr, GeoParquet).
 - `beacon-arrow-netcdf` — Arrow/NetCDF integration (reader/writer utilities).
+- `beacon-arrow-zarr` — Arrow/Zarr integration (reader/writer utilities).
 - `beacon-arrow-odv` — Arrow/ODV ASCII integration.
 - `beacon-data-lake` — Utilities for working with object stores, dataset discovery and table management.
 - `beacon-functions` — User-defined functions and helpers used in query execution.
@@ -54,6 +75,8 @@ These are short summaries to help contributors quickly find where to work:
 - `beacon-formats/` — Implements DataFusion FileFormat adapters for a range of formats. Notable submodule: `zarr` implements async discovery of Zarr v3 groups and integrates with `zarrs` + `zarrs_object_store` to create partitioned file groups and compute pushdown statistics.
 
 - `beacon-arrow-netcdf/`, `beacon-arrow-odv/` — Adapter crates that expose NetCDF and ODV data as Arrow arrays and schemas.
+
+- `beacon-arrow-zarr/` — Adapter crate that exposes Zarr v3 datasets as Arrow arrays and schemas. Uses `zarrs` and `zarrs_object_store` for low-level Zarr access.
 
 - `beacon-data-lake/` — Utilities to manage datasets on object stores and local file systems, object discovery, and helper functions for scanning.
 
@@ -124,6 +147,5 @@ cargo fmt --all
 
 ## Troubleshooting
 
-- Missing workspace member: if `cargo` errors about a workspace member not being found (for example `beacon-arrow-zarr`), ensure the crate exists locally or add it as a git submodule/clone the missing repository. The workspace `Cargo.toml` may reference crates that live in separate repos.
 - Long compile times: use incremental builds and build individual crates when working on a small change.
 
