@@ -54,7 +54,7 @@ impl Default for ZarrFormatFactory {
 
 impl GetExt for ZarrFormatFactory {
     fn get_ext(&self) -> String {
-        "zarr".to_string()
+        "zarr.json".to_string()
     }
 }
 

@@ -62,7 +62,7 @@ pub struct ZarrFileFormat {
 #[typetag::serde(name = "zarr")]
 impl TableFileFormat for ZarrFileFormat {
     fn file_ext(&self) -> String {
-        "zarr".to_string()
+        "zarr.json".to_string()
     }
 
     fn file_format(&self) -> Option<Arc<dyn FileFormat>> {

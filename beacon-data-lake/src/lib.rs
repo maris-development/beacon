@@ -442,16 +442,23 @@ impl DataLake {
         file_pattern: &str,
     ) -> datafusion::error::Result<SchemaRef> {
         let session_state = self.session_context.state();
-        let extension = match Path::new(file_pattern).extension() {
-            Some(ext) => ext.to_string_lossy().to_string(),
-            None => {
-                return Err(DataFusionError::Plan(format!(
-                    "No file extension found for {}. No file type information available.",
-                    file_pattern
-                )));
+        let extension = if file_pattern.ends_with("zarr.json") {
+            "zarr.json".to_string()
+        } else {
+            match Path::new(file_pattern).extension() {
+                Some(ext) => {
+                    // Fetch file format from extension
+                    ext.to_string_lossy().to_string()
+                }
+                None => {
+                    return Err(DataFusionError::Plan(format!(
+                        "No file extension found for {}. No file type information available.",
+                        file_pattern
+                    )));
+                }
             }
         };
-
+        tracing::debug!("Interpreted file extension: {}", extension);
         let listing_url = self.try_create_listing_url(file_pattern.to_string())?;
 
         let file_format_factory = session_state
@@ -459,8 +466,8 @@ impl DataLake {
             .ok_or_else(|| {
                 DataFusionError::Plan(format!("No file format reader found for {}", extension))
             })?;
-
         let file_format = file_format_factory.create(&session_state, &HashMap::new())?;
+        tracing::debug!("Using file format: {:?}", file_format);
 
         let file_collection =
             FileCollection::new(&session_state, file_format, vec![listing_url]).await?;
