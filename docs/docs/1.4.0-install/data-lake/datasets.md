@@ -29,6 +29,8 @@ Beacon supports NetCDF but limited to native data types. User defined types are 
 - NetCDF4 (recommended)
 - NetCDF3
   - char* arrays with a string like dimension (eg. STRLEN) will be inferred as a fixed size string
+Limitations:
+- Cloud Storage backends for NetCDF are only supported when allowing anonymous access. Authenticated access is not supported yet.
 
 ### Parquet
 

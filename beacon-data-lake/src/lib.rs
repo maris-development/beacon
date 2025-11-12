@@ -262,6 +262,7 @@ impl DataLake {
         context: Arc<SessionContext>,
     ) -> (ObjectStoreUrl, object_store::path::Path) {
         if beacon_config::CONFIG.s3_data_lake {
+            tracing::info!("Configuring S3 object store for datasets");
             // Fetch the s3 settings from the config
             let mut s3_object_store_builder = AmazonS3Builder::new()
                 .with_allow_http(true)
@@ -301,6 +302,7 @@ impl DataLake {
 
             (object_store_url, object_store::path::Path::from(""))
         } else {
+            tracing::info!("Configuring LOCAL FS object store for datasets");
             let base_path = PathBuf::from("./data");
             let dataset_directory = base_path.join("datasets");
 

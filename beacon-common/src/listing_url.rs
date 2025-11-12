@@ -15,7 +15,11 @@ pub fn parse_listing_table_url(
     let (path, glob_pattern) = split_path_and_glob(glob_path);
     let mut full_path = format!("{}{}", data_directory_store_url, data_directory_prefix);
     if path.components().next().is_some() {
-        full_path.push_str(format!("/{}", path.as_os_str().to_string_lossy()).as_str());
+        if full_path.ends_with('/') {
+            full_path.push_str(format!("{}", path.as_os_str().to_string_lossy()).as_str());
+        } else {
+            full_path.push_str(format!("/{}", path.as_os_str().to_string_lossy()).as_str());
+        }
     }
 
     let glob_pattern_parsed = if let Some(pattern) = glob_pattern {
