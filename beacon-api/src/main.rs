@@ -103,7 +103,7 @@ fn setup_tracing() {
                 // axum logs rejections from built-in extractors with the `axum::rejection`
                 // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
                 format!(
-                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug",
+                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug,beacon_common=debug",
                     env!("CARGO_CRATE_NAME")
                 )
                 .into()
@@ -169,29 +169,36 @@ where
             )
             .on_failure(
                 |error: ServerErrorsFailureClass, latency: Duration, span: &Span| {
-                    let method = span
-                        .metadata()
-                        .and_then(|m| m.fields().field("method"))
-                        .unwrap();
-                    let path = span
-                        .metadata()
-                        .and_then(|m| m.fields().field("path"))
-                        .unwrap();
+                    let method = span.metadata().and_then(|m| m.fields().field("method"));
+                    let path = span.metadata().and_then(|m| m.fields().field("path"));
 
                     let status_code = match &error {
                         ServerErrorsFailureClass::StatusCode(status) => status.as_u16(),
                         _ => 0, // Unknown or internal failure
                     };
 
-                    tracing::error!(
-                        parent: span,
-                        method = %method,
-                        path = %path,
-                        status = status_code,
-                        error = ?error,
-                        latency = ?latency,
-                        "Request failed"
-                    );
+                    match (method, path) {
+                        (Some(m), Some(p)) => {
+                            tracing::error!(
+                                parent: span,
+                                method = %m,
+                                path = %p,
+                                status = status_code,
+                                error = ?error,
+                                latency = ?latency,
+                                "Request failed"
+                            );
+                        }
+                        _ => {
+                            tracing::error!(
+                                parent: span,
+                                status = status_code,
+                                error = ?error,
+                                latency = ?latency,
+                                "Request failed"
+                            );
+                        }
+                    }
                 },
             ),
     );

@@ -1,8 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use beacon_formats::zarr::{
-    ZarrFormat, array_step_span::NumericArrayStepSpan, pushdown_statistics::ZarrPushDownStatistics,
-};
+use beacon_formats::zarr::{ZarrFormat, statistics::ZarrStatisticsSelection};
 use datafusion::datasource::file_format::FileFormat;
 
 #[typetag::serde(tag = "file_format")]
@@ -58,22 +56,18 @@ impl TableFileFormat for NetCDFFileFormat {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct ZarrFileFormat {
     #[serde(default)]
-    pub global_array_steps: HashMap<String, NumericArrayStepSpan>,
-    #[serde(default)]
-    pub pushdown_statistics: ZarrPushDownStatistics,
+    pub statistics: Option<Arc<ZarrStatisticsSelection>>,
 }
 
 #[typetag::serde(name = "zarr")]
 impl TableFileFormat for ZarrFileFormat {
     fn file_ext(&self) -> String {
-        "zarr".to_string()
+        "zarr.json".to_string()
     }
 
     fn file_format(&self) -> Option<Arc<dyn FileFormat>> {
         Some(Arc::new(
-            ZarrFormat::default()
-                .with_array_steps(self.global_array_steps.clone())
-                .with_pushdown_statistics(self.pushdown_statistics.clone()),
+            ZarrFormat::default().with_zarr_statistics(self.statistics.clone()),
         ))
     }
 }

@@ -35,7 +35,7 @@ pub struct Dataset {
     pub format: DatasetFormat,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum DatasetFormat {
     Parquet,
