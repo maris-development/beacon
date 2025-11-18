@@ -4,9 +4,9 @@ use arrow::datatypes::SchemaRef;
 use beacon_common::util::async_once::AsyncOnce;
 use datafusion::{
     catalog::Session,
-    common::{Statistics, not_impl_err},
+    common::{GetExt, Statistics, not_impl_err},
     datasource::{
-        file_format::{FileFormat, file_compression_type::FileCompressionType},
+        file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         physical_plan::{FileScanConfig, FileSource},
         sink::DataSinkExec,
     },
@@ -23,14 +23,12 @@ use crate::arrow_stream::{
 pub mod sink;
 pub mod stream;
 
-pub struct ArrowBatchesStreamFormatFactory;
-
 #[derive(Debug)]
-pub struct ArrowBatchesStreamFormat {
+pub struct ArrowBatchesStreamFormatFactory {
     pub sender: Arc<ArrowBatchesStreamSender>,
 }
 
-impl ArrowBatchesStreamFormat {
+impl ArrowBatchesStreamFormatFactory {
     pub fn new() -> (Self, DeferredBatchStream) {
         let async_once = Arc::new(AsyncOnce::new());
         let (batch_tx, batch_rx) = flume::bounded(beacon_config::CONFIG.deferred_stream_capacity);
@@ -40,7 +38,7 @@ impl ArrowBatchesStreamFormat {
             schema: async_once.clone(),
         };
 
-        let format = ArrowBatchesStreamFormat {
+        let factory = ArrowBatchesStreamFormatFactory {
             sender: Arc::new(sender),
         };
 
@@ -49,8 +47,39 @@ impl ArrowBatchesStreamFormat {
             batches_stream: batch_rx,
         };
 
-        (format, deferred_stream)
+        (factory, deferred_stream)
     }
+}
+
+impl GetExt for ArrowBatchesStreamFormatFactory {
+    fn get_ext(&self) -> String {
+        "arrow_stream".to_string()
+    }
+}
+
+impl FileFormatFactory for ArrowBatchesStreamFormatFactory {
+    fn create(
+        &self,
+        state: &dyn Session,
+        format_options: &std::collections::HashMap<String, String>,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        Ok(self.default())
+    }
+
+    fn default(&self) -> Arc<dyn FileFormat> {
+        Arc::new(ArrowBatchesStreamFormat {
+            sender: self.sender.clone(),
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct ArrowBatchesStreamFormat {
+    pub sender: Arc<ArrowBatchesStreamSender>,
 }
 
 #[async_trait::async_trait]

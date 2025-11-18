@@ -14,11 +14,27 @@ pub struct DeferredBatchStream {
 }
 
 impl DeferredBatchStream {
+    pub fn new() -> Self {
+        let async_once = Arc::new(AsyncOnce::new());
+        let (batch_tx, batch_rx) = flume::bounded(beacon_config::CONFIG.deferred_stream_capacity);
+
+        Self {
+            schema: async_once,
+            batches_stream: batch_rx,
+        }
+    }
+
     pub async fn into_stream(self) -> datafusion::error::Result<SendableRecordBatchStream> {
         let schema = self.schema.get().await;
         let adapter = RecordBatchStreamAdapter::new(schema, self.batches_stream.into_stream());
 
         Ok(Box::pin(adapter) as SendableRecordBatchStream)
+    }
+}
+
+impl Default for DeferredBatchStream {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

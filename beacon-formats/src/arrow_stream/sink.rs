@@ -86,8 +86,9 @@ impl DataSink for ArrowBatchesStreamSink {
 
             // Send the batch to the stream
             sender
-                .send(Ok(batch))
-                .map_err(|e| exec_datafusion_err!("Failed to send batch to stream: {}", e))?;
+                .send_async(Ok(batch))
+                .map_err(|e| exec_datafusion_err!("Failed to send batch to stream: {}", e))
+                .await?;
         }
 
         Ok(total_written)
