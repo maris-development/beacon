@@ -140,12 +140,6 @@ pub fn extract_range_from_physical_filters(
         walk_physical_expr(f, target_col, &mut out);
     }
 
-    tracing::debug!(
-        "Extracted ZarrFilterRange for column '{}': {:?}",
-        target_col,
-        out
-    );
-
     if out.min.is_some() || out.max.is_some() {
         Some(out)
     } else {

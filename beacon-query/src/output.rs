@@ -28,7 +28,6 @@ use utoipa::ToSchema;
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct Output {
     /// The desired output format.
-    #[serde(flatten)]
     #[serde(default)]
     pub format: OutputFormat,
 }

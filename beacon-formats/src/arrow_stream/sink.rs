@@ -83,7 +83,7 @@ impl DataSink for ArrowBatchesStreamSink {
         while let Some(batch) = data.try_next().await? {
             let num_rows = batch.num_rows() as u64;
             total_written += num_rows;
-
+            tracing::info!("Sending batch with {} rows", num_rows);
             // Send the batch to the stream
             sender
                 .send_async(Ok(batch))

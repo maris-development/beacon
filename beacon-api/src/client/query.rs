@@ -14,7 +14,7 @@ use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
 use beacon_query::{output::QueryOutput, Query};
 use either::Either;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -116,6 +116,10 @@ pub(crate) async fn query(
                 .try_with_compression(Some(CompressionType::ZSTD))
                 .unwrap();
 
+            tracing::info!(
+                "Preparing Arrow IPC stream for query ID {}",
+                query_result.query_id
+            );
             let schema = deferred_batch_stream.schema.get().await;
             let batch_stream = deferred_batch_stream.into_stream().await.map_err(|e| {
                 (
@@ -124,9 +128,19 @@ pub(crate) async fn query(
                 )
             })?;
 
+            tracing::info!(
+                "Streaming Arrow IPC results for query ID {}",
+                query_result.query_id
+            );
+
             let axum_stream = axum_streams::StreamBodyAs::arrow_ipc_with_options_errors(
                 schema,
-                batch_stream.map_err(|e| axum::Error::new(Box::new(e))),
+                batch_stream
+                    .map(|b| {
+                        tracing::info!("Passing Batch");
+                        b
+                    })
+                    .map_err(|e| axum::Error::new(Box::new(e))),
                 ipc_options,
             );
 

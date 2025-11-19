@@ -53,7 +53,7 @@ pub async fn fetch_partitioned_stream(
 
         let mut array_slice_pushdowns = vec![];
         for column in statistics_columns {
-            tracing::debug!("Predicate: {:?}", pruning_predicate_expr);
+            // tracing::debug!("Predicate: {:?}", pruning_predicate_expr);
             let range = extract_range_from_physical_filters(
                 std::slice::from_ref(pruning_predicate_expr),
                 column.as_str(),
@@ -74,7 +74,7 @@ pub async fn fetch_partitioned_stream(
         // Generate stream with pushdowns
         let pushdowns = ArraySlicePushDownResult::get_slice_pushdowns(&optimized_pushdowns);
 
-        tracing::debug!("Zarr slice pushdowns: {:?}", pushdowns);
+        // tracing::debug!("Zarr slice pushdowns: {:?}", pushdowns);
 
         Some(pushdowns)
     } else {
