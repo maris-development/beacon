@@ -35,14 +35,7 @@ impl Runtime {
         )
         .await?;
 
-        let output = self
-            .virtual_machine
-            .run_plan(
-                plan.physical_plan.clone(),
-                plan.metrics_tracker.clone(),
-                plan.output_buffer,
-            )
-            .await?;
+        self.virtual_machine.run_plan(&plan).await?;
 
         self.query_metrics.lock().insert(
             plan.query_id,
@@ -50,7 +43,7 @@ impl Runtime {
         );
 
         Ok(QueryResult {
-            output_buffer: output,
+            output_buffer: plan.output_buffer,
             query_id: plan.query_id,
         })
     }

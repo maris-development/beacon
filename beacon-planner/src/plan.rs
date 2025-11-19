@@ -17,7 +17,7 @@ pub struct BeaconQueryPlan {
     /// The physical execution plan for the query.
     pub physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
     /// Output buffer for the query results.
-    pub output_buffer: Option<QueryOutput>,
+    pub output_buffer: QueryOutput,
 }
 
 /// Plans a query by parsing, optimizing, and generating a physical plan.

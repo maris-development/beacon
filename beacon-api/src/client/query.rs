@@ -52,81 +52,84 @@ pub(crate) async fn query(
     };
 
     match query_result.output_buffer {
-        Either::Left(output_file) => match output_file {
-            QueryOutput::Csv(temp_file) => {
-                handle_output_file_stream(
-                    temp_file.path(),
-                    "text/csv",
-                    "csv",
-                    &query_result.query_id,
-                )
+        QueryOutput::Csv(temp_file) => {
+            handle_output_file_stream(temp_file.path(), "text/csv", "csv", &query_result.query_id)
                 .await
-            }
-            QueryOutput::Parquet(temp_file) => {
-                handle_output_file_stream(
-                    temp_file.path(),
-                    "application/vnd.apache.parquet",
-                    "parquet",
-                    &query_result.query_id,
-                )
-                .await
-            }
-            QueryOutput::Ipc(temp_file) => {
-                handle_output_file_stream(
-                    temp_file.path(),
-                    "application/vnd.apache.arrow.file",
-                    "arrow",
-                    &query_result.query_id,
-                )
-                .await
-            }
-            QueryOutput::Json(temp_file) => {
-                handle_output_file_stream(
-                    temp_file.path(),
-                    "application/json",
-                    "json",
-                    &query_result.query_id,
-                )
-                .await
-            }
-            QueryOutput::Odv(temp_file) => {
-                handle_output_file_stream(
-                    temp_file.path(),
-                    "application/zip",
-                    "zip",
-                    &query_result.query_id,
-                )
-                .await
-            }
-            QueryOutput::NetCDF(temp_file) => {
-                handle_output_file_stream(
-                    temp_file.path(),
-                    "application/netcdf",
-                    "nc",
-                    &query_result.query_id,
-                )
-                .await
-            }
-            QueryOutput::GeoParquet(temp_file) => {
-                handle_output_file_stream(
-                    temp_file.path(),
-                    "application/vnd.apache.arrow.geo+parquet",
-                    "geoparquet",
-                    &query_result.query_id,
-                )
-                .await
-            }
-        },
-        Either::Right(ipc_stream) => {
+        }
+        QueryOutput::Parquet(temp_file) => {
+            handle_output_file_stream(
+                temp_file.path(),
+                "application/vnd.apache.parquet",
+                "parquet",
+                &query_result.query_id,
+            )
+            .await
+        }
+        QueryOutput::Ipc(temp_file) => {
+            handle_output_file_stream(
+                temp_file.path(),
+                "application/vnd.apache.arrow.file",
+                "arrow",
+                &query_result.query_id,
+            )
+            .await
+        }
+        QueryOutput::Json(temp_file) => {
+            handle_output_file_stream(
+                temp_file.path(),
+                "application/json",
+                "json",
+                &query_result.query_id,
+            )
+            .await
+        }
+        QueryOutput::Odv(temp_file) => {
+            handle_output_file_stream(
+                temp_file.path(),
+                "application/zip",
+                "zip",
+                &query_result.query_id,
+            )
+            .await
+        }
+        QueryOutput::NetCDF(temp_file) => {
+            handle_output_file_stream(
+                temp_file.path(),
+                "application/netcdf",
+                "nc",
+                &query_result.query_id,
+            )
+            .await
+        }
+        QueryOutput::GeoParquet(temp_file) => {
+            handle_output_file_stream(
+                temp_file.path(),
+                "application/vnd.apache.arrow.geo+parquet",
+                "geoparquet",
+                &query_result.query_id,
+            )
+            .await
+        }
+        QueryOutput::ArrowStream(deferred_batch_stream) => {
             // Create axum stream from ipc_stream
             let ipc_options = IpcWriteOptions::default()
                 .try_with_compression(Some(CompressionType::ZSTD))
                 .unwrap();
+
+            let schema = deferred_batch_stream.schema.get().await;
+            let batch_stream = deferred_batch_stream.into_stream().await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(format!("Error creating Arrow IPC stream: {}", e)),
+                )
+            })?;
+
             let axum_stream = axum_streams::StreamBodyAs::arrow_ipc_with_options_errors(
-                ipc_stream.schema(),
-                ipc_stream.map_err(|e| axum::Error::new(Box::new(e))),
+                schema,
+                batch_stream.map_err(|e| axum::Error::new(Box::new(e))),
                 ipc_options,
             );
+
             return Ok(axum_stream.into_response());
         }
     }
