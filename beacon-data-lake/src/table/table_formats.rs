@@ -1,10 +1,25 @@
 use std::{collections::HashMap, sync::Arc};
 
 use beacon_formats::zarr::{ZarrFormat, statistics::ZarrStatisticsSelection};
-use datafusion::datasource::file_format::FileFormat;
+use datafusion::{
+    datasource::{
+        file_format::FileFormat,
+        listing::{ListingTable, ListingTableUrl},
+    },
+    prelude::SessionContext,
+};
 
 #[typetag::serde(tag = "file_format")]
+#[async_trait::async_trait]
 pub trait TableFileFormat: std::fmt::Debug + Send + Sync {
+    async fn apply_operation(
+        &self,
+        _op: serde_json::Value,
+        _urls: Vec<ListingTableUrl>,
+        _session_ctx: Arc<SessionContext>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Err("No operations supported for this file format".into())
+    }
     fn file_ext(&self) -> String;
     fn file_format(&self) -> Option<Arc<dyn FileFormat>> {
         None

@@ -237,4 +237,12 @@ impl VirtualMachine {
     pub(crate) async fn list_table_config(&self, table_name: String) -> Option<Table> {
         self.data_lake.list_table(&table_name)
     }
+
+    pub(crate) async fn apply_table_operation(
+        &self,
+        table_name: &str,
+        op: serde_json::Value,
+    ) -> Result<(), anyhow::Error> {
+        Ok(self.data_lake.apply_operation(table_name, op).await?)
+    }
 }

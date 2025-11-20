@@ -17,10 +17,10 @@ use crate::{
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LogicalTable {
     #[serde(alias = "paths")]
-    glob_paths: Vec<String>,
+    pub glob_paths: Vec<String>,
     /// The file format for this logical table.
     #[serde(flatten)]
-    file_format: Arc<dyn TableFileFormat>,
+    pub file_format: Arc<dyn TableFileFormat>,
 }
 
 impl LogicalTable {

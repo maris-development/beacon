@@ -4,6 +4,7 @@ use crate::table::{
     empty::EmptyTable, error::TableError, geospatial::GeoSpatialTable, logical::LogicalTable,
     preset::PresetTable,
 };
+use beacon_common::listing_url::parse_listing_table_url;
 use datafusion::{
     catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
@@ -65,6 +66,38 @@ impl TableType {
                     session_ctx,
                 ))
                 .await
+            }
+        }
+    }
+
+    pub async fn apply_operation(
+        &self,
+        op: serde_json::Value,
+        session_ctx: Arc<SessionContext>,
+        data_directory_store_url: &ObjectStoreUrl,
+        data_directory_prefix: &object_store::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            TableType::Logical(logical_table) => {
+                let listing_urls = logical_table
+                    .glob_paths
+                    .iter()
+                    .map(|glob_path| {
+                        parse_listing_table_url(
+                            data_directory_store_url,
+                            data_directory_prefix,
+                            glob_path,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                logical_table
+                    .file_format
+                    .apply_operation(op, listing_urls, session_ctx)
+                    .await
+            }
+            table_type => {
+                Err(format!("No operations supported for table type: {:?}", table_type).into())
             }
         }
     }

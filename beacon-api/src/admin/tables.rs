@@ -75,3 +75,36 @@ pub(crate) async fn delete_table(
         }
     }
 }
+
+#[derive(Debug, serde::Serialize, ToSchema, serde::Deserialize, IntoParams)]
+pub struct TableOperation {
+    pub table_name: String,
+    pub operation: serde_json::Value,
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "tables",
+    post, 
+    path = "/api/admin/apply-table-operation", 
+    responses((status = 200, description = "Apply operation to a table")),
+    security(
+        ("basic-auth" = []),
+        ("bearer" = [])
+    ))
+]
+pub(crate) async fn apply_table_operation(
+    State(state): State<Arc<Runtime>>,
+    Json(table_operation): Json<TableOperation>,
+) -> (StatusCode, String) {
+    let result = state
+        .apply_table_operation(&table_operation.table_name, table_operation.operation)
+        .await;
+    match result {
+        Ok(_) => (StatusCode::OK, format!("Operation applied to table: {}", table_operation.table_name)),
+        Err(err) => {
+            tracing::error!("Error applying operation to table: {:?}", err);
+            (StatusCode::BAD_REQUEST, format!("Error applying operation to table: {:?}", err))
+        }
+    }
+}
