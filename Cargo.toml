@@ -9,7 +9,7 @@ futures-util = "0.3.31"
 async-trait = "0.1.85"
 bytes = "1.9.0"
 parking_lot = { version = "0.12.3", features = ["send_guard", "serde"] }
-
+either = "1.15.0"
 
 utoipa = { version= "=5.3.1", features = ["chrono","preserve_order", "preserve_path_order","rc_schema", "axum_extras"] }
 utoipa-axum = "0.2.0"
@@ -29,6 +29,7 @@ typetag = "0.2.19"
 indexmap = { version = "2.7.1", features = ["serde"]}
 chrono = { version = "0.4.41", features = ["serde"] }
 crossbeam = "0.8.4"
+flume = { version = "0.11.1", features = ["async"] }
 
 datafusion = "49.0.0"
 object_store = { version = "0.12.3", features = ["aws"] }

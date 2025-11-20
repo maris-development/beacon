@@ -9,12 +9,13 @@ pprof = { version = "0.15", features = ["flamegraph"] }
 
 [dependencies]
 axum = { version = "0.8.1", features = ["tracing"] }
+axum-streams = { version = "0.21.0", features = ["arrow"]}
 tower-http = { version = "0.6.1", features = ["trace", "cors"] }
 base64 = "0.22.1"
 
 futures = { workspace = true }
 futures-util = { workspace = true }
-
+either = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 utoipa-scalar = { workspace = true }

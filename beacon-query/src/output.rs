@@ -9,6 +9,7 @@ use beacon_arrow_odv::writer::OdvOptions;
 use beacon_data_lake::DataLake;
 use beacon_formats::{
     arrow::ArrowFormatFactory,
+    arrow_stream::{stream::DeferredBatchStream, ArrowBatchesStreamFormatFactory},
     csv::CsvFormatFactory,
     geo_parquet::{GeoParquetFormatFactory, GeoParquetOptions},
     netcdf::{NetCDFFormatFactory, NetcdfOptions},
@@ -16,7 +17,6 @@ use beacon_formats::{
     parquet::ParquetFormatFactory,
 };
 use datafusion::{
-    common::file_options::file_type::FileType,
     datasource::file_format::format_as_file_type,
     logical_expr::{LogicalPlan, LogicalPlanBuilder},
     prelude::SessionContext,
@@ -28,6 +28,7 @@ use utoipa::ToSchema;
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct Output {
     /// The desired output format.
+    #[serde(default)]
     pub format: OutputFormat,
 }
 
@@ -46,21 +47,123 @@ impl Output {
         _session_context: &SessionContext,
         data_lake: &DataLake,
         input_plan: LogicalPlan,
-    ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
-        let file_type = self.format.file_type();
+    ) -> datafusion::error::Result<(LogicalPlan, QueryOutput)> {
         let temp_output = data_lake.try_create_temp_output_file(".tmp");
-        let plan = LogicalPlanBuilder::copy_to(
-            input_plan,
-            temp_output.output_url(),
-            file_type,
-            Default::default(),
-            vec![],
-        )?;
 
-        Ok((
-            plan.build()?,
-            self.format.output_file(temp_output.into_temp_file()),
-        ))
+        match &self.format {
+            OutputFormat::Csv => {
+                let ff = format_as_file_type(Arc::new(CsvFormatFactory));
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    temp_output.output_url(),
+                    ff,
+                    Default::default(),
+                    vec![],
+                )?;
+                Ok((
+                    plan.build()?,
+                    QueryOutput::Csv(temp_output.into_temp_file()),
+                ))
+            }
+            OutputFormat::Ipc => {
+                let ff = format_as_file_type(Arc::new(ArrowFormatFactory));
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    temp_output.output_url(),
+                    ff,
+                    Default::default(),
+                    vec![],
+                )?;
+                Ok((
+                    plan.build()?,
+                    QueryOutput::Ipc(temp_output.into_temp_file()),
+                ))
+            }
+            OutputFormat::Parquet => {
+                let ff = format_as_file_type(Arc::new(ParquetFormatFactory));
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    temp_output.output_url(),
+                    ff,
+                    Default::default(),
+                    vec![],
+                )?;
+                Ok((
+                    plan.build()?,
+                    QueryOutput::Parquet(temp_output.into_temp_file()),
+                ))
+            }
+            OutputFormat::NetCDF => {
+                let options = NetcdfOptions::default();
+                let object_resolver = DataLake::netcdf_object_resolver();
+                let sink_resolver = DataLake::netcdf_sink_resolver();
+                let ff = format_as_file_type(Arc::new(NetCDFFormatFactory::new(
+                    options,
+                    object_resolver,
+                    sink_resolver,
+                )));
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    temp_output.output_url(),
+                    ff,
+                    Default::default(),
+                    vec![],
+                )?;
+                Ok((
+                    plan.build()?,
+                    QueryOutput::NetCDF(temp_output.into_temp_file()),
+                ))
+            }
+            OutputFormat::GeoParquet {
+                longitude_column,
+                latitude_column,
+            } => {
+                let ff = format_as_file_type(Arc::new(GeoParquetFormatFactory::new(
+                    GeoParquetOptions {
+                        longitude_column: longitude_column.clone(),
+                        latitude_column: latitude_column.clone(),
+                    },
+                )));
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    temp_output.output_url(),
+                    ff,
+                    Default::default(),
+                    vec![],
+                )?;
+                Ok((
+                    plan.build()?,
+                    QueryOutput::GeoParquet(temp_output.into_temp_file()),
+                ))
+            }
+            OutputFormat::Odv(odv_options) => {
+                let ff = format_as_file_type(Arc::new(OdvFileFormatFactory::new(Some(
+                    odv_options.clone(),
+                ))));
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    temp_output.output_url(),
+                    ff,
+                    Default::default(),
+                    vec![],
+                )?;
+                Ok((
+                    plan.build()?,
+                    QueryOutput::Odv(temp_output.into_temp_file()),
+                ))
+            }
+            OutputFormat::ArrowStream => {
+                let (ff, stream) = ArrowBatchesStreamFormatFactory::new();
+                let plan = LogicalPlanBuilder::copy_to(
+                    input_plan,
+                    temp_output.output_url(),
+                    format_as_file_type(Arc::new(ff)),
+                    Default::default(),
+                    vec![],
+                )?;
+                Ok((plan.build()?, QueryOutput::ArrowStream(stream)))
+            }
+        }
     }
 }
 
@@ -86,55 +189,20 @@ pub enum OutputFormat {
         latitude_column: Option<String>,
     },
     Odv(OdvOptions),
+    /// Default arrow stream
+    #[serde(alias = "arrow_stream")]
+    ArrowStream,
 }
 
-impl OutputFormat {
-    /// Wraps a temporary file in the appropriate output file enum variant.
-    pub fn output_file(&self, temp_file: NamedTempFile) -> QueryOutputFile {
-        match self {
-            OutputFormat::Csv => QueryOutputFile::Csv(temp_file),
-            OutputFormat::Ipc => QueryOutputFile::Ipc(temp_file),
-            OutputFormat::Parquet => QueryOutputFile::Parquet(temp_file),
-            OutputFormat::GeoParquet { .. } => QueryOutputFile::GeoParquet(temp_file),
-            OutputFormat::NetCDF => QueryOutputFile::NetCDF(temp_file),
-            OutputFormat::Odv(_) => QueryOutputFile::Odv(temp_file),
-        }
-    }
-
-    /// Returns the DataFusion file type for this output format.
-    pub fn file_type(&self) -> Arc<dyn FileType> {
-        match self {
-            OutputFormat::Csv => format_as_file_type(Arc::new(CsvFormatFactory)),
-            OutputFormat::Ipc => format_as_file_type(Arc::new(ArrowFormatFactory)),
-            OutputFormat::Parquet => format_as_file_type(Arc::new(ParquetFormatFactory)),
-            OutputFormat::GeoParquet {
-                longitude_column,
-                latitude_column,
-            } => format_as_file_type(Arc::new(GeoParquetFormatFactory::new(GeoParquetOptions {
-                longitude_column: longitude_column.clone(),
-                latitude_column: latitude_column.clone(),
-            }))),
-            OutputFormat::NetCDF => {
-                let options = NetcdfOptions::default();
-                let object_resolver = DataLake::netcdf_object_resolver();
-                let sink_resolver = DataLake::netcdf_sink_resolver();
-
-                format_as_file_type(Arc::new(NetCDFFormatFactory::new(
-                    options,
-                    object_resolver,
-                    sink_resolver,
-                )))
-            }
-            OutputFormat::Odv(options) => {
-                format_as_file_type(Arc::new(OdvFileFormatFactory::new(Some(options.clone()))))
-            }
-        }
+impl Default for OutputFormat {
+    fn default() -> Self {
+        OutputFormat::ArrowStream
     }
 }
 
 /// Wrapper for temporary output files in various formats.
 #[derive(Debug)]
-pub enum QueryOutputFile {
+pub enum QueryOutput {
     /// CSV output file.
     Csv(NamedTempFile),
     /// Arrow IPC output file.
@@ -149,31 +217,23 @@ pub enum QueryOutputFile {
     Odv(NamedTempFile),
     /// GeoParquet output file.
     GeoParquet(NamedTempFile),
+    /// Default arrow stream
+    ArrowStream(DeferredBatchStream),
 }
 
-impl QueryOutputFile {
+impl QueryOutput {
     /// Returns the size of the output file in bytes.
     pub fn size(&self) -> anyhow::Result<u64> {
         match self {
-            QueryOutputFile::Csv(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Ipc(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Json(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Parquet(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::NetCDF(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Odv(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
-        }
-    }
-
-    pub fn path(&self) -> &std::path::Path {
-        match self {
-            QueryOutputFile::Csv(file) => file.path(),
-            QueryOutputFile::Ipc(file) => file.path(),
-            QueryOutputFile::Json(file) => file.path(),
-            QueryOutputFile::Parquet(file) => file.path(),
-            QueryOutputFile::NetCDF(file) => file.path(),
-            QueryOutputFile::Odv(file) => file.path(),
-            QueryOutputFile::GeoParquet(file) => file.path(),
+            QueryOutput::Csv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::Ipc(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::Json(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::Parquet(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::NetCDF(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::Odv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutput::GeoParquet(file) => Ok(file.path().metadata()?.len()),
+            // ToDo: implement size calculation for ArrowStream
+            QueryOutput::ArrowStream(_) => Ok(0),
         }
     }
 }
