@@ -19,7 +19,7 @@ use datafusion::{
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryFutureExt};
 use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
 
 use crate::{
@@ -528,6 +528,28 @@ impl DataLake {
         table_providers.insert(table.table_name.clone(), table_provider);
         tables.insert(table.table_name.clone(), table);
         Ok(())
+    }
+
+    pub async fn apply_operation(
+        &self,
+        table_name: &str,
+        _op: serde_json::Value,
+    ) -> Result<(), TableError> {
+        let tables = self.tables.lock();
+        let table = tables
+            .get(table_name)
+            .ok_or(TableError::TableNotFound(table_name.to_string()))?;
+
+        table
+            .table_type
+            .apply_operation(
+                _op,
+                self.session_context.clone(),
+                &self.data_directory_store_url,
+                &self.data_directory_prefix,
+            )
+            .map_err(|e| TableError::GenericTableError(format!("Failed to apply operation: {}", e)))
+            .await
     }
 
     pub fn remove_table(&self, table_name: &str) -> bool {

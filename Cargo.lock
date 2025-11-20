@@ -562,6 +562,7 @@ dependencies = [
  "futures-util",
  "pprof",
  "serde",
+ "serde_json",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",

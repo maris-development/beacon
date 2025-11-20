@@ -80,6 +80,16 @@ impl Runtime {
         self.virtual_machine.add_table(table).await
     }
 
+    pub async fn apply_table_operation(
+        &self,
+        table_name: &str,
+        op: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.virtual_machine
+            .apply_table_operation(table_name, op)
+            .await
+    }
+
     pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
         self.virtual_machine.delete_table(table_name)
     }
