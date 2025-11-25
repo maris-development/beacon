@@ -31,6 +31,8 @@ pub struct Config {
     pub st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     pub worker_threads: usize,
+    #[envconfig(from = "BEACON_DEFERRED_STREAM_CAPACITY", default = "128")]
+    pub deferred_stream_capacity: usize,
 
     // S3 Settings
     #[envconfig(from = "BEACON_S3_ENDPOINT")]

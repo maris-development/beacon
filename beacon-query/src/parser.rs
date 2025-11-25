@@ -19,12 +19,11 @@ impl Parser {
         let datafusion_logical_plan =
             Self::parse_to_logical_plan(session, data_lake, query.inner).await?;
 
-        let (plan, output_file) = query
+        let (plan, output) = query
             .output
             .parse(session, data_lake, datafusion_logical_plan)
             .await?;
-
-        Ok(ParsedPlan::new(plan, output_file))
+        Ok(ParsedPlan::new(plan, output))
     }
 
     pub async fn parse_to_logical_plan(

@@ -26,6 +26,7 @@ sysinfo = { version = "0.35.2", features = ["serde"]}
 uuid = "1.16.0"
 inventory = "0.3.18"
 pathdiff = "0.2.3"
+either = { workspace=true }
 
 tracing = { workspace=true}
 # Local dependencies

@@ -15,6 +15,7 @@ use crate::{
 };
 
 pub mod arrow;
+pub mod arrow_stream;
 pub mod csv;
 pub mod geo_parquet;
 pub mod netcdf;
