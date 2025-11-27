@@ -24,6 +24,7 @@ use crate::{
     },
 };
 
+pub mod execution;
 pub mod object_resolver;
 pub mod sink;
 pub mod source;
@@ -33,7 +34,14 @@ const NETCDF_EXTENSION: &str = "nc";
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetcdfOptions {
     pub compression: Option<String>,
-    // Add more options as needed
+    #[serde(default)]
+    pub unique_value_columns: Vec<String>,
+    #[serde(default = "default_replay_batch_size")]
+    pub replay_batch_size: usize,
+}
+
+fn default_replay_batch_size() -> usize {
+    8_192
 }
 
 #[derive(Debug, Clone)]

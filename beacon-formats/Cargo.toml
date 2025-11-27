@@ -11,6 +11,7 @@ geoarrow = { workspace = true }
 geoarrow-array = { workspace = true }
 geoparquet = { workspace = true }
 parquet = { workspace = true }
+ordered-float = { workspace = true }
 
 typetag =  { workspace=true}
 async-trait = { workspace=true}
@@ -22,6 +23,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
+indexmap = { workspace = true }
 
 async_zip = { version = "0.0.18", features = ["tokio", "zstd", "deflate"] }
 tokio-util = "0.7.16"
