@@ -34,6 +34,7 @@ use datafusion::{
     },
 };
 use futures::{Stream, StreamExt};
+use indexmap::IndexMap;
 use ordered_float::OrderedFloat;
 use parking_lot::Mutex;
 
@@ -205,10 +206,86 @@ impl UniqueValuesHandleCollection {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Merges the unique values collected across all registered handles into a single map grouped by column(field).
+    pub fn unique_values(&self) -> Vec<ColumnValueMap> {
+        let handles = self.handles();
+        if handles.is_empty() {
+            return vec![];
+        }
+
+        let mut merged: ColumnValueMap = ColumnValueMap::new();
+
+        for handle in handles {
+            let guard = handle.unique_column_values.lock();
+            for (field, source_values) in guard.iter() {
+                let field_ref = field.clone();
+                let target = match merged.entry(field_ref.clone()) {
+                    indexmap::map::Entry::Occupied(entry) => entry.into_mut(),
+                    indexmap::map::Entry::Vacant(entry) => entry.insert(
+                        UniqueValuesHandle::init_column_values(field_ref.clone())
+                            .expect("unsupported data type for unique value tracking"),
+                    ),
+                };
+                merge_column_value_sets(&field_ref, target, source_values);
+            }
+        }
+
+        if merged.is_empty() {
+            vec![]
+        } else {
+            vec![merged]
+        }
+    }
 }
 
-type ErasedColumnValues = Box<dyn Any + Send + Sync>;
-type ColumnValueMap = HashMap<String, ErasedColumnValues>;
+fn merge_column_value_sets(
+    field: &FieldRef,
+    target: &mut ErasedColumnValues,
+    source: &ErasedColumnValues,
+) {
+    let field_name = field.name().clone();
+
+    macro_rules! merge_values {
+        ($ty:ty) => {{
+            let target_column = target
+                .downcast_mut::<UniqueColumnValues<$ty>>()
+                .unwrap_or_else(|| panic!("Unexpected unique value type for column {field_name}"));
+            let source_column = source
+                .downcast_ref::<UniqueColumnValues<$ty>>()
+                .unwrap_or_else(|| panic!("Unexpected unique value type for column {field_name}"));
+            target_column.compare_and_add(source_column.values.iter().cloned());
+        }};
+    }
+
+    match field.data_type() {
+        DataType::Utf8 | DataType::LargeUtf8 => merge_values!(String),
+        DataType::Binary | DataType::LargeBinary | DataType::FixedSizeBinary(_) => {
+            merge_values!(Vec<u8>)
+        }
+        DataType::Boolean => merge_values!(bool),
+        DataType::Int8 => merge_values!(i8),
+        DataType::Int16 => merge_values!(i16),
+        DataType::Int32 | DataType::Date32 | DataType::Time32(_) => merge_values!(i32),
+        DataType::Int64
+        | DataType::Date64
+        | DataType::Time64(_)
+        | DataType::Timestamp(_, _)
+        | DataType::Duration(_)
+        | DataType::Interval(_) => merge_values!(i64),
+        DataType::UInt8 => merge_values!(u8),
+        DataType::UInt16 => merge_values!(u16),
+        DataType::UInt32 => merge_values!(u32),
+        DataType::UInt64 => merge_values!(u64),
+        DataType::Float32 => merge_values!(OrderedFloat<f32>),
+        DataType::Float64 => merge_values!(OrderedFloat<f64>),
+        DataType::Decimal128(_, _) => merge_values!(i128),
+        other => panic!("Unsupported data type for unique value merge: {:?}", other),
+    }
+}
+
+pub type ErasedColumnValues = Box<dyn Any + Send + Sync>;
+pub type ColumnValueMap = IndexMap<FieldRef, ErasedColumnValues>;
 
 /// Shared state that keeps track of the unique values discovered for each column.
 ///
@@ -234,10 +311,7 @@ impl UniqueValuesHandle {
     pub fn try_new(fields: &[FieldRef]) -> Result<Self> {
         let mut unique_column_values = ColumnValueMap::with_capacity(fields.len());
         for field in fields {
-            unique_column_values.insert(
-                field.name().clone(),
-                Self::init_column_values(field.clone())?,
-            );
+            unique_column_values.insert(field.clone(), Self::init_column_values(field.clone())?);
         }
 
         Ok(Self {
@@ -297,7 +371,7 @@ impl UniqueValuesHandle {
 }
 
 /// Sorted container that stores the unique values for a single column.
-struct UniqueColumnValues<T: Ord + Eq + Send + Sync + 'static> {
+pub(crate) struct UniqueColumnValues<T: Ord + Eq + Send + Sync + 'static> {
     pub values: Vec<T>,
 }
 
@@ -391,7 +465,7 @@ impl UniqueValueStream {
         for &col_idx in projection {
             let field = schema.field(col_idx);
             let field_name = field.name().clone();
-            let column_values_any = unique_values.get_mut(&field_name).ok_or_else(|| {
+            let (_, column_values_any) = unique_values.get_index_mut(col_idx).ok_or_else(|| {
                 DataFusionError::Internal(format!(
                     "Unique values handle missing column {field_name}"
                 ))
@@ -632,6 +706,44 @@ mod tests {
         assert_eq!(expected_pretty, actual_pretty);
     }
 
+    fn add_string_values(handle: &Arc<UniqueValuesHandle>, field_name: &str, values: &[&str]) {
+        let mut guard = handle.unique_column_values.lock();
+        let column = guard
+            .iter_mut()
+            .find_map(|(field, erased)| {
+                if field.name() == field_name {
+                    erased
+                        .downcast_mut::<UniqueColumnValues<String>>()
+                        .map(|col| (field.clone(), col))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("field {field_name} not found"))
+            .1;
+
+        column.compare_and_add(values.iter().map(|value| value.to_string()));
+    }
+
+    fn add_i32_values(handle: &Arc<UniqueValuesHandle>, field_name: &str, values: &[i32]) {
+        let mut guard = handle.unique_column_values.lock();
+        let column = guard
+            .iter_mut()
+            .find_map(|(field, erased)| {
+                if field.name() == field_name {
+                    erased
+                        .downcast_mut::<UniqueColumnValues<i32>>()
+                        .map(|col| (field.clone(), col))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("field {field_name} not found"))
+            .1;
+
+        column.compare_and_add(values.iter().copied());
+    }
+
     #[tokio::test]
     async fn collects_unique_values_and_replays_input() {
         let batch1 = batch_from(
@@ -666,17 +778,26 @@ mod tests {
         assert_batches_eq(&[batch1.clone(), batch2.clone()], &output);
 
         let unique_values = handle.unique_column_values.lock();
-        let station_values = unique_values["station"]
+        let station_values = unique_values
+            .iter()
+            .find_map(|(f, b)| if f.name() == "station" { Some(b) } else { None })
+            .unwrap()
             .downcast_ref::<UniqueColumnValues<String>>()
             .expect("station unique values");
         assert_eq!(station_values.values, vec!["A", "B", "C"]);
 
-        let depth_values = unique_values["depth"]
+        let depth_values = unique_values
+            .iter()
+            .find_map(|(f, b)| if f.name() == "depth" { Some(b) } else { None })
+            .unwrap()
             .downcast_ref::<UniqueColumnValues<i32>>()
             .expect("depth unique values");
         assert_eq!(depth_values.values, vec![5, 7, 10, 12]);
 
-        let payload_values = unique_values["payload"]
+        let payload_values = unique_values
+            .iter()
+            .find_map(|(f, b)| if f.name() == "payload" { Some(b) } else { None })
+            .unwrap()
             .downcast_ref::<UniqueColumnValues<Vec<u8>>>()
             .expect("payload unique values");
         assert_eq!(
@@ -718,17 +839,26 @@ mod tests {
         assert_batches_eq(std::slice::from_ref(&batch), &output);
 
         let unique_values = handle.unique_column_values.lock();
-        let station_values = unique_values["station"]
+        let station_values = unique_values
+            .iter()
+            .find_map(|(f, b)| if f.name() == "station" { Some(b) } else { None })
+            .unwrap()
             .downcast_ref::<UniqueColumnValues<String>>()
             .expect("station unique values");
         assert_eq!(station_values.values, vec!["A", "B", "C"]);
 
-        let depth_values = unique_values["depth"]
+        let depth_values = unique_values
+            .iter()
+            .find_map(|(f, b)| if f.name() == "depth" { Some(b) } else { None })
+            .unwrap()
             .downcast_ref::<UniqueColumnValues<i32>>()
             .expect("depth unique values");
         assert!(depth_values.values.is_empty());
 
-        let payload_values = unique_values["payload"]
+        let payload_values = unique_values
+            .iter()
+            .find_map(|(f, b)| if f.name() == "payload" { Some(b) } else { None })
+            .unwrap()
             .downcast_ref::<UniqueColumnValues<Vec<u8>>>()
             .expect("payload unique values");
         assert!(payload_values.values.is_empty());
@@ -777,17 +907,28 @@ mod tests {
         let mut depths = BTreeSet::new();
         for handle in handles {
             let guard = handle.unique_column_values.lock();
-            let station_values = guard["station"]
+            let station_values = guard
+                .iter()
+                .find_map(|(f, b)| if f.name() == "station" { Some(b) } else { None })
+                .unwrap()
                 .downcast_ref::<UniqueColumnValues<String>>()
                 .expect("station values");
             stations.extend(station_values.values.iter().cloned());
 
-            let depth_values = guard["depth"]
+            let depth_values = guard
+                .iter()
+                .find_map(|(f, b)| if f.name() == "depth" { Some(b) } else { None })
+                .unwrap()
                 .downcast_ref::<UniqueColumnValues<i32>>()
                 .expect("depth values");
             depths.extend(depth_values.values.iter().copied());
 
-            assert!(guard.get("payload").is_none());
+            assert!(
+                guard
+                    .iter()
+                    .find_map(|(f, b)| if f.name() == "payload" { Some(b) } else { None })
+                    .is_none()
+            );
         }
 
         assert_eq!(
@@ -795,5 +936,59 @@ mod tests {
             vec!["A", "B", "C"]
         );
         assert_eq!(depths.into_iter().collect::<Vec<_>>(), vec![3, 5, 7]);
+    }
+
+    #[test]
+    fn unique_value_handles_merge_across_partitions() {
+        let schema = build_schema();
+        let collection = UniqueValuesHandleCollection::new();
+
+        let handle_a = Arc::new(UniqueValuesHandle::from_schema(schema.clone()).unwrap());
+        add_string_values(&handle_a, "station", &["A", "B"]);
+        add_i32_values(&handle_a, "depth", &[5, 3]);
+        collection.register_handle(handle_a);
+
+        let handle_b = Arc::new(UniqueValuesHandle::from_schema(schema.clone()).unwrap());
+        add_string_values(&handle_b, "station", &["C", "B"]);
+        add_i32_values(&handle_b, "depth", &[7]);
+        collection.register_handle(handle_b);
+
+        let merged = collection.unique_values();
+        assert_eq!(merged.len(), 1, "expected single merged map");
+        let merged_map = &merged[0];
+
+        let station_values = merged_map
+            .iter()
+            .find_map(|(f, erased)| {
+                if f.name() == "station" {
+                    Some(erased)
+                } else {
+                    None
+                }
+            })
+            .unwrap()
+            .downcast_ref::<UniqueColumnValues<String>>()
+            .unwrap();
+        assert_eq!(station_values.values, vec!["A", "B", "C"]);
+
+        let depth_values = merged_map
+            .iter()
+            .find_map(|(f, erased)| {
+                if f.name() == "depth" {
+                    Some(erased)
+                } else {
+                    None
+                }
+            })
+            .unwrap()
+            .downcast_ref::<UniqueColumnValues<i32>>()
+            .unwrap();
+        assert_eq!(depth_values.values, vec![3, 5, 7]);
+    }
+
+    #[test]
+    fn unique_value_handles_return_empty_when_no_handles_registered() {
+        let collection = UniqueValuesHandleCollection::new();
+        assert!(collection.unique_values().is_empty());
     }
 }
