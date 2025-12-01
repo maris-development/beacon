@@ -42,3 +42,6 @@ beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
 beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }
 nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main" }
+
+[dev-dependencies]
+tempfile = "3.10"

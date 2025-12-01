@@ -1,3 +1,16 @@
+//! DataFusion sinks that materialize Arrow record batches into NetCDF files.
+//!
+//! The module provides two sinks:
+//! * [`NetCDFSink`] writes each incoming [`RecordBatch`] directly via the
+//!   high-level Arrow writer, making it suitable for classic table-shaped data.
+//! * [`NetCDFNdSink`] reshapes rows into N-dimensional slabs using previously
+//!   collected unique dimension values, enabling gridded NetCDF outputs.
+//!
+//! In addition to the sinks themselves, the module exposes helpers that bridge
+//! Arrow columnar data and the `beacon_arrow_netcdf` writer, including creating
+//! variables, defining dimensions, and projecting column values into
+//! multi-dimensional ndarray slabs.
+
 use std::{any::Any, fmt::Formatter, sync::Arc};
 
 use arrow::{
@@ -5,7 +18,6 @@ use arrow::{
     datatypes::{DataType, FieldRef, SchemaRef},
 };
 use beacon_arrow_netcdf::{
-    NcString,
     encoders::default::DefaultEncoder,
     netcdf::{Extents, FileMut, NcTypeDescriptor, VariableMut},
     writer::ArrowRecordBatchWriter,
@@ -28,6 +40,8 @@ use crate::netcdf::{
     object_resolver::NetCDFSinkResolver,
 };
 
+/// DataFusion [`DataSink`] that writes batches to a NetCDF file via the
+/// high-level Arrow writer.
 #[derive(Debug, Clone)]
 pub struct NetCDFSink {
     sink_config: FileSinkConfig,
@@ -35,6 +49,7 @@ pub struct NetCDFSink {
 }
 
 impl NetCDFSink {
+    /// Create a new sink bound to a [`FileSinkConfig`] and path resolver.
     pub fn new(path_resolver: Arc<NetCDFSinkResolver>, sink_config: FileSinkConfig) -> Self {
         Self {
             sink_config,
@@ -71,7 +86,7 @@ impl DataSink for NetCDFSink {
         let arrow_schema = self.sink_config.output_schema().clone();
         let output_path = self
             .path_resolver
-            .resolve_output_path(&self.sink_config.table_paths[0].prefix());
+            .resolve_output_path(self.sink_config.table_paths[0].prefix());
 
         let mut rows_written: u64 = 0;
         let mut nc_writer =
@@ -108,6 +123,7 @@ impl DataSink for NetCDFSink {
     }
 }
 
+/// NetCDF sink that reshapes data into an N-dimensional slab before writing.
 #[derive(Debug, Clone)]
 pub struct NetCDFNdSink {
     sink_config: FileSinkConfig,
@@ -117,6 +133,10 @@ pub struct NetCDFNdSink {
 }
 
 impl NetCDFNdSink {
+    /// Create a new N-dimensional sink.
+    ///
+    /// The sink validates that every output column is primitive because complex
+    /// Arrow types cannot be represented in NetCDF variables.
     pub fn new(
         path_resolver: Arc<NetCDFSinkResolver>,
         sink_config: FileSinkConfig,
@@ -168,10 +188,9 @@ impl DataSink for NetCDFNdSink {
         data: SendableRecordBatchStream,
         _context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
-        let arrow_schema = self.sink_config.output_schema().clone();
         let output_path = self
             .path_resolver
-            .resolve_output_path(&self.sink_config.table_paths[0].prefix());
+            .resolve_output_path(self.sink_config.table_paths[0].prefix());
 
         let mut rows_written: u64 = 0;
         let mut nc_file = beacon_arrow_netcdf::netcdf::create(output_path).map_err(|e| {
@@ -180,53 +199,112 @@ impl DataSink for NetCDFNdSink {
                 e
             ))
         })?;
-        let unique_values_collection: ColumnValueMap =
-            self.unique_values.unique_values().ok_or_else(|| {
+        let unique_values_collection: Arc<ColumnValueMap> = self
+            .unique_values
+            .unique_values()
+            .ok_or_else(|| {
                 DataFusionError::Execution(
                     "No dimensions values collected for NetCDFNdSink".to_string(),
                 )
-            })?;
+            })
+            .map(Arc::new)?;
+
+        let dimension_fields: Vec<FieldRef> = unique_values_collection
+            .keys()
+            .take(self.ndims)
+            .cloned()
+            .collect();
+
+        if dimension_fields.len() != self.ndims {
+            return Err(DataFusionError::Execution(format!(
+                "Expected {} dimension columns but only collected {}",
+                self.ndims,
+                dimension_fields.len()
+            )));
+        }
+
+        let value_fields: Vec<FieldRef> = self
+            .sink_config
+            .output_schema()
+            .fields()
+            .iter()
+            .filter(|field| !unique_values_collection.contains_key(*field))
+            .cloned()
+            .collect();
+
+        let dim_names: Vec<&str> = dimension_fields.iter().map(|f| f.name().as_str()).collect();
+
+        let dimension_schema = Arc::new(arrow::datatypes::Schema::new(
+            dimension_fields
+                .iter()
+                .map(|f| f.as_ref().clone())
+                .collect::<Vec<_>>(),
+        ));
 
         create_dimension_variables(&mut nc_file, &unique_values_collection)?;
 
         // For each field that is not part of the unique values collection. Create a variable that used the unique values fields as dimensions
-        for field in self.sink_config.output_schema().fields() {
-            if unique_values_collection.contains_key(field) {
-                continue;
-            }
-            let dims: Vec<&str> = unique_values_collection
-                .keys()
-                .take(self.ndims)
-                .map(|f| f.name().as_str())
-                .collect();
-
-            create_variable(&mut nc_file, field, &dims)?; // Create variable
+        for field in &value_fields {
+            create_variable(&mut nc_file, field, &dim_names)?; // Create variable
         }
 
-        // let mut pinned_steam = std::pin::pin!(data);
+        let mut pinned_steam = std::pin::pin!(data);
 
-        // while let Some(batch) = pinned_steam.next().await {
-        //     let batch = batch?;
-        //     rows_written += batch.num_rows() as u64;
-        //     nc_writer.write_record_batch(batch).map_err(|e| {
-        //         datafusion::error::DataFusionError::Execution(format!(
-        //             "Failed to write record batch to NetCDF: {}",
-        //             e
-        //         ))
-        //     })?;
-        // }
+        while let Some(batch) = pinned_steam.next().await {
+            let batch = batch?;
 
-        // nc_writer.finish().map_err(|e| {
-        //     datafusion::error::DataFusionError::Execution(format!(
-        //         "Failed to finish writing NetCDF: {}",
-        //         e
-        //     ))
-        // })?;
+            // Split into batch for dimension columns and an array of value columns
+            let dimension_columns = RecordBatch::try_new(
+                dimension_schema.clone(),
+                dimension_fields
+                    .iter()
+                    .map(|field| {
+                        batch
+                            .column(batch.schema().index_of(field.name()).unwrap())
+                            .clone()
+                    })
+                    .collect(),
+            )
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to create dimension columns record batch: {}",
+                    e
+                ))
+            })?;
+
+            for field in &value_fields {
+                let value_array = batch.column(batch.schema().index_of(field.name()).unwrap());
+
+                let mut variable = nc_file.variable_mut(field.name()).ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Variable '{}' not found in NetCDF file",
+                        field.name()
+                    ))
+                })?;
+
+                write_ndarray_slab(
+                    &mut variable,
+                    unique_values_collection.clone(),
+                    dimension_columns.clone(),
+                    value_array.clone(),
+                )?;
+            }
+
+            rows_written += batch.num_rows() as u64;
+        }
+
+        nc_file.close().map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to finish writing NetCDF: {}",
+                e
+            ))
+        })?;
 
         Ok(rows_written)
     }
 }
 
+/// Create a NetCDF variable for the provided Arrow field and dimension names.
 fn create_variable<'a>(
     file: &'a mut FileMut,
     variable: &FieldRef,
@@ -309,6 +387,8 @@ fn create_variable<'a>(
     }
 }
 
+/// Define NetCDF variables (and corresponding dimensions) for each dimension
+/// column that has collected unique values.
 fn create_dimension_variables(
     file: &mut FileMut,
     unique_values: &ColumnValueMap,
@@ -320,6 +400,8 @@ fn create_dimension_variables(
     Ok(())
 }
 
+/// Ensure the NetCDF dimension exists for the provided field and populate it
+/// with the collected unique values.
 fn create_dimension_for_field(
     file: &mut FileMut,
     field: &FieldRef,
@@ -407,6 +489,7 @@ fn create_dimension_for_field(
     Ok(())
 }
 
+/// Write primitive coordinate values into a dimension variable.
 fn write_numeric_dimension_values<T>(
     variable: &mut VariableMut,
     values: &[T],
@@ -426,6 +509,8 @@ where
     Ok(())
 }
 
+/// Ensure a NetCDF dimension exists with the desired length, validating
+/// collisions if the dimension was previously defined.
 fn ensure_dimension(file: &mut FileMut, name: &str, len: usize) -> datafusion::error::Result<()> {
     if let Some(dimension) = file.dimension(name) {
         if dimension.len() != len {
@@ -444,6 +529,8 @@ fn ensure_dimension(file: &mut FileMut, name: &str, len: usize) -> datafusion::e
     Ok(())
 }
 
+/// Downcast erased column values into their concrete type, cloning the
+/// collected values for re-use.
 fn typed_values<T: Clone + Ord + Send + Sync + 'static>(
     field_name: &str,
     erased_values: &ErasedColumnValues,
@@ -467,6 +554,8 @@ fn df_err(field: &str, action: &str, err: impl std::fmt::Display) -> DataFusionE
     ))
 }
 
+/// Allocate an ndarray slab pre-filled with the NetCDF fill value for the
+/// target Arrow primitive type.
 fn typed_ndarray_slab<T: NcTypeDescriptor + Clone>(
     dims: &[usize],
     fill_value: T,
@@ -474,6 +563,13 @@ fn typed_ndarray_slab<T: NcTypeDescriptor + Clone>(
     ArrayBase::from_elem(ndarray::IxDyn(dims), fill_value)
 }
 
+/// Translate one column of values into an ndarray slab and write it into a
+/// NetCDF variable at the inferred extents.
+///
+/// The function projects the combination of dimension coordinates to a
+/// position derived from the unique value map, fills a dense ndarray buffer
+/// (initialized with each type's minimum value as a stand-in for `_FillValue`),
+/// and finally writes the block into the file.
 fn write_ndarray_slab(
     variable: &mut VariableMut,
     unique_values: Arc<ColumnValueMap>,
@@ -660,6 +756,7 @@ fn write_ndarray_slab(
     Ok(())
 }
 
+/// Infer contiguous write extents from sparse slab positions.
 fn infer_extents(
     positions: &[Option<Vec<usize>>],
 ) -> Result<Vec<std::ops::Range<usize>>, DataFusionError> {
@@ -690,7 +787,8 @@ fn infer_extents(
     Ok(extents)
 }
 
-fn infer_slab_dims(extents: &Vec<std::ops::Range<usize>>) -> Vec<usize> {
+/// Convert per-axis extents into ndarray-compatible dimension lengths.
+fn infer_slab_dims(extents: &[std::ops::Range<usize>]) -> Vec<usize> {
     let mut dims = Vec::new();
 
     for extent in extents {
@@ -700,6 +798,8 @@ fn infer_slab_dims(extents: &Vec<std::ops::Range<usize>>) -> Vec<usize> {
     dims
 }
 
+/// Populate an owned ndarray slab with primitive values using the provided
+/// slab positions as indices.
 fn fill_primitive_slab<T>(
     dims: &[usize],
     slab_positions: &[Option<Vec<usize>>],
@@ -737,6 +837,8 @@ where
     base
 }
 
+/// Map each row's dimension values to their index within the unique value map,
+/// returning per-row coordinates for slab placement.
 fn dimension_slab_positions(
     dimension_columns: RecordBatch,
     unique_values: Arc<ColumnValueMap>,
@@ -858,8 +960,13 @@ fn dimension_slab_positions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Int32Array;
+    use crate::netcdf::execution::unique_values::UniqueColumnValues;
+    use arrow::{
+        array::{ArrayRef, Float64Array, Int32Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+    };
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[test]
     fn infer_extents_returns_expected_ranges() {
@@ -912,5 +1019,191 @@ mod tests {
         assert_eq!(slab[[1, 1]], i32::MIN);
         assert_eq!(slab[[2, 1]], 30);
         assert_eq!(slab[[2, 0]], i32::MIN);
+    }
+
+    #[test]
+    fn dimension_slab_positions_maps_values_to_indices() {
+        // Create two dimension columns: an Int32 and a Float64
+        let int_col: Arc<dyn Array> = Arc::new(Int32Array::from(vec![Some(10), Some(20), None]));
+        let float_col: Arc<dyn Array> =
+            Arc::new(Float64Array::from(vec![Some(1.5), Some(2.5), Some(1.5)]));
+
+        let fields = vec![
+            Field::new("int_dim", DataType::Int32, true),
+            Field::new("float_dim", DataType::Float64, true),
+        ];
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(fields.clone())),
+            vec![int_col, float_col],
+        )
+        .expect("record batch creation");
+
+        // Build unique values map with ordered lists for each field
+
+        use crate::netcdf::execution::unique_values::UniqueColumnValues;
+        use ordered_float::OrderedFloat;
+
+        let mut map: ColumnValueMap = ColumnValueMap::new();
+
+        // For int_dim unique values [10,20]
+        let int_uniques = UniqueColumnValues {
+            values: vec![10i32, 20i32],
+        };
+        map.insert(Arc::new(fields[0].clone()), Box::new(int_uniques));
+
+        // For float_dim unique values [1.5,2.5]
+        let float_uniques = UniqueColumnValues {
+            values: vec![OrderedFloat(1.5f64), OrderedFloat(2.5f64)],
+        };
+        map.insert(Arc::new(fields[1].clone()), Box::new(float_uniques));
+
+        let positions = dimension_slab_positions(batch, Arc::new(map));
+
+        // Expect mapping per row:
+        // row0: int 10 -> pos 0, float 1.5 -> pos 0  => Some([0,0])
+        // row1: int 20 -> pos 1, float 2.5 -> pos 1  => Some([1,1])
+        // row2: int NULL -> missing => None
+
+        assert_eq!(positions.len(), 3);
+        assert_eq!(positions[0], Some(vec![0usize, 0usize]));
+        assert_eq!(positions[1], Some(vec![1usize, 1usize]));
+        assert!(positions[2].is_none());
+    }
+
+    fn sample_dimension_inputs() -> (Arc<ColumnValueMap>, RecordBatch) {
+        let field_x: FieldRef = Arc::new(Field::new("x_dim", DataType::Int32, true));
+        let field_y: FieldRef = Arc::new(Field::new("y_dim", DataType::Int32, true));
+
+        let mut map = ColumnValueMap::new();
+        map.insert(
+            field_x.clone(),
+            Box::new(UniqueColumnValues {
+                values: vec![10i32, 20i32],
+            }),
+        );
+        map.insert(
+            field_y.clone(),
+            Box::new(UniqueColumnValues {
+                values: vec![1i32, 2i32],
+            }),
+        );
+
+        let schema_fields: Vec<Field> = map.keys().map(|f| f.as_ref().clone()).collect();
+        let schema = Arc::new(Schema::new(schema_fields));
+
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int32Array::from(vec![
+                Some(10),
+                Some(10),
+                Some(20),
+                Some(20),
+            ])) as ArrayRef,
+            Arc::new(Int32Array::from(vec![Some(1), Some(2), Some(1), Some(2)])) as ArrayRef,
+        ];
+
+        let batch = RecordBatch::try_new(schema, arrays).expect("dimension batch creation");
+
+        (Arc::new(map), batch)
+    }
+
+    fn create_test_file(
+        dims: &[(&str, usize)],
+    ) -> (tempfile::TempDir, beacon_arrow_netcdf::netcdf::FileMut) {
+        let temp_dir = tempdir().expect("create tempdir");
+        let file_path = temp_dir.path().join("slab.nc");
+        let mut file = beacon_arrow_netcdf::netcdf::create(&file_path).expect("create netcdf file");
+        for (name, len) in dims {
+            file.add_dimension(name, *len).expect("add dimension");
+        }
+        (temp_dir, file)
+    }
+
+    #[test]
+    fn write_ndarray_slab_writes_primitive_values() {
+        let (_tempdir, mut file) = create_test_file(&[("x_dim", 2), ("y_dim", 2)]);
+        let mut variable = file
+            .add_variable::<i32>("values", &["x_dim", "y_dim"])
+            .expect("add variable");
+
+        let (unique_values, dimension_columns) = sample_dimension_inputs();
+        let value_column: ArrayRef =
+            Arc::new(Int32Array::from(vec![Some(1), Some(2), Some(3), Some(4)]));
+
+        write_ndarray_slab(
+            &mut variable,
+            unique_values,
+            dimension_columns,
+            value_column,
+        )
+        .expect("slab write should succeed");
+
+        // keep file alive until here
+        drop(variable);
+        drop(file);
+    }
+
+    #[test]
+    fn write_ndarray_slab_errors_on_dimension_mismatch() {
+        let (_tempdir, mut file) = create_test_file(&[("x_dim", 2)]);
+        let mut variable = file
+            .add_variable::<i32>("values", &["x_dim"])
+            .expect("add variable");
+
+        let (unique_values, dimension_columns) = sample_dimension_inputs();
+        let value_column: ArrayRef =
+            Arc::new(Int32Array::from(vec![Some(1), Some(2), Some(3), Some(4)]));
+
+        let err = write_ndarray_slab(
+            &mut variable,
+            unique_values,
+            dimension_columns,
+            value_column,
+        )
+        .expect_err("expected mismatch error");
+
+        match err {
+            DataFusionError::Execution(message) => {
+                assert!(message.contains("length"));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+
+        drop(variable);
+        drop(file);
+    }
+
+    #[test]
+    fn write_ndarray_slab_errors_for_unsupported_type() {
+        let (_tempdir, mut file) = create_test_file(&[("x_dim", 2), ("y_dim", 2)]);
+        let mut variable = file
+            .add_variable::<i32>("values", &["x_dim", "y_dim"])
+            .expect("add variable");
+
+        let (unique_values, dimension_columns) = sample_dimension_inputs();
+        let value_column: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("a"),
+            Some("b"),
+            Some("c"),
+            Some("d"),
+        ]));
+
+        let err = write_ndarray_slab(
+            &mut variable,
+            unique_values,
+            dimension_columns,
+            value_column,
+        )
+        .expect_err("expected unsupported type error");
+
+        match err {
+            DataFusionError::Execution(message) => {
+                assert!(message.contains("not implemented"));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+
+        drop(variable);
+        drop(file);
     }
 }

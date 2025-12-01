@@ -18,8 +18,9 @@ use object_store::{ObjectMeta, ObjectStore};
 use crate::{
     Dataset, DatasetFormat, FileFormatFactoryExt,
     netcdf::{
+        execution::unique_values::UniqueValuesExec,
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
-        sink::NetCDFSink,
+        sink::{NetCDFNdSink, NetCDFSink},
         source::{NetCDFFileSource, fetch_schema},
     },
 };
@@ -41,7 +42,7 @@ pub struct NetcdfOptions {
 }
 
 fn default_replay_batch_size() -> usize {
-    8_192
+    128 * 1024
 }
 
 #[derive(Debug, Clone)]
@@ -205,12 +206,32 @@ impl FileFormat for NetcdfFormat {
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let netcdf_sink = Arc::new(NetCDFSink::new(self.sink_resolver.clone(), conf));
-        Ok(Arc::new(DataSinkExec::new(
-            input,
-            netcdf_sink,
-            order_requirements,
-        )))
+        if self.options.unique_value_columns.is_empty() {
+            let netcdf_sink = Arc::new(NetCDFSink::new(self.sink_resolver.clone(), conf));
+            Ok(Arc::new(DataSinkExec::new(
+                input,
+                netcdf_sink,
+                order_requirements,
+            )))
+        } else {
+            let unique_columns = self.options.unique_value_columns.clone();
+
+            let (unique_exec, collection_handle) =
+                UniqueValuesExec::new(input, unique_columns.clone())?;
+
+            let netcdf_sink = Arc::new(NetCDFNdSink::new(
+                self.sink_resolver.clone(),
+                conf,
+                unique_columns.len(),
+                collection_handle,
+            )?);
+
+            Ok(Arc::new(DataSinkExec::new(
+                Arc::new(unique_exec),
+                netcdf_sink,
+                order_requirements,
+            )))
+        }
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {

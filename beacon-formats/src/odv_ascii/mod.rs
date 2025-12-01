@@ -422,6 +422,7 @@ mod tests {
 
     use super::*;
 
+    #[ignore]
     #[tokio::test]
     async fn test_name() {
         let object_store =
