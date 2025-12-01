@@ -586,7 +586,7 @@ dependencies = [
  "hifitime",
  "indexmap 2.10.0",
  "nd-arrow-array",
- "ndarray 0.16.1",
+ "ndarray",
  "netcdf",
  "netcdf-sys",
  "num-traits",
@@ -767,7 +767,8 @@ dependencies = [
  "glob",
  "indexmap 2.10.0",
  "nd-arrow-array",
- "ndarray 0.17.1",
+ "ndarray",
+ "num-traits",
  "object_store 0.12.3",
  "ordered-float 5.1.0",
  "parking_lot",
@@ -3494,28 +3495,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "ndarray"
-version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c7c9125e8f6f10c9da3aad044cc918cf8784fa34de857b1aa68038eb05a50a9"
-dependencies = [
- "matrixmultiply",
- "num-complex",
- "num-integer",
- "num-traits",
- "portable-atomic",
- "portable-atomic-util",
- "rawpointer",
-]
-
-[[package]]
 name = "netcdf"
 version = "0.10.5"
 source = "git+https://github.com/robinskil/netcdf.git#4e003679930b9160734d4cf2dbdb8ef35bd8e616"
 dependencies = [
  "bitflags 2.9.2",
  "libc",
- "ndarray 0.16.1",
+ "ndarray",
  "netcdf-sys",
  "semver",
 ]
@@ -6165,7 +6151,7 @@ dependencies = [
  "itoa",
  "lru 0.16.1",
  "moka",
- "ndarray 0.16.1",
+ "ndarray",
  "num",
  "num-complex",
  "quick_cache",

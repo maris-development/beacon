@@ -15,6 +15,7 @@
 use std::{
     any::Any,
     cmp::Ordering,
+    fmt::Debug,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -208,10 +209,10 @@ impl UniqueValuesHandleCollection {
     }
 
     /// Merges the unique values collected across all registered handles into a single map grouped by column(field).
-    pub fn unique_values(&self) -> Vec<ColumnValueMap> {
+    pub fn unique_values(&self) -> Option<ColumnValueMap> {
         let handles = self.handles();
         if handles.is_empty() {
-            return vec![];
+            return None;
         }
 
         let mut merged: ColumnValueMap = ColumnValueMap::new();
@@ -231,11 +232,7 @@ impl UniqueValuesHandleCollection {
             }
         }
 
-        if merged.is_empty() {
-            vec![]
-        } else {
-            vec![merged]
-        }
+        Some(merged)
     }
 }
 
@@ -249,9 +246,12 @@ fn merge_column_value_sets(
     macro_rules! merge_values {
         ($ty:ty) => {{
             let target_column = target
+                .as_mut()
+                .as_mut()
                 .downcast_mut::<UniqueColumnValues<$ty>>()
                 .unwrap_or_else(|| panic!("Unexpected unique value type for column {field_name}"));
             let source_column = source
+                .as_any()
                 .downcast_ref::<UniqueColumnValues<$ty>>()
                 .unwrap_or_else(|| panic!("Unexpected unique value type for column {field_name}"));
             target_column.compare_and_add(source_column.values.iter().cloned());
@@ -284,7 +284,7 @@ fn merge_column_value_sets(
     }
 }
 
-pub type ErasedColumnValues = Box<dyn Any + Send + Sync>;
+pub type ErasedColumnValues = Box<dyn UniqueVec + Send + Sync>;
 pub type ColumnValueMap = IndexMap<FieldRef, ErasedColumnValues>;
 
 /// Shared state that keeps track of the unique values discovered for each column.
@@ -370,12 +370,39 @@ impl UniqueValuesHandle {
     }
 }
 
+pub trait UniqueVec: Any + Debug {
+    fn len(&self) -> usize;
+    fn as_any(&self) -> &dyn Any;
+    fn as_mut(&mut self) -> &mut dyn Any;
+}
+
 /// Sorted container that stores the unique values for a single column.
+#[derive(Debug)]
 pub(crate) struct UniqueColumnValues<T: Ord + Eq + Send + Sync + 'static> {
     pub values: Vec<T>,
 }
 
+impl<T: Ord + Eq + Send + Sync + Debug + 'static> UniqueVec for UniqueColumnValues<T> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+}
+
 impl<T: Ord + Eq + Send + Sync + 'static> UniqueColumnValues<T> {
+    pub fn needle_position(&self, needle: &T) -> Result<usize> {
+        match self.values.binary_search(needle) {
+            Ok(pos) => Ok(pos),
+            Err(pos) => Ok(pos),
+        }
+    }
+
     /// Inserts values that are not already present while maintaining sorted
     /// order. The implementation sorts the incoming values and performs a
     /// classic merge with the existing sorted set.
@@ -485,6 +512,8 @@ impl UniqueValueStream {
         macro_rules! handle_primitive {
             ($array_ty:ty, $value_ty:ty, $map:expr) => {{
                 let column_values = column_values_any
+                    .as_mut()
+                    .as_mut()
                     .downcast_mut::<UniqueColumnValues<$value_ty>>()
                     .ok_or_else(|| unexpected_unique_value_type(&field_name))?;
                 let typed_array = array
@@ -500,6 +529,8 @@ impl UniqueValueStream {
         macro_rules! handle_string {
             ($array_ty:ty) => {{
                 let column_values = column_values_any
+                    .as_mut()
+                    .as_mut()
                     .downcast_mut::<UniqueColumnValues<String>>()
                     .ok_or_else(|| unexpected_unique_value_type(&field_name))?;
                 let typed_array = array
@@ -515,6 +546,8 @@ impl UniqueValueStream {
         macro_rules! handle_binary {
             ($array_ty:ty) => {{
                 let column_values = column_values_any
+                    .as_mut()
+                    .as_mut()
                     .downcast_mut::<UniqueColumnValues<Vec<u8>>>()
                     .ok_or_else(|| unexpected_unique_value_type(&field_name))?;
                 let typed_array = array
@@ -713,6 +746,8 @@ mod tests {
             .find_map(|(field, erased)| {
                 if field.name() == field_name {
                     erased
+                        .as_mut()
+                        .as_mut()
                         .downcast_mut::<UniqueColumnValues<String>>()
                         .map(|col| (field.clone(), col))
                 } else {
@@ -732,6 +767,8 @@ mod tests {
             .find_map(|(field, erased)| {
                 if field.name() == field_name {
                     erased
+                        .as_mut()
+                        .as_mut()
                         .downcast_mut::<UniqueColumnValues<i32>>()
                         .map(|col| (field.clone(), col))
                 } else {
@@ -782,6 +819,7 @@ mod tests {
             .iter()
             .find_map(|(f, b)| if f.name() == "station" { Some(b) } else { None })
             .unwrap()
+            .as_any()
             .downcast_ref::<UniqueColumnValues<String>>()
             .expect("station unique values");
         assert_eq!(station_values.values, vec!["A", "B", "C"]);
@@ -790,6 +828,7 @@ mod tests {
             .iter()
             .find_map(|(f, b)| if f.name() == "depth" { Some(b) } else { None })
             .unwrap()
+            .as_any()
             .downcast_ref::<UniqueColumnValues<i32>>()
             .expect("depth unique values");
         assert_eq!(depth_values.values, vec![5, 7, 10, 12]);
@@ -798,6 +837,7 @@ mod tests {
             .iter()
             .find_map(|(f, b)| if f.name() == "payload" { Some(b) } else { None })
             .unwrap()
+            .as_any()
             .downcast_ref::<UniqueColumnValues<Vec<u8>>>()
             .expect("payload unique values");
         assert_eq!(
@@ -843,6 +883,7 @@ mod tests {
             .iter()
             .find_map(|(f, b)| if f.name() == "station" { Some(b) } else { None })
             .unwrap()
+            .as_any()
             .downcast_ref::<UniqueColumnValues<String>>()
             .expect("station unique values");
         assert_eq!(station_values.values, vec!["A", "B", "C"]);
@@ -851,6 +892,7 @@ mod tests {
             .iter()
             .find_map(|(f, b)| if f.name() == "depth" { Some(b) } else { None })
             .unwrap()
+            .as_any()
             .downcast_ref::<UniqueColumnValues<i32>>()
             .expect("depth unique values");
         assert!(depth_values.values.is_empty());
@@ -859,6 +901,7 @@ mod tests {
             .iter()
             .find_map(|(f, b)| if f.name() == "payload" { Some(b) } else { None })
             .unwrap()
+            .as_any()
             .downcast_ref::<UniqueColumnValues<Vec<u8>>>()
             .expect("payload unique values");
         assert!(payload_values.values.is_empty());
@@ -911,6 +954,7 @@ mod tests {
                 .iter()
                 .find_map(|(f, b)| if f.name() == "station" { Some(b) } else { None })
                 .unwrap()
+                .as_any()
                 .downcast_ref::<UniqueColumnValues<String>>()
                 .expect("station values");
             stations.extend(station_values.values.iter().cloned());
@@ -919,6 +963,7 @@ mod tests {
                 .iter()
                 .find_map(|(f, b)| if f.name() == "depth" { Some(b) } else { None })
                 .unwrap()
+                .as_any()
                 .downcast_ref::<UniqueColumnValues<i32>>()
                 .expect("depth values");
             depths.extend(depth_values.values.iter().copied());
@@ -953,9 +998,9 @@ mod tests {
         add_i32_values(&handle_b, "depth", &[7]);
         collection.register_handle(handle_b);
 
-        let merged = collection.unique_values();
-        assert_eq!(merged.len(), 1, "expected single merged map");
-        let merged_map = &merged[0];
+        let merged_map = collection
+            .unique_values()
+            .expect("expected single merged map");
 
         let station_values = merged_map
             .iter()
@@ -967,6 +1012,7 @@ mod tests {
                 }
             })
             .unwrap()
+            .as_any()
             .downcast_ref::<UniqueColumnValues<String>>()
             .unwrap();
         assert_eq!(station_values.values, vec!["A", "B", "C"]);
@@ -981,6 +1027,7 @@ mod tests {
                 }
             })
             .unwrap()
+            .as_any()
             .downcast_ref::<UniqueColumnValues<i32>>()
             .unwrap();
         assert_eq!(depth_values.values, vec![3, 5, 7]);
@@ -989,6 +1036,6 @@ mod tests {
     #[test]
     fn unique_value_handles_return_empty_when_no_handles_registered() {
         let collection = UniqueValuesHandleCollection::new();
-        assert!(collection.unique_values().is_empty());
+        assert!(collection.unique_values().is_none());
     }
 }
