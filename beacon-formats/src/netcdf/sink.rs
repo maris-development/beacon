@@ -143,6 +143,7 @@ impl NetCDFNdSink {
         ndims: usize,
         unique_values: UniqueValuesHandleCollection,
     ) -> Result<Self, DataFusionError> {
+        tracing::info!("Creating NetCDFNdSink with {} dimensions", ndims);
         // Assert that the sink config only contains primitive types
         for field in sink_config.output_schema().fields() {
             if !field.data_type().is_primitive() {
@@ -191,6 +192,7 @@ impl DataSink for NetCDFNdSink {
         let output_path = self
             .path_resolver
             .resolve_output_path(self.sink_config.table_paths[0].prefix());
+        tracing::info!("Writing ND NetCDF to path: {:?}", output_path);
 
         let mut rows_written: u64 = 0;
         let mut nc_file = beacon_arrow_netcdf::netcdf::create(output_path).map_err(|e| {
@@ -199,6 +201,26 @@ impl DataSink for NetCDFNdSink {
                 e
             ))
         })?;
+
+        let mut pinned_stream = std::pin::pin!(data);
+        let mut batches = vec![];
+        while let Some(batch) = pinned_stream.next().await {
+            let batch = batch?;
+            rows_written += batch.num_rows() as u64;
+            batches.push(batch);
+        }
+
+        // ToDo: Optimize by processing batches one by one instead of concatenating all (we should process in slabs)
+        let concatted_batch =
+            arrow::compute::concat_batches(&pinned_stream.schema(), batches.iter()).map_err(
+                |e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "No data received in NetCDFNdSink: {}",
+                        e
+                    ))
+                },
+            )?;
+
         let unique_values_collection: Arc<ColumnValueMap> = self
             .unique_values
             .unique_values()
@@ -208,7 +230,7 @@ impl DataSink for NetCDFNdSink {
                 )
             })
             .map(Arc::new)?;
-
+        // tracing::info!("Unique values collection: {:?}", unique_values_collection);
         let dimension_fields: Vec<FieldRef> = unique_values_collection
             .keys()
             .take(self.ndims)
@@ -248,49 +270,42 @@ impl DataSink for NetCDFNdSink {
             create_variable(&mut nc_file, field, &dim_names)?; // Create variable
         }
 
-        let mut pinned_steam = std::pin::pin!(data);
+        // Split into batch for dimension columns and an array of value columns
+        let dimension_columns = RecordBatch::try_new(
+            dimension_schema.clone(),
+            dimension_fields
+                .iter()
+                .map(|field| {
+                    concatted_batch
+                        .column(concatted_batch.schema().index_of(field.name()).unwrap())
+                        .clone()
+                })
+                .collect(),
+        )
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to create dimension columns record batch: {}",
+                e
+            ))
+        })?;
 
-        while let Some(batch) = pinned_steam.next().await {
-            let batch = batch?;
+        for field in &value_fields {
+            let value_array =
+                concatted_batch.column(concatted_batch.schema().index_of(field.name()).unwrap());
 
-            // Split into batch for dimension columns and an array of value columns
-            let dimension_columns = RecordBatch::try_new(
-                dimension_schema.clone(),
-                dimension_fields
-                    .iter()
-                    .map(|field| {
-                        batch
-                            .column(batch.schema().index_of(field.name()).unwrap())
-                            .clone()
-                    })
-                    .collect(),
-            )
-            .map_err(|e| {
+            let mut variable = nc_file.variable_mut(field.name()).ok_or_else(|| {
                 datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to create dimension columns record batch: {}",
-                    e
+                    "Variable '{}' not found in NetCDF file",
+                    field.name()
                 ))
             })?;
 
-            for field in &value_fields {
-                let value_array = batch.column(batch.schema().index_of(field.name()).unwrap());
-
-                let mut variable = nc_file.variable_mut(field.name()).ok_or_else(|| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Variable '{}' not found in NetCDF file",
-                        field.name()
-                    ))
-                })?;
-
-                write_ndarray_slab(
-                    &mut variable,
-                    unique_values_collection.clone(),
-                    dimension_columns.clone(),
-                    value_array.clone(),
-                )?;
-            }
-
-            rows_written += batch.num_rows() as u64;
+            write_ndarray_slab(
+                &mut variable,
+                unique_values_collection.clone(),
+                dimension_columns.clone(),
+                value_array.clone(),
+            )?;
         }
 
         nc_file.close().map_err(|e| {
@@ -340,7 +355,6 @@ fn create_variable<'a>(
                 arrow::datatypes::TimeUnit::Microsecond => "microseconds",
                 arrow::datatypes::TimeUnit::Nanosecond => "nanoseconds",
             };
-
             nc_variable
                 .put_attribute("units", format!("{} since 1970-01-01T00:00:00Z", unit))
                 .map_err(|e| df_err(variable.name(), "write timestamp units attribute", e))?;
@@ -563,6 +577,24 @@ fn typed_ndarray_slab<T: NcTypeDescriptor + Clone>(
     ArrayBase::from_elem(ndarray::IxDyn(dims), fill_value)
 }
 
+fn relative_slab_positions(
+    extents: &[std::ops::Range<usize>],
+    slab_positions: &[Option<Vec<usize>>],
+) -> Vec<Option<Vec<usize>>> {
+    slab_positions
+        .iter()
+        .map(|pos_opt| {
+            pos_opt.as_ref().map(|positions| {
+                positions
+                    .iter()
+                    .enumerate()
+                    .map(|(dim_idx, &pos)| pos - extents[dim_idx].start)
+                    .collect()
+            })
+        })
+        .collect()
+}
+
 /// Translate one column of values into an ndarray slab and write it into a
 /// NetCDF variable at the inferred extents.
 ///
@@ -578,8 +610,9 @@ fn write_ndarray_slab(
 ) -> datafusion::error::Result<()> {
     assert_eq!(dimension_columns.num_rows(), value_column.len());
 
-    let slab_positions = dimension_slab_positions(dimension_columns, unique_values);
-    let extents = infer_extents(&slab_positions)?;
+    let positions = dimension_slab_positions(dimension_columns, unique_values);
+    let extents = infer_extents(&positions)?;
+    let slab_positions = relative_slab_positions(&extents, &positions);
     let dims = infer_slab_dims(&extents);
     let nc_extents: Extents = extents.into();
 
@@ -597,7 +630,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -612,7 +645,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -627,7 +660,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -637,16 +670,47 @@ fn write_ndarray_slab(
                 ))
             })?;
         }
-        DataType::Int64 | DataType::Timestamp(_, _) | DataType::Date64 | DataType::Time64(_) => {
+        DataType::Int64 | DataType::Date64 | DataType::Time64(_) => {
             let slab = fill_primitive_slab::<arrow::datatypes::Int64Type>(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab Int64 data to variable '{}': {}",
+                    variable.name(),
+                    e
+                ))
+            })?;
+        }
+        DataType::Timestamp(unit, _) => {
+            let slab = match unit {
+                arrow::datatypes::TimeUnit::Second => fill_primitive_slab::<
+                    arrow::datatypes::TimestampSecondType,
+                >(
+                    &dims, &slab_positions, &value_column
+                )?,
+                arrow::datatypes::TimeUnit::Millisecond => fill_primitive_slab::<
+                    arrow::datatypes::TimestampMillisecondType,
+                >(
+                    &dims, &slab_positions, &value_column
+                )?,
+                arrow::datatypes::TimeUnit::Microsecond => fill_primitive_slab::<
+                    arrow::datatypes::TimestampMicrosecondType,
+                >(
+                    &dims, &slab_positions, &value_column
+                )?,
+                arrow::datatypes::TimeUnit::Nanosecond => fill_primitive_slab::<
+                    arrow::datatypes::TimestampSecondType,
+                >(
+                    &dims, &slab_positions, &value_column
+                )?,
+            };
+            variable.put(nc_extents, slab.view()).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "Failed to write slab Timestamp data to variable '{}': {}",
                     variable.name(),
                     e
                 ))
@@ -657,7 +721,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -672,7 +736,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -688,7 +752,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -704,7 +768,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -719,7 +783,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -734,7 +798,7 @@ fn write_ndarray_slab(
                 &dims,
                 &slab_positions,
                 &value_column,
-            );
+            )?;
 
             variable.put(nc_extents, slab.view()).map_err(|e| {
                 DataFusionError::Execution(format!(
@@ -804,9 +868,11 @@ fn fill_primitive_slab<T>(
     dims: &[usize],
     slab_positions: &[Option<Vec<usize>>],
     value_column: &arrow::array::ArrayRef,
-) -> ArrayBase<
-    ndarray::OwnedRepr<<T as ArrowPrimitiveType>::Native>,
-    ndarray::Dim<ndarray::IxDynImpl>,
+) -> datafusion::error::Result<
+    ArrayBase<
+        ndarray::OwnedRepr<<T as ArrowPrimitiveType>::Native>,
+        ndarray::Dim<ndarray::IxDynImpl>,
+    >,
 >
 where
     T: ArrowPrimitiveType,
@@ -831,10 +897,17 @@ where
         };
 
         let ix = ndarray::IxDyn(position.as_slice());
-        base[ix] = value;
+        base.get_mut(&ix)
+            .map(|cell| *cell = value.clone())
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "inferred slab position: {:?} was out of bounds",
+                    &ix
+                ))
+            })?;
     }
 
-    base
+    Ok(base)
 }
 
 /// Map each row's dimension values to their index within the unique value map,
@@ -853,6 +926,7 @@ fn dimension_slab_positions(
 
     for column_index in 0..dimension_columns.num_columns() {
         let field = schema.field(column_index);
+
         let array = dimension_columns.column(column_index);
         let erased_values = unique_values
             .get(field)
@@ -913,11 +987,24 @@ fn dimension_slab_positions(
             DataType::Int64
             | DataType::Date64
             | DataType::Time64(_)
-            | DataType::Timestamp(_, _)
             | DataType::Duration(_)
             | DataType::Interval(_) => {
                 push_primitive_positions!(arrow::datatypes::Int64Type, i64);
             }
+            DataType::Timestamp(unit, _) => match unit {
+                arrow::datatypes::TimeUnit::Second => {
+                    push_primitive_positions!(arrow::datatypes::TimestampSecondType, i64)
+                }
+                arrow::datatypes::TimeUnit::Millisecond => {
+                    push_primitive_positions!(arrow::datatypes::TimestampMillisecondType, i64);
+                }
+                arrow::datatypes::TimeUnit::Microsecond => {
+                    push_primitive_positions!(arrow::datatypes::TimestampMicrosecondType, i64)
+                }
+                arrow::datatypes::TimeUnit::Nanosecond => {
+                    push_primitive_positions!(arrow::datatypes::TimestampNanosecondType, i64)
+                }
+            },
             DataType::UInt8 => {
                 push_primitive_positions!(arrow::datatypes::UInt8Type, u8);
             }
@@ -1012,7 +1099,8 @@ mod tests {
             &dims,
             &slab_positions,
             &value_column,
-        );
+        )
+        .unwrap();
 
         assert_eq!(slab.shape(), &[3, 2]);
         assert_eq!(slab[[0, 0]], 10);

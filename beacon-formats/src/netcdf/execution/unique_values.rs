@@ -31,7 +31,8 @@ use datafusion::{
     execution::{RecordBatchStream, SendableRecordBatchStream},
     physical_expr::{LexOrdering, PhysicalSortExpr},
     physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, expressions::col, sorts::sort::SortExec,
+        DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
+        expressions::col, sorts::sort::SortExec,
     },
 };
 use futures::{Stream, StreamExt};
@@ -54,6 +55,7 @@ pub struct UniqueValuesExec {
     schema: Arc<Schema>,
     columns_to_track: Vec<usize>,
     handle_collection: UniqueValuesHandleCollection,
+    cache: PlanProperties,
 }
 
 impl UniqueValuesExec {
@@ -70,7 +72,7 @@ impl UniqueValuesExec {
     ) -> datafusion::error::Result<(Self, UniqueValuesHandleCollection)> {
         let schema = input.schema();
         let mut columns_to_track_indices = Vec::with_capacity(columns_to_track.len());
-        let mut sort_expr = Vec::with_capacity(columns_to_track.len());
+        // let mut sort_expr = Vec::with_capacity(columns_to_track.len());
         for col_name in columns_to_track {
             let index = schema.index_of(&col_name).map_err(|_| {
                 DataFusionError::Plan(format!(
@@ -78,27 +80,35 @@ impl UniqueValuesExec {
                 ))
             })?;
 
-            sort_expr.push(PhysicalSortExpr::new_default(col(&col_name, &schema)?));
+            // sort_expr.push(PhysicalSortExpr::new_default(col(&col_name, &schema)?));
             columns_to_track_indices.push(index);
         }
 
-        let lex_ordering = LexOrdering::new(sort_expr);
-
-        if let Some(lex) = lex_ordering {
-            let sorted_input = Arc::new(SortExec::new(lex, input.clone()));
-            let handle_collection = UniqueValuesHandleCollection::new();
-            let exec = Self {
-                input: sorted_input,
-                schema,
+        let handle_collection = UniqueValuesHandleCollection::new();
+        Ok((
+            Self {
+                schema: schema.clone(),
                 columns_to_track: columns_to_track_indices,
                 handle_collection: handle_collection.clone(),
-            };
-            Ok((exec, handle_collection))
-        } else {
-            Err(DataFusionError::Plan(
-                "UniqueValuesExec requires at least one column to track".to_string(),
-            ))
-        }
+                cache: Self::create_plan_properties(input.clone()),
+                input,
+            },
+            handle_collection,
+        ))
+    }
+
+    fn create_plan_properties(
+        input: Arc<dyn ExecutionPlan>,
+    ) -> datafusion::physical_plan::PlanProperties {
+        let mut eq_properties = input.equivalence_properties().clone();
+        eq_properties.clear_orderings();
+        eq_properties.clear_per_partition_constants();
+        datafusion::physical_plan::PlanProperties::new(
+            eq_properties,                       // Equivalence Properties
+            input.output_partitioning().clone(), // Output Partitioning
+            datafusion::physical_plan::execution_plan::EmissionType::Final, // Emission Type
+            input.boundedness(),
+        )
     }
 }
 
@@ -118,7 +128,7 @@ impl ExecutionPlan for UniqueValuesExec {
     }
 
     fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
-        self.input.properties()
+        &self.cache
     }
 
     fn schema(&self) -> SchemaRef {
@@ -148,6 +158,7 @@ impl ExecutionPlan for UniqueValuesExec {
             schema: self.schema.clone(),
             columns_to_track: self.columns_to_track.clone(),
             handle_collection: self.handle_collection.clone(),
+            cache: Self::create_plan_properties(children[0].clone()),
         }))
     }
 
@@ -492,7 +503,7 @@ impl UniqueValueStream {
         for &col_idx in projection {
             let field = schema.field(col_idx);
             let field_name = field.name().clone();
-            let (_, column_values_any) = unique_values.get_index_mut(col_idx).ok_or_else(|| {
+            let column_values_any = unique_values.get_mut(field).ok_or_else(|| {
                 DataFusionError::Internal(format!(
                     "Unique values handle missing column {field_name}"
                 ))

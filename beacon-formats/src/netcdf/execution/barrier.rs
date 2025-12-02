@@ -17,7 +17,9 @@ use datafusion::{
     error::DataFusionError,
     execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext},
     physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, coalesce_partitions::CoalescePartitionsExec,
+        DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
+        PlanProperties, coalesce_partitions::CoalescePartitionsExec,
+        sorts::sort_preserving_merge::SortPreservingMergeExec,
     },
 };
 use futures::{Stream, StreamExt};
@@ -33,15 +35,24 @@ pub struct NetCDFBarrierExec {
 }
 
 impl NetCDFBarrierExec {
-    /// Wraps any upstream plan in a [`CoalescePartitionsExec`] so we only have to
+    /// Wraps any input plan in a [`CoalescePartitionsExec`] so we only have to
     /// manage a single input stream.
-    pub fn new(upstream: Arc<dyn ExecutionPlan>, barrier: Arc<NetCDFBarrier>) -> Self {
-        let schema = upstream.schema();
-        let coalesced: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(upstream));
+    pub fn new(input: Arc<dyn ExecutionPlan>, barrier: Arc<NetCDFBarrier>) -> Self {
+        let input = Arc::new(CoalescePartitionsExec::new(input));
 
+        let schema = input.schema();
+        // let mut eq_properties = input.equivalence_properties().clone();
+        // eq_properties.clear_orderings();
+        // eq_properties.clear_per_partition_constants();
+        // let cache = PlanProperties::new(
+        //     eq_properties,                        // Equivalence Properties
+        //     Partitioning::UnknownPartitioning(1), // Output Partitioning
+        //     datafusion::physical_plan::execution_plan::EmissionType::Final, // Emission Type
+        //     datafusion::physical_plan::execution_plan::Boundedness::Bounded, // Boundedness
+        // );
         Self {
-            input: coalesced,
             schema,
+            input,
             barrier,
         }
     }
@@ -70,6 +81,10 @@ impl ExecutionPlan for NetCDFBarrierExec {
         vec![&self.input]
     }
 
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false]
+    }
+
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
@@ -80,11 +95,24 @@ impl ExecutionPlan for NetCDFBarrierExec {
             ));
         }
 
-        Ok(Arc::new(Self {
-            input: children[0].clone(),
-            schema: self.schema.clone(),
-            barrier: self.barrier.clone(),
-        }))
+        println!(
+            "Children Partitioning: {:?}",
+            children[0].properties().output_partitioning()
+        );
+
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            self.barrier.clone(),
+        )))
+    }
+
+    fn repartitioned(
+        &self,
+        _target_partitions: usize,
+        _config: &datafusion::config::ConfigOptions,
+    ) -> datafusion::error::Result<Option<Arc<dyn ExecutionPlan>>> {
+        // We always force a single partition upstream, so no repartitioning is possible
+        Ok(None)
     }
 
     fn schema(&self) -> arrow::datatypes::SchemaRef {
@@ -109,8 +137,16 @@ impl ExecutionPlan for NetCDFBarrierExec {
             "NetCDFBarrierExec only has 1 output partition"
         );
 
+        println!(
+            "NetCDFBarrierExec: Input partitions: {}",
+            self.input
+                .properties()
+                .output_partitioning()
+                .partition_count()
+        );
+
         // Because we wrapped upstream in CoalescePartitionsExec, it also has 1 partition
-        let input_stream = self.input.execute(0, ctx)?;
+        let input_stream = self.input.execute(partition, ctx)?;
 
         Ok(Box::pin(NetCDFBarrierStream::new(
             input_stream,
@@ -191,6 +227,10 @@ impl Stream for NetCDFBarrierStream {
                         }
                         Some(Err(e)) => return Poll::Ready(Some(Err(e))),
                         None => {
+                            println!(
+                                "NetCDFBarrierStream: completed buffering {} batches",
+                                self.barrier.finalized_batches().len()
+                            );
                             // Upstream complete → snapshot the batches for replay
                             self.replay_batches = self.barrier.finalized_batches();
                             self.replay_idx = 0;

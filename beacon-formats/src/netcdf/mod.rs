@@ -4,21 +4,24 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
-    common::{GetExt, Statistics},
+    common::{GetExt, Statistics, exec_datafusion_err},
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
         sink::DataSinkExec,
     },
-    physical_expr::LexRequirement,
-    physical_plan::ExecutionPlan,
+    physical_expr::{LexOrdering, LexRequirement, PhysicalSortExpr},
+    physical_plan::{
+        ExecutionPlan,
+        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+    },
 };
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::{
     Dataset, DatasetFormat, FileFormatFactoryExt,
     netcdf::{
-        execution::unique_values::UniqueValuesExec,
+        execution::{barrier::NetCDFBarrier, unique_values::UniqueValuesExec},
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
         sink::{NetCDFNdSink, NetCDFSink},
         source::{NetCDFFileSource, fetch_schema},
@@ -219,6 +222,22 @@ impl FileFormat for NetcdfFormat {
             let (unique_exec, collection_handle) =
                 UniqueValuesExec::new(input, unique_columns.clone())?;
 
+            // Create lex order requirements based on the unique columns
+            let schema = unique_exec.schema();
+            let mut sort_exprs = vec![];
+            for col in &unique_columns {
+                sort_exprs.push(PhysicalSortExpr::new_default(
+                    datafusion::physical_expr::expressions::col(col, &schema)?,
+                ));
+            }
+            let lex_order = LexOrdering::new(sort_exprs)
+                .ok_or(exec_datafusion_err!("Failed to create LexOrdering"))?;
+            // Create sort exec on the unique columns
+            let sort_exec = SortExec::new(lex_order.clone(), Arc::new(unique_exec));
+            // Create a sort preserving merge exec to ensure global ordering
+            let sort_preserving_merge_exec =
+                SortPreservingMergeExec::new(lex_order, Arc::new(sort_exec));
+
             let netcdf_sink = Arc::new(NetCDFNdSink::new(
                 self.sink_resolver.clone(),
                 conf,
@@ -227,7 +246,7 @@ impl FileFormat for NetcdfFormat {
             )?);
 
             Ok(Arc::new(DataSinkExec::new(
-                Arc::new(unique_exec),
+                Arc::new(sort_preserving_merge_exec),
                 netcdf_sink,
                 order_requirements,
             )))
