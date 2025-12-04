@@ -8,12 +8,13 @@ tikv-jemallocator = "0.6.0"
 pprof = { version = "0.15", features = ["flamegraph"] }
 
 [dependencies]
-axum = { version = "0.8.1", features = ["tracing"] }
+axum = { version = "0.8.1", features = ["tracing", "multipart"] }
 tower-http = { version = "0.6.1", features = ["trace", "cors"] }
 base64 = "0.22.1"
 
 futures = { workspace = true }
 futures-util = { workspace = true }
+bytes = { workspace = true }
 
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }

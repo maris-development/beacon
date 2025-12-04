@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use crate::{
     query_result::QueryResult,
     sys::{self, SystemInfo},
     virtual_machine,
 };
 use arrow::datatypes::SchemaRef;
-use beacon_data_lake::table::Table;
+use beacon_data_lake::{table::Table, DataLake};
 use beacon_formats::Dataset;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
@@ -131,5 +133,9 @@ impl Runtime {
 
     pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {
         self.virtual_machine.list_dataset_schema(file).await
+    }
+
+    pub fn data_lake(&self) -> Arc<DataLake> {
+        self.virtual_machine.data_lake()
     }
 }

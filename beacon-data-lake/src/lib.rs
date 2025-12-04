@@ -19,7 +19,10 @@ use datafusion::{
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
-use futures::{StreamExt, TryFutureExt};
+use futures::{
+    stream::BoxStream,
+    {StreamExt, TryFutureExt},
+};
 use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
 
 use crate::{
@@ -552,6 +555,99 @@ impl DataLake {
             .await
     }
 
+    pub async fn upload_file<S>(
+        &self,
+        file_path: &str,
+        mut stream: S,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        S: futures::Stream<Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>
+            + Unpin,
+    {
+        let object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(&self.data_directory_store_url)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let upload_path = object_store::path::Path::from(file_path);
+
+        let mut object_path = self.data_directory_prefix.clone();
+        for part in upload_path.parts() {
+            object_path = object_path.child(part.as_ref());
+        }
+
+        let mut writer = object_store
+            .put_multipart(&object_path)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            writer
+                .put_part(bytes.into())
+                .await
+                .map_err(|e: object_store::Error| Box::new(e))?;
+        }
+
+        // Finalize the upload
+        writer
+            .complete()
+            .await
+            .map_err(|e: object_store::Error| Box::new(e))?;
+
+        Ok(())
+    }
+
+    pub async fn download_file(
+        &self,
+        file_name: &str,
+    ) -> Result<
+        BoxStream<'static, Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(&self.data_directory_store_url)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let object_path = self.data_directory_prefix.child(file_name);
+
+        let get_result = object_store
+            .get(&object_path)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let stream = get_result.into_stream();
+
+        let file_stream = Box::pin(stream.map(|result| {
+            result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        }));
+
+        Ok(file_stream)
+    }
+
+    pub async fn delete_file(
+        &self,
+        file_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(&self.data_directory_store_url)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        let object_path = self.data_directory_prefix.child(file_name);
+
+        object_store
+            .delete(&object_path)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+        Ok(())
+    }
+
     pub fn remove_table(&self, table_name: &str) -> bool {
         let mut tables = self.tables.lock();
         if tables.remove(table_name).is_some() {
@@ -589,128 +685,5 @@ impl SchemaProvider for DataLake {
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
         let table_providers = self.table_providers.lock();
         Ok(table_providers.get(name).cloned())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use datafusion::{
-        datasource::listing::ListingTableUrl, execution::object_store::ObjectStoreUrl,
-    };
-    use futures::StreamExt;
-    use object_store::{aws::AmazonS3, parse_url, path::PathPart};
-    use url::Url;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_object_store() {
-        let aws = Arc::new(
-            AmazonS3Builder::new()
-                .with_endpoint("http://localhost:8000")
-                .with_bucket_name("era5")
-                .with_allow_http(true)
-                .with_skip_signature(true)
-                .build()
-                .unwrap(),
-        ) as Arc<dyn ObjectStore>;
-
-        let object_store_url = ObjectStoreUrl::parse("http://datasets").unwrap();
-
-        let session = SessionContext::new();
-        session.register_object_store(object_store_url.as_ref(), aws.clone());
-
-        let mut files = aws.list(None);
-        while let Some(file) = files.next().await {
-            match file {
-                Ok(file) => println!("Found file: {:?}", file),
-                Err(e) => eprintln!("Error listing files: {}", e),
-            }
-        }
-
-        let pattern = glob::Pattern::new("*.parquet").unwrap();
-        let listing_url =
-            ListingTableUrl::try_new(Url::parse("http://datasets/").unwrap(), Some(pattern))
-                .unwrap();
-
-        println!("Listing URL: {:?}", listing_url);
-
-        let state = session.state();
-        let mut stream = listing_url.list_all_files(&state, &aws, "").await.unwrap();
-
-        while let Some(file) = stream.next().await {
-            println!("Found file: {:?}", file);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_data_lake_initialization() {
-        let session_context = Arc::new(SessionContext::new());
-        let data_lake = DataLake::new(session_context.clone()).await;
-
-        println!("Data Lake Initialization {:?}", data_lake);
-
-        // List tables
-        // let tables = data_lake.table_names();
-        // println!("Tables in Data Lake: {:?}", tables);
-
-        // let store = data_lake
-        //     .session_context
-        //     .runtime_env()
-        //     .object_store(&data_lake.data_directory_store_url)
-        //     .unwrap();
-
-        // println!(
-        //     "Data Directory Store URL: {:?}, Prefix: {:?}",
-        //     data_lake.data_directory_store_url, data_lake.data_directory_prefix
-        // );
-        // println!("Store: {:?}", store);
-
-        // let mut entry_stream = store.list(None);
-        // while let Some(entry) = entry_stream.next().await {
-        //     println!("Found entry: {:?}", entry);
-        // }
-
-        panic!("")
-    }
-
-    #[tokio::test]
-    async fn test_name() {
-        // let fs = Arc::new(LocalFileSystem::new_with_prefix("./data").unwrap());
-        // let mut list_files = fs.list(None);
-
-        // // object_store::path::Path::from_url_path(path)
-
-        // let url = Url::parse("s3://bucket/path").unwrap();
-        // let (store, path) = parse_url(&url).unwrap();
-        // // assert_eq!(path.as_ref(), "path");
-        // println!("Path: {:?}", path);
-
-        let object_store_url = ObjectStoreUrl::parse("s3://example-bucket").unwrap();
-        println!("Object Store URL: {:?}", object_store_url);
-
-        let local_path = object_store::path::Path::parse("data/*.json").unwrap();
-        let full_path = format!("{}{}", object_store_url, local_path);
-
-        println!("Full Path: {}", full_path);
-        // let parsed_path = object_store::path::Path::fr(&full_path).unwrap();
-        // println!("Parsed Path: {:?}", parsed_path);
-        let table_url = ListingTableUrl::parse(&full_path);
-        println!("Table URL: {:?}", table_url);
-
-        // let part: PathPart<'_> = PathPart::parse("foo/bar").unwrap();
-        // println!("{:?}", part);
-
-        // while let Some(file) = list_files.next().await {
-        //     match file {
-        //         Ok(file) => {
-        //             println!("Found file: {:?}", file);
-
-        //             let parts = file.location.parts().collect::<Vec<_>>();
-        //             println!("File parts: {:?}", parts);
-        //         }
-        //         Err(e) => eprintln!("Error listing files: {}", e),
-        //     }
-        // }
     }
 }
