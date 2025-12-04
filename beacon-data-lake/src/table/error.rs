@@ -10,4 +10,6 @@ pub enum TableError {
     TableAlreadyExists(String),
     #[error("Table not found: {0}")]
     TableNotFound(String),
+    #[error("Datafusion Error: {0}")]
+    DatafusionError(#[from] datafusion::error::DataFusionError),
 }

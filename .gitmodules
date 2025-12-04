@@ -1,9 +1,12 @@
 [submodule "beacon-py"]
 	path = beacon-py
 	url = https://github.com/maris-development/beacon-py.git
+	branch = main
 [submodule "beacon-example"]
 	path = beacon-example
 	url = https://github.com/maris-development/beacon-example.git
+	branch = main
 [submodule "beacon-studio"]
 	path = beacon-studio
 	url = https://github.com/maris-development/beacon-studio.git
+	branch = main

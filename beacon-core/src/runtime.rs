@@ -7,6 +7,7 @@ use crate::{
 };
 use arrow::datatypes::SchemaRef;
 use beacon_data_lake::{table::Table, DataLake};
+use beacon_formats::Dataset;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
 use beacon_query::{parser::Parser, Query};
@@ -73,8 +74,22 @@ impl Runtime {
         self.virtual_machine.list_functions()
     }
 
+    pub fn list_table_functions(&self) -> Vec<FunctionDoc> {
+        self.virtual_machine.list_table_functions()
+    }
+
     pub async fn add_table(&self, table: Table) -> anyhow::Result<()> {
         self.virtual_machine.add_table(table).await
+    }
+
+    pub async fn apply_table_operation(
+        &self,
+        table_name: &str,
+        op: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.virtual_machine
+            .apply_table_operation(table_name, op)
+            .await
     }
 
     pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
@@ -106,7 +121,7 @@ impl Runtime {
         pattern: Option<String>,
         offset: Option<usize>,
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<Vec<Dataset>> {
         self.virtual_machine
             .list_datasets(pattern, offset, limit)
             .await

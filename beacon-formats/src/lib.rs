@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
-use datafusion::execution::SessionState;
+use datafusion::prelude::SessionContext;
+use object_store::ObjectMeta;
 
 use crate::{
     arrow::ArrowFormatFactory,
     csv::CsvFormatFactory,
-    geo_parquet::GeoParquetFormatFactory,
     netcdf::{
         NetCDFFormatFactory, NetcdfOptions,
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
     },
     parquet::ParquetFormatFactory,
+    zarr::ZarrFormatFactory,
 };
 
 pub mod arrow;
@@ -19,24 +20,64 @@ pub mod geo_parquet;
 pub mod netcdf;
 pub mod odv_ascii;
 pub mod parquet;
+pub mod zarr;
+
+pub trait FileFormatFactoryExt:
+    datafusion::datasource::file_format::FileFormatFactory + Send + Sync
+{
+    fn discover_datasets(&self, objects: &[ObjectMeta]) -> datafusion::error::Result<Vec<Dataset>>;
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Dataset {
+    pub file_path: String,
+    pub format: DatasetFormat,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DatasetFormat {
+    Parquet,
+    Csv,
+    Arrow,
+    NetCDF,
+    Zarr,
+}
+
+impl Dataset {
+    pub fn update_file_path(&mut self, new_path: String) {
+        self.file_path = new_path;
+    }
+
+    pub fn file_path(&self) -> &str {
+        &self.file_path
+    }
+}
 
 /// Register file formats with the session state that can be used for reading
-pub fn register_file_formats(
-    session_state: &mut SessionState,
+pub fn file_formats(
+    session_context: Arc<SessionContext>,
     netcdf_object_resolver: Arc<NetCDFObjectResolver>,
     netcdf_sink_resolver: Arc<NetCDFSinkResolver>,
-) -> datafusion::error::Result<()> {
-    session_state.register_file_format(Arc::new(ParquetFormatFactory), true)?;
-    session_state.register_file_format(Arc::new(CsvFormatFactory), true)?;
-    session_state.register_file_format(Arc::new(ArrowFormatFactory), true)?;
-    session_state.register_file_format(Arc::new(GeoParquetFormatFactory::default()), true)?;
-    session_state.register_file_format(
+) -> datafusion::error::Result<Vec<Arc<dyn FileFormatFactoryExt>>> {
+    let state_ref = session_context.state_ref();
+    let mut state = state_ref.write();
+
+    let formats: Vec<Arc<dyn FileFormatFactoryExt>> = vec![
+        Arc::new(ParquetFormatFactory),
+        Arc::new(CsvFormatFactory),
+        Arc::new(ArrowFormatFactory),
         Arc::new(NetCDFFormatFactory::new(
             NetcdfOptions::default(),
             netcdf_object_resolver,
             netcdf_sink_resolver,
         )),
-        true,
-    )?;
-    Ok(())
+        Arc::new(ZarrFormatFactory),
+    ];
+
+    for format in formats.iter() {
+        state.register_file_format(format.clone(), true)?;
+    }
+
+    Ok(formats)
 }

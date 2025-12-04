@@ -29,15 +29,17 @@ impl FileCollection {
         file_format: Arc<dyn FileFormat>,
         table_urls: Vec<ListingTableUrl>,
     ) -> Result<Self, DataFusionError> {
-        let listing_options = ListingOptions::new(file_format).with_file_extension("");
+        let listing_options = ListingOptions::new(file_format)
+            .with_file_extension("")
+            .with_target_partitions(session_state.config_options().execution.target_partitions)
+            .with_collect_stat(true);
         let mut schemas = vec![];
 
         for table_url in &table_urls {
             tracing::debug!("Infer schema for table: {}", table_url);
             let schema = listing_options
                 .infer_schema(session_state, table_url)
-                .await
-                .unwrap();
+                .await?;
 
             schemas.push(schema.clone());
         }
@@ -128,6 +130,7 @@ impl TableProvider for FileCollection {
             .inner_table
             .scan(state, projection, filters, limit)
             .await?;
+
         Ok(plan)
     }
 

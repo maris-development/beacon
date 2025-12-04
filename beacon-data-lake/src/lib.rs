@@ -7,7 +7,11 @@ use std::{
 };
 
 use arrow::datatypes::SchemaRef;
-use beacon_formats::netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver};
+use beacon_common::listing_url::parse_listing_table_url;
+use beacon_formats::{
+    Dataset, FileFormatFactoryExt, file_formats,
+    netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
+};
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     datasource::listing::ListingTableUrl,
@@ -15,14 +19,15 @@ use datafusion::{
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
-use futures::{StreamExt, stream::BoxStream};
+use futures::{
+    stream::BoxStream,
+    {StreamExt, TryFutureExt},
+};
 use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
-use url::Url;
 
 use crate::{
     files::{collection::FileCollection, temp_output_file::TempOutputFile},
     table::{Table, empty::EmptyTable, error::TableError},
-    util::split_glob,
 };
 
 pub mod files;
@@ -56,6 +61,9 @@ pub struct DataLake {
     // Map of tables
     tables: parking_lot::Mutex<HashMap<String, Table>>,
     table_providers: parking_lot::Mutex<HashMap<String, Arc<dyn TableProvider>>>,
+
+    // File formats
+    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 }
 
 impl Debug for DataLake {
@@ -72,50 +80,16 @@ impl Debug for DataLake {
 }
 
 impl DataLake {
+    #[inline(always)]
     pub fn try_create_listing_url(
         &self,
         path: String,
     ) -> datafusion::error::Result<ListingTableUrl> {
-        let parts = self.data_directory_prefix.parts().collect::<Vec<_>>();
-        if let Some((base, pattern)) = split_glob(&path) {
-            let pattern = glob::Pattern::new(&pattern).unwrap();
-            let mut full_path = format!(
-                "{}{}",
-                self.data_directory_store_url,
-                object_store::path::Path::from_iter(parts.clone().into_iter()),
-            );
-            if base.components().next().is_some() {
-                full_path.push_str(format!("/{}", base.as_os_str().to_string_lossy()).as_str());
-            }
-            if !full_path.ends_with('/') {
-                full_path.push('/');
-            }
-
-            let url = Url::parse(&full_path).unwrap();
-
-            let table_url = ListingTableUrl::try_new(url, Some(pattern))?;
-
-            Ok(table_url)
-        } else {
-            let mut full_path = format!(
-                "{}{}",
-                self.data_directory_store_url,
-                object_store::path::Path::from_iter(parts.clone().into_iter()),
-            );
-
-            // If full path ends with '/' then just append the path, otherwise append without a '/'
-            if full_path.ends_with('/') {
-                full_path.push_str(&path);
-            } else {
-                full_path.push_str(format!("/{}", path).as_str());
-            }
-
-            let url = Url::parse(&full_path).unwrap();
-
-            let table_url = ListingTableUrl::try_new(url, None)?;
-
-            Ok(table_url)
-        }
+        parse_listing_table_url(
+            &self.data_directory_store_url,
+            &self.data_directory_prefix,
+            &path,
+        )
     }
 
     pub fn netcdf_object_resolver() -> Arc<NetCDFObjectResolver> {
@@ -161,6 +135,14 @@ impl DataLake {
         Arc::new(NetCDFSinkResolver::new(absolute_path))
     }
 
+    pub fn data_object_store_url(&self) -> ObjectStoreUrl {
+        self.data_directory_store_url.clone()
+    }
+
+    pub fn data_object_store_prefix(&self) -> object_store::path::Path {
+        self.data_directory_prefix.clone()
+    }
+
     pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {
         TempOutputFile::new(self, extension)
     }
@@ -177,6 +159,13 @@ impl DataLake {
 
         let mut table_providers = HashMap::new();
         let mut tables = HashMap::new();
+
+        let file_formats = file_formats(
+            session_context.clone(),
+            DataLake::netcdf_object_resolver(),
+            DataLake::netcdf_sink_resolver(),
+        )
+        .unwrap();
 
         Self::init_tables(
             tables_url.clone(),
@@ -199,6 +188,7 @@ impl DataLake {
             tmp_directory_prefix,
             session_context,
             config,
+            file_formats,
             table_providers: parking_lot::Mutex::new(table_providers),
             tables: parking_lot::Mutex::new(tables),
         };
@@ -275,6 +265,7 @@ impl DataLake {
         context: Arc<SessionContext>,
     ) -> (ObjectStoreUrl, object_store::path::Path) {
         if beacon_config::CONFIG.s3_data_lake {
+            tracing::info!("Configuring S3 object store for datasets");
             // Fetch the s3 settings from the config
             let mut s3_object_store_builder = AmazonS3Builder::new()
                 .with_allow_http(true)
@@ -314,6 +305,7 @@ impl DataLake {
 
             (object_store_url, object_store::path::Path::from(""))
         } else {
+            tracing::info!("Configuring LOCAL FS object store for datasets");
             let base_path = PathBuf::from("./data");
             let dataset_directory = base_path.join("datasets");
 
@@ -398,7 +390,7 @@ impl DataLake {
         offset: Option<usize>,
         limit: Option<usize>,
         pattern: Option<String>,
-    ) -> datafusion::error::Result<Vec<String>> {
+    ) -> datafusion::error::Result<Vec<Dataset>> {
         let state = self.session_context.state();
         let object_store = self
             .session_context
@@ -408,43 +400,44 @@ impl DataLake {
         let listing_url =
             self.try_create_listing_url(pattern.unwrap_or_else(|| "*".to_string()))?;
 
-        let mut datasets = Vec::new();
+        let mut objects = Vec::new();
         let mut entry_stream = listing_url
             .list_all_files(&state, &object_store, "")
             .await?;
 
         while let Some(entry) = entry_stream.next().await {
             if let Ok(entry) = entry {
-                datasets.push(entry.location.to_string());
+                objects.push(entry);
             }
         }
 
-        datasets.sort();
+        let mut datasets = vec![];
 
-        if let Some(offset) = offset {
-            datasets = datasets.into_iter().skip(offset).collect();
+        for file_format in self.file_formats.iter() {
+            let format_datasets = file_format.discover_datasets(&objects)?;
+            datasets.extend(format_datasets);
         }
 
-        if let Some(limit) = limit {
-            datasets = datasets.into_iter().take(limit).collect();
-        }
-
-        // For each dataset, remove the prefix if the file starts with that prefix
-        let mut prefix = self.data_directory_prefix.clone().to_string();
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-
-        datasets = datasets
+        // From each dataset, remove the dataset prefix path.
+        let datasets: Vec<Dataset> = datasets
             .into_iter()
-            .map(|d| {
-                if d.starts_with(&prefix) {
-                    d.strip_prefix(&prefix).unwrap().to_string()
-                } else {
-                    d
+            .map(|mut dataset| {
+                let updated_file_path = dataset
+                    .file_path()
+                    .strip_prefix(&format!("{}/", self.data_directory_prefix.as_ref()));
+
+                if let Some(stripped_path) = updated_file_path {
+                    dataset.update_file_path(stripped_path.to_string());
                 }
+
+                dataset
             })
             .collect();
+
+        // Apply offset and limit
+        let start = offset.unwrap_or(0);
+        let end = limit.map(|l| start + l).unwrap_or(datasets.len());
+        let datasets = datasets.into_iter().skip(start).take(end - start).collect();
 
         Ok(datasets)
     }
@@ -454,16 +447,23 @@ impl DataLake {
         file_pattern: &str,
     ) -> datafusion::error::Result<SchemaRef> {
         let session_state = self.session_context.state();
-        let extension = match Path::new(file_pattern).extension() {
-            Some(ext) => ext.to_string_lossy().to_string(),
-            None => {
-                return Err(DataFusionError::Plan(format!(
-                    "No file extension found for {}. No file type information available.",
-                    file_pattern
-                )));
+        let extension = if file_pattern.ends_with("zarr.json") {
+            "zarr.json".to_string()
+        } else {
+            match Path::new(file_pattern).extension() {
+                Some(ext) => {
+                    // Fetch file format from extension
+                    ext.to_string_lossy().to_string()
+                }
+                None => {
+                    return Err(DataFusionError::Plan(format!(
+                        "No file extension found for {}. No file type information available.",
+                        file_pattern
+                    )));
+                }
             }
         };
-
+        tracing::debug!("Interpreted file extension: {}", extension);
         let listing_url = self.try_create_listing_url(file_pattern.to_string())?;
 
         let file_format_factory = session_state
@@ -471,8 +471,8 @@ impl DataLake {
             .ok_or_else(|| {
                 DataFusionError::Plan(format!("No file format reader found for {}", extension))
             })?;
-
         let file_format = file_format_factory.create(&session_state, &HashMap::new())?;
+        tracing::debug!("Using file format: {:?}", file_format);
 
         let file_collection =
             FileCollection::new(&session_state, file_format, vec![listing_url]).await?;
@@ -531,6 +531,28 @@ impl DataLake {
         table_providers.insert(table.table_name.clone(), table_provider);
         tables.insert(table.table_name.clone(), table);
         Ok(())
+    }
+
+    pub async fn apply_operation(
+        &self,
+        table_name: &str,
+        _op: serde_json::Value,
+    ) -> Result<(), TableError> {
+        let tables = self.tables.lock();
+        let table = tables
+            .get(table_name)
+            .ok_or(TableError::TableNotFound(table_name.to_string()))?;
+
+        table
+            .table_type
+            .apply_operation(
+                _op,
+                self.session_context.clone(),
+                &self.data_directory_store_url,
+                &self.data_directory_prefix,
+            )
+            .map_err(|e| TableError::GenericTableError(format!("Failed to apply operation: {}", e)))
+            .await
     }
 
     pub async fn upload_file<S>(

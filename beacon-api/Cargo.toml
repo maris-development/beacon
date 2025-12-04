@@ -1,12 +1,15 @@
 [package]
 name = "beacon-api"
-version = "1.2.0"
+version = "1.4.1"
 edition = "2021"
+
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = "0.6.0"
+pprof = { version = "0.15", features = ["flamegraph"] }
 
 [dependencies]
 axum = { version = "0.8.1", features = ["tracing", "multipart"] }
 tower-http = { version = "0.6.1", features = ["trace", "cors"] }
-tikv-jemallocator = "0.6.0"
 base64 = "0.22.1"
 
 futures = { workspace = true }
@@ -20,6 +23,7 @@ utoipa-swagger-ui = { workspace = true }
 tokio = { workspace = true}
 tokio-util = { workspace = true}
 serde = { workspace = true}
+serde_json = { workspace = true}
 anyhow = { workspace = true}
 arrow = { workspace = true}
 arrow-schema = { workspace = true}
@@ -33,4 +37,5 @@ beacon-core = { path = "../beacon-core" }
 beacon-query = { path = "../beacon-query" }
 beacon-planner = { path = "../beacon-planner" }
 beacon-functions = { path = "../beacon-functions" }
+beacon-formats = { path = "../beacon-formats" }
 beacon-data-lake = { path = "../beacon-data-lake" }

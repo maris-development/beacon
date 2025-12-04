@@ -1,0 +1,52 @@
+{
+  "shape": [
+    1208
+  ],
+  "data_type": "float32",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        1208
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0.0,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 0,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "long_name": "latitude",
+    "standard_name": "latitude",
+    "axis": "Y",
+    "units": "degrees_north",
+    "comment": "geographical coordinates, WGS84 projection",
+    "valid_min": 37.0,
+    "valid_max": 49.0,
+    "_FillValue": "AAAAAAAA+H8="
+  },
+  "dimension_names": [
+    "lat"
+  ],
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

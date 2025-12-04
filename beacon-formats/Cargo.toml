@@ -1,6 +1,6 @@
 [package]
 name = "beacon-formats"
-version = "1.2.0"
+version = "1.4.0"
 edition = "2024"
 
 [dependencies]
@@ -11,6 +11,7 @@ geoarrow = { workspace = true }
 geoarrow-array = { workspace = true }
 geoparquet = { workspace = true }
 parquet = { workspace = true }
+ordered-float = { workspace = true }
 
 typetag =  { workspace=true}
 async-trait = { workspace=true}
@@ -22,10 +23,25 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
+indexmap = { workspace = true }
 
 async_zip = { version = "0.0.18", features = ["tokio", "zstd", "deflate"] }
 tokio-util = "0.7.16"
+zarrs_object_store = "0.5.0"
+zarrs_storage = "0.4.0"
+zarrs = {"version" = "0.22.2", features = ["async"]}
+
+url = "2.5.4"
+glob = "0.3.3"
+num-traits = "0.2.19"
+ndarray = { version = ">=0.15,<=0.16" }
+chrono = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
+beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }
+nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main" }
+
+[dev-dependencies]
+tempfile = "3.10"

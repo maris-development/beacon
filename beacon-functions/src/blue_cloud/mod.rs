@@ -1,4 +1,5 @@
 pub mod argo;
+pub mod cmems;
 pub mod common;
 pub mod cora;
 pub mod emodnet_chemistry;
@@ -9,6 +10,7 @@ pub mod world_ocean_database;
 pub fn blue_cloud_udfs() -> Vec<datafusion::logical_expr::ScalarUDF> {
     let mut udfs = vec![];
     udfs.extend(argo::argo_udfs());
+    udfs.extend(cmems::cmems_udfs());
     udfs.extend(common::common_udfs());
     udfs.extend(cora::cora_udfs());
     udfs.extend(emodnet_chemistry::emodnet_chemistry_udfs());

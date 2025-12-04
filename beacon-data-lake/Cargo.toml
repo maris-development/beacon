@@ -1,6 +1,6 @@
 [package]
 name = "beacon-data-lake"
-version = "1.2.0"
+version = "1.4.1"
 edition = "2024"
 
 [dependencies]
@@ -34,6 +34,7 @@ indexmap = { workspace = true }
 
 utoipa = { workspace=true}
 
-
+beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
 beacon-formats = { path = "../beacon-formats" }
+beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }

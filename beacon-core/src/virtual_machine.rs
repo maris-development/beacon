@@ -5,10 +5,12 @@ use arrow::{
     datatypes::{SchemaRef, UInt64Type},
 };
 use beacon_data_lake::{table::Table, DataLake};
-use beacon_functions::function_doc::FunctionDoc;
+use beacon_formats::{Dataset, FileFormatFactoryExt};
+use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
 use beacon_planner::plan::BeaconQueryPlan;
 use datafusion::{
-    catalog::SchemaProvider,
+    catalog::{SchemaProvider, TableFunctionImpl},
+    datasource::listing::ListingTableUrl,
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
@@ -17,6 +19,7 @@ use datafusion::{
 };
 
 pub struct VirtualMachine {
+    table_functions: Vec<Arc<dyn BeaconTableFunctionImpl>>,
     session_ctx: Arc<SessionContext>,
     data_lake: Arc<DataLake>,
 }
@@ -50,8 +53,27 @@ impl VirtualMachine {
         for udf in blue_cloud_udfs {
             session_ctx.register_udf(udf);
         }
+
+        // Register table functions
+        let table_functions = beacon_functions::file_formats::register_table_functions(
+            tokio::runtime::Handle::current(),
+            session_ctx.clone(),
+            data_lake.data_object_store_url(),
+            data_lake.data_object_store_prefix(),
+            DataLake::netcdf_object_resolver(),
+            DataLake::netcdf_sink_resolver(),
+        );
+
+        for tf in table_functions.iter() {
+            session_ctx.register_udtf(
+                tf.name().as_str(),
+                Arc::clone(tf) as Arc<dyn TableFunctionImpl>,
+            );
+        }
+
         //FINISH INIT FUNCTIONS FROM beacon-functions module
         Ok(Self {
+            table_functions,
             session_ctx,
             data_lake,
         })
@@ -76,17 +98,11 @@ impl VirtualMachine {
             .with_memory_pool(mem_pool)
             .build_arc()?;
 
-        let mut session_state = SessionStateBuilder::new()
+        let session_state = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(runtime_env)
             .with_default_features()
             .build();
-
-        beacon_formats::register_file_formats(
-            &mut session_state,
-            DataLake::netcdf_object_resolver(),
-            DataLake::netcdf_sink_resolver(),
-        )?;
 
         let session_context = Arc::new(SessionContext::new_with_state(session_state));
 
@@ -107,13 +123,26 @@ impl VirtualMachine {
             .state()
             .scalar_functions()
             .values()
-            .map(|f| FunctionDoc::from_scalar(f))
+            .flat_map(|f| FunctionDoc::from_scalar(f))
             .collect();
 
         functions.sort_by(|a, b| a.function_name.cmp(&b.function_name));
         functions.dedup_by(|a, b| a.function_name == b.function_name);
 
         functions
+    }
+
+    pub fn list_table_functions(&self) -> Vec<FunctionDoc> {
+        let mut table_functions: Vec<FunctionDoc> = self
+            .table_functions
+            .iter()
+            .map(|tf| FunctionDoc::from_beacon_table_function(tf.as_ref()))
+            .collect();
+
+        table_functions.sort_by(|a, b| a.function_name.cmp(&b.function_name));
+        table_functions.dedup_by(|a, b| a.function_name == b.function_name);
+
+        table_functions
     }
 
     pub fn list_tables(&self) -> Vec<String> {
@@ -197,7 +226,7 @@ impl VirtualMachine {
         pattern: Option<String>,
         offset: Option<usize>,
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<Vec<Dataset>> {
         Ok(self.data_lake.list_datasets(offset, limit, pattern).await?)
     }
 
@@ -207,5 +236,13 @@ impl VirtualMachine {
 
     pub(crate) async fn list_table_config(&self, table_name: String) -> Option<Table> {
         self.data_lake.list_table(&table_name)
+    }
+
+    pub(crate) async fn apply_table_operation(
+        &self,
+        table_name: &str,
+        op: serde_json::Value,
+    ) -> Result<(), anyhow::Error> {
+        Ok(self.data_lake.apply_operation(table_name, op).await?)
     }
 }
