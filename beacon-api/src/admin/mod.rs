@@ -61,6 +61,8 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
         .routes(routes!(tables::create_table))
         .routes(routes!(tables::apply_table_operation))
         .routes(routes!(tables::delete_table))
+        .routes(routes!(file::upload_file))
+        .routes(routes!(file::download_handler))
         .layer(axum::middleware::from_fn(basic_auth))
         .layer(DefaultBodyLimit::disable())
         .split_for_parts();

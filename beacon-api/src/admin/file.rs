@@ -1,18 +1,28 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Multipart, Path, Query, State}, http::StatusCode, response::IntoResponse, Json
+    extract::{Multipart, Query, State}, http::StatusCode, response::IntoResponse, Json
 };
 use beacon_core::{runtime::Runtime};
 use futures::StreamExt;
+use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::admin::file;
+/// Just a schema for axum native multipart
+#[derive(Deserialize, ToSchema)]
+#[allow(unused)]
+struct UploadDatasetMultipart {
+    #[schema(example = "base_dir/sub_dir")]
+    prefix: String,
+    #[schema(format = Binary, content_media_type = "application/octet-stream")]
+    file: String,
+}
 
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "file",
-    post, 
+    post,
+    request_body(content = UploadDatasetMultipart, content_type = "multipart/form-data"),
     path = "/api/admin/upload-file", 
     responses((status = 200, description = "File uploaded successfully")),
     security(
@@ -24,38 +34,58 @@ pub async fn upload_file(
     State(state): State<Arc<Runtime>>,
     mut multipart: Multipart,
 ) -> Result<Json<String>, Json<String>> {
-    while let Some(field) = multipart.next_field().await.map_err(|e| e.to_string())? {
-        let file_name = field
-            .file_name()
-            .ok_or(Json("missing filename".to_string()))?
-            .to_string();
+    let mut prefix: Option<String> = None;
 
-        tracing::info!("📤 Uploading `{}` to object store...", file_name);
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Json(format!("Multipart error: {e}")))?
+    {
+        let name = field.name().unwrap_or("");
 
-        // Convert Axum field into a stream of Bytes
-        let stream = futures::stream::unfold(field, |mut f| async {
-            match f.chunk().await {
-                Ok(Some(chunk)) => {
-                    tracing::debug!("Read {} bytes for file `{}`", chunk.len(), file_name);
-                    Some((Ok::<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>(chunk), f))
-                },
-                Ok(None) => None,
-                Err(e) => Some((Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>), f)),
+        match name {
+            "prefix" => {
+                // read small text field
+                let value = field.text().await.unwrap_or_default();
+                prefix = Some(value);
             }
-        });
-        let boxed_stream = Box::pin(stream);
 
-        // Stream upload into the data lake
-        let data_lake = state.data_lake();
-        match data_lake.upload_file(&file_name, boxed_stream).await {
-            Ok(_) => (),
-            Err(e) => {
-                tracing::error!("❌ Failed to upload `{}`: {}", file_name, e);
-                return Err(Json(format!("Failed to upload file: {}", e)));
+            "file" => {
+                let file_name = field
+                    .file_name()
+                    .ok_or_else(|| Json("missing filename".to_string()))?
+                    .to_string();
+
+                let prefix = prefix.clone().unwrap_or_default();
+                let full_path = format!("{}/{}", prefix, file_name);
+
+                tracing::info!("📤 Uploading `{}`...", full_path);
+
+                // Convert Axum field into a stream of Bytes
+                let stream = futures::stream::unfold(field, |mut f| async {
+                    match f.chunk().await {
+                        Ok(Some(chunk)) => Some((Ok(chunk), f)),
+                        Ok(None) => None,
+                        Err(e) => Some((Err(e.into()), f)),
+                    }
+                });
+
+                let boxed_stream = Box::pin(stream);
+                println!("Full path: {}", full_path);
+                // Stream into storage
+                let data_lake = state.data_lake();
+                data_lake
+                    .upload_file(&full_path, boxed_stream)
+                    .await
+                    .map_err(|e| Json(format!("Failed to upload file: {e}")))?;
+
+                tracing::info!("✅ Uploaded `{}`", full_path);
+            }
+
+            _ => {
+                // Ignore unknown fields
             }
         }
-
-        tracing::info!("✅ Uploaded `{}`", file_name);
     }
 
     Ok(Json("Upload successful!".to_string()))
@@ -66,7 +96,19 @@ pub struct DownloadQuery {
     pub file_name: String,
 }
 
-async fn download_handler(
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "file",
+    get, 
+    params(DownloadQuery),
+    path = "/api/admin/download-file", 
+    responses((status = 200, description = "File downloaded successfully")),
+    security(
+        ("basic-auth" = []),
+        ("bearer" = [])
+    ))
+]
+pub async fn download_handler(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<DownloadQuery>,
 ) -> impl IntoResponse {

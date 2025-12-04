@@ -557,7 +557,7 @@ impl DataLake {
 
     pub async fn upload_file<S>(
         &self,
-        file_name: &str,
+        file_path: &str,
         mut stream: S,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     where
@@ -570,7 +570,12 @@ impl DataLake {
             .object_store(&self.data_directory_store_url)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        let object_path = self.data_directory_prefix.child(file_name);
+        let upload_path = object_store::path::Path::from(file_path);
+
+        let mut object_path = self.data_directory_prefix.clone();
+        for part in upload_path.parts() {
+            object_path = object_path.child(part.as_ref());
+        }
 
         let mut writer = object_store
             .put_multipart(&object_path)
