@@ -78,6 +78,11 @@ pub enum OutputFormat {
     // Json,
     // Odv(OdvOptions),
     NetCDF,
+    #[serde(alias = "nd_netcdf")]
+    NdNetCDF {
+        /// Columns to use as dimensions for the ND NetCDF output.
+        dimension_columns: Vec<String>, // Cannot be empty
+    },
     /// GeoParquet format with optional longitude/latitude columns.
     GeoParquet {
         /// Name of the longitude column, if any.
@@ -97,6 +102,7 @@ impl OutputFormat {
             OutputFormat::Parquet => QueryOutputFile::Parquet(temp_file),
             OutputFormat::GeoParquet { .. } => QueryOutputFile::GeoParquet(temp_file),
             OutputFormat::NetCDF => QueryOutputFile::NetCDF(temp_file),
+            OutputFormat::NdNetCDF { .. } => QueryOutputFile::NetCDF(temp_file),
             OutputFormat::Odv(_) => QueryOutputFile::Odv(temp_file),
         }
     }
@@ -116,6 +122,18 @@ impl OutputFormat {
             }))),
             OutputFormat::NetCDF => {
                 let options = NetcdfOptions::default();
+                let object_resolver = DataLake::netcdf_object_resolver();
+                let sink_resolver = DataLake::netcdf_sink_resolver();
+
+                format_as_file_type(Arc::new(NetCDFFormatFactory::new(
+                    options,
+                    object_resolver,
+                    sink_resolver,
+                )))
+            }
+            OutputFormat::NdNetCDF { dimension_columns } => {
+                let mut options = NetcdfOptions::default();
+                options.unique_value_columns = dimension_columns.clone();
                 let object_resolver = DataLake::netcdf_object_resolver();
                 let sink_resolver = DataLake::netcdf_sink_resolver();
 

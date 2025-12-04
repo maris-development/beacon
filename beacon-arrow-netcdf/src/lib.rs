@@ -9,6 +9,8 @@ pub mod error;
 pub mod nc_array;
 pub mod reader;
 pub mod writer;
+pub use netcdf;
+pub use netcdf_sys;
 
 pub type NcResult<T> = std::result::Result<T, error::ArrowNetCDFError>;
 

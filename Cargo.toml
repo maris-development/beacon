@@ -9,6 +9,7 @@ futures-util = "0.3.31"
 async-trait = "0.1.85"
 bytes = "1.9.0"
 parking_lot = { version = "0.12.3", features = ["send_guard", "serde"] }
+ordered-float = "5.1.0"
 
 
 utoipa = { version= "=5.3.1", features = ["chrono","preserve_order", "preserve_path_order","rc_schema", "axum_extras"] }
