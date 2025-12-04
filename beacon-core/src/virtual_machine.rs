@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arrow::{
     array::AsArray,
@@ -7,7 +7,7 @@ use arrow::{
 use beacon_data_lake::{table::Table, DataLake};
 use beacon_formats::{Dataset, FileFormatFactoryExt};
 use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
-use beacon_planner::plan::BeaconQueryPlan;
+use beacon_planner::{metrics::ConsolidatedMetrics, plan::BeaconQueryPlan};
 use datafusion::{
     catalog::{SchemaProvider, TableFunctionImpl},
     datasource::listing::ListingTableUrl,
@@ -17,6 +17,10 @@ use datafusion::{
     },
     prelude::{SessionConfig, SessionContext},
 };
+use futures::StreamExt;
+use parking_lot::Mutex;
+
+use crate::query_result::{ArrowOutputStream, QueryOutput, QueryResult};
 
 pub struct VirtualMachine {
     table_functions: Vec<Arc<dyn BeaconTableFunctionImpl>>,
@@ -182,39 +186,63 @@ impl VirtualMachine {
     }
 
     #[tracing::instrument(skip(self, beacon_plan))]
-    pub async fn run_plan(&self, beacon_plan: &BeaconQueryPlan) -> anyhow::Result<()> {
-        let result = datafusion::physical_plan::collect(
-            beacon_plan.physical_plan.clone(),
-            self.session_ctx().task_ctx(),
-        )
-        .await?;
+    pub async fn run_plan(
+        &self,
+        beacon_plan: BeaconQueryPlan,
+        query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
+    ) -> anyhow::Result<QueryResult> {
+        let task_ctx = self.session_ctx().task_ctx();
 
-        match result
-            .get(0)
-            .map(|r| r.column(0).as_primitive_opt::<UInt64Type>())
-            .flatten()
-        {
-            Some(num_rows_arr) => {
-                if num_rows_arr.len() > 0 {
-                    let num_rows = num_rows_arr.value(0);
-                    beacon_plan.metrics_tracker.add_output_rows(num_rows);
-                    tracing::info!("Query Returned {} rows", num_rows);
+        match beacon_plan.output_file {
+            Some(output_file) => {
+                // This means the plan contains an output file to write to. We should run the entire stream to completion. Afterwards we can return the output file info.
+                let mut stream = datafusion::physical_plan::execute_stream(
+                    beacon_plan.physical_plan.clone(),
+                    task_ctx,
+                )?;
+
+                let mut total_rows: u64 = 0;
+                while let Some(maybe_batch) = stream.next().await {
+                    let batch = maybe_batch?;
+                    let num_rows_array = batch.column(0).as_primitive::<UInt64Type>();
+                    if num_rows_array.len() > 0 {
+                        let num_rows = num_rows_array.value(0);
+                        beacon_plan.metrics_tracker.add_output_rows(num_rows);
+                        total_rows += num_rows;
+                    }
                 }
+
+                tracing::info!("Query Returned {} rows", total_rows);
+                tracing::info!("Query result size in bytes: {:?}", output_file.size());
+
+                beacon_plan
+                    .metrics_tracker
+                    .add_output_bytes(output_file.size()?);
+
+                Ok(QueryResult {
+                    query_output: QueryOutput::File(output_file),
+                    query_id: beacon_plan.query_id,
+                })
             }
             None => {
-                tracing::error!("Error getting number of rows from plan");
+                // This means the plan does not contain an output file. We can stream results back to the user directly.
+                let stream = datafusion::physical_plan::execute_stream(
+                    beacon_plan.physical_plan.clone(),
+                    task_ctx,
+                )?;
+
+                let output_stream = ArrowOutputStream {
+                    stream,
+                    metrics: beacon_plan.metrics_tracker.clone(),
+                    all_consolidated_metrics: query_metrics.clone(),
+                };
+
+                Ok(QueryResult {
+                    query_output: QueryOutput::Stream(output_stream),
+                    query_id: beacon_plan.query_id,
+                })
             }
         }
-        // Get the row count
-        tracing::info!(
-            "Query result size in bytes: {:?}",
-            beacon_plan.output_buffer.size()
-        );
-        beacon_plan
-            .metrics_tracker
-            .add_output_bytes(beacon_plan.output_buffer.size()?);
-
-        Ok(())
     }
 
     pub async fn list_dataset_schema(&self, dataset: String) -> anyhow::Result<SchemaRef> {

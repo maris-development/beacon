@@ -4,14 +4,14 @@ use crate::output::QueryOutputFile;
 
 pub struct ParsedPlan {
     pub datafusion_plan: LogicalPlan,
-    pub output: QueryOutputFile,
+    pub output_file: Option<QueryOutputFile>,
 }
 
 impl ParsedPlan {
-    pub fn new(datafusion_plan: LogicalPlan, output: QueryOutputFile) -> Self {
+    pub fn new(datafusion_plan: LogicalPlan, output_file: Option<QueryOutputFile>) -> Self {
         Self {
             datafusion_plan,
-            output,
+            output_file,
         }
     }
 }
