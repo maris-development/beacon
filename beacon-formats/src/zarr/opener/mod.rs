@@ -155,12 +155,8 @@ impl FileOpener for ZarrFileOpener {
 
 async fn flatten_partitioned_streams(
     partitioned_streams: Arc<[PartitionedZarrStreamShare]>,
-) -> Pin<
-    Box<
-        dyn futures::Stream<Item = Result<arrow::array::RecordBatch, arrow::error::ArrowError>>
-            + Send,
-    >,
-> {
+) -> Pin<Box<dyn futures::Stream<Item = datafusion::error::Result<arrow::array::RecordBatch>> + Send>>
+{
     let mut all_streams = Vec::new();
     for partition in partitioned_streams.iter() {
         let stream = flatten_batch_stream(partition.stream_composer.pollable_shared_stream());
@@ -172,12 +168,8 @@ async fn flatten_partitioned_streams(
 
 fn flatten_batch_stream(
     stream: ArrowZarrStream,
-) -> Pin<
-    Box<
-        dyn futures::Stream<Item = Result<arrow::array::RecordBatch, arrow::error::ArrowError>>
-            + Send,
-    >,
-> {
+) -> Pin<Box<dyn futures::Stream<Item = datafusion::error::Result<arrow::array::RecordBatch>> + Send>>
+{
     (stream
         .map(|res_nd_batch| {
             let nd_batch = res_nd_batch.map_err(|e| {
@@ -187,9 +179,12 @@ fn flatten_batch_stream(
                 )
             })?;
 
-            let arrow_batch = nd_batch
-                .to_arrow_record_batch()
-                .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+            let arrow_batch = nd_batch.to_arrow_record_batch().map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to convert NdRecordBatch to Arrow RecordBatch: {}",
+                    e
+                ))
+            })?;
 
             Ok(arrow_batch)
         })

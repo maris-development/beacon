@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 arrow = { workspace = true }
-datafusion = { version = "49.0.0" }
+datafusion = { workspace = true }
 geoarrow = { workspace = true }
 geoarrow-array = { workspace = true }
 geoparquet = { workspace = true }
