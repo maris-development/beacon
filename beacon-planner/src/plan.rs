@@ -16,8 +16,8 @@ pub struct BeaconQueryPlan {
     pub metrics_tracker: Arc<MetricsTracker>,
     /// The physical execution plan for the query.
     pub physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
-    /// Output buffer for the query results.
-    pub output_buffer: QueryOutputFile,
+    /// Optional output file for the query results. Otherwise, results are streamed back directly to the user.
+    pub output_file: Option<QueryOutputFile>,
 }
 
 /// Plans a query by parsing, optimizing, and generating a physical plan.
@@ -65,7 +65,7 @@ pub async fn plan_query(
         query_id,
         metrics_tracker,
         physical_plan: tracked_physical_plan,
-        output_buffer: parsed_plan.output,
+        output_file: parsed_plan.output_file,
     })
 }
 

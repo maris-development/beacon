@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     query_result::QueryResult,
@@ -11,12 +11,11 @@ use beacon_formats::Dataset;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
 use beacon_query::{parser::Parser, Query};
-use datafusion::common::HashMap;
 use parking_lot::Mutex;
 
 pub struct Runtime {
     virtual_machine: virtual_machine::VirtualMachine,
-    query_metrics: Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>,
+    query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
 }
 
 impl Runtime {
@@ -24,7 +23,7 @@ impl Runtime {
         let virtual_machine = virtual_machine::VirtualMachine::new().await?;
         Ok(Self {
             virtual_machine,
-            query_metrics: Mutex::new(HashMap::new()),
+            query_metrics: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -37,17 +36,9 @@ impl Runtime {
         )
         .await?;
 
-        self.virtual_machine.run_plan(&plan).await?;
-
-        self.query_metrics.lock().insert(
-            plan.query_id,
-            plan.metrics_tracker.get_consolidated_metrics(),
-        );
-
-        Ok(QueryResult {
-            output_buffer: plan.output_buffer,
-            query_id: plan.query_id,
-        })
+        self.virtual_machine
+            .run_plan(plan, self.query_metrics.clone())
+            .await
     }
 
     pub fn system_info(&self) -> SystemInfo {
