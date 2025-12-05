@@ -249,16 +249,17 @@ impl FileSource for ZarrSource {
         config: &FileScanConfig,
     ) -> datafusion::error::Result<Option<FileScanConfig>> {
         // Repartition by duplicating the file groups to reach the target number of partitions.
-        let file_groups = config.file_groups.clone();
+        let mut scan_config = config.clone();
 
-        let repartitioned: Vec<FileGroup> = file_groups
+        scan_config.file_groups = scan_config
+            .file_groups
             .iter()
             .cycle()
             .take(target_partitions)
             .cloned()
             .collect();
 
-        Ok(config.clone().with_file_groups(repartitioned).into())
+        Ok(Some(scan_config))
     }
 
     fn try_pushdown_filters(

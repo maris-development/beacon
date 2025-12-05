@@ -56,7 +56,7 @@ pub fn map_units() -> ScalarUDF {
     ScalarUDF::new_from_impl(MapUnits::new())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct MapUnits {
     signature: datafusion::logical_expr::Signature,
 }

@@ -8,7 +8,7 @@ use std::{any::Any, sync::Arc};
 use arrow::{datatypes::SchemaRef, error::ArrowError};
 use beacon_arrow_odv::reader::AsyncOdvDecoder;
 use datafusion::{
-    common::Statistics,
+    common::{Statistics, exec_datafusion_err},
     datasource::{
         file_format::file_compression_type::FileCompressionType,
         listing::PartitionedFile,
@@ -17,7 +17,7 @@ use datafusion::{
     },
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
-use futures::{StreamExt, TryStreamExt};
+use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use object_store::ObjectStore;
 
 use crate::odv_ascii::OdvFormat;
@@ -192,14 +192,13 @@ impl FileOpener for OdvOpener {
                 compression.convert_stream(Box::pin(input_stream.map_err(Into::into)))?;
             let odv_schema_mapper =
                 AsyncOdvDecoder::decode_schema_mapper(uncompressed_stream.map_err(Into::into))
+                    .map_err(|e| exec_datafusion_err!("Failed to decode ODV schema: {}", e))
                     .await?;
 
             let file_schema = odv_schema_mapper.output_schema();
 
             // Map the file schema to the projected schema
-            let (schema_mapper, projection) = schema_adapter
-                .map_schema(&file_schema)
-                .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+            let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
 
             // Open and decode the file body
             let body_stream = object_store.get(file_meta.location()).await?.into_stream();
@@ -215,10 +214,13 @@ impl FileOpener for OdvOpener {
             .await
             .map(move |maybe_batch| {
                 maybe_batch
-                    .and_then(|batch| schema_mapper.clone().map_batch(batch).map_err(Into::into))
+                    .map_err(|e| exec_datafusion_err!("Failed to decode ODV batch: {}", e))
+                    .and_then(|batch| schema_mapper.clone().map_batch(batch))
             });
-
-            Ok(batch_stream.boxed())
+            let stream = batch_stream
+                .map_err(|e| exec_datafusion_err!("Error reading ODV ASCII file: {}", e))
+                .boxed();
+            Ok(stream)
         }))
     }
 }

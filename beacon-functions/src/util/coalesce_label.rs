@@ -18,7 +18,7 @@ pub fn coalesce_label() -> ScalarUDF {
 
 /// A UDF that takes any number of (column, label) pairs,
 /// and for each row returns the label corresponding to the first non-null column.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CoalesceLabel {
     signature: Signature,
 }

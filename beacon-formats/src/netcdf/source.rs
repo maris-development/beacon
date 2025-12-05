@@ -10,7 +10,7 @@ use std::sync::Arc;
 use arrow::{array::RecordBatch, datatypes::SchemaRef, error::ArrowError};
 use datafusion::{
     catalog::memory::DataSourceExec,
-    common::Statistics,
+    common::{Statistics, exec_datafusion_err},
     datasource::{
         listing::{ListingTable, PartitionedFile},
         physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileScanConfig, FileSource},
@@ -186,19 +186,16 @@ impl FileOpener for NetCDFLocalFileOpener {
         let schema_adapter = self.schema_adapter.clone();
 
         Ok(Box::pin(async move {
-            let (schema_mapper, projection) = schema_adapter
-                .map_schema(&file_schema)
-                .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+            let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
 
             let stream = Box::pin(futures::stream::once(async move {
                 let batch = file
                     .read_as_batch(Some(&projection))
-                    .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-                let adapted_batch = schema_mapper
-                    .map_batch(batch)
-                    .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+                    .map_err(|e| exec_datafusion_err!("Failed to read NetCDF batch: {}", e))?;
+                let adapted_batch = schema_mapper.map_batch(batch)?;
                 Ok(adapted_batch)
-            })) as BoxStream<'static, Result<RecordBatch, ArrowError>>;
+            }))
+                as BoxStream<'static, Result<RecordBatch, datafusion::error::DataFusionError>>;
 
             Ok(stream.boxed())
         }))

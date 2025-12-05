@@ -20,7 +20,7 @@ pub fn try_arrow_cast() -> ScalarUDF {
     ScalarUDF::new_from_impl(TryArrowCastFunc::new())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TryArrowCastFunc {
     signature: Signature,
 }

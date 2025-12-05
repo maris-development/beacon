@@ -9,7 +9,7 @@ use geo::{BoundingRect, Contains, Geometry, Point, Rect};
 use ordered_float::OrderedFloat;
 use wkt::Wkt;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct WithinPointUdf {
     signature: Signature,
 }

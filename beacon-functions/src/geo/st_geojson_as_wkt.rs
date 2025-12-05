@@ -9,7 +9,7 @@ use datafusion::{
 use geo::{Contains, Geometry};
 use wkt::{ToWkt, Wkt};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct GeoJsonAsWktUdf {
     signature: Signature,
 }
