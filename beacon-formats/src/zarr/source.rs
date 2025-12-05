@@ -241,27 +241,6 @@ impl FileSource for ZarrSource {
         self.schema_adapter_factory.clone()
     }
 
-    fn repartitioned(
-        &self,
-        target_partitions: usize,
-        repartition_file_min_size: usize,
-        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
-        config: &FileScanConfig,
-    ) -> datafusion::error::Result<Option<FileScanConfig>> {
-        // Repartition by duplicating the file groups to reach the target number of partitions.
-        let mut scan_config = config.clone();
-
-        scan_config.file_groups = scan_config
-            .file_groups
-            .iter()
-            .cycle()
-            .take(target_partitions)
-            .cloned()
-            .collect();
-
-        Ok(Some(scan_config))
-    }
-
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,
