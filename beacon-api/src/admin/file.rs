@@ -93,7 +93,7 @@ pub async fn upload_file(
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct DownloadQuery {
-    pub file_name: String,
+    pub file_path: String,
 }
 
 #[tracing::instrument(level = "info", skip(state))]
@@ -112,10 +112,10 @@ pub async fn download_handler(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<DownloadQuery>,
 ) -> impl IntoResponse {
-    tracing::error!("📥 Download request for `{}`", query.file_name);
-    let file_name = query.file_name.clone();
+    tracing::error!("📥 Download request for `{}`", query.file_path);
+    let file_path = query.file_path.clone();
 
-    match state.data_lake().download_file(&file_name).await {
+    match state.data_lake().download_file(&file_path).await {
         Ok(stream) => {
             // Convert object_store stream into Axum-compatible stream
             let body_stream = stream.map(|result| {
@@ -131,7 +131,7 @@ pub async fn download_handler(
                 StatusCode::OK,
                 [
                     ("Content-Type", "application/octet-stream"),
-                    ("Content-Disposition", &format!("attachment; filename=\"{file_name}\"")),
+                    ("Content-Disposition", &format!("attachment; filename=\"{file_path}\"")),
                 ],
                 body,
             )
@@ -139,7 +139,47 @@ pub async fn download_handler(
         }
         Err(e) => {
             eprintln!("❌ Download error: {e}");
-            (StatusCode::NOT_FOUND, format!("File not found: {file_name}")).into_response()
+            (StatusCode::NOT_FOUND, format!("File not found: {file_path}")).into_response()
         }
     }
 }
+
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
+pub struct DeleteQuery {
+    pub file_path: String,
+}
+
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "file",
+    get, 
+    params(DeleteQuery),
+    path = "/api/admin/delete-file", 
+    responses((status = 200, description = "File deleted successfully")),
+    security(
+        ("basic-auth" = []),
+        ("bearer" = [])
+    ))
+]
+pub async fn delete_file(
+        State(state): State<Arc<Runtime>>,
+        Query(query): Query<DeleteQuery>,
+) -> impl IntoResponse{
+    tracing::error!("📤 Delete request for `{}`", query.file_path);
+    let file_path = query.file_path.clone();
+
+    match state.data_lake().delete_file(&file_path).await {
+        Ok(_) => {
+            tracing::info!("✅ Deleted `{}`", file_path);
+            (StatusCode::OK, format!("File deleted: {file_path}")).into_response()
+        },
+        Err(e) => {
+            eprintln!("❌ Delete error: {e}");
+            (StatusCode::NOT_FOUND, format!("File not found: {file_path}")).into_response()
+        },
+    }
+
+}
+
+

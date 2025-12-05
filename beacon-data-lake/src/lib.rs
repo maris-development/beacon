@@ -601,7 +601,7 @@ impl DataLake {
 
     pub async fn download_file(
         &self,
-        file_name: &str,
+        file_path: &str,
     ) -> Result<
         BoxStream<'static, Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>,
         Box<dyn std::error::Error + Send + Sync>,
@@ -612,7 +612,11 @@ impl DataLake {
             .object_store(&self.data_directory_store_url)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        let object_path = self.data_directory_prefix.child(file_name);
+        let file_path = object_store::path::Path::from(file_path);
+        let mut object_path = self.data_directory_prefix.clone();
+        for part in file_path.parts() {
+            object_path = object_path.child(part.as_ref());
+        }
 
         let get_result = object_store
             .get(&object_path)
@@ -630,7 +634,7 @@ impl DataLake {
 
     pub async fn delete_file(
         &self,
-        file_name: &str,
+        file_path: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let object_store = self
             .session_context
@@ -638,7 +642,11 @@ impl DataLake {
             .object_store(&self.data_directory_store_url)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        let object_path = self.data_directory_prefix.child(file_name);
+        let file_path = object_store::path::Path::from(file_path);
+        let mut object_path = self.data_directory_prefix.clone();
+        for part in file_path.parts() {
+            object_path = object_path.child(part.as_ref());
+        }
 
         object_store
             .delete(&object_path)
