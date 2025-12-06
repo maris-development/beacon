@@ -10,6 +10,7 @@ geoarrow = { workspace = true }
 geoarrow-array = { workspace = true }
 geoparquet = { workspace = true }
 parquet = { version = "^55"}
+deltalake = { version = "^0.29", features = ["datafusion"] }
 
 object_store = { version = "0.12.3", features = ["aws"] }
 url = "2.5.4"

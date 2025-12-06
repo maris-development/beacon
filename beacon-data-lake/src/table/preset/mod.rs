@@ -94,6 +94,9 @@ impl PresetTable {
             TableType::Empty(default_table) => {
                 Box::pin(default_table.create(table_directory, session_ctx)).await?
             }
+            TableType::Delta(delta_table) => {
+                Box::pin(delta_table.create(table_directory, session_ctx)).await?
+            }
         }
         Ok(())
     }

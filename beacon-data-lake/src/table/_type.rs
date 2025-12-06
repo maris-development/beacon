@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::table::{
-    empty::EmptyTable, error::TableError, geospatial::GeoSpatialTable, logical::LogicalTable,
-    preset::PresetTable,
+    delta::DeltaTable, empty::EmptyTable, error::TableError, geospatial::GeoSpatialTable,
+    logical::LogicalTable, preset::PresetTable,
 };
 use beacon_common::listing_url::parse_listing_table_url;
 use datafusion::{
@@ -17,6 +17,7 @@ pub enum TableType {
     Preset(PresetTable),
     GeoSpatial(GeoSpatialTable),
     Empty(EmptyTable),
+    Delta(DeltaTable),
 }
 
 impl TableType {
@@ -61,6 +62,14 @@ impl TableType {
                 Box::pin(default_table.table_provider(
                     table_directory_store_url,
                     table_directory_prefix,
+                    data_directory_store_url,
+                    data_directory_prefix,
+                    session_ctx,
+                ))
+                .await
+            }
+            TableType::Delta(table) => {
+                Box::pin(table.table_provider(
                     data_directory_store_url,
                     data_directory_prefix,
                     session_ctx,
