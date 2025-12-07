@@ -42,6 +42,9 @@ impl VirtualMachine {
             .unwrap()
             .register_schema("public", data_lake.clone())?;
 
+        // INIT Functions from geodatafusion
+        geodatafusion::register(&session_ctx);
+
         //INIT FUNCTIONS FROM beacon-functions module
         let geo_udfs = beacon_functions::geo::geo_udfs();
         for udf in geo_udfs {
