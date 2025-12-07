@@ -181,11 +181,8 @@ impl VirtualMachine {
         Ok(self.data_lake.create_table(table).await?)
     }
 
-    pub fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
-        self.data_lake
-            .deregister_table(table_name)?
-            .ok_or(anyhow::anyhow!("Table not found"))?;
-        Ok(())
+    pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
+        Ok(self.data_lake.remove_table(table_name).await?)
     }
 
     #[tracing::instrument(skip(self, beacon_plan))]
