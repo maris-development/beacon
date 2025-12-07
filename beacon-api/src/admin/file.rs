@@ -127,11 +127,18 @@ pub async fn download_handler(
 
             let body = axum::body::Body::from_stream(body_stream);
 
+            // Parse filename from file_path for Content-Disposition
+            let filename = std::path::Path::new(&file_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("file");
+
+            tracing::info!("✅ Downloaded `{}` as `{}`", file_path, filename);
             (
                 StatusCode::OK,
                 [
                     ("Content-Type", "application/octet-stream"),
-                    ("Content-Disposition", &format!("attachment; filename=\"{file_path}\"")),
+                    ("Content-Disposition", &format!("attachment; filename=\"{filename}\"")),
                 ],
                 body,
             )
