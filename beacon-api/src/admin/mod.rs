@@ -14,6 +14,7 @@ use utoipa::{
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+mod check;
 mod file;
 mod tables;
 
@@ -64,6 +65,7 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
         .routes(routes!(file::upload_file))
         .routes(routes!(file::download_handler))
         .routes(routes!(file::delete_file))
+        .routes(routes!(check::check))
         .layer(axum::middleware::from_fn(basic_auth))
         .layer(DefaultBodyLimit::disable())
         .split_for_parts();
