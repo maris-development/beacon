@@ -3,6 +3,7 @@ use std::sync::Arc;
 use datafusion::{
     catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
+use futures::StreamExt;
 use object_store::{
     ObjectStore, PutPayload,
     path::{Path, PathPart},
@@ -98,5 +99,35 @@ impl Table {
 
     pub fn table_name(&self) -> &str {
         &self.table_name
+    }
+
+    pub async fn delete_table(
+        &self,
+        session_ctx: Arc<SessionContext>,
+        table_directory_store_url: ObjectStoreUrl,
+        table_directory_prefix: object_store::path::Path,
+    ) {
+        let full_path = table_directory_prefix.child(self.table_name.clone());
+        // Delete the table directory
+        let object_store = session_ctx
+            .runtime_env()
+            .object_store(&table_directory_store_url)
+            .unwrap();
+        let mut table_files = object_store.list(Some(&full_path));
+        while let Some(res) = table_files.next().await {
+            match res {
+                Ok(object_meta) => {
+                    let path = object_meta.location.clone();
+                    if let Err(e) = object_store.delete(&path).await {
+                        tracing::error!("Failed to delete table file {:?}: {:?}", path, e);
+                    }
+                    tracing::debug!("Deleted table file: {:?}", path);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to list table files for deletion: {:?}", e);
+                }
+            }
+        }
+        tracing::info!("Deleted table directory: {:?}", full_path);
     }
 }

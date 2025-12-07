@@ -656,14 +656,28 @@ impl DataLake {
         Ok(())
     }
 
-    pub fn remove_table(&self, table_name: &str) -> bool {
+    pub async fn remove_table(&self, table_name: &str) -> Result<(), TableError> {
+        let mut table_providers = self.table_providers.lock();
+        table_providers.remove(table_name);
+        drop(table_providers); // Release the lock before deleting the table
         let mut tables = self.tables.lock();
-        if tables.remove(table_name).is_some() {
-            let mut table_providers = self.table_providers.lock();
-            table_providers.remove(table_name);
-            true
+        let table = tables.remove(table_name);
+        drop(tables); // Release the lock before async call
+
+        if let Some(table) = table {
+            let table_object_store_url = self.table_directory_store_url.clone();
+            let table_object_store_prefix = self.table_directory_prefix.clone();
+
+            table
+                .delete_table(
+                    self.session_context.clone(),
+                    table_object_store_url,
+                    table_object_store_prefix,
+                )
+                .await;
+            Ok(())
         } else {
-            false
+            Err(TableError::TableNotFound(table_name.to_string()))
         }
     }
 }
