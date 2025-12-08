@@ -39,4 +39,4 @@ Some of the configuration options can be set using environment variables. The fo
 
 ### Optional Environment Variables
 
-- `BEACON_TOKEN=YOUR_TOKEN` - The token to activate extra features for Beacon.
+- `BEACON_TOKEN=YOUR_TOKEN` - The token to activate the beacon binary format (this can be freely retrieved for non-commercial use [here](https://beacon.maris.nl/plans)).

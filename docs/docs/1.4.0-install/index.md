@@ -1,9 +1,5 @@
 # 🛠️ Installation
 
-::: info
-The Installation guide for both the Beacon Community Edition and Beacon Standard Edition is the same. The only difference is the activation of extra features in the Standard Edition that requires a token.
-:::
-
 Welcome to the installation guide for Beacon. In this chapter, we will walk you through the installation process of Beacon using a Docker image. By leveraging Docker, you can quickly and easily deploy Beacon on various operating systems without worrying about complex dependencies or compatibility issues.
 
 To proceed with the installation, make sure you have Docker installed on your system. Docker provides comprehensive installation guides for various operating systems on their official website (https://www.docker.com/). Follow the instructions specific to your operating system to set up Docker.
@@ -23,12 +19,12 @@ To deploy Beacon using Docker Compose, you need to create a `docker-compose.yml`
 
 ::: code-group
 
-```yaml [docker-compose.community.yml]
+```yaml [docker-compose.yml]
 version: "3.8"
 
 services:
     beacon:
-        image: ghcr.io/maris-development/beacon:community-v1.4.0
+        image: ghcr.io/maris-development/beacon:community-latest
         container_name: beacon
         restart: unless-stopped
         ports:
@@ -41,30 +37,6 @@ services:
             - BEACON_LOG_LEVEL=INFO # Adjust log level
             - BEACON_HOST=0.0.0.0 # Set IP address to listen on
             - BEACON_PORT=8080 # Set port number
-        volumes:
-            - ./data/datasets:/beacon/data/datasets # Adjust the volume mapping as required
-            - ./data/tables:/beacon/data/tables # Adjust the volume mapping as required. This enable persistence of created tables
-```
-
-```yaml [docker-compose.standard.yml]
-version: "3.8"
-
-services:
-    beacon:
-        image: ghcr.io/maris-development/beacon:standard-v1.4.0
-        container_name: beacon
-        restart: unless-stopped
-        ports:
-            - "8080:8080" # Adjust the port mapping as needed
-        environment:
-            - BEACON_ADMIN_USERNAME=admin # Replace with your admin username
-            - BEACON_ADMIN_PASSWORD=securepassword # Replace with your admin password
-            - BEACON_VM_MEMORY_SIZE=4096 # Adjust memory allocation as needed (in MB)
-            - BEACON_DEFAULT_TABLE=default # Set default table name
-            - BEACON_LOG_LEVEL=INFO # Adjust log level
-            - BEACON_HOST=0.0.0.0 # Set IP address to listen on
-            - BEACON_PORT=8080 # Set port number
-            - BEACON_TOKEN=yourtoken # Replace with your received token
         volumes:
             - ./data/datasets:/beacon/data/datasets # Adjust the volume mapping as required
             - ./data/tables:/beacon/data/tables # Adjust the volume mapping as required. This enable persistence of created tables
@@ -79,14 +51,6 @@ If the installation was successful, you should see the Beacon Swagger Interface 
 Congratulations! You have successfully installed Beacon using Docker. You can now start leveraging its powerful features.
 
 In case you encounter any issues during the installation process, please refer to the troubleshooting section of this documentation or reach out to our support team for assistance.
-
-::: info Activation - only required for Standard Edition
-To get access to features such as beacon-binary-format, you will need to activate Beacon. This requires you to set the following environment variables:
-
-* `BEACON_TOKEN=YOUR_TOKEN` - The token to activate Beacon.
-
-This check will be done on startup and can only be used to start a single Beacon Instance. You can request another token if you would like to spawn another instance of Beacon at https://beacon.maris.nl/.
-:::
 
 ## Troubleshooting
 

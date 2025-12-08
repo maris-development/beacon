@@ -63,9 +63,9 @@ Beacon will automatically detect the compression and decompress the file on the 
 
 Fully supported.
 
-### Beacon Binary Format (Standard Edition only)
+### Beacon Binary Format
 
-Fully supported. Learn more more about this format and its usage. (Works only with the Standard Edition of Beacon.)
+Fully supported. Learn more more about this format and its usage.
 It fully supports S3 data lake integration and allows for efficient pruning similar to parquet.
 
 ## Mounting Datasets into the Docker Container

@@ -11,7 +11,7 @@ It is built on top of the Apache Arrow ecosystem, which provides a columnar in-m
   - `CSV`
   - `ODV ASCII`
   - `Arrow IPC`
-  - `Beacon Binary Format (Standard Edition only)`
+  - `Beacon Binary Format`
 
 - Beacon also allows you to create logical data tables (aka collections) from datasets, enabling efficient querying and analysis of large collections of datasets as logical tables similar to a virtual database table. Learn more about [Data Tables](./data-tables.md).
 

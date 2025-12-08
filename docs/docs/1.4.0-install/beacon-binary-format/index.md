@@ -1,7 +1,8 @@
 # Beacon Binary Format
 
-> [!WARNING]
-> This is a Feature that requires the `Beacon Standard Edition` with an activated Token. See: [Beacon plans](https://beacon.maris.nl/plans)
+> [!Info]
+> This is a File Format that requires the `Beacon Standard Edition` with an token that can be freely obtained for non-commercial use [here](https://beacon.maris.nl/plans).
+> To activate the format, set the environment variable `BEACON_TOKEN=YOUR_TOKEN` when starting the Beacon Standard Edition.
 
 Beacon Binary Format is a collection file format that allows users to combine multiple datasets into a single file while still maintaining the ability to access individual or multiple files inside the collection. It is designed to be fast, efficient, and scalable, making it ideal for large-scale marine and oceanographic datasets.
 
