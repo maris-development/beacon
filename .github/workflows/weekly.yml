@@ -1,4 +1,4 @@
-name: "Weekly Build (Wednesday)"
+name: "Weekly Build"
 
 on:
   schedule:
@@ -11,7 +11,15 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm64
 
     steps:
       - uses: actions/checkout@v3
@@ -41,7 +49,7 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/beacon:community-nightly-${{ env.DATE_TAG }}
             ghcr.io/${{ github.repository_owner }}/beacon:community-nightly-latest
