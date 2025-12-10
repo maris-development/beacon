@@ -783,6 +783,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-binary-format"
+version = "1.5.0"
+dependencies = [
+ "arrow",
+ "arrow-schema 56.2.0",
+ "hmac-sha256",
+ "indexmap 2.12.1",
+ "moka",
+ "nd-arrow-array",
+ "object_store 0.12.4",
+ "parquet 56.2.0",
+ "serde",
+ "sha256",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "beacon-common"
 version = "1.4.1"
 dependencies = [
@@ -2967,6 +2986,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmac-sha256"
+version = "1.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad6880c8d4a9ebf39c6e8b77007ce223f646a4d21ce29d99f70cb16420545425"
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5052,6 +5077,19 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sha256"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f880fc8562bdeb709793f00eb42a2ad0e672c4f883bbe59122b926eca935c8f6"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "hex",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
