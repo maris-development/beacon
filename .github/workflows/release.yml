@@ -57,5 +57,5 @@ jobs:
           push: true
           platforms: ${{ matrix.platform }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/beacon:community-${{ env.VERSION_TAG }}
-            ghcr.io/${{ github.repository_owner }}/beacon:community-latest
+            ghcr.io/${{ github.repository_owner }}/beacon:${{ env.VERSION_TAG }}
+            ghcr.io/${{ github.repository_owner }}/beacon:latest
