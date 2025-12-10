@@ -787,6 +787,7 @@ name = "beacon-binary-format"
 version = "1.5.0"
 dependencies = [
  "arrow",
+ "arrow-ipc 56.2.0",
  "arrow-schema 56.2.0",
  "hmac-sha256",
  "indexmap 2.12.1",
@@ -795,6 +796,7 @@ dependencies = [
  "object_store 0.12.4",
  "parquet 56.2.0",
  "serde",
+ "serde_json",
  "sha256",
  "tempfile",
  "thiserror 2.0.17",

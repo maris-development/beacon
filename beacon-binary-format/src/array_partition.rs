@@ -8,7 +8,7 @@ use arrow::{
         writer::{FileWriter, IpcWriteOptions},
     },
 };
-use arrow_schema::DataType;
+use arrow_schema::{DataType, Schema};
 use hmac_sha256::Hash;
 use indexmap::IndexMap;
 use nd_arrow_array::NdArrowArray;
@@ -65,14 +65,30 @@ pub struct ArrayPartitionWriter {
 
 impl ArrayPartitionWriter {
     /// Return IPC writer options used when creating temporary Arrow writers.
-    ///
-    /// Currently uses Arrow's default IPC options (no compression requested)
-    /// to remain compatible with environments where optional compression
-    /// features may not be available.
     pub fn ipc_opts() -> IpcWriteOptions {
         IpcWriteOptions::default()
             .try_with_compression(Some(CompressionType::ZSTD))
             .unwrap_or_default()
+    }
+
+    fn create_temp_file_writer(
+        array_name: &str,
+        schema: &Schema,
+    ) -> Result<FileWriter<File>, BBFWritingError> {
+        let make_temp_file = || {
+            tempfile()
+                .map_err(|e| BBFWritingError::TempFileCreationFailure(e, array_name.to_string()))
+        };
+
+        match arrow::ipc::writer::FileWriter::try_new_with_options(
+            make_temp_file()?,
+            schema,
+            Self::ipc_opts(),
+        ) {
+            Ok(writer) => Ok(writer),
+            Err(_) => arrow::ipc::writer::FileWriter::try_new(make_temp_file()?, schema)
+                .map_err(BBFWritingError::ArrayGroupWriteFailure),
+        }
     }
 
     /// Create a new `ArrayPartitionWriter`.
@@ -173,16 +189,8 @@ impl ArrayPartitionWriter {
         let file_writer = match current_temp_file.as_mut() {
             Some(fw) => fw,
             None => {
-                let temp_file = tempfile().map_err(|e| {
-                    BBFWritingError::TempFileCreationFailure(e, array_name.to_string())
-                })?;
                 let schema = array_group.batch.schema();
-                let file_writer = arrow::ipc::writer::FileWriter::try_new_with_options(
-                    temp_file,
-                    &schema,
-                    Self::ipc_opts(),
-                )
-                .map_err(BBFWritingError::ArrayGroupWriteFailure)?;
+                let file_writer = Self::create_temp_file_writer(array_name, &schema)?;
                 *current_temp_file = Some(file_writer);
                 current_temp_file.as_mut().unwrap()
             }
@@ -192,14 +200,8 @@ impl ArrayPartitionWriter {
         if *file_writer.schema() != array_group.batch.schema() {
             // Iterate through the batches and update the values list array column to the partition type.
             file_writer.finish().unwrap();
-            let new_temp_file = tempfile()
-                .map_err(|e| BBFWritingError::TempFileCreationFailure(e, array_name.to_string()))?;
-            let new_writer = arrow::ipc::writer::FileWriter::try_new_with_options(
-                new_temp_file,
-                &array_group.batch.schema(),
-                Self::ipc_opts(),
-            )
-            .map_err(BBFWritingError::ArrayGroupWriteFailure)?;
+            let schema = array_group.batch.schema();
+            let new_writer = Self::create_temp_file_writer(array_name, &schema)?;
             let input_file = std::mem::replace(file_writer, new_writer)
                 .into_inner()
                 .map_err(BBFWritingError::ArrayGroupWriteFailure)?;
@@ -358,6 +360,176 @@ mod range_index_map {
             map.insert(range.into(), value);
         }
         Ok(map)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{ArrayRef, Int32Array};
+    use nd_arrow_array::dimensions::{Dimension, Dimensions};
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use std::sync::Arc as StdArc;
+
+    fn scalar_int32(values: &[i32]) -> NdArrowArray {
+        let array: ArrayRef = StdArc::new(Int32Array::from(values.to_vec()));
+        let dimension = Dimension {
+            name: "dim0".to_string(),
+            size: values.len(),
+        };
+        NdArrowArray::new(array, Dimensions::MultiDimensional(vec![dimension]))
+            .expect("nd array creation")
+    }
+
+    async fn build_writer(
+        store: StdArc<dyn ObjectStore>,
+        dir: Path,
+        max_group_size: usize,
+    ) -> ArrayPartitionWriter {
+        ArrayPartitionWriter::new(
+            store,
+            dir,
+            "test_array".to_string(),
+            max_group_size,
+            None,
+            0,
+        )
+        .await
+        .expect("writer init")
+    }
+
+    #[tokio::test]
+    async fn finish_writes_partition_and_uploads() {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let dir = Path::from("tests/arrays");
+        let mut writer = build_writer(store.clone(), dir.clone(), usize::MAX).await;
+
+        writer
+            .append_array(Some(scalar_int32(&[1, 2])))
+            .await
+            .expect("append first");
+        writer
+            .append_array(Some(scalar_int32(&[3])))
+            .await
+            .expect("append second");
+        writer
+            .append_array(Some(scalar_int32(&[4, 5])))
+            .await
+            .expect("append third");
+
+        let metadata = writer.finish().await.expect("finish success");
+
+        assert_eq!(metadata.num_elements, 5);
+        assert_eq!(metadata.data_type, DataType::Int32);
+        assert_eq!(metadata.groups.len(), 1);
+        let (range, group_metadata) = metadata.groups.iter().next().unwrap();
+        assert_eq!(range.clone(), 0..3);
+        assert_eq!(group_metadata.num_chunks, 3);
+        assert!(group_metadata.uncompressed_array_byte_size > 0);
+        assert!(!metadata.hash.is_empty());
+
+        let object_path = dir.child(format!("{}.arrow", metadata.hash));
+        let stored_bytes = store
+            .get(&object_path)
+            .await
+            .expect("object exists")
+            .bytes()
+            .await
+            .expect("object bytes");
+        assert!(!stored_bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finish_tracks_null_chunks() {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let dir = Path::from("tests/nulls");
+        let mut writer = build_writer(store, dir, usize::MAX).await;
+
+        writer
+            .append_array(Some(scalar_int32(&[1, 2])))
+            .await
+            .expect("append first");
+        writer.append_array(None).await.expect("append null");
+        writer
+            .append_array(Some(scalar_int32(&[3, 4, 5])))
+            .await
+            .expect("append last");
+
+        let metadata = writer.finish().await.expect("finish success");
+
+        assert_eq!(metadata.num_elements, 5);
+        assert_eq!(metadata.groups.len(), 1);
+        let (range, group_metadata) = metadata.groups.iter().next().unwrap();
+        assert_eq!(range.clone(), 0..3);
+        assert_eq!(group_metadata.num_chunks, 3);
+    }
+
+    #[tokio::test]
+    async fn finish_records_multiple_groups_when_limit_hit() {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let dir = Path::from("tests/multi_group");
+        let mut writer = build_writer(store, dir, 1).await;
+
+        writer
+            .append_array(Some(scalar_int32(&[1, 2, 3])))
+            .await
+            .expect("append first");
+        writer
+            .append_array(Some(scalar_int32(&[4, 5, 6])))
+            .await
+            .expect("append second");
+        writer
+            .append_array(Some(scalar_int32(&[])))
+            .await
+            .expect("append zero length");
+
+        let metadata = writer.finish().await.expect("finish success");
+
+        assert_eq!(metadata.num_elements, 6);
+        assert_eq!(metadata.groups.len(), 3);
+        let ranges: Vec<_> = metadata.groups.keys().cloned().collect();
+        assert_eq!(ranges, vec![0..1, 1..2, 2..3]);
+        for group in metadata.groups.values() {
+            assert_eq!(group.num_chunks, 1);
+        }
+    }
+
+    #[test]
+    fn range_index_map_round_trip() {
+        let mut groups = IndexMap::new();
+        groups.insert(
+            0..2,
+            ArrayGroupMetadata {
+                uncompressed_array_byte_size: 10,
+                num_chunks: 2,
+                num_elements: 4,
+            },
+        );
+        groups.insert(
+            2..5,
+            ArrayGroupMetadata {
+                uncompressed_array_byte_size: 20,
+                num_chunks: 3,
+                num_elements: 6,
+            },
+        );
+
+        let metadata = ArrayPartitionMetadata {
+            num_elements: 10,
+            hash: "abc123".to_string(),
+            data_type: DataType::Int32,
+            groups,
+        };
+
+        let serialized = serde_json::to_string(&metadata).expect("serialize");
+        let restored: ArrayPartitionMetadata =
+            serde_json::from_str(&serialized).expect("deserialize");
+
+        assert_eq!(restored.num_elements, metadata.num_elements);
+        assert_eq!(restored.hash, metadata.hash);
+        let restored_ranges: Vec<_> = restored.groups.keys().cloned().collect();
+        assert_eq!(restored_ranges, vec![0..2, 2..5]);
     }
 }
 
