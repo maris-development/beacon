@@ -1,4 +1,4 @@
-use std::{fs::File, sync::Arc};
+use std::{convert::TryFrom, fs::File, sync::Arc};
 
 use arrow::{
     array::RecordBatch,
@@ -8,6 +8,7 @@ use arrow::{
         writer::{FileWriter, IpcWriteOptions},
     },
 };
+use arrow_ipc::{convert::fb_to_schema, reader::read_footer_length, root_as_footer};
 use arrow_schema::{DataType, Schema};
 use hmac_sha256::Hash;
 use indexmap::IndexMap;
@@ -18,8 +19,9 @@ use tempfile::tempfile;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::{
-    array_group::{ArrayGroup, ArrayGroupBuilder, ArrayGroupMetadata},
-    error::{BBFError, BBFResult, BBFWritingError},
+    array_group::{ArrayGroup, ArrayGroupBuilder, ArrayGroupMetadata, ArrayGroupReader},
+    error::{BBFError, BBFReadingError, BBFResult, BBFWritingError},
+    io_cache::{ArrayIoCache, CacheKey},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +175,7 @@ impl ArrayPartitionWriter {
         self.partition_metadata
             .groups
             .insert(chunk_range, group_metadata);
+        self.partition_metadata.data_type = self.partition_data_type.clone();
 
         Ok(())
     }
@@ -270,6 +273,7 @@ impl ArrayPartitionWriter {
                 let hash_string = String::from_utf8_lossy(&hash_result).to_string();
                 // Set the hash of the partition in the metadata
                 self.partition_metadata.hash = hash_string.clone();
+                self.partition_metadata.data_type = self.partition_data_type.clone();
 
                 // Upload the temp file to object store
                 let object_path = self.dir.child(format!("{}.arrow", hash_string));
@@ -293,6 +297,11 @@ impl ArrayPartitionWriter {
                     .await
                     .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
 
+                obj_writer
+                    .shutdown()
+                    .await
+                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
+
                 Ok(self.partition_metadata)
             }
             None => {
@@ -304,6 +313,293 @@ impl ArrayPartitionWriter {
                 ))
             }
         }
+    }
+}
+
+struct IPCDecoder {
+    file_decoder: FileDecoder,
+    blocks: Vec<Block>,
+}
+
+pub struct ArrayPartitionReader {
+    store: Arc<dyn ObjectStore>,
+    decoder: Arc<IPCDecoder>,
+    array_name: String,
+    partition_path: object_store::path::Path,
+    partition_metadata: Arc<ArrayPartitionMetadata>,
+    partition_offset: usize,
+    partition_hash: String,
+    cache: ArrayIoCache,
+}
+
+impl ArrayPartitionReader {
+    const IPC_TRAILER_LEN_BYTES: usize = 10;
+
+    pub async fn new(
+        store: Arc<dyn ObjectStore>,
+        array_name: String,
+        partition_path: object_store::path::Path,
+        partition_metadata: ArrayPartitionMetadata,
+        partition_offset: usize,
+        cache: ArrayIoCache,
+    ) -> BBFResult<Self> {
+        let decoder = Arc::new(Self::build_ipc_decoder(&store, &partition_path).await?);
+
+        Ok(Self {
+            array_name,
+            cache,
+            decoder,
+            store,
+            partition_path,
+            partition_offset,
+            partition_hash: partition_metadata.hash.clone(),
+            partition_metadata: Arc::new(partition_metadata),
+        })
+    }
+
+    async fn build_ipc_decoder(
+        store: &Arc<dyn ObjectStore>,
+        partition_path: &object_store::path::Path,
+    ) -> BBFResult<IPCDecoder> {
+        let partition_display = partition_path.to_string();
+        let trailer_len = Self::IPC_TRAILER_LEN_BYTES as u64;
+
+        let file_head = store.head(partition_path).await.map_err(|source| {
+            BBFReadingError::PartitionBytesFetch {
+                partition_path: partition_display.clone(),
+                source,
+            }
+        })?;
+        let file_size = file_head.size as u64;
+
+        if file_size < trailer_len {
+            return Err(BBFReadingError::PartitionTooSmall {
+                partition_path: partition_display.clone(),
+                required: trailer_len,
+                actual: file_size,
+            }
+            .into());
+        }
+
+        let trailer_start = file_size - trailer_len;
+        let footer_len_bytes = store
+            .get_range(partition_path, trailer_start..file_size)
+            .await
+            .map_err(|source| BBFReadingError::PartitionBytesFetch {
+                partition_path: partition_display.clone(),
+                source,
+            })?;
+
+        let trailer_array: [u8; Self::IPC_TRAILER_LEN_BYTES] = footer_len_bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: format!(
+                    "expected {} trailer bytes, received {}",
+                    Self::IPC_TRAILER_LEN_BYTES,
+                    footer_len_bytes.len()
+                ),
+            })?;
+
+        let footer_len = read_footer_length(trailer_array).map_err(|err| {
+            BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: err.to_string(),
+            }
+        })?;
+
+        let footer_len =
+            u64::try_from(footer_len).map_err(|_| BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: "footer length reported as negative".to_string(),
+            })?;
+
+        if footer_len == 0 {
+            return Err(BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: "footer length reported as zero".to_string(),
+            }
+            .into());
+        }
+
+        let footer_start = trailer_start.checked_sub(footer_len).ok_or_else(|| {
+            BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: format!("footer length {footer_len} exceeds available bytes ({file_size})"),
+            }
+        })?;
+
+        let footer_bytes = store
+            .get_range(partition_path, footer_start..trailer_start)
+            .await
+            .map_err(|source| BBFReadingError::PartitionBytesFetch {
+                partition_path: partition_display.clone(),
+                source,
+            })?;
+
+        let footer = root_as_footer(&footer_bytes).map_err(|err| {
+            BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: err.to_string(),
+            }
+        })?;
+
+        let schema_fb = footer
+            .schema()
+            .ok_or_else(|| BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: "missing schema in footer".to_string(),
+            })?;
+
+        let schema = fb_to_schema(schema_fb);
+        let file_decoder = FileDecoder::new(Arc::new(schema), footer.version());
+        let blocks: Vec<Block> = footer
+            .recordBatches()
+            .map(|b| b.iter().copied().collect())
+            .unwrap_or_default();
+
+        Ok(IPCDecoder {
+            blocks,
+            file_decoder,
+        })
+    }
+
+    async fn fetch_partition_group(
+        store: Arc<dyn ObjectStore>,
+        blob_partition_path: object_store::path::Path,
+        array_name: String,
+        partition_hash: String,
+        group_index: usize,
+        decoder: Arc<IPCDecoder>,
+        cache: ArrayIoCache,
+    ) -> Result<Option<RecordBatch>, BBFError> {
+        let cache_key = CacheKey {
+            array_name,
+            partition_hash,
+            group_index,
+        };
+
+        let decoder_for_loader = decoder.clone();
+        let store_for_loader = store.clone();
+        let partition_path_for_loader = blob_partition_path.clone();
+        let partition_display = blob_partition_path.to_string();
+
+        cache
+            .try_get_or_insert_with(cache_key, move |_key| {
+                let decoder = decoder_for_loader.clone();
+                let store = store_for_loader.clone();
+                let partition_path = partition_path_for_loader.clone();
+                let partition_display = partition_display.clone();
+
+                async move {
+                    let block = decoder
+                        .blocks
+                        .get(group_index)
+                        .copied()
+                        .ok_or_else(|| BBFReadingError::PartitionGroupIndexOutOfBounds {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            total_groups: decoder.blocks.len(),
+                        })?;
+
+                    let offset = u64::try_from(block.offset()).map_err(|_| {
+                        BBFReadingError::PartitionGroupLengthInvalid {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            reason: format!("negative block offset: {}", block.offset()),
+                        }
+                    })?;
+
+                    let metadata_len = u64::try_from(block.metaDataLength()).map_err(|_| {
+                        BBFReadingError::PartitionGroupLengthInvalid {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            reason: format!(
+                                "negative metadata length: {}",
+                                block.metaDataLength()
+                            ),
+                        }
+                    })?;
+
+                    let body_len = u64::try_from(block.bodyLength()).map_err(|_| {
+                        BBFReadingError::PartitionGroupLengthInvalid {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            reason: format!("negative body length: {}", block.bodyLength()),
+                        }
+                    })?;
+
+                    let range_end = offset
+                        .checked_add(metadata_len)
+                        .and_then(|v| v.checked_add(body_len))
+                        .ok_or_else(|| BBFReadingError::PartitionGroupLengthInvalid {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            reason: format!(
+                                "block range overflow: offset={offset}, metadata_len={metadata_len}, body_len={body_len}"
+                            ),
+                        })?;
+
+                    let group_bytes = store
+                        .get_range(&partition_path, offset..range_end)
+                        .await
+                        .map_err(|source| BBFReadingError::PartitionGroupBytesFetch {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            source,
+                        })?;
+
+                    let ipc_buffer = arrow::buffer::Buffer::from(group_bytes);
+
+                    let batch = decoder
+                        .file_decoder
+                        .read_record_batch(&block, &ipc_buffer)
+                        .map_err(|err| BBFReadingError::PartitionGroupDecode {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            reason: err.to_string(),
+                        })?;
+
+                    Ok::<Option<RecordBatch>, BBFError>(batch)
+                }
+            })
+            .await
+    }
+
+    pub async fn read_array(&self, entry_index: usize) -> BBFResult<Option<NdArrowArray>> {
+        let entry_partition_index = match entry_index.checked_sub(self.partition_offset) {
+            Some(entry_index) => entry_index,
+            None => return Ok(None),
+        };
+        let group_match = self
+            .partition_metadata
+            .groups
+            .iter()
+            .enumerate()
+            .find(|(_, (range, _))| range.contains(&entry_partition_index));
+
+        if let Some((group_index, (range, _))) = group_match {
+            let read_req = Self::fetch_partition_group(
+                self.store.clone(),
+                self.partition_path.clone(),
+                self.array_name.clone(),
+                self.partition_hash.clone(),
+                group_index,
+                self.decoder.clone(),
+                self.cache.clone(),
+            )
+            .await?;
+
+            if let Some(batch) = read_req {
+                let array_group_reader = ArrayGroupReader::new(self.array_name.clone(), batch);
+                let group_array_entry_index = entry_partition_index - range.start;
+                // Fetch the row within the batch
+                return array_group_reader.try_get_array(group_array_entry_index);
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -366,7 +662,7 @@ mod range_index_map {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{ArrayRef, Int32Array};
+    use arrow::array::{Array, ArrayRef, Int32Array};
     use nd_arrow_array::dimensions::{Dimension, Dimensions};
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -495,6 +791,184 @@ mod tests {
         }
     }
 
+    async fn build_partition_for_reader(
+        store: StdArc<dyn ObjectStore>,
+        dir: Path,
+    ) -> (
+        ArrayPartitionMetadata,
+        object_store::path::Path,
+        Arc<IPCDecoder>,
+    ) {
+        let mut writer = build_writer(store.clone(), dir.clone(), usize::MAX).await;
+        writer
+            .append_array(Some(scalar_int32(&[1, 2])))
+            .await
+            .expect("append first");
+        writer
+            .append_array(Some(scalar_int32(&[3, 4, 5])))
+            .await
+            .expect("append second");
+
+        let metadata = writer.finish().await.expect("finish success");
+        let partition_path = dir.child(format!("{}.arrow", metadata.hash));
+        let decoder = ArrayPartitionReader::build_ipc_decoder(&store, &partition_path)
+            .await
+            .expect("decoder build");
+
+        (metadata, partition_path, Arc::new(decoder))
+    }
+
+    #[tokio::test]
+    async fn fetch_partition_group_reads_expected_batch() {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let dir = Path::from("tests/fetch_success");
+        let (metadata, partition_path, decoder) =
+            build_partition_for_reader(store.clone(), dir).await;
+
+        let batch = ArrayPartitionReader::fetch_partition_group(
+            store.clone(),
+            partition_path.clone(),
+            "test_array".to_string(),
+            metadata.hash.clone(),
+            0,
+            decoder,
+            ArrayIoCache::new(1024 * 1024),
+        )
+        .await
+        .expect("fetch succeeds")
+        .expect("batch present");
+
+        assert_eq!(batch.num_columns(), 3);
+        let expected_chunks = metadata
+            .groups
+            .values()
+            .next()
+            .expect("group metadata")
+            .num_chunks;
+        assert_eq!(batch.num_rows(), expected_chunks);
+        let values_column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .expect("list column");
+        assert_eq!(values_column.len(), expected_chunks);
+    }
+
+    #[tokio::test]
+    async fn fetch_partition_group_errors_when_index_is_out_of_bounds() {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let dir = Path::from("tests/fetch_oob");
+        let (metadata, partition_path, decoder) =
+            build_partition_for_reader(store.clone(), dir).await;
+        let missing_index = decoder.blocks.len();
+
+        let _err = ArrayPartitionReader::fetch_partition_group(
+            store,
+            partition_path,
+            "test_array".to_string(),
+            metadata.hash,
+            missing_index,
+            decoder,
+            ArrayIoCache::new(1024 * 1024),
+        )
+        .await
+        .expect_err("fetch should fail");
+    }
+
+    #[tokio::test]
+    async fn read_array_returns_expected_chunk() {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let dir = Path::from("tests/read_array_single_group");
+        let mut writer = build_writer(store.clone(), dir.clone(), usize::MAX).await;
+
+        writer
+            .append_array(Some(scalar_int32(&[10, 20])))
+            .await
+            .expect("append first");
+        writer
+            .append_array(Some(scalar_int32(&[30, 40, 50])))
+            .await
+            .expect("append second");
+
+        let metadata = writer.finish().await.expect("finish success");
+        let partition_path = dir.child(format!("{}.arrow", metadata.hash));
+        let reader = ArrayPartitionReader::new(
+            store.clone(),
+            "test_array".to_string(),
+            partition_path,
+            metadata,
+            0,
+            ArrayIoCache::new(1024 * 1024),
+        )
+        .await
+        .expect("reader init");
+
+        let maybe_array = reader.read_array(1).await.expect("read succeeds");
+        let nd_array = maybe_array.expect("array exists");
+        let arrow_array = nd_array.as_arrow_array();
+        let int_array = arrow_array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("int32 array");
+        let actual: Vec<_> = (0..int_array.len())
+            .map(|idx| int_array.value(idx))
+            .collect();
+        assert_eq!(actual, vec![30, 40, 50]);
+    }
+
+    #[tokio::test]
+    async fn read_array_handles_group_offsets() {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let dir = Path::from("tests/read_array_group_offsets");
+
+        let first = scalar_int32(&[1, 2, 3]);
+        let second = scalar_int32(&[4, 5]);
+        let third = scalar_int32(&[6]);
+
+        let first_group_size = first.as_arrow_array().get_buffer_memory_size()
+            + second.as_arrow_array().get_buffer_memory_size();
+
+        let mut writer = build_writer(store.clone(), dir.clone(), first_group_size).await;
+
+        writer
+            .append_array(Some(first))
+            .await
+            .expect("append first chunk");
+        writer
+            .append_array(Some(second))
+            .await
+            .expect("append second chunk");
+        writer
+            .append_array(Some(third))
+            .await
+            .expect("append third chunk");
+
+        let metadata = writer.finish().await.expect("finish success");
+        assert_eq!(metadata.groups.len(), 2, "expected two groups recorded");
+        let partition_path = dir.child(format!("{}.arrow", metadata.hash));
+
+        let reader = ArrayPartitionReader::new(
+            store,
+            "test_array".to_string(),
+            partition_path,
+            metadata,
+            0,
+            ArrayIoCache::new(1024 * 1024),
+        )
+        .await
+        .expect("reader init");
+
+        let maybe_array = reader.read_array(2).await.expect("read succeeds");
+        let nd_array = maybe_array.expect("array exists");
+        let arrow_array = nd_array.as_arrow_array();
+        let int_array = arrow_array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("int32 array");
+        assert_eq!(int_array.len(), 1);
+        assert_eq!(int_array.value(0), 6);
+    }
+
     #[test]
     fn range_index_map_round_trip() {
         let mut groups = IndexMap::new();
@@ -531,9 +1005,4 @@ mod tests {
         let restored_ranges: Vec<_> = restored.groups.keys().cloned().collect();
         assert_eq!(restored_ranges, vec![0..2, 2..5]);
     }
-}
-
-struct IPCDecoder {
-    file_decoder: FileDecoder,
-    blocks: Vec<Block>,
 }

@@ -789,6 +789,7 @@ dependencies = [
  "arrow",
  "arrow-ipc 56.2.0",
  "arrow-schema 56.2.0",
+ "futures",
  "hmac-sha256",
  "indexmap 2.12.1",
  "moka",

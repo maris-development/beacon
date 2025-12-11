@@ -296,6 +296,8 @@ impl ArrayGroupReader {
         }
 
         let dimensions = if dimension_names.is_empty() {
+            Dimensions::Scalar
+        } else {
             Dimensions::MultiDimensional(
                 dimension_names
                     .as_string::<i32>()
@@ -310,8 +312,6 @@ impl ArrayGroupReader {
                     })
                     .collect(),
             )
-        } else {
-            Dimensions::Scalar
         };
 
         let nd_array = NdArrowArray::new(inner_values_array.clone(), dimensions).map_err(|e| {

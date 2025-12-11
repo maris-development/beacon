@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use arrow_schema::{ArrowError, DataType};
 use nd_arrow_array::error::NdArrayError;
+use object_store::Error as ObjectStoreError;
 
 use crate::util::SuperTypeError;
 
@@ -39,4 +40,52 @@ pub enum BBFWritingError {
 pub enum BBFReadingError {
     #[error("Failed reading array from array group: {0} with error: {1}")]
     ArrayGroupReadFailure(String, Box<dyn std::error::Error + Send + Sync>),
+    #[error("Failed to fetch bytes for partition {partition_path}: {source}")]
+    PartitionBytesFetch {
+        partition_path: String,
+        #[source]
+        source: ObjectStoreError,
+    },
+    #[error(
+        "Partition {partition_path} is smaller than the required Arrow IPC trailer ({required} bytes), actual size: {actual}"
+    )]
+    PartitionTooSmall {
+        partition_path: String,
+        required: u64,
+        actual: u64,
+    },
+    #[error("Invalid Arrow IPC footer for partition {partition_path}: {reason}")]
+    PartitionFooterDecode {
+        partition_path: String,
+        reason: String,
+    },
+    #[error(
+        "Partition {partition_path} group index {group_index} is out of bounds (total groups: {total_groups})"
+    )]
+    PartitionGroupIndexOutOfBounds {
+        partition_path: String,
+        group_index: usize,
+        total_groups: usize,
+    },
+    #[error("Failed to fetch bytes for partition {partition_path} group {group_index}: {source}")]
+    PartitionGroupBytesFetch {
+        partition_path: String,
+        group_index: usize,
+        #[source]
+        source: ObjectStoreError,
+    },
+    #[error("Invalid block length for partition {partition_path} group {group_index}: {reason}")]
+    PartitionGroupLengthInvalid {
+        partition_path: String,
+        group_index: usize,
+        reason: String,
+    },
+    #[error(
+        "Failed to decode record batch for partition {partition_path} group {group_index}: {reason}"
+    )]
+    PartitionGroupDecode {
+        partition_path: String,
+        group_index: usize,
+        reason: String,
+    },
 }

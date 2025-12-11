@@ -9,6 +9,7 @@ arrow-schema = { workspace = true }
 parquet = { workspace = true }
 object_store = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main", version = "1.3.0"}
 
 serde = { workspace = true }
