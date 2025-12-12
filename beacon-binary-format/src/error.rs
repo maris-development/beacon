@@ -40,6 +40,14 @@ pub enum BBFWritingError {
 pub enum BBFReadingError {
     #[error("Failed reading array from array group: {0} with error: {1}")]
     ArrayGroupReadFailure(String, Box<dyn std::error::Error + Send + Sync>),
+    #[error("Failed to fetch metadata for array partition group at {meta_path}: {source}")]
+    PartitionGroupMetadataFetch {
+        meta_path: String,
+        #[source]
+        source: ObjectStoreError,
+    },
+    #[error("Failed to decode metadata for array partition group at {meta_path}: {reason}")]
+    PartitionGroupMetadataDecode { meta_path: String, reason: String },
     #[error("Failed to fetch bytes for partition {partition_path}: {source}")]
     PartitionBytesFetch {
         partition_path: String,

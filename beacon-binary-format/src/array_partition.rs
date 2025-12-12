@@ -27,9 +27,11 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrayPartitionMetadata {
     pub num_elements: usize,
+    pub partition_offset: usize,
+    pub partition_byte_size: usize,
     pub hash: String,
     pub data_type: arrow::datatypes::DataType,
-    #[serde(with = "range_index_map")]
+    #[serde(with = "crate::util::range_index_map")]
     pub groups: IndexMap<std::ops::Range<usize>, ArrayGroupMetadata>,
 }
 
@@ -56,7 +58,7 @@ pub struct ArrayPartitionWriter {
     /// Partition-wide super type for arrays (if known).
     pub partition_data_type: arrow::datatypes::DataType,
     /// Offset of the first chunk in this partition.
-    pub array_chunk_offset: usize,
+    pub array_partition_offset: usize,
     /// Total number of chunks written to the partition.
     pub total_chunks: usize,
     /// Currently accumulating group builder (flushed when large enough).
@@ -103,7 +105,7 @@ impl ArrayPartitionWriter {
         array_name: String,
         max_group_size: usize,
         partition_data_type: Option<DataType>,
-        array_chunk_offset: usize,
+        array_partition_offset: usize,
     ) -> BBFResult<Self> {
         let partition_data_type = partition_data_type.unwrap_or(DataType::Null);
         Ok(Self {
@@ -117,6 +119,8 @@ impl ArrayPartitionWriter {
                 hash: String::new(),
                 data_type: partition_data_type.clone(),
                 groups: IndexMap::new(),
+                partition_offset: array_partition_offset,
+                partition_byte_size: 0,
             },
             array_name: array_name.clone(),
             partition_data_type: partition_data_type.clone(),
@@ -124,7 +128,7 @@ impl ArrayPartitionWriter {
                 array_name.clone(),
                 Some(partition_data_type.clone()),
             ),
-            array_chunk_offset,
+            array_partition_offset,
             total_chunks: 0,
         })
     }
@@ -170,6 +174,7 @@ impl ArrayPartitionWriter {
 
         let group_metadata = group.metadata;
         self.partition_metadata.num_elements += group_metadata.num_elements;
+        self.partition_metadata.partition_byte_size += group_metadata.uncompressed_array_byte_size;
         let chunk_range = self.total_chunks..self.total_chunks + group_metadata.num_chunks;
         self.total_chunks += group_metadata.num_chunks;
         self.partition_metadata
@@ -327,7 +332,6 @@ pub struct ArrayPartitionReader {
     array_name: String,
     partition_path: object_store::path::Path,
     partition_metadata: Arc<ArrayPartitionMetadata>,
-    partition_offset: usize,
     partition_hash: String,
     cache: ArrayIoCache,
 }
@@ -340,7 +344,6 @@ impl ArrayPartitionReader {
         array_name: String,
         partition_path: object_store::path::Path,
         partition_metadata: ArrayPartitionMetadata,
-        partition_offset: usize,
         cache: ArrayIoCache,
     ) -> BBFResult<Self> {
         let decoder = Arc::new(Self::build_ipc_decoder(&store, &partition_path).await?);
@@ -351,7 +354,6 @@ impl ArrayPartitionReader {
             decoder,
             store,
             partition_path,
-            partition_offset,
             partition_hash: partition_metadata.hash.clone(),
             partition_metadata: Arc::new(partition_metadata),
         })
@@ -568,10 +570,11 @@ impl ArrayPartitionReader {
     }
 
     pub async fn read_array(&self, entry_index: usize) -> BBFResult<Option<NdArrowArray>> {
-        let entry_partition_index = match entry_index.checked_sub(self.partition_offset) {
-            Some(entry_index) => entry_index,
-            None => return Ok(None),
-        };
+        let entry_partition_index =
+            match entry_index.checked_sub(self.partition_metadata.partition_offset) {
+                Some(entry_index) => entry_index,
+                None => return Ok(None),
+            };
         let group_match = self
             .partition_metadata
             .groups
@@ -600,62 +603,6 @@ impl ArrayPartitionReader {
         }
 
         Ok(None)
-    }
-}
-
-mod range_index_map {
-    use super::*;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    struct RangeSerde {
-        start: usize,
-        end: usize,
-    }
-
-    impl From<&std::ops::Range<usize>> for RangeSerde {
-        fn from(range: &std::ops::Range<usize>) -> Self {
-            Self {
-                start: range.start,
-                end: range.end,
-            }
-        }
-    }
-
-    impl From<RangeSerde> for std::ops::Range<usize> {
-        fn from(range: RangeSerde) -> Self {
-            range.start..range.end
-        }
-    }
-
-    pub fn serialize<S, V>(
-        map: &IndexMap<std::ops::Range<usize>, V>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-        V: Serialize,
-    {
-        let items: Vec<(RangeSerde, &V)> = map
-            .iter()
-            .map(|(range, value)| (RangeSerde::from(range), value))
-            .collect();
-        items.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D, V>(
-        deserializer: D,
-    ) -> Result<IndexMap<std::ops::Range<usize>, V>, D::Error>
-    where
-        D: Deserializer<'de>,
-        V: Deserialize<'de>,
-    {
-        let items: Vec<(RangeSerde, V)> = Vec::deserialize(deserializer)?;
-        let mut map = IndexMap::with_capacity(items.len());
-        for (range, value) in items {
-            map.insert(range.into(), value);
-        }
-        Ok(map)
     }
 }
 
@@ -897,7 +844,6 @@ mod tests {
             "test_array".to_string(),
             partition_path,
             metadata,
-            0,
             ArrayIoCache::new(1024 * 1024),
         )
         .await
@@ -952,7 +898,6 @@ mod tests {
             "test_array".to_string(),
             partition_path,
             metadata,
-            0,
             ArrayIoCache::new(1024 * 1024),
         )
         .await
@@ -994,6 +939,8 @@ mod tests {
             hash: "abc123".to_string(),
             data_type: DataType::Int32,
             groups,
+            partition_offset: 0,
+            partition_byte_size: 30,
         };
 
         let serialized = serde_json::to_string(&metadata).expect("serialize");

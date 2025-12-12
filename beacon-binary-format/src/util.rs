@@ -254,3 +254,60 @@ pub fn super_type_arrow(left: &DataType, right: &DataType) -> Option<DataType> {
 
     Some(super_type)
 }
+
+pub(crate) mod range_index_map {
+    use super::*;
+    use indexmap::IndexMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct RangeSerde {
+        start: usize,
+        end: usize,
+    }
+
+    impl From<&std::ops::Range<usize>> for RangeSerde {
+        fn from(range: &std::ops::Range<usize>) -> Self {
+            Self {
+                start: range.start,
+                end: range.end,
+            }
+        }
+    }
+
+    impl From<RangeSerde> for std::ops::Range<usize> {
+        fn from(range: RangeSerde) -> Self {
+            range.start..range.end
+        }
+    }
+
+    pub fn serialize<S, V>(
+        map: &IndexMap<std::ops::Range<usize>, V>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        V: Serialize,
+    {
+        let items: Vec<(RangeSerde, &V)> = map
+            .iter()
+            .map(|(range, value)| (RangeSerde::from(range), value))
+            .collect();
+        items.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, V>(
+        deserializer: D,
+    ) -> std::result::Result<IndexMap<std::ops::Range<usize>, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        let items: Vec<(RangeSerde, V)> = Vec::deserialize(deserializer)?;
+        let mut map = IndexMap::with_capacity(items.len());
+        for (range, value) in items {
+            map.insert(range.into(), value);
+        }
+        Ok(map)
+    }
+}

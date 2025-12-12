@@ -1,5 +1,9 @@
 pub mod array_group;
 pub mod array_partition;
+pub mod array_partition_group;
+pub mod collection;
+pub mod collection_partition;
 pub mod error;
 pub mod io_cache;
+pub mod stream;
 pub mod util;
