@@ -1,3 +1,13 @@
+//! Collection partition reader and writer for reconstructing logical entries
+//! from per-array partitions.
+//!
+//! The binary format stores each logical entry as a set of independent array
+//! partitions so writers can flush and upload data incrementally. This module
+//! provides the glue required to go from the decomposed representation back to
+//! cohesive Arrow record batches. It also exposes the inverse operation so new
+//! entries can be fanned out into array partitions while tracking metadata
+//! such as byte sizes and element counts.
+
 use std::pin;
 use std::sync::Arc;
 
@@ -21,27 +31,48 @@ use crate::{
     error::BBFResult,
 };
 
+/// Metadata describing a collection partition and its constituent arrays.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionPartitionMetadata {
+    /// Total uncompressed byte size across all child arrays.
     pub byte_size: usize,
+    /// Number of flattened elements contained in all arrays.
     pub num_elements: usize,
+    /// Number of logical entries present in the partition.
     pub num_entries: usize,
+    /// Arrow schema describing every array (including `__entry_key`).
     pub partition_schema: Arc<arrow::datatypes::Schema>,
+    /// Mapping from array name to its partition metadata.
     pub arrays: IndexMap<String, ArrayPartitionMetadata>,
 }
 
+/// Reader that stitches multiple array partitions back into logical entries.
 pub struct CollectionPartitionReader {
+    /// Per-partition metadata loaded from disk/object store.
     pub metadata: CollectionPartitionMetadata,
+    /// Root path where array partitions and metadata live.
     pub path: object_store::path::Path,
+    /// Object store used to fetch partition bytes.
     pub object_store: Arc<dyn ObjectStore>,
+    /// Cache shared with array partition readers to avoid duplicate fetches.
     pub io_cache: io_cache::ArrayIoCache,
 }
 
+/// Tunable options that control how collection partitions are read.
+///
+/// These options primarily influence concurrency when the reader builds a
+/// future per entry. Keeping the value modest helps avoid overwhelming the
+/// backing object store.
 pub struct CollectionPartitionReadOptions {
+    /// Maximum number of concurrent entry read tasks.
     pub max_concurrent_reads: usize,
 }
 
 impl CollectionPartitionReader {
+    /// Create a new reader over the provided metadata and backing object store.
+    ///
+    /// The caller is responsible for ensuring `metadata.partition_schema`
+    /// contains every field that may be requested via projections.
     pub fn new(
         path: object_store::path::Path,
         object_store: Arc<dyn ObjectStore>,
@@ -56,6 +87,11 @@ impl CollectionPartitionReader {
         }
     }
 
+    /// Read partition entries, optionally projecting a subset of arrays.
+    ///
+    /// The returned scheduler multiplexes a future per entry, allowing callers
+    /// to bound parallelism via `options.max_concurrent_reads` when fetching
+    /// data from the object store.
     pub async fn read(
         &self,
         projection: Option<Arc<[String]>>,
@@ -88,7 +124,7 @@ impl CollectionPartitionReader {
         }
         let shared_readers = Arc::new(array_readers);
         let mut projected_fields = Vec::new();
-        for (array_name, array_metadata) in &arrays_to_read {
+        for (array_name, _) in &arrays_to_read {
             let field = self
                 .metadata
                 .partition_schema
@@ -99,6 +135,8 @@ impl CollectionPartitionReader {
         }
         let projected_schema = Arc::new(arrow::datatypes::Schema::new(projected_fields.clone()));
 
+        // Construct a future per entry that reads all projected arrays, then
+        // reassembles them into an NdRecordBatch.
         let mut futures = Vec::new();
         for index in 0..self.metadata.num_entries {
             // For each entry, read arrays
@@ -140,19 +178,35 @@ impl CollectionPartitionReader {
     }
 }
 
+/// Writer that splits incoming entry streams into per-array partitions.
 pub struct CollectionPartitionWriter {
+    /// Metadata being accumulated while writing entries.
     pub metadata: CollectionPartitionMetadata,
+    /// Destination path under which array partitions will be stored.
     pub path: object_store::path::Path,
+    /// Object store that will persist partition data.
     pub object_store: Arc<dyn ObjectStore>,
+    /// Active per-array partition writers keyed by array name.
     pub array_writers: IndexMap<String, ArrayPartitionWriter>,
+    /// Global writer configuration shared by all arrays.
     pub write_options: WriterOptions,
 }
 
+/// Options controlling the size/shape of generated array partitions.
+///
+/// Larger group sizes incur more memory usage but reduce the number of objects
+/// written to the object store.
 pub struct WriterOptions {
+    /// Maximum buffer size (in bytes) before array groups are flushed.
     pub max_group_size: usize,
 }
 
 impl CollectionPartitionWriter {
+    /// Create a writer that will materialize array partitions under `path`.
+    ///
+    /// Writers stay entirely in-memory until the underlying
+    /// `ArrayPartitionWriter`s flush, so callers should size
+    /// `WriterOptions::max_group_size` accordingly.
     pub fn new(
         path: object_store::path::Path,
         object_store: Arc<dyn ObjectStore>,
@@ -175,6 +229,11 @@ impl CollectionPartitionWriter {
         }
     }
 
+    /// Write a logical entry comprised of multiple arrays (streamed per field).
+    ///
+    /// `arrays` should yield each projected field once. Missing fields are
+    /// automatically padded with null entries so subsequent reads retain a
+    /// consistent cardinality across arrays.
     pub async fn write_entry(
         &mut self,
         entry_name: &str,
@@ -187,6 +246,7 @@ impl CollectionPartitionWriter {
             // Check if we have an array writer for this array
             if !self.array_writers.contains_key(field.name()) {
                 // Create new array writer
+                // Array partition writers are stored under array-specific directories.
                 let path = self.path.child(field.name().to_string());
                 let array_partition_writer = ArrayPartitionWriter::new(
                     self.object_store.clone(),
@@ -246,6 +306,10 @@ impl CollectionPartitionWriter {
         Ok(())
     }
 
+    /// Finalize all array partitions, returning the completed metadata.
+    ///
+    /// This drains every `ArrayPartitionWriter`, ensuring their buffers flush
+    /// to the object store before aggregating byte counts and element totals.
     pub async fn finish(mut self) -> BBFResult<CollectionPartitionMetadata> {
         let mut total_byte_size = 0;
         let mut total_num_elements = 0;
@@ -266,14 +330,16 @@ impl CollectionPartitionWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{ArrayRef, Int32Array};
-    use arrow_schema::{DataType, Field};
-    use futures::stream;
+    use arrow::array::{Array, ArrayRef, Int32Array, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use futures::{StreamExt, stream};
+    use indexmap::IndexMap;
     use nd_arrow_array::dimensions::{Dimension, Dimensions};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc as StdArc;
 
+    /// Create a 1D integer `NdArrowArray` used by the fixture builders.
     fn scalar_int32(values: &[i32]) -> NdArrowArray {
         let array: ArrayRef = StdArc::new(Int32Array::from(values.to_vec()));
         let dimension = Dimension {
@@ -284,6 +350,8 @@ mod tests {
             .expect("nd array creation")
     }
 
+    /// Verifies that writing entries tracks every array plus the synthetic
+    /// `__entry_key` column used for joins.
     #[tokio::test]
     async fn write_entry_records_arrays_and_entry_keys() {
         let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
@@ -338,5 +406,219 @@ mod tests {
             .get("__entry_key")
             .expect("entry key metadata");
         assert_eq!(entry_key_meta.num_elements, 2);
+    }
+
+    /// Builds an in-memory reader with two entries to simplify test setup.
+    async fn build_reader_fixture() -> CollectionPartitionReader {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let path = Path::from("collection/read");
+        let mut writer = CollectionPartitionWriter::new(
+            path.clone(),
+            store.clone(),
+            WriterOptions {
+                max_group_size: usize::MAX,
+            },
+        );
+
+        let temp_field: FieldRef = StdArc::new(Field::new("temp", DataType::Int32, true));
+        let sal_field: FieldRef = StdArc::new(Field::new("sal", DataType::Int32, true));
+
+        writer
+            .write_entry(
+                "entry-1",
+                stream::iter(vec![
+                    (temp_field.clone(), scalar_int32(&[1, 2])),
+                    (sal_field.clone(), scalar_int32(&[7])),
+                ]),
+            )
+            .await
+            .expect("write entry 1");
+
+        writer
+            .write_entry(
+                "entry-2",
+                stream::iter(vec![(temp_field.clone(), scalar_int32(&[3]))]),
+            )
+            .await
+            .expect("write entry 2");
+
+        let mut metadata = writer.finish().await.expect("finish success");
+        metadata.partition_schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Int32, true),
+            Field::new("sal", DataType::Int32, true),
+            Field::new("__entry_key", DataType::Utf8, false),
+        ]));
+
+        for (array_name, array_meta) in metadata.arrays.iter() {
+            let hashed_path = path
+                .clone()
+                .child(array_name.clone())
+                .child(format!("{}.arrow", array_meta.hash));
+            let flattened_path = path.child(array_name.clone());
+            let bytes = store
+                .get(&hashed_path)
+                .await
+                .expect("hashed file exists")
+                .bytes()
+                .await
+                .expect("hashed bytes");
+            store
+                .put(&flattened_path, bytes.into())
+                .await
+                .expect("write flattened path");
+        }
+
+        CollectionPartitionReader::new(
+            path,
+            store,
+            metadata,
+            io_cache::ArrayIoCache::new(1024 * 1024),
+        )
+    }
+
+    /// Transform an Arrow `Int32Array` into optional scalars to ease
+    /// assertions about null propagation.
+    fn collect_optional_ints(array: &Int32Array) -> Vec<Option<i32>> {
+        (0..array.len())
+            .map(|idx| {
+                if array.is_null(idx) {
+                    None
+                } else {
+                    Some(array.value(idx))
+                }
+            })
+            .collect()
+    }
+
+    /// Ensures readers yield one batch per entry and surface nulls when an
+    /// array was missing for a given entry.
+    #[tokio::test]
+    async fn read_returns_batches_for_all_arrays() {
+        let reader = build_reader_fixture().await;
+        let scheduler = reader
+            .read(
+                None,
+                CollectionPartitionReadOptions {
+                    max_concurrent_reads: 2,
+                },
+            )
+            .await
+            .expect("scheduler");
+        let stream = scheduler.shared_pollable_stream_ref().await;
+        let batches = stream.collect::<Vec<_>>().await;
+
+        assert_eq!(batches.len(), reader.metadata.num_entries);
+
+        let mut observed: IndexMap<String, (Vec<Option<i32>>, Vec<Option<i32>>)> = IndexMap::new();
+
+        for batch_result in batches {
+            let batch = batch_result.expect("batch success");
+            let schema = batch.schema();
+            let arrays = batch.arrays();
+
+            let mut entry_key = None;
+            let mut temp = None;
+            let mut sal = None;
+
+            for (field, nd_array) in schema.fields().iter().zip(arrays.iter()) {
+                match field.name().as_str() {
+                    "temp" => {
+                        let arr = nd_array
+                            .as_arrow_array()
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
+                            .expect("temp int array");
+                        temp = Some(collect_optional_ints(arr));
+                    }
+                    "sal" => {
+                        let arr = nd_array
+                            .as_arrow_array()
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
+                            .expect("sal int array");
+                        sal = Some(collect_optional_ints(arr));
+                    }
+                    "__entry_key" => {
+                        let arr = nd_array
+                            .as_arrow_array()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .expect("entry key array");
+                        entry_key = Some(arr.value(0).to_string());
+                    }
+                    _ => {}
+                }
+            }
+
+            let entry_key = entry_key.expect("entry key present");
+            observed.insert(
+                entry_key,
+                (
+                    temp.expect("temp data present"),
+                    sal.expect("sal data present"),
+                ),
+            );
+        }
+
+        let entry_one = observed.get("entry-1").expect("entry-1 present");
+        assert_eq!(entry_one.0, vec![Some(1), Some(2)]);
+        assert_eq!(entry_one.1, vec![Some(7)]);
+
+        let entry_two = observed.get("entry-2").expect("entry-2 present");
+        assert_eq!(entry_two.0, vec![Some(3)]);
+        assert_eq!(entry_two.1, vec![None]);
+    }
+
+    /// Confirms field projection only materializes requested arrays while
+    /// still emitting every logical entry.
+    #[tokio::test]
+    async fn read_respects_projection() {
+        let reader = build_reader_fixture().await;
+        let projection: Arc<[String]> =
+            Arc::from(vec!["temp".to_string(), "__entry_key".to_string()].into_boxed_slice());
+
+        let scheduler = reader
+            .read(
+                Some(projection),
+                CollectionPartitionReadOptions {
+                    max_concurrent_reads: 1,
+                },
+            )
+            .await
+            .expect("scheduler");
+        let stream = scheduler.shared_pollable_stream_ref().await;
+        let batches = stream.collect::<Vec<_>>().await;
+
+        assert_eq!(batches.len(), reader.metadata.num_entries);
+
+        for batch_result in batches {
+            let batch = batch_result.expect("batch success");
+            let schema = batch.schema();
+            assert_eq!(schema.fields().len(), 2);
+            assert_eq!(schema.field(0).name(), "temp");
+            assert_eq!(schema.field(1).name(), "__entry_key");
+
+            let arrays = batch.arrays();
+            let temp_arr = arrays[0]
+                .as_arrow_array()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("temp int array");
+            let entry_key_arr = arrays[1]
+                .as_arrow_array()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("entry key array");
+
+            match entry_key_arr.value(0) {
+                "entry-1" => {
+                    assert_eq!(collect_optional_ints(temp_arr), vec![Some(1), Some(2)]);
+                }
+                "entry-2" => {
+                    assert_eq!(collect_optional_ints(temp_arr), vec![Some(3)]);
+                }
+                other => panic!("unexpected entry key {other}"),
+            }
+        }
     }
 }
