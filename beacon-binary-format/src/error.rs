@@ -34,6 +34,12 @@ pub enum BBFWritingError {
     ArrayGroupWriteFailure(ArrowError),
     #[error("Failed to finalize array partition: {0}")]
     ArrayPartitionFinalizeFailure(Box<dyn std::error::Error + Send + Sync>),
+    #[error("Failed to write pruning index for array partition: {0}")]
+    ArrayPartitionPruningIndexWriteFailure(Box<dyn std::error::Error + Send + Sync>),
+    #[error("Failed to write collection metadata: {0}")]
+    CollectionMetadataWriteFailure(Box<dyn std::error::Error + Send + Sync>),
+    #[error("Collection schema mismatch: expected {expected}, observed {actual}")]
+    CollectionSchemaMismatch { expected: String, actual: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +54,14 @@ pub enum BBFReadingError {
     },
     #[error("Failed to decode metadata for array partition group at {meta_path}: {reason}")]
     PartitionGroupMetadataDecode { meta_path: String, reason: String },
+    #[error("Failed to fetch metadata for collection at {meta_path}: {source}")]
+    CollectionMetadataFetch {
+        meta_path: String,
+        #[source]
+        source: ObjectStoreError,
+    },
+    #[error("Failed to decode metadata for collection at {meta_path}: {reason}")]
+    CollectionMetadataDecode { meta_path: String, reason: String },
     #[error("Failed to fetch bytes for partition {partition_path}: {source}")]
     PartitionBytesFetch {
         partition_path: String,
@@ -94,6 +108,11 @@ pub enum BBFReadingError {
     PartitionGroupDecode {
         partition_path: String,
         group_index: usize,
+        reason: String,
+    },
+    #[error("Failed to decode pruning index for partition {partition_path}: {reason}")]
+    PartitionPruningIndexDecode {
+        partition_path: String,
         reason: String,
     },
 }

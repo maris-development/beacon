@@ -789,6 +789,7 @@ dependencies = [
  "arrow",
  "arrow-ipc 56.2.0",
  "arrow-schema 56.2.0",
+ "bytes",
  "flume",
  "futures",
  "hmac-sha256",

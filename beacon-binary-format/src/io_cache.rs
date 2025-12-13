@@ -6,8 +6,7 @@ use crate::error::BBFError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    pub array_name: String,
-    pub partition_hash: String,
+    pub array_partition_path: object_store::path::Path,
     pub group_index: usize,
 }
 
