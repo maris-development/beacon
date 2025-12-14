@@ -24,7 +24,13 @@ EntryPayload = Mapping[str, ArrayPayload]
 
 class Collection:
     """Logical Beacon collection that can host multiple partitions."""
-    def __init__(self, base_dir: str, collection_path: str) -> None: ...
+    def __init__(
+        self,
+        base_dir: str,
+        collection_path: str,
+        storage_options: Optional[Mapping[str, Any]] = ...,
+        filesystem: Optional[Any] = ...,
+    ) -> None: ...
     def create_partition(
         self,
         partition_name: Optional[str] = ..., 
@@ -49,6 +55,8 @@ class CollectionBuilder:
         collection_path: str,
         partition_name: Optional[str] = ..., 
         max_group_size: Optional[int] = ...,
+        storage_options: Optional[Mapping[str, Any]] = ...,
+        filesystem: Optional[Any] = ...,
     ) -> None: ...
     def write_entry(self, entry_key: str, arrays: ArrayMap) -> None:
         """Shortcut to the single-partition workflow retained for legacy scripts."""
@@ -65,6 +73,8 @@ class CollectionReader:
         base_dir: str,
         collection_path: str,
         cache_bytes: Optional[int] = ...,
+        storage_options: Optional[Mapping[str, Any]] = ...,
+        filesystem: Optional[Any] = ...,
     ) -> None: ...
 
     def metadata(self) -> CollectionMetadata: ...

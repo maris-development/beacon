@@ -71,7 +71,6 @@ partition.write_entry(
 	},
 )
 ```
-
 The number of names must match the rank of the array (or be exactly one for scalars). Any mismatch raises a `ValueError`, which keeps the partition builder in a valid state for additional writes.
 
 ### NumPy masked arrays
@@ -105,7 +104,66 @@ for entry in entries:
 
 Optional `projection=["temperature", "salinity"]` narrows the arrays fetched from disk, and `max_concurrent_reads` lets you tune object-store fanout.
 
-The legacy `CollectionBuilder` class remains available for scripts that only ever deal with a single partition, but the `Collection`/`PartitionBuilder` pair is the recommended interface moving forward. Shipping `.pyi` stubs and `py.typed` ensures editors and static type checkers understand the API surface.
+### Object stores and `fsspec`-style options
+
+`Collection`, `CollectionBuilder`, and `CollectionReader` each accept an optional `storage_options` mapping along with richer `base_dir` URIs. Supplying "s3://bucket/prefix" switches the backend to AWS S3 via the Rust `object_store` crate, while ordinary filesystem paths (or `file://` URLs) continue to use `LocalFileSystem`.
+
+`storage_options` mirrors the values you would normally pass to [`fsspec`](https://filesystem-spec.readthedocs.io/), which means existing credential dictionaries can be reused verbatim:
+
+```python
+from beacon_bbf import Collection
+
+collection = Collection(
+    base_dir="s3://beacon-dev/datasets",
+    collection_path="planning/profiles",
+    storage_options={
+        "key": "minio-access-key",
+        "secret": "minio-secret-key",
+        "region_name": "us-east-1",
+        "client_kwargs": {
+            "endpoint_url": "http://localhost:9000",
+            "allow_http": True,
+        },
+    },
+)
 ```
 
+The same configuration works for readers and builders, and you can even forward `fs.storage_options` from an existing `fsspec` filesystem for consistency across libraries.
+
+Prefer to pass the filesystem object itself? Provide it via the `filesystem` keyword alongside a path scoped to that instance:
+
+```python
+import numpy as np
+import fsspec
+from beacon_bbf import Collection, CollectionReader
+
+fs = fsspec.filesystem(
+	"s3",
+	key="minio-access-key",
+	secret="minio-secret-key",
+	client_kwargs={"endpoint_url": "http://localhost:9000", "allow_http": True},
+)
+
+collection = Collection(
+	base_dir="beacon-dev/datasets",  # interpreted relative to `fs`
+	collection_path="planning/profiles",
+	filesystem=fs,
+)
+partition = collection.create_partition("p0")
+partition.write_entry("row-0", {"temperature": np.array([9.2], dtype=np.float32)})
+partition.finish()
+
+reader = CollectionReader(
+	base_dir="beacon-dev/datasets",
+	collection_path="planning/profiles",
+	filesystem=fs,
+)
+entries = reader.open_partition("p0").read_entries()
+print(entries[0]["temperature"]["data"])
+```
+
+When the supplied path lacks a scheme, the constructor infers it from `filesystem.protocol`, so `s3`, `gcs`, `abfs`, etc. remain fully supported. Explicit `storage_options` still take precedence if you need to override anything pulled from the filesystem instance.
+
 The legacy `CollectionBuilder` class remains available for scripts that only ever deal with a single partition, but the `Collection`/`PartitionBuilder` pair is the recommended interface moving forward. Shipping `.pyi` stubs and `py.typed` ensures editors and static type checkers understand the API surface.
+
+````

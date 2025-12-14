@@ -16,12 +16,11 @@ use beacon_binary_format::io_cache::ArrayIoCache;
 use futures::StreamExt;
 use nd_arrow_array::{NdArrowArray, batch::NdRecordBatch, dimensions::Dimensions};
 use numpy::PyArray1;
-use object_store::path::Path;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyString, PyTuple};
 
-use crate::utils::{init_store, to_py_err};
+use crate::utils::{StorageOptions, init_store, prepare_store_inputs, to_py_err};
 
 const DEFAULT_CACHE_SIZE_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_MAX_CONCURRENCY: usize = 32;
@@ -37,16 +36,17 @@ impl ReaderInner {
         base_dir: String,
         collection_path: String,
         cache_bytes: Option<usize>,
+        storage: StorageOptions,
     ) -> PyResult<Self> {
         let runtime =
             Arc::new(tokio::runtime::Runtime::new().map_err(|err| {
                 PyRuntimeError::new_err(format!("failed to start runtime: {err}"))
             })?);
-        let store = init_store(base_dir)?;
-        let path = Path::from(collection_path.as_str());
+        let store = init_store(base_dir, storage)?;
+        let path = store.resolve_collection_path(&collection_path)?;
         let cache = ArrayIoCache::new(cache_bytes.unwrap_or(DEFAULT_CACHE_SIZE_BYTES));
         let reader = runtime
-            .block_on(CollectionReader::new(store, path, cache))
+            .block_on(CollectionReader::new(store.store.clone(), path, cache))
             .map_err(to_py_err)?;
         Ok(Self { runtime, reader })
     }
@@ -67,14 +67,23 @@ pub struct CollectionReaderHandle {
 #[pymethods]
 impl CollectionReaderHandle {
     #[new]
-    #[pyo3(signature = (base_dir, collection_path, cache_bytes=None))]
+    #[pyo3(signature = (base_dir, collection_path, cache_bytes=None, storage_options=None, filesystem=None))]
     pub fn new(
         base_dir: String,
         collection_path: String,
         cache_bytes: Option<usize>,
+        storage_options: Option<Bound<'_, PyDict>>,
+        filesystem: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        let (normalized_base, storage) =
+            prepare_store_inputs(base_dir, storage_options, filesystem)?;
         Ok(Self {
-            inner: Arc::new(ReaderInner::new(base_dir, collection_path, cache_bytes)?),
+            inner: Arc::new(ReaderInner::new(
+                normalized_base,
+                collection_path,
+                cache_bytes,
+                storage,
+            )?),
         })
     }
 

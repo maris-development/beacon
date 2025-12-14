@@ -10,10 +10,11 @@ use object_store::ObjectStore;
 use object_store::path::Path;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyAny;
 use pyo3::types::PyDict;
 
 use crate::numpy_arrays::build_nd_array;
-use crate::utils::{init_store, to_py_err};
+use crate::utils::{StorageOptions, init_store, prepare_store_inputs, to_py_err};
 
 struct CollectionInner {
     runtime: Arc<tokio::runtime::Runtime>,
@@ -24,13 +25,14 @@ struct CollectionInner {
 }
 
 impl CollectionInner {
-    fn new(base_dir: String, collection_path: String) -> PyResult<Self> {
+    fn new(base_dir: String, collection_path: String, storage: StorageOptions) -> PyResult<Self> {
         let runtime =
             Arc::new(tokio::runtime::Runtime::new().map_err(|err| {
                 PyRuntimeError::new_err(format!("failed to start runtime: {err}"))
             })?);
-        let store = init_store(base_dir)?;
-        let path = Path::from(collection_path.as_str());
+        let store_handle = init_store(base_dir, storage)?;
+        let path = store_handle.resolve_collection_path(&collection_path)?;
+        let store = store_handle.store.clone();
         let writer = runtime
             .block_on(CollectionWriter::new(store.clone(), path.clone()))
             .map_err(to_py_err)?;
@@ -72,10 +74,16 @@ pub struct Collection {
 #[pymethods]
 impl Collection {
     #[new]
-    pub fn new(base_dir: String, collection_path: String) -> PyResult<Self> {
-        Ok(Self {
-            inner: Arc::new(CollectionInner::new(base_dir, collection_path)?),
-        })
+    #[pyo3(signature = (base_dir, collection_path, storage_options=None, filesystem=None))]
+    pub fn new(
+        base_dir: String,
+        collection_path: String,
+        storage_options: Option<Bound<'_, PyDict>>,
+        filesystem: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let (normalized_base, storage) =
+            prepare_store_inputs(base_dir, storage_options, filesystem)?;
+        Self::with_storage(normalized_base, collection_path, storage)
     }
 
     /// Create a new logical partition writer.
@@ -113,6 +121,16 @@ impl Collection {
 }
 
 impl Collection {
+    fn with_storage(
+        base_dir: String,
+        collection_path: String,
+        storage: StorageOptions,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: Arc::new(CollectionInner::new(base_dir, collection_path, storage)?),
+        })
+    }
+
     fn runtime(&self) -> &Arc<tokio::runtime::Runtime> {
         &self.inner.runtime
     }
@@ -202,14 +220,18 @@ pub struct CollectionBuilder {
 #[pymethods]
 impl CollectionBuilder {
     #[new]
-    #[pyo3(signature = (base_dir, collection_path, partition_name=None, max_group_size=None))]
+    #[pyo3(signature = (base_dir, collection_path, partition_name=None, max_group_size=None, storage_options=None, filesystem=None))]
     pub fn new(
         base_dir: String,
         collection_path: String,
         partition_name: Option<String>,
         max_group_size: Option<usize>,
+        storage_options: Option<Bound<'_, PyDict>>,
+        filesystem: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let collection = Collection::new(base_dir, collection_path)?;
+        let (normalized_base, storage) =
+            prepare_store_inputs(base_dir, storage_options, filesystem)?;
+        let collection = Collection::with_storage(normalized_base, collection_path, storage)?;
         let partition = collection.create_partition(partition_name, max_group_size)?;
         Ok(Self {
             collection,
