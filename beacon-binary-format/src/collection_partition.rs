@@ -12,6 +12,7 @@ use std::pin;
 use std::sync::Arc;
 
 use arrow::array::StringArray;
+use arrow_schema::Field;
 use arrow_schema::FieldRef;
 use futures::Stream;
 use futures::StreamExt;
@@ -34,6 +35,8 @@ use crate::{
 /// Metadata describing a collection partition and its constituent arrays.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionPartitionMetadata {
+    /// Name of the partition (typically derived from its directory).
+    pub partition_name: String,
     /// Total uncompressed byte size across all child arrays.
     pub byte_size: usize,
     /// Number of flattened elements contained in all arrays.
@@ -208,11 +211,13 @@ impl CollectionPartitionWriter {
     /// `ArrayPartitionWriter`s flush, so callers should size
     /// `WriterOptions::max_group_size` accordingly.
     pub fn new(
-        path: object_store::path::Path,
+        collection_root: object_store::path::Path,
         object_store: Arc<dyn ObjectStore>,
+        partition_name: String,
         options: WriterOptions,
     ) -> Self {
         let metadata = CollectionPartitionMetadata {
+            partition_name: partition_name.clone(),
             byte_size: 0,
             num_elements: 0,
             partition_schema: Arc::new(arrow::datatypes::Schema::empty()),
@@ -222,7 +227,7 @@ impl CollectionPartitionWriter {
 
         Self {
             metadata,
-            path,
+            path: collection_root.child(partition_name.clone()),
             object_store,
             array_writers: IndexMap::new(),
             write_options: options,
@@ -320,6 +325,14 @@ impl CollectionPartitionWriter {
             self.metadata.arrays.insert(array_name, array_metadata);
         }
 
+        // Build partition schema
+        let mut fields = Vec::new();
+        for (array_name, array_metadata) in &self.metadata.arrays {
+            let field = Field::new(array_name.clone(), array_metadata.data_type.clone(), true);
+            fields.push(field);
+        }
+        self.metadata.partition_schema = Arc::new(arrow::datatypes::Schema::new(fields));
+
         self.metadata.byte_size = total_byte_size;
         self.metadata.num_elements = total_num_elements;
 
@@ -359,6 +372,7 @@ mod tests {
         let mut writer = CollectionPartitionWriter::new(
             path,
             store,
+            "test-partition".to_string(),
             WriterOptions {
                 max_group_size: usize::MAX,
             },
@@ -415,6 +429,7 @@ mod tests {
         let mut writer = CollectionPartitionWriter::new(
             path.clone(),
             store.clone(),
+            "test-partition".to_string(),
             WriterOptions {
                 max_group_size: usize::MAX,
             },

@@ -288,7 +288,8 @@ impl ArrayPartitionWriter {
                     self.hasher.update(&buffer[..bytes_read]);
                 }
                 let hash_result = self.hasher.finalize();
-                let hash_string = String::from_utf8_lossy(&hash_result).to_string();
+                let hash_string: String =
+                    hash_result.iter().map(|b| format!("{:02x}", b)).collect();
                 // Set the hash of the partition in the metadata
                 self.partition_metadata.hash = hash_string.clone();
                 self.partition_metadata.data_type = self.partition_data_type.clone();

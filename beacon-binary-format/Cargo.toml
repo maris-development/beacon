@@ -26,3 +26,14 @@ sha256 = "1.6.0"
 moka = { version = "0.12.10", features = ["future"] }
 flume = { version = "0.11.1", "features" = ["async"] }
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "io_cache"
+harness = false
+
+[[bench]]
+name = "collection_partition"
+harness = false
+

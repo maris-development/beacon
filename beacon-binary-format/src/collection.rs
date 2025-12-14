@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow::datatypes::Schema;
+use arrow::{compute::kernels::partition, datatypes::Schema};
 use indexmap::IndexMap;
 use object_store::{Error as ObjectStoreError, ObjectStore, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub struct CollectionMetadata {
     /// Sum of partition element counts.
     pub collection_num_elements: usize,
     /// Map of partition index to its metadata descriptor.
-    pub partitions: IndexMap<usize, CollectionPartitionMetadata>,
+    pub partitions: IndexMap<String, CollectionPartitionMetadata>,
     /// Logical schema shared by every partition in the collection.
     pub schema: Arc<Schema>,
 }
@@ -87,13 +87,13 @@ impl CollectionReader {
     }
 
     /// Builds a `CollectionPartitionReader` for `partition_index` when metadata is present.
-    pub fn partition_reader(&self, partition_index: usize) -> Option<CollectionPartitionReader> {
+    pub fn partition_reader(&self, partition_name: &str) -> Option<CollectionPartitionReader> {
         self.metadata
             .partitions
-            .get(&partition_index)
+            .get(partition_name)
             .cloned()
             .map(|partition_metadata| {
-                let partition_path = self.root_path.child(partition_index.to_string());
+                let partition_path = self.root_path.child(partition_name.to_string());
                 CollectionPartitionReader::new(
                     partition_path,
                     self.object_store.clone(),
@@ -157,33 +157,38 @@ impl CollectionWriter {
     pub fn append_partition(
         &mut self,
         partition_metadata: CollectionPartitionMetadata,
-    ) -> BBFResult<usize> {
-        if self.metadata.schema.fields().is_empty() {
-            self.metadata.schema = partition_metadata.partition_schema.clone();
-        } else if self.metadata.schema.as_ref() != partition_metadata.partition_schema.as_ref() {
+    ) -> BBFResult<()> {
+        // Check if partition with the same name already exists
+        if self
+            .metadata
+            .partitions
+            .contains_key(&partition_metadata.partition_name)
+        {
             return Err(BBFWritingError::CollectionSchemaMismatch {
-                expected: format!("{:?}", self.metadata.schema.as_ref()),
+                expected: format!(
+                    "Unique partition name, found duplicate: {}",
+                    partition_metadata.partition_name
+                ),
                 actual: format!("{:?}", partition_metadata.partition_schema.as_ref()),
             }
             .into());
         }
 
-        let partition_index = self
-            .metadata
-            .partitions
-            .keys()
-            .max()
-            .map(|idx| idx + 1)
-            .unwrap_or(0);
+        if self.metadata.schema.fields().is_empty() {
+            self.metadata.schema = partition_metadata.partition_schema.clone();
+        } else if self.metadata.schema.as_ref() != partition_metadata.partition_schema.as_ref() {
+            // Super type schema
+            todo!()
+        }
 
-        self.metadata
-            .partitions
-            .insert(partition_index, partition_metadata.clone());
-
+        self.metadata.partitions.insert(
+            partition_metadata.partition_name.clone(),
+            partition_metadata.clone(),
+        );
         self.metadata.collection_byte_size += partition_metadata.byte_size;
         self.metadata.collection_num_elements += partition_metadata.num_elements;
 
-        Ok(partition_index)
+        Ok(())
     }
 
     /// Persists the metadata to `collection.json`.
@@ -212,6 +217,7 @@ mod tests {
             num_elements,
             num_entries: 1,
             partition_schema: schema,
+            partition_name: "sample-partition".to_string(),
             arrays: IndexMap::new(),
         }
     }
@@ -224,10 +230,9 @@ mod tests {
             .await
             .expect("writer init");
 
-        let idx = writer
+        writer
             .append_partition(sample_partition(64, 10))
             .expect("append partition");
-        assert_eq!(idx, 0);
         writer.persist().await.expect("persist metadata");
 
         let writer_again = CollectionWriter::new(store.clone(), root.clone())
@@ -236,7 +241,12 @@ mod tests {
 
         assert_eq!(writer_again.metadata().collection_byte_size, 64);
         assert_eq!(writer_again.metadata().collection_num_elements, 10);
-        assert!(writer_again.metadata().partitions.contains_key(&0));
+        assert!(
+            writer_again
+                .metadata()
+                .partitions
+                .contains_key("sample-partition")
+        );
     }
 
     #[tokio::test]
@@ -246,10 +256,9 @@ mod tests {
         let mut writer = CollectionWriter::new(store.clone(), root.clone())
             .await
             .expect("writer init");
-        let idx = writer
+        writer
             .append_partition(sample_partition(32, 5))
             .expect("append partition");
-        assert_eq!(idx, 0);
         writer.persist().await.expect("persist metadata");
 
         let reader = CollectionReader::new(store.clone(), root.clone(), ArrayIoCache::new(1024))
@@ -257,7 +266,9 @@ mod tests {
             .expect("reader init");
         assert_eq!(reader.metadata().partitions.len(), 1);
 
-        let partition_reader = reader.partition_reader(idx).expect("reader exists");
+        let partition_reader = reader
+            .partition_reader("sample-partition")
+            .expect("reader exists");
         assert_eq!(partition_reader.metadata.num_entries, 1);
         assert_eq!(partition_reader.metadata.num_elements, 5);
     }
