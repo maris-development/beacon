@@ -1,6 +1,6 @@
 [package]
 name = "beacon-binary-format"
-version = "1.5.0"
+version = "3.0.0"
 edition = "2024"
 
 [dependencies]

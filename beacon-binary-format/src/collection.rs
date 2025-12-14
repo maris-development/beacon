@@ -22,6 +22,9 @@ use crate::{
 };
 
 pub const COLLECTION_META_FILE: &str = "bbf.json";
+fn default_library_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
 
 /// Aggregate metadata for a collection spanning multiple collection partitions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,9 @@ pub struct CollectionMetadata {
     pub partitions: IndexMap<String, CollectionPartitionMetadata>,
     /// Logical schema shared by every partition in the collection.
     pub schema: Arc<Schema>,
+    /// Version of `beacon-binary-format` that produced the metadata.
+    #[serde(default = "default_library_version")]
+    pub library_version: String,
 }
 
 impl CollectionMetadata {
@@ -43,6 +49,7 @@ impl CollectionMetadata {
             collection_num_elements: 0,
             partitions: IndexMap::new(),
             schema: Arc::new(Schema::empty()),
+            library_version: default_library_version(),
         }
     }
 }
@@ -126,7 +133,7 @@ impl CollectionWriter {
     pub async fn new(object_store: Arc<dyn ObjectStore>, root_path: Path) -> BBFResult<Self> {
         let meta_path = root_path.child(COLLECTION_META_FILE);
         let meta_display = meta_path.to_string();
-        let metadata = match object_store.get(&meta_path).await {
+        let mut metadata = match object_store.get(&meta_path).await {
             Ok(existing) => {
                 let bytes = existing.bytes().await.map_err(|source| {
                     BBFReadingError::CollectionMetadataFetch {
@@ -150,6 +157,10 @@ impl CollectionWriter {
                 .into());
             }
         };
+
+        if metadata.library_version.is_empty() {
+            metadata.library_version = default_library_version();
+        }
 
         Ok(Self {
             metadata,
@@ -258,6 +269,10 @@ mod tests {
                 .partitions
                 .contains_key("sample-partition")
         );
+        assert_eq!(
+            writer_again.metadata().library_version,
+            default_library_version()
+        );
     }
 
     #[tokio::test]
@@ -276,6 +291,7 @@ mod tests {
             .await
             .expect("reader init");
         assert_eq!(reader.metadata().partitions.len(), 1);
+        assert_eq!(reader.metadata().library_version, default_library_version());
 
         let partition_reader = reader
             .partition_reader("sample-partition")
