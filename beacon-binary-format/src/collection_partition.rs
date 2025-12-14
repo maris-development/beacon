@@ -100,49 +100,9 @@ impl CollectionPartitionReader {
         projection: Option<Arc<[String]>>,
         options: CollectionPartitionReadOptions,
     ) -> BBFResult<AsyncStreamScheduler<BBFResult<NdRecordBatch>>> {
-        let arrays_to_read = match projection {
-            Some(proj) => proj
-                .iter()
-                .filter_map(|name| {
-                    self.metadata
-                        .arrays
-                        .get(name)
-                        .map(|meta| (name.clone(), meta.clone()))
-                })
-                .collect::<IndexMap<String, ArrayPartitionMetadata>>(),
-            None => self.metadata.arrays.clone(),
-        };
-
-        let mut array_readers = IndexMap::new();
-        for (array_name, array_metadata) in &arrays_to_read {
-            let array_partition_reader = ArrayPartitionReader::new(
-                self.object_store.clone(),
-                array_name.clone(),
-                self.path.child(array_name.clone()),
-                array_metadata.clone(),
-                self.io_cache.clone(),
-            )
-            .await?;
-            array_readers.insert(array_name.clone(), array_partition_reader);
-        }
-        let shared_readers = Arc::new(array_readers);
-        let mut projected_fields = Vec::new();
-        for (array_name, _) in &arrays_to_read {
-            let field = self
-                .metadata
-                .partition_schema
-                .field_with_name(array_name)
-                .expect("field exists")
-                .clone();
-            projected_fields.push(field);
-        }
-        let projected_schema = Arc::new(arrow::datatypes::Schema::new(projected_fields.clone()));
-
-        // Construct a future per entry that reads all projected arrays, then
-        // reassembles them into an NdRecordBatch.
+        let (shared_readers, projected_schema) = self.prepare_read(projection).await?;
         let mut futures = Vec::new();
         for index in 0..self.metadata.num_entries {
-            // For each entry, read arrays
             let shared_readers = shared_readers.clone();
             let projected_schema = projected_schema.clone();
             let read_fut = async move {
@@ -178,6 +138,101 @@ impl CollectionPartitionReader {
 
         let scheduler = AsyncStreamScheduler::new(futures, options.max_concurrent_reads);
         Ok(scheduler)
+    }
+
+    /// Read partition entries while retaining the logical entry index
+    /// associated with every batch.
+    pub async fn read_indexed(
+        &self,
+        projection: Option<Arc<[String]>>,
+        options: CollectionPartitionReadOptions,
+    ) -> BBFResult<AsyncStreamScheduler<BBFResult<(usize, NdRecordBatch)>>> {
+        let (shared_readers, projected_schema) = self.prepare_read(projection).await?;
+        let mut futures = Vec::new();
+        for index in 0..self.metadata.num_entries {
+            let shared_readers = shared_readers.clone();
+            let projected_schema = projected_schema.clone();
+            let read_fut = async move {
+                let mut read_tasks = Vec::new();
+                for (_, array_reader) in shared_readers.as_ref() {
+                    let array_read_task = array_reader.read_array(index);
+                    read_tasks.push(array_read_task);
+                }
+
+                let array_results = futures::future::join_all(read_tasks).await;
+                let mut fields = Vec::new();
+                let mut arrays = Vec::new();
+
+                for (i, array_result) in array_results.into_iter().enumerate() {
+                    let field = projected_schema.field(i).clone();
+                    let array = array_result?.unwrap_or(NdArrowArray::new_null_scalar(Some(
+                        field.data_type().clone(),
+                    )));
+                    fields.push(field);
+                    arrays.push(array);
+                }
+
+                let nd_batch = NdRecordBatch::new(fields, arrays).map_err(|e| {
+                    BBFError::Reading(BBFReadingError::ArrayGroupReadFailure(
+                        format!("entry index {}", index),
+                        Box::new(e),
+                    ))
+                })?;
+                Ok::<_, BBFError>((index, nd_batch))
+            };
+            futures.push(read_fut);
+        }
+
+        let scheduler = AsyncStreamScheduler::new(futures, options.max_concurrent_reads);
+        Ok(scheduler)
+    }
+
+    async fn prepare_read(
+        &self,
+        projection: Option<Arc<[String]>>,
+    ) -> BBFResult<(
+        Arc<IndexMap<String, ArrayPartitionReader>>,
+        Arc<arrow::datatypes::Schema>,
+    )> {
+        let arrays_to_read = match projection {
+            Some(proj) => proj
+                .iter()
+                .filter_map(|name| {
+                    self.metadata
+                        .arrays
+                        .get(name)
+                        .map(|meta| (name.clone(), meta.clone()))
+                })
+                .collect::<IndexMap<String, ArrayPartitionMetadata>>(),
+            None => self.metadata.arrays.clone(),
+        };
+
+        let mut array_readers = IndexMap::new();
+        for (array_name, array_metadata) in &arrays_to_read {
+            let array_partition_reader = ArrayPartitionReader::new(
+                self.object_store.clone(),
+                array_name.clone(),
+                self.path.child(array_name.clone()),
+                array_metadata.clone(),
+                self.io_cache.clone(),
+            )
+            .await?;
+            array_readers.insert(array_name.clone(), array_partition_reader);
+        }
+        let shared_readers = Arc::new(array_readers);
+
+        let mut projected_fields = Vec::new();
+        for (array_name, _) in &arrays_to_read {
+            let field = self
+                .metadata
+                .partition_schema
+                .field_with_name(array_name)
+                .expect("field exists")
+                .clone();
+            projected_fields.push(field);
+        }
+        let projected_schema = Arc::new(arrow::datatypes::Schema::new(projected_fields));
+        Ok((shared_readers, projected_schema))
     }
 }
 

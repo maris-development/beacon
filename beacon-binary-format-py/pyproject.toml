@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "beacon-bbf"
+version = "3.0.0a0"
+description = "Python bindings for the Beacon Binary Format collection writer."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "../LICENSE" }
+keywords = ["ocean", "arrow", "beacon", "bbf"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy>=1.24",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "beacon_bbf"
+features = []
+include = ["beacon_bbf.pyi", "py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra"
+testpaths = ["tests"]

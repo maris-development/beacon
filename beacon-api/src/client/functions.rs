@@ -16,9 +16,7 @@ use beacon_functions::function_doc::FunctionDoc;
         ("bearer" = [])
     )
 )]
-pub(crate) async fn list_functions(
-    State(state): State<Arc<Runtime>>,
-) -> Json<Vec<FunctionDoc>> {
+pub(crate) async fn list_functions(State(state): State<Arc<Runtime>>) -> Json<Vec<FunctionDoc>> {
     let functions = state.list_functions();
     Json(functions)
 }

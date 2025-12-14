@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use beacon_core::{runtime::Runtime};
+use beacon_core::runtime::Runtime;
 use beacon_data_lake::table::Table;
 use utoipa::{IntoParams, ToSchema};
 
@@ -31,7 +31,7 @@ pub struct CreateTable {
 pub(crate) async fn create_table(
     State(state): State<Arc<Runtime>>,
     Json(create_table): Json<CreateTable>,
-) -> Result<(StatusCode,String), Json<String>> {
+) -> Result<(StatusCode, String), Json<String>> {
     let table_name = create_table.inner.table_name().to_string();
     let result = state.add_table(create_table.inner).await;
     match result {
@@ -42,7 +42,6 @@ pub(crate) async fn create_table(
         }
     }
 }
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct DeleteTable {
@@ -68,10 +67,16 @@ pub(crate) async fn delete_table(
     let result = state.delete_table(&delete_table.table_name).await;
 
     match result {
-        Ok(_) => (StatusCode::OK, format!("Table: {} was deleted", delete_table.table_name)),
+        Ok(_) => (
+            StatusCode::OK,
+            format!("Table: {} was deleted", delete_table.table_name),
+        ),
         Err(err) => {
             tracing::error!("Error deleting table: {:?}", err);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Error deleting table: {:?}", err))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Error deleting table: {:?}", err),
+            )
         }
     }
 }
@@ -101,10 +106,16 @@ pub(crate) async fn apply_table_operation(
         .apply_table_operation(&table_operation.table_name, table_operation.operation)
         .await;
     match result {
-        Ok(_) => (StatusCode::OK, format!("Operation applied to table: {}", table_operation.table_name)),
+        Ok(_) => (
+            StatusCode::OK,
+            format!("Operation applied to table: {}", table_operation.table_name),
+        ),
         Err(err) => {
             tracing::error!("Error applying operation to table: {:?}", err);
-            (StatusCode::BAD_REQUEST, format!("Error applying operation to table: {:?}", err))
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Error applying operation to table: {:?}", err),
+            )
         }
     }
 }
