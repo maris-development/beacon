@@ -1,15 +1,22 @@
+//! Cooperative scheduler for joining a batch of async operations.
+//!
+//! `AsyncStreamScheduler` gives callers a stream view over a list of futures
+//! while bounding concurrency via a semaphore.
+
 use std::{future::Future, sync::Arc};
 
 use futures::Stream;
 use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone)]
-
+/// Wraps a bounded channel that yields results as futures complete.
 pub struct AsyncStreamScheduler<T: Send + 'static> {
     receiver: flume::Receiver<T>,
 }
 
 impl<T: Send + 'static> AsyncStreamScheduler<T> {
+    /// Spawn the provided futures and stream their outputs with at most
+    /// `parallelism` concurrent tasks in-flight.
     pub fn new<Fut>(futures: Vec<Fut>, parallelism: usize) -> Self
     where
         Fut: Future<Output = T> + Send + 'static,
@@ -42,6 +49,8 @@ impl<T: Send + 'static> AsyncStreamScheduler<T> {
         Self { receiver }
     }
 
+    /// Obtain a clone of the underlying stream so multiple readers can drive
+    /// completion concurrently.
     pub async fn shared_pollable_stream_ref(&self) -> impl Stream<Item = T> + '_ {
         self.receiver.clone().into_stream()
     }

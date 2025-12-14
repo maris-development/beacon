@@ -425,11 +425,12 @@ mod tests {
     /// Builds an in-memory reader with two entries to simplify test setup.
     async fn build_reader_fixture() -> CollectionPartitionReader {
         let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
-        let path = Path::from("collection/read");
+        let collection_root = Path::from("collection/read");
+        let partition_name = "test-partition".to_string();
         let mut writer = CollectionPartitionWriter::new(
-            path.clone(),
+            collection_root.clone(),
             store.clone(),
-            "test-partition".to_string(),
+            partition_name.clone(),
             WriterOptions {
                 max_group_size: usize::MAX,
             },
@@ -464,27 +465,8 @@ mod tests {
             Field::new("__entry_key", DataType::Utf8, false),
         ]));
 
-        for (array_name, array_meta) in metadata.arrays.iter() {
-            let hashed_path = path
-                .clone()
-                .child(array_name.clone())
-                .child(format!("{}.arrow", array_meta.hash));
-            let flattened_path = path.child(array_name.clone());
-            let bytes = store
-                .get(&hashed_path)
-                .await
-                .expect("hashed file exists")
-                .bytes()
-                .await
-                .expect("hashed bytes");
-            store
-                .put(&flattened_path, bytes.into())
-                .await
-                .expect("write flattened path");
-        }
-
         CollectionPartitionReader::new(
-            path,
+            collection_root.child(partition_name),
             store,
             metadata,
             io_cache::ArrayIoCache::new(1024 * 1024),

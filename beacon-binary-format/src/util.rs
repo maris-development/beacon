@@ -1,3 +1,8 @@
+//! Shared Arrow utility helpers.
+//!
+//! The functions in this module help reconcile Arrow schemas and serialize
+//! range-based metadata blobs shared across the crate.
+
 use arrow::datatypes::{DataType, Fields, Schema, TimeUnit};
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -256,7 +261,6 @@ pub fn super_type_arrow(left: &DataType, right: &DataType) -> Option<DataType> {
 }
 
 pub(crate) mod range_index_map {
-    use super::*;
     use indexmap::IndexMap;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

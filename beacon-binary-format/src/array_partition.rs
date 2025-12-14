@@ -1,3 +1,9 @@
+//! Array partition readers and writers built on Arrow IPC.
+//!
+//! This module defines the primitives responsible for flushing streamed
+//! `NdArrowArray`s into compressed Arrow IPC files as well as the matching
+//! readers that recover `RecordBatch` data out of object storage.
+
 use std::{convert::TryFrom, fs::File, io::Cursor, sync::Arc};
 
 use arrow::{
@@ -30,6 +36,7 @@ use crate::{
     io_cache::{ArrayIoCache, CacheKey},
 };
 
+/// Summary describing one Arrow IPC partition stored in object storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrayPartitionMetadata {
     pub num_elements: usize,
@@ -400,6 +407,7 @@ struct IPCDecoder {
     blocks: Vec<Block>,
 }
 
+/// Lazily reads batches out of an Arrow IPC partition.
 pub struct ArrayPartitionReader {
     store: Arc<dyn ObjectStore>,
     decoder: Arc<IPCDecoder>,
@@ -945,7 +953,7 @@ mod tests {
     async fn fetch_partition_group_errors_when_index_is_out_of_bounds() {
         let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
         let dir = Path::from("tests/fetch_oob");
-        let (metadata, partition_path, decoder) =
+        let (_metadata, partition_path, decoder) =
             build_partition_for_reader(store.clone(), dir).await;
         let missing_index = decoder.blocks.len();
 

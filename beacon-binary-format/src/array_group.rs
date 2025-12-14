@@ -1,3 +1,10 @@
+//! Arrow record batch builders for grouped Nd arrays.
+//!
+//! An `ArrayGroup` represents a bundle of logically-related `NdArrowArray`
+//! entries.  Writers rely on this module to flatten multidimensional tensors
+//! into Arrow-friendly batches while preserving dimension metadata.  The
+//! accompanying `ArrayGroupReader` reverses the process.
+
 use std::sync::Arc;
 
 use arrow::{

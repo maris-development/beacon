@@ -1,6 +1,16 @@
+//! Collection metadata management.
+//!
+//! A _collection_ orchestrates a set of `CollectionPartition`s that share a
+//! logical schema.  The metadata stored in `bbf.json` is the primary contract
+//! consumers rely on to discover which partitions exist, how large they are,
+//! and which Arrow schema they adhere to.  This module exposes a
+//! `CollectionWriter` that keeps the metadata consistent while new partitions
+//! are produced, and a `CollectionReader` that hands out partition readers for
+//! downstream consumers.
+
 use std::sync::Arc;
 
-use arrow::{compute::kernels::partition, datatypes::Schema};
+use arrow::datatypes::Schema;
 use indexmap::IndexMap;
 use object_store::{Error as ObjectStoreError, ObjectStore, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
@@ -153,7 +163,8 @@ impl CollectionWriter {
         &self.metadata
     }
 
-    /// Appends `partition_metadata` as the next partition, returning the assigned index.
+    /// Records `partition_metadata` in the collection, ensuring schema
+    /// compatibility and unique partition names.
     pub fn append_partition(
         &mut self,
         partition_metadata: CollectionPartitionMetadata,

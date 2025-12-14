@@ -1,3 +1,10 @@
+//! Metadata helpers for collections of array partitions.
+//!
+//! Array partition groups track every Arrow partition produced for a single
+//! logical array.  The reader and writer surfaces defined here own the JSON
+//! descriptor, enforce schema compatibility, and expose ergonomic helpers for
+//! fetching concrete `ArrayPartitionReader`s.
+
 use std::sync::Arc;
 
 use arrow_schema::DataType;
@@ -38,6 +45,7 @@ impl ArrayPartitionGroup {
     }
 }
 
+/// Provides lazy access to individual partitions referenced by a group.
 pub struct ArrayPartitionGroupReader {
     metadata: ArrayPartitionGroupMetadata,
     object_store: Arc<dyn ObjectStore>,
