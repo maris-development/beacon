@@ -16,7 +16,7 @@ fn crate_version() -> &'static str {
 }
 
 #[pymodule]
-fn beacon_bbf(_py: Python<'_>, m: Bound<'_, PyModule>) -> PyResult<()> {
+fn beacon_binary_format(_py: Python<'_>, m: Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Collection>()?;
     m.add_class::<PartitionBuilder>()?;
     m.add_class::<CollectionBuilder>()?;

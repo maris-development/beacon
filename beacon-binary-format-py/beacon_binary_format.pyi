@@ -92,5 +92,6 @@ class PartitionReader:
         max_concurrent_reads: Optional[int] = ...,
     ) -> List[EntryPayload]: ...
 
+
 def crate_version() -> str:
-    """Return the underlying Rust crate version bundled with beacon_bbf."""
+    """Return the underlying Rust crate version bundled with beacon_binary_format."""

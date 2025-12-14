@@ -1,4 +1,4 @@
-name: Publish beacon_bbf
+name: Publish beacon-binary-format
 
 on:
   release:

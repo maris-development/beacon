@@ -1,11 +1,11 @@
 import numpy as np
 import pytest
 
-import beacon_bbf
+import beacon_binary_format as bbf
 
 
 def test_collection_supports_multiple_partitions(tmp_path):
-    collection = beacon_bbf.Collection(str(tmp_path), "collection")
+    collection = bbf.Collection(str(tmp_path), "collection")
     partition = collection.create_partition("partition-0")
 
     arrays = {
@@ -60,7 +60,7 @@ def test_collection_supports_multiple_partitions(tmp_path):
 
 
 def test_numpy_arrays_support_named_dimensions(tmp_path):
-    collection = beacon_bbf.Collection(str(tmp_path), "dims")
+    collection = bbf.Collection(str(tmp_path), "dims")
     partition = collection.create_partition("partition-dims")
 
     grid = np.ones((2, 3, 4), dtype=np.float32)
@@ -92,7 +92,7 @@ def test_numpy_arrays_support_named_dimensions(tmp_path):
 
 
 def test_numpy_masked_arrays_respect_nulls(tmp_path):
-    collection = beacon_bbf.Collection(str(tmp_path), "masked")
+    collection = bbf.Collection(str(tmp_path), "masked")
     partition = collection.create_partition("partition-masked")
 
     masked_floats = np.ma.array(

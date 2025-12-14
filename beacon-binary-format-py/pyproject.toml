@@ -3,7 +3,7 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "beacon-bbf"
+name = "beacon-binary-format"
 version = "3.0.0a0"
 description = "Python bindings for the Beacon Binary Format collection writer."
 readme = "README.md"
@@ -23,9 +23,9 @@ dependencies = [
 
 [tool.maturin]
 bindings = "pyo3"
-module-name = "beacon_bbf"
+module-name = "beacon_binary_format"
 features = []
-include = ["beacon_bbf.pyi", "py.typed"]
+include = ["beacon_binary_format.pyi", "py.typed"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"

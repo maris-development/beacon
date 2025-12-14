@@ -1,6 +1,6 @@
 import numpy as np
 
-from beacon_bbf import Collection, CollectionReader
+from beacon_binary_format import Collection, CollectionReader
 
 
 def test_masked_values_roundtrip(tmp_path):

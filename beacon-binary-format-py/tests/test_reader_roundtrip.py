@@ -2,7 +2,7 @@ import numpy as np
 import fsspec
 import pytest
 
-from beacon_bbf import Collection, CollectionReader
+from beacon_binary_format import Collection, CollectionReader
 
 
 def test_roundtrip_readback(tmp_path):

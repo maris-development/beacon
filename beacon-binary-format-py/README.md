@@ -22,7 +22,7 @@ Run the following inside `beacon-binary-format-py/`:
 maturin develop --release
 ```
 
-This builds the Rust crate in release mode and installs the resulting Python module (`beacon_bbf`) into your active virtual environment. Re-run the command whenever you change the Rust sources.
+This builds the Rust crate in release mode and installs the resulting Python module (`beacon_binary_format`) into your active virtual environment. Re-run the command whenever you change the Rust sources.
 
 ## Usage
 
@@ -31,7 +31,7 @@ The module now exposes a `Collection` object that can host any number of partiti
 ```python
 from pathlib import Path
 import numpy as np
-from beacon_bbf import Collection
+from beacon_binary_format import Collection
 
 tmp_dir = Path("/tmp/beacon")
 collection = Collection(str(tmp_dir), "example")
@@ -92,7 +92,7 @@ Any position masked in NumPy is written as a null value in the corresponding Arr
 A matching `CollectionReader` can reconstruct logical entries as dictionaries of NumPy payloads. Every field is returned as `{"data": <ndarray|masked array>, "dims": [...], "shape": [...]}` so dimension metadata survives round-trips.
 
 ```python
-from beacon_bbf import CollectionReader
+from beacon_binary_format import CollectionReader
 
 reader = CollectionReader(str(tmp_dir), "example")
 partition = reader.open_partition("partition-0")
@@ -111,7 +111,7 @@ Optional `projection=["temperature", "salinity"]` narrows the arrays fetched fro
 `storage_options` mirrors the values you would normally pass to [`fsspec`](https://filesystem-spec.readthedocs.io/), which means existing credential dictionaries can be reused verbatim:
 
 ```python
-from beacon_bbf import Collection
+from beacon_binary_format import Collection
 
 collection = Collection(
     base_dir="s3://beacon-dev/datasets",
@@ -135,7 +135,7 @@ Prefer to pass the filesystem object itself? Provide it via the `filesystem` key
 ```python
 import numpy as np
 import fsspec
-from beacon_bbf import Collection, CollectionReader
+from beacon_binary_format import Collection, CollectionReader
 
 fs = fsspec.filesystem(
 	"s3",
