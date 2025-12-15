@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Multipart, Query, State}, http::StatusCode, response::IntoResponse, Json
+    extract::{Multipart, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
 };
-use beacon_core::{runtime::Runtime};
+use beacon_core::runtime::Runtime;
 use futures::StreamExt;
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
@@ -138,7 +141,10 @@ pub async fn download_handler(
                 StatusCode::OK,
                 [
                     ("Content-Type", "application/octet-stream"),
-                    ("Content-Disposition", &format!("attachment; filename=\"{filename}\"")),
+                    (
+                        "Content-Disposition",
+                        &format!("attachment; filename=\"{filename}\""),
+                    ),
                 ],
                 body,
             )
@@ -146,11 +152,14 @@ pub async fn download_handler(
         }
         Err(e) => {
             tracing::error!("❌ Download error: {e}");
-            (StatusCode::NOT_FOUND, format!("File not found: {file_path}")).into_response()
+            (
+                StatusCode::NOT_FOUND,
+                format!("File not found: {file_path}"),
+            )
+                .into_response()
         }
     }
 }
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct DeleteQuery {
@@ -170,9 +179,9 @@ pub struct DeleteQuery {
     ))
 ]
 pub async fn delete_file(
-        State(state): State<Arc<Runtime>>,
-        Query(query): Query<DeleteQuery>,
-) -> impl IntoResponse{
+    State(state): State<Arc<Runtime>>,
+    Query(query): Query<DeleteQuery>,
+) -> impl IntoResponse {
     tracing::info!("📤 Delete request for `{}`", query.file_path);
     let file_path = query.file_path.clone();
 
@@ -180,13 +189,14 @@ pub async fn delete_file(
         Ok(_) => {
             tracing::info!("✅ Deleted `{}`", file_path);
             (StatusCode::OK, format!("File deleted: {file_path}")).into_response()
-        },
+        }
         Err(e) => {
             tracing::error!("❌ Delete error: {e}");
-            (StatusCode::NOT_FOUND, format!("File not found: {file_path}")).into_response()
-        },
+            (
+                StatusCode::NOT_FOUND,
+                format!("File not found: {file_path}"),
+            )
+                .into_response()
+        }
     }
-
 }
-
-

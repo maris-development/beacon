@@ -53,7 +53,10 @@ pub(crate) async fn list_tables_with_schema(
     let mut result = Vec::new();
     for table_name in table_names {
         if let Some(schema) = state.list_table_schema(table_name.clone()).await {
-            result.push(TableWithSchema { table_name, columns: schema.fields().iter().map(|f| f.as_ref().clone()).collect() });
+            result.push(TableWithSchema {
+                table_name,
+                columns: schema.fields().iter().map(|f| f.as_ref().clone()).collect(),
+            });
         }
     }
 

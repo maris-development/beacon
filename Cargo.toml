@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr"]
+members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format", "beacon-binary-format-py"]
 
 [workspace.dependencies]
 tokio = { version = "1.47.1", features = ["full"] }
@@ -10,7 +10,6 @@ async-trait = "0.1.85"
 bytes = "1.9.0"
 parking_lot = { version = "0.12.3", features = ["send_guard", "serde"] }
 ordered-float = "5.1.0"
-
 
 utoipa = { version= "=5.3.1", features = ["chrono","preserve_order", "preserve_path_order","rc_schema", "axum_extras"] }
 utoipa-axum = "0.2.0"
