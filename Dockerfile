@@ -27,6 +27,7 @@ COPY beacon-api/ /beacon-api/
 COPY beacon-arrow-netcdf/ /beacon-arrow-netcdf/
 COPY beacon-arrow-zarr/ /beacon-arrow-zarr/
 COPY beacon-arrow-odv/ /beacon-arrow-odv/
+COPY beacon-binary-format/ /beacon-binary-format/
 COPY beacon-common/ /beacon-common/
 COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
