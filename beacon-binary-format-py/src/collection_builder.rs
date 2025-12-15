@@ -177,7 +177,7 @@ impl PartitionBuilder {
         let mut entries = Vec::with_capacity(arrays.len());
         for (key, value) in arrays.iter() {
             let name: String = key.extract()?;
-            let (field, nd_array) = build_nd_array(py, &name, value.to_object(py))?;
+            let (field, nd_array) = build_nd_array(py, &name, value.unbind())?;
             entries.push((field, nd_array));
         }
 

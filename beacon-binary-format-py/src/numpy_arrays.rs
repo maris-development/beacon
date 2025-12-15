@@ -12,7 +12,7 @@ use numpy::{PyArrayDyn, PyArrayMethods, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySequenceMethods;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PySequence, PyTuple, PyUnicode};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyInt, PyList, PySequence, PyString, PyTuple};
 
 macro_rules! try_numpy_array {
     ($value:expr, $ty:ty, $builder:ident, $field_name:expr, $dims:expr, $mask:expr) => {
@@ -238,8 +238,9 @@ fn build_from_sequence(
     let sequence = value.downcast::<PySequence>()?;
     let len = sequence.len()? as usize;
     let mut items = Vec::with_capacity(len);
-    for item in sequence.iter()? {
-        items.push(item?.to_object(py));
+    for idx in 0..len {
+        let item = sequence.get_item(idx)?;
+        items.push(item.into_any().unbind());
     }
 
     let kind = infer_kind(py, &items)?;
@@ -303,7 +304,7 @@ fn build_numpy_datetime64(
     dimension_names: Option<&[String]>,
     mask: Option<&MaskValues>,
 ) -> PyResult<(FieldRef, NdArrowArray)> {
-    let numpy = py.import_bound("numpy")?;
+    let numpy = py.import("numpy")?;
     let int64_type = numpy.getattr("int64")?;
     let viewed = array.call_method1("view", (int64_type,))?;
     let int_array = viewed.downcast::<PyArrayDyn<i64>>()?;
@@ -385,8 +386,9 @@ fn flatten_numpy_items(py: Python<'_>, array: &Bound<'_, PyAny>) -> PyResult<Vec
     let sequence = list.downcast::<PySequence>()?;
     let len = sequence.len()? as usize;
     let mut items = Vec::with_capacity(len);
-    for item in sequence.iter()? {
-        items.push(item?.to_object(py));
+    for idx in 0..len {
+        let item = sequence.get_item(idx)?;
+        items.push(item.into_any().unbind());
     }
     Ok(items)
 }
@@ -399,8 +401,9 @@ fn numpy_shape(array: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
         return Ok(vec![1]);
     }
     let mut shape = Vec::with_capacity(ndim);
-    for dim in dims.iter()? {
-        shape.push(dim?.extract::<usize>()?);
+    for idx in 0..ndim {
+        let dim = dims.get_item(idx)?;
+        shape.push(dim.extract::<usize>()?);
     }
     Ok(shape)
 }
@@ -476,7 +479,7 @@ fn separate_masked_array(
     py: Python<'_>,
     value: PyObject,
 ) -> PyResult<(PyObject, Option<MaskValues>)> {
-    let numpy = py.import_bound("numpy")?;
+    let numpy = py.import("numpy")?;
     let ma = numpy.getattr("ma")?;
     let bound_value = value.bind(py);
     let is_masked: bool = ma
@@ -491,7 +494,7 @@ fn separate_masked_array(
     let flags: Vec<bool> = mask_view.as_array().iter().copied().collect();
     let mask_values = MaskValues::from_flags(flags);
     let data_obj = bound_value.getattr("data")?;
-    Ok((data_obj.to_object(py), mask_values))
+    Ok((data_obj.into_any().unbind(), mask_values))
 }
 
 fn try_extract_from_named_sequence(
@@ -506,7 +509,7 @@ fn try_extract_from_named_sequence(
         return match parse_dimension_names(&dims_obj)? {
             DimensionNameParse::Names(names) => {
                 let data_obj = tuple.get_item(0)?;
-                Ok(Some((data_obj.to_object(py), Some(names))))
+                Ok(Some((data_obj.into_any().unbind(), Some(names))))
             }
             DimensionNameParse::NotDimensions => Ok(None),
         };
@@ -520,7 +523,7 @@ fn try_extract_from_named_sequence(
         return match parse_dimension_names(&dims_obj)? {
             DimensionNameParse::Names(names) => {
                 let data_obj = list.get_item(0)?;
-                Ok(Some((data_obj.to_object(py), Some(names))))
+                Ok(Some((data_obj.into_any().unbind(), Some(names))))
             }
             DimensionNameParse::NotDimensions => Ok(None),
         };
@@ -551,7 +554,7 @@ fn try_extract_from_mapping(
     } else {
         None
     };
-    Ok(Some((array_obj.to_object(py), dims)))
+    Ok(Some((array_obj.into_any().unbind(), dims)))
 }
 
 fn find_mapping_value<'py>(
@@ -576,7 +579,7 @@ fn parse_dimension_names(value: &Bound<'_, PyAny>) -> PyResult<DimensionNamePars
         return Ok(DimensionNameParse::NotDimensions);
     }
 
-    if value.is_instance_of::<PyUnicode>() {
+    if value.is_instance_of::<PyString>() {
         let name: String = value.extract()?;
         validate_dimension_name(&name)?;
         return Ok(DimensionNameParse::Names(vec![name]));
@@ -590,9 +593,9 @@ fn parse_dimension_names(value: &Bound<'_, PyAny>) -> PyResult<DimensionNamePars
             ));
         }
         let mut names = Vec::with_capacity(len);
-        for item in sequence.iter()? {
-            let item = item?;
-            if !item.is_instance_of::<PyUnicode>() {
+        for idx in 0..len {
+            let item = sequence.get_item(idx)?;
+            if !item.is_instance_of::<PyString>() {
                 return Ok(DimensionNameParse::NotDimensions);
             }
             let name: String = item.extract()?;
@@ -712,7 +715,7 @@ enum ValueKind {
 
 fn infer_kind(py: Python<'_>, items: &[PyObject]) -> PyResult<ValueKind> {
     if has_type(py, items, |any| {
-        Ok(any.is_instance_of::<pyo3::types::PyUnicode>())
+        Ok(any.is_instance_of::<PyString>())
     })? {
         return Ok(ValueKind::Utf8);
     }
@@ -730,7 +733,7 @@ fn infer_kind(py: Python<'_>, items: &[PyObject]) -> PyResult<ValueKind> {
         return Ok(ValueKind::Bool);
     }
     if has_type(py, items, |any| {
-        Ok(any.is_instance_of::<pyo3::types::PyLong>())
+        Ok(any.is_instance_of::<PyInt>())
     })? {
         return Ok(ValueKind::Int);
     }

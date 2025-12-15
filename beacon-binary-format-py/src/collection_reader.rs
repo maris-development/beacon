@@ -89,7 +89,7 @@ impl CollectionReaderHandle {
 
     pub fn metadata(&self, py: Python<'_>) -> PyResult<PyObject> {
         let meta = self.inner.metadata();
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         dict.set_item("collection_byte_size", meta.collection_byte_size)?;
         dict.set_item("collection_num_elements", meta.collection_num_elements)?;
         dict.set_item("partition_count", meta.partitions.len())?;
@@ -193,7 +193,7 @@ impl PartitionReaderHandle {
 }
 
 fn batch_to_python(py: Python<'_>, batch: &NdRecordBatch) -> PyResult<PyObject> {
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     for (field, array) in batch.schema().fields().iter().zip(batch.arrays().iter()) {
         let payload = array_to_python(py, array)?;
         dict.set_item(field.name(), payload)?;
@@ -309,8 +309,8 @@ fn build_null_payload(py: Python<'_>, dims: &DimensionMetadata) -> PyResult<PyOb
     let total = dims.element_count();
     let zeros = vec![0f64; total];
     let mask = vec![true; total];
-    let data = PyArray1::from_vec_bound(py, zeros).into_any().unbind();
-    let mask_obj = PyArray1::from_vec_bound(py, mask).into_any().unbind();
+    let data = PyArray1::from_vec(py, zeros).into_any().unbind();
+    let mask_obj = PyArray1::from_vec(py, mask).into_any().unbind();
     let reshaped_data = reshape_array_object(py, data, dims)?;
     let reshaped_mask = reshape_array_object(py, mask_obj, dims)?;
     let masked = apply_mask(py, reshaped_data, Some(reshaped_mask))?;
@@ -348,8 +348,8 @@ where
             }
         }
     }
-    let data = PyArray1::from_vec_bound(py, values).into_any().unbind();
-    let mask_obj = mask.map(|bits| PyArray1::from_vec_bound(py, bits).into_any().unbind());
+    let data = PyArray1::from_vec(py, values).into_any().unbind();
+    let mask_obj = mask.map(|bits| PyArray1::from_vec(py, bits).into_any().unbind());
     Ok(NumpyConversion {
         data,
         mask: mask_obj,
@@ -374,8 +374,8 @@ fn boolean_array_to_numpy(py: Python<'_>, array: &BooleanArray) -> PyResult<Nump
             values.push(array.value(idx));
         }
     }
-    let data = PyArray1::from_vec_bound(py, values).into_any().unbind();
-    let mask_obj = mask.map(|bits| PyArray1::from_vec_bound(py, bits).into_any().unbind());
+    let data = PyArray1::from_vec(py, values).into_any().unbind();
+    let mask_obj = mask.map(|bits| PyArray1::from_vec(py, bits).into_any().unbind());
     Ok(NumpyConversion {
         data,
         mask: mask_obj,
@@ -402,12 +402,12 @@ fn string_array_to_numpy(py: Python<'_>, array: &StringArray) -> PyResult<NumpyC
     }
     let py_values: Vec<PyObject> = values
         .iter()
-        .map(|value| PyString::new_bound(py, value).into())
+        .map(|value| PyString::new(py, value).into())
         .collect();
-    let list = PyList::new_bound(py, py_values);
-    let numpy = py.import_bound("numpy")?;
+    let list = PyList::new(py, py_values)?;
+    let numpy = py.import("numpy")?;
     let data = numpy.getattr("array")?.call1((list,))?;
-    let mask_obj = mask.map(|bits| PyArray1::from_vec_bound(py, bits).into_any().unbind());
+    let mask_obj = mask.map(|bits| PyArray1::from_vec(py, bits).into_any().unbind());
     Ok(NumpyConversion {
         data: data.into(),
         mask: mask_obj,
@@ -434,12 +434,12 @@ fn binary_array_to_numpy(py: Python<'_>, array: &BinaryArray) -> PyResult<NumpyC
     }
     let py_values: Vec<PyObject> = values
         .iter()
-        .map(|value| PyBytes::new_bound(py, value).into())
+        .map(|value| PyBytes::new(py, value).into())
         .collect();
-    let list = PyList::new_bound(py, py_values);
-    let numpy = py.import_bound("numpy")?;
+    let list = PyList::new(py, py_values)?;
+    let numpy = py.import("numpy")?;
     let data = numpy.getattr("array")?.call1((list,))?;
-    let mask_obj = mask.map(|bits| PyArray1::from_vec_bound(py, bits).into_any().unbind());
+    let mask_obj = mask.map(|bits| PyArray1::from_vec(py, bits).into_any().unbind());
     Ok(NumpyConversion {
         data: data.into(),
         mask: mask_obj,
@@ -458,7 +458,7 @@ fn reshape_array_object(
 
 fn shape_tuple<'py>(py: Python<'py>, dims: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
     if dims.is_empty() {
-        Ok(PyTuple::empty_bound(py))
+        Ok(PyTuple::empty(py))
     } else {
         let converted = dims
             .iter()
@@ -467,15 +467,15 @@ fn shape_tuple<'py>(py: Python<'py>, dims: &[usize]) -> PyResult<Bound<'py, PyTu
                     .map_err(|_| PyValueError::new_err("dimension size exceeds platform limits"))
             })
             .collect::<PyResult<Vec<isize>>>()?;
-        Ok(PyTuple::new_bound(py, converted))
+        PyTuple::new(py, converted)
     }
 }
 
 fn apply_mask(py: Python<'_>, data: PyObject, mask: Option<PyObject>) -> PyResult<PyObject> {
     if let Some(mask_obj) = mask {
-        let numpy = py.import_bound("numpy")?;
+        let numpy = py.import("numpy")?;
         let ma = numpy.getattr("ma")?;
-        let kwargs = PyDict::new_bound(py);
+        let kwargs = PyDict::new(py);
         kwargs.set_item("mask", mask_obj)?;
         let masked = ma.call_method("array", (data,), Some(&kwargs))?;
         Ok(masked.into())
@@ -489,11 +489,11 @@ fn build_array_payload(
     dims: &DimensionMetadata,
     data: PyObject,
 ) -> PyResult<PyObject> {
-    let payload = PyDict::new_bound(py);
+    let payload = PyDict::new(py);
     payload.set_item("data", data)?;
-    let dims_list = PyList::new_bound(py, dims.names.iter().map(|name| name.as_str()));
+    let dims_list = PyList::new(py, dims.names.iter().map(|name| name.as_str()))?;
     payload.set_item("dims", dims_list)?;
-    let shape_tuple = PyTuple::new_bound(py, dims.shape.iter().cloned());
+    let shape_tuple = PyTuple::new(py, dims.shape.iter().cloned())?;
     payload.set_item("shape", shape_tuple)?;
     Ok(payload.into())
 }
