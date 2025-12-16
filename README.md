@@ -1,6 +1,6 @@
 # Beacon ARCO Data lake Platform (1.4.0)
 
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/maris-development/beacon)
+[![Release](https://img.shields.io/github/v/release/maris-development/beacon?style=for-the-badge&label=Release&color=success)](https://github.com/maris-development/beacon/releases)
 [![Docker Image](https://img.shields.io/badge/Docker-2CA5E0?style=for-the-badge&logo=docker&logoColor=white)](https://github.com/maris-development/beacon/pkgs/container/beacon)
 [![Docs](https://github.com/maris-development/beacon/actions/workflows/pages.yml/badge.svg)](https://maris-development.github.io/beacon/)
 [![Chat on Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg)
@@ -8,19 +8,11 @@
 ## Contents
 
 - [What is Beacon?](#what-is-beacon)
-- [Platform highlights](#platform-highlights)
 - [Documentation](#documentation)
 - [Getting started](#getting-started)
 - [Install Beacon with Docker Compose](#install-beacon-with-docker-compose)
 - [Data Lake model](#data-lake-model)
 - [Querying Beacon](#querying-beacon)
-- [Support](#support)
-- [Workspace overview](#workspace-overview)
-- [Per-crate quick descriptions](#per-crate-quick-descriptions)
-- [Building](#building)
-- [Testing](#testing)
-- [Linting and formatting](#linting-and-formatting)
-- [Development tips](#development-tips)
 - [Contributing](#contributing)
 - [Troubleshooting](#troubleshooting)
 
@@ -38,12 +30,7 @@ Key capabilities:
 - Object store friendly: works with local files and S3-like object stores using the `object_store` abstraction.
 - HTTP API: optional Axum-based service to expose query endpoints and metadata.
 - SQL support: execute SQL queries (via DataFusion) against registered formats and datasets. Beacon integrates DataFusion's SQL engine so callers can run SQL directly through the API.
-
-## Platform highlights
-
-- High-performance ARCO data lake built on Rust, Apache Arrow, and DataFusion so you can query millions of datasets with sub-second responsiveness.
-- Efficient storage story that spans S3-compatible buckets and local disks, letting you manage large fleets of NetCDF, Zarr, Parquet, and CSV assets without format conversions.
-- Flexible query interfaces: REST API with SQL and JSON DSL endpoints, plus a Python SDK for fluent query building and DataFrame integration.
+- JSON query DSL: structured query format for building queries programmatically or via UIs.
 
 ## Documentation
 
