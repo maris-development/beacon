@@ -37,25 +37,25 @@ use beacon_binary_format::array_partition::ArrayPartitionWriter;
 use nd_arrow_array::NdArrowArray;
 use object_store::{memory::InMemory, path::Path};
 
-# async fn demo() -> beacon_binary_format::error::BBFResult<()> {
-let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-let array_path = Path::from("demo/temp");
-let mut writer = ArrayPartitionWriter::new(
-    store.clone(),
-    array_path,
-    "temp".to_string(),
-    8 * 1024 * 1024,
-    Some(DataType::Float64),
-    0,
-)
-.await?;
+async fn demo() -> beacon_binary_format::error::BBFResult<()> {
+  let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+  let array_path = Path::from("demo/temp");
+  let mut writer = ArrayPartitionWriter::new(
+      store.clone(),
+      array_path,
+      "temp".to_string(),
+      8 * 1024 * 1024,
+      Some(DataType::Float64),
+      0,
+  )
+  .await?;
 
-let temp_field = Field::new("temp", DataType::Float64, true);
-let values = NdArrowArray::from_arrow_array(temp_field.data_type().clone(), vec![1.0, 2.0])?;
-writer.append_array(Some(values)).await?;
-let metadata = writer.finish().await?; // Uploads IPC file + pruning index
-# Ok(())
-# }
+  let temp_field = Field::new("temp", DataType::Float64, true);
+  let values = NdArrowArray::from_arrow_array(temp_field.data_type().clone(), vec![1.0, 2.0])?;
+  writer.append_array(Some(values)).await?;
+  let metadata = writer.finish().await?; // Uploads IPC file + pruning index
+  Ok(())
+}
 ```
 
 ### Reading a collection partition
@@ -67,26 +67,26 @@ use beacon_binary_format::collection_partition::{
 use beacon_binary_format::io_cache::ArrayIoCache;
 use object_store::{memory::InMemory, path::Path};
 
-# async fn read_partition_example(meta: beacon_binary_format::collection_partition::CollectionPartitionMetadata) -> beacon_binary_format::error::BBFResult<()> {
-let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-let partition_root = Path::from("collections/demo/partition-0");
-let reader = CollectionPartitionReader::new(
-    partition_root,
-    store,
-    meta,
-    ArrayIoCache::new(64 * 1024 * 1024),
-);
+async fn read_partition_example(meta: beacon_binary_format::collection_partition::CollectionPartitionMetadata) -> beacon_binary_format::error::BBFResult<()> {
+  let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+  let partition_root = Path::from("collections/demo/partition-0");
+  let reader = CollectionPartitionReader::new(
+      partition_root,
+      store,
+      meta,
+      ArrayIoCache::new(64 * 1024 * 1024),
+  );
 
-let scheduler = reader
-    .read(None, CollectionPartitionReadOptions { max_concurrent_reads: 32 })
-    .await?;
-let mut stream = scheduler.shared_pollable_stream_ref().await;
-while let Some(batch) = stream.next().await {
-    let batch = batch?;
-    // process NdRecordBatch for each logical entry
+  let scheduler = reader
+      .read(None, CollectionPartitionReadOptions { max_concurrent_reads: 32 })
+      .await?;
+  let mut stream = scheduler.shared_pollable_stream_ref().await;
+  while let Some(batch) = stream.next().await {
+      let batch = batch?;
+      // process NdRecordBatch for each logical entry
+  }
+  Ok(())
 }
-# Ok(())
-# }
 ```
 
 ## Development
@@ -97,7 +97,7 @@ while let Some(batch) = stream.next().await {
 
 ### Repository layout
 
-```
+```bash
 beacon-binary-format/
 ├── benches/
 │   ├── collection_partition.rs   # Criterion benchmarks for collection IO
