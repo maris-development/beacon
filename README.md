@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/maris-development/beacon?style=for-the-badge&label=Release&color=success)](https://github.com/maris-development/beacon/releases)
 [![Docker Image](https://img.shields.io/badge/Docker-2CA5E0?style=for-the-badge&logo=docker&logoColor=white)](https://github.com/maris-development/beacon/pkgs/container/beacon)
-[![Docs](https://img.shields.io/github/actions/workflow/status/maris-development/beacon/pages.yml?style=for-the-badge&label=Docs)]
+[![Docs](https://img.shields.io/github/actions/workflow/status/maris-development/beacon/pages.yml?style=for-the-badge&label=Docs)](https://maris-development.github.io/beacon/)
 [![Chat on Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg)
 
 ## Contents
