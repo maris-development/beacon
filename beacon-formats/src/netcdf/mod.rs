@@ -30,6 +30,7 @@ use crate::{
 
 pub mod execution;
 pub mod object_resolver;
+pub mod reader;
 pub mod sink;
 pub mod source;
 

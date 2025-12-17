@@ -68,6 +68,9 @@ pub struct Config {
     pub max_age: u64,
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "false")]
     pub enable_pushdown_projection: bool,
+
+    #[envconfig(from = "BEACON_ENABLE_MULTIFLEXER_NETCDF", default = "false")]
+    pub enable_multiflexer_netcdf: bool,
 }
 
 impl Config {
