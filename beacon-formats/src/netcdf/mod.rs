@@ -21,7 +21,7 @@ use object_store::{ObjectMeta, ObjectStore};
 use crate::{
     Dataset, DatasetFormat, FileFormatFactoryExt,
     netcdf::{
-        execution::{barrier::NetCDFBarrier, unique_values::UniqueValuesExec},
+        execution::unique_values::UniqueValuesExec,
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
         sink::{NetCDFNdSink, NetCDFSink},
         source::{NetCDFFileSource, fetch_schema},
@@ -30,9 +30,9 @@ use crate::{
 
 pub mod execution;
 pub mod object_resolver;
-pub mod reader;
 pub mod sink;
 pub mod source;
+pub mod source_;
 
 const NETCDF_EXTENSION: &str = "nc";
 

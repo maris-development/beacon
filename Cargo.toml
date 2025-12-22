@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format", "beacon-binary-format-py"]
+members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format", "beacon-binary-format-py", "beacon-arrow-netcdf-mpio"]
 
 [workspace.dependencies]
 tokio = { version = "1.47.1", features = ["full"] }
@@ -10,6 +10,7 @@ async-trait = "0.1.85"
 bytes = "1.9.0"
 parking_lot = { version = "0.12.3", features = ["send_guard", "serde"] }
 ordered-float = "5.1.0"
+num_cpus = "1.17.0"
 
 utoipa = { version= "=5.3.1", features = ["chrono","preserve_order", "preserve_path_order","rc_schema", "axum_extras"] }
 utoipa-axum = "0.2.0"
@@ -29,6 +30,9 @@ typetag = "0.2.19"
 indexmap = { version = "2.7.1", features = ["serde"]}
 chrono = { version = "0.4.41", features = ["serde"] }
 crossbeam = "0.8.4"
+moka = { version = "0.12.10", features = ["future"] }
+lru = "0.16.2"
+lazy_static = "1.5.0"
 
 datafusion = "^50.0.0"
 geodatafusion = "0.1.1"

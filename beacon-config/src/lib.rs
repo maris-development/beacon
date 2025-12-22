@@ -69,8 +69,20 @@ pub struct Config {
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "false")]
     pub enable_pushdown_projection: bool,
 
-    #[envconfig(from = "BEACON_ENABLE_MULTIFLEXER_NETCDF", default = "false")]
-    pub enable_multiflexer_netcdf: bool,
+    #[envconfig(from = "BEACON_NETCDF_USE_SCHEMA_CACHE", default = "true")]
+    pub netcdf_use_schema_cache: bool,
+    #[envconfig(from = "BEACON_NETCDF_SCHEMA_CACHE_SIZE", default = "1024")]
+    pub netcdf_schema_cache_size: u64,
+
+    #[envconfig(from = "BEACON_NETCDF_USE_READER_CACHE", default = "true")]
+    pub netcdf_use_reader_cache: bool,
+    #[envconfig(from = "BEACON_NETCDF_READER_CACHE_SIZE", default = "128")]
+    pub netcdf_reader_cache_size: usize,
+
+    #[envconfig(from = "BEACON_ENABLE_MULTIPLEXER_NETCDF", default = "false")]
+    pub enable_multiplexer_netcdf: bool,
+    #[envconfig(from = "BEACON_NETCDF_MULTIPLEXER_THREADS")]
+    pub netcdf_multiplexer_threads: Option<usize>,
 }
 
 impl Config {

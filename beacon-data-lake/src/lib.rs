@@ -23,7 +23,12 @@ use futures::{
     stream::BoxStream,
     {StreamExt, TryFutureExt},
 };
-use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
+use object_store::{
+    ObjectStore,
+    aws::{AmazonS3, AmazonS3Builder},
+    local::LocalFileSystem,
+    path::PathPart,
+};
 
 use crate::{
     files::{collection::FileCollection, temp_output_file::TempOutputFile},

@@ -1,0 +1,13 @@
+[package]
+name = "beacon-arrow-netcdf-mpio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+arrow = { workspace = true }
+
+beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }

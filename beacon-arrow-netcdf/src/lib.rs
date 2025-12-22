@@ -6,6 +6,7 @@ pub mod cf_time;
 pub mod chunked_stream;
 pub mod encoders;
 pub mod error;
+pub mod mpio_utils;
 pub mod nc_array;
 pub mod reader;
 pub mod writer;
