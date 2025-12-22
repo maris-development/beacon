@@ -974,6 +974,7 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "object_store 0.12.4",
+ "once_cell",
  "ordered-float 5.1.0",
  "parking_lot",
  "parquet 56.2.0",

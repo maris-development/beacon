@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 
-use beacon_arrow_netcdf::mpio_utils::Command;
+use beacon_arrow_netcdf::mpio_utils::ReadCommand;
 use beacon_arrow_netcdf::reader::NetCDFArrowReader;
 
 fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> io::Result<()> {
@@ -16,11 +16,17 @@ fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
+    // Create a log file for debugging
+    let log_file = std::fs::File::create("mpio.log")?;
+    let mut log_writer = BufWriter::new(log_file);
+
     let mut stdin = BufReader::new(io::stdin());
     let mut stdout = BufWriter::with_capacity(4 * 1024 * 1024, io::stdout());
     let mut reader_cache: HashMap<String, NetCDFArrowReader> = std::collections::HashMap::new();
 
     loop {
+        writeln!(log_writer, "Waiting for command...")?;
+        log_writer.flush()?;
         // --- read JSON length ---
         let mut len_buf = [0u8; 4];
         if stdin.read(&mut len_buf)? == 0 {
@@ -33,11 +39,13 @@ fn main() -> io::Result<()> {
         let mut json_buf = vec![0u8; json_len];
         read_exact(&mut stdin, &mut json_buf)?;
 
-        let cmd: Command = serde_json::from_slice(&json_buf).unwrap();
+        let cmd: ReadCommand = serde_json::from_slice(&json_buf).unwrap();
 
-        match cmd {
-            Command::ReadArrowSchema { request_id, path } => {
-                let schema = if let Some(reader) = reader_cache.get(&path) {
+        match &cmd {
+            ReadCommand::ReadArrowSchema { request_id, path } => {
+                writeln!(log_writer, "Received ReadArrowSchema command: {:?}", cmd)?;
+                log_writer.flush()?;
+                let schema = if let Some(reader) = reader_cache.get(path) {
                     // already cached
                     reader.schema().clone()
                 } else {
@@ -46,7 +54,7 @@ fn main() -> io::Result<()> {
                         Err(e) => {
                             respond_error(
                                 &mut stdout,
-                                request_id,
+                                *request_id,
                                 format!("Failed to open file: {}", e),
                             )?;
                             continue;
@@ -59,9 +67,10 @@ fn main() -> io::Result<()> {
                 };
 
                 let response = beacon_arrow_netcdf::mpio_utils::CommandReponse::ArrowSchema {
-                    request_id,
+                    request_id: *request_id,
                     schema: schema.as_ref().clone(),
                 };
+                writeln!(log_writer, "Sending response: {:?}", response)?;
                 let response_json = serde_json::to_vec(&response)
                     .expect("Incorrect command message. This should never happen.");
                 let response_len = (response_json.len() as u32).to_le_bytes();
@@ -69,14 +78,14 @@ fn main() -> io::Result<()> {
                 stdout.write_all(&response_json)?;
                 stdout.flush()?;
             }
-            Command::ReadFile {
+            ReadCommand::ReadFile {
                 request_id,
                 path,
                 projection,
                 chunk_size,
                 stream_size,
             } => {
-                let reader = if let Some(reader) = reader_cache.get_mut(&path) {
+                let reader = if let Some(reader) = reader_cache.get_mut(path) {
                     // already cached
                     reader
                 } else {
@@ -85,7 +94,7 @@ fn main() -> io::Result<()> {
                         Err(e) => {
                             respond_error(
                                 &mut stdout,
-                                request_id,
+                                *request_id,
                                 format!("Failed to open file: {}", e),
                             )?;
                             continue;
@@ -93,15 +102,15 @@ fn main() -> io::Result<()> {
                     };
 
                     reader_cache.insert(path.clone(), reader);
-                    reader_cache.get_mut(&path).unwrap()
+                    reader_cache.get_mut(path).unwrap()
                 };
 
-                let batch = match reader.read_as_batch(projection) {
+                let batch = match reader.read_as_batch(projection.clone()) {
                     Ok(b) => b,
                     Err(e) => {
                         respond_error(
                             &mut stdout,
-                            request_id,
+                            *request_id,
                             format!("Failed to read data: {}", e),
                         )?;
                         continue;
@@ -118,19 +127,19 @@ fn main() -> io::Result<()> {
                 let buffer = arrow_stream_writer.into_inner().unwrap();
 
                 let response = beacon_arrow_netcdf::mpio_utils::CommandReponse::BatchesStream {
-                    request_id,
+                    request_id: *request_id,
                     length: buffer.len(),
                     has_more: false,
                 };
                 let response_json = serde_json::to_vec(&response)
                     .expect("Incorrect command message. This should never happen.");
-                let response_len = (response_json.len() as u32).to_le_bytes();
-                stdout.write_all(&response_len)?;
+                let header_response_len = (response_json.len() as u32).to_le_bytes();
+                stdout.write_all(&header_response_len)?;
                 stdout.write_all(&response_json)?;
                 stdout.write_all(&buffer)?;
                 stdout.flush()?;
             }
-            Command::Exit => {
+            ReadCommand::Exit => {
                 break;
             }
         }

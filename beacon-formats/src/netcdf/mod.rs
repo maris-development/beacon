@@ -24,14 +24,13 @@ use crate::{
         execution::unique_values::UniqueValuesExec,
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
         sink::{NetCDFNdSink, NetCDFSink},
-        source::{NetCDFFileSource, fetch_schema},
+        source_::{NetCDFFileSource, fetch_schema},
     },
 };
 
 pub mod execution;
 pub mod object_resolver;
 pub mod sink;
-pub mod source;
 pub mod source_;
 
 const NETCDF_EXTENSION: &str = "nc";
@@ -172,10 +171,12 @@ impl FileFormat for NetcdfFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
+        let _ = (state, store);
+
         println!("Object metadata: {:?}", objects);
         let mut schema = None;
         for object in objects {
-            let object_schema = fetch_schema(&self.object_resolver, object.clone())?;
+            let object_schema = fetch_schema(self.object_resolver.clone(), object.clone()).await?;
             schema = Some(object_schema);
         }
         Ok(schema.unwrap())

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum Command {
+pub enum ReadCommand {
     ReadArrowSchema {
         request_id: u32,
         path: String,

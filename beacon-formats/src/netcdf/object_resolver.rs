@@ -41,7 +41,20 @@ impl NetCDFObjectResolver {
             path_builder.push_str(prefix);
         }
 
-        path_builder.push_str(&format!("/{}#mode=bytes", object_meta.location));
+        // `netcdf::open` supports `#mode=bytes` for certain remote URLs (e.g. HTTP/S3).
+        // For local filesystem paths, appending this fragment can break file opening.
+        let location = object_meta.location.to_string();
+        if !path_builder.ends_with('/') {
+            path_builder.push('/');
+        }
+        path_builder.push_str(&location);
+
+        let is_remote = self.endpoint.starts_with("http://")
+            || self.endpoint.starts_with("https://")
+            || self.endpoint.starts_with("s3://");
+        if is_remote {
+            path_builder.push_str("#mode=bytes");
+        }
 
         PathBuf::from(path_builder)
     }

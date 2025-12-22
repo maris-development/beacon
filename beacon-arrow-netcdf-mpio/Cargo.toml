@@ -11,3 +11,7 @@ serde_json = { workspace = true }
 arrow = { workspace = true }
 
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
+
+[[bin]]
+name = "beacon-arrow-netcdf-mpio"
+path = "src/main.rs"

@@ -13,7 +13,7 @@ pub fn get_options() -> Options {
 }
 
 pub struct MPIOOptions {
-    num_processes: usize,
+    pub num_processes: usize,
 }
 
 pub fn get_mpio_opts() -> MPIOOptions {
