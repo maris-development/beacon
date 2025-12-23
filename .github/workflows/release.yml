@@ -1,27 +1,29 @@
 name: "Release Build"
 
 on:
-  # Trigger ONLY when a tag is pushed (e.g., v1.2.3)
   push:
     tags:
       - "v*"
-  # Optional: also allow manual trigger
   workflow_dispatch:
 
 permissions:
   packages: write
   contents: write
 
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/beacon
+
 jobs:
   build:
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
+            arch: amd64
             runner: ubuntu-24.04
           - platform: linux/arm64
+            arch: arm64
             runner: ubuntu-24.04-arm
 
     steps:
@@ -40,15 +42,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract tag name (version)
-        id: tag
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          echo "VERSION_TAG=${VERSION}" >> $GITHUB_ENV
+      - name: Extract version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
       - name: Log version tag
         run: |
-          echo "Building release version: ${{ env.VERSION_TAG }}"
+          echo "Building release version: ${{ env.VERSION }}"
 
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v3
@@ -57,5 +56,38 @@ jobs:
           push: true
           platforms: ${{ matrix.platform }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/beacon:${{ env.VERSION_TAG }}
-            ghcr.io/${{ github.repository_owner }}/beacon:latest
+            ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ matrix.arch }}
+            ${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+
+  manifest:
+    name: Create multi-arch manifest
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        run: |
+          docker manifest create \
+            ${{ env.IMAGE_NAME }}:${VERSION} \
+            ${{ env.IMAGE_NAME }}:${VERSION}-amd64 \
+            ${{ env.IMAGE_NAME }}:${VERSION}-arm64
+
+          docker manifest push \
+            ${{ env.IMAGE_NAME }}:${VERSION}
+
+      - name: Update latest tag
+        run: |
+          docker manifest create \
+            ${{ env.IMAGE_NAME }}:latest \
+            ${{ env.IMAGE_NAME }}:${VERSION}-amd64 \
+            ${{ env.IMAGE_NAME }}:${VERSION}-arm64
+
+          docker manifest push \
+            ${{ env.IMAGE_NAME }}:latest
