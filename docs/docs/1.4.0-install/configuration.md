@@ -37,6 +37,20 @@ Some of the configuration options can be set using environment variables. The fo
 - `BEACON_CORS_ALLOWED_CREDENTIALS` - Whether to allow credentials for CORS (default is `false`).
 - `BEACON_CORS_MAX_AGE` - The maximum age for CORS preflight requests (default is 3600).
 
+### NetCDF
+
+- `BEACON_NETCDF_USE_SCHEMA_CACHE` - Whether to cache discovered NetCDF Arrow schemas in-memory (default is `true`).
+- `BEACON_NETCDF_SCHEMA_CACHE_SIZE` - Max number of schema entries to keep in the in-memory schema cache (default is `1024`).
+- `BEACON_NETCDF_USE_READER_CACHE` - Whether to cache opened NetCDF readers in-memory (default is `true`).
+- `BEACON_NETCDF_READER_CACHE_SIZE` - Max number of reader entries to keep in the in-memory reader cache (default is `128`).
+
+### NetCDF multiplexer (MPIO)
+
+- `BEACON_ENABLE_MULTIPLEXER_NETCDF` - Enable NetCDF multiplexer mode (multi-process worker pool) (default is `false`).
+- `BEACON_NETCDF_MULTIPLEXER_PROCESSES` - Number of worker processes to spawn when NetCDF multiplexer is enabled (default is half of CPU cores).
+- `BEACON_NETCDF_MPIO_WORKER` - Optional path to the `beacon-arrow-netcdf-mpio` executable (used when NetCDF MPIO is enabled).
+- `BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS` - Per-request timeout (in milliseconds) for NetCDF MPIO worker requests. Set to `0` to disable (default is `0`).
+
 ### Optional Environment Variables
 
 - `BEACON_TOKEN=YOUR_TOKEN` - The token to activate the beacon binary format (this can be freely retrieved for non-commercial use [here](https://beacon.maris.nl/plans)).

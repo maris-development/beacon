@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use envconfig::Envconfig;
 use lazy_static::lazy_static;
@@ -68,6 +68,34 @@ pub struct Config {
     pub max_age: u64,
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "false")]
     pub enable_pushdown_projection: bool,
+
+    #[envconfig(from = "BEACON_NETCDF_USE_SCHEMA_CACHE", default = "true")]
+    pub netcdf_use_schema_cache: bool,
+    #[envconfig(from = "BEACON_NETCDF_SCHEMA_CACHE_SIZE", default = "1024")]
+    pub netcdf_schema_cache_size: u64,
+
+    #[envconfig(from = "BEACON_NETCDF_USE_READER_CACHE", default = "true")]
+    pub netcdf_use_reader_cache: bool,
+    #[envconfig(from = "BEACON_NETCDF_READER_CACHE_SIZE", default = "128")]
+    pub netcdf_reader_cache_size: usize,
+
+    #[envconfig(from = "BEACON_ENABLE_MULTIPLEXER_NETCDF", default = "false")]
+    pub enable_multiplexer_netcdf: bool,
+    #[envconfig(from = "BEACON_NETCDF_MULTIPLEXER_PROCESSES")]
+    pub netcdf_multiplexer_processes: Option<usize>,
+
+    /// Optional path to the NetCDF MPIO worker executable.
+    ///
+    /// When set, Beacon will spawn this executable (instead of resolving
+    /// `beacon-arrow-netcdf-mpio` from `PATH`) when MPIO is enabled.
+    #[envconfig(from = "BEACON_NETCDF_MPIO_WORKER")]
+    pub netcdf_mpio_worker: Option<PathBuf>,
+
+    /// Per-request timeout (in milliseconds) for the NetCDF MPIO worker pool.
+    ///
+    /// Set to `0` to disable timeouts (default).
+    #[envconfig(from = "BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS", default = "0")]
+    pub netcdf_mpio_request_timeout_ms: u64,
 }
 
 impl Config {

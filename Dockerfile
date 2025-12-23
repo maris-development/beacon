@@ -25,6 +25,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 COPY beacon-api/ /beacon-api/
 COPY beacon-arrow-netcdf/ /beacon-arrow-netcdf/
+COPY beacon-arrow-netcdf-mpio/ /beacon-arrow-netcdf-mpio/
 COPY beacon-arrow-zarr/ /beacon-arrow-zarr/
 COPY beacon-arrow-odv/ /beacon-arrow-odv/
 COPY beacon-binary-format/ /beacon-binary-format/
@@ -46,6 +47,7 @@ RUN cargo build --release
 FROM ubuntu:latest AS node
 WORKDIR /beacon
 COPY --from=builder /target/release/beacon-api /beacon/
+COPY --from=builder /target/release/beacon-arrow-netcdf-mpio /beacon/
 
 #Install Dependencies
 RUN apt-get update
