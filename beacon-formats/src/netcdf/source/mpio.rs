@@ -81,7 +81,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::netcdf::object_resolver::NetCDFObjectResolver;
-use crate::netcdf::source_::options::get_mpio_opts;
+use crate::netcdf::source::options::get_mpio_opts;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {

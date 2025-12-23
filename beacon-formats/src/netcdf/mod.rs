@@ -25,14 +25,14 @@ use crate::{
         execution::unique_values::UniqueValuesExec,
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
         sink::{NetCDFNdSink, NetCDFSink},
-        source_::{NetCDFFileSource, fetch_schema},
+        source::{NetCDFFileSource, fetch_schema},
     },
 };
 
 pub mod execution;
 pub mod object_resolver;
 pub mod sink;
-pub mod source_;
+pub mod source;
 
 const NETCDF_EXTENSION: &str = "nc";
 
