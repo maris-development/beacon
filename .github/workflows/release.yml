@@ -1,4 +1,4 @@
-name: "Release Build"
+name: Release Build
 
 on:
   push:
@@ -9,62 +9,40 @@ on:
 permissions:
   packages: write
   contents: write
+  attestations: write
+  id-token: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/beacon
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/beacon
 
 jobs:
   build:
-    runs-on: ${{ matrix.runner }}
+    name: Build (${{ matrix.platform }})
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
-            arch: amd64
             runner: ubuntu-24.04
           - platform: linux/arm64
-            arch: arm64
             runner: ubuntu-24.04-arm
 
+    runs-on: ${{ matrix.runner }}
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-
-      - name: Log version tag
+      - name: Prepare
         run: |
-          echo "Building release version: ${{ env.VERSION }}"
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
 
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v3
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          context: .
-          push: true
-          platforms: ${{ matrix.platform }}
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ matrix.arch }}
-            ${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+          images: ${{ env.REGISTRY_IMAGE }}
 
-  manifest:
-    name: Create multi-arch manifest
-    needs: build
-    runs-on: ubuntu-24.04
-
-    steps:
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -72,25 +50,82 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Create and push manifest
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.REGISTRY_IMAGE }}
+          outputs: |
+            type=image,
+            push-by-digest=true,
+            name-canonical=true,
+            push=true
+
+      - name: Export digest
         run: |
-          docker manifest create \
-            ${{ env.IMAGE_NAME }}:${{env.VERSION}} \
-            ${{ env.IMAGE_NAME }}:${{env.VERSION}}-amd64 \
-            ${{ env.IMAGE_NAME }}:${{env.VERSION}}-arm64
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
-          docker manifest push \
-            ${{ env.IMAGE_NAME }}:${{env.VERSION}}
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Update latest tag
+  merge:
+    name: Create multi-arch manifest
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Create and push manifest list
+        working-directory: ${{ runner.temp }}/digests
         run: |
-          docker manifest create \
-            ${{ env.IMAGE_NAME }}:latest \
-            ${{ env.IMAGE_NAME }}:${{env.VERSION}}-amd64 \
-            ${{ env.IMAGE_NAME }}:${{env.VERSION}}-arm64
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
 
-          docker manifest push \
-            ${{ env.IMAGE_NAME }}:latest
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
