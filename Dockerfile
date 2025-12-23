@@ -29,6 +29,7 @@ COPY beacon-arrow-netcdf-mpio/ /beacon-arrow-netcdf-mpio/
 COPY beacon-arrow-zarr/ /beacon-arrow-zarr/
 COPY beacon-arrow-odv/ /beacon-arrow-odv/
 COPY beacon-binary-format/ /beacon-binary-format/
+COPY beacon-binary-format-py/ /beacon-binary-format-py/
 COPY beacon-common/ /beacon-common/
 COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
