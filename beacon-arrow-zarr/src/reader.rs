@@ -49,7 +49,12 @@ impl AsyncArrowZarrGroupReader {
 
         let group_path = group.path();
 
-        for array in group.async_child_arrays().await.unwrap() {
+        let child_arrays = group
+            .async_child_arrays()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        for array in child_arrays {
             let array_json_attributes = array.attributes();
             let array_node_path = array.path().clone();
             let array_name = array_node_path
