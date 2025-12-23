@@ -71,7 +71,7 @@ use std::time::Duration;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
-use beacon_arrow_netcdf::mpio_utils::{CommandReponse, ReadCommand};
+use beacon_arrow_netcdf::mpio_utils::{CommandResponse, ReadCommand};
 use beacon_config::CONFIG;
 use object_store::ObjectMeta;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
@@ -115,7 +115,7 @@ struct MpioReadRequest {
 }
 
 struct MpioReadResponse {
-    pub response: CommandReponse,
+    pub response: CommandResponse,
     pub payload: Option<Vec<u8>>,
 }
 
@@ -459,21 +459,21 @@ async fn handle_request(
 ) -> Result<MpioReadResponse, PoolError> {
     write_framed_json(&mut proc.stdin, &command).await?;
     tracing::trace!(command = ?command, "sent command to mpio worker");
-    let response: CommandReponse = read_framed_json(&mut proc.stdout).await?;
+    let response: CommandResponse = read_framed_json(&mut proc.stdout).await?;
     tracing::trace!(response = ?response, "received response from mpio worker");
     match &response {
-        CommandReponse::Error {
+        CommandResponse::Error {
             request_id,
             message,
         } => Err(PoolError::WorkerError {
             request_id: *request_id,
             message: message.clone(),
         }),
-        CommandReponse::ArrowSchema { .. } => Ok(MpioReadResponse {
+        CommandResponse::ArrowSchema { .. } => Ok(MpioReadResponse {
             response,
             payload: None,
         }),
-        CommandReponse::BatchesStream {
+        CommandResponse::BatchesStream {
             length, has_more, ..
         } => {
             if *has_more {
@@ -513,7 +513,7 @@ pub async fn read_schema(
         .await?;
 
     match resp.response {
-        CommandReponse::ArrowSchema { schema, .. } => Ok(Arc::new(schema)),
+        CommandResponse::ArrowSchema { schema, .. } => Ok(Arc::new(schema)),
         _ => Err(PoolError::UnexpectedResponse),
     }
 }
@@ -580,7 +580,7 @@ mod tests {
                 _ => panic!("unexpected command"),
             }
 
-            let response = CommandReponse::BatchesStream {
+            let response = CommandResponse::BatchesStream {
                 request_id: 42,
                 length: 3,
                 has_more: false,
@@ -591,9 +591,9 @@ mod tests {
         });
 
         write_framed_json(&mut client, &send).await.unwrap();
-        let resp: CommandReponse = read_framed_json(&mut client).await.unwrap();
+        let resp: CommandResponse = read_framed_json(&mut client).await.unwrap();
         match resp {
-            CommandReponse::BatchesStream {
+            CommandResponse::BatchesStream {
                 request_id,
                 length,
                 has_more,

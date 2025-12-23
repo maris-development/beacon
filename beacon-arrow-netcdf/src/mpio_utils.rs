@@ -19,7 +19,7 @@ pub enum ReadCommand {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum CommandReponse {
+pub enum CommandResponse {
     Error {
         request_id: u32,
         message: String,

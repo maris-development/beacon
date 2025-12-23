@@ -81,8 +81,8 @@ pub struct Config {
 
     #[envconfig(from = "BEACON_ENABLE_MULTIPLEXER_NETCDF", default = "false")]
     pub enable_multiplexer_netcdf: bool,
-    #[envconfig(from = "BEACON_NETCDF_MULTIPLEXER_THREADS")]
-    pub netcdf_multiplexer_threads: Option<usize>,
+    #[envconfig(from = "BEACON_NETCDF_MULTIPLEXER_PROCESSES")]
+    pub netcdf_multiplexer_processes: Option<usize>,
 
     /// Optional path to the NetCDF MPIO worker executable.
     ///

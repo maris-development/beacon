@@ -47,7 +47,7 @@ Some of the configuration options can be set using environment variables. The fo
 ### NetCDF multiplexer (MPIO)
 
 - `BEACON_ENABLE_MULTIPLEXER_NETCDF` - Enable NetCDF multiplexer mode (multi-process worker pool) (default is `false`).
-- `BEACON_NETCDF_MULTIPLEXER_THREADS` - Number of worker processes to spawn when NetCDF multiplexer is enabled (default is half of CPU cores).
+- `BEACON_NETCDF_MULTIPLEXER_PROCESSES` - Number of worker processes to spawn when NetCDF multiplexer is enabled (default is half of CPU cores).
 - `BEACON_NETCDF_MPIO_WORKER` - Optional path to the `beacon-arrow-netcdf-mpio` executable (used when NetCDF MPIO is enabled).
 - `BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS` - Per-request timeout (in milliseconds) for NetCDF MPIO worker requests. Set to `0` to disable (default is `0`).
 

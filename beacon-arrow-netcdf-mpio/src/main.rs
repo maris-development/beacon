@@ -77,7 +77,7 @@ fn main() -> io::Result<()> {
                     schema.clone()
                 };
 
-                let response = beacon_arrow_netcdf::mpio_utils::CommandReponse::ArrowSchema {
+                let response = beacon_arrow_netcdf::mpio_utils::CommandResponse::ArrowSchema {
                     request_id: *request_id,
                     schema: schema.as_ref().clone(),
                 };
@@ -167,7 +167,7 @@ fn main() -> io::Result<()> {
                     }
                 };
 
-                let response = beacon_arrow_netcdf::mpio_utils::CommandReponse::BatchesStream {
+                let response = beacon_arrow_netcdf::mpio_utils::CommandResponse::BatchesStream {
                     request_id: *request_id,
                     length: buffer.len(),
                     has_more: false,
@@ -198,7 +198,7 @@ fn respond_error(
     request_id: u32,
     message: String,
 ) -> io::Result<()> {
-    let response = beacon_arrow_netcdf::mpio_utils::CommandReponse::Error {
+    let response = beacon_arrow_netcdf::mpio_utils::CommandResponse::Error {
         request_id,
         message,
     };
