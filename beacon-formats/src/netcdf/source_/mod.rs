@@ -306,16 +306,9 @@ impl DefaultFileOpener {
         schema_adapter: Arc<dyn SchemaAdapter>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         // Map the file schema into the table schema.
-        // In MPIO mode, schema comes from the worker; otherwise open the local reader.
+        // In MPIO mode, schema comes from the worker (and can be cached); otherwise open the local reader.
         let (reader, file_schema) = if mpio_enabled() {
-            let schema = mpio::read_schema(object_resolver.clone(), object.clone())
-                .await
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "MPIO read_schema failed: {}",
-                        e
-                    ))
-                })?;
+            let schema = fetch_schema(object_resolver.clone(), object.clone()).await?;
             (None, schema)
         } else {
             let reader = open_reader(object_resolver.clone(), object.clone())?;
@@ -464,7 +457,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn multiplexer_reads_schema_and_batch_via_worker() {
         let _guard = override_mpio_enabled_for_test(true);
 
@@ -477,6 +469,10 @@ mod tests {
             .await
             .expect("schema");
         assert!(!table_schema.fields().is_empty());
+
+        // Table schema should only contain projected columns.
+        let projection = vec![0];
+        let table_schema = Arc::new(table_schema.project(&projection).expect("projected schema"));
 
         let schema_adapter_factory = DefaultSchemaAdapterFactory;
         let schema_adapter =

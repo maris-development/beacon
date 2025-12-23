@@ -2,6 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use beacon_common::super_typing::super_type_schema;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -167,19 +168,29 @@ impl FileFormat for NetcdfFormat {
 
     async fn infer_schema(
         &self,
-        state: &dyn Session,
-        store: &Arc<dyn ObjectStore>,
+        _state: &dyn Session,
+        _store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let _ = (state, store);
-
-        println!("Object metadata: {:?}", objects);
-        let mut schema = None;
+        let mut tasks = vec![];
         for object in objects {
-            let object_schema = fetch_schema(self.object_resolver.clone(), object.clone()).await?;
-            schema = Some(object_schema);
+            let schema_task = fetch_schema(self.object_resolver.clone(), object.clone());
+            tasks.push(schema_task);
         }
-        Ok(schema.unwrap())
+        let schemas = futures::future::try_join_all(tasks).await?;
+        if schemas.is_empty() {
+            return Err(exec_datafusion_err!(
+                "No schemas or datasets found when inferring NetCDF schema"
+            ));
+        }
+        let schema = super_type_schema(&schemas).map_err(|e| {
+            exec_datafusion_err!(
+                "Failed to compute super type schema for NetCDF datasets: {}",
+                e
+            )
+        })?;
+
+        Ok(schema.into())
     }
 
     async fn infer_stats(
@@ -187,7 +198,7 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         _store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
-        object: &ObjectMeta,
+        _object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
         Ok(Statistics::new_unknown(&table_schema))
     }

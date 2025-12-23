@@ -1,11 +1,78 @@
+//! Multi-process NetCDF (MPIO) reader client.
+//!
+//! This module provides an async, in-process client that farms out NetCDF decoding
+//! work to a small pool of external worker processes (`beacon-arrow-netcdf-mpio`).
+//! The main reason to do this is isolation and parallelism: NetCDF/HDF5 stacks can
+//! be heavy and may not always be perfectly async-friendly; running reads in separate
+//! processes gives us better fault isolation and lets us scale reads across CPU cores.
+//!
+//! **Top-level architecture**
+//!
+//! ```text
+//! ┌───────────────────────────────────────────────────────────────┐
+//! │                       Calling code (Tokio)                    │
+//! │                                                               │
+//! │  read_schema(...) / read_file_as_batch(...)                    │
+//! │            │                                                  │
+//! │            ▼                                                  │
+//! │      ┌───────────┐         mpsc (requests)                    │
+//! │      │  MpioPool  │ ─────────────────────────────────────┐    │
+//! │      └───────────┘                                      │    │
+//! │            │                                             ▼    │
+//! │            │                                  ┌────────────────┐
+//! │            │                                  │ worker_dispatcher│
+//! │            │                                  │  - FIFO queue    │
+//! │            │                                  │  - idle workers  │
+//! │            │                                  └───────┬────────┘
+//! │            │                                          │
+//! │            │                   per-worker mpsc (1 in-flight)  │
+//! │            └──────────────────────────────────────────┬────────┘
+//! │                                                      ▼
+//! │   ┌───────────────────────┐   framed JSON over stdin/stdout   ┌───────────────────────┐
+//! │   │  worker task (id = 0) │ ◀────────────────────────────────▶ │ beacon-arrow-netcdf-  │
+//! │   │  - owns ChildProc      │                                   │ mpio (process)        │
+//! │   │  - handle_request()    │                                   │ - reads NetCDF        │
+//! │   └───────────────────────┘                                   │ - returns Arrow IPC   │
+//! │               ▲                                                └───────────────────────┘
+//!               ...
+//! │   ┌───────────────────────┐
+//! │   │  worker task (id = N) │
+//! │   └───────────────────────┘
+//! └───────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! **Wire protocol (client <-> worker)**
+//!
+//! All control messages are length-prefixed JSON frames:
+//! - `[u32 little-endian length]` followed by that many bytes of UTF-8 JSON.
+//!
+//! For `CommandReponse::BatchesStream { length, has_more: false, .. }`, the JSON frame
+//! is immediately followed by exactly `length` bytes of Arrow IPC stream payload.
+//! (Streaming multiple payload frames is not supported here; `has_more=true` is treated
+//! as a protocol error.)
+//!
+//! **Concurrency model**
+//!
+//! - The dispatcher receives requests, queues them FIFO, and assigns them to idle workers.
+//! - Each worker task has a `mpsc::channel(1)` so it processes at most one request at a time.
+//! - If a worker task dies, the dispatcher respawns it; the in-flight request is retried once.
+//!
+//! **Operational knobs**
+//!
+//! - `BEACON_NETCDF_MPIO_WORKER`: override the worker executable path.
+//! - `BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS`: per-request timeout. If set, the caller will
+//!   error if no response arrives within this duration.
+//!
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use beacon_arrow_netcdf::mpio_utils::{CommandReponse, ReadCommand};
+use beacon_config::CONFIG;
 use object_store::ObjectMeta;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -15,8 +82,6 @@ use tokio::sync::oneshot;
 
 use crate::netcdf::object_resolver::NetCDFObjectResolver;
 use crate::netcdf::source_::options::get_mpio_opts;
-
-use std::iter::Iterator as _;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {
@@ -34,6 +99,9 @@ pub enum PoolError {
     NotInTokioRuntime,
     #[error("Arrow IPC error: {0}")]
     ArrowIpcError(arrow::error::ArrowError),
+
+    #[error("MPIO request timed out after {timeout_ms}ms")]
+    Timeout { timeout_ms: u64 },
 }
 
 impl From<arrow::error::ArrowError> for PoolError {
@@ -66,6 +134,9 @@ struct MpioPool {
 }
 
 impl MpioPool {
+    /// Returns the global pool (initialized once).
+    ///
+    /// Must be called from within a Tokio runtime.
     pub async fn global() -> Result<&'static Self, PoolError> {
         MPIO_POOL
             .get_or_try_init(|| async {
@@ -83,6 +154,11 @@ impl MpioPool {
             .await
     }
 
+    /// Sends a single request through the pool and awaits the worker response.
+    ///
+    /// This uses a oneshot channel per request to route the response back to the caller.
+    ///
+    /// If `BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS` is set, the wait for the response is bounded.
     pub async fn send_request(&self, command: ReadCommand) -> Result<MpioReadResponse, PoolError> {
         let (resp_tx, resp_rx) = oneshot::channel();
 
@@ -98,23 +174,49 @@ impl MpioPool {
             )))
         })?;
 
-        resp_rx.await.map_err(|e| {
-            PoolError::IoError(std::io::Error::other(format!(
-                "Failed to receive response from MPIO pool: {}",
-                e
-            )))
-        })?
+        if let Some(timeout) = mpio_request_timeout() {
+            let timeout_ms = timeout.as_millis().min(u64::MAX as u128) as u64;
+            match tokio::time::timeout(timeout, resp_rx).await {
+                Ok(result) => result.map_err(|e| {
+                    PoolError::IoError(std::io::Error::other(format!(
+                        "Failed to receive response from MPIO pool: {}",
+                        e
+                    )))
+                })?,
+                Err(_) => Err(PoolError::Timeout { timeout_ms }),
+            }
+        } else {
+            resp_rx.await.map_err(|e| {
+                PoolError::IoError(std::io::Error::other(format!(
+                    "Failed to receive response from MPIO pool: {}",
+                    e
+                )))
+            })?
+        }
+    }
+}
+
+fn mpio_request_timeout() -> Option<Duration> {
+    // Centralized via `beacon-config`.
+    // Default is 0 (disabled) to avoid surprising behavior changes for large reads.
+    let timeout_ms = CONFIG.netcdf_mpio_request_timeout_ms;
+    if timeout_ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms))
     }
 }
 
 fn next_request_id() -> u32 {
+    // The worker protocol uses `u32` request ids. We generate them from a process-wide
+    // counter and wrap to stay in range.
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     (id % (u32::MAX as u64)) as u32
 }
 
 fn worker_executable_path() -> PathBuf {
     if cfg!(test) {
-        // Check if windows or unix style executable
+        // In tests, prefer the just-built binary sitting next to the test harness.
         if cfg!(windows) {
             return std::env::current_exe()
                 .unwrap()
@@ -134,8 +236,8 @@ fn worker_executable_path() -> PathBuf {
         }
     }
 
-    if let Ok(path) = std::env::var("BEACON_NETCDF_MPIO_WORKER") {
-        return PathBuf::from(path);
+    if let Some(path) = CONFIG.netcdf_mpio_worker.clone() {
+        return path;
     }
 
     // Default to resolving from PATH.
@@ -143,10 +245,15 @@ fn worker_executable_path() -> PathBuf {
 }
 
 async fn worker_dispatcher(mut rx: mpsc::Receiver<MpioReadRequest>) -> Result<(), PoolError> {
+    // Central scheduler:
+    // - Receives requests on `rx`.
+    // - Stores them FIFO in `queue`.
+    // - Assigns work to idle workers in a roughly round-robin fashion by popping from
+    //   `idle_workers`.
     let num_workers = get_mpio_opts().num_processes.max(1);
-    println!("Starting MPIO pool with {} workers", num_workers);
+    tracing::info!(num_workers, "starting MPIO pool");
     let worker_path = worker_executable_path();
-    println!("Using MPIO worker executable at {:?}", worker_path);
+    tracing::info!(worker_path = ?worker_path, "using MPIO worker executable");
 
     // Workers notify the dispatcher when they become idle again.
     let (idle_tx, mut idle_rx) = mpsc::channel::<usize>(num_workers * 4);
@@ -154,8 +261,7 @@ async fn worker_dispatcher(mut rx: mpsc::Receiver<MpioReadRequest>) -> Result<()
     let mut idle_workers = std::collections::VecDeque::new();
 
     for worker_id in 0..num_workers {
-        let (tx, rx_worker) = mpsc::channel::<MpioReadRequest>(1);
-        spawn_worker_task(worker_id, worker_path.clone(), rx_worker, idle_tx.clone());
+        let tx = spawn_worker_channel(worker_id, worker_path.clone(), idle_tx.clone());
         worker_senders.push(tx);
         idle_workers.push_back(worker_id);
     }
@@ -163,14 +269,9 @@ async fn worker_dispatcher(mut rx: mpsc::Receiver<MpioReadRequest>) -> Result<()
     let mut queue = std::collections::VecDeque::new();
 
     loop {
-        println!(
-            "MPIO dispatcher loop: queue size {}, idle workers {}",
-            queue.len(),
-            idle_workers.len()
-        );
         tokio::select! {
             Some(req) = rx.recv() => {
-                println!("Received request from client: {:?}", req.command);
+                tracing::debug!(command = ?req.command, "mpio request received");
                 queue.push_back(req);
             }
 
@@ -180,24 +281,60 @@ async fn worker_dispatcher(mut rx: mpsc::Receiver<MpioReadRequest>) -> Result<()
         }
 
         while let (Some(req), Some(worker_id)) = (queue.pop_front(), idle_workers.pop_front()) {
-            println!(
-                "Dispatching request {:?} to worker {}",
-                req.command, worker_id
-            );
+            tracing::debug!(worker_id, command = ?req.command, "dispatching mpio request");
             let sender = worker_senders
                 .get(worker_id)
                 .ok_or_else(|| PoolError::ProtocolError("Worker id out of range".to_string()))?
                 .clone();
 
-            if sender.send(req).await.is_err() {
-                println!("Worker {} channel closed", worker_id);
-                // Worker task died; report error back to caller.
-                // (We could respawn here, but the simplest safe behavior is to fail fast.)
-                // Re-insert the worker id as idle so future work doesn't stall.
-                idle_workers.push_back(worker_id);
+            // If a worker task died (channel closed), respawn it and retry once.
+            match sender.send(req).await {
+                Ok(()) => {}
+                Err(e) => {
+                    // `SendError` carries the original request back.
+                    let req = e.0;
+                    tracing::warn!(worker_id, "mpio worker channel closed; respawning");
+
+                    let new_tx =
+                        spawn_worker_channel(worker_id, worker_path.clone(), idle_tx.clone());
+                    if let Some(slot) = worker_senders.get_mut(worker_id) {
+                        *slot = new_tx.clone();
+                    }
+
+                    match new_tx.send(req).await {
+                        Ok(()) => {
+                            // Worker is now busy; it will re-advertise idleness via `idle_tx`.
+                        }
+                        Err(e2) => {
+                            let req = e2.0;
+                            tracing::error!(
+                                worker_id,
+                                "failed to send request to respawned worker"
+                            );
+                            let _ =
+                                req.responder
+                                    .send(Err(PoolError::IoError(std::io::Error::other(
+                                        "MPIO worker unavailable",
+                                    ))));
+                            // The respawned worker task exists and is idle; re-add it.
+                            idle_workers.push_back(worker_id);
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+fn spawn_worker_channel(
+    worker_id: usize,
+    worker_path: PathBuf,
+    idle_tx: mpsc::Sender<usize>,
+) -> mpsc::Sender<MpioReadRequest> {
+    // Capacity=1 enforces at most one in-flight request per worker.
+    let (tx, rx_worker) = mpsc::channel::<MpioReadRequest>(1);
+    spawn_worker_task(worker_id, worker_path, rx_worker, idle_tx);
+    tx
 }
 
 fn spawn_worker_task(
@@ -206,20 +343,45 @@ fn spawn_worker_task(
     mut rx: mpsc::Receiver<MpioReadRequest>,
     idle_tx: mpsc::Sender<usize>,
 ) {
+    // One Tokio task per worker.
+    // Owns the child process and its stdin/stdout handles.
     tokio::spawn(async move {
         let mut proc = match spawn_worker(&worker_path).await {
             Ok(p) => p,
             Err(e) => {
-                println!("Failed to spawn MPIO worker: {}", e);
                 tracing::error!(worker_id, error = ?e, "failed to spawn mpio worker");
                 return;
             }
         };
 
         while let Some(req) = rx.recv().await {
-            println!("Worker {} processing request {:?}", worker_id, req.command);
+            tracing::debug!(worker_id, command = ?req.command, "mpio worker handling request");
             let result = handle_request(&mut proc, req.command).await;
-            println!("Worker {} completed request", worker_id);
+
+            // If the worker process crashed or the protocol stream is corrupted, refresh
+            // the process so subsequent requests don't fail in a loop.
+            if matches!(
+                &result,
+                Err(PoolError::IoError(_))
+                    | Err(PoolError::SerdeError(_))
+                    | Err(PoolError::ProtocolError(_))
+            ) {
+                tracing::warn!(
+                    worker_id,
+                    error = ?result.as_ref().err(),
+                    "mpio worker unhealthy; respawning process"
+                );
+                match spawn_worker(&worker_path).await {
+                    Ok(new_proc) => proc = new_proc,
+                    Err(e) => {
+                        tracing::error!(worker_id, error = ?e, "failed to respawn mpio worker process");
+                        // Keep the original error for this request; future sends will fail and
+                        // the dispatcher will respawn the worker task.
+                    }
+                }
+            }
+
+            tracing::debug!(worker_id, "mpio worker completed request");
             let _ = req.responder.send(result);
             let _ = idle_tx.send(worker_id).await;
         }
@@ -227,7 +389,7 @@ fn spawn_worker_task(
 }
 
 async fn spawn_worker(worker_path: &PathBuf) -> Result<WorkerProc, PoolError> {
-    println!("Spawning MPIO worker process at {:?}", worker_path);
+    tracing::debug!(worker_path = ?worker_path, "spawning mpio worker process");
     let mut child = Command::new(worker_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -249,6 +411,7 @@ async fn spawn_worker(worker_path: &PathBuf) -> Result<WorkerProc, PoolError> {
     Ok(WorkerProc {
         child,
         stdin: BufWriter::new(stdin),
+        // Use a larger buffer to reduce syscalls when reading Arrow IPC payloads.
         stdout: BufReader::with_capacity(2 * 1024 * 1024, stdout),
     })
 }
@@ -257,12 +420,13 @@ async fn write_framed_json<W: AsyncWrite + Unpin, T: serde::Serialize>(
     writer: &mut W,
     value: &T,
 ) -> Result<(), PoolError> {
+    // Frame format: [u32 little-endian length] + JSON bytes.
     let json = serde_json::to_vec(value).map_err(PoolError::SerdeError)?;
     let len = (json.len() as u32).to_le_bytes();
     writer.write_all(&len).await.map_err(PoolError::IoError)?;
     writer.write_all(&json).await.map_err(PoolError::IoError)?;
     writer.flush().await.map_err(PoolError::IoError)?;
-    println!("Wrote frame of length {}", json.len());
+    tracing::trace!(len = json.len(), "wrote framed json");
     Ok(())
 }
 
@@ -274,7 +438,7 @@ async fn read_framed_json<R: AsyncRead + Unpin, T: serde::de::DeserializeOwned>(
         .read_exact(&mut len_buf)
         .await
         .map_err(PoolError::IoError)?;
-    println!("Read frame length: {}", u32::from_le_bytes(len_buf));
+    tracing::trace!(len = u32::from_le_bytes(len_buf), "read framed json length");
     let json_len = u32::from_le_bytes(len_buf) as usize;
     if json_len == 0 {
         return Err(PoolError::ProtocolError(
@@ -294,10 +458,9 @@ async fn handle_request(
     command: ReadCommand,
 ) -> Result<MpioReadResponse, PoolError> {
     write_framed_json(&mut proc.stdin, &command).await?;
-    println!("Sent command to worker: {:?}", command);
-    panic!("test");
+    tracing::trace!(command = ?command, "sent command to mpio worker");
     let response: CommandReponse = read_framed_json(&mut proc.stdout).await?;
-    println!("Received response from worker: {:?}", response);
+    tracing::trace!(response = ?response, "received response from mpio worker");
     match &response {
         CommandReponse::Error {
             request_id,
@@ -318,6 +481,8 @@ async fn handle_request(
                     "has_more=true is not supported".to_string(),
                 ));
             }
+            // Immediately after the JSON response frame, the worker writes the raw
+            // Arrow IPC stream bytes.
             let mut payload = vec![0u8; *length];
             proc.stdout
                 .read_exact(&mut payload)
@@ -335,6 +500,7 @@ pub async fn read_schema(
     resolver: Arc<NetCDFObjectResolver>,
     object: ObjectMeta,
 ) -> Result<SchemaRef, PoolError> {
+    // Schema reads are small; we only return the JSON response.
     let pool = MpioPool::global().await?;
     let request_id = next_request_id();
     let path = resolver
@@ -359,6 +525,7 @@ pub async fn read_file_as_batch(
     chunk_size: usize,
     stream_size: usize,
 ) -> Result<RecordBatch, PoolError> {
+    // File reads return an Arrow IPC stream containing at least one RecordBatch.
     let pool = MpioPool::global().await?;
     let request_id = next_request_id();
     let path = resolver
@@ -446,14 +613,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_read_schema_with_worker_and_test_file() {
+    async fn e2e_read_schema_and_first_batch_with_worker_and_test_file() {
         let exe = std::env::current_exe().unwrap();
         let bin = exe
             .parent()
             .unwrap()
             .parent()
             .unwrap()
-            .join("beacon-arrow-netcdf-mpio.exe");
+            .join("beacon-arrow-netcdf-mpio");
 
         assert!(bin.exists(), "MPIO worker executable not found");
 
@@ -473,8 +640,17 @@ mod tests {
             version: None,
         };
 
-        let schema = read_schema(resolver, object).await.unwrap();
-
+        let schema = read_schema(resolver.clone(), object.clone()).await.unwrap();
         assert!(!schema.fields().is_empty());
+
+        // Read the first RecordBatch through the worker and sanity-check the result.
+        // Keep sizes small to avoid making this test slow.
+        let batch = read_file_as_batch(resolver, object, Some(vec![0]), 1024, 1024)
+            .await
+            .unwrap();
+
+        assert!(batch.num_columns() > 0);
+        assert!(batch.num_rows() > 0);
+        assert_eq!(batch.schema().fields().len(), 1);
     }
 }

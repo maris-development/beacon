@@ -15,36 +15,47 @@ fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn main() -> io::Result<()> {
-    // Create a log file for debugging
-    let log_file = std::fs::File::create("mpio.log")?;
-    let mut log_writer = BufWriter::new(log_file);
+fn read_framed_json<R: Read>(stdin: &mut R) -> io::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    match read_exact(stdin, &mut len_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
 
+    let json_len = u32::from_le_bytes(len_buf) as usize;
+    if json_len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zero-length frame",
+        ));
+    }
+
+    let mut json_buf = vec![0u8; json_len];
+    read_exact(stdin, &mut json_buf)?;
+    Ok(Some(json_buf))
+}
+
+fn main() -> io::Result<()> {
     let mut stdin = BufReader::new(io::stdin());
     let mut stdout = BufWriter::with_capacity(4 * 1024 * 1024, io::stdout());
     let mut reader_cache: HashMap<String, NetCDFArrowReader> = std::collections::HashMap::new();
 
     loop {
-        writeln!(log_writer, "Waiting for command...")?;
-        log_writer.flush()?;
-        // --- read JSON length ---
-        let mut len_buf = [0u8; 4];
-        if stdin.read(&mut len_buf)? == 0 {
+        let Some(json_buf) = read_framed_json(&mut stdin)? else {
             break;
-        }
-        read_exact(&mut stdin, &mut len_buf)?;
-        let json_len = u32::from_le_bytes(len_buf) as usize;
+        };
 
-        // --- read JSON ---
-        let mut json_buf = vec![0u8; json_len];
-        read_exact(&mut stdin, &mut json_buf)?;
-
-        let cmd: ReadCommand = serde_json::from_slice(&json_buf).unwrap();
+        let cmd: ReadCommand = match serde_json::from_slice(&json_buf) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("mpio worker: invalid JSON command: {e}");
+                continue;
+            }
+        };
 
         match &cmd {
             ReadCommand::ReadArrowSchema { request_id, path } => {
-                writeln!(log_writer, "Received ReadArrowSchema command: {:?}", cmd)?;
-                log_writer.flush()?;
                 let schema = if let Some(reader) = reader_cache.get(path) {
                     // already cached
                     reader.schema().clone()
@@ -70,9 +81,13 @@ fn main() -> io::Result<()> {
                     request_id: *request_id,
                     schema: schema.as_ref().clone(),
                 };
-                writeln!(log_writer, "Sending response: {:?}", response)?;
-                let response_json = serde_json::to_vec(&response)
-                    .expect("Incorrect command message. This should never happen.");
+                let response_json = match serde_json::to_vec(&response) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        respond_error(&mut stdout, *request_id, format!("Serialize error: {e}"))?;
+                        continue;
+                    }
+                };
                 let response_len = (response_json.len() as u32).to_le_bytes();
                 stdout.write_all(&response_len)?;
                 stdout.write_all(&response_json)?;
@@ -82,8 +97,8 @@ fn main() -> io::Result<()> {
                 request_id,
                 path,
                 projection,
-                chunk_size,
-                stream_size,
+                chunk_size: _chunk_size,
+                stream_size: _stream_size,
             } => {
                 let reader = if let Some(reader) = reader_cache.get_mut(path) {
                     // already cached
@@ -120,19 +135,50 @@ fn main() -> io::Result<()> {
                 // Serialize the batch and send it back
                 let buffer = Vec::new();
                 let mut arrow_stream_writer =
-                    arrow::ipc::writer::StreamWriter::try_new(buffer, &batch.schema()).unwrap();
+                    match arrow::ipc::writer::StreamWriter::try_new(buffer, &batch.schema()) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            respond_error(
+                                &mut stdout,
+                                *request_id,
+                                format!("IPC writer init error: {e}"),
+                            )?;
+                            continue;
+                        }
+                    };
 
-                arrow_stream_writer.write(&batch).unwrap();
-                arrow_stream_writer.finish().unwrap();
-                let buffer = arrow_stream_writer.into_inner().unwrap();
+                if let Err(e) = arrow_stream_writer.write(&batch) {
+                    respond_error(&mut stdout, *request_id, format!("IPC write error: {e}"))?;
+                    continue;
+                }
+                if let Err(e) = arrow_stream_writer.finish() {
+                    respond_error(&mut stdout, *request_id, format!("IPC finish error: {e}"))?;
+                    continue;
+                }
+                let buffer = match arrow_stream_writer.into_inner() {
+                    Ok(b) => b,
+                    Err(e) => {
+                        respond_error(
+                            &mut stdout,
+                            *request_id,
+                            format!("IPC finalize error: {e}"),
+                        )?;
+                        continue;
+                    }
+                };
 
                 let response = beacon_arrow_netcdf::mpio_utils::CommandReponse::BatchesStream {
                     request_id: *request_id,
                     length: buffer.len(),
                     has_more: false,
                 };
-                let response_json = serde_json::to_vec(&response)
-                    .expect("Incorrect command message. This should never happen.");
+                let response_json = match serde_json::to_vec(&response) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        respond_error(&mut stdout, *request_id, format!("Serialize error: {e}"))?;
+                        continue;
+                    }
+                };
                 let header_response_len = (response_json.len() as u32).to_le_bytes();
                 stdout.write_all(&header_response_len)?;
                 stdout.write_all(&response_json)?;
@@ -144,7 +190,6 @@ fn main() -> io::Result<()> {
             }
         }
     }
-
     Ok(())
 }
 
