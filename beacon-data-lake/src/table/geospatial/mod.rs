@@ -8,7 +8,6 @@ use datafusion::{
     physical_plan::ExecutionPlan,
     prelude::{Expr, SessionContext},
 };
-use object_store::path::Path;
 
 use crate::table::{_type::TableType, error::TableError};
 
@@ -47,18 +46,14 @@ impl GeoSpatialTable {
     pub(crate) async fn table_provider(
         &self,
         table_directory_store_url: ObjectStoreUrl,
-        table_directory_prefix: Path,
         data_directory_store_url: ObjectStoreUrl,
-        data_directory_prefix: Path,
         session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         self.table_engine
             .table_provider(
                 session_ctx,
                 table_directory_store_url,
-                table_directory_prefix,
                 data_directory_store_url,
-                data_directory_prefix,
             )
             .await
     }

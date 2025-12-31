@@ -177,6 +177,11 @@ impl FileFormat for ZarrFormat {
             let object_schema = fetch_schema(store.clone(), &zarr_path).await?;
             schema = Some(object_schema);
         }
+        if schema.is_none() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "No valid Zarr v3 groups found to infer schema".to_string(),
+            ));
+        }
         Ok(schema.unwrap())
     }
 

@@ -30,9 +30,7 @@ impl EmptyTable {
     pub async fn table_provider(
         &self,
         _table_directory_store_url: ObjectStoreUrl,
-        _table_directory: object_store::path::Path,
         _data_directory_store_url: ObjectStoreUrl,
-        _data_directory: object_store::path::Path,
         _session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         Ok(Arc::new(EmptyTableProvider))

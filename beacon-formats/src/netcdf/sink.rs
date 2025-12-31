@@ -11,7 +11,7 @@
 //! variables, defining dimensions, and projecting column values into
 //! multi-dimensional ndarray slabs.
 
-use std::{any::Any, fmt::Formatter, sync::Arc};
+use std::{any::Any, env::temp_dir, fmt::Formatter, sync::Arc};
 
 use arrow::{
     array::{Array, ArrowPrimitiveType, PrimitiveArray, RecordBatch},
@@ -45,16 +45,12 @@ use crate::netcdf::{
 #[derive(Debug, Clone)]
 pub struct NetCDFSink {
     sink_config: FileSinkConfig,
-    path_resolver: NetCDFSinkResolver,
 }
 
 impl NetCDFSink {
     /// Create a new sink bound to a [`FileSinkConfig`] and path resolver.
-    pub fn new(path_resolver: Arc<NetCDFSinkResolver>, sink_config: FileSinkConfig) -> Self {
-        Self {
-            sink_config,
-            path_resolver: (*path_resolver).clone(),
-        }
+    pub fn new(sink_config: FileSinkConfig) -> Self {
+        Self { sink_config }
     }
 }
 
@@ -84,20 +80,18 @@ impl DataSink for NetCDFSink {
         _context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
         let arrow_schema = self.sink_config.output_schema().clone();
-        let output_path = self
-            .path_resolver
-            .resolve_output_path(self.sink_config.table_paths[0].prefix());
+        let file_path = self.sink_config.table_paths[0].prefix();
+        let full_path = temp_dir().join(file_path.as_ref());
+        tracing::info!("Writing NetCDF to path: {:?}", full_path);
 
         let mut rows_written: u64 = 0;
-        let mut nc_writer =
-            ArrowRecordBatchWriter::<DefaultEncoder>::new(output_path, arrow_schema).map_err(
-                |e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to create NetCDF ArrowRecordBatchWriter: {}",
-                        e
-                    ))
-                },
-            )?;
+        let mut nc_writer = ArrowRecordBatchWriter::<DefaultEncoder>::new(full_path, arrow_schema)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to create NetCDF ArrowRecordBatchWriter: {}",
+                    e
+                ))
+            })?;
 
         let mut pinned_steam = std::pin::pin!(data);
 
@@ -127,7 +121,6 @@ impl DataSink for NetCDFSink {
 #[derive(Debug, Clone)]
 pub struct NetCDFNdSink {
     sink_config: FileSinkConfig,
-    path_resolver: NetCDFSinkResolver,
     ndims: usize,
     unique_values: UniqueValuesHandleCollection,
 }
@@ -138,7 +131,6 @@ impl NetCDFNdSink {
     /// The sink validates that every output column is primitive because complex
     /// Arrow types cannot be represented in NetCDF variables.
     pub fn new(
-        path_resolver: Arc<NetCDFSinkResolver>,
         sink_config: FileSinkConfig,
         ndims: usize,
         unique_values: UniqueValuesHandleCollection,
@@ -157,7 +149,6 @@ impl NetCDFNdSink {
 
         Ok(Self {
             sink_config,
-            path_resolver: (*path_resolver).clone(),
             ndims,
             unique_values,
         })
@@ -189,9 +180,7 @@ impl DataSink for NetCDFNdSink {
         data: SendableRecordBatchStream,
         _context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
-        let output_path = self
-            .path_resolver
-            .resolve_output_path(self.sink_config.table_paths[0].prefix());
+        let output_path = temp_dir().join(self.sink_config.table_paths[0].prefix().as_ref());
         tracing::info!("Writing ND NetCDF to path: {:?}", output_path);
 
         let mut rows_written: u64 = 0;

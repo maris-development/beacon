@@ -34,7 +34,6 @@ impl LogicalTable {
     pub async fn table_provider(
         &self,
         data_directory_store_url: &ObjectStoreUrl,
-        data_directory_prefix: &object_store::path::Path,
         session_context: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         // Retrieve the session state from the session context.
@@ -46,7 +45,6 @@ impl LogicalTable {
         for glob_path in &self.glob_paths {
             table_urls.push(parse_listing_table_url(
                 data_directory_store_url,
-                data_directory_prefix,
                 glob_path,
             )?);
         }

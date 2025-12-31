@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use arrow::datatypes::SchemaRef;
@@ -12,6 +12,7 @@ use beacon_formats::{
     Dataset, FileFormatFactoryExt, file_formats,
     netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
 };
+use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     datasource::listing::ListingTableUrl,
@@ -23,12 +24,8 @@ use futures::{
     stream::BoxStream,
     {StreamExt, TryFutureExt},
 };
-use object_store::{
-    ObjectStore,
-    aws::{AmazonS3, AmazonS3Builder},
-    local::LocalFileSystem,
-    path::PathPart,
-};
+use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
+use url::Url;
 
 use crate::{
     files::{collection::FileCollection, temp_output_file::TempOutputFile},
@@ -51,14 +48,9 @@ pub struct Config {
 
 pub struct DataLake {
     data_directory_store_url: ObjectStoreUrl,
-    data_directory_prefix: object_store::path::Path,
-
     table_directory_store_url: ObjectStoreUrl,
-    table_directory_prefix: object_store::path::Path,
-
-    tmp_directory_object_store: Arc<LocalFileSystem>,
     tmp_directory_store_url: ObjectStoreUrl,
-    tmp_directory_prefix: object_store::path::Path,
+
     /// The session context used for executing queries and managing the session state.
     session_context: Arc<SessionContext>,
 
@@ -75,14 +67,21 @@ impl Debug for DataLake {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataLake")
             .field("data_directory_store_url", &self.data_directory_store_url)
-            .field("data_directory_prefix", &self.data_directory_prefix)
             .field("table_directory_store_url", &self.table_directory_store_url)
-            .field("table_directory_prefix", &self.table_directory_prefix)
             .field("config", &self.config)
             .field("tables", &self.tables)
             .finish()
     }
 }
+
+pub static DATASETS_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("datasets://").expect("Failed to parse datasets URL"));
+pub static TABLES_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("tables://").expect("Failed to parse tables URL"));
+pub static TMP_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("tmp://").expect("Failed to parse tmp URL"));
+pub static INDEX_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("index://").expect("Failed to parse index URL")); // ToDo: implement indexing on top of existing files utilizing the notified storage events.
 
 impl DataLake {
     #[inline(always)]
@@ -90,93 +89,59 @@ impl DataLake {
         &self,
         path: String,
     ) -> datafusion::error::Result<ListingTableUrl> {
-        parse_listing_table_url(
-            &self.data_directory_store_url,
-            &self.data_directory_prefix,
-            &path,
-        )
-    }
-
-    pub fn netcdf_object_resolver() -> Arc<NetCDFObjectResolver> {
-        if beacon_config::CONFIG.s3_data_lake {
-            let endpoint = beacon_config::CONFIG
-                .s3_endpoint
-                .clone()
-                .expect("S3 endpoint not set");
-            let bucket = beacon_config::CONFIG
-                .s3_bucket
-                .clone()
-                .expect("S3 bucket not set");
-            Arc::new(NetCDFObjectResolver::new(endpoint, Some(bucket), None))
-        } else {
-            let base_path = PathBuf::from("./data");
-
-            std::fs::create_dir_all(&base_path).expect("Failed to create datasets directory");
-
-            let absolute_path = base_path.canonicalize().unwrap();
-
-            // Create directories if they do not exist
-            std::fs::create_dir_all(&absolute_path).expect("Failed to create datasets directory");
-            tracing::debug!(
-                "Using local NetCDF datasets path: {}",
-                absolute_path.display()
-            );
-            Arc::new(NetCDFObjectResolver::new(
-                "file://".to_string(),
-                None,
-                Some(absolute_path.to_string_lossy().to_string()),
-            ))
-        }
-    }
-
-    pub fn netcdf_sink_resolver() -> Arc<NetCDFSinkResolver> {
-        let base_path = PathBuf::from("./data");
-        std::fs::create_dir_all(&base_path).expect("Failed to create datasets directory");
-        let absolute_path = base_path.canonicalize().unwrap();
-
-        tracing::debug!("Using local NetCDF sink path: {}", absolute_path.display());
-
-        // Create directories if they do not exist
-        Arc::new(NetCDFSinkResolver::new(absolute_path))
+        parse_listing_table_url(&self.data_directory_store_url, &path)
     }
 
     pub fn data_object_store_url(&self) -> ObjectStoreUrl {
         self.data_directory_store_url.clone()
     }
 
-    pub fn data_object_store_prefix(&self) -> object_store::path::Path {
-        self.data_directory_prefix.clone()
-    }
-
     pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {
-        TempOutputFile::new(self, extension)
+        Self::create_temp_output_file(extension)
+    }
+    pub fn create_temp_output_file(extension: &str) -> TempOutputFile {
+        TempOutputFile::new(extension)
     }
 
     pub async fn new(session_context: Arc<SessionContext>) -> Self {
-        // Create tmp object store for storing temp files.
-        let (datasets_url, datasets_prefix) =
-            Self::datasets_url_with_prefix(session_context.clone());
-        let (tables_url, tables_prefix) = Self::tables_url_with_prefix(session_context.clone());
-        let (tmp_directory_object_store, tmp_directory_store_url, tmp_directory_prefix) =
-            Self::tmp_url_with_prefix(session_context.clone());
+        // Register object stores
+        // Init them if they have not been initialized yet.
+        beacon_object_storage::init_datastores()
+            .await
+            .expect("Failed to initialize Data Lake Engine...");
+        let datasets_object_store = get_datasets_object_store().await;
+        let datasets_object_store_url = DATASETS_OBJECT_STORE_URL.clone();
+        // Register datasets object store
+        session_context.register_object_store(
+            &Url::parse(datasets_object_store_url.as_str()).unwrap(),
+            datasets_object_store,
+        );
+        // Register tables object store
+        let tables_object_store = beacon_object_storage::get_tables_object_store().await;
+        let tables_object_store_url = TABLES_OBJECT_STORE_URL.clone();
+        session_context.register_object_store(
+            &Url::parse(tables_object_store_url.as_str()).unwrap(),
+            tables_object_store,
+        );
+        // Register tmp object store
+        let tmp_object_store = beacon_object_storage::get_tmp_object_store().await;
+        let tmp_object_store_url = TMP_OBJECT_STORE_URL.clone();
+        session_context.register_object_store(
+            &Url::parse(tmp_object_store_url.as_str()).unwrap(),
+            tmp_object_store,
+        );
 
         let config = Self::read_config();
 
         let mut table_providers = HashMap::new();
         let mut tables = HashMap::new();
 
-        let file_formats = file_formats(
-            session_context.clone(),
-            DataLake::netcdf_object_resolver(),
-            DataLake::netcdf_sink_resolver(),
-        )
-        .unwrap();
+        let file_formats =
+            file_formats(session_context.clone(), get_datasets_object_store().await).unwrap();
 
         Self::init_tables(
-            tables_url.clone(),
-            tables_prefix.clone(),
-            datasets_url.clone(),
-            datasets_prefix.clone(),
+            tables_object_store_url.clone(),
+            datasets_object_store_url.clone(),
             session_context.clone(),
             &mut table_providers,
             &mut tables,
@@ -184,13 +149,9 @@ impl DataLake {
         .await;
 
         let data_lake = Self {
-            data_directory_store_url: datasets_url,
-            data_directory_prefix: datasets_prefix,
-            table_directory_store_url: tables_url,
-            table_directory_prefix: tables_prefix,
-            tmp_directory_object_store,
-            tmp_directory_store_url,
-            tmp_directory_prefix,
+            data_directory_store_url: datasets_object_store_url,
+            table_directory_store_url: tables_object_store_url,
+            tmp_directory_store_url: tmp_object_store_url,
             session_context,
             config,
             file_formats,
@@ -222,117 +183,9 @@ impl DataLake {
         }
     }
 
-    fn tmp_url_with_prefix(
-        context: Arc<SessionContext>,
-    ) -> (
-        Arc<LocalFileSystem>,
-        ObjectStoreUrl,
-        object_store::path::Path,
-    ) {
-        let base_path = PathBuf::from("./data");
-        let tmp_directory = base_path.join("tmp");
-
-        // Create directories if they do not exist
-        std::fs::create_dir_all(&tmp_directory).expect("Failed to create tmp directory");
-
-        // Configure the object store using LOCAL FS
-        let tmp_url = ObjectStoreUrl::parse("file://").expect("Failed to parse file URL");
-        let tmp_fs = LocalFileSystem::new_with_prefix("./data").unwrap();
-        let tmp_fs_arc = Arc::new(tmp_fs);
-        context.register_object_store(tmp_url.as_ref(), tmp_fs_arc.clone());
-
-        let path_prefix = object_store::path::Path::from("tmp/");
-
-        (tmp_fs_arc, tmp_url, path_prefix)
-    }
-
-    fn tables_url_with_prefix(
-        context: Arc<SessionContext>,
-    ) -> (ObjectStoreUrl, object_store::path::Path) {
-        let base_path = PathBuf::from("./data");
-        let table_directory = base_path.join("tables");
-
-        // Create directories if they do not exist
-        std::fs::create_dir_all(&table_directory).expect("Failed to create tables directory");
-
-        // Configure the object store using LOCAL FS
-        let table_url = ObjectStoreUrl::parse("file://").expect("Failed to parse file URL");
-        let table_fs = LocalFileSystem::new_with_prefix("./data").unwrap();
-
-        context.register_object_store(table_url.as_ref(), Arc::new(table_fs));
-
-        let path_prefix = object_store::path::Path::from("tables/");
-
-        (table_url, path_prefix)
-    }
-
-    fn datasets_url_with_prefix(
-        context: Arc<SessionContext>,
-    ) -> (ObjectStoreUrl, object_store::path::Path) {
-        if beacon_config::CONFIG.s3_data_lake {
-            tracing::info!("Configuring S3 object store for datasets");
-            // Fetch the s3 settings from the config
-            let mut s3_object_store_builder = AmazonS3Builder::new()
-                .with_allow_http(true)
-                .with_virtual_hosted_style_request(false);
-
-            let endpoint = beacon_config::CONFIG
-                .s3_endpoint
-                .clone()
-                .expect("S3 endpoint not set");
-            s3_object_store_builder = s3_object_store_builder.with_endpoint(endpoint);
-            let bucket = beacon_config::CONFIG
-                .s3_bucket
-                .clone()
-                .expect("S3 bucket not set");
-            s3_object_store_builder = s3_object_store_builder.with_bucket_name(bucket.clone());
-
-            if let Some(region) = beacon_config::CONFIG.s3_region.clone() {
-                s3_object_store_builder = s3_object_store_builder.with_region(region);
-            }
-
-            if let Some(access_key_id) = beacon_config::CONFIG.s3_access_key_id.clone() {
-                s3_object_store_builder = s3_object_store_builder.with_access_key_id(access_key_id);
-            }
-
-            if let Some(secret_access_key) = beacon_config::CONFIG.s3_secret_access_key.clone() {
-                s3_object_store_builder =
-                    s3_object_store_builder.with_secret_access_key(secret_access_key);
-            } else {
-                s3_object_store_builder = s3_object_store_builder.with_skip_signature(true);
-            }
-
-            let s3_object_store = s3_object_store_builder.build().unwrap();
-
-            let object_store_url =
-                ObjectStoreUrl::parse("http://datasets").expect("Failed to parse S3 URL");
-            context.register_object_store(object_store_url.as_ref(), Arc::new(s3_object_store));
-
-            (object_store_url, object_store::path::Path::from(""))
-        } else {
-            tracing::info!("Configuring LOCAL FS object store for datasets");
-            let base_path = PathBuf::from("./data");
-            let dataset_directory = base_path.join("datasets");
-
-            // Create directories if they do not exist
-            std::fs::create_dir_all(&dataset_directory)
-                .expect("Failed to create datasets directory");
-
-            // Configure the object store using LOCAL FS
-            let dataset_url = ObjectStoreUrl::parse("file://").expect("Failed to parse file URL");
-            let dataset_fs = LocalFileSystem::new_with_prefix("./data").unwrap();
-
-            context.register_object_store(dataset_url.as_ref(), Arc::new(dataset_fs));
-            let path_prefix = object_store::path::Path::from("datasets/");
-            (dataset_url, path_prefix)
-        }
-    }
-
     async fn init_tables(
         tables_object_store_url: ObjectStoreUrl,
-        tables_prefix: object_store::path::Path,
         data_directory_store_url: ObjectStoreUrl,
-        data_directory_prefix: object_store::path::Path,
         session_context: Arc<SessionContext>,
         table_providers: &mut HashMap<String, Arc<dyn TableProvider>>,
         tables: &mut HashMap<String, Table>,
@@ -343,7 +196,7 @@ impl DataLake {
             .object_store(&tables_object_store_url)
             .unwrap();
 
-        let mut entry_stream = tables_object_store.list(Some(&tables_prefix));
+        let mut entry_stream = tables_object_store.list(None);
         while let Some(entry) = entry_stream.next().await {
             tracing::info!("Found table entry: {:?}", entry);
             if let Ok(entry) = entry
@@ -365,9 +218,7 @@ impl DataLake {
                             .table_provider(
                                 session_context.clone(),
                                 data_directory_store_url.clone(),
-                                data_directory_prefix.clone(),
                                 tables_object_store_url.clone(),
-                                tables_prefix.clone(),
                             )
                             .await;
 
@@ -422,22 +273,6 @@ impl DataLake {
             let format_datasets = file_format.discover_datasets(&objects)?;
             datasets.extend(format_datasets);
         }
-
-        // From each dataset, remove the dataset prefix path.
-        let datasets: Vec<Dataset> = datasets
-            .into_iter()
-            .map(|mut dataset| {
-                let updated_file_path = dataset
-                    .file_path()
-                    .strip_prefix(&format!("{}/", self.data_directory_prefix.as_ref()));
-
-                if let Some(stripped_path) = updated_file_path {
-                    dataset.update_file_path(stripped_path.to_string());
-                }
-
-                dataset
-            })
-            .collect();
 
         // Apply offset and limit
         let start = offset.unwrap_or(0);
@@ -512,12 +347,7 @@ impl DataLake {
             .object_store(&self.table_directory_store_url)
             .unwrap();
 
-        let mut table_directory: Vec<PathPart<'static>> = self
-            .table_directory_prefix
-            .clone()
-            .parts()
-            .map(|part| part.as_ref().to_string().into())
-            .collect::<Vec<_>>();
+        let mut table_directory: Vec<PathPart<'static>> = vec![];
         table_directory.push(PathPart::from(table.table_name.clone()));
         drop(tables); // Release the lock before saving the table as to not deadlock across the async call
         table.save(table_object_store, table_directory).await;
@@ -525,9 +355,7 @@ impl DataLake {
             .table_provider(
                 self.session_context.clone(),
                 self.data_directory_store_url.clone(),
-                self.data_directory_prefix.clone(),
                 self.table_directory_store_url.clone(),
-                self.table_directory_prefix.clone(),
             )
             .await?;
         // Re-acquire the lock to insert the table
@@ -554,7 +382,6 @@ impl DataLake {
                 _op,
                 self.session_context.clone(),
                 &self.data_directory_store_url,
-                &self.data_directory_prefix,
             )
             .map_err(|e| TableError::GenericTableError(format!("Failed to apply operation: {}", e)))
             .await
@@ -577,13 +404,8 @@ impl DataLake {
 
         let upload_path = object_store::path::Path::from(file_path);
 
-        let mut object_path = self.data_directory_prefix.clone();
-        for part in upload_path.parts() {
-            object_path = object_path.child(part.as_ref());
-        }
-
         let mut writer = object_store
-            .put_multipart(&object_path)
+            .put_multipart(&upload_path)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
@@ -618,13 +440,9 @@ impl DataLake {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         let file_path = object_store::path::Path::from(file_path);
-        let mut object_path = self.data_directory_prefix.clone();
-        for part in file_path.parts() {
-            object_path = object_path.child(part.as_ref());
-        }
 
         let get_result = object_store
-            .get(&object_path)
+            .get(&file_path)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
@@ -648,13 +466,9 @@ impl DataLake {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         let file_path = object_store::path::Path::from(file_path);
-        let mut object_path = self.data_directory_prefix.clone();
-        for part in file_path.parts() {
-            object_path = object_path.child(part.as_ref());
-        }
 
         object_store
-            .delete(&object_path)
+            .delete(&file_path)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
@@ -671,14 +485,9 @@ impl DataLake {
 
         if let Some(table) = table {
             let table_object_store_url = self.table_directory_store_url.clone();
-            let table_object_store_prefix = self.table_directory_prefix.clone();
 
             table
-                .delete_table(
-                    self.session_context.clone(),
-                    table_object_store_url,
-                    table_object_store_prefix,
-                )
+                .delete_table(self.session_context.clone(), table_object_store_url)
                 .await;
             Ok(())
         } else {

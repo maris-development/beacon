@@ -73,6 +73,7 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use beacon_arrow_netcdf::mpio_utils::{CommandResponse, ReadCommand};
 use beacon_config::CONFIG;
+use beacon_object_storage::DatasetsStore;
 use object_store::ObjectMeta;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -95,11 +96,12 @@ pub enum PoolError {
     ProtocolError(String),
     #[error("Worker produced an unexpected response")]
     UnexpectedResponse,
+    #[error("Failed to translate NetCDF URL path: {0}")]
+    UrlTranslationError(beacon_object_storage::error::StorageError),
     #[error("MPIO pool must be initialized inside a Tokio runtime")]
     NotInTokioRuntime,
     #[error("Arrow IPC error: {0}")]
     ArrowIpcError(arrow::error::ArrowError),
-
     #[error("MPIO request timed out after {timeout_ms}ms")]
     Timeout { timeout_ms: u64 },
 }
@@ -497,21 +499,19 @@ async fn handle_request(
 }
 
 pub async fn read_schema(
-    resolver: Arc<NetCDFObjectResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
 ) -> Result<SchemaRef, PoolError> {
     // Schema reads are small; we only return the JSON response.
     let pool = MpioPool::global().await?;
     let request_id = next_request_id();
-    let path = resolver
-        .resolve_object_meta(object)
-        .to_string_lossy()
-        .to_string();
+    let path = datasets_object_store
+        .translate_netcdf_url_path(&object.location)
+        .map_err(|e| PoolError::UrlTranslationError(e))?;
 
     let resp = pool
         .send_request(ReadCommand::ReadArrowSchema { request_id, path })
         .await?;
-
     match resp.response {
         CommandResponse::ArrowSchema { schema, .. } => Ok(Arc::new(schema)),
         _ => Err(PoolError::UnexpectedResponse),
@@ -519,7 +519,7 @@ pub async fn read_schema(
 }
 
 pub async fn read_file_as_batch(
-    resolver: Arc<NetCDFObjectResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
     projection: Option<Vec<usize>>,
     chunk_size: usize,
@@ -528,10 +528,9 @@ pub async fn read_file_as_batch(
     // File reads return an Arrow IPC stream containing at least one RecordBatch.
     let pool = MpioPool::global().await?;
     let request_id = next_request_id();
-    let path = resolver
-        .resolve_object_meta(object)
-        .to_string_lossy()
-        .to_string();
+    let path = datasets_object_store
+        .translate_netcdf_url_path(&object.location)
+        .map_err(|e| PoolError::UrlTranslationError(e))?;
 
     let resp = pool
         .send_request(ReadCommand::ReadFile {
@@ -559,6 +558,7 @@ pub async fn read_file_as_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beacon_object_storage::get_datasets_object_store;
     use tokio::io::duplex;
 
     #[tokio::test]
@@ -626,11 +626,7 @@ mod tests {
 
         // Requires the `beacon-arrow-netcdf-mpio` executable.
         // Provide a path via `BEACON_NETCDF_MPIO_WORKER`.
-        let resolver = Arc::new(NetCDFObjectResolver::new(
-            env!("CARGO_MANIFEST_DIR").to_string(),
-            None,
-            None,
-        ));
+        let datasets_object_store = get_datasets_object_store().await;
 
         let object = ObjectMeta {
             location: object_store::path::Path::from("test-files/gridded-example.nc"),
@@ -640,14 +636,22 @@ mod tests {
             version: None,
         };
 
-        let schema = read_schema(resolver.clone(), object.clone()).await.unwrap();
+        let schema = read_schema(datasets_object_store.clone(), object.clone())
+            .await
+            .unwrap();
         assert!(!schema.fields().is_empty());
 
         // Read the first RecordBatch through the worker and sanity-check the result.
         // Keep sizes small to avoid making this test slow.
-        let batch = read_file_as_batch(resolver, object, Some(vec![0]), 1024, 1024)
-            .await
-            .unwrap();
+        let batch = read_file_as_batch(
+            datasets_object_store.clone(),
+            object,
+            Some(vec![0]),
+            1024,
+            1024,
+        )
+        .await
+        .unwrap();
 
         assert!(batch.num_columns() > 0);
         assert!(batch.num_rows() > 0);

@@ -101,9 +101,7 @@ impl PresetTable {
     pub async fn table_provider(
         &self,
         table_directory_store_url: ObjectStoreUrl,
-        table_directory: object_store::path::Path,
         data_directory_store_url: ObjectStoreUrl,
-        data_directory: object_store::path::Path,
         session_ctx: Arc<SessionContext>,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         let current_provider = self
@@ -111,9 +109,7 @@ impl PresetTable {
             .table_provider(
                 session_ctx,
                 table_directory_store_url,
-                table_directory,
                 data_directory_store_url,
-                data_directory,
             )
             .await?;
 

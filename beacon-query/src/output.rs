@@ -47,7 +47,7 @@ impl Output {
         data_lake: &DataLake,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
-        let file_type = self.format.file_type();
+        let file_type = self.format.file_type().await;
         let temp_output = data_lake.try_create_temp_output_file(".tmp");
         let plan = LogicalPlanBuilder::copy_to(
             input_plan,
@@ -108,7 +108,7 @@ impl OutputFormat {
     }
 
     /// Returns the DataFusion file type for this output format.
-    pub fn file_type(&self) -> Arc<dyn FileType> {
+    pub async fn file_type(&self) -> Arc<dyn FileType> {
         match self {
             OutputFormat::Csv => format_as_file_type(Arc::new(CsvFormatFactory)),
             OutputFormat::Ipc => format_as_file_type(Arc::new(ArrowFormatFactory)),
@@ -122,25 +122,19 @@ impl OutputFormat {
             }))),
             OutputFormat::NetCDF => {
                 let options = NetcdfOptions::default();
-                let object_resolver = DataLake::netcdf_object_resolver();
-                let sink_resolver = DataLake::netcdf_sink_resolver();
 
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
+                    beacon_object_storage::get_datasets_object_store().await,
                     options,
-                    object_resolver,
-                    sink_resolver,
                 )))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {
                 let mut options = NetcdfOptions::default();
                 options.unique_value_columns = dimension_columns.clone();
-                let object_resolver = DataLake::netcdf_object_resolver();
-                let sink_resolver = DataLake::netcdf_sink_resolver();
 
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
+                    beacon_object_storage::get_datasets_object_store().await,
                     options,
-                    object_resolver,
-                    sink_resolver,
                 )))
             }
             OutputFormat::Odv(options) => {

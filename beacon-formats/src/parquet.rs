@@ -183,7 +183,6 @@ fn cast_ts_seconds_to_ms(
     input: Arc<dyn ExecutionPlan>,
     session: &dyn Session,
 ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-    println!("Casting Time[s] to Time[ms]");
     let schema = input.schema();
     let df_schema: DFSchema = DFSchema::try_from(schema.clone()).unwrap();
 

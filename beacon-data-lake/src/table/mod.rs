@@ -82,17 +82,13 @@ impl Table {
         &self,
         session_ctx: Arc<SessionContext>,
         data_directory_store_url: ObjectStoreUrl,
-        data_directory_prefix: object_store::path::Path,
         table_directory_store_url: ObjectStoreUrl,
-        table_directory_prefix: object_store::path::Path,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         self.table_type
             .table_provider(
                 session_ctx,
                 table_directory_store_url,
-                table_directory_prefix,
                 data_directory_store_url,
-                data_directory_prefix,
             )
             .await
     }
@@ -105,9 +101,8 @@ impl Table {
         &self,
         session_ctx: Arc<SessionContext>,
         table_directory_store_url: ObjectStoreUrl,
-        table_directory_prefix: object_store::path::Path,
     ) {
-        let full_path = table_directory_prefix.child(self.table_name.clone());
+        let full_path = Path::from(self.table_name.clone());
         // Delete the table directory
         let object_store = session_ctx
             .runtime_env()

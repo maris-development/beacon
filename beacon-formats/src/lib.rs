@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use beacon_object_storage::DatasetsStore;
 use datafusion::prelude::SessionContext;
 use object_store::ObjectMeta;
 
@@ -57,8 +58,7 @@ impl Dataset {
 /// Register file formats with the session state that can be used for reading
 pub fn file_formats(
     session_context: Arc<SessionContext>,
-    netcdf_object_resolver: Arc<NetCDFObjectResolver>,
-    netcdf_sink_resolver: Arc<NetCDFSinkResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
 ) -> datafusion::error::Result<Vec<Arc<dyn FileFormatFactoryExt>>> {
     let state_ref = session_context.state_ref();
     let mut state = state_ref.write();
@@ -68,9 +68,8 @@ pub fn file_formats(
         Arc::new(CsvFormatFactory),
         Arc::new(ArrowFormatFactory),
         Arc::new(NetCDFFormatFactory::new(
+            datasets_object_store.clone(),
             NetcdfOptions::default(),
-            netcdf_object_resolver,
-            netcdf_sink_resolver,
         )),
         Arc::new(ZarrFormatFactory),
     ];

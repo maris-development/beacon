@@ -1,8 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use envconfig::Envconfig;
 use lazy_static::lazy_static;
-use object_store::local::LocalFileSystem;
 
 #[derive(Debug, Envconfig)]
 pub struct Config {
@@ -32,19 +31,16 @@ pub struct Config {
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     pub worker_threads: usize,
 
-    // S3 Settings
-    #[envconfig(from = "BEACON_S3_ENDPOINT")]
-    pub s3_endpoint: Option<String>,
-    #[envconfig(from = "BEACON_S3_REGION")]
-    pub s3_region: Option<String>,
     #[envconfig(from = "BEACON_S3_BUCKET")]
     pub s3_bucket: Option<String>,
-    #[envconfig(from = "BEACON_S3_ACCESS_KEY_ID")]
-    pub s3_access_key_id: Option<String>,
-    #[envconfig(from = "BEACON_S3_SECRET_ACCESS_KEY")]
-    pub s3_secret_access_key: Option<String>,
+    #[envconfig(from = "BEACON_S3_ENABLE_VIRTUAL_HOSTING", default = "false")]
+    pub s3_enable_virtual_hosting: bool,
     #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
     pub s3_data_lake: bool,
+    #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "false")]
+    pub enable_fs_events: bool,
+    #[envconfig(from = "BEACON_ENABLE_S3_EVENTS", default = "false")]
+    pub enable_s3_events: bool,
 
     // Others
     #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
@@ -106,12 +102,9 @@ impl Config {
 
 lazy_static! {
     pub static ref CONFIG: Config = Config::init();
-    pub static ref DATA_DIR: PathBuf = PathBuf::from("./data/");
-    pub static ref OBJECT_STORE_LOCAL_FS: Arc<LocalFileSystem> = {
-        //Create the dir if it doesn't exist
-        std::fs::create_dir_all(DATA_DIR.as_path()).expect("Failed to create data dir");
-        Arc::new(LocalFileSystem::new_with_prefix(DATA_DIR.clone())
-            .expect("Failed to create local file system. Is the data dir set correctly?"))
+    pub static ref DATA_DIR: PathBuf = {
+        std::fs::create_dir_all("./data").expect("Failed to create data dir");
+        PathBuf::from("./data")
     };
     /// The path to the datasets directory
     pub static ref DATASETS_DIR_PATH: PathBuf = {
@@ -126,6 +119,18 @@ lazy_static! {
 
     pub static ref TABLES_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("tables");
+    pub static ref TABLES_DIR: PathBuf = {
+        let dir = DATA_DIR.join("tables");
+        std::fs::create_dir_all(&dir).expect("Failed to create tables dir");
+        dir
+    };
+
+    pub static ref TMP_DIR: PathBuf = {
+        let dir = DATA_DIR.join("tmp");
+        std::fs::create_dir_all(&dir).expect("Failed to create tmp dir");
+        dir
+    };
+
 
     /// The path to the indexes directory
     pub static ref INDEX_DIR_PATH: PathBuf = {
