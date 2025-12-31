@@ -268,6 +268,7 @@ pub fn open_reader(
                 e
             ))
         })?;
+    tracing::debug!("Opening NetCDFArrowReader for path: {}", netcdf_path);
     let reader = NetCDFArrowReader::new(netcdf_path).map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
             "Failed to create NetCDFArrowReader: {}",
