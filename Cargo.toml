@@ -8,7 +8,7 @@ futures = "0.3.31"
 futures-util = "0.3.31"
 async-trait = "0.1.85"
 bytes = "1.9.0"
-flume = { version = "0.11.1", "features" = ["async"] }
+flume = { version = "0.11.1", features = ["async"] }
 parking_lot = { version = "0.12.3", features = ["send_guard", "serde"] }
 ordered-float = "5.1.0"
 num_cpus = "1.17.0"

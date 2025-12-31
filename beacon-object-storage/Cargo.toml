@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-object_store = { version = "0.12.3", features = ["aws"] }
 bumpalo = "3.19.1"
 smol_str = { version = "0.3.4", features = ["serde"] }
 notify = { version = "8.2.0", features = ["flume"] }
@@ -23,6 +22,7 @@ tracing-test = { workspace = true }
 chrono = { workspace = true }
 flume = { workspace = true }
 thiserror = { workspace = true }
+object_store = { workspace = true }
 
 beacon-config = { path = "../beacon-config" }
 
