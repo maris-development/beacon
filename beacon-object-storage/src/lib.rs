@@ -428,8 +428,20 @@ impl DatasetsStore {
             .build()
             .map_err(|e| error::StorageError::InitializationError(format!("{}", e)))?;
 
-        // Get the endpoint for URL translation from the Environment. It should exist otherwise the builder would have failed.
-        let endpoint = std::env::var("AWS_ENDPOINT").expect("AWS_ENDPOINT must be set");
+        // Get the endpoint used for URL translation.
+        // We keep this in the store because downstream libraries (e.g. NetCDF)
+        // often require HTTP/S URLs rather than `s3://...`.
+        let endpoint =
+            std::env::var("AWS_ENDPOINT").map_err(|e| error::StorageError::MissingEnvVar {
+                var: "AWS_ENDPOINT",
+                source: e,
+            })?;
+        if endpoint.trim().is_empty() {
+            return Err(error::StorageError::InvalidConfig {
+                key: "AWS_ENDPOINT",
+                message: "must not be empty".to_string(),
+            });
+        }
 
         if beacon_config::CONFIG.enable_s3_events {
             let notified_store = NotifiedStore::new(Arc::new(store) as Arc<dyn ObjectStore>).await;
@@ -491,9 +503,12 @@ impl DatasetsStore {
                 // NetCDF remote access requires an HTTP/S URL and `#mode=bytes`.
                 // We intentionally do not return `s3://...` URLs here.
                 if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-                    return Err(error::StorageError::InitializationError(format!(
-                        "NetCDF URLs require S3 endpoint must start with http:// or https://, got: {endpoint}"
-                    )));
+                    return Err(error::StorageError::InvalidConfig {
+                        key: "AWS_ENDPOINT",
+                        message: format!(
+                            "NetCDF URLs require an http:// or https:// endpoint, got: {endpoint}"
+                        ),
+                    });
                 }
 
                 let mut url = self.object_url_path(object)?;
@@ -540,12 +555,21 @@ impl DatasetsStore {
                 let key = object.as_ref().trim_start_matches('/');
 
                 let url = if *is_virtual_hosted_style {
-                    format!("{}/{}", endpoint, key)
+                    if key.is_empty() {
+                        endpoint.to_string()
+                    } else {
+                        format!("{}/{}", endpoint, key)
+                    }
                 } else {
-                    let bucket_name = bucket
-                        .as_ref()
-                        .expect("Non-virtual hosted style requires an bucket name.");
-                    format!("{}/{}/{}", endpoint, bucket_name, key)
+                    let bucket_name =
+                        bucket.as_ref().ok_or(error::StorageError::MissingConfig {
+                            key: "BEACON_S3_BUCKET",
+                        })?;
+                    if key.is_empty() {
+                        format!("{}/{bucket_name}", endpoint)
+                    } else {
+                        format!("{}/{}/{}", endpoint, bucket_name, key)
+                    }
                 };
 
                 Ok(url)
@@ -800,5 +824,47 @@ mod tests {
             url,
             "https://my-bucket.example.test/datasets/foo.nc#mode=bytes"
         );
+    }
+
+    #[test]
+    fn translate_netcdf_url_path_rejects_non_http_endpoint() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = DatasetsStore {
+            inner: BeaconObjectStoreType::Default(Arc::new(
+                LocalFileSystem::new_with_prefix(dir.path()).expect("local fs"),
+            )),
+            base: DatasetsStoreBase::S3 {
+                bucket: Some("my-bucket".to_string()),
+                endpoint: "s3://my-bucket".to_string(),
+                is_virtual_hosted_style: true,
+            },
+        };
+
+        let err = store
+            .translate_netcdf_url_path(&Path::from("datasets/foo.nc"))
+            .expect_err("should error");
+        let msg = err.to_string();
+        assert!(msg.contains("AWS_ENDPOINT"), "msg={}", msg);
+        assert!(msg.contains("http"), "msg={}", msg);
+    }
+
+    #[test]
+    fn object_url_path_non_virtual_requires_bucket() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = DatasetsStore {
+            inner: BeaconObjectStoreType::Default(Arc::new(
+                LocalFileSystem::new_with_prefix(dir.path()).expect("local fs"),
+            )),
+            base: DatasetsStoreBase::S3 {
+                bucket: None,
+                endpoint: "https://example.test".to_string(),
+                is_virtual_hosted_style: false,
+            },
+        };
+
+        let err = store
+            .object_url_path(&Path::from("datasets/foo.nc"))
+            .expect_err("should error");
+        assert!(err.to_string().contains("BEACON_S3_BUCKET"));
     }
 }

@@ -8,4 +8,17 @@ pub enum StorageError {
     EventHandlingError(String),
     #[error("Initialization error: {0}")]
     InitializationError(String),
+
+    #[error("Missing configuration: {key}")]
+    MissingConfig { key: &'static str },
+
+    #[error("Invalid configuration for {key}: {message}")]
+    InvalidConfig { key: &'static str, message: String },
+
+    #[error("Missing environment variable {var}: {source}")]
+    MissingEnvVar {
+        var: &'static str,
+        #[source]
+        source: std::env::VarError,
+    },
 }
