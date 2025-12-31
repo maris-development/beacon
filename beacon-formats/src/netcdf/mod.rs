@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
+use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -51,21 +52,15 @@ fn default_replay_batch_size() -> usize {
 
 #[derive(Debug, Clone)]
 pub struct NetCDFFormatFactory {
+    pub datasets_object_store: Arc<DatasetsStore>,
     pub options: NetcdfOptions,
-    pub object_resolver: Arc<NetCDFObjectResolver>,
-    pub sink_resolver: Arc<NetCDFSinkResolver>,
 }
 
 impl NetCDFFormatFactory {
-    pub fn new(
-        options: NetcdfOptions,
-        object_resolver: Arc<NetCDFObjectResolver>,
-        sink_resolver: Arc<NetCDFSinkResolver>,
-    ) -> Self {
+    pub fn new(datasets_object_store: Arc<DatasetsStore>, options: NetcdfOptions) -> Self {
         Self {
+            datasets_object_store,
             options,
-            object_resolver,
-            sink_resolver,
         }
     }
 }
@@ -77,17 +72,15 @@ impl FileFormatFactory for NetCDFFormatFactory {
         _format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         Ok(Arc::new(NetcdfFormat::new(
+            self.datasets_object_store.clone(),
             self.options.clone(),
-            self.object_resolver.clone(),
-            self.sink_resolver.clone(),
         )))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
         Arc::new(NetcdfFormat::new(
+            self.datasets_object_store.clone(),
             self.options.clone(),
-            self.object_resolver.clone(),
-            self.sink_resolver.clone(),
         ))
     }
 
@@ -126,21 +119,15 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 
 #[derive(Debug, Clone)]
 pub struct NetcdfFormat {
+    pub datasets_object_store: Arc<DatasetsStore>,
     pub options: NetcdfOptions,
-    pub object_resolver: Arc<NetCDFObjectResolver>,
-    pub sink_resolver: Arc<NetCDFSinkResolver>,
 }
 
 impl NetcdfFormat {
-    pub fn new(
-        options: NetcdfOptions,
-        object_resolver: Arc<NetCDFObjectResolver>,
-        sink_resolver: Arc<NetCDFSinkResolver>,
-    ) -> Self {
+    pub fn new(datasets_object_store: Arc<DatasetsStore>, options: NetcdfOptions) -> Self {
         Self {
+            datasets_object_store,
             options,
-            object_resolver,
-            sink_resolver,
         }
     }
 }
@@ -174,7 +161,7 @@ impl FileFormat for NetcdfFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         let mut tasks = vec![];
         for object in objects {
-            let schema_task = fetch_schema(self.object_resolver.clone(), object.clone());
+            let schema_task = fetch_schema(self.datasets_object_store.clone(), object.clone());
             tasks.push(schema_task);
         }
         let schemas = futures::future::try_join_all(tasks).await?;
@@ -208,7 +195,7 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let source = NetCDFFileSource::new(self.object_resolver.clone());
+        let source = NetCDFFileSource::new(self.datasets_object_store.clone());
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -223,7 +210,7 @@ impl FileFormat for NetcdfFormat {
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         if self.options.unique_value_columns.is_empty() {
-            let netcdf_sink = Arc::new(NetCDFSink::new(self.sink_resolver.clone(), conf));
+            let netcdf_sink = Arc::new(NetCDFSink::new(conf));
             Ok(Arc::new(DataSinkExec::new(
                 input,
                 netcdf_sink,
@@ -252,7 +239,6 @@ impl FileFormat for NetcdfFormat {
                 SortPreservingMergeExec::new(lex_order, Arc::new(sort_exec));
 
             let netcdf_sink = Arc::new(NetCDFNdSink::new(
-                self.sink_resolver.clone(),
                 conf,
                 unique_columns.len(),
                 collection_handle,
@@ -267,6 +253,6 @@ impl FileFormat for NetcdfFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(NetCDFFileSource::new(self.object_resolver.clone()))
+        Arc::new(NetCDFFileSource::new(self.datasets_object_store.clone()))
     }
 }

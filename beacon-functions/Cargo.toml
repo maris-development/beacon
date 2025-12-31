@@ -27,3 +27,4 @@ chrono = { workspace = true }
 beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
 beacon-formats = { path = "../beacon-formats" }
+beacon-object-storage = { path = "../beacon-object-storage" }

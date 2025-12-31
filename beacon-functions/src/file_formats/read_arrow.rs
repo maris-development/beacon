@@ -18,7 +18,6 @@ pub struct ReadArrowFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
-    data_object_store_prefix: object_store::path::Path,
 }
 
 impl ReadArrowFunc {
@@ -26,13 +25,11 @@ impl ReadArrowFunc {
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Arc<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
-        data_object_store_prefix: object_store::path::Path,
     ) -> Self {
         Self {
             runtime_handle,
             session_ctx,
             data_object_store_url,
-            data_object_store_prefix,
         }
     }
 }
@@ -108,11 +105,7 @@ impl TableFunctionImpl for ReadArrowFunc {
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_arrow processing path: {}", path);
-            listing_urls.push(parse_listing_table_url(
-                &self.data_object_store_url,
-                &self.data_object_store_prefix,
-                path,
-            )?);
+            listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
         let file_format = ArrowFormat::default();

@@ -6,6 +6,7 @@ use beacon_formats::netcdf::{
     object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
     NetcdfFormat,
 };
+use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
@@ -21,9 +22,7 @@ pub struct ReadNetCDFFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
-    data_object_store_prefix: object_store::path::Path,
-    netcdf_object_resolver: Arc<NetCDFObjectResolver>,
-    netcdf_sink_resolver: Arc<NetCDFSinkResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
 }
 
 impl ReadNetCDFFunc {
@@ -31,17 +30,13 @@ impl ReadNetCDFFunc {
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Arc<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
-        data_object_store_prefix: object_store::path::Path,
-        netcdf_object_resolver: Arc<NetCDFObjectResolver>,
-        netcdf_sink_resolver: Arc<NetCDFSinkResolver>,
+        datasets_object_store: Arc<DatasetsStore>,
     ) -> Self {
         Self {
             runtime_handle,
             session_ctx,
             data_object_store_url,
-            data_object_store_prefix,
-            netcdf_object_resolver,
-            netcdf_sink_resolver,
+            datasets_object_store,
         }
     }
 }
@@ -117,18 +112,10 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_netcdf processing path: {}", path);
-            listing_urls.push(parse_listing_table_url(
-                &self.data_object_store_url,
-                &self.data_object_store_prefix,
-                path,
-            )?);
+            listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
-        let file_format = NetcdfFormat::new(
-            Default::default(),
-            self.netcdf_object_resolver.clone(),
-            self.netcdf_sink_resolver.clone(),
-        );
+        let file_format = NetcdfFormat::new(self.datasets_object_store.clone(), Default::default());
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

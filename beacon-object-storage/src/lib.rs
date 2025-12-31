@@ -34,7 +34,7 @@
 //! (e.g. `https://my-bucket.example.test`). For path-style, the bucket is appended
 //! as a path segment (e.g. `https://example.test/my-bucket`).
 
-use std::{fmt::Display, ops::Deref, path::PathBuf, sync::Arc};
+use std::{env::temp_dir, fmt::Display, ops::Deref, path::PathBuf, sync::Arc};
 
 use ::notify::{RecommendedWatcher, Watcher, recommended_watcher};
 use futures::stream::BoxStream;
@@ -66,6 +66,13 @@ static TABLES_OBJECT_STORE: tokio::sync::OnceCell<Arc<dyn ObjectStore>> =
 static TMP_OBJECT_STORE: tokio::sync::OnceCell<Arc<dyn ObjectStore>> =
     tokio::sync::OnceCell::const_new();
 
+pub async fn init_datastores() -> StorageResult<()> {
+    let _ = get_datasets_object_store().await;
+    let _ = get_tables_object_store().await;
+    let _ = get_tmp_object_store().await;
+    Ok(())
+}
+
 pub async fn get_datasets_object_store() -> Arc<DatasetsStore> {
     DATASETS_OBJECT_STORE
         .get_or_init(|| async {
@@ -94,7 +101,7 @@ pub async fn get_tmp_object_store() -> Arc<dyn ObjectStore> {
     TMP_OBJECT_STORE
         .get_or_init(|| async {
             Arc::new(
-                LocalFileSystem::new_with_prefix(beacon_config::TMP_DIR.clone())
+                LocalFileSystem::new_with_prefix(temp_dir())
                     .expect("Failed to initialize tmp object store"),
             ) as Arc<dyn ObjectStore>
         })
@@ -162,7 +169,7 @@ impl DatasetsStore {
     /// - If `beacon_config::CONFIG.s3_data_lake` is true, initializes an S3 store.
     /// - Otherwise initializes a local filesystem store rooted at
     ///   `beacon_config::DATASETS_DIR_PATH`.
-    pub async fn new() -> StorageResult<Self> {
+    pub(crate) async fn new() -> StorageResult<Self> {
         if beacon_config::CONFIG.s3_data_lake {
             tracing::info!("Using S3 object store for datasets");
             Ok(Self::new_s3().await?)

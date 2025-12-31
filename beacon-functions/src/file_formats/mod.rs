@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
 use beacon_formats::netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver};
+use beacon_object_storage::DatasetsStore;
 use datafusion::{
-    catalog::{TableFunction, TableFunctionImpl},
+    catalog::TableFunctionImpl,
     execution::{object_store::ObjectStoreUrl, SessionState},
     logical_expr::{Documentation, Signature},
     prelude::SessionContext,
@@ -20,50 +21,40 @@ pub fn register_table_functions(
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
-    data_object_store_prefix: object_store::path::Path,
-    netcdf_object_resolver: Arc<NetCDFObjectResolver>,
-    netcdf_sink_resolver: Arc<NetCDFSinkResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
 ) -> Vec<Arc<dyn BeaconTableFunctionImpl>> {
     vec![
         Arc::new(read_parquet::ReadParquetFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
-            data_object_store_prefix.clone(),
         )),
         Arc::new(read_arrow::ReadArrowFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
-            data_object_store_prefix.clone(),
         )),
         Arc::new(read_csv::ReadCsvFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
-            data_object_store_prefix.clone(),
         )),
         Arc::new(read_zarr::ReadZarrFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
-            data_object_store_prefix.clone(),
         )),
         Arc::new(read_netcdf::ReadNetCDFFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
-            data_object_store_prefix.clone(),
-            netcdf_object_resolver.clone(),
-            netcdf_sink_resolver.clone(),
+            datasets_object_store.clone(),
         )),
         Arc::new(read_schema::ReadSchemaFunc::new(
             runtime_handle,
             session_ctx,
             data_object_store_url,
-            data_object_store_prefix,
-            netcdf_object_resolver,
-            netcdf_sink_resolver,
+            datasets_object_store,
         )),
     ]
 }

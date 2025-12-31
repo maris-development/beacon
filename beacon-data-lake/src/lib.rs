@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use arrow::datatypes::SchemaRef;
@@ -23,12 +23,7 @@ use futures::{
     stream::BoxStream,
     {StreamExt, TryFutureExt},
 };
-use object_store::{
-    ObjectStore,
-    aws::{AmazonS3, AmazonS3Builder},
-    local::LocalFileSystem,
-    path::PathPart,
-};
+use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
 
 use crate::{
     files::{collection::FileCollection, temp_output_file::TempOutputFile},
@@ -51,14 +46,9 @@ pub struct Config {
 
 pub struct DataLake {
     data_directory_store_url: ObjectStoreUrl,
-    data_directory_prefix: object_store::path::Path,
-
     table_directory_store_url: ObjectStoreUrl,
-    table_directory_prefix: object_store::path::Path,
-
-    tmp_directory_object_store: Arc<LocalFileSystem>,
     tmp_directory_store_url: ObjectStoreUrl,
-    tmp_directory_prefix: object_store::path::Path,
+
     /// The session context used for executing queries and managing the session state.
     session_context: Arc<SessionContext>,
 
@@ -75,14 +65,21 @@ impl Debug for DataLake {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataLake")
             .field("data_directory_store_url", &self.data_directory_store_url)
-            .field("data_directory_prefix", &self.data_directory_prefix)
             .field("table_directory_store_url", &self.table_directory_store_url)
-            .field("table_directory_prefix", &self.table_directory_prefix)
             .field("config", &self.config)
             .field("tables", &self.tables)
             .finish()
     }
 }
+
+pub static DATASETS_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("datasets://").expect("Failed to parse datasets URL"));
+pub static TABLES_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("tables://").expect("Failed to parse tables URL"));
+pub static TMP_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("tmp://").expect("Failed to parse tmp URL"));
+pub static INDEX_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("index://").expect("Failed to parse index URL")); // ToDo: implement indexing on top of existing files utilizing the notified storage events.
 
 impl DataLake {
     #[inline(always)]
@@ -90,66 +87,18 @@ impl DataLake {
         &self,
         path: String,
     ) -> datafusion::error::Result<ListingTableUrl> {
-        parse_listing_table_url(
-            &self.data_directory_store_url,
-            &self.data_directory_prefix,
-            &path,
-        )
-    }
-
-    pub fn netcdf_object_resolver() -> Arc<NetCDFObjectResolver> {
-        if beacon_config::CONFIG.s3_data_lake {
-            let endpoint = beacon_config::CONFIG
-                .s3_endpoint
-                .clone()
-                .expect("S3 endpoint not set");
-            let bucket = beacon_config::CONFIG
-                .s3_bucket
-                .clone()
-                .expect("S3 bucket not set");
-            Arc::new(NetCDFObjectResolver::new(endpoint, Some(bucket), None))
-        } else {
-            let base_path = PathBuf::from("./data");
-
-            std::fs::create_dir_all(&base_path).expect("Failed to create datasets directory");
-
-            let absolute_path = base_path.canonicalize().unwrap();
-
-            // Create directories if they do not exist
-            std::fs::create_dir_all(&absolute_path).expect("Failed to create datasets directory");
-            tracing::debug!(
-                "Using local NetCDF datasets path: {}",
-                absolute_path.display()
-            );
-            Arc::new(NetCDFObjectResolver::new(
-                "file://".to_string(),
-                None,
-                Some(absolute_path.to_string_lossy().to_string()),
-            ))
-        }
-    }
-
-    pub fn netcdf_sink_resolver() -> Arc<NetCDFSinkResolver> {
-        let base_path = PathBuf::from("./data");
-        std::fs::create_dir_all(&base_path).expect("Failed to create datasets directory");
-        let absolute_path = base_path.canonicalize().unwrap();
-
-        tracing::debug!("Using local NetCDF sink path: {}", absolute_path.display());
-
-        // Create directories if they do not exist
-        Arc::new(NetCDFSinkResolver::new(absolute_path))
+        parse_listing_table_url(&self.data_directory_store_url, &path)
     }
 
     pub fn data_object_store_url(&self) -> ObjectStoreUrl {
         self.data_directory_store_url.clone()
     }
 
-    pub fn data_object_store_prefix(&self) -> object_store::path::Path {
-        self.data_directory_prefix.clone()
-    }
-
     pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {
-        TempOutputFile::new(self, extension)
+        Self::create_temp_output_file(extension)
+    }
+    pub fn create_temp_output_file(extension: &str) -> TempOutputFile {
+        TempOutputFile::new(extension)
     }
 
     pub async fn new(session_context: Arc<SessionContext>) -> Self {

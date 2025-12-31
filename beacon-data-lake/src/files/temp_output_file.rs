@@ -1,4 +1,4 @@
-use crate::DataLake;
+use std::env::temp_dir;
 
 pub struct TempOutputFile {
     temp_file: tempfile::NamedTempFile,
@@ -7,19 +7,15 @@ pub struct TempOutputFile {
 }
 
 impl TempOutputFile {
-    pub fn new(datalake: &DataLake, extension: &str) -> Self {
-        let base_path = datalake
-            .tmp_directory_object_store
-            .path_to_filesystem(&object_store::path::Path::from("tmp/"))
-            .unwrap();
+    pub fn new(extension: &str) -> Self {
         let temp_file = tempfile::Builder::new()
             .prefix("beacon_temp_")
             .suffix(extension)
-            .tempfile_in(base_path)
+            .tempfile_in(temp_dir())
             .unwrap();
 
         let file_name = temp_file.path().file_name().unwrap().to_string_lossy();
-        let object_path = object_store::path::Path::from(format!("tmp/{}", file_name));
+        let object_path = object_store::path::Path::from(file_name.to_string());
         Self {
             file_name: file_name.to_string(),
             temp_file,

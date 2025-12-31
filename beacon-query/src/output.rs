@@ -108,7 +108,7 @@ impl OutputFormat {
     }
 
     /// Returns the DataFusion file type for this output format.
-    pub fn file_type(&self) -> Arc<dyn FileType> {
+    pub async fn file_type(&self) -> Arc<dyn FileType> {
         match self {
             OutputFormat::Csv => format_as_file_type(Arc::new(CsvFormatFactory)),
             OutputFormat::Ipc => format_as_file_type(Arc::new(ArrowFormatFactory)),
@@ -126,9 +126,8 @@ impl OutputFormat {
                 let sink_resolver = DataLake::netcdf_sink_resolver();
 
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
+                    beacon_object_storage::get_datasets_object_store().await,
                     options,
-                    object_resolver,
-                    sink_resolver,
                 )))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {
@@ -139,8 +138,7 @@ impl OutputFormat {
 
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
                     options,
-                    object_resolver,
-                    sink_resolver,
+                    beacon_object_storage::get_datasets_object_store().await,
                 )))
             }
             OutputFormat::Odv(options) => {

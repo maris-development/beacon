@@ -8,12 +8,11 @@ use url::Url;
 
 pub fn parse_listing_table_url(
     data_directory_store_url: &ObjectStoreUrl,
-    data_directory_prefix: &object_store::path::Path,
     glob_path: &str,
 ) -> datafusion::error::Result<ListingTableUrl> {
     // Check if path contains glob expression
     let (path, glob_pattern) = split_path_and_glob(glob_path);
-    let mut full_path = format!("{}{}", data_directory_store_url, data_directory_prefix);
+    let mut full_path = data_directory_store_url.to_string();
     if path.components().next().is_some() {
         if full_path.ends_with('/') {
             full_path.push_str(format!("{}", path.as_os_str().to_string_lossy()).as_str());
@@ -136,23 +135,22 @@ mod tests {
     fn test_parse_listing_table_url_no_glob() {
         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        let store_url: ObjectStoreUrl = ObjectStoreUrl::parse("file:///").unwrap();
-        let prefix = object_store::path::Path::from("datasets");
-        let url = parse_listing_table_url(&store_url, &prefix, "foo/zarr.json").unwrap();
+        let store_url: ObjectStoreUrl = ObjectStoreUrl::parse("file://").unwrap();
+        let url = parse_listing_table_url(&store_url, "foo/zarr.json").unwrap();
         // Debug representation should contain the base path we constructed
         let dbg = format!("{:?}", url);
-        assert!(dbg.contains("/datasets/foo/"), "dbg={}", dbg);
+        assert!(dbg.contains("/foo/"), "dbg={}", dbg);
     }
 
     #[test]
     fn test_parse_listing_table_url_with_glob() {
         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        let store_url: ObjectStoreUrl = ObjectStoreUrl::parse("file:///").unwrap();
-        let prefix = object_store::path::Path::from("datasets");
-        let url = parse_listing_table_url(&store_url, &prefix, "subdir/*.json").unwrap();
+        let store_url: ObjectStoreUrl = ObjectStoreUrl::parse("file://").unwrap();
+        let url = parse_listing_table_url(&store_url, "subdir/*.json").unwrap();
         let dbg = format!("{:?}", url);
-        assert!(dbg.contains("/datasets/subdir/"), "dbg={}", dbg);
+        println!("dbg={}", dbg);
+        assert!(dbg.contains("/subdir/"), "dbg={}", dbg);
         // pattern should be present in debug output
         assert!(dbg.contains("*.json"), "dbg={}", dbg);
     }
@@ -161,9 +159,8 @@ mod tests {
     fn test_parse_listing_table_url_invalid_glob() {
         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        let store_url: ObjectStoreUrl = ObjectStoreUrl::parse("file:///").unwrap();
-        let prefix = object_store::path::Path::from("datasets");
-        let res = parse_listing_table_url(&store_url, &prefix, "subdir/[invalid");
+        let store_url: ObjectStoreUrl = ObjectStoreUrl::parse("file://").unwrap();
+        let res = parse_listing_table_url(&store_url, "subdir/[invalid");
         assert!(res.is_err(), "expected error for invalid glob pattern");
     }
 }

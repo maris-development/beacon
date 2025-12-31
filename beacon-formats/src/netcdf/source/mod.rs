@@ -6,6 +6,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
 use beacon_arrow_netcdf::reader::NetCDFArrowReader;
+use beacon_object_storage::DatasetsStore;
 use datafusion::{
     common::Statistics,
     datasource::{
@@ -70,7 +71,7 @@ fn override_mpio_enabled_for_test(enabled: bool) -> MpioOverrideGuard {
 /// - Reader/schema caches are controlled via `beacon_config::CONFIG`.
 #[derive(Debug, Clone)]
 pub struct NetCDFFileSource {
-    object_resolver: Arc<NetCDFObjectResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
     /// Optional schema adapter factory.
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     /// Optional schema override.
@@ -87,9 +88,9 @@ impl NetCDFFileSource {
     /// The `object_resolver` determines how an `ObjectMeta` location is turned
     /// into a concrete path that `netcdf::open` can handle (local path or
     /// remote URL).
-    pub fn new(object_resolver: Arc<NetCDFObjectResolver>) -> Self {
+    pub fn new(datasets_object_store: Arc<DatasetsStore>) -> Self {
         Self {
-            object_resolver,
+            datasets_object_store,
             override_schema: None,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projected_statistics: None,
@@ -119,7 +120,7 @@ impl FileSource for NetCDFFileSource {
         let arc_schema_adapter = Arc::from(schema_adapter);
 
         Arc::new(DefaultFileOpener::new(
-            self.object_resolver.clone(),
+            self.datasets_object_store.clone(),
             arc_schema_adapter,
         ))
     }
@@ -204,7 +205,7 @@ struct ReaderCacheKey {
 /// When enabled via `beacon_config::CONFIG.netcdf_use_schema_cache`, the schema
 /// is cached using the object's location and last-modified time.
 pub async fn fetch_schema(
-    object_resolver: Arc<NetCDFObjectResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
     // First try to get the schema from the cache.
@@ -218,7 +219,7 @@ pub async fn fetch_schema(
         Ok(schema)
     } else {
         let schema = if mpio_enabled() {
-            mpio::read_schema(object_resolver.clone(), object.clone())
+            mpio::read_schema(datasets_object_store.clone(), object.clone())
                 .await
                 .map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
@@ -227,7 +228,7 @@ pub async fn fetch_schema(
                     ))
                 })?
         } else {
-            let reader = open_reader(object_resolver, object.clone())?;
+            let reader = open_reader(datasets_object_store.clone(), object.clone())?;
             reader.schema()
         };
         // Insert the schema into the cache for future use
@@ -246,7 +247,7 @@ pub async fn fetch_schema(
 ///
 /// Important: this function avoids holding the cache lock while performing IO.
 pub fn open_reader(
-    object_resolver: Arc<NetCDFObjectResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
 ) -> datafusion::error::Result<Arc<NetCDFArrowReader>> {
     if beacon_config::CONFIG.netcdf_use_reader_cache {
@@ -259,7 +260,14 @@ pub fn open_reader(
         }
     }
 
-    let netcdf_path = object_resolver.resolve_object_meta(object.clone());
+    let netcdf_path = datasets_object_store
+        .translate_netcdf_url_path(&object.location)
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to translate NetCDF URL path: {}",
+                e
+            ))
+        })?;
     let reader = NetCDFArrowReader::new(netcdf_path).map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
             "Failed to create NetCDFArrowReader: {}",
@@ -282,18 +290,18 @@ pub fn open_reader(
 /// Reads the whole NetCDF file into a single `RecordBatch`, then applies the
 /// DataFusion schema mapping and projection.
 pub struct DefaultFileOpener {
-    object_resolver: Arc<NetCDFObjectResolver>,
+    datasets_object_store: Arc<DatasetsStore>,
     /// Schema adapter for mapping NetCDF schema to Arrow schema.
     schema_adapter: Arc<dyn SchemaAdapter>,
 }
 
 impl DefaultFileOpener {
     pub fn new(
-        object_resolver: Arc<NetCDFObjectResolver>,
+        datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
     ) -> Self {
         Self {
-            object_resolver,
+            datasets_object_store,
             schema_adapter,
         }
     }
@@ -302,16 +310,16 @@ impl DefaultFileOpener {
 impl DefaultFileOpener {
     async fn read_task(
         object: ObjectMeta,
-        object_resolver: Arc<NetCDFObjectResolver>,
+        datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         // Map the file schema into the table schema.
         // In MPIO mode, schema comes from the worker (and can be cached); otherwise open the local reader.
         let (reader, file_schema) = if mpio_enabled() {
-            let schema = fetch_schema(object_resolver.clone(), object.clone()).await?;
+            let schema = fetch_schema(datasets_object_store.clone(), object.clone()).await?;
             (None, schema)
         } else {
-            let reader = open_reader(object_resolver.clone(), object.clone())?;
+            let reader = open_reader(datasets_object_store.clone(), object.clone())?;
             let schema = reader.schema();
             (Some(reader), schema)
         };
@@ -323,7 +331,7 @@ impl DefaultFileOpener {
         let stream = Box::pin(futures::stream::once(async move {
             let batch = if mpio_enabled() {
                 mpio::read_file_as_batch(
-                    object_resolver,
+                    datasets_object_store.clone(),
                     object,
                     Some(projection),
                     DEFAULT_MPIO_CHUNK_SIZE,
@@ -361,7 +369,7 @@ impl FileOpener for DefaultFileOpener {
     ) -> datafusion::error::Result<FileOpenFuture> {
         let stream = Self::read_task(
             file_meta.object_meta,
-            self.object_resolver.clone(),
+            self.datasets_object_store.clone(),
             self.schema_adapter.clone(),
         )
         .boxed();
@@ -373,6 +381,7 @@ impl FileOpener for DefaultFileOpener {
 mod tests {
     use super::*;
     use crate::netcdf::object_resolver::NetCDFObjectResolver;
+    use beacon_object_storage::get_datasets_object_store;
     use datafusion::datasource::physical_plan::FileMeta;
     use futures::StreamExt;
     use object_store::path::Path;
@@ -390,37 +399,34 @@ mod tests {
         }
     }
 
-    fn test_resolver() -> Arc<NetCDFObjectResolver> {
-        // Local filesystem endpoint.
-        Arc::new(NetCDFObjectResolver::new(
-            env!("CARGO_MANIFEST_DIR").to_string(),
-            None,
-            None,
-        ))
+    async fn test_datasets_object_store() -> Arc<DatasetsStore> {
+        get_datasets_object_store().await
     }
 
     #[tokio::test]
     async fn fetch_schema_reads_and_caches() {
         let _guard = override_mpio_enabled_for_test(false);
-        let resolver = test_resolver();
+        let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let s1 = fetch_schema(resolver.clone(), obj.clone())
+        let s1 = fetch_schema(datasets_object_store.clone(), obj.clone())
             .await
             .expect("schema");
         assert!(!s1.fields().is_empty());
 
-        let s2 = fetch_schema(resolver, obj).await.expect("schema 2");
+        let s2 = fetch_schema(datasets_object_store.clone(), obj)
+            .await
+            .expect("schema 2");
         assert_eq!(s1.fields().len(), s2.fields().len());
     }
 
     #[tokio::test]
     async fn open_reader_returns_reader() {
         let _guard = override_mpio_enabled_for_test(false);
-        let resolver = test_resolver();
+        let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let reader = open_reader(resolver, obj).expect("reader");
+        let reader = open_reader(datasets_object_store, obj).expect("reader");
         let schema = reader.schema();
         assert!(!schema.fields().is_empty());
     }
@@ -428,16 +434,16 @@ mod tests {
     #[tokio::test]
     async fn default_file_opener_produces_one_batch() {
         let _guard = override_mpio_enabled_for_test(false);
-        let resolver = test_resolver();
+        let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let table_schema = fetch_schema(resolver.clone(), obj.clone())
+        let table_schema = fetch_schema(datasets_object_store.clone(), obj.clone())
             .await
             .expect("schema");
         let schema_adapter_factory = DefaultSchemaAdapterFactory;
         let schema_adapter = schema_adapter_factory.create(table_schema.clone(), table_schema);
 
-        let opener = DefaultFileOpener::new(resolver, Arc::from(schema_adapter));
+        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter));
 
         let file_meta = FileMeta {
             object_meta: obj,
@@ -462,10 +468,10 @@ mod tests {
 
         // Requires the `beacon-arrow-netcdf-mpio` executable.
         // Optionally provide a path via `BEACON_NETCDF_MPIO_WORKER`.
-        let resolver = test_resolver();
+        let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let table_schema = fetch_schema(resolver.clone(), obj.clone())
+        let table_schema = fetch_schema(datasets_object_store.clone(), obj.clone())
             .await
             .expect("schema");
         assert!(!table_schema.fields().is_empty());
@@ -477,7 +483,7 @@ mod tests {
         let schema_adapter_factory = DefaultSchemaAdapterFactory;
         let schema_adapter =
             schema_adapter_factory.create(table_schema.clone(), table_schema.clone());
-        let opener = DefaultFileOpener::new(resolver, Arc::from(schema_adapter));
+        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter));
 
         let file_meta = FileMeta {
             object_meta: obj,
