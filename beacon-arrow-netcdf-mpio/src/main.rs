@@ -111,7 +111,7 @@ fn main() -> io::Result<()> {
                 chunk_size: _chunk_size,
                 stream_size: _stream_size,
             } => {
-                write!(
+                writeln!(
                     log_file,
                     "mpio worker: received ReadFile request {} for path {}",
                     request_id, path
