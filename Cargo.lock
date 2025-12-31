@@ -889,6 +889,7 @@ dependencies = [
  "beacon-data-lake",
  "beacon-formats",
  "beacon-functions",
+ "beacon-object-storage",
  "beacon-planner",
  "beacon-query",
  "bytes",

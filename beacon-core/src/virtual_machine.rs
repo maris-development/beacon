@@ -66,9 +66,7 @@ impl VirtualMachine {
             tokio::runtime::Handle::current(),
             session_ctx.clone(),
             data_lake.data_object_store_url(),
-            data_lake.data_object_store_prefix(),
-            DataLake::netcdf_object_resolver(),
-            DataLake::netcdf_sink_resolver(),
+            beacon_object_storage::get_datasets_object_store().await,
         );
 
         for tf in table_functions.iter() {

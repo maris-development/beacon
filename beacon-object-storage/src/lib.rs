@@ -90,7 +90,7 @@ pub async fn get_tables_object_store() -> Arc<dyn ObjectStore> {
         .get_or_init(|| async {
             // For tables, we always use the local filesystem
             Arc::new(
-                LocalFileSystem::new_with_prefix(beacon_config::DATA_DIR.clone())
+                LocalFileSystem::new_with_prefix(beacon_config::TABLES_DIR.clone())
                     .expect("Failed to initialize tables object store"),
             ) as Arc<dyn ObjectStore>
         })

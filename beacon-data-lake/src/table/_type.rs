@@ -24,25 +24,16 @@ impl TableType {
         &self,
         session_ctx: Arc<SessionContext>,
         table_directory_store_url: ObjectStoreUrl,
-        table_directory_prefix: object_store::path::Path,
         data_directory_store_url: ObjectStoreUrl,
-        data_directory_prefix: object_store::path::Path,
     ) -> Result<Arc<dyn TableProvider>, TableError> {
         match self {
             TableType::Logical(logical_table) => {
-                Box::pin(logical_table.table_provider(
-                    &data_directory_store_url,
-                    &data_directory_prefix,
-                    session_ctx,
-                ))
-                .await
+                Box::pin(logical_table.table_provider(&data_directory_store_url, session_ctx)).await
             }
             TableType::Preset(preset_table) => {
                 Box::pin(preset_table.table_provider(
                     table_directory_store_url,
-                    table_directory_prefix,
                     data_directory_store_url,
-                    data_directory_prefix,
                     session_ctx,
                 ))
                 .await
@@ -50,9 +41,7 @@ impl TableType {
             TableType::GeoSpatial(geo_spatial_table) => {
                 Box::pin(geo_spatial_table.table_provider(
                     table_directory_store_url,
-                    table_directory_prefix,
                     data_directory_store_url,
-                    data_directory_prefix,
                     session_ctx,
                 ))
                 .await
@@ -60,9 +49,7 @@ impl TableType {
             TableType::Empty(default_table) => {
                 Box::pin(default_table.table_provider(
                     table_directory_store_url,
-                    table_directory_prefix,
                     data_directory_store_url,
-                    data_directory_prefix,
                     session_ctx,
                 ))
                 .await
@@ -75,20 +62,13 @@ impl TableType {
         op: serde_json::Value,
         session_ctx: Arc<SessionContext>,
         data_directory_store_url: &ObjectStoreUrl,
-        data_directory_prefix: &object_store::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match self {
             TableType::Logical(logical_table) => {
                 let listing_urls = logical_table
                     .glob_paths
                     .iter()
-                    .map(|glob_path| {
-                        parse_listing_table_url(
-                            data_directory_store_url,
-                            data_directory_prefix,
-                            glob_path,
-                        )
-                    })
+                    .map(|glob_path| parse_listing_table_url(data_directory_store_url, glob_path))
                     .collect::<Result<Vec<_>, _>>()?;
 
                 logical_table

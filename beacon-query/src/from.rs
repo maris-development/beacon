@@ -7,6 +7,7 @@ use std::sync::Arc;
 use beacon_data_lake::{
     files::collection::FileCollection, table::table_formats::NetCDFFileFormat, DataLake,
 };
+use beacon_formats::netcdf::NetcdfOptions;
 use beacon_formats::zarr::statistics::ZarrStatisticsSelection;
 use beacon_formats::{
     arrow::ArrowFormat, csv::CsvFormat, odv_ascii::OdvFormat, parquet::ParquetFormat,
@@ -133,7 +134,7 @@ impl FromFormat {
         session_context: &SessionContext,
         data_lake: &DataLake,
     ) -> datafusion::error::Result<Arc<dyn TableSource>> {
-        let file_format = self.file_format(session_context)?;
+        let file_format = self.file_format(session_context).await?;
         let urls = self.listing_table_urls(data_lake)?;
 
         // Create a FileCollection as the table provider.
@@ -144,7 +145,7 @@ impl FromFormat {
     }
 
     /// Returns the corresponding [`FileFormat`] for the variant.
-    fn file_format(
+    async fn file_format(
         &self,
         _session_context: &SessionContext,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
@@ -156,9 +157,8 @@ impl FromFormat {
             FromFormat::Parquet { .. } => Ok(Arc::new(ParquetFormat::new())),
             FromFormat::Arrow { .. } => Ok(Arc::new(ArrowFormat::new())),
             FromFormat::NetCDF { .. } => Ok(Arc::new(beacon_formats::netcdf::NetcdfFormat::new(
-                Default::default(),
-                DataLake::netcdf_object_resolver(),
-                DataLake::netcdf_sink_resolver(),
+                beacon_object_storage::get_datasets_object_store().await,
+                NetcdfOptions::default(),
             ))),
             FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new())),
             FromFormat::Zarr {

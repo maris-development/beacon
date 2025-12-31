@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field};
-use beacon_formats::netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver};
+use arrow::datatypes::Field;
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
-    execution::{object_store::ObjectStoreUrl, SessionState},
+    execution::object_store::ObjectStoreUrl,
     logical_expr::{Documentation, Signature},
     prelude::SessionContext,
 };

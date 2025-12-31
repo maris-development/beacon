@@ -32,6 +32,6 @@ impl TempOutputFile {
     }
 
     pub fn output_url(&self) -> String {
-        format!("file:///tmp/{}", self.file_name)
+        format!("{}{}", crate::TMP_OBJECT_STORE_URL.as_str(), self.file_name)
     }
 }

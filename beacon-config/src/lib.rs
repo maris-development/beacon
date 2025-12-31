@@ -102,7 +102,10 @@ impl Config {
 
 lazy_static! {
     pub static ref CONFIG: Config = Config::init();
-    pub static ref DATA_DIR: PathBuf = PathBuf::from("./data/");
+    pub static ref DATA_DIR: PathBuf = {
+        std::fs::create_dir_all("./data").expect("Failed to create data dir");
+        PathBuf::from("./data")
+    };
     /// The path to the datasets directory
     pub static ref DATASETS_DIR_PATH: PathBuf = {
         //Create the dir if it doesn't exist

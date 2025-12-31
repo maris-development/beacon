@@ -163,4 +163,11 @@ mod tests {
         let res = parse_listing_table_url(&store_url, "subdir/[invalid");
         assert!(res.is_err(), "expected error for invalid glob pattern");
     }
+
+    #[test]
+    fn test_object_store_urls() {
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        let url = Url::parse(store_url.as_str()).unwrap();
+        println!("Parsed URL: {}", url);
+    }
 }
