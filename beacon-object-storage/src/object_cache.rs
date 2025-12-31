@@ -65,6 +65,10 @@ impl ObjectCache {
     }
 
     /// Get an entry by its string path.
+    ///
+    /// Note: This is currently unused within this crate, but is intentionally
+    /// kept as a stable API for downstream crates / planned query paths.
+    #[allow(dead_code)]
     pub fn get(&self, path: &str) -> Option<ObjectMeta> {
         self.tree
             .get(&ObjectKey(SmolStr::new(path)))
@@ -94,6 +98,11 @@ impl ObjectCache {
         }
     }
 
+    /// Return objects modified after `since` (optionally filtered by prefix).
+    ///
+    /// Note: This is currently unused within this crate, but is intentionally
+    /// kept as a stable API for downstream crates / planned query paths.
+    #[allow(dead_code)]
     pub fn modified_since(
         &self,
         since: DateTime<Utc>,

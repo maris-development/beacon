@@ -19,8 +19,12 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 once_cell = { workspace = true }
 tracing = { workspace = true }
+tracing-test = { workspace = true }
 chrono = { workspace = true }
 flume = { workspace = true }
 thiserror = { workspace = true }
 
 beacon-config = { path = "../beacon-config" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

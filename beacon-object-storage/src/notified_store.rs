@@ -135,3 +135,94 @@ impl<O: ObjectStore> ObjectStore for NotifiedStore<O> {
         self.inner.copy_if_not_exists(from, to).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use futures::StreamExt;
+    use object_store::local::LocalFileSystem;
+    use object_store::path::Path;
+
+    use crate::event_handlers::fs::{FileSystemEvent, FileSystemEventHandler};
+
+    async fn list_locations(store: &impl ObjectStore, prefix: Option<&Path>) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stream = store.list(prefix);
+        while let Some(item) = stream.next().await {
+            let meta = item.expect("list item should be Ok");
+            out.push(meta.location.to_string());
+        }
+        out.sort();
+        out
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn primes_cache_from_existing_objects() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("a")).expect("mkdir");
+        std::fs::write(dir.path().join("a/file.txt"), b"hi").expect("write file");
+
+        let inner =
+            LocalFileSystem::new_with_prefix(dir.path()).expect("local fs store with prefix");
+        let notified = NotifiedStore::new(inner).await;
+
+        let got = list_locations(&notified, None).await;
+        assert_eq!(got, vec!["a/file.txt"]);
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn create_modify_delete_events_update_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let inner =
+            LocalFileSystem::new_with_prefix(dir.path()).expect("local fs store with prefix");
+        let notified = NotifiedStore::new(inner).await;
+
+        // Created
+        let created_meta = ObjectMeta {
+            location: Path::from("a/file.txt"),
+            size: 2,
+            last_modified: Utc::now(),
+            e_tag: None,
+            version: None,
+        };
+        notified
+            .handle_event::<FileSystemEventHandler, _>(FileSystemEvent::Created(created_meta))
+            .expect("handle created");
+
+        let got = list_locations(&notified, Some(&Path::from("a/"))).await;
+        assert_eq!(got, vec!["a/file.txt"]);
+
+        // Modified overwrites metadata in cache (size is observable via a full list)
+        let modified_meta = ObjectMeta {
+            location: Path::from("a/file.txt"),
+            size: 999,
+            last_modified: Utc::now(),
+            e_tag: None,
+            version: None,
+        };
+        notified
+            .handle_event::<FileSystemEventHandler, _>(FileSystemEvent::Modified(modified_meta))
+            .expect("handle modified");
+
+        let mut stream = notified.list(Some(&Path::from("a/")));
+        let meta = stream
+            .next()
+            .await
+            .expect("expected one item")
+            .expect("ok item");
+        assert_eq!(meta.location.as_ref(), "a/file.txt");
+        assert_eq!(meta.size, 999);
+
+        // Deleted
+        notified
+            .handle_event::<FileSystemEventHandler, _>(FileSystemEvent::Deleted(Path::from(
+                "a/file.txt",
+            )))
+            .expect("handle deleted");
+        let got = list_locations(&notified, Some(&Path::from("a/"))).await;
+        assert!(got.is_empty());
+    }
+}
