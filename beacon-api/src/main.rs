@@ -97,6 +97,10 @@ async fn async_main() -> anyhow::Result<()> {
 }
 
 fn setup_tracing() {
+    // ---- file appender ----
+    let file_appender = tracing_appender::rolling::daily("logs", "beacon.log");
+    let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -110,7 +114,11 @@ fn setup_tracing() {
             }),
         )
         .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(file_writer).with_ansi(false))
         .init();
+
+    // Prevent the file writer from being dropped
+    std::mem::forget(_guard);
 }
 
 fn setup_tracing_router<T>(mut router: Router<T>) -> Router<T>

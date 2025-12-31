@@ -40,6 +40,7 @@ fn main() -> io::Result<()> {
     let mut stdin = BufReader::new(io::stdin());
     let mut stdout = BufWriter::with_capacity(4 * 1024 * 1024, io::stdout());
     let mut reader_cache: HashMap<String, NetCDFArrowReader> = std::collections::HashMap::new();
+    let mut log_file = std::fs::File::create("mpio.log")?;
 
     loop {
         let Some(json_buf) = read_framed_json(&mut stdin)? else {
@@ -56,6 +57,11 @@ fn main() -> io::Result<()> {
 
         match &cmd {
             ReadCommand::ReadArrowSchema { request_id, path } => {
+                writeln!(
+                    log_file,
+                    "mpio worker: received ReadArrowSchema request {} for path {}",
+                    request_id, path
+                )?;
                 let schema = if let Some(reader) = reader_cache.get(path) {
                     // already cached
                     reader.schema().clone()
@@ -92,6 +98,11 @@ fn main() -> io::Result<()> {
                 stdout.write_all(&response_len)?;
                 stdout.write_all(&response_json)?;
                 stdout.flush()?;
+                writeln!(
+                    log_file,
+                    "mpio worker: sent schema response for request {}",
+                    request_id
+                )?;
             }
             ReadCommand::ReadFile {
                 request_id,
@@ -100,6 +111,11 @@ fn main() -> io::Result<()> {
                 chunk_size: _chunk_size,
                 stream_size: _stream_size,
             } => {
+                writeln!(
+                    log_file,
+                    "mpio worker: received ReadFile request {} for path {}",
+                    request_id, path
+                )?;
                 let reader = if let Some(reader) = reader_cache.get_mut(path) {
                     // already cached
                     reader
@@ -184,12 +200,20 @@ fn main() -> io::Result<()> {
                 stdout.write_all(&response_json)?;
                 stdout.write_all(&buffer)?;
                 stdout.flush()?;
+                writeln!(
+                    log_file,
+                    "mpio worker: sent {} bytes for request {}",
+                    buffer.len(),
+                    request_id
+                )?;
             }
             ReadCommand::Exit => {
+                writeln!(log_file, "mpio worker: exiting as requested")?;
                 break;
             }
         }
     }
+    writeln!(log_file, "mpio worker: shutting down")?;
     Ok(())
 }
 
