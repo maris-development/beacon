@@ -239,10 +239,33 @@ fn worker_executable_path() -> PathBuf {
     }
 
     if let Some(path) = CONFIG.netcdf_mpio_worker.clone() {
+        tracing::debug!(path = ?path, "using beacon-arrow-netcdf-mpio from config");
         return path;
     }
 
+    // Check for `beacon-arrow-netcdf-mpio` in PATH.
+    if let Ok(path) = which::which("beacon-arrow-netcdf-mpio") {
+        tracing::debug!(path = ?path, "using beacon-arrow-netcdf-mpio from PATH");
+        return path;
+    }
+
+    // As a last resort, check if it nexts to the current executable (ourselves).
+    if let Ok(current_exe) = std::env::current_exe() {
+        let candidate = current_exe
+            .parent()
+            .unwrap()
+            .join("beacon-arrow-netcdf-mpio");
+        if candidate.exists() {
+            tracing::debug!(
+                path = ?candidate,
+                "using beacon-arrow-netcdf-mpio next to current executable"
+            );
+            return candidate;
+        }
+    }
+
     // Default to resolving from PATH.
+    tracing::debug!("using beacon-arrow-netcdf-mpio from default PATH resolution");
     PathBuf::from("beacon-arrow-netcdf-mpio")
 }
 

@@ -36,6 +36,7 @@ COPY beacon-core/ /beacon-core/
 COPY beacon-data-lake/ /beacon-data-lake/
 COPY beacon-formats/ /beacon-formats/
 COPY beacon-functions/ /beacon-functions/
+COPY beacon-object-storage/ /beacon-object-storage/
 COPY beacon-planner/ /beacon-planner/
 COPY beacon-query/ /beacon-query/
 COPY Cargo.toml /
