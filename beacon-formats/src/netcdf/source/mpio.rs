@@ -271,19 +271,28 @@ async fn worker_dispatcher(mut rx: mpsc::Receiver<MpioReadRequest>) -> Result<()
     let mut queue = std::collections::VecDeque::new();
 
     loop {
+        tracing::trace!("mpio dispatcher waiting for requests or idle workers");
         tokio::select! {
             Some(req) = rx.recv() => {
-                tracing::debug!(command = ?req.command, "mpio request received");
+                tracing::trace!(command = ?req.command, "mpio request received and pushed to command buffer.");
                 queue.push_back(req);
             }
 
             Some(worker_id) = idle_rx.recv() => {
+                tracing::trace!(worker_id, "mpio worker became idle");
                 idle_workers.push_back(worker_id);
             }
         }
+        tracing::trace!(
+            queue_len = queue.len(),
+            idle_workers = idle_workers.len(),
+            "mpio dispatcher processing loop"
+        );
 
-        while let (Some(req), Some(worker_id)) = (queue.pop_front(), idle_workers.pop_front()) {
-            tracing::debug!(worker_id, command = ?req.command, "dispatching mpio request");
+        while !queue.is_empty() && !idle_workers.is_empty() {
+            let req = queue.pop_front().unwrap();
+            let worker_id = idle_workers.pop_front().unwrap();
+            tracing::trace!(worker_id, command = ?req.command, "dispatching mpio request");
             let sender = worker_senders
                 .get(worker_id)
                 .ok_or_else(|| PoolError::ProtocolError("Worker id out of range".to_string()))?
@@ -291,11 +300,17 @@ async fn worker_dispatcher(mut rx: mpsc::Receiver<MpioReadRequest>) -> Result<()
 
             // If a worker task died (channel closed), respawn it and retry once.
             match sender.send(req).await {
-                Ok(()) => {}
+                Ok(()) => {
+                    tracing::trace!(worker_id, "mpio request sent to worker");
+                }
                 Err(e) => {
                     // `SendError` carries the original request back.
+                    tracing::warn!(
+                        worker_id,
+                        "mpio worker channel closed; respawning with error: {}",
+                        e
+                    );
                     let req = e.0;
-                    tracing::warn!(worker_id, "mpio worker channel closed; respawning");
 
                     let new_tx =
                         spawn_worker_channel(worker_id, worker_path.clone(), idle_tx.clone());
@@ -325,6 +340,7 @@ async fn worker_dispatcher(mut rx: mpsc::Receiver<MpioReadRequest>) -> Result<()
                 }
             }
         }
+        tracing::trace!("mpio dispatcher loop iteration complete");
     }
 }
 
@@ -357,7 +373,7 @@ fn spawn_worker_task(
         };
 
         while let Some(req) = rx.recv().await {
-            tracing::debug!(worker_id, command = ?req.command, "mpio worker handling request");
+            tracing::trace!(worker_id, command = ?req.command, "mpio worker handling request");
             let result = handle_request(&mut proc, req.command).await;
 
             // If the worker process crashed or the protocol stream is corrupted, refresh
@@ -383,7 +399,7 @@ fn spawn_worker_task(
                 }
             }
 
-            tracing::debug!(worker_id, "mpio worker completed request");
+            tracing::trace!(worker_id, "mpio worker completed request");
             let _ = req.responder.send(result);
             let _ = idle_tx.send(worker_id).await;
         }
