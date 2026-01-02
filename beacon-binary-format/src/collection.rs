@@ -19,6 +19,7 @@ use crate::{
     collection_partition::{CollectionPartitionMetadata, CollectionPartitionReader},
     error::{BBFReadingError, BBFResult, BBFWritingError},
     io_cache::ArrayIoCache,
+    layout::PARTITIONS_DIR,
 };
 
 pub const COLLECTION_META_FILE: &str = "bbf.json";
@@ -110,7 +111,10 @@ impl CollectionReader {
             .get(partition_name)
             .cloned()
             .map(|partition_metadata| {
-                let partition_path = self.root_path.child(partition_name.to_string());
+                let partition_path = self
+                    .root_path
+                    .child(PARTITIONS_DIR.to_string())
+                    .child(partition_name.to_string());
                 CollectionPartitionReader::new(
                     partition_path,
                     self.object_store.clone(),

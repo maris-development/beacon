@@ -16,6 +16,8 @@ use crate::{
     array_partition::{ArrayPartitionMetadata, ArrayPartitionReader},
     error::{BBFReadingError, BBFResult},
     io_cache::ArrayIoCache,
+    layout::{PARTITION_BLOB_FILE, PARTITION_PRUNING_INDEX_FILE, PARTITION_RESOLUTION_FILE},
+    partition_resolution::PartitionResolution,
     util::super_type_arrow,
 };
 
@@ -103,11 +105,60 @@ impl ArrayPartitionGroupReader {
         partition: usize,
     ) -> BBFResult<Option<ArrayPartitionReader>> {
         if let Some(partition_metadata) = self.metadata.partitions.get(&partition) {
-            let partition_path = self.path.child(partition_metadata.hash.clone());
+            let resolution_path = self.path.child(PARTITION_RESOLUTION_FILE.to_string());
+            let resolution_display = resolution_path.to_string();
+            let bytes = self
+                .object_store
+                .get(&resolution_path)
+                .await
+                .map_err(|source| BBFReadingError::PartitionResolutionFetch {
+                    meta_path: resolution_display.clone(),
+                    source,
+                })?
+                .bytes()
+                .await
+                .map_err(|source| BBFReadingError::PartitionResolutionFetch {
+                    meta_path: resolution_display.clone(),
+                    source,
+                })?;
+            let resolution: PartitionResolution = serde_json::from_slice(&bytes).map_err(|e| {
+                BBFReadingError::PartitionResolutionDecode {
+                    meta_path: resolution_display,
+                    reason: e.to_string(),
+                }
+            })?;
+
+            let blob_path = self.path.child(PARTITION_BLOB_FILE.to_string());
+            let slice = *resolution
+                .objects
+                .get(&partition_metadata.hash)
+                .ok_or_else(|| BBFReadingError::PartitionResolutionMissing {
+                    meta_path: resolution_path.to_string(),
+                    hash: partition_metadata.hash.clone(),
+                })?;
+
+            let pruning_index = match partition_metadata.pruning_index_hash.as_ref() {
+                Some(index_hash) => {
+                    let index_slice = *resolution.objects.get(index_hash).ok_or_else(|| {
+                        BBFReadingError::PartitionResolutionMissing {
+                            meta_path: resolution_path.to_string(),
+                            hash: index_hash.clone(),
+                        }
+                    })?;
+                    Some((
+                        self.path.child(PARTITION_PRUNING_INDEX_FILE.to_string()),
+                        index_slice,
+                    ))
+                }
+                None => None,
+            };
+
             let partition_reader = ArrayPartitionReader::new(
                 self.object_store.clone(),
                 self.metadata.array_name.clone(),
-                partition_path,
+                blob_path,
+                slice,
+                pruning_index,
                 partition_metadata.clone(),
                 self.io_cache.clone(),
             )
@@ -217,6 +268,7 @@ mod tests {
             partition_offset: 0,
             partition_byte_size: byte_size,
             hash: hash.to_string(),
+            pruning_index_hash: None,
             data_type,
             groups: IndexMap::new(),
         }

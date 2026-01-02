@@ -62,6 +62,16 @@ pub enum BBFReadingError {
     },
     #[error("Failed to decode metadata for collection at {meta_path}: {reason}")]
     CollectionMetadataDecode { meta_path: String, reason: String },
+    #[error("Failed to fetch resolution metadata for partition at {meta_path}: {source}")]
+    PartitionResolutionFetch {
+        meta_path: String,
+        #[source]
+        source: ObjectStoreError,
+    },
+    #[error("Failed to decode resolution metadata for partition at {meta_path}: {reason}")]
+    PartitionResolutionDecode { meta_path: String, reason: String },
+    #[error("Resolution metadata for partition {meta_path} is missing entry for hash {hash}")]
+    PartitionResolutionMissing { meta_path: String, hash: String },
     #[error("Failed to fetch bytes for partition {partition_path}: {source}")]
     PartitionBytesFetch {
         partition_path: String,

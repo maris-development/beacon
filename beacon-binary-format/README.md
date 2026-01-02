@@ -32,17 +32,15 @@ stable Rust.
 
 ```rust
 use std::sync::Arc;
-use arrow_schema::{DataType, Field};
+
+use arrow::array::{ArrayRef, Float64Array};
+use arrow_schema::DataType;
 use beacon_binary_format::array_partition::ArrayPartitionWriter;
 use nd_arrow_array::NdArrowArray;
-use object_store::{memory::InMemory, path::Path};
+use nd_arrow_array::dimensions::{Dimension, Dimensions};
 
 async fn demo() -> beacon_binary_format::error::BBFResult<()> {
-  let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-  let array_path = Path::from("demo/temp");
   let mut writer = ArrayPartitionWriter::new(
-      store.clone(),
-      array_path,
       "temp".to_string(),
       8 * 1024 * 1024,
       Some(DataType::Float64),
@@ -50,10 +48,19 @@ async fn demo() -> beacon_binary_format::error::BBFResult<()> {
   )
   .await?;
 
-  let temp_field = Field::new("temp", DataType::Float64, true);
-  let values = NdArrowArray::from_arrow_array(temp_field.data_type().clone(), vec![1.0, 2.0])?;
+  let values: ArrayRef = Arc::new(Float64Array::from(vec![1.0, 2.0]));
+  let dimension = Dimension {
+      name: "dim0".to_string(),
+      size: 2,
+  };
+  let values = NdArrowArray::new(values, Dimensions::MultiDimensional(vec![dimension]))
+      .expect("nd array creation");
+
   writer.append_array(Some(values)).await?;
-  let metadata = writer.finish().await?; // Uploads IPC file + pruning index
+  let _artifact = writer.finish().await?;
+  // `finish()` returns a temp-file backed artifact (Arrow IPC file + optional pruning index)
+  // that higher-level writers (e.g. `CollectionPartitionWriter`) stream into the final
+  // partition layout.
   Ok(())
 }
 ```
@@ -61,15 +68,20 @@ async fn demo() -> beacon_binary_format::error::BBFResult<()> {
 ### Reading a collection partition
 
 ```rust
+use std::sync::Arc;
+
 use beacon_binary_format::collection_partition::{
     CollectionPartitionReader, CollectionPartitionReadOptions
 };
 use beacon_binary_format::io_cache::ArrayIoCache;
+use futures::StreamExt;
 use object_store::{memory::InMemory, path::Path};
 
 async fn read_partition_example(meta: beacon_binary_format::collection_partition::CollectionPartitionMetadata) -> beacon_binary_format::error::BBFResult<()> {
   let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-  let partition_root = Path::from("collections/demo/partition-0");
+  let partition_root = Path::from("collections/demo")
+    .child("partitions".to_string())
+    .child(meta.partition_name.clone());
   let reader = CollectionPartitionReader::new(
       partition_root,
       store,
@@ -120,6 +132,10 @@ beacon-binary-format/
 - Metadata files (`bbf.json`, `apg.json`) are JSON for debuggability. Arrow IPC blobs
   are compressed with ZSTD by default, but writers gracefully fall back to
   uncompressed IPC when required by the environment.
+- Within a partition directory, data is stored in `partition_blob.bbb` (arrays) plus
+  an optional `pruning_index.bbpi` (concatenated pruning indices). `resolution.json`
+  maps each content hash (array hash and pruning-index hash) to an `{offset,size}`
+  slice inside the appropriate blob.
 - `ArrayIoCache` uses `moka` under the hood; tune cache size and eviction policies at
   construction time to match workload characteristics.
 

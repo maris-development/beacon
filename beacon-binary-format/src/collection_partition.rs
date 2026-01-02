@@ -8,24 +8,32 @@
 //! entries can be fanned out into array partitions while tracking metadata
 //! such as byte sizes and element counts.
 
+use std::io::SeekFrom;
 use std::pin;
 use std::sync::Arc;
 
 use arrow::array::StringArray;
 use arrow_schema::Field;
 use arrow_schema::FieldRef;
+use bytes::Bytes;
 use futures::Stream;
 use futures::StreamExt;
 use indexmap::IndexMap;
 use nd_arrow_array::NdArrowArray;
 use nd_arrow_array::batch::NdRecordBatch;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, PutPayload};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::OnceCell;
 
 use crate::array_partition::ArrayPartitionReader;
 use crate::error::BBFError;
 use crate::error::BBFReadingError;
 use crate::io_cache;
+use crate::layout::{
+    PARTITION_BLOB_FILE, PARTITION_PRUNING_INDEX_FILE, PARTITION_RESOLUTION_FILE, PARTITIONS_DIR,
+};
+use crate::partition_resolution::{PartitionResolution, ResolvedSlice};
 use crate::stream::AsyncStreamScheduler;
 use crate::{
     array_partition::{ArrayPartitionMetadata, ArrayPartitionWriter},
@@ -59,6 +67,7 @@ pub struct CollectionPartitionReader {
     pub object_store: Arc<dyn ObjectStore>,
     /// Cache shared with array partition readers to avoid duplicate fetches.
     pub io_cache: io_cache::ArrayIoCache,
+    resolution: OnceCell<Arc<PartitionResolution>>,
 }
 
 /// Tunable options that control how collection partitions are read.
@@ -87,6 +96,7 @@ impl CollectionPartitionReader {
             path,
             object_store,
             io_cache,
+            resolution: OnceCell::new(),
         }
     }
 
@@ -194,6 +204,34 @@ impl CollectionPartitionReader {
         Arc<IndexMap<String, ArrayPartitionReader>>,
         Arc<arrow::datatypes::Schema>,
     )> {
+        let resolution = self
+            .resolution
+            .get_or_try_init(|| async {
+                let meta_path = self.path.child(PARTITION_RESOLUTION_FILE);
+                let meta_display = meta_path.to_string();
+                let meta_object = self.object_store.get(&meta_path).await.map_err(|source| {
+                    BBFReadingError::PartitionResolutionFetch {
+                        meta_path: meta_display.clone(),
+                        source,
+                    }
+                })?;
+                let bytes = meta_object.bytes().await.map_err(|source| {
+                    BBFReadingError::PartitionResolutionFetch {
+                        meta_path: meta_display.clone(),
+                        source,
+                    }
+                })?;
+                let resolution: PartitionResolution =
+                    serde_json::from_slice(&bytes).map_err(|e| {
+                        BBFReadingError::PartitionResolutionDecode {
+                            meta_path: meta_display,
+                            reason: e.to_string(),
+                        }
+                    })?;
+                Ok::<_, BBFError>(Arc::new(resolution))
+            })
+            .await?;
+
         let arrays_to_read = match projection {
             Some(proj) => proj
                 .iter()
@@ -207,12 +245,40 @@ impl CollectionPartitionReader {
             None => self.metadata.arrays.clone(),
         };
 
+        let blob_path = self.path.child(PARTITION_BLOB_FILE);
+        let pruning_blob_path = self.path.child(PARTITION_PRUNING_INDEX_FILE);
+
         let mut array_readers = IndexMap::new();
         for (array_name, array_metadata) in &arrays_to_read {
+            let slice = resolution
+                .objects
+                .get(&array_metadata.hash)
+                .copied()
+                .ok_or_else(|| BBFReadingError::PartitionResolutionMissing {
+                    meta_path: self.path.child(PARTITION_RESOLUTION_FILE).to_string(),
+                    hash: array_metadata.hash.clone(),
+                })?;
+
+            let pruning_index = match array_metadata.pruning_index_hash.as_ref() {
+                Some(index_hash) => {
+                    let index_slice =
+                        resolution.objects.get(index_hash).copied().ok_or_else(|| {
+                            BBFReadingError::PartitionResolutionMissing {
+                                meta_path: self.path.child(PARTITION_RESOLUTION_FILE).to_string(),
+                                hash: index_hash.clone(),
+                            }
+                        })?;
+                    Some((pruning_blob_path.clone(), index_slice))
+                }
+                None => None,
+            };
+
             let array_partition_reader = ArrayPartitionReader::new(
                 self.object_store.clone(),
                 array_name.clone(),
-                self.path.child(array_name.clone()),
+                blob_path.clone(),
+                slice,
+                pruning_index,
                 array_metadata.clone(),
                 self.io_cache.clone(),
             )
@@ -282,7 +348,9 @@ impl CollectionPartitionWriter {
 
         Self {
             metadata,
-            path: collection_root.child(partition_name.clone()),
+            path: collection_root
+                .child(PARTITIONS_DIR.to_string())
+                .child(partition_name.clone()),
             object_store,
             array_writers: IndexMap::new(),
             write_options: options,
@@ -306,11 +374,7 @@ impl CollectionPartitionWriter {
             // Check if we have an array writer for this array
             if !self.array_writers.contains_key(field.name()) {
                 // Create new array writer
-                // Array partition writers are stored under array-specific directories.
-                let path = self.path.child(field.name().to_string());
                 let array_partition_writer = ArrayPartitionWriter::new(
-                    self.object_store.clone(),
-                    path,
                     field.name().to_string(),
                     self.write_options.max_group_size,
                     Some(field.data_type().to_owned()),
@@ -329,10 +393,7 @@ impl CollectionPartitionWriter {
         }
         // Write __entry_key array
         if !self.array_writers.contains_key("__entry_key") {
-            let path = self.path.child("__entry_key".to_string());
             let array_partition_writer = ArrayPartitionWriter::new(
-                self.object_store.clone(),
-                path,
                 "__entry_key".to_string(),
                 self.write_options.max_group_size,
                 Some(arrow::datatypes::DataType::Utf8),
@@ -373,12 +434,114 @@ impl CollectionPartitionWriter {
     pub async fn finish(mut self) -> BBFResult<CollectionPartitionMetadata> {
         let mut total_byte_size = 0;
         let mut total_num_elements = 0;
+        let mut resolution = PartitionResolution::default();
+        let mut offset: u64 = 0;
+        let mut pruning_offset: u64 = 0;
+
+        let blob_path = self.path.child(PARTITION_BLOB_FILE);
+        let mut blob_writer =
+            object_store::buffered::BufWriter::new(self.object_store.clone(), blob_path.clone());
+
+        let pruning_blob_path = self.path.child(PARTITION_PRUNING_INDEX_FILE);
+        let mut pruning_writer: Option<object_store::buffered::BufWriter> = None;
+
         for (array_name, array_writer) in self.array_writers {
-            let array_metadata = array_writer.finish().await?;
-            total_byte_size += array_metadata.partition_byte_size;
-            total_num_elements += array_metadata.num_elements;
-            self.metadata.arrays.insert(array_name, array_metadata);
+            let artifact = array_writer.finish().await?;
+
+            total_byte_size += artifact.metadata.partition_byte_size;
+            total_num_elements += artifact.metadata.num_elements;
+
+            let array_size = artifact.file_size;
+            resolution.objects.insert(
+                artifact.metadata.hash.clone(),
+                ResolvedSlice {
+                    offset,
+                    size: array_size,
+                },
+            );
+
+            let mut array_file = artifact.file;
+            array_file.seek(SeekFrom::Start(0)).await.map_err(|e| {
+                crate::error::BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e))
+            })?;
+            tokio::io::copy(&mut array_file, &mut blob_writer)
+                .await
+                .map_err(|e| {
+                    crate::error::BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e))
+                })?;
+
+            offset = offset.saturating_add(array_size);
+
+            // Append optional pruning index to the partition-level pruning blob.
+            if let (Some(index_hash), Some(mut index_file), Some(index_size)) = (
+                artifact.metadata.pruning_index_hash.clone(),
+                artifact.pruning_index_file,
+                artifact.pruning_index_size,
+            ) {
+                resolution.objects.insert(
+                    index_hash,
+                    ResolvedSlice {
+                        offset: pruning_offset,
+                        size: index_size,
+                    },
+                );
+
+                index_file.seek(SeekFrom::Start(0)).await.map_err(|e| {
+                    crate::error::BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(
+                        e,
+                    ))
+                })?;
+
+                if pruning_writer.is_none() {
+                    pruning_writer = Some(object_store::buffered::BufWriter::new(
+                        self.object_store.clone(),
+                        pruning_blob_path.clone(),
+                    ));
+                }
+
+                let writer = pruning_writer.as_mut().expect("pruning writer");
+                tokio::io::copy(&mut index_file, writer)
+                    .await
+                    .map_err(|e| {
+                        crate::error::BBFWritingError::ArrayPartitionPruningIndexWriteFailure(
+                            Box::new(e),
+                        )
+                    })?;
+                pruning_offset = pruning_offset.saturating_add(index_size);
+            }
+
+            self.metadata.arrays.insert(array_name, artifact.metadata);
         }
+
+        blob_writer.flush().await.map_err(|e| {
+            crate::error::BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e))
+        })?;
+        blob_writer.shutdown().await.map_err(|e| {
+            crate::error::BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e))
+        })?;
+
+        if let Some(mut writer) = pruning_writer {
+            writer.flush().await.map_err(|e| {
+                crate::error::BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(e))
+            })?;
+            writer.shutdown().await.map_err(|e| {
+                crate::error::BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(e))
+            })?;
+        }
+
+        let resolution_path = self.path.child(PARTITION_RESOLUTION_FILE);
+        let resolution_payload = serde_json::to_vec(&resolution).map_err(|e| {
+            crate::error::BBFWritingError::CollectionMetadataWriteFailure(Box::new(e))
+        })?;
+        self.object_store
+            .put(
+                &resolution_path,
+                PutPayload::from_bytes(Bytes::from(resolution_payload)),
+            )
+            .await
+            .map_err(|e| {
+                crate::error::BBFWritingError::CollectionMetadataWriteFailure(Box::new(e))
+            })?;
 
         // Build partition schema
         let mut fields = Vec::new();
@@ -521,7 +684,9 @@ mod tests {
         ]));
 
         CollectionPartitionReader::new(
-            collection_root.child(partition_name),
+            collection_root
+                .child(PARTITIONS_DIR.to_string())
+                .child(partition_name),
             store,
             metadata,
             io_cache::ArrayIoCache::new(1024 * 1024),
