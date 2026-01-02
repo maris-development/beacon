@@ -131,6 +131,9 @@ pub enum BBFReadingError {
     #[error("Failed to decode entry mask: {reason}")]
     EntryMaskDecode { reason: String },
 
+    #[error("Entry selection length mismatch (expected {expected} entries, got {actual} entries)")]
+    EntrySelectionLengthMismatch { expected: usize, actual: usize },
+
     #[error("Entry mask length mismatch (expected {expected} entries, got {actual} entries)")]
     EntryMaskLengthMismatch { expected: usize, actual: usize },
 }

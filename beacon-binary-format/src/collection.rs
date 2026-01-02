@@ -518,6 +518,7 @@ mod tests {
                 None,
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 2,
+                    entry_selection: None,
                 },
             )
             .await
@@ -605,6 +606,7 @@ mod tests {
                     None,
                     CollectionPartitionReadOptions {
                         max_concurrent_reads: 2,
+                        entry_selection: None,
                     },
                 )
                 .await

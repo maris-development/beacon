@@ -64,7 +64,6 @@ pub struct CollectionPartitionMetadata {
     pub partition_schema: Arc<arrow::datatypes::Schema>,
     /// Mapping from array name to its partition metadata.
     pub arrays: IndexMap<String, ArrayPartitionMetadata>,
-
     /// Optional content hash for an entry deletion mask stored in `entry_mask.bbem`.
     /// When present, readers should skip entries where the mask marks them as deleted.
     #[serde(default)]
@@ -93,6 +92,11 @@ pub struct CollectionPartitionReader {
 pub struct CollectionPartitionReadOptions {
     /// Maximum number of concurrent entry read tasks.
     pub max_concurrent_reads: usize,
+    /// Optional selection mask to enable reading a subset of entries.
+    ///
+    /// When provided, `entry_selection.len()` must equal `metadata.num_entries`.
+    /// Entries are read when `entry_selection[i] == true`.
+    pub entry_selection: Option<Vec<bool>>,
 }
 
 impl CollectionPartitionReader {
@@ -127,7 +131,9 @@ impl CollectionPartitionReader {
         options: CollectionPartitionReadOptions,
     ) -> BBFResult<AsyncStreamScheduler<BBFResult<NdRecordBatch>>> {
         let (shared_readers, projected_schema) = self.prepare_read(projection).await?;
-        let entry_indices = self.active_entry_indices().await?;
+        let entry_indices = self
+            .selected_entry_indices(options.entry_selection.as_ref())
+            .await?;
         let mut futures = Vec::new();
         for index in entry_indices {
             let shared_readers = shared_readers.clone();
@@ -175,7 +181,9 @@ impl CollectionPartitionReader {
         options: CollectionPartitionReadOptions,
     ) -> BBFResult<AsyncStreamScheduler<BBFResult<(usize, NdRecordBatch)>>> {
         let (shared_readers, projected_schema) = self.prepare_read(projection).await?;
-        let entry_indices = self.active_entry_indices().await?;
+        let entry_indices = self
+            .selected_entry_indices(options.entry_selection.as_ref())
+            .await?;
         let mut futures = Vec::new();
         for index in entry_indices {
             let shared_readers = shared_readers.clone();
@@ -483,6 +491,28 @@ impl CollectionPartitionReader {
         };
 
         Ok(indices)
+    }
+
+    async fn selected_entry_indices(&self, selection: Option<&Vec<bool>>) -> BBFResult<Vec<usize>> {
+        if let Some(selection) = selection {
+            if selection.len() != self.metadata.num_entries {
+                return Err(BBFReadingError::EntrySelectionLengthMismatch {
+                    expected: self.metadata.num_entries,
+                    actual: selection.len(),
+                }
+                .into());
+            }
+        }
+
+        let active = self.active_entry_indices().await?;
+        let Some(selection) = selection else {
+            return Ok(active);
+        };
+
+        Ok(active
+            .into_iter()
+            .filter(|&idx| *selection.get(idx).unwrap_or(&false))
+            .collect())
     }
 }
 
@@ -1299,6 +1329,7 @@ mod tests {
                 None,
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 2,
+                    entry_selection: None,
                 },
             )
             .await
@@ -1381,6 +1412,7 @@ mod tests {
                 Some(projection),
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 1,
+                    entry_selection: None,
                 },
             )
             .await
@@ -1429,6 +1461,7 @@ mod tests {
                 None,
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 2,
+                    entry_selection: None,
                 },
             )
             .await
@@ -1483,6 +1516,7 @@ mod tests {
                 None,
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 2,
+                    entry_selection: None,
                 },
             )
             .await
@@ -1536,6 +1570,7 @@ mod tests {
                 None,
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 2,
+                    entry_selection: None,
                 },
             )
             .await
@@ -1579,6 +1614,7 @@ mod tests {
                 None,
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 2,
+                    entry_selection: None,
                 },
             )
             .await
@@ -1617,6 +1653,7 @@ mod tests {
                 None,
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 2,
+                    entry_selection: None,
                 },
             )
             .await
@@ -1666,6 +1703,7 @@ mod tests {
                 None,
                 CollectionPartitionReadOptions {
                     max_concurrent_reads: 2,
+                    entry_selection: None,
                 },
             )
             .await
@@ -1810,5 +1848,61 @@ mod tests {
         assert!(names.contains(&"sal:max".to_string()));
         assert!(names.contains(&"sal:null_count".to_string()));
         assert!(names.contains(&"sal:row_count".to_string()));
+    }
+
+    #[tokio::test]
+    async fn read_respects_entry_selection_mask() {
+        let reader = build_reader_fixture().await;
+        let projection: Arc<[String]> =
+            Arc::from(vec!["__entry_key".to_string()].into_boxed_slice());
+
+        let scheduler = reader
+            .read(
+                Some(projection),
+                CollectionPartitionReadOptions {
+                    max_concurrent_reads: 2,
+                    entry_selection: Some(vec![false, true]),
+                },
+            )
+            .await
+            .expect("scheduler");
+        let stream = scheduler.shared_pollable_stream_ref().await;
+        let batches = stream.collect::<Vec<_>>().await;
+
+        assert_eq!(batches.len(), 1);
+        let batch = batches[0].as_ref().expect("batch success");
+        let schema = batch.schema();
+        let arrays = batch.arrays();
+        let entry_key_idx = schema
+            .fields()
+            .iter()
+            .position(|f| f.name() == "__entry_key")
+            .expect("entry key column");
+        let entry_key_arr = arrays[entry_key_idx]
+            .as_arrow_array()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("entry key array");
+        assert_eq!(entry_key_arr.value(0), "entry-2");
+    }
+
+    #[tokio::test]
+    async fn read_errors_on_entry_selection_length_mismatch() {
+        let reader = build_reader_fixture().await;
+        let err = reader
+            .read(
+                None,
+                CollectionPartitionReadOptions {
+                    max_concurrent_reads: 1,
+                    entry_selection: Some(vec![true]),
+                },
+            )
+            .await
+            .expect_err("expected mismatch");
+
+        assert!(matches!(
+            err,
+            BBFError::Reading(BBFReadingError::EntrySelectionLengthMismatch { .. })
+        ));
     }
 }

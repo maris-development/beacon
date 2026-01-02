@@ -157,6 +157,7 @@ async fn write_read_and_pruning_index_round_trip() {
             None,
             CollectionPartitionReadOptions {
                 max_concurrent_reads: 2,
+                entry_selection: None,
             },
         )
         .await
