@@ -22,14 +22,28 @@ class CollectionMetadata(TypedDict):
 
 EntryPayload = Mapping[str, ArrayPayload]
 
+class ObjectStore:
+    @staticmethod
+    def local(base_dir: str) -> ObjectStore: ...
+
+    @staticmethod
+    def s3(
+        bucket: str,
+        prefix: Optional[str] = ...,
+        region: Optional[str] = ...,
+        endpoint_url: Optional[str] = ...,
+        access_key_id: Optional[str] = ...,
+        secret_access_key: Optional[str] = ...,
+        session_token: Optional[str] = ...,
+        allow_http: Optional[bool] = ...,
+    ) -> ObjectStore: ...
+
 class Collection:
     """Logical Beacon collection that can host multiple partitions."""
     def __init__(
         self,
-        base_dir: str,
+        store: ObjectStore,
         collection_path: str,
-        storage_options: Optional[Mapping[str, Any]] = ...,
-        filesystem: Optional[Any] = ...,
     ) -> None: ...
     def create_partition(
         self,
@@ -51,12 +65,10 @@ class CollectionBuilder:
     """Backwards-compatible façade that opens one partition immediately."""
     def __init__(
         self,
-        base_dir: str,
+        store: ObjectStore,
         collection_path: str,
         partition_name: Optional[str] = ..., 
         max_group_size: Optional[int] = ...,
-        storage_options: Optional[Mapping[str, Any]] = ...,
-        filesystem: Optional[Any] = ...,
     ) -> None: ...
     def write_entry(self, entry_key: str, arrays: ArrayMap) -> None:
         """Shortcut to the single-partition workflow retained for legacy scripts."""
@@ -70,11 +82,9 @@ class CollectionReader:
 
     def __init__(
         self,
-        base_dir: str,
+        store: ObjectStore,
         collection_path: str,
         cache_bytes: Optional[int] = ...,
-        storage_options: Optional[Mapping[str, Any]] = ...,
-        filesystem: Optional[Any] = ...,
     ) -> None: ...
 
     def metadata(self) -> CollectionMetadata: ...
@@ -90,6 +100,7 @@ class PartitionReader:
         self,
         projection: Optional[Iterable[str]] = ...,
         max_concurrent_reads: Optional[int] = ...,
+        entry_selection: Optional[List[bool]] = ...,
     ) -> List[EntryPayload]: ...
 
 

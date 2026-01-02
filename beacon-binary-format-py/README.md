@@ -4,15 +4,18 @@ This crate exposes the Beacon Binary Format to Python via [PyO3](https://pyo3.rs
 
 ## Usage
 
+### Writing
+
 The module now exposes a `Collection` object that can host any number of partitions. Each partition is managed by a `PartitionBuilder` which mirrors the original single-partition workflow:
 
 ```python
 from pathlib import Path
 import numpy as np
-from beacon_binary_format import Collection
+from beacon_binary_format import Collection, ObjectStore
 
 tmp_dir = Path("/tmp/beacon")
-collection = Collection(str(tmp_dir), "example")
+store = ObjectStore.local(str(tmp_dir))
+collection = Collection(store, "example")
 
 partition = collection.create_partition("partition-0")
 partition.write_entry(
@@ -33,6 +36,38 @@ print(collection.library_version())
 
 ```
 
+### Reading
+
+Use `CollectionReader` to open a collection and read entries back as dictionaries of NumPy payloads. Every field is returned as `{"data": <ndarray|masked array>, "dims": [...], "shape": [...]}` so dimension metadata survives round-trips.
+
+```python
+from beacon_binary_format import CollectionReader
+
+store = ObjectStore.local(str(tmp_dir))
+reader = CollectionReader(store, "example")
+
+print(reader.partition_names())
+
+partition = reader.open_partition("partition-0")
+entries = partition.read_entries(
+	projection=["temperature"],
+	max_concurrent_reads=32,
+)
+
+for entry in entries:
+	print(entry["__entry_key"]["data"], entry["temperature"]["dims"])
+```
+
+#### Entry selection
+
+`entry_selection` lets you provide an explicit boolean selection mask (length must equal `partition.num_entries()`). This is applied in addition to any persisted logical deletes.
+
+```python
+partition = reader.open_partition("partition-0")
+selection = [(i % 2) == 0 for i in range(partition.num_entries())]
+entries = partition.read_entries(entry_selection=selection)
+```
+
 ### Named dimensions
 
 NumPy arrays default to synthetic dimension names (`dim0`, `dim1`, ...). You can override them per array by wrapping the data in either a tuple or a tiny mapping when calling `write_entry`:
@@ -43,10 +78,10 @@ partition.write_entry(
 	"dataset-2",
 	{
 		# tuple form -> (<array-like>, <sequence-of-dimension-names>)
-		"salinity_grid": (np.ones((2, 3), dtype=np.float32), ["depth", "lat", "lon"]),
+		"salinity_grid": (np.ones((2, 3, 4), dtype=np.float32), ["depth", "lat", "lon"]),
 		# mapping form -> keys `data` + `dims`
 		"temperature_grid": {
-			"data": np.ones((2, 3), dtype=np.float32),
+			"data": np.ones((2, 3, 4), dtype=np.float32),
 			"dims": ["depth", "lat", "lon"],
 		},
 	},
@@ -72,82 +107,57 @@ partition.write_entry("row-0", {"masked": masked})
 
 Any position masked in NumPy is written as a null value in the corresponding Arrow array.
 
-### Reading collections back into NumPy
+### Object stores
 
-A matching `CollectionReader` can reconstruct logical entries as dictionaries of NumPy payloads. Every field is returned as `{"data": <ndarray|masked array>, "dims": [...], "shape": [...]}` so dimension metadata survives round-trips.
+The bindings expose an `ObjectStore` helper that can be configured up-front and then passed into writers/readers.
 
-```python
-from beacon_binary_format import CollectionReader
-
-reader = CollectionReader(str(tmp_dir), "example")
-partition = reader.open_partition("partition-0")
-entries = partition.read_entries()
-
-for entry in entries:
-    print(entry["__entry_key"]["data"], entry["temperature"]["dims"])
-```
-
-Optional `projection=["temperature", "salinity"]` narrows the arrays fetched from disk, and `max_concurrent_reads` lets you tune object-store fanout.
-
-### Object stores and `fsspec`-style options
-
-`Collection`, `CollectionBuilder`, and `CollectionReader` each accept an optional `storage_options` mapping along with richer `base_dir` URIs. Supplying "s3://bucket/prefix" switches the backend to AWS S3 via the Rust `object_store` crate, while ordinary filesystem paths (or `file://` URLs) continue to use `LocalFileSystem`.
-
-`storage_options` mirrors the values you would normally pass to [`fsspec`](https://filesystem-spec.readthedocs.io/), which means existing credential dictionaries can be reused verbatim:
+Local filesystem:
 
 ```python
-from beacon_binary_format import Collection
+from beacon_binary_format import ObjectStore, Collection
 
-collection = Collection(
-    base_dir="s3://beacon-dev/datasets",
-    collection_path="planning/profiles",
-    storage_options={
-        "key": "minio-access-key",
-        "secret": "minio-secret-key",
-        "region_name": "us-east-1",
-        "client_kwargs": {
-            "endpoint_url": "http://localhost:9000",
-            "allow_http": True,
-        },
-    },
-)
+store = ObjectStore.local("/tmp/beacon")
+collection = Collection(store, "example")
 ```
 
-The same configuration works for readers and builders, and you can even forward `fs.storage_options` from an existing `fsspec` filesystem for consistency across libraries.
-
-Prefer to pass the filesystem object itself? Provide it via the `filesystem` keyword alongside a path scoped to that instance:
+S3 / S3-compatible:
 
 ```python
-import numpy as np
-import fsspec
-from beacon_binary_format import Collection, CollectionReader
+from beacon_binary_format import ObjectStore, Collection
 
-fs = fsspec.filesystem(
-	"s3",
-	key="minio-access-key",
-	secret="minio-secret-key",
-	client_kwargs={"endpoint_url": "http://localhost:9000", "allow_http": True},
+store = ObjectStore.s3(
+	bucket="beacon-dev",
+	prefix="datasets",
+	region="us-east-1",
+	endpoint_url="http://localhost:9000",  # optional
+	access_key_id="minio-access-key",      # optional
+	secret_access_key="minio-secret-key",  # optional
+	allow_http=True,                         # optional
 )
 
-collection = Collection(
-	base_dir="beacon-dev/datasets",  # interpreted relative to `fs`
-	collection_path="planning/profiles",
-	filesystem=fs,
-)
-partition = collection.create_partition("p0")
-partition.write_entry("row-0", {"temperature": np.array([9.2], dtype=np.float32)})
-partition.finish()
-
-reader = CollectionReader(
-	base_dir="beacon-dev/datasets",
-	collection_path="planning/profiles",
-	filesystem=fs,
-)
-entries = reader.open_partition("p0").read_entries()
-print(entries[0]["temperature"]["data"])
+collection = Collection(store, "planning/profiles")
 ```
 
-When the supplied path lacks a scheme, the constructor infers it from `filesystem.protocol`, so `s3`, `gcs`, `abfs`, etc. remain fully supported. Explicit `storage_options` still take precedence if you need to override anything pulled from the filesystem instance.
+## File format layout
+
+On disk, a Beacon collection is stored under the `collection_path` you pass to `Collection`/`CollectionReader`. The root contains a `bbf.json` metadata file and a `partitions/` directory.
+
+```text
+<collection_root>/<collection_path>/
+	bbf.json
+	partitions/
+		<partition_name>/
+			partition_blob.bbb
+			resolution.json
+			pruning_index.bbpi        (optional)
+			entry_mask.bbem           (optional)
+```
+
+- `bbf.json` tracks collection-level schema/metadata and the set of partitions.
+- `partition_blob.bbb` stores Arrow IPC payloads for arrays concatenated into a single blob.
+- `pruning_index.bbpi` stores concatenated Arrow IPC pruning indices (one slice per array that has a pruning index).
+- `entry_mask.bbem` stores an Arrow IPC boolean array used for logical deletes.
+- `resolution.json` maps content hashes (array hash, pruning-index hash, entry-mask hash) to `{offset,size}` slices inside the corresponding blob, enabling efficient object-store range reads.
 
 The legacy `CollectionBuilder` class remains available for scripts that only ever deal with a single partition, but the `Collection`/`PartitionBuilder` pair is the recommended interface moving forward. Shipping `.pyi` stubs and `py.typed` ensures editors and static type checkers understand the API surface.
 

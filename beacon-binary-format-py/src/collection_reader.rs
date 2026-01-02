@@ -7,20 +7,21 @@ use arrow::datatypes::{
     ArrowPrimitiveType, DataType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
     Int64Type, TimeUnit, TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
-use beacon_binary_format::collection::CollectionReader;
-use beacon_binary_format::collection_partition::{
+use beacon_binary_format_core::collection::CollectionReader;
+use beacon_binary_format_core::collection_partition::{
     CollectionPartitionReadOptions, CollectionPartitionReader,
 };
-use beacon_binary_format::error::BBFError;
-use beacon_binary_format::io_cache::ArrayIoCache;
+use beacon_binary_format_core::error::BBFError;
+use beacon_binary_format_core::io_cache::ArrayIoCache;
 use futures::StreamExt;
 use nd_arrow_array::{NdArrowArray, batch::NdRecordBatch, dimensions::Dimensions};
 use numpy::PyArray1;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 
-use crate::utils::{StorageOptions, init_store, prepare_store_inputs, to_py_err};
+use crate::object_store_handle::ObjectStoreHandle;
+use crate::utils::to_py_err;
 
 const DEFAULT_CACHE_SIZE_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_MAX_CONCURRENCY: usize = 32;
@@ -32,17 +33,11 @@ struct ReaderInner {
 }
 
 impl ReaderInner {
-    fn new(
-        base_dir: String,
-        collection_path: String,
-        cache_bytes: Option<usize>,
-        storage: StorageOptions,
-    ) -> PyResult<Self> {
+    fn new(store: ObjectStoreHandle, collection_path: String, cache_bytes: Option<usize>) -> PyResult<Self> {
         let runtime =
             Arc::new(tokio::runtime::Runtime::new().map_err(|err| {
                 PyRuntimeError::new_err(format!("failed to start runtime: {err}"))
             })?);
-        let store = init_store(base_dir, storage)?;
         let path = store.resolve_collection_path(&collection_path)?;
         let cache = ArrayIoCache::new(cache_bytes.unwrap_or(DEFAULT_CACHE_SIZE_BYTES));
         let reader = runtime
@@ -53,7 +48,7 @@ impl ReaderInner {
 }
 
 impl ReaderInner {
-    fn metadata(&self) -> &beacon_binary_format::collection::CollectionMetadata {
+    fn metadata(&self) -> &beacon_binary_format_core::collection::CollectionMetadata {
         self.reader.metadata()
     }
 }
@@ -67,23 +62,10 @@ pub struct CollectionReaderHandle {
 #[pymethods]
 impl CollectionReaderHandle {
     #[new]
-    #[pyo3(signature = (base_dir, collection_path, cache_bytes=None, storage_options=None, filesystem=None))]
-    pub fn new(
-        base_dir: String,
-        collection_path: String,
-        cache_bytes: Option<usize>,
-        storage_options: Option<Bound<'_, PyDict>>,
-        filesystem: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<Self> {
-        let (normalized_base, storage) =
-            prepare_store_inputs(base_dir, storage_options, filesystem)?;
+    #[pyo3(signature = (store, collection_path, cache_bytes=None))]
+    pub fn new(store: ObjectStoreHandle, collection_path: String, cache_bytes: Option<usize>) -> PyResult<Self> {
         Ok(Self {
-            inner: Arc::new(ReaderInner::new(
-                normalized_base,
-                collection_path,
-                cache_bytes,
-                storage,
-            )?),
+            inner: Arc::new(ReaderInner::new(store, collection_path, cache_bytes)?),
         })
     }
 
@@ -134,16 +116,28 @@ impl PartitionReaderHandle {
         self.reader.metadata.num_entries
     }
 
-    #[pyo3(signature = (projection=None, max_concurrent_reads=None))]
+    #[pyo3(signature = (projection=None, max_concurrent_reads=None, entry_selection=None))]
     pub fn read_entries(
         &self,
         py: Python<'_>,
         projection: Option<Vec<String>>,
         max_concurrent_reads: Option<usize>,
+        entry_selection: Option<Vec<bool>>,
     ) -> PyResult<Vec<PyObject>> {
         let projection = self.normalize_projection(projection);
+
+        if let Some(selection) = entry_selection.as_ref() {
+            if selection.len() != self.reader.metadata.num_entries {
+                return Err(PyValueError::new_err(format!(
+                    "entry_selection length mismatch (expected {}, got {})",
+                    self.reader.metadata.num_entries,
+                    selection.len()
+                )));
+            }
+        }
         let options = CollectionPartitionReadOptions {
             max_concurrent_reads: max_concurrent_reads.unwrap_or(DEFAULT_MAX_CONCURRENCY),
+            entry_selection,
         };
         let scheduler = self
             .collection
@@ -152,32 +146,28 @@ impl PartitionReaderHandle {
             .block_on(self.reader.read_indexed(projection, options))
             .map_err(to_py_err)?;
 
-        let total_entries = self.reader.metadata.num_entries;
-        let batches = self
+        let mut indexed = self
             .collection
             .inner
             .runtime
             .block_on(async {
                 let mut stream = scheduler.shared_pollable_stream_ref().await;
-                let mut ordered = vec![None; total_entries];
+                let mut out: Vec<(usize, NdRecordBatch)> = Vec::new();
                 while let Some(batch_result) = stream.next().await {
                     match batch_result {
-                        Ok((index, batch)) => ordered[index] = Some(batch),
+                        Ok((index, batch)) => out.push((index, batch)),
                         Err(err) => return Err(err),
                     }
                 }
-                Ok::<_, BBFError>(ordered)
+                Ok::<_, BBFError>(out)
             })
             .map_err(to_py_err)?;
 
-        let mut entries = Vec::with_capacity(total_entries);
-        for maybe_batch in batches {
-            let batch = maybe_batch.ok_or_else(|| {
-                PyRuntimeError::new_err("partition reader returned incomplete results")
-            })?;
-            entries.push(batch_to_python(py, &batch)?);
-        }
-        Ok(entries)
+        indexed.sort_by_key(|(idx, _)| *idx);
+        indexed
+            .into_iter()
+            .map(|(_idx, batch)| batch_to_python(py, &batch))
+            .collect()
     }
 }
 
