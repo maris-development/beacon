@@ -128,6 +128,18 @@ pub enum BBFReadingError {
         reason: String,
     },
 
+    #[error("Projection requested unknown array '{array_name}' for partition {partition_path}")]
+    PartitionProjectionUnknownArray {
+        partition_path: String,
+        array_name: String,
+    },
+
+    #[error("Partition schema is missing expected field '{field}' for partition {partition_path}")]
+    PartitionSchemaMissingField {
+        partition_path: String,
+        field: String,
+    },
+
     #[error("Failed to decode entry mask: {reason}")]
     EntryMaskDecode { reason: String },
 

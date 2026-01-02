@@ -132,7 +132,7 @@ impl CollectionPartitionReader {
     ) -> BBFResult<AsyncStreamScheduler<BBFResult<NdRecordBatch>>> {
         let (shared_readers, projected_schema) = self.prepare_read(projection).await?;
         let entry_indices = self
-            .selected_entry_indices(options.entry_selection.as_ref())
+            .selected_entry_indices(options.entry_selection.as_deref())
             .await?;
         let mut futures = Vec::new();
         for index in entry_indices {
@@ -182,7 +182,7 @@ impl CollectionPartitionReader {
     ) -> BBFResult<AsyncStreamScheduler<BBFResult<(usize, NdRecordBatch)>>> {
         let (shared_readers, projected_schema) = self.prepare_read(projection).await?;
         let entry_indices = self
-            .selected_entry_indices(options.entry_selection.as_ref())
+            .selected_entry_indices(options.entry_selection.as_deref())
             .await?;
         let mut futures = Vec::new();
         for index in entry_indices {
@@ -320,15 +320,20 @@ impl CollectionPartitionReader {
             .await?;
 
         let arrays_to_read = match projection {
-            Some(proj) => proj
-                .iter()
-                .filter_map(|name| {
-                    self.metadata
-                        .arrays
-                        .get(name)
-                        .map(|meta| (name.clone(), meta.clone()))
-                })
-                .collect::<IndexMap<String, ArrayPartitionMetadata>>(),
+            Some(proj) => {
+                let mut arrays = IndexMap::new();
+                for name in proj.iter() {
+                    let Some(meta) = self.metadata.arrays.get(name) else {
+                        return Err(BBFReadingError::PartitionProjectionUnknownArray {
+                            partition_path: self.path.to_string(),
+                            array_name: name.clone(),
+                        }
+                        .into());
+                    };
+                    arrays.insert(name.clone(), meta.clone());
+                }
+                arrays
+            }
             None => self.metadata.arrays.clone(),
         };
 
@@ -380,7 +385,10 @@ impl CollectionPartitionReader {
                 .metadata
                 .partition_schema
                 .field_with_name(array_name)
-                .expect("field exists")
+                .map_err(|_e| BBFReadingError::PartitionSchemaMissingField {
+                    partition_path: self.path.to_string(),
+                    field: array_name.clone(),
+                })?
                 .clone();
             projected_fields.push(field);
         }
@@ -454,7 +462,11 @@ impl CollectionPartitionReader {
                 })?;
 
                 if batches.is_empty() {
-                    return Ok::<_, BBFError>(Some(Arc::new(Vec::new())));
+                    return Err(BBFReadingError::EntryMaskLengthMismatch {
+                        expected: self.metadata.num_entries,
+                        actual: 0,
+                    }
+                    .into());
                 }
                 let batch = if batches.len() == 1 {
                     batches.into_iter().next().expect("batch")
@@ -493,7 +505,7 @@ impl CollectionPartitionReader {
         Ok(indices)
     }
 
-    async fn selected_entry_indices(&self, selection: Option<&Vec<bool>>) -> BBFResult<Vec<usize>> {
+    async fn selected_entry_indices(&self, selection: Option<&[bool]>) -> BBFResult<Vec<usize>> {
         if let Some(selection) = selection {
             if selection.len() != self.metadata.num_entries {
                 return Err(BBFReadingError::EntrySelectionLengthMismatch {
@@ -509,10 +521,7 @@ impl CollectionPartitionReader {
             return Ok(active);
         };
 
-        Ok(active
-            .into_iter()
-            .filter(|&idx| *selection.get(idx).unwrap_or(&false))
-            .collect())
+        Ok(active.into_iter().filter(|&idx| selection[idx]).collect())
     }
 }
 
@@ -612,7 +621,14 @@ impl CollectionPartitionWriter {
             }
 
             // Write to array writer
-            let (idx, _, array_writer) = self.array_writers.get_full_mut(field.name()).unwrap();
+            let (idx, _, array_writer) =
+                self.array_writers
+                    .get_full_mut(field.name())
+                    .ok_or_else(|| {
+                        BBFWritingError::ArrayGroupBuildFailure(Box::new(std::io::Error::other(
+                            format!("missing array writer for '{}'", field.name()),
+                        )))
+                    })?;
             array_writer.append_array(Some(array)).await?;
             // Remove from skipped arrays
             skipped_arrays.retain(|&i| i != idx);
@@ -629,23 +645,33 @@ impl CollectionPartitionWriter {
             self.array_writers
                 .insert("__entry_key".to_string(), array_partition_writer);
         }
-        let (idx, _, entry_key_writer) = self.array_writers.get_full_mut("__entry_key").unwrap();
+        let (idx, _, entry_key_writer) = self
+            .array_writers
+            .get_full_mut("__entry_key")
+            .ok_or_else(|| {
+                BBFWritingError::ArrayGroupBuildFailure(Box::new(std::io::Error::other(
+                    "missing __entry_key writer",
+                )))
+            })?;
         let arrow_array = StringArray::from(vec![entry_name]);
         let nd_arrow_array = NdArrowArray::new(
             Arc::new(arrow_array),
             nd_arrow_array::dimensions::Dimensions::Scalar,
         )
-        .expect("create entry key array");
+        .map_err(|e| {
+            BBFWritingError::NdArrowArrayCreationFailure(e, "create entry key array".to_string())
+        })?;
         entry_key_writer.append_array(Some(nd_arrow_array)).await?;
         // Remove from skipped arrays
         skipped_arrays.retain(|&i| i != idx);
 
         // For skipped arrays, write a null entry
         for idx in skipped_arrays {
-            let (_, array_writer) = self
-                .array_writers
-                .get_index_mut(idx)
-                .expect("array writer exists");
+            let (_, array_writer) = self.array_writers.get_index_mut(idx).ok_or_else(|| {
+                BBFWritingError::ArrayGroupBuildFailure(Box::new(std::io::Error::other(format!(
+                    "missing array writer at index {idx}"
+                ))))
+            })?;
             array_writer.append_array(None).await?;
         }
 
@@ -727,7 +753,11 @@ impl CollectionPartitionWriter {
                     ));
                 }
 
-                let writer = pruning_writer.as_mut().expect("pruning writer");
+                let writer = pruning_writer.as_mut().ok_or_else(|| {
+                    crate::error::BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(
+                        std::io::Error::other("missing pruning writer"),
+                    ))
+                })?;
                 tokio::io::copy(&mut index_file, writer)
                     .await
                     .map_err(|e| {
