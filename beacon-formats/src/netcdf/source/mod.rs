@@ -386,11 +386,31 @@ mod tests {
     use datafusion::datasource::physical_plan::FileMeta;
     use futures::StreamExt;
     use object_store::path::Path;
+    use std::path::PathBuf;
+    use std::sync::Once;
+
+    static TEST_FIXTURES: Once = Once::new();
+
+    fn ensure_test_fixtures() {
+        TEST_FIXTURES.call_once(|| {
+            let src: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test-files")
+                .join("gridded-example.nc");
+
+            let dst_dir: PathBuf = beacon_config::DATASETS_DIR_PATH.join("test-files");
+            std::fs::create_dir_all(&dst_dir).expect("create datasets test-files dir");
+
+            let dst = dst_dir.join("gridded-example.nc");
+            if !dst.exists() {
+                std::fs::copy(&src, &dst).expect("copy NetCDF test fixture into datasets dir");
+            }
+        });
+    }
 
     fn test_object_meta() -> ObjectMeta {
-        // For tests, keep `ObjectMeta.location` relative and point the resolver
-        // endpoint at the crate directory. This matches how the resolver builds
-        // filesystem paths.
+        // For tests, keep `ObjectMeta.location` relative to the datasets store
+        // root (./data/datasets). We copy the fixture into place via
+        // `ensure_test_fixtures()`.
         ObjectMeta {
             location: Path::from("test-files/gridded-example.nc"),
             last_modified: chrono::Utc::now(),
@@ -401,11 +421,13 @@ mod tests {
     }
 
     async fn test_datasets_object_store() -> Arc<DatasetsStore> {
+        ensure_test_fixtures();
         get_datasets_object_store().await
     }
 
     #[tokio::test]
     async fn fetch_schema_reads_and_caches() {
+        ensure_test_fixtures();
         let _guard = override_mpio_enabled_for_test(false);
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
@@ -423,6 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_reader_returns_reader() {
+        ensure_test_fixtures();
         let _guard = override_mpio_enabled_for_test(false);
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
@@ -434,6 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_file_opener_produces_one_batch() {
+        ensure_test_fixtures();
         let _guard = override_mpio_enabled_for_test(false);
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
@@ -465,6 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn multiplexer_reads_schema_and_batch_via_worker() {
+        ensure_test_fixtures();
         let _guard = override_mpio_enabled_for_test(true);
 
         // Requires the `beacon-arrow-netcdf-mpio` executable.
