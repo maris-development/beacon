@@ -133,9 +133,11 @@ beacon-binary-format/
   are compressed with ZSTD by default, but writers gracefully fall back to
   uncompressed IPC when required by the environment.
 - Within a partition directory, data is stored in `partition_blob.bbb` (arrays) plus
-  an optional `pruning_index.bbpi` (concatenated pruning indices). `resolution.json`
-  maps each content hash (array hash and pruning-index hash) to an `{offset,size}`
-  slice inside the appropriate blob.
+  optional sidecars: `pruning_index.bbpi` (concatenated pruning indices) and
+  `entry_mask.bbem` (deleted-entry mask). `resolution.json` maps each content hash
+  (array hash, pruning-index hash, and entry-mask hash) to an `{offset,size}` slice
+  inside the appropriate blob. When an entry mask is present, readers skip entries
+  where the mask marks them as deleted.
 - `ArrayIoCache` uses `moka` under the hood; tune cache size and eviction policies at
   construction time to match workload characteristics.
 

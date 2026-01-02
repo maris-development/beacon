@@ -31,6 +31,7 @@ pub mod array_partition_group;
 pub mod array_partition_index;
 pub mod collection;
 pub mod collection_partition;
+pub mod entry_mask;
 pub mod error;
 pub mod io_cache;
 pub mod layout;

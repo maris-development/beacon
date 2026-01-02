@@ -38,6 +38,8 @@ pub enum BBFWritingError {
     ArrayPartitionPruningIndexWriteFailure(Box<dyn std::error::Error + Send + Sync>),
     #[error("Failed to write collection metadata: {0}")]
     CollectionMetadataWriteFailure(Box<dyn std::error::Error + Send + Sync>),
+    #[error("Entry mask length mismatch (expected {expected} entries, got {actual} entries)")]
+    EntryMaskLengthMismatch { expected: usize, actual: usize },
     #[error("Collection schema mismatch: expected {expected}, observed {actual}")]
     CollectionSchemaMismatch { expected: String, actual: String },
 }
@@ -125,4 +127,10 @@ pub enum BBFReadingError {
         partition_path: String,
         reason: String,
     },
+
+    #[error("Failed to decode entry mask: {reason}")]
+    EntryMaskDecode { reason: String },
+
+    #[error("Entry mask length mismatch (expected {expected} entries, got {actual} entries)")]
+    EntryMaskLengthMismatch { expected: usize, actual: usize },
 }
