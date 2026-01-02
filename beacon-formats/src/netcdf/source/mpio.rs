@@ -653,6 +653,18 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_read_schema_and_first_batch_with_worker_and_test_file() {
+        // The datasets object store is rooted at ./data/datasets; copy the test
+        // fixture into place so the worker can open it.
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files")
+            .join("gridded-example.nc");
+        let dst_dir = beacon_config::DATASETS_DIR_PATH.join("test-files");
+        std::fs::create_dir_all(&dst_dir).expect("create datasets test-files dir");
+        let dst = dst_dir.join("gridded-example.nc");
+        if !dst.exists() {
+            std::fs::copy(&src, &dst).expect("copy NetCDF test fixture into datasets dir");
+        }
+
         let exe = std::env::current_exe().unwrap();
         let bin = exe
             .parent()

@@ -321,8 +321,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_listing_table() {
+        let test_files_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("beacon-arrow-zarr")
+            .join("test_files");
         let object_store =
-            object_store::local::LocalFileSystem::new_with_prefix("./test_files").unwrap();
+            object_store::local::LocalFileSystem::new_with_prefix(test_files_dir).unwrap();
 
         let url = ListingTableUrl::try_new(
             "file:///".try_into().unwrap(),

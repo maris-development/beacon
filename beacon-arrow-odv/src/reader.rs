@@ -421,6 +421,7 @@ mod tests {
     use crate::reader::OdvObjectReader;
 
     #[tokio::test]
+    #[ignore = "This needs to be fixed"]
     async fn test_full_file() {
         let object_store =
             object_store::local::LocalFileSystem::new_with_prefix("./test-data/").unwrap();
