@@ -38,6 +38,8 @@ pub enum BBFWritingError {
     ArrayPartitionPruningIndexWriteFailure(Box<dyn std::error::Error + Send + Sync>),
     #[error("Failed to write collection metadata: {0}")]
     CollectionMetadataWriteFailure(Box<dyn std::error::Error + Send + Sync>),
+    #[error("Entry mask length mismatch (expected {expected} entries, got {actual} entries)")]
+    EntryMaskLengthMismatch { expected: usize, actual: usize },
     #[error("Collection schema mismatch: expected {expected}, observed {actual}")]
     CollectionSchemaMismatch { expected: String, actual: String },
 }
@@ -62,6 +64,16 @@ pub enum BBFReadingError {
     },
     #[error("Failed to decode metadata for collection at {meta_path}: {reason}")]
     CollectionMetadataDecode { meta_path: String, reason: String },
+    #[error("Failed to fetch resolution metadata for partition at {meta_path}: {source}")]
+    PartitionResolutionFetch {
+        meta_path: String,
+        #[source]
+        source: ObjectStoreError,
+    },
+    #[error("Failed to decode resolution metadata for partition at {meta_path}: {reason}")]
+    PartitionResolutionDecode { meta_path: String, reason: String },
+    #[error("Resolution metadata for partition {meta_path} is missing entry for hash {hash}")]
+    PartitionResolutionMissing { meta_path: String, hash: String },
     #[error("Failed to fetch bytes for partition {partition_path}: {source}")]
     PartitionBytesFetch {
         partition_path: String,
@@ -115,4 +127,25 @@ pub enum BBFReadingError {
         partition_path: String,
         reason: String,
     },
+
+    #[error("Projection requested unknown array '{array_name}' for partition {partition_path}")]
+    PartitionProjectionUnknownArray {
+        partition_path: String,
+        array_name: String,
+    },
+
+    #[error("Partition schema is missing expected field '{field}' for partition {partition_path}")]
+    PartitionSchemaMissingField {
+        partition_path: String,
+        field: String,
+    },
+
+    #[error("Failed to decode entry mask: {reason}")]
+    EntryMaskDecode { reason: String },
+
+    #[error("Entry selection length mismatch (expected {expected} entries, got {actual} entries)")]
+    EntrySelectionLengthMismatch { expected: usize, actual: usize },
+
+    #[error("Entry mask length mismatch (expected {expected} entries, got {actual} entries)")]
+    EntryMaskLengthMismatch { expected: usize, actual: usize },
 }

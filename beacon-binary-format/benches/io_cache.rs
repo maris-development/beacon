@@ -19,7 +19,8 @@ fn bench_cache_hits(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let cache = Arc::new(ArrayIoCache::new(10 * 1024 * 1024));
     let key = CacheKey {
-        array_partition_path: Path::from("bench/partition.arrow"),
+        blob_path: Path::from("bench/partition_blob.bbb"),
+        object_hash: "object-0".to_string(),
         group_index: 0,
     };
     let batch = Arc::new(build_batch());
@@ -68,7 +69,8 @@ fn bench_cache_misses(c: &mut Criterion) {
             let counter = counter.clone();
             let idx = counter.fetch_add(1, Ordering::Relaxed);
             let key = CacheKey {
-                array_partition_path: Path::from(format!("bench/partition_{idx}.arrow")),
+                blob_path: Path::from("bench/partition_blob.bbb"),
+                object_hash: format!("object_{idx}"),
                 group_index: 0,
             };
             async move {

@@ -3,18 +3,18 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use beacon_binary_format::collection::CollectionWriter;
-use beacon_binary_format::collection_partition::{CollectionPartitionWriter, WriterOptions};
+use beacon_binary_format_core::collection::CollectionWriter;
+use beacon_binary_format_core::collection_partition::{CollectionPartitionWriter, WriterOptions};
 use futures::stream;
 use object_store::ObjectStore;
 use object_store::path::Path;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
 use pyo3::types::PyDict;
 
 use crate::numpy_arrays::build_nd_array;
-use crate::utils::{StorageOptions, init_store, prepare_store_inputs, to_py_err};
+use crate::object_store_handle::ObjectStoreHandle;
+use crate::utils::to_py_err;
 
 struct CollectionInner {
     runtime: Arc<tokio::runtime::Runtime>,
@@ -25,20 +25,19 @@ struct CollectionInner {
 }
 
 impl CollectionInner {
-    fn new(base_dir: String, collection_path: String, storage: StorageOptions) -> PyResult<Self> {
+    fn new(store: ObjectStoreHandle, collection_path: String) -> PyResult<Self> {
         let runtime =
             Arc::new(tokio::runtime::Runtime::new().map_err(|err| {
                 PyRuntimeError::new_err(format!("failed to start runtime: {err}"))
             })?);
-        let store_handle = init_store(base_dir, storage)?;
-        let path = store_handle.resolve_collection_path(&collection_path)?;
-        let store = store_handle.store.clone();
+        let path = store.resolve_collection_path(&collection_path)?;
+        let store_arc = store.store.clone();
         let writer = runtime
-            .block_on(CollectionWriter::new(store.clone(), path.clone()))
+            .block_on(CollectionWriter::new(store_arc.clone(), path.clone()))
             .map_err(to_py_err)?;
         Ok(Self {
             runtime,
-            store,
+            store: store_arc,
             collection_path: path,
             writer: Arc::new(Mutex::new(writer)),
             partition_counter: AtomicUsize::new(0),
@@ -74,16 +73,10 @@ pub struct Collection {
 #[pymethods]
 impl Collection {
     #[new]
-    #[pyo3(signature = (base_dir, collection_path, storage_options=None, filesystem=None))]
-    pub fn new(
-        base_dir: String,
-        collection_path: String,
-        storage_options: Option<Bound<'_, PyDict>>,
-        filesystem: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<Self> {
-        let (normalized_base, storage) =
-            prepare_store_inputs(base_dir, storage_options, filesystem)?;
-        Self::with_storage(normalized_base, collection_path, storage)
+    pub fn new(store: ObjectStoreHandle, collection_path: String) -> PyResult<Self> {
+        Ok(Self {
+            inner: Arc::new(CollectionInner::new(store, collection_path)?),
+        })
     }
 
     /// Create a new logical partition writer.
@@ -121,23 +114,13 @@ impl Collection {
 }
 
 impl Collection {
-    fn with_storage(
-        base_dir: String,
-        collection_path: String,
-        storage: StorageOptions,
-    ) -> PyResult<Self> {
-        Ok(Self {
-            inner: Arc::new(CollectionInner::new(base_dir, collection_path, storage)?),
-        })
-    }
-
     fn runtime(&self) -> &Arc<tokio::runtime::Runtime> {
         &self.inner.runtime
     }
 
     fn append_partition(
         &self,
-        metadata: beacon_binary_format::collection_partition::CollectionPartitionMetadata,
+        metadata: beacon_binary_format_core::collection_partition::CollectionPartitionMetadata,
     ) -> PyResult<()> {
         let mut writer = lock_writer(&self.inner.writer)?;
         writer.append_partition(metadata).map_err(to_py_err)?;
@@ -220,18 +203,14 @@ pub struct CollectionBuilder {
 #[pymethods]
 impl CollectionBuilder {
     #[new]
-    #[pyo3(signature = (base_dir, collection_path, partition_name=None, max_group_size=None, storage_options=None, filesystem=None))]
+    #[pyo3(signature = (store, collection_path, partition_name=None, max_group_size=None))]
     pub fn new(
-        base_dir: String,
+        store: ObjectStoreHandle,
         collection_path: String,
         partition_name: Option<String>,
         max_group_size: Option<usize>,
-        storage_options: Option<Bound<'_, PyDict>>,
-        filesystem: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let (normalized_base, storage) =
-            prepare_store_inputs(base_dir, storage_options, filesystem)?;
-        let collection = Collection::with_storage(normalized_base, collection_path, storage)?;
+        let collection = Collection::new(store, collection_path)?;
         let partition = collection.create_partition(partition_name, max_group_size)?;
         Ok(Self {
             collection,

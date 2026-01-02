@@ -150,6 +150,7 @@ async fn read_partition(fixture: Arc<CollectionFixture>) {
             None,
             CollectionPartitionReadOptions {
                 max_concurrent_reads: READ_CONCURRENCY,
+                entry_selection: None,
             },
         )
         .await

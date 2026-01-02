@@ -20,21 +20,36 @@ use arrow_ipc::{
     root_as_footer,
 };
 use arrow_schema::{DataType, Schema};
-use bytes::Bytes;
 use hmac_sha256::Hash;
 use indexmap::IndexMap;
 use nd_arrow_array::NdArrowArray;
-use object_store::{ObjectStore, PutPayload};
+use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
+use std::io::SeekFrom;
 use tempfile::tempfile;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::{
     array_group::{ArrayGroup, ArrayGroupBuilder, ArrayGroupMetadata, ArrayGroupReader},
     array_partition_index::build_pruning_index,
     error::{BBFError, BBFReadingError, BBFResult, BBFWritingError},
     io_cache::{ArrayIoCache, CacheKey},
+    partition_resolution::ResolvedSlice,
 };
+
+/// Result of finishing an [`ArrayPartitionWriter`].
+///
+/// The Arrow IPC payload is stored in a temp file to avoid keeping potentially
+/// large partitions in memory. Callers can stream these files into the final
+/// partition layout (e.g. append into `partition_blob.bbb`).
+#[derive(Debug)]
+pub struct ArrayPartitionArtifact {
+    pub metadata: ArrayPartitionMetadata,
+    pub file: tokio::fs::File,
+    pub file_size: u64,
+    pub pruning_index_file: Option<tokio::fs::File>,
+    pub pruning_index_size: Option<u64>,
+}
 
 /// Summary describing one Arrow IPC partition stored in object storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +58,8 @@ pub struct ArrayPartitionMetadata {
     pub partition_offset: usize,
     pub partition_byte_size: usize,
     pub hash: String,
+    #[serde(default)]
+    pub pruning_index_hash: Option<String>,
     pub data_type: arrow::datatypes::DataType,
     #[serde(with = "crate::util::range_index_map")]
     pub groups: IndexMap<std::ops::Range<usize>, ArrayGroupMetadata>,
@@ -59,11 +76,6 @@ pub struct ArrayPartitionWriter {
     pub hasher: Hash,
     /// Optional temp file writer used while building the IPC file.
     pub temp_file: Option<arrow::ipc::writer::FileWriter<std::fs::File>>,
-    /// The object store to which the completed partition will be uploaded.
-    /// Object store used to upload finalized partition files.
-    pub store: Arc<dyn ObjectStore>,
-    /// Directory path in the object store where files are written.
-    pub dir: object_store::path::Path,
     /// Name of the array being written.
     pub array_name: String,
     /// Maximum byte size for a group before it is flushed.
@@ -109,12 +121,7 @@ impl ArrayPartitionWriter {
     }
 
     /// Create a new `ArrayPartitionWriter`.
-    ///
-    /// `store` is the object store to which finalized partition files will be
-    /// uploaded. `array_blob_dir` is the destination path inside the store.
     pub async fn new(
-        store: Arc<dyn ObjectStore>,
-        array_blob_dir: object_store::path::Path,
         array_name: String,
         max_group_size: usize,
         partition_data_type: Option<DataType>,
@@ -124,12 +131,11 @@ impl ArrayPartitionWriter {
         Ok(Self {
             hasher: Hash::new(),
             temp_file: None,
-            store,
-            dir: array_blob_dir,
             max_group_size,
             partition_metadata: ArrayPartitionMetadata {
                 num_elements: 0,
                 hash: String::new(),
+                pruning_index_hash: None,
                 data_type: partition_data_type.clone(),
                 groups: IndexMap::new(),
                 partition_offset: array_partition_offset,
@@ -213,21 +219,26 @@ impl ArrayPartitionWriter {
                 let schema = array_group.batch.schema();
                 let file_writer = Self::create_temp_file_writer(array_name, &schema)?;
                 *current_temp_file = Some(file_writer);
-                current_temp_file.as_mut().unwrap()
+                current_temp_file
+                    .as_mut()
+                    .expect("temp file writer initialized")
             }
         };
 
         // Compare schema's. If different, then map the type for the values list array column to the current array group as that always contains the super type of the two.
         if *file_writer.schema() != array_group.batch.schema() {
             // Iterate through the batches and update the values list array column to the partition type.
-            file_writer.finish().unwrap();
+            file_writer
+                .finish()
+                .map_err(BBFWritingError::ArrayGroupWriteFailure)?;
             let schema = array_group.batch.schema();
             let new_writer = Self::create_temp_file_writer(array_name, &schema)?;
             let input_file = std::mem::replace(file_writer, new_writer)
                 .into_inner()
                 .map_err(BBFWritingError::ArrayGroupWriteFailure)?;
 
-            let reader = arrow::ipc::reader::FileReader::try_new(input_file, None).unwrap();
+            let reader = arrow::ipc::reader::FileReader::try_new(input_file, None)
+                .map_err(BBFWritingError::ArrayGroupWriteFailure)?;
 
             for maybe_batch in reader {
                 let batch = maybe_batch.map_err(BBFWritingError::ArrayGroupWriteFailure)?;
@@ -237,14 +248,18 @@ impl ArrayPartitionWriter {
                     .zip(array_group.batch.columns().iter())
                     .map(|(old_col, new_col)| {
                         if old_col.data_type() != new_col.data_type() {
-                            // Cast old_col to new_col's data type
-
-                            arrow::compute::cast(old_col, new_col.data_type()).unwrap()
+                            arrow::compute::cast(old_col, new_col.data_type()).map_err(|err| {
+                                BBFWritingError::ArrowCastFailure(
+                                    old_col.data_type().clone(),
+                                    new_col.data_type().clone(),
+                                    err,
+                                )
+                            })
                         } else {
-                            old_col.clone()
+                            Ok(old_col.clone())
                         }
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 let updated_record_batch =
                     RecordBatch::try_new(array_group.batch.schema(), updated_batch)
@@ -265,15 +280,17 @@ impl ArrayPartitionWriter {
     }
 
     /// Finalize the partition: flush remaining groups, finish the temp
-    /// IPC file, compute its hash and upload it to the object store. Returns
-    /// the finalized `ArrayPartitionMetadata`.
-    pub async fn finish(mut self) -> Result<ArrayPartitionMetadata, BBFError> {
+    /// IPC file, compute its hash and return a temp-file backed artifact.
+    pub async fn finish(mut self) -> Result<ArrayPartitionArtifact, BBFError> {
         self.flush_current_group()?;
         // Finalize the temp file (if any)
         match self.temp_file {
             Some(mut fw) => {
-                fw.finish().unwrap();
-                let mut file = fw.into_inner().unwrap();
+                fw.finish()
+                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
+                let mut file = fw
+                    .into_inner()
+                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
 
                 let pruning_index = build_pruning_index(
                     &self.array_name,
@@ -281,65 +298,112 @@ impl ArrayPartitionWriter {
                     self.partition_data_type.clone(),
                 )?;
 
-                let tokio_f = tokio::fs::File::from_std(file);
+                let mut tokio_f = tokio::fs::File::from_std(file);
 
-                // Create a hash of the temp file, read the file in chunks of 1MB
+                tokio_f
+                    .seek(SeekFrom::Start(0))
+                    .await
+                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
+
+                // Hash the Arrow IPC file without materializing it into memory.
                 let chunk_size = 1024 * 1024;
                 let mut reader = tokio::io::BufReader::with_capacity(1024 * 1024, tokio_f);
                 let mut buffer = vec![0; chunk_size];
+                let mut file_size: u64 = 0;
                 loop {
-                    let bytes_read = reader.read(&mut buffer).await.unwrap();
+                    let bytes_read = reader
+                        .read(&mut buffer)
+                        .await
+                        .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
                     if bytes_read == 0 {
                         break;
                     }
                     self.hasher.update(&buffer[..bytes_read]);
+                    file_size = file_size.saturating_add(bytes_read as u64);
                 }
+
+                let mut tokio_f = reader.into_inner();
+                tokio_f
+                    .seek(SeekFrom::Start(0))
+                    .await
+                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
+
                 let hash_result = self.hasher.finalize();
                 let hash_string: String =
                     hash_result.iter().map(|b| format!("{:02x}", b)).collect();
-                // Set the hash of the partition in the metadata
-                self.partition_metadata.hash = hash_string.clone();
+
+                self.partition_metadata.hash = hash_string;
                 self.partition_metadata.data_type = self.partition_data_type.clone();
 
-                // Upload the temp file to object store
-                let object_path = self.dir.child(format!("{}.arrow", hash_string));
+                // Encode pruning index (if present) as Arrow IPC bytes in a temp file and hash it.
+                let mut pruning_index_file: Option<tokio::fs::File> = None;
+                let mut pruning_index_size: Option<u64> = None;
 
-                // Rewind the reader
-                reader
-                    .rewind()
-                    .await
-                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
-
-                // Create put upload stream
-                let mut obj_writer =
-                    object_store::buffered::BufWriter::new(self.store.clone(), object_path);
-
-                tokio::io::copy_buf(&mut reader, &mut obj_writer)
-                    .await
-                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
-
-                obj_writer
-                    .flush()
-                    .await
-                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
-
-                obj_writer
-                    .shutdown()
-                    .await
-                    .map_err(|e| BBFWritingError::ArrayPartitionFinalizeFailure(Box::new(e)))?;
-
-                // Write the pruning index if present
                 if let Some(pruning_index) = pruning_index {
-                    Self::write_pruning_index(
-                        self.store.clone(),
-                        self.dir.clone(),
-                        self.partition_metadata.hash.clone(),
-                        pruning_index,
-                    )
-                    .await?;
+                    let mut index_file = tempfile().map_err(|e| {
+                        BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(e))
+                    })?;
+                    {
+                        let mut writer = FileWriter::try_new_with_options(
+                            &mut index_file,
+                            &pruning_index.schema(),
+                            Self::ipc_opts(),
+                        )
+                        .map_err(|err| {
+                            BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(err))
+                        })?;
+                        writer.write(&pruning_index).map_err(|err| {
+                            BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(err))
+                        })?;
+                        writer.finish().map_err(|err| {
+                            BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(err))
+                        })?;
+                    }
+
+                    let mut tokio_index = tokio::fs::File::from_std(index_file);
+                    tokio_index.seek(SeekFrom::Start(0)).await.map_err(|e| {
+                        BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(e))
+                    })?;
+
+                    let chunk_size = 1024 * 1024;
+                    let mut reader = tokio::io::BufReader::with_capacity(1024 * 1024, tokio_index);
+                    let mut buffer = vec![0; chunk_size];
+                    let mut index_hasher = Hash::new();
+                    let mut index_size: u64 = 0;
+                    loop {
+                        let bytes_read = reader.read(&mut buffer).await.map_err(|e| {
+                            BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(e))
+                        })?;
+                        if bytes_read == 0 {
+                            break;
+                        }
+                        index_hasher.update(&buffer[..bytes_read]);
+                        index_size = index_size.saturating_add(bytes_read as u64);
+                    }
+
+                    let index_hash: String = index_hasher
+                        .finalize()
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
+                    self.partition_metadata.pruning_index_hash = Some(index_hash);
+
+                    let mut tokio_index = reader.into_inner();
+                    tokio_index.seek(SeekFrom::Start(0)).await.map_err(|e| {
+                        BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(e))
+                    })?;
+
+                    pruning_index_file = Some(tokio_index);
+                    pruning_index_size = Some(index_size);
                 }
 
-                Ok(self.partition_metadata)
+                Ok(ArrayPartitionArtifact {
+                    metadata: self.partition_metadata,
+                    file: tokio_f,
+                    file_size,
+                    pruning_index_file,
+                    pruning_index_size,
+                })
             }
             None => {
                 // No data was written
@@ -350,55 +414,6 @@ impl ArrayPartitionWriter {
                 ))
             }
         }
-    }
-
-    async fn write_pruning_index(
-        store: Arc<dyn ObjectStore>,
-        dir_path: object_store::path::Path,
-        partition_hash: String,
-        index: RecordBatch,
-    ) -> BBFResult<()> {
-        let path = dir_path.child(format!("{}.pruning_index.arrow", partition_hash));
-
-        // Encode the pruning batch using the same IPC options as array groups so the
-        // reader can rely on consistent metadata/compression settings.
-        let mut cursor = Cursor::new(Vec::new());
-        {
-            let mut writer =
-                FileWriter::try_new_with_options(&mut cursor, &index.schema(), Self::ipc_opts())
-                    .map_err(|err| {
-                        Self::pruning_index_write_error(&path, "initialise IPC writer", err)
-                    })?;
-
-            writer.write(&index).map_err(|err| {
-                Self::pruning_index_write_error(&path, "serialize pruning batch", err)
-            })?;
-
-            writer.finish().map_err(|err| {
-                Self::pruning_index_write_error(&path, "finalize IPC writer", err)
-            })?;
-        }
-
-        // Upload to object store
-        let payload = PutPayload::from_bytes(Bytes::from(cursor.into_inner()));
-        store
-            .put(&path, payload)
-            .await
-            .map_err(|err| Self::pruning_index_write_error(&path, "upload pruning index", err))?;
-
-        Ok(())
-    }
-
-    fn pruning_index_write_error(
-        path: &object_store::path::Path,
-        stage: &'static str,
-        err: impl std::error::Error + Send + Sync + 'static,
-    ) -> BBFWritingError {
-        let display_path = path.to_string();
-        let message = format!("failed to {stage} for pruning index {display_path}: {err}");
-        BBFWritingError::ArrayPartitionPruningIndexWriteFailure(Box::new(std::io::Error::other(
-            message,
-        )))
     }
 }
 
@@ -412,8 +427,9 @@ pub struct ArrayPartitionReader {
     store: Arc<dyn ObjectStore>,
     decoder: Arc<IPCDecoder>,
     array_name: String,
-    partition_group_path: object_store::path::Path,
-    partition_path: object_store::path::Path,
+    blob_path: object_store::path::Path,
+    blob_slice: ResolvedSlice,
+    pruning_index: Option<(object_store::path::Path, ResolvedSlice)>,
     partition_metadata: Arc<ArrayPartitionMetadata>,
     cache: ArrayIoCache,
 }
@@ -424,40 +440,35 @@ impl ArrayPartitionReader {
     pub async fn new(
         store: Arc<dyn ObjectStore>,
         array_name: String,
-        partition_group_path: object_store::path::Path,
+        blob_path: object_store::path::Path,
+        blob_slice: ResolvedSlice,
+        pruning_index: Option<(object_store::path::Path, ResolvedSlice)>,
         partition_metadata: ArrayPartitionMetadata,
         cache: ArrayIoCache,
     ) -> BBFResult<Self> {
-        let partition_path =
-            partition_group_path.child(format!("{}.arrow", partition_metadata.hash));
-
-        let decoder = Arc::new(Self::build_ipc_decoder(&store, &partition_path).await?);
+        let decoder = Arc::new(Self::build_ipc_decoder(&store, &blob_path, blob_slice).await?);
 
         Ok(Self {
             array_name,
             cache,
             decoder,
             store,
-            partition_group_path,
-            partition_path,
+            blob_path,
+            blob_slice,
+            pruning_index,
             partition_metadata: Arc::new(partition_metadata),
         })
     }
 
     async fn build_ipc_decoder(
         store: &Arc<dyn ObjectStore>,
-        partition_path: &object_store::path::Path,
+        blob_path: &object_store::path::Path,
+        blob_slice: ResolvedSlice,
     ) -> BBFResult<IPCDecoder> {
-        let partition_display = partition_path.to_string();
+        let partition_display = format!("{}#{}", blob_path.to_string(), blob_slice.offset);
         let trailer_len = Self::IPC_TRAILER_LEN_BYTES as u64;
 
-        let file_head = store.head(partition_path).await.map_err(|source| {
-            BBFReadingError::PartitionBytesFetch {
-                partition_path: partition_display.clone(),
-                source,
-            }
-        })?;
-        let file_size = file_head.size as u64;
+        let file_size = blob_slice.size;
 
         if file_size < trailer_len {
             return Err(BBFReadingError::PartitionTooSmall {
@@ -469,8 +480,22 @@ impl ArrayPartitionReader {
         }
 
         let trailer_start = file_size - trailer_len;
+        let trailer_start = blob_slice
+            .offset
+            .checked_add(trailer_start)
+            .ok_or_else(|| BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: "trailer offset overflow".to_string(),
+            })?;
+        let trailer_end = blob_slice.offset.checked_add(file_size).ok_or_else(|| {
+            BBFReadingError::PartitionFooterDecode {
+                partition_path: partition_display.clone(),
+                reason: "trailer end overflow".to_string(),
+            }
+        })?;
+
         let footer_len_bytes = store
-            .get_range(partition_path, trailer_start..file_size)
+            .get_range(blob_path, trailer_start..trailer_end)
             .await
             .map_err(|source| BBFReadingError::PartitionBytesFetch {
                 partition_path: partition_display.clone(),
@@ -518,7 +543,7 @@ impl ArrayPartitionReader {
         })?;
 
         let footer_bytes = store
-            .get_range(partition_path, footer_start..trailer_start)
+            .get_range(blob_path, footer_start..trailer_start)
             .await
             .map_err(|source| BBFReadingError::PartitionBytesFetch {
                 partition_path: partition_display.clone(),
@@ -554,26 +579,29 @@ impl ArrayPartitionReader {
 
     async fn fetch_partition_group(
         store: Arc<dyn ObjectStore>,
-        array_partition_path: object_store::path::Path,
+        blob_path: object_store::path::Path,
+        object_hash: String,
+        base_offset: u64,
         group_index: usize,
         decoder: Arc<IPCDecoder>,
         cache: ArrayIoCache,
     ) -> Result<Option<RecordBatch>, BBFError> {
         let cache_key = CacheKey {
-            array_partition_path: array_partition_path.clone(),
+            blob_path: blob_path.clone(),
+            object_hash: object_hash.clone(),
             group_index,
         };
 
         let decoder_for_loader = decoder.clone();
         let store_for_loader = store.clone();
-        let partition_path_for_loader = array_partition_path.clone();
-        let partition_display = array_partition_path.to_string();
+        let blob_path_for_loader = blob_path.clone();
+        let partition_display = format!("{}#{object_hash}", blob_path.to_string());
 
         cache
             .try_get_or_insert_with(cache_key, move |_key| {
                 let decoder = decoder_for_loader.clone();
                 let store = store_for_loader.clone();
-                let partition_path = partition_path_for_loader.clone();
+                let blob_path = blob_path_for_loader.clone();
                 let partition_display = partition_display.clone();
 
                 async move {
@@ -625,8 +653,23 @@ impl ArrayPartitionReader {
                             ),
                         })?;
 
+                    let absolute_start = base_offset.checked_add(offset).ok_or_else(|| {
+                        BBFReadingError::PartitionGroupLengthInvalid {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            reason: "base offset overflow".to_string(),
+                        }
+                    })?;
+                    let absolute_end = base_offset.checked_add(range_end).ok_or_else(|| {
+                        BBFReadingError::PartitionGroupLengthInvalid {
+                            partition_path: partition_display.clone(),
+                            group_index,
+                            reason: "base end overflow".to_string(),
+                        }
+                    })?;
+
                     let group_bytes = store
-                        .get_range(&partition_path, offset..range_end)
+                        .get_range(&blob_path, absolute_start..absolute_end)
                         .await
                         .map_err(|source| BBFReadingError::PartitionGroupBytesFetch {
                             partition_path: partition_display.clone(),
@@ -652,31 +695,26 @@ impl ArrayPartitionReader {
     }
 
     pub async fn read_partition_pruning_index(&self) -> BBFResult<Option<RecordBatch>> {
-        let pruning_index_path = self.partition_group_path.child(format!(
-            "{}.pruning_index.arrow",
-            self.partition_metadata.hash
-        ));
-
-        let bytes = match self.store.get(&pruning_index_path).await {
-            Ok(obj) => obj
-                .bytes()
-                .await
-                .map_err(|e| BBFReadingError::PartitionBytesFetch {
-                    partition_path: pruning_index_path.to_string(),
-                    source: e,
-                })?,
-            Err(object_store::Error::NotFound { .. }) => {
-                // No pruning index present
-                return Ok(None);
-            }
-            Err(e) => {
-                return Err(BBFReadingError::PartitionBytesFetch {
-                    partition_path: pruning_index_path.to_string(),
-                    source: e,
-                }
-                .into());
-            }
+        let Some((pruning_index_path, slice)) = self.pruning_index.as_ref() else {
+            return Ok(None);
         };
+
+        let slice_start = slice.offset;
+        let slice_end = slice.offset.checked_add(slice.size).ok_or_else(|| {
+            BBFReadingError::PartitionPruningIndexDecode {
+                partition_path: pruning_index_path.to_string(),
+                reason: "pruning index range overflow".to_string(),
+            }
+        })?;
+
+        let bytes = self
+            .store
+            .get_range(pruning_index_path, slice_start..slice_end)
+            .await
+            .map_err(|e| BBFReadingError::PartitionBytesFetch {
+                partition_path: pruning_index_path.to_string(),
+                source: e,
+            })?;
 
         let io_buf = Cursor::new(bytes);
 
@@ -698,7 +736,7 @@ impl ArrayPartitionReader {
         if batches.is_empty() {
             Ok(None)
         } else if batches.len() == 1 {
-            Ok(Some(batches.into_iter().next().unwrap()))
+            Ok(batches.into_iter().next())
         } else {
             let schema = batches[0].schema();
             let concatenated = arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
@@ -727,7 +765,9 @@ impl ArrayPartitionReader {
         if let Some((group_index, (range, _))) = group_match {
             let read_req = Self::fetch_partition_group(
                 self.store.clone(),
-                self.partition_path.clone(),
+                self.blob_path.clone(),
+                self.partition_metadata.hash.clone(),
+                self.blob_slice.offset,
                 group_index,
                 self.decoder.clone(),
                 self.cache.clone(),
@@ -749,8 +789,11 @@ impl ArrayPartitionReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::partition_resolution::PartitionResolution;
     use arrow::array::{Array, ArrayRef, Int32Array, UInt64Array};
+    use bytes::Bytes;
     use nd_arrow_array::dimensions::{Dimension, Dimensions};
+    use object_store::PutPayload;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use std::sync::Arc as StdArc;
@@ -775,28 +818,108 @@ mod tests {
             .expect("nd array creation")
     }
 
-    async fn build_writer(
+    async fn build_writer(max_group_size: usize) -> ArrayPartitionWriter {
+        ArrayPartitionWriter::new("test_array".to_string(), max_group_size, None, 0)
+            .await
+            .expect("writer init")
+    }
+
+    async fn materialize_reader(
         store: StdArc<dyn ObjectStore>,
         dir: Path,
-        max_group_size: usize,
-    ) -> ArrayPartitionWriter {
-        ArrayPartitionWriter::new(
+        artifact: ArrayPartitionArtifact,
+    ) -> ArrayPartitionReader {
+        let blob_path = dir.child(crate::layout::PARTITION_BLOB_FILE);
+        let mut blob = Vec::new();
+
+        let mut array_file = artifact.file;
+        array_file
+            .seek(SeekFrom::Start(0))
+            .await
+            .expect("seek array file");
+        array_file
+            .read_to_end(&mut blob)
+            .await
+            .expect("read array file");
+
+        let array_slice = ResolvedSlice {
+            offset: 0,
+            size: artifact.file_size,
+        };
+
+        let (pruning_index_path, pruning_index_slice, pruning_index_hash) =
+            if let (Some(index_hash), Some(mut index_file), Some(index_size)) = (
+                artifact.metadata.pruning_index_hash.clone(),
+                artifact.pruning_index_file,
+                artifact.pruning_index_size,
+            ) {
+                let mut index_bytes = Vec::new();
+                index_file
+                    .seek(SeekFrom::Start(0))
+                    .await
+                    .expect("seek index file");
+                index_file
+                    .read_to_end(&mut index_bytes)
+                    .await
+                    .expect("read index file");
+
+                let path = dir.child(crate::layout::PARTITION_PRUNING_INDEX_FILE);
+                store
+                    .put(&path, PutPayload::from_bytes(Bytes::from(index_bytes)))
+                    .await
+                    .expect("put pruning index");
+
+                (
+                    Some(path),
+                    Some(ResolvedSlice {
+                        offset: 0,
+                        size: index_size,
+                    }),
+                    Some(index_hash),
+                )
+            } else {
+                (None, None, None)
+            };
+
+        store
+            .put(&blob_path, PutPayload::from_bytes(Bytes::from(blob)))
+            .await
+            .expect("put blob");
+
+        // Also persist resolution.json to mimic the on-disk format.
+        let mut resolution = PartitionResolution::default();
+        resolution
+            .objects
+            .insert(artifact.metadata.hash.clone(), array_slice);
+        if let (Some(index_hash), Some(index_slice)) = (pruning_index_hash, pruning_index_slice) {
+            resolution.objects.insert(index_hash, index_slice);
+        }
+        let resolution_path = dir.child(crate::layout::PARTITION_RESOLUTION_FILE);
+        let payload = serde_json::to_vec(&resolution).expect("serialize resolution");
+        store
+            .put(
+                &resolution_path,
+                PutPayload::from_bytes(Bytes::from(payload)),
+            )
+            .await
+            .expect("put resolution");
+
+        ArrayPartitionReader::new(
             store,
-            dir,
             "test_array".to_string(),
-            max_group_size,
-            None,
-            0,
+            blob_path,
+            array_slice,
+            pruning_index_path.zip(pruning_index_slice),
+            artifact.metadata,
+            ArrayIoCache::new(1024 * 1024),
         )
         .await
-        .expect("writer init")
+        .expect("reader init")
     }
 
     #[tokio::test]
-    async fn finish_writes_partition_and_uploads() {
-        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
-        let dir = Path::from("tests/arrays");
-        let mut writer = build_writer(store.clone(), dir.clone(), usize::MAX).await;
+    async fn finish_returns_bytes_and_metadata() {
+        let mut writer = build_writer(usize::MAX).await;
 
         writer
             .append_array(Some(scalar_int32(&[1, 2])))
@@ -811,33 +934,22 @@ mod tests {
             .await
             .expect("append third");
 
-        let metadata = writer.finish().await.expect("finish success");
+        let artifact = writer.finish().await.expect("finish success");
 
-        assert_eq!(metadata.num_elements, 5);
-        assert_eq!(metadata.data_type, DataType::Int32);
-        assert_eq!(metadata.groups.len(), 1);
-        let (range, group_metadata) = metadata.groups.iter().next().unwrap();
+        assert!(artifact.file_size > 0);
+        assert_eq!(artifact.metadata.num_elements, 5);
+        assert_eq!(artifact.metadata.data_type, DataType::Int32);
+        assert_eq!(artifact.metadata.groups.len(), 1);
+        let (range, group_metadata) = artifact.metadata.groups.iter().next().unwrap();
         assert_eq!(range.clone(), 0..3);
         assert_eq!(group_metadata.num_chunks, 3);
         assert!(group_metadata.uncompressed_array_byte_size > 0);
-        assert!(!metadata.hash.is_empty());
-
-        let object_path = dir.child(format!("{}.arrow", metadata.hash));
-        let stored_bytes = store
-            .get(&object_path)
-            .await
-            .expect("object exists")
-            .bytes()
-            .await
-            .expect("object bytes");
-        assert!(!stored_bytes.is_empty());
+        assert!(!artifact.metadata.hash.is_empty());
     }
 
     #[tokio::test]
     async fn finish_tracks_null_chunks() {
-        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
-        let dir = Path::from("tests/nulls");
-        let mut writer = build_writer(store, dir, usize::MAX).await;
+        let mut writer = build_writer(usize::MAX).await;
 
         writer
             .append_array(Some(scalar_int32(&[1, 2])))
@@ -849,20 +961,18 @@ mod tests {
             .await
             .expect("append last");
 
-        let metadata = writer.finish().await.expect("finish success");
+        let artifact = writer.finish().await.expect("finish success");
 
-        assert_eq!(metadata.num_elements, 5);
-        assert_eq!(metadata.groups.len(), 1);
-        let (range, group_metadata) = metadata.groups.iter().next().unwrap();
+        assert_eq!(artifact.metadata.num_elements, 5);
+        assert_eq!(artifact.metadata.groups.len(), 1);
+        let (range, group_metadata) = artifact.metadata.groups.iter().next().unwrap();
         assert_eq!(range.clone(), 0..3);
         assert_eq!(group_metadata.num_chunks, 3);
     }
 
     #[tokio::test]
     async fn finish_records_multiple_groups_when_limit_hit() {
-        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
-        let dir = Path::from("tests/multi_group");
-        let mut writer = build_writer(store, dir, 1).await;
+        let mut writer = build_writer(1).await;
 
         writer
             .append_array(Some(scalar_int32(&[1, 2, 3])))
@@ -877,26 +987,22 @@ mod tests {
             .await
             .expect("append zero length");
 
-        let metadata = writer.finish().await.expect("finish success");
+        let artifact = writer.finish().await.expect("finish success");
 
-        assert_eq!(metadata.num_elements, 6);
-        assert_eq!(metadata.groups.len(), 3);
-        let ranges: Vec<_> = metadata.groups.keys().cloned().collect();
+        assert_eq!(artifact.metadata.num_elements, 6);
+        assert_eq!(artifact.metadata.groups.len(), 3);
+        let ranges: Vec<_> = artifact.metadata.groups.keys().cloned().collect();
         assert_eq!(ranges, vec![0..1, 1..2, 2..3]);
-        for group in metadata.groups.values() {
+        for group in artifact.metadata.groups.values() {
             assert_eq!(group.num_chunks, 1);
         }
     }
 
-    async fn build_partition_for_reader(
-        store: StdArc<dyn ObjectStore>,
-        dir: Path,
-    ) -> (
-        ArrayPartitionMetadata,
-        object_store::path::Path,
-        Arc<IPCDecoder>,
-    ) {
-        let mut writer = build_writer(store.clone(), dir.clone(), usize::MAX).await;
+    #[tokio::test]
+    async fn fetch_partition_group_reads_expected_batch() {
+        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
+        let dir = Path::from("tests/fetch_success");
+        let mut writer = build_writer(usize::MAX).await;
         writer
             .append_array(Some(scalar_int32(&[1, 2])))
             .await
@@ -905,36 +1011,26 @@ mod tests {
             .append_array(Some(scalar_int32(&[3, 4, 5])))
             .await
             .expect("append second");
+        let artifact = writer.finish().await.expect("finish success");
 
-        let metadata = writer.finish().await.expect("finish success");
-        let partition_path = dir.child(format!("{}.arrow", metadata.hash));
-        let decoder = ArrayPartitionReader::build_ipc_decoder(&store, &partition_path)
-            .await
-            .expect("decoder build");
-
-        (metadata, partition_path, Arc::new(decoder))
-    }
-
-    #[tokio::test]
-    async fn fetch_partition_group_reads_expected_batch() {
-        let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
-        let dir = Path::from("tests/fetch_success");
-        let (metadata, partition_path, decoder) =
-            build_partition_for_reader(store.clone(), dir).await;
+        let reader = materialize_reader(store.clone(), dir, artifact).await;
 
         let batch = ArrayPartitionReader::fetch_partition_group(
             store.clone(),
-            partition_path.clone(),
+            reader.blob_path.clone(),
+            reader.partition_metadata.hash.clone(),
+            reader.blob_slice.offset,
             0,
-            decoder,
-            ArrayIoCache::new(1024 * 1024),
+            reader.decoder.clone(),
+            reader.cache.clone(),
         )
         .await
         .expect("fetch succeeds")
         .expect("batch present");
 
         assert_eq!(batch.num_columns(), 3);
-        let expected_chunks = metadata
+        let expected_chunks = reader
+            .partition_metadata
             .groups
             .values()
             .next()
@@ -953,16 +1049,27 @@ mod tests {
     async fn fetch_partition_group_errors_when_index_is_out_of_bounds() {
         let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
         let dir = Path::from("tests/fetch_oob");
-        let (_metadata, partition_path, decoder) =
-            build_partition_for_reader(store.clone(), dir).await;
-        let missing_index = decoder.blocks.len();
+        let mut writer = build_writer(usize::MAX).await;
+        writer
+            .append_array(Some(scalar_int32(&[1, 2])))
+            .await
+            .expect("append first");
+        writer
+            .append_array(Some(scalar_int32(&[3, 4, 5])))
+            .await
+            .expect("append second");
+        let artifact = writer.finish().await.expect("finish success");
+        let reader = materialize_reader(store.clone(), dir, artifact).await;
+        let missing_index = reader.decoder.blocks.len();
 
         let _err = ArrayPartitionReader::fetch_partition_group(
             store,
-            partition_path,
+            reader.blob_path.clone(),
+            reader.partition_metadata.hash.clone(),
+            reader.blob_slice.offset,
             missing_index,
-            decoder,
-            ArrayIoCache::new(1024 * 1024),
+            reader.decoder.clone(),
+            reader.cache.clone(),
         )
         .await
         .expect_err("fetch should fail");
@@ -972,7 +1079,7 @@ mod tests {
     async fn read_array_returns_expected_chunk() {
         let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
         let dir = Path::from("tests/read_array_single_group");
-        let mut writer = build_writer(store.clone(), dir.clone(), usize::MAX).await;
+        let mut writer = build_writer(usize::MAX).await;
 
         writer
             .append_array(Some(scalar_int32(&[10, 20])))
@@ -983,16 +1090,8 @@ mod tests {
             .await
             .expect("append second");
 
-        let metadata = writer.finish().await.expect("finish success");
-        let reader = ArrayPartitionReader::new(
-            store.clone(),
-            "test_array".to_string(),
-            dir,
-            metadata,
-            ArrayIoCache::new(1024 * 1024),
-        )
-        .await
-        .expect("reader init");
+        let artifact = writer.finish().await.expect("finish success");
+        let reader = materialize_reader(store.clone(), dir, artifact).await;
 
         let maybe_array = reader.read_array(1).await.expect("read succeeds");
         let nd_array = maybe_array.expect("array exists");
@@ -1019,7 +1118,7 @@ mod tests {
         let first_group_size = first.as_arrow_array().get_buffer_memory_size()
             + second.as_arrow_array().get_buffer_memory_size();
 
-        let mut writer = build_writer(store.clone(), dir.clone(), first_group_size).await;
+        let mut writer = build_writer(first_group_size).await;
 
         writer
             .append_array(Some(first))
@@ -1034,18 +1133,14 @@ mod tests {
             .await
             .expect("append third chunk");
 
-        let metadata = writer.finish().await.expect("finish success");
-        assert_eq!(metadata.groups.len(), 2, "expected two groups recorded");
+        let artifact = writer.finish().await.expect("finish success");
+        assert_eq!(
+            artifact.metadata.groups.len(),
+            2,
+            "expected two groups recorded"
+        );
 
-        let reader = ArrayPartitionReader::new(
-            store,
-            "test_array".to_string(),
-            dir,
-            metadata,
-            ArrayIoCache::new(1024 * 1024),
-        )
-        .await
-        .expect("reader init");
+        let reader = materialize_reader(store, dir, artifact).await;
 
         let maybe_array = reader.read_array(2).await.expect("read succeeds");
         let nd_array = maybe_array.expect("array exists");
@@ -1062,7 +1157,7 @@ mod tests {
     async fn finish_writes_pruning_index_and_reader_loads_it() {
         let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
         let dir = Path::from("tests/pruning_index");
-        let mut writer = build_writer(store.clone(), dir.clone(), usize::MAX).await;
+        let mut writer = build_writer(usize::MAX).await;
 
         writer
             .append_array(Some(scalar_int32(&[11, 7, 9])))
@@ -1073,16 +1168,8 @@ mod tests {
             .await
             .expect("append second");
 
-        let metadata = writer.finish().await.expect("finish success");
-        let reader = ArrayPartitionReader::new(
-            store.clone(),
-            "test_array".to_string(),
-            dir,
-            metadata,
-            ArrayIoCache::new(1024 * 1024),
-        )
-        .await
-        .expect("reader init");
+        let artifact = writer.finish().await.expect("finish success");
+        let reader = materialize_reader(store.clone(), dir, artifact).await;
 
         let pruning_batch = reader
             .read_partition_pruning_index()
@@ -1129,7 +1216,7 @@ mod tests {
     async fn pruning_index_tracks_null_counts() {
         let store: StdArc<dyn ObjectStore> = StdArc::new(InMemory::new());
         let dir = Path::from("tests/pruning_index_nulls");
-        let mut writer = build_writer(store.clone(), dir.clone(), usize::MAX).await;
+        let mut writer = build_writer(usize::MAX).await;
 
         writer
             .append_array(Some(scalar_int32_nullable(&[
@@ -1145,16 +1232,8 @@ mod tests {
             .await
             .expect("append second");
 
-        let metadata = writer.finish().await.expect("finish success");
-        let reader = ArrayPartitionReader::new(
-            store.clone(),
-            "test_array".to_string(),
-            dir,
-            metadata,
-            ArrayIoCache::new(1024 * 1024),
-        )
-        .await
-        .expect("reader init");
+        let artifact = writer.finish().await.expect("finish success");
+        let reader = materialize_reader(store.clone(), dir, artifact).await;
 
         let pruning_batch = reader
             .read_partition_pruning_index()
@@ -1215,7 +1294,7 @@ mod tests {
         assert!(chunk1.as_arrow_array().get_buffer_memory_size() > max_group_size);
         assert!(chunk2.as_arrow_array().get_buffer_memory_size() > max_group_size);
 
-        let mut writer = build_writer(store.clone(), dir.clone(), max_group_size).await;
+        let mut writer = build_writer(max_group_size).await;
 
         writer
             .append_array(Some(chunk1))
@@ -1234,21 +1313,13 @@ mod tests {
             .await
             .expect("append fourth");
 
-        let metadata = writer.finish().await.expect("finish success");
+        let artifact = writer.finish().await.expect("finish success");
         assert!(
-            metadata.groups.len() >= 2,
+            artifact.metadata.groups.len() >= 2,
             "expected at least two flushed groups"
         );
 
-        let reader = ArrayPartitionReader::new(
-            store.clone(),
-            "test_array".to_string(),
-            dir,
-            metadata,
-            ArrayIoCache::new(1024 * 1024),
-        )
-        .await
-        .expect("reader init");
+        let reader = materialize_reader(store.clone(), dir, artifact).await;
 
         let pruning_batch = reader
             .read_partition_pruning_index()
@@ -1304,6 +1375,7 @@ mod tests {
         let metadata = ArrayPartitionMetadata {
             num_elements: 10,
             hash: "abc123".to_string(),
+            pruning_index_hash: None,
             data_type: DataType::Int32,
             groups,
             partition_offset: 0,

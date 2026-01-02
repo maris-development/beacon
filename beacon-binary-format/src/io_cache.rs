@@ -13,7 +13,8 @@ use crate::error::BBFError;
 /// Cache key that uniquely addresses a partition group inside object storage.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    pub array_partition_path: object_store::path::Path,
+    pub blob_path: object_store::path::Path,
+    pub object_hash: String,
     pub group_index: usize,
 }
 
