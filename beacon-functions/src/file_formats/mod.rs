@@ -10,6 +10,7 @@ use datafusion::{
 };
 
 pub mod read_arrow;
+pub mod read_bbf;
 pub mod read_csv;
 pub mod read_netcdf;
 pub mod read_parquet;
@@ -48,6 +49,11 @@ pub fn register_table_functions(
             session_ctx.clone(),
             data_object_store_url.clone(),
             datasets_object_store.clone(),
+        )),
+        Arc::new(read_bbf::ReadBBFFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
         )),
         Arc::new(read_schema::ReadSchemaFunc::new(
             runtime_handle,

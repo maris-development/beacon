@@ -10,3 +10,6 @@
 	path = beacon-studio
 	url = https://github.com/maris-development/beacon-studio.git
 	branch = main
+[submodule "beacon-binary-format"]
+	path = beacon-binary-format
+	url = https://github.com/maris-development/beacon-binary-format.git

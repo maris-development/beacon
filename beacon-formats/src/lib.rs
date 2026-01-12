@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub mod arrow;
+pub mod bbf;
 pub mod csv;
 pub mod geo_parquet;
 pub mod netcdf;
@@ -43,6 +44,7 @@ pub enum DatasetFormat {
     Arrow,
     NetCDF,
     Zarr,
+    BBF,
 }
 
 impl Dataset {
@@ -72,6 +74,7 @@ pub fn file_formats(
             NetcdfOptions::default(),
         )),
         Arc::new(ZarrFormatFactory),
+        Arc::new(bbf::BBFFormatFactory),
     ];
 
     for format in formats.iter() {

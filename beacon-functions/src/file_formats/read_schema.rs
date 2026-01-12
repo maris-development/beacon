@@ -7,6 +7,7 @@ use beacon_common::{
 };
 use beacon_formats::{
     arrow::ArrowFormat,
+    bbf::BBFFormat,
     csv::CsvFormat,
     netcdf::{
         object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
@@ -143,9 +144,10 @@ impl TableFunctionImpl for ReadSchemaFunc {
                             Default::default(),
                         )),
                         "zarr" => Arc::new(ZarrFormat::default()),
+                        "bbf" => Arc::new(BBFFormat::default()),
                         _ => {
                             return plan_err!(
-                                "read_schema second argument file_format must be one of: parquet, netcdf, zarr"
+                                "read_schema second argument file_format must be one of: parquet, netcdf, zarr, csv, arrow, bbf"
                             );
                         }
                     }
