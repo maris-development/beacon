@@ -1,4 +1,4 @@
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
@@ -29,7 +29,8 @@ unsafe impl NcTypeDescriptor for NcChar {
 }
 
 #[repr(transparent)]
-pub struct NcString(*mut i8);
+#[derive(Clone, Copy)]
+pub struct NcString(*mut std::ffi::c_char);
 unsafe impl NcTypeDescriptor for NcString {
     fn type_descriptor() -> NcVariableType {
         NcVariableType::String
@@ -42,12 +43,20 @@ impl NcString {
         let ptr = c_str.into_raw();
         Self(ptr.cast())
     }
-}
 
-impl Drop for NcString {
-    fn drop(&mut self) {
+    pub fn copy_to_string(&self) -> String {
         unsafe {
-            drop(CString::from_raw(self.0.cast()));
+            let c_str = CStr::from_ptr(self.0.cast());
+            let string = c_str.to_string_lossy().into_owned();
+            string
         }
     }
 }
+
+// impl Drop for NcString {
+//     fn drop(&mut self) {
+//         unsafe {
+//             drop(CString::from_raw(self.0.cast()));
+//         }
+//     }
+// }

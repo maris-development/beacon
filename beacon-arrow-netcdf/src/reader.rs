@@ -13,7 +13,7 @@ use crate::{
     chunked_stream::{Chunking, Stream},
     error::ArrowNetCDFError,
     nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner},
-    NcChar, NcResult,
+    NcChar, NcResult, NcString,
 };
 
 pub struct NetCDFArrowReader {
@@ -350,6 +350,24 @@ pub fn read_variable(
             }
             create_netcdf_ndarray!(variable, NcChar, Char, as_nc_char, Some(dims), extents)
         }
+        netcdf::types::NcVariableType::String => {
+            let strings = variable.get_strings(&extents)?;
+
+            let base = NetCDFNdArrayBase::<String> {
+                inner: ArrayD::from_shape_vec(
+                    dims.iter().map(|d| d.size).collect::<Vec<_>>(),
+                    strings,
+                )
+                .unwrap(),
+                fill_value: None,
+            };
+
+            let inner_array = NetCDFNdArrayInner::String(base);
+            Ok(NetCDFNdArray {
+                dims,
+                array: inner_array,
+            })
+        }
         nctype => Err(ArrowNetCDFError::UnsupportedNetCDFDataType(nctype)),
     }
 }
@@ -434,6 +452,7 @@ fn variable_to_arrow_type(variable: &Variable) -> NcResult<arrow::datatypes::Dat
             Ok(arrow::datatypes::DataType::Float64)
         }
         netcdf::types::NcVariableType::Char => Ok(arrow::datatypes::DataType::Utf8),
+        netcdf::types::NcVariableType::String => Ok(arrow::datatypes::DataType::Utf8),
         nctype => Err(ArrowNetCDFError::UnsupportedNetCDFDataType(nctype)),
     }
 }

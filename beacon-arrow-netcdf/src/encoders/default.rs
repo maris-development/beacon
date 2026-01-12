@@ -168,7 +168,7 @@ impl DefaultEncoder {
                 // println!("View: {:?}", view.len());
                 // println!("Extents: {:?}", extents);
 
-                variable.put(extents, view).unwrap();
+                variable.put(view, extents).unwrap();
                 // variable.put_values::<NcChar, _>(fixed_size_string, extents)?;
                 // std::mem::drop(fixed_size_string);
             }

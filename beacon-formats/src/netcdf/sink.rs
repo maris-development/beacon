@@ -621,7 +621,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab Int8 data to variable '{}': {}",
                     variable.name(),
@@ -636,7 +636,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab Int16 data to variable '{}': {}",
                     variable.name(),
@@ -651,7 +651,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab Int32 data to variable '{}': {}",
                     variable.name(),
@@ -666,7 +666,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab Int64 data to variable '{}': {}",
                     variable.name(),
@@ -697,7 +697,7 @@ fn write_ndarray_slab(
                     &dims, &slab_positions, &value_column
                 )?,
             };
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab Timestamp data to variable '{}': {}",
                     variable.name(),
@@ -712,7 +712,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab UInt8 data to variable '{}': {}",
                     variable.name(),
@@ -727,7 +727,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab UInt16 data to variable '{}': {}",
                     variable.name(),
@@ -743,7 +743,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab UInt32 data to variable '{}': {}",
                     variable.name(),
@@ -759,7 +759,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab UInt64 data to variable '{}': {}",
                     variable.name(),
@@ -774,7 +774,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab Float32 data to variable '{}': {}",
                     variable.name(),
@@ -789,7 +789,7 @@ fn write_ndarray_slab(
                 &value_column,
             )?;
 
-            variable.put(nc_extents, slab.view()).map_err(|e| {
+            variable.put(slab.view(), nc_extents).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "Failed to write slab Float64 data to variable '{}': {}",
                     variable.name(),
