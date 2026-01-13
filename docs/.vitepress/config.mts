@@ -8,6 +8,7 @@ export default defineConfig({
       light: 'light-plus',
     }
   },
+  head: [['link', { rel: 'icon', href: '/beacon/favicon.ico' }]],
   base: '/beacon/',
   ignoreDeadLinks: true,
   title: "Documentation",
@@ -72,24 +73,24 @@ export default defineConfig({
         items: [
           {
             text: 'Introduction',
-            link: '/docs/1.5.0-install/introduction'
+            link: '/docs/1.5.0-install/'
           },
           {
             text: 'Installation',
-            link: '/docs/1.5.0-install/',
+            link: '/docs/1.5.0-install/installation',
             collapsed: true,
             items: [
               {
                 text: 'Docker',
-                link: '/docs/1.5.0-install#deploy-using-docker-compose'
+                link: '/docs/1.5.0-install/installation#deploy-using-docker-compose'
               },
               {
                 text: 'Verify the installation',
-                link: '/docs/1.5.0-install#verify-the-installation'
+                link: '/docs/1.5.0-install/installation#verify-the-installation'
               },
               {
                 text: 'Troubleshooting',
-                link: '/docs/1.5.0-install#troubleshooting'
+                link: '/docs/1.5.0-install/installation#troubleshooting'
               },
             ]
           },
