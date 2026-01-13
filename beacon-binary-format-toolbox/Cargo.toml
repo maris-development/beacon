@@ -1,0 +1,18 @@
+[package]
+name = "beacon-binary-format-toolbox"
+version = "2.1.2"
+edition = "2024"
+
+[dependencies]
+clap = {version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"
+byte-unit = "5"
+glob = "0.3"
+beacon-binary-format = { path = "../beacon-binary-format" }
+beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
+arrow = { version = "^56.0.0", features = ["ipc"] }
+arrow-ipc = { version = "^56.0.0", features = ["zstd"]}
+parquet = "^56.0.0"
+tokio = { version = "1.47.0", features = ["full"] }
+regex = "1.11.2"
+futures = "0.3.31"
