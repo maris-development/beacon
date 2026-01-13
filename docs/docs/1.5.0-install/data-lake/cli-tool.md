@@ -24,12 +24,14 @@ To install the Beacon Data Lake CLI Tool, follow these steps:
    pip install beacon-datalake-cli
    ```
 
-3. Verify the installation by checking the version:
+3. Verify the installation by running the following command in your terminal (this can take a few seconds to start):
 
    ```bash
-   beacon-datalake-cli --version
+   beacon-datalake-cli
    ```
 
 ## Usage
 
 Once installed, you can use the Beacon Data Lake CLI Tool by running the `beacon-datalake-cli` which will start the interactive command-line interface.
+
+![Beacon Data Lake CLI Tool](/beacon-cli.png)

@@ -14,6 +14,7 @@ export default defineConfig({
   description: "Beacon Documentation",
   lastUpdated: true,
   themeConfig: {
+    logo: 'beacon-logo-small.png',
     // https://vitepress.dev/reference/default-theme-config
     nav: [
       { text: 'Beacon', link: 'https://beacon.maris.nl/', target: '_blank', rel: 'noopener' },
@@ -70,6 +71,10 @@ export default defineConfig({
         text: 'Installation Docs (1.5.0)',
         items: [
           {
+            text: 'Introduction',
+            link: '/docs/1.5.0-install/introduction'
+          },
+          {
             text: 'Installation',
             link: '/docs/1.5.0-install/',
             collapsed: true,
@@ -94,11 +99,15 @@ export default defineConfig({
             items: [
               {
                 text: 'Local File System',
-                link: '/docs/1.5.0-install/getting-started#local-file-system-example',
+                link: '/docs/1.5.0-install/getting-started#beacon-local-file-system',
               },
               {
                 text: 'S3 Cloud Storage (MinIO)',
-                link: '/docs/1.5.0-install/getting-started#cloud-storage-example-minio',
+                link: '/docs/1.5.0-install/getting-started#beacon-s3-cloud-storage',
+              },
+              {
+                text: 'More Examples',
+                link: '/docs/1.5.0-install/getting-started#ready-made-examples',
               },
             ]
           },

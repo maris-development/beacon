@@ -1,0 +1,34 @@
+:root {
+    --vp-home-hero-name-color: transparent;
+    --vp-home-hero-name-background: linear-gradient(270deg, #ff512f, #dd2476, #24c6dc);
+    --vp-home-hero-name-background-clip: text;
+
+}
+
+@keyframes gradientMove {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.VPHero {
+    justify-content: center;
+    text-align: center;
+    display: flex;
+}
+
+.actions {
+    justify-content: center;
+}
+
+.heading {
+    display: grid !important;
+    justify-items: center;
+}
+
+.heading .name {
+    font-size: 72px;
+    line-height: 82px;
+    background-size: 300% 300%;
+    animation: gradientMove 4s ease infinite;
+}
