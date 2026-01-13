@@ -29,6 +29,6 @@ features:
     icon: ⚙️
   - title: It just works
     details: Beacon has been designed for simplicity! 🌟 Experience seamless integration with existing file formats such as NetCDF, Zarr, Parquet and many others. 🛠️ You'll have a powerful data lake query engine up in minutes.
-    icon: 🙂
+    icon: 😄
 
 ---
