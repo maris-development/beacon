@@ -1,5 +1,9 @@
 # Datasets Harmonization
 
+:::info
+Schema Merging is applied automatically when querying multiple datasets with differing schemas. No additional configuration is required, Beacon will handle the merging process for you.
+:::
+
 ## Schema Merging Overview
 
 When working with multiple datasets that share similar structures but have slight variations in their schemas, it is essential to harmonize these schemas to enable seamless querying and analysis. Schema harmonization involves aligning the schemas of different datasets to create a unified view.
@@ -15,7 +19,6 @@ Beacon employs a schema merging strategy that intelligently combines the schemas
 4. **Conflict Resolution**: In cases where there are conflicts in field definitions (e.g., different data types for the same field), Beacon applies predefined rules to resolve these conflicts, such as promoting to a more general data type.
 
 ![Schema Harmonization](/schema-harmonization.png)
-
 
 ## N-Dimensional Datasets Harmonization
 

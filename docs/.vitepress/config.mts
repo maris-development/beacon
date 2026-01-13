@@ -192,6 +192,14 @@ export default defineConfig({
                   },
                 ]
               },
+              {
+                text: 'Python SDK',
+                link: '/docs/1.5.0-install/data-lake/python-sdk'
+              },
+              {
+                text: 'CLI Tool',
+                link: '/docs/1.5.0-install/data-lake/cli-tool'
+              }
             ]
           },
           {

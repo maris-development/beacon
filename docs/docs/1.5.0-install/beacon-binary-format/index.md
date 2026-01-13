@@ -1,5 +1,11 @@
 # Beacon Binary Format
 
+:::info Open Source (AGPL V3)
+Beacon Binary Format is an open source file format available under the AGPL V3 license. You can find the source code and contribute to its development on GitHub: [beacon-binary-format](https://github.com/maris-development/beacon-binary-format)
+
+It is available as a standalone library but also integrated into the [Beacon Data Lake Github Repository](https://github.com/maris-development/beacon) as a submodule.
+:::
+
 Beacon Binary Format is a collection file format that allows users to combine multiple datasets into a single file while still maintaining the ability to access individual or multiple files inside the collection. It is designed to be fast, efficient, and scalable, making it ideal for large-scale marine and oceanographic datasets.
 
 Its possible to store millions of datasets into a individual Beacon Binary Format file without sacrificing performance and making it immediately accessible for Beacon. Beacon can then leverage multiple threads at the same time to prune and read the file in parallel.

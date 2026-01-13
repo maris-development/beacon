@@ -1,5 +1,9 @@
 # 🛠️ Installation
 
+:::info Open Source (AGPL V3)
+Beacon is an open source project available under the AGPL V3 license. You can find the source code and contribute to its development on GitHub: [beacon](https://github.com/maris-development/beacon)
+:::
+
 Welcome to the installation guide for Beacon. In this chapter, we will walk you through the installation process of Beacon using a Docker image. By leveraging Docker, you can quickly and easily deploy Beacon on various operating systems without worrying about complex dependencies or compatibility issues.
 
 To proceed with the installation, make sure you have Docker installed on your system. Docker provides comprehensive installation guides for various operating systems on their official website (https://www.docker.com/). Follow the instructions specific to your operating system to set up Docker.

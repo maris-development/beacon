@@ -3,6 +3,7 @@
 To quickly get started with the Beacon Data Lake, we have created a example repository that contains a complete setup of the Beacon Data Lake using Docker Compose. This example repository is available at [beacon-example](https://github.com/maris-development/beacon-example).
 
 Install docker and docker-compose on your machine. You can find the installation instructions for Docker and Docker Compose in the official documentation:
+
 - [Docker Installation](https://docs.docker.com/get-docker/)
 
 To run the example repository, follow these steps:
@@ -14,6 +15,8 @@ git clone https://github.com/maris-development/beacon-example.git
 ```
 
 ## Local File System Example
+
+Example of running Beacon Data Lake with datasets stored locally on your machine.
 
 - Navigate into the cloned directory:
 
@@ -30,6 +33,12 @@ docker-compose up -d
 - Open your web browser and navigate to `http://localhost:8080/swagger` to access the Beacon Swagger Page.
 
 ## S3 Cloud Storage Example (MinIO)
+
+Example of running Beacon Data Lake with datasets stored in an S3-compatible cloud storage. This example uses MinIO as the S3-compatible storage solution but can be adapted to other S3-compatible services such as Amazon S3.
+
+:::tip
+You can run Beacon against existing non-owned S3 buckets that allow for anonymous access.
+:::
 
 - Navigate into the cloned directory:
 

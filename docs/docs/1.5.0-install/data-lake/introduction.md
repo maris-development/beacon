@@ -114,6 +114,3 @@ Notes:
 - PHYSICAL TABLES are efficient, materialized results from SQL queries allowing 
   for various optimization and chunking rules to be applied. These are backed by formats like Parquet or Beacon Binary Format.
 ```
-
-## Schema Merging
-

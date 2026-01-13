@@ -4,7 +4,7 @@ layout: home
 
 hero:
   name: "Beacon"
-  text: "Open Source High-Performance ARCO Data Lake Engine"
+  text: "High-Performance ARCO Data Lake Engine"
   tagline: Making climate data available to everyone
   actions:
     - theme: brand
