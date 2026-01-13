@@ -213,9 +213,27 @@ export default defineConfig({
             ]
           },
           {
+            text: 'Data Lake Querying',
+            link: '/docs/1.5.0-install/data-lake-querying',
+            items: [
+              {
+                text: 'Introduction',
+                link: '/docs/1.5.0-install/data-lake-querying'
+              },
+              {
+                text: 'Querying with SQL',
+                link: '/docs/1.5.0-install/data-lake-querying/sql',
+              },
+              {
+                text: 'Querying with JSON',
+                link: '/docs/1.5.0-install/data-lake-querying/json',
+              }
+            ]
+          },
+          {
             text: 'Tuning for performance',
             link: '/docs/1.5.0-install/performance',
-            collapsed: true,
+            collapsed: false,
             items: [
               {
                 text: 'NetCDF',
