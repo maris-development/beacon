@@ -67,7 +67,9 @@ Making Beacon work with S3 compatible cloud storage is straightforward. It just 
 
 Create a docker compose file with the following content:
 
-```yaml  {19-23}
+::: code-group
+
+```yaml  [s3_auth.docker-compose.yml]{19-23}
 version: "3.8"
 
 services:
@@ -92,9 +94,37 @@ services:
             - BEACON_S3_BUCKET=beacon-bucket # Set your S3 bucket name here. Make sure the bucket exists. // [!code ++]
             - BEACON_S3_DATA_LAKE=true # Enable S3 data lake mode. This will make Beacon use S3 as data lake storage. // [!code ++]
         volumes:
-            - ./datasets:/beacon/data/datasets # Adjust the volume mapping as required. Folder containing your datasets. // [!code --]
             - ./tables:/beacon/data/tables # Adjust the volume mapping as required. This enable persistence of created tables.
 ```
+
+```yaml  [s3_anonymous.docker-compose.yml]{19-23}
+version: "3.8"
+
+services:
+    beacon:
+        image: ghcr.io/maris-development/beacon:latest
+        container_name: beacon
+        restart: unless-stopped
+        ports:
+            - "8080:8080" # Adjust the port mapping as needed
+        environment:
+            - BEACON_ADMIN_USERNAME=admin # Replace with your admin username
+            - BEACON_ADMIN_PASSWORD=securepassword # Replace with your admin password
+            - BEACON_VM_MEMORY_SIZE=4096 # Adjust memory allocation as needed (in MB)
+            - BEACON_DEFAULT_TABLE=default # Set default table name
+            - BEACON_LOG_LEVEL=INFO # Adjust log level
+            - BEACON_HOST=0.0.0.0 # Set IP address to listen on
+            - BEACON_PORT=8080 # Set port number
+
+            - AWS_ENDPOINT=http://minio:9000 # Set your S3 endpoint here. Adjust to your S3 provider. // [!code ++]
+            - AWS_SKIP_SIGNATURE=true # Set to true to skip request signing for anonymous access. // [!code ++]
+            - BEACON_S3_BUCKET=beacon-bucket # Set your S3 bucket name here. Make sure the bucket exists. // [!code ++]
+            - BEACON_S3_DATA_LAKE=true # Enable S3 data lake mode. This will make Beacon use S3 as data lake storage. // [!code ++]
+        volumes:
+            - ./tables:/beacon/data/tables # Adjust the volume mapping as required. This enable persistence of created tables.
+```
+
+:::
 
 :::warning
 Make sure to replace the environment variable values such as `BEACON_ADMIN_USERNAME` and `BEACON_ADMIN_PASSWORD` with your desired credentials for accessing the Beacon admin interface.

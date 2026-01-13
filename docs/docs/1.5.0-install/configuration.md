@@ -28,6 +28,7 @@ Some of the configuration options can be set using environment variables. The fo
   - `AWS_SECRET_ACCESS_KEY` - S3 secret_access_key. Only required when the S3-compatible object storage requires authentication.
   - `AWS_DEFAULT_REGION` -  S3 optional region
   - `AWS_ENDPOINT` -  S3 endpoint. This should include the full URL to the S3-compatible object storage service. If the endpoint URL does not contain the bucket name, the bucket name should be specified using the `BEACON_S3_BUCKET` environment variable.
+  - `AWS_SKIP_SIGNATURE` - Set to `true` to skip request signing. Useful for local S3-compatible object storage that does not require signed requests.
 - `BEACON_S3_BUCKET` - The bucket name for the S3-compatible object storage. If the env variable `BEACON_S3_DATA_LAKE` is enabled, and the `AWS_ENDPOINT` doesn't contain the bucket name, the bucket name should be specified here.
 
 - `BEACON_ENABLE_FS_EVENTS` - Whether to enable file system events monitoring. Set to `true` to enable. Uses inotify on Linux systems. Default is `false`. This is not supported when using S3 data lake.
