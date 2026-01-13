@@ -14,7 +14,6 @@ export default defineConfig({
   description: "Beacon Documentation",
   lastUpdated: true,
   themeConfig: {
-    logo: 'beacon-logo-small.png',
     // https://vitepress.dev/reference/default-theme-config
     nav: [
       { text: 'Beacon', link: 'https://beacon.maris.nl/', target: '_blank', rel: 'noopener' },
