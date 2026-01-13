@@ -349,7 +349,7 @@ export default defineConfig({
                 },
                 {
                   text: 'Querying with JSON',
-                  link: '/docs/1.4.0/query-docs/querying/json',
+                  link: '/docs/1.5.0/query-docs/querying/json',
                   items: [
                     {
                       text: 'Selecting Columns',
