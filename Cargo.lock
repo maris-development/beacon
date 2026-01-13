@@ -922,6 +922,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-arrow-zarr",
+ "beacon-binary-format",
  "beacon-common",
  "beacon-config",
  "beacon-formats",

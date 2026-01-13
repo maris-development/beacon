@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use beacon_binary_format::object_store::ArrowBBFObjectWriter;
 use beacon_formats::zarr::{ZarrFormat, statistics::ZarrStatisticsSelection};
 use datafusion::{
     datasource::{
@@ -8,6 +9,7 @@ use datafusion::{
     },
     prelude::SessionContext,
 };
+use futures::StreamExt;
 
 #[typetag::serde(tag = "file_format")]
 #[async_trait::async_trait]
@@ -85,4 +87,59 @@ impl TableFileFormat for ZarrFileFormat {
             ZarrFormat::default().with_zarr_statistics(self.statistics.clone()),
         ))
     }
+}
+
+// Support for BBF File Format
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct BBFFileFormat;
+
+#[typetag::serde(name = "bbf")]
+#[async_trait::async_trait]
+impl TableFileFormat for BBFFileFormat {
+    fn file_ext(&self) -> String {
+        "bbf".to_string()
+    }
+
+    async fn apply_operation(
+        &self,
+        op: serde_json::Value,
+        urls: Vec<ListingTableUrl>,
+        session_ctx: Arc<SessionContext>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Parse operation from serde_json::Value
+        let operation: BBFOperation = serde_json::from_value(op)?;
+
+        for url in urls {
+            let object_store = session_ctx.runtime_env().object_store(url.object_store())?;
+            let state = session_ctx.state();
+            let mut objects = url.list_all_files(&state, &object_store, "").await?;
+
+            while let Some(object_meta) = objects.next().await {
+                // For each file, create an ArrowBBFObjectWriter and perform the operation
+                let object_meta = object_meta?;
+                let writer =
+                    ArrowBBFObjectWriter::new(object_meta.location.clone(), object_store.clone());
+
+                match &operation {
+                    BBFOperation::DeleteEntries { entries } => {
+                        // Here you would implement the logic to delete entries from the BBF file.
+                        // This is a placeholder for demonstration purposes.
+                        beacon_binary_format::ops::async_delete_entries(
+                            Arc::new(writer),
+                            entries.clone(),
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub enum BBFOperation {
+    #[serde(rename = "delete_entries")]
+    DeleteEntries { entries: Vec<String> },
 }
