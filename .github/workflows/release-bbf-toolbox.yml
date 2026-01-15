@@ -36,8 +36,8 @@ jobs:
           - os: macos-14 # Apple Silicon (ARM64)
             target: aarch64-apple-darwin
 
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout repository (with submodules)
@@ -80,47 +80,8 @@ jobs:
           brew update
           brew install pkg-config hdf5 netcdf
 
-      - name: Install conda (Windows)
-        if: runner.os == 'Windows'
-        uses: conda-incubator/setup-miniconda@v3
-        with:
-          miniforge-variant: Miniforge3
-          miniforge-version: latest
-          auto-update-conda: false
-          activate-environment: beacon
-          channels: conda-forge
-          channel-priority: strict
-
-      - name: Install NetCDF + HDF5 (conda, Windows)
-        if: runner.os == 'Windows'
-        shell: bash -l {0}
-        run: |
-          conda install -y libnetcdf=4.8.1 hdf5 pkg-config
-
-      - name: Set up MSVC (Windows)
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Export HDF5 + NetCDF vars (Windows)
-        if: runner.os == 'Windows'
-        shell: bash -l {0}
-        run: |
-          # Make CONDA_PREFIX available to pwsh steps too.
-          echo "CONDA_PREFIX=$CONDA_PREFIX" >> "$GITHUB_ENV"
-          echo "HDF5_DIR=$CONDA_PREFIX/Library" >> "$GITHUB_ENV"
-          echo "NETCDF_DIR=$CONDA_PREFIX/Library" >> "$GITHUB_ENV"
-          echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
-          echo "$CONDA_PREFIX/DLLs" >> "$GITHUB_PATH"
-
       - name: Build (Linux/macOS)
         if: runner.os != 'Windows'
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path beacon-binary-format-toolbox/Cargo.toml
-
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        shell: bash -l {0}
         run: cargo build --release --target ${{ matrix.target }} --manifest-path beacon-binary-format-toolbox/Cargo.toml
 
       - name: Package (Linux/macOS)
@@ -134,45 +95,6 @@ jobs:
           cp "$BIN_PATH" "dist/${BIN_NAME}-${RELEASE_TAG}-${{ matrix.target }}"
           tar -C dist -czf "dist/${BIN_NAME}-${RELEASE_TAG}-${{ matrix.target }}.tar.gz" "${BIN_NAME}-${RELEASE_TAG}-${{ matrix.target }}"
           rm "dist/${BIN_NAME}-${RELEASE_TAG}-${{ matrix.target }}"
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $binName = "beacon-binary-format-toolbox"
-          $binPath = "beacon-binary-format-toolbox/target/${{ matrix.target }}/release/$binName.exe"
-
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $stageDir = "dist/$binName-$env:RELEASE_TAG-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-
-          # Copy the executable
-          Copy-Item $binPath (Join-Path $stageDir "$binName.exe")
-
-          # Copy runtime DLLs from conda (netcdf/hdf5 and their dependencies)
-          $condaPrefix = $env:CONDA_PREFIX
-          if ([string]::IsNullOrWhiteSpace($condaPrefix)) {
-            throw "CONDA_PREFIX is not set; conda environment was not activated."
-          }
-          $dllDirs = @(
-            (Join-Path $condaPrefix "Library\\bin"),
-            (Join-Path $condaPrefix "DLLs")
-          )
-          foreach ($dllDir in $dllDirs) {
-            if (Test-Path $dllDir) {
-              Get-ChildItem -Path (Join-Path $dllDir "*.dll") -File | ForEach-Object {
-                Copy-Item $_.FullName $stageDir
-              }
-            }
-          }
-
-          # Create zip with exe + dlls
-          $zipPath = "dist/$binName-$env:RELEASE_TAG-${{ matrix.target }}.zip"
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-          Compress-Archive -Force -Path (Join-Path $stageDir "*") -DestinationPath $zipPath
-
-          # Cleanup staging directory
-          Remove-Item $stageDir -Recurse -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
