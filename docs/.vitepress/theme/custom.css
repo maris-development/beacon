@@ -3,6 +3,17 @@
     --vp-home-hero-name-background: linear-gradient(270deg, #ff512f, #dd2476, #24c6dc);
     --vp-home-hero-name-background-clip: text;
 
+    /* Deep Iris */
+    /* --vp-c-deep-iris-1: #895eff;
+    --vp-c-deep-iris-2: #5f24dd;
+    --vp-c-deep-iris-3: #4a1bb3;
+    --vp-c-deep-iris-soft: rgba(95, 36, 221, 0.16);
+
+
+    --vp-c-brand: var(--vp-c-deep-iris-2);
+    --vp-c-brand-1: var(--vp-c-deep-iris-1);
+    --vp-c-brand-2: var(--vp-c-deep-iris-2);
+    --vp-c-brand-3: var(--vp-c-deep-iris-3); */
 }
 
 @keyframes gradientMove {
@@ -20,6 +31,7 @@
 .actions {
     justify-content: center;
 }
+
 
 .heading {
     display: grid !important;

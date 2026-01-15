@@ -8,13 +8,13 @@ hero:
   tagline: Making large climate datasets instantly queryable by users using SQL and JSON.
   actions:
     - theme: brand
-      text: Install Beacon Node
+      text: Getting Started
       link: /docs/1.5.0-install
-    - theme: brand
-      text: Query Beacon Nodes
-      link: /docs/1.5.0/query-docs/
     - theme: alt
-      text: Existing Nodes
+      text: Documentation
+      link: /docs/1.5.0/query-docs/api-reference
+    - theme: alt
+      text: Existing Data Lake Nodes
       link: /available-nodes/available-nodes
 
 features:

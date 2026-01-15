@@ -11,16 +11,19 @@ export default defineConfig({
   head: [['link', { rel: 'icon', href: '/beacon/favicon.ico' }]],
   base: '/beacon/',
   ignoreDeadLinks: true,
-  title: "Documentation",
+  title: "Beacon",
   description: "Beacon Documentation",
   lastUpdated: true,
   themeConfig: {
+    search: {
+      provider: 'local'
+    },
     // https://vitepress.dev/reference/default-theme-config
     logo: '/beacon-logo-small.png',
     nav: [
       { text: 'Beacon', link: 'https://beacon.maris.nl/', target: '_blank', rel: 'noopener' },
       {
-        text: 'How to install', items: [
+        text: 'Docs', items: [
           {
             text: '1.5.0 (latest)',
             link: '/docs/1.5.0-install/',
@@ -29,7 +32,7 @@ export default defineConfig({
         ]
       },
       {
-        text: 'Query docs', items: [
+        text: 'API reference', items: [
           {
             text: '1.5.0 (latest)',
             link: '/docs/1.5.0/query-docs/data-lake',
