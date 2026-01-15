@@ -80,33 +80,47 @@ jobs:
           brew update
           brew install pkg-config hdf5 netcdf
 
-      - name: Install system dependencies (Windows)
+      - name: Install conda (Windows)
         if: runner.os == 'Windows'
-        uses: lukka/run-vcpkg@v11
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          vcpkgGitCommitId: "389d14fa0e0692f36967e9eb5499e909317644d5"
-          runVcpkgInstall: true
-          vcpkgJsonGlob: "vcpkg.json"
-        env:
-          VCPKG_DEFAULT_TRIPLET: x64-windows
-          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows
+          miniforge-variant: Miniforge3
+          miniforge-version: latest
+          auto-update-conda: false
+          activate-environment: beacon
+          channels: conda-forge
+          channel-priority: strict
+
+      - name: Install NetCDF + HDF5 (conda, Windows)
+        if: runner.os == 'Windows'
+        shell: bash -l {0}
+        run: |
+          conda install -y libnetcdf=4.8.1 hdf5 pkg-config
+
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Export HDF5 + NetCDF vars (Windows)
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: bash -l {0}
         run: |
-          $prefix = "$env:GITHUB_WORKSPACE\vcpkg_installed\x64-windows"
+          # Make CONDA_PREFIX available to pwsh steps too.
+          echo "CONDA_PREFIX=$CONDA_PREFIX" >> "$GITHUB_ENV"
+          echo "HDF5_DIR=$CONDA_PREFIX/Library" >> "$GITHUB_ENV"
+          echo "NETCDF_DIR=$CONDA_PREFIX/Library" >> "$GITHUB_ENV"
+          echo "$CONDA_PREFIX/Library/bin" >> "$GITHUB_PATH"
+          echo "$CONDA_PREFIX/DLLs" >> "$GITHUB_PATH"
 
-          # Rust hdf5-metno-sys expects the *cmake config dir*
-          echo "HDF5_DIR=$prefix\lib\cmake\hdf5" >> $env:GITHUB_ENV
+      - name: Build (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path beacon-binary-format-toolbox/Cargo.toml
 
-          # NetCDF crates are fine with the prefix
-          echo "NETCDF_DIR=$prefix" >> $env:GITHUB_ENV
-
-          # Runtime DLLs
-          echo "$prefix\bin" >> $env:GITHUB_PATH
-
-      - name: Build
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash -l {0}
         run: cargo build --release --target ${{ matrix.target }} --manifest-path beacon-binary-format-toolbox/Cargo.toml
 
       - name: Package (Linux/macOS)
@@ -135,20 +149,21 @@ jobs:
           # Copy the executable
           Copy-Item $binPath (Join-Path $stageDir "$binName.exe")
 
-          # Copy runtime DLLs from vcpkg (netcdf/hdf5 and their dependencies)
-          $triplet = $env:VCPKG_DEFAULT_TRIPLET
-          $installedRoot = $env:VCPKG_INSTALLED_DIR
-          if ([string]::IsNullOrWhiteSpace($installedRoot)) {
-            $installedRoot = "$env:GITHUB_WORKSPACE\\vcpkg_installed"
+          # Copy runtime DLLs from conda (netcdf/hdf5 and their dependencies)
+          $condaPrefix = $env:CONDA_PREFIX
+          if ([string]::IsNullOrWhiteSpace($condaPrefix)) {
+            throw "CONDA_PREFIX is not set; conda environment was not activated."
           }
-          $prefix = Join-Path $installedRoot $triplet
-          $dllDir = Join-Path $prefix "bin"
-          if (Test-Path $dllDir) {
-            Get-ChildItem -Path (Join-Path $dllDir "*.dll") -File | ForEach-Object {
-              Copy-Item $_.FullName $stageDir
+          $dllDirs = @(
+            (Join-Path $condaPrefix "Library\\bin"),
+            (Join-Path $condaPrefix "DLLs")
+          )
+          foreach ($dllDir in $dllDirs) {
+            if (Test-Path $dllDir) {
+              Get-ChildItem -Path (Join-Path $dllDir "*.dll") -File | ForEach-Object {
+                Copy-Item $_.FullName $stageDir
+              }
             }
-          } else {
-            Write-Warning "vcpkg DLL directory not found: $dllDir"
           }
 
           # Create zip with exe + dlls
