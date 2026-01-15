@@ -91,18 +91,20 @@ jobs:
           VCPKG_DEFAULT_TRIPLET: x64-windows
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows
 
-      - name: Export NetCDF & HDF5 env vars
+      - name: Export HDF5 + NetCDF vars (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           $prefix = "$env:GITHUB_WORKSPACE\vcpkg_installed\x64-windows"
+
+          # Rust hdf5-metno-sys expects the *cmake config dir*
+          echo "HDF5_DIR=$prefix\lib\cmake\hdf5" >> $env:GITHUB_ENV
+
+          # NetCDF crates are fine with the prefix
           echo "NETCDF_DIR=$prefix" >> $env:GITHUB_ENV
-          echo "HDF5_DIR=$prefix" >> $env:GITHUB_ENV
-          # Needed so DLLs are found at runtime
+
+          # Runtime DLLs
           echo "$prefix\bin" >> $env:GITHUB_PATH
-          # print for debugging
-          echo "NETCDF_DIR=$env:NETCDF_DIR"
-          echo "HDF5_DIR=$env:HDF5_DIR"
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --manifest-path beacon-binary-format-toolbox/Cargo.toml
