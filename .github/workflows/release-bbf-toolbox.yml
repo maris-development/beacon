@@ -86,7 +86,7 @@ jobs:
         with:
           vcpkgGitCommitId: "389d14fa0e0692f36967e9eb5499e909317644d5"
           runVcpkgInstall: true
-          vcpkgJsonGlob: "**/vcpkg.json"
+          vcpkgJsonGlob: "vcpkg.json"
         env:
           VCPKG_DEFAULT_TRIPLET: x64-windows
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows
