@@ -1060,6 +1060,7 @@ dependencies = [
  "anyhow",
  "beacon-config",
  "beacon-data-lake",
+ "beacon-formats",
  "beacon-functions",
  "beacon-query",
  "chrono",

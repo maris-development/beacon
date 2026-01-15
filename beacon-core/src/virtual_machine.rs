@@ -217,6 +217,11 @@ impl VirtualMachine {
                     .metrics_tracker
                     .add_output_bytes(output_file.size()?);
 
+                let consolidated_metrics = beacon_plan.metrics_tracker.get_consolidated_metrics();
+                query_metrics
+                    .lock()
+                    .insert(beacon_plan.query_id, consolidated_metrics);
+
                 Ok(QueryResult {
                     query_output: QueryOutput::File(output_file),
                     query_id: beacon_plan.query_id,

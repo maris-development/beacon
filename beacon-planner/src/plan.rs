@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use beacon_formats::bbf::source::BBFSource;
 use beacon_query::{Query, output::QueryOutputFile};
 use datafusion::{
     catalog::memory::DataSourceExec, datasource::physical_plan::FileScanConfig,
@@ -89,14 +90,24 @@ fn wrap_file_scans(
             .as_any()
             .downcast_ref::<FileScanConfig>()
         {
-            // Collect file paths from all file groups.
-            let files = file_scan_config
-                .file_groups
-                .iter()
-                .flat_map(|group| group.iter())
-                .map(|f| f.object_meta.location.to_string())
-                .collect::<Vec<_>>();
-            tracker.add_file_paths(files);
+            // Handle BBF Source Differently as it encompasses multiple files
+            if let Some(bbf_source) = file_scan_config
+                .file_source()
+                .as_any()
+                .downcast_ref::<BBFSource>()
+            {
+                let tracer = tracker.get_as_file_tracer();
+                bbf_source.set_file_tracer(tracer);
+            } else {
+                // Collect file paths from all file groups.
+                let files = file_scan_config
+                    .file_groups
+                    .iter()
+                    .flat_map(|group| group.iter())
+                    .map(|f| f.object_meta.location.to_string())
+                    .collect::<Vec<_>>();
+                tracker.add_file_paths(files);
+            }
         } else {
             tracing::warn!("DataSourceExec is not a FileScanConfig. File paths are not logged.");
         }
