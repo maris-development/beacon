@@ -91,23 +91,18 @@ jobs:
           VCPKG_DEFAULT_TRIPLET: x64-windows
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows
 
-      - name: Configure HDF5/NetCDF env (Windows)
+      - name: Export NetCDF & HDF5 env vars
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
-          # run-vcpkg typically installs into $GITHUB_WORKSPACE\vcpkg_installed.
-          # The Rust build scripts for hdf5/netcdf look for HDF5_DIR/NETCDF_DIR.
-          $triplet = $env:VCPKG_DEFAULT_TRIPLET
-          $installedRoot = $env:VCPKG_INSTALLED_DIR
-          if ([string]::IsNullOrWhiteSpace($installedRoot)) {
-            $installedRoot = "$env:GITHUB_WORKSPACE\\vcpkg_installed"
-            "VCPKG_INSTALLED_DIR=$installedRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
-          }
-          $prefix = Join-Path $installedRoot $triplet
-          "HDF5_DIR=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "HDF5_ROOT=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "NETCDF_DIR=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "NETCDF_ROOT=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $prefix = "$env:GITHUB_WORKSPACE\vcpkg_installed\x64-windows"
+          echo "NETCDF_DIR=$prefix" >> $env:GITHUB_ENV
+          echo "HDF5_DIR=$prefix" >> $env:GITHUB_ENV
+          # Needed so DLLs are found at runtime
+          echo "$prefix\bin" >> $env:GITHUB_PATH
+          # print for debugging
+          echo "NETCDF_DIR=$env:NETCDF_DIR"
+          echo "HDF5_DIR=$env:HDF5_DIR"
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --manifest-path beacon-binary-format-toolbox/Cargo.toml
