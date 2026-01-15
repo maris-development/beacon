@@ -91,6 +91,24 @@ jobs:
           VCPKG_DEFAULT_TRIPLET: x64-windows
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows
 
+      - name: Configure HDF5/NetCDF env (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # run-vcpkg typically installs into $GITHUB_WORKSPACE\vcpkg_installed.
+          # The Rust build scripts for hdf5/netcdf look for HDF5_DIR/NETCDF_DIR.
+          $triplet = $env:VCPKG_DEFAULT_TRIPLET
+          $installedRoot = $env:VCPKG_INSTALLED_DIR
+          if ([string]::IsNullOrWhiteSpace($installedRoot)) {
+            $installedRoot = "$env:GITHUB_WORKSPACE\\vcpkg_installed"
+            "VCPKG_INSTALLED_DIR=$installedRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+          $prefix = Join-Path $installedRoot $triplet
+          "HDF5_DIR=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "HDF5_ROOT=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "NETCDF_DIR=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "NETCDF_ROOT=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --manifest-path beacon-binary-format-toolbox/Cargo.toml
 
@@ -112,11 +130,37 @@ jobs:
         run: |
           $binName = "beacon-binary-format-toolbox"
           $binPath = "beacon-binary-format-toolbox/target/${{ matrix.target }}/release/$binName.exe"
+
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $outExe = "dist/$binName-$env:RELEASE_TAG-${{ matrix.target }}.exe"
-          Copy-Item $binPath $outExe
-          Compress-Archive -Force -Path $outExe -DestinationPath "dist/$binName-$env:RELEASE_TAG-${{ matrix.target }}.zip"
-          Remove-Item $outExe
+          $stageDir = "dist/$binName-$env:RELEASE_TAG-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+
+          # Copy the executable
+          Copy-Item $binPath (Join-Path $stageDir "$binName.exe")
+
+          # Copy runtime DLLs from vcpkg (netcdf/hdf5 and their dependencies)
+          $triplet = $env:VCPKG_DEFAULT_TRIPLET
+          $installedRoot = $env:VCPKG_INSTALLED_DIR
+          if ([string]::IsNullOrWhiteSpace($installedRoot)) {
+            $installedRoot = "$env:GITHUB_WORKSPACE\\vcpkg_installed"
+          }
+          $prefix = Join-Path $installedRoot $triplet
+          $dllDir = Join-Path $prefix "bin"
+          if (Test-Path $dllDir) {
+            Get-ChildItem -Path (Join-Path $dllDir "*.dll") -File | ForEach-Object {
+              Copy-Item $_.FullName $stageDir
+            }
+          } else {
+            Write-Warning "vcpkg DLL directory not found: $dllDir"
+          }
+
+          # Create zip with exe + dlls
+          $zipPath = "dist/$binName-$env:RELEASE_TAG-${{ matrix.target }}.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Force -Path (Join-Path $stageDir "*") -DestinationPath $zipPath
+
+          # Cleanup staging directory
+          Remove-Item $stageDir -Recurse -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
