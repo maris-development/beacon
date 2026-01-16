@@ -1,0 +1,21 @@
+[package]
+name = "beacon-atlas"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+object_store = { workspace = true}
+arrow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+bytes = { workspace = true }
+
+arrow-ipc = { version = "^56.0.0", features = ["zstd"]}
+flume = { version = "0.11.1", "features" = ["async"] }
+moka = { version = "0.12.10", features = ["future"] }
+
+beacon-nd-arrow = { path = "../beacon-nd-arrow" }
