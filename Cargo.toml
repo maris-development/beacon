@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format","beacon-arrow-netcdf-mpio", "beacon-object-storage"]
+members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format","beacon-arrow-netcdf-mpio", "beacon-object-storage", "beacon-nd-arrow"]
 exclude = ["beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
@@ -49,3 +49,5 @@ parquet = { version = "^56.0.0", features = ["async"] }
 geoarrow = { version = "^0.6.0" }
 geoarrow-array = "^0.6.0"
 geoparquet = "^0.6.0"
+
+beacon-nd-arrow = { path = "beacon-nd-arrow" }

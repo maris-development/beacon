@@ -91,6 +91,17 @@ Beacon organizes storage into datasets (raw files) and data tables (named collec
 
 The [data lake guide](https://maris-development.github.io/beacon/docs/1.4.0/query-docs/data-lake.html) contains a deeper architectural explanation plus links to tutorials for SQL and JSON queries, language SDKs, and the Beacon Studio web UI.
 
+### ND broadcasting (dataset harmonization)
+
+When Beacon needs to combine or harmonize n-dimensional variables coming from different files (e.g. NetCDF/Zarr cubes with slightly different shapes), it can apply broadcasting to align arrays on compatible dimensions.
+
+- Beacon broadcasts by matching dimension names (xarray-style): input dims must be a subset of target dims and order must be preserved.
+
+For details and examples, see the harmonization docs:
+- https://maris-development.github.io/beacon/docs/1.4.0-install/data-lake/datasets-harmonization/
+
+The underlying Arrow encoding and broadcasting implementation lives in the `beacon-nd-arrow` crate.
+
 ## Querying Beacon
 
 ### SQL endpoint
