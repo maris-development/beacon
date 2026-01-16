@@ -4,12 +4,18 @@ version = "0.1.0"
 edition = "2024"
 readme = "README.md"
 
+[features]
+default = []
+ndarray = ["dep:ndarray", "dep:chrono"]
+
 [dependencies]
 arrow = { workspace = true }
 arrow-schema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+chrono = { workspace = true, optional = true }
+ndarray = { version = "0.17.1", optional = true }
 
 [dev-dependencies]
 arrow-ipc = { version = "^56.0.0", features = ["zstd"]}

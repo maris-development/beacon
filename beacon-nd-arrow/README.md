@@ -172,6 +172,56 @@ assert_eq!(batch.num_rows(), 2);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+## `ndarray` conversions (optional)
+
+This crate can convert to/from `ndarray::ArrayD<T>` behind the `ndarray` feature flag.
+
+Enable it in your `Cargo.toml`:
+
+```toml
+beacon-nd-arrow = { version = "0.1", features = ["ndarray"] }
+```
+
+### `ndarray -> NdArrowArray`
+
+`ndarray` does not store axis names, but Beacon ND arrays require **named dimensions** for
+name-aligned broadcasting. Therefore you must provide `dim_names`.
+
+```rust
+use beacon_nd_arrow::{NdArrowArray, ndarray_convert::FromNdarray};
+
+let a = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 3]), (1..=6).collect()).unwrap();
+let nd = NdArrowArray::from_ndarray(&a, &vec!["y".to_string(), "x".to_string()]).unwrap();
+assert_eq!(nd.dimensions().shape(), vec![2, 3]);
+```
+
+Supported storage types include:
+
+- Integers: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`
+- Floats: `f32`, `f64`
+- `bool`, `String` (Utf8)
+- Timestamps: `chrono::NaiveDateTime`, `chrono::DateTime<chrono::Utc>`
+
+### `NdArrowArray -> ndarray` (strict vs null-filling)
+
+By default, `ToNdarray::to_ndarray()` is **strict** and errors if the Arrow storage contains nulls.
+If you want to materialize nulls into an `ndarray`, use `ToNdarrayWithNulls`:
+
+```rust
+use beacon_nd_arrow::ndarray_convert::ToNdarrayWithNulls;
+
+let (arr, fill_value) = nd.to_ndarray_with_default_fill().unwrap();
+// `fill_value` is the sentinel used to represent Arrow nulls.
+```
+
+Default fill values:
+
+- Integers: `T::MAX` (e.g. `i64::MAX`, `u8::MAX`)
+- Floats: `NaN`
+- `bool`: `false`
+- `String`: empty string
+- Timestamps: Unix epoch (`1970-01-01T00:00:00Z`)
+
 ## Notes on size & performance
 
 - `dim_names` is dictionary-encoded to avoid repeating common dimension strings across rows.

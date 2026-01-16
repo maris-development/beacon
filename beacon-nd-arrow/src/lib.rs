@@ -74,6 +74,9 @@ pub mod dimensions;
 pub mod error;
 pub mod extension;
 
+#[cfg(feature = "ndarray")]
+pub mod ndarray_convert;
+
 use std::{ops::Deref, sync::Arc};
 
 use arrow::array::ArrayRef;
