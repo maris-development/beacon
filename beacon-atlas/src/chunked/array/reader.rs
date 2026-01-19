@@ -6,6 +6,7 @@ use arrow_ipc::{
     reader::{FileDecoder, read_footer_length},
     root_as_footer,
 };
+use bytes::BytesMut;
 use object_store::ObjectStore;
 
 use crate::chunked::array::CHUNKED_ARRAY_FILE_NAME;
@@ -49,32 +50,30 @@ impl<S: ObjectStore> ArrowStoreReader<S> {
     pub const PREFETCH_LEN: u64 = 256 * 1024; // 256 KB
     async fn new(store: Arc<S>, path: object_store::path::Path) -> Self {
         let object_meta = store.head(&path).await.unwrap();
-        let size = object_meta.size as usize;
-        let prefetch_start = if size > Self::PREFETCH_LEN as usize {
-            size - Self::PREFETCH_LEN as usize
-        } else {
-            0
-        };
 
-        let prefetch_buffer = store
-            .get_range(&path, prefetch_start as u64..size as u64)
+        let trailer_start = object_meta.size - 10;
+        let footer_len_buf = store
+            .get_range(&path, trailer_start..object_meta.size)
+            .await
+            .unwrap();
+        let footer_len = read_footer_length(footer_len_buf.as_ref().try_into().unwrap()).unwrap();
+
+        let footer_start = trailer_start - footer_len as u64;
+        let footer_buffer = store
+            .get_range(&path, footer_start..object_meta.size)
             .await
             .unwrap();
 
-        let trailer_start = prefetch_buffer.len() - 10;
-        let footer_len =
-            read_footer_length(prefetch_buffer[trailer_start..].try_into().unwrap()).unwrap();
-        let footer =
-            root_as_footer(&prefetch_buffer[trailer_start - footer_len..trailer_start]).unwrap();
+        let footer = root_as_footer(&footer_buffer[..]).unwrap();
 
         let schema = fb_to_schema(footer.schema().unwrap());
 
-        let mut decoder = FileDecoder::new(Arc::new(schema), footer.version());
+        let decoder = FileDecoder::new(Arc::new(schema), footer.version());
 
         // Read dictionaries
         for block in footer.dictionaries().iter().flatten() {
             let block_len = block.bodyLength() as usize + block.metaDataLength() as usize;
-            let data = buffer.slice_with_length(block.offset() as _, block_len);
+            let data = footer_buffer.slice_with_length(block.offset() as _, block_len);
             decoder.read_dictionary(block, &data).unwrap();
         }
 
