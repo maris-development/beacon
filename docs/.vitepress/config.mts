@@ -11,29 +11,23 @@ export default defineConfig({
   head: [['link', { rel: 'icon', href: '/beacon/favicon.ico' }]],
   base: '/beacon/',
   ignoreDeadLinks: true,
-  title: "Documentation",
+  title: "Beacon",
   description: "Beacon Documentation",
   lastUpdated: true,
   themeConfig: {
+    search: {
+      provider: 'local'
+    },
     // https://vitepress.dev/reference/default-theme-config
     logo: '/beacon-logo-small.png',
     nav: [
       { text: 'Beacon', link: 'https://beacon.maris.nl/', target: '_blank', rel: 'noopener' },
       {
-        text: 'How to install', items: [
+        text: 'Docs', items: [
           {
-            text: '1.5.0 (latest)',
-            link: '/docs/1.5.0-install/',
-            activeMatch: '/docs/1.5.0-install/'
-          },
-        ]
-      },
-      {
-        text: 'Query docs', items: [
-          {
-            text: '1.5.0 (latest)',
-            link: '/docs/1.5.0/query-docs/data-lake',
-            activeMatch: '/docs/1.5.0/query-docs/'
+            text: '1.5.2 (latest)',
+            link: '/docs/1.5.2/introduction',
+            activeMatch: '/docs/1.5.2/introduction'
           },
         ]
       },
@@ -50,6 +44,173 @@ export default defineConfig({
     ],
 
     sidebar: {
+      '/docs/1.5.2/': [
+        {
+          text: 'Introduction',
+          link: '/docs/1.5.2/introduction',
+        },
+        {
+          text: 'Getting Started',
+          link: '/docs/1.5.2/getting-started',
+          collapsed: false,
+          items: [
+            {
+              text: 'Local',
+              link: '/docs/1.5.2/getting-started#local',
+            },
+            {
+              text: 'Cloud (S3)',
+              link: '/docs/1.5.2/getting-started#s3-compatible-object-storage',
+            }
+          ]
+        },
+        {
+          text: 'Data Lake Setup',
+          link: '/docs/1.5.2/data-lake',
+          collapsed: false,
+          items: [
+            {
+              text: 'Datasets',
+              link: '/docs/1.5.2/data-lake/datasets',
+              items: [
+                {
+                  text: 'Zarr',
+                  link: '/docs/1.5.2/data-lake/datasets#zarr'
+                },
+                {
+                  text: 'NetCDF',
+                  link: '/docs/1.5.2/data-lake/datasets#netcdf'
+                },
+                {
+                  text: 'ODV ASCII',
+                  link: '/docs/1.5.2/data-lake/datasets#odv-ascii'
+                },
+                {
+                  text: 'Parquet',
+                  link: '/docs/1.5.2/data-lake/datasets#parquet'
+                },
+                {
+                  text: 'CSV',
+                  link: '/docs/1.5.2/data-lake/datasets#csv'
+                },
+                {
+                  text: 'Arrow IPC',
+                  link: '/docs/1.5.2/data-lake/datasets#arrow-ipc'
+                },
+                {
+                  text: 'Beacon Binary Format',
+                  link: '/docs/1.5.2/data-lake/datasets#beacon-binary-format'
+                },
+              ]
+            },
+            {
+              text: 'Collections',
+              link: '/docs/1.5.2/data-lake/collections',
+              collapsed: true,
+              items: [
+                {
+                  text: 'Logical Collections',
+                  link: '/docs/1.5.2/data-lake/collections#logical-data-tables'
+                },
+                {
+                  text: 'Preset Collections',
+                  link: '/docs/1.5.2/data-lake/collections#preset-data-tables'
+                }
+              ]
+            },
+            {
+              text: 'Configuration',
+              link: '/docs/1.5.2/data-lake/configuration',
+            },
+            {
+              text: 'Performance Tuning',
+              link: '/docs/1.5.2/data-lake/performance-tuning',
+              collapsed: true,
+              items: [
+                {
+                  text: 'Settings',
+                  link: '/docs/1.5.2/data-lake/performance-tuning#beacon-query-engine-settings'
+                },
+                {
+                  text: 'NetCDF',
+                  link: '/docs/1.5.2/data-lake/performance-tuning#netcdf-tuning'
+                },
+                {
+                  text: 'Zarr',
+                  link: '/docs/1.5.2/data-lake/performance-tuning#zarr-statistics-predicate-pruning'
+                }
+              ]
+            }
+          ]
+        },
+        {
+          text: 'API',
+          link: '/docs/1.5.2/api/',
+          collapsed: false,
+          items: [
+            {
+              text: 'Introduction',
+              link: '/docs/1.5.2/api/',
+            },
+            {
+              text: 'Exploring the Data Lake',
+              link: '/docs/1.5.2/api/exploring-data-lake',
+            },
+            {
+              text: 'Querying',
+              link: '/docs/1.5.2/api/querying',
+              collapsed: false,
+              items: [
+                {
+                  text: 'SQL',
+                  link: '/docs/1.5.2/api/querying/sql',
+                },
+                {
+                  text: 'JSON',
+                  link: '/docs/1.5.2/api/querying/json',
+                  items: [
+                    {
+                      text: 'Selecting Columns',
+                      link: '/docs/1.5.2/api/querying/json#selecting-columns'
+                    },
+                    {
+                      text: 'From',
+                      link: '/docs/1.5.2/api/querying/json#choosing-the-data-source-from'
+                    },
+                    {
+                      text: 'Filtering',
+                      link: '/docs/1.5.2/api/querying/json#filters'
+                    },
+                    {
+                      text: 'Output',
+                      link: '/docs/1.5.2/api/querying/json#output-formats'
+                    }
+                  ]
+                },
+                {
+                  text: 'Examples',
+                  link: '/docs/1.5.2/api/querying/examples',
+                },
+              ]
+            },
+          ]
+
+        },
+        {
+          text: 'API Libraries & Tooling',
+          link: '/docs/1.5.2/libraries-tooling',
+          items: [
+            {
+              text: 'Python',
+              link: '/docs/1.5.2/libraries-tooling/python-sdk',
+            },
+            {
+              text: 'CLI Tool',
+              link: '/docs/1.5.2/libraries-tooling/cli',
+            }
+          ]
+        }
+      ],
       '/available-nodes/': [
         {
           text: 'Euro-Argo',
@@ -393,11 +554,15 @@ export default defineConfig({
           text: 'Changelog',
           items: [
             {
-              text: '1.5.0 (latest)',
+              text: '1.5.2',
               link: '/docs/changelog'
             },
             {
-              text: '1.4.0 (latest)',
+              text: '1.5.0',
+              link: '/docs/changelog'
+            },
+            {
+              text: '1.4.0',
               link: '/docs/changelog'
             },
             {

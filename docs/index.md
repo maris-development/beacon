@@ -5,16 +5,16 @@ layout: home
 hero:
   name: "Beacon"
   text: "A High-Performance ARCO Data Lake Query Engine"
-  tagline: Making large climate datasets instantly queryable by users using SQL and JSON.
+  tagline: Making climate datasets instantly queryable by users using SQL and JSON.
   actions:
     - theme: brand
-      text: Install Beacon Node
-      link: /docs/1.5.0-install
-    - theme: brand
-      text: Query Beacon Nodes
-      link: /docs/1.5.0/query-docs/
+      text: Getting Started
+      link: /docs/1.5.2/getting-started
     - theme: alt
-      text: Existing Nodes
+      text: Documentation
+      link: /docs/1.5.2/introduction
+    - theme: alt
+      text: Existing Data Lake Nodes
       link: /available-nodes/available-nodes
 
 features:
