@@ -26,8 +26,8 @@ export default defineConfig({
         text: 'Docs', items: [
           {
             text: '1.5.0 (latest)',
-            link: '/docs/1.5.0-install/',
-            activeMatch: '/docs/1.5.0-install/'
+            link: '/docs/1.5.0/introduction',
+            activeMatch: '/docs/1.5.0/introduction'
           },
         ]
       },
@@ -53,6 +53,67 @@ export default defineConfig({
     ],
 
     sidebar: {
+      '/docs/1.5.0/': [
+        {
+          text: 'Introduction',
+          link: '/docs/1.5.0/introduction',
+        },
+        {
+          text: 'Getting Started',
+          link: '/docs/1.5.0/getting-started',
+          collapsed: false,
+          items: [
+            {
+              text: 'Local',
+              link: '/docs/1.5.0/getting-started#beacon-local',
+            },
+            {
+              text: 'Cloud (S3)',
+              link: '/docs/1.5.0/getting-started#beacon-cloud-s3',
+            }
+          ]
+        },
+        {
+          text: 'Data Lake',
+          link: '/docs/1.5.0/data-lake',
+          collapsed: false,
+          items: [
+            {
+              text: 'Datasets',
+              link: '/docs/1.5.0/data-lake/datasets',
+              items: [
+                {
+                  text: 'NetCDF',
+                  link: '/docs/1.5.0/data-lake/datasets#netcdf',
+                },
+                {
+                  text: 'Zarr',
+                  link: '/docs/1.5.0/data-lake/datasets#zarr',
+                },
+              ]
+            },
+            {
+              text: 'Collections',
+              link: '/docs/1.5.0/data-lake/data-tables',
+            }
+          ]
+        },
+        {
+          text: 'Querying',
+          link: '/docs/1.5.0/querying',
+          collapsed: false,
+          items: [
+            {
+              text: 'SQL',
+              link: '/docs/1.5.0/querying/sql',
+            },
+            {
+              text: 'JSON',
+              link: '/docs/1.5.0/querying/json',
+            }
+          ]
+        }
+      ],
       '/available-nodes/': [
         {
           text: 'Euro-Argo',
