@@ -8,8 +8,8 @@
 Beacon is a lightweight, high-performance ARCO data lake query engine for discovering, reading, transforming, and serving scientific array and tabular datasets. It focuses on Arrow + DataFusion interoperability and supports formats such as Parquet, NetCDF, Zarr, ODV, and CSV.
 
 - Docs: https://maris-development.github.io/beacon/
-- Installation: https://maris-development.github.io/beacon/docs/1.4.0-install/
-- Query reference: https://maris-development.github.io/beacon/docs/1.4.0/query-docs/data-lake.html
+- Installation: https://maris-development.github.io/beacon/docs/1.5.2/getting-started.html#local
+- Query reference: https://maris-development.github.io/beacon/docs/1.5.2/api/querying/
 - Slack: https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg
 
 ## Quick start (Docker)
@@ -37,7 +37,7 @@ services:
       - ./tables:/beacon/data/tables
 ```
 
-Start and open the API docs at http://localhost:8080/swagger/.
+Start and open the API docs at http://localhost:8080/swagger/
 
 Add datasets by placing files (e.g., .nc, .zarr, .parquet, .csv) into ./datasets so the container can discover them via the mounted volume.
 
