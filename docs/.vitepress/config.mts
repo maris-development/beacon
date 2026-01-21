@@ -150,12 +150,12 @@ export default defineConfig({
         },
         {
           text: 'API',
-          link: '/docs/1.5.2/api/introduction',
+          link: '/docs/1.5.2/api/',
           collapsed: false,
           items: [
             {
               text: 'Introduction',
-              link: '/docs/1.5.2/api/introduction',
+              link: '/docs/1.5.2/api/',
             },
             {
               text: 'Exploring the Data Lake',
@@ -163,36 +163,36 @@ export default defineConfig({
             },
             {
               text: 'Querying',
-              link: '/docs/1.5.2/querying',
+              link: '/docs/1.5.2/api/querying',
               collapsed: false,
               items: [
                 {
                   text: 'SQL',
-                  link: '/docs/1.5.2/querying/sql',
+                  link: '/docs/1.5.2/api/querying/sql',
                 },
                 {
                   text: 'JSON',
-                  link: '/docs/1.5.2/querying/json',
+                  link: '/docs/1.5.2/api/querying/json',
                   items: [
                     {
                       text: 'Selecting Columns',
-                      link: '/docs/1.5.2/querying/json#query-parameters'
+                      link: '/docs/1.5.2/api/querying/json#query-parameters'
                     },
                     {
                       text: 'From',
-                      link: '/docs/1.5.2/querying/json#from'
+                      link: '/docs/1.5.2/api/querying/json#from'
                     },
                     {
                       text: 'Filtering',
-                      link: '/docs/1.5.2/querying/json#filters'
+                      link: '/docs/1.5.2/api/querying/json#filters'
                     },
                     {
                       text: 'Output',
-                      link: '/docs/1.5.2/querying/json#output-format'
+                      link: '/docs/1.5.2/api/querying/json#output-format'
                     },
                     {
                       text: 'Examples',
-                      link: '/docs/1.5.2/querying/json#examples'
+                      link: '/docs/1.5.2/api/querying/json#examples'
                     }
                   ]
                 },
