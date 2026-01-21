@@ -196,3 +196,12 @@ fn collect_metrics_json(plan: &dyn ExecutionPlan) -> NodeMetrics {
         children,
     }
 }
+
+/// Extended:
+/// Extend the metrics tracker to expose the files as a tracer we can use for BBF
+impl MetricsTracker {
+    /// Get a tracer that can be passed to BBFSource to track files read
+    pub fn get_as_file_tracer(&self) -> Arc<Mutex<Vec<String>>> {
+        self.file_paths.clone()
+    }
+}

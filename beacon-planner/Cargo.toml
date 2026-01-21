@@ -1,6 +1,6 @@
 [package]
 name = "beacon-planner"
-version = "1.5.0"
+version = "1.5.2"
 edition = "2024"
 
 [dependencies]
@@ -20,3 +20,4 @@ beacon-config = { path = "../beacon-config" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-query = { path = "../beacon-query" }
 beacon-data-lake = { path = "../beacon-data-lake" }
+beacon-formats = { path = "../beacon-formats" }
