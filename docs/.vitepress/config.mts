@@ -554,11 +554,15 @@ export default defineConfig({
           text: 'Changelog',
           items: [
             {
-              text: '1.5.0 (latest)',
+              text: '1.5.2',
               link: '/docs/changelog'
             },
             {
-              text: '1.4.0 (latest)',
+              text: '1.5.0',
+              link: '/docs/changelog'
+            },
+            {
+              text: '1.4.0',
               link: '/docs/changelog'
             },
             {
