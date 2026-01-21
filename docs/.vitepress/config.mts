@@ -83,18 +83,46 @@ export default defineConfig({
               link: '/docs/1.5.0/data-lake/datasets',
               items: [
                 {
-                  text: 'NetCDF',
-                  link: '/docs/1.5.0/data-lake/datasets#netcdf',
+                  text: 'Zarr',
+                  link: '/docs/1.5.0-install/data-lake/datasets#zarr'
                 },
                 {
-                  text: 'Zarr',
-                  link: '/docs/1.5.0/data-lake/datasets#zarr',
+                  text: 'NetCDF',
+                  link: '/docs/1.5.0-install/data-lake/datasets#netcdf'
+                },
+                {
+                  text: 'ODV ASCII',
+                  link: '/docs/1.5.0-install/data-lake/datasets#odv-ascii'
+                },
+                {
+                  text: 'Parquet',
+                  link: '/docs/1.5.0-install/data-lake/datasets#parquet'
+                },
+                {
+                  text: 'CSV',
+                  link: '/docs/1.5.0-install/data-lake/datasets#csv'
+                },
+                {
+                  text: 'Arrow IPC',
+                  link: '/docs/1.5.0-install/data-lake/datasets#arrow-ipc'
+                },
+                {
+                  text: 'Beacon Binary Format',
+                  link: '/docs/1.5.0-install/data-lake/datasets#beacon-binary-format'
                 },
               ]
             },
             {
               text: 'Collections',
               link: '/docs/1.5.0/data-lake/data-tables',
+            },
+            {
+              text: 'Configuration',
+              link: '/docs/1.5.0/data-lake/configuration',
+            },
+            {
+              text: 'Performance Tuning',
+              link: '/docs/1.5.0/data-lake/performance-tuning',
             }
           ]
         },
@@ -110,6 +138,42 @@ export default defineConfig({
             {
               text: 'JSON',
               link: '/docs/1.5.0/querying/json',
+              items: [
+                {
+                  text: 'Selecting Columns',
+                  link: '/docs/1.5.0/querying/json#query-parameters'
+                },
+                {
+                  text: 'From',
+                  link: '/docs/1.5.0/querying/json#from'
+                },
+                {
+                  text: 'Filtering',
+                  link: '/docs/1.5.0/querying/json#filters'
+                },
+                {
+                  text: 'Output',
+                  link: '/docs/1.5.0/querying/json#output-format'
+                },
+                {
+                  text: 'Examples',
+                  link: '/docs/1.5.0/querying/json#examples'
+                }
+              ]
+            },
+          ]
+        },
+        {
+          text: 'API Libraries & Tooling',
+          link: '/docs/1.5.0/querying/libraries',
+          items: [
+            {
+              text: 'Python',
+              link: '/docs/1.5.0/querying/libraries/python',
+            },
+            {
+              text: 'CLI Tool',
+              link: '/docs/1.5.0/querying/libraries/cli-tool',
             }
           ]
         }
