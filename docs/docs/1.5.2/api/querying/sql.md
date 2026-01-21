@@ -150,6 +150,18 @@ Content-Type: application/json
 }
 ```
 
+`read_zarr` also supports an optional second argument `statistics_columns` (a list of column names). Supplying these can improve performance for large Zarr datasets by enabling predicate-based pruning and 1D slice pushdown.
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "sql": "SELECT * FROM read_zarr(['some-zarr-dataset/zarr.json'], ['valid_time', 'latitude', 'longitude']) WHERE valid_time >= '2025-01-01' LIMIT 100",
+  "output": { "format": "csv" }
+}
+```
+
 ## Output formats
 
 If `output` is omitted, the response is streamed back (Apache Arrow IPC stream (content type `application/vnd.apache.arrow.stream`)).

@@ -143,6 +143,10 @@ export default defineConfig({
                 {
                   text: 'NetCDF',
                   link: '/docs/1.5.2/data-lake/performance-tuning#netcdf-tuning'
+                },
+                {
+                  text: 'Zarr',
+                  link: '/docs/1.5.2/data-lake/performance-tuning#zarr-statistics-predicate-pruning'
                 }
               ]
             }
@@ -176,11 +180,11 @@ export default defineConfig({
                   items: [
                     {
                       text: 'Selecting Columns',
-                      link: '/docs/1.5.2/api/querying/json#query-parameters'
+                      link: '/docs/1.5.2/api/querying/json#selecting-columns'
                     },
                     {
                       text: 'From',
-                      link: '/docs/1.5.2/api/querying/json#from'
+                      link: '/docs/1.5.2/api/querying/json#choosing-the-data-source-from'
                     },
                     {
                       text: 'Filtering',
@@ -188,13 +192,13 @@ export default defineConfig({
                     },
                     {
                       text: 'Output',
-                      link: '/docs/1.5.2/api/querying/json#output-format'
-                    },
-                    {
-                      text: 'Examples',
-                      link: '/docs/1.5.2/api/querying/json#examples'
+                      link: '/docs/1.5.2/api/querying/json#output-formats'
                     }
                   ]
+                },
+                {
+                  text: 'Examples',
+                  link: '/docs/1.5.2/api/querying/examples',
                 },
               ]
             },
@@ -203,15 +207,15 @@ export default defineConfig({
         },
         {
           text: 'API Libraries & Tooling',
-          link: '/docs/1.5.2/querying/libraries',
+          link: '/docs/1.5.2/libraries-tooling',
           items: [
             {
               text: 'Python',
-              link: '/docs/1.5.2/querying/libraries/python',
+              link: '/docs/1.5.2/libraries-tooling/python-sdk',
             },
             {
               text: 'CLI Tool',
-              link: '/docs/1.5.2/querying/libraries/cli-tool',
+              link: '/docs/1.5.2/libraries-tooling/cli',
             }
           ]
         }

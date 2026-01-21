@@ -34,3 +34,4 @@ GET /api/health
 - Explore datasets/tables: [exploring-data-lake.md](exploring-data-lake.md)
 - Query with JSON: [querying/json.md](querying/json.md)
 - Query with SQL: [querying/sql.md](querying/sql.md)
+- Query examples: [querying/examples.md](querying/examples.md)

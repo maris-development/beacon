@@ -176,3 +176,77 @@ For a “many users, many NetCDF files” deployment:
 For a small single-user deployment:
 
 - Keep defaults, and only enable the MPIO multiplexer if NetCDF reads dominate runtime.
+
+## Zarr statistics (predicate pruning)
+
+Beacon’s Zarr reader can use lightweight statistics for predicate-aware IO reduction. When enabled, Beacon can:
+
+- Prune entire Zarr groups that cannot satisfy your filter (based on per-column min/max)
+- Push down 1D slicing for selected “coordinate-like” arrays (for example time/lat/lon), so only relevant ranges are read
+
+### Enable statistics for a Zarr collection
+
+When you create a logical Zarr table/collection, include `statistics.columns` under the Zarr table definition.
+
+```http
+POST /api/admin/create-table/
+
+Content-Type: application/json
+{
+	"table_name": "my_zarr_table",
+	"table_type": {
+		"logical": {
+			"paths": [
+				"datasets/**/*.zarr/zarr.json"
+			],
+			"file_format": "zarr",
+			"statistics": {
+				"columns": ["valid_time", "latitude", "longitude"]
+			}
+		}
+	}
+}
+```
+
+### Enable statistics for ad-hoc reads (SQL)
+
+`read_zarr` supports an optional second argument: a list of `statistics_columns`.
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+	"sql": "SELECT * FROM read_zarr(['datasets/**/*.zarr/zarr.json'], ['valid_time', 'latitude', 'longitude']) WHERE valid_time >= '2025-01-01' AND longitude < 30 LIMIT 100",
+	"output": { "format": "csv" }
+}
+```
+
+### Enable statistics for ad-hoc reads (JSON)
+
+For JSON queries, set `from.zarr.statistics_columns`:
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+	"from": {
+		"zarr": {
+			"paths": ["datasets/**/*.zarr/zarr.json"],
+			"statistics_columns": ["valid_time", "latitude", "longitude"]
+		}
+	},
+	"select": ["valid_time", "latitude", "longitude"],
+	"filters": [
+        { "column": "valid_time", "min": "2025-01-01" },
+        { "column": "longitude", "min": 15, "max": 30 }
+    ],
+	"limit": 100,
+	"output": { "format": "csv" }
+}
+```
+
+::: warning
+Statistics are computed by reading the full values of the selected arrays (and slice pushdown only applies to 1D arrays). Only enable statistics for a small set of frequently-filtered, coordinate-like columns.
+:::

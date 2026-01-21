@@ -14,11 +14,14 @@ Use the query API when you want to:
 
 - **JSON query DSL** ([json.md](json.md))
   - Best for programmatic query builders.
-  - Request is a typed object: `select`, optional `from`, optional `filter`, optional `output`.
+  - Request is a typed object: `select`, optional `from`, optional `filters`, optional `output`.
 
 - **SQL** ([sql.md](sql.md))
   - Best for power users and ad-hoc analysis.
   - Send `{ "sql": "SELECT ..." }` to the same endpoint.
+
+- **Examples** ([examples.md](examples.md))
+  - Copy/paste query patterns for JSON and SQL.
 
 ## Core endpoints
 

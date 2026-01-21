@@ -59,7 +59,7 @@ Beacon fully supports zarr datasets as logical data tables. You can create a log
 For example, if you have a zarr dataset stored in `/beacon/data/datasets/my_zarr_dataset/`, you will need to specify the path as `my_zarr_dataset/zarr.json`.
 You can also use glob patterns to match multiple zarr datasets, e.g. `my_zarr_datasets/*/zarr.json`.
 
-``` http
+```http
 POST /api/admin/create-table/
 
 Content-Type: application/json
@@ -81,9 +81,9 @@ Content-Type: application/json
 
 > [!TIP] [Performance Tip] Push Down Predicates
 > When using zarr datasets in logical tables, Beacon can efficiently prune data based on query predicates, similar to how it works with parquet files. This means that only the necessary chunks of data will be read from the zarr datasets based on the query conditions, improving performance.
-> To enable this feature, ensure you specify which columns can be used by the pruning predicate to push down filters. Only apply this to columns that are frequently used in query filters such as geo-spatial, time or other commonly filtered columns.
+> To enable this feature, configure `statistics.columns` for the table to specify which columns Beacon may compute statistics for (typically time/lat/lon style coordinate columns). See [Performance tuning: Zarr statistics](./performance-tuning#zarr-statistics-predicate-pruning).
 
-``` http{15-21}
+```http{15-21}
 
 POST /api/admin/create-table/
 

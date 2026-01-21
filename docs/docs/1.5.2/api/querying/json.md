@@ -149,6 +149,28 @@ Content-Type: application/json
 }
 ```
 
+Zarr statistics (predicate pruning):
+
+If you frequently filter on a small set of “coordinate-like” columns (for example time/lat/lon), provide `statistics_columns` so Beacon can prune Zarr groups and push down 1D slicing.
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "from": {
+    "zarr": {
+      "paths": ["some-zarr-dataset/zarr.json"],
+      "statistics_columns": ["valid_time", "latitude", "longitude"]
+    }
+  },
+  "select": ["valid_time", "latitude", "longitude"],
+  "filters": [{ "column": "valid_time", "min": "2025-01-01" }],
+  "limit": 100,
+  "output": { "format": "csv" }
+}
+```
+
 Zarr with glob paths and multiple datasets:
 
 ```http
@@ -189,7 +211,13 @@ Other supported `from` formats include `zarr`, `parquet`, `csv`, `arrow`, and `o
 
 ## Filters
 
-Use `filter` (recommended) to constrain results.
+Use `filters` (recommended) to constrain results.
+
+`filters` is an array so you can apply multiple filters (even multiple filters on the same column). Filters are combined with AND by default.
+
+::: tip
+Beacon also accepts a legacy single-object `filter` property, but the docs use `filters` for clarity.
+:::
 
 ### Range filter (between)
 
@@ -199,7 +227,7 @@ Content-Type: application/json
 
 {
   "select": ["time", "temp"],
-  "filter": { "column": "temp", "min": 2, "max": 10 },
+  "filters": [{ "column": "temp", "min": 2, "max": 10 }],
   "limit": 100,
   "output": { "format": "csv" }
 }
@@ -215,7 +243,7 @@ Content-Type: application/json
 
 {
   "select": ["time", "platform"],
-  "filter": { "column": "platform", "eq": "SHIP" },
+  "filters": [{ "column": "platform", "eq": "SHIP" }],
   "limit": 100,
   "output": { "format": "csv" }
 }
@@ -229,13 +257,32 @@ Content-Type: application/json
 
 {
   "select": ["time", "latitude", "longitude", "temp"],
-  "filter": {
-    "and": [
-      { "column": "temp", "min": 2, "max": 10 },
-      { "column": "latitude", "min": -10, "max": 10 }
-    ]
-  },
+  "filters": [
+    { "column": "temp", "min": 2, "max": 10 },
+    { "column": "latitude", "min": -10, "max": 10 }
+  ],
   "limit": 10000,
+  "output": { "format": "csv" }
+}
+```
+
+To express OR conditions, wrap them in an `or` filter:
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "select": ["time", "platform"],
+  "filters": [
+    {
+      "or": [
+        { "column": "platform", "eq": "SHIP" },
+        { "column": "platform", "eq": "BUOY" }
+      ]
+    }
+  ],
+  "limit": 100,
   "output": { "format": "csv" }
 }
 ```
@@ -250,22 +297,24 @@ Content-Type: application/json
 
 {
   "select": ["time", "longitude", "latitude", "temp"],
-  "filter": {
-    "longitude_column": "longitude",
-    "latitude_column": "latitude",
-    "geometry": {
-      "type": "Polygon",
-      "coordinates": [
-        [
-          [4.0, 52.0],
-          [6.0, 52.0],
-          [6.0, 54.0],
-          [4.0, 54.0],
-          [4.0, 52.0]
+  "filters": [
+    {
+      "longitude_column": "longitude",
+      "latitude_column": "latitude",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [4.0, 52.0],
+            [6.0, 52.0],
+            [6.0, 54.0],
+            [4.0, 54.0],
+            [4.0, 52.0]
+          ]
         ]
-      ]
+      }
     }
-  },
+  ],
   "limit": 10000,
   "output": { "format": "csv" }
 }
