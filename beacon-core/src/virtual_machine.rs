@@ -183,7 +183,7 @@ impl VirtualMachine {
         Ok(self.data_lake.remove_table(table_name).await?)
     }
 
-    #[tracing::instrument(skip(self, beacon_plan))]
+    #[tracing::instrument(skip(self, beacon_plan, query_metrics))]
     pub async fn run_plan(
         &self,
         beacon_plan: BeaconQueryPlan,
