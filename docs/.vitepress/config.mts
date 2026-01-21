@@ -32,15 +32,6 @@ export default defineConfig({
         ]
       },
       {
-        text: 'API reference', items: [
-          {
-            text: '1.5.2 (latest)',
-            link: '/docs/1.5.2/query-docs/data-lake',
-            activeMatch: '/docs/1.5.2/query-docs/'
-          },
-        ]
-      },
-      {
         text: 'Changelog',
         link: '/docs/changelog',
         activeMatch: '/changelog'
