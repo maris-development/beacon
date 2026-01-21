@@ -25,18 +25,18 @@ export default defineConfig({
       {
         text: 'Docs', items: [
           {
-            text: '1.5.0 (latest)',
-            link: '/docs/1.5.0/introduction',
-            activeMatch: '/docs/1.5.0/introduction'
+            text: '1.5.2 (latest)',
+            link: '/docs/1.5.2/introduction',
+            activeMatch: '/docs/1.5.2/introduction'
           },
         ]
       },
       {
         text: 'API reference', items: [
           {
-            text: '1.5.0 (latest)',
-            link: '/docs/1.5.0/query-docs/data-lake',
-            activeMatch: '/docs/1.5.0/query-docs/'
+            text: '1.5.2 (latest)',
+            link: '/docs/1.5.2/query-docs/data-lake',
+            activeMatch: '/docs/1.5.2/query-docs/'
           },
         ]
       },
@@ -53,127 +53,165 @@ export default defineConfig({
     ],
 
     sidebar: {
-      '/docs/1.5.0/': [
+      '/docs/1.5.2/': [
         {
           text: 'Introduction',
-          link: '/docs/1.5.0/introduction',
+          link: '/docs/1.5.2/introduction',
         },
         {
           text: 'Getting Started',
-          link: '/docs/1.5.0/getting-started',
+          link: '/docs/1.5.2/getting-started',
           collapsed: false,
           items: [
             {
               text: 'Local',
-              link: '/docs/1.5.0/getting-started#beacon-local',
+              link: '/docs/1.5.2/getting-started#local',
             },
             {
               text: 'Cloud (S3)',
-              link: '/docs/1.5.0/getting-started#beacon-cloud-s3',
+              link: '/docs/1.5.2/getting-started#s3-compatible-object-storage',
             }
           ]
         },
         {
-          text: 'Data Lake',
-          link: '/docs/1.5.0/data-lake',
+          text: 'Data Lake Setup',
+          link: '/docs/1.5.2/data-lake',
           collapsed: false,
           items: [
             {
               text: 'Datasets',
-              link: '/docs/1.5.0/data-lake/datasets',
+              link: '/docs/1.5.2/data-lake/datasets',
               items: [
                 {
                   text: 'Zarr',
-                  link: '/docs/1.5.0-install/data-lake/datasets#zarr'
+                  link: '/docs/1.5.2/data-lake/datasets#zarr'
                 },
                 {
                   text: 'NetCDF',
-                  link: '/docs/1.5.0-install/data-lake/datasets#netcdf'
+                  link: '/docs/1.5.2/data-lake/datasets#netcdf'
                 },
                 {
                   text: 'ODV ASCII',
-                  link: '/docs/1.5.0-install/data-lake/datasets#odv-ascii'
+                  link: '/docs/1.5.2/data-lake/datasets#odv-ascii'
                 },
                 {
                   text: 'Parquet',
-                  link: '/docs/1.5.0-install/data-lake/datasets#parquet'
+                  link: '/docs/1.5.2/data-lake/datasets#parquet'
                 },
                 {
                   text: 'CSV',
-                  link: '/docs/1.5.0-install/data-lake/datasets#csv'
+                  link: '/docs/1.5.2/data-lake/datasets#csv'
                 },
                 {
                   text: 'Arrow IPC',
-                  link: '/docs/1.5.0-install/data-lake/datasets#arrow-ipc'
+                  link: '/docs/1.5.2/data-lake/datasets#arrow-ipc'
                 },
                 {
                   text: 'Beacon Binary Format',
-                  link: '/docs/1.5.0-install/data-lake/datasets#beacon-binary-format'
+                  link: '/docs/1.5.2/data-lake/datasets#beacon-binary-format'
                 },
               ]
             },
             {
               text: 'Collections',
-              link: '/docs/1.5.0/data-lake/data-tables',
+              link: '/docs/1.5.2/data-lake/collections',
+              collapsed: true,
+              items: [
+                {
+                  text: 'Logical Collections',
+                  link: '/docs/1.5.2/data-lake/collections#logical-data-tables'
+                },
+                {
+                  text: 'Preset Collections',
+                  link: '/docs/1.5.2/data-lake/collections#preset-data-tables'
+                }
+              ]
             },
             {
               text: 'Configuration',
-              link: '/docs/1.5.0/data-lake/configuration',
+              link: '/docs/1.5.2/data-lake/configuration',
             },
             {
               text: 'Performance Tuning',
-              link: '/docs/1.5.0/data-lake/performance-tuning',
+              link: '/docs/1.5.2/data-lake/performance-tuning',
+              collapsed: true,
+              items: [
+                {
+                  text: 'Settings',
+                  link: '/docs/1.5.2/data-lake/performance-tuning#beacon-query-engine-settings'
+                },
+                {
+                  text: 'NetCDF',
+                  link: '/docs/1.5.2/data-lake/performance-tuning#netcdf-tuning'
+                }
+              ]
             }
           ]
         },
         {
-          text: 'Querying',
-          link: '/docs/1.5.0/querying',
+          text: 'API',
+          link: '/docs/1.5.2/api/introduction',
           collapsed: false,
           items: [
             {
-              text: 'SQL',
-              link: '/docs/1.5.0/querying/sql',
+              text: 'Introduction',
+              link: '/docs/1.5.2/api/introduction',
             },
             {
-              text: 'JSON',
-              link: '/docs/1.5.0/querying/json',
+              text: 'Exploring the Data Lake',
+              link: '/docs/1.5.2/api/exploring-data-lake',
+            },
+            {
+              text: 'Querying',
+              link: '/docs/1.5.2/querying',
+              collapsed: false,
               items: [
                 {
-                  text: 'Selecting Columns',
-                  link: '/docs/1.5.0/querying/json#query-parameters'
+                  text: 'SQL',
+                  link: '/docs/1.5.2/querying/sql',
                 },
                 {
-                  text: 'From',
-                  link: '/docs/1.5.0/querying/json#from'
+                  text: 'JSON',
+                  link: '/docs/1.5.2/querying/json',
+                  items: [
+                    {
+                      text: 'Selecting Columns',
+                      link: '/docs/1.5.2/querying/json#query-parameters'
+                    },
+                    {
+                      text: 'From',
+                      link: '/docs/1.5.2/querying/json#from'
+                    },
+                    {
+                      text: 'Filtering',
+                      link: '/docs/1.5.2/querying/json#filters'
+                    },
+                    {
+                      text: 'Output',
+                      link: '/docs/1.5.2/querying/json#output-format'
+                    },
+                    {
+                      text: 'Examples',
+                      link: '/docs/1.5.2/querying/json#examples'
+                    }
+                  ]
                 },
-                {
-                  text: 'Filtering',
-                  link: '/docs/1.5.0/querying/json#filters'
-                },
-                {
-                  text: 'Output',
-                  link: '/docs/1.5.0/querying/json#output-format'
-                },
-                {
-                  text: 'Examples',
-                  link: '/docs/1.5.0/querying/json#examples'
-                }
               ]
             },
           ]
+
         },
         {
           text: 'API Libraries & Tooling',
-          link: '/docs/1.5.0/querying/libraries',
+          link: '/docs/1.5.2/querying/libraries',
           items: [
             {
               text: 'Python',
-              link: '/docs/1.5.0/querying/libraries/python',
+              link: '/docs/1.5.2/querying/libraries/python',
             },
             {
               text: 'CLI Tool',
-              link: '/docs/1.5.0/querying/libraries/cli-tool',
+              link: '/docs/1.5.2/querying/libraries/cli-tool',
             }
           ]
         }
