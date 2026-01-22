@@ -118,6 +118,8 @@ pub enum FromFormat {
         paths: Vec<String>,
         statistics_columns: Option<Vec<String>>,
     },
+    #[serde(rename = "bbf")]
+    Bbf { paths: Vec<String> },
 }
 
 impl FromFormat {
@@ -172,6 +174,7 @@ impl FromFormat {
 
                 Ok(Arc::new(zarr_format))
             }
+            FromFormat::Bbf { .. } => Ok(Arc::new(beacon_formats::bbf::BBFFormat::default())),
         }
     }
 
@@ -187,6 +190,7 @@ impl FromFormat {
             | FromFormat::NetCDF { paths }
             | FromFormat::Odv { paths }
             | FromFormat::Zarr { paths, .. } => paths,
+            FromFormat::Bbf { paths } => paths,
         };
 
         let mut listing_table_urls = Vec::with_capacity(paths.len());
