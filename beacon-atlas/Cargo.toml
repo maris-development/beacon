@@ -1,0 +1,14 @@
+[package]
+name = "beacon-atlas"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+object_store = { workspace = true }
+tokio = { workspace = true }
+arrow = { workspace = true }
+anyhow = { workspace = true }   
+tempfile = { workspace = true }
+
+beacon-nd-arrow = { path = "../beacon-nd-arrow" }

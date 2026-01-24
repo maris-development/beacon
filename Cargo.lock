@@ -819,6 +819,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-atlas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "beacon-nd-arrow",
+ "object_store 0.12.4",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "beacon-binary-format"
 version = "2.1.3"
 dependencies = [
