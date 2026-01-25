@@ -38,6 +38,8 @@ moka = { version = "0.12.10", features = ["future"] }
 lru = "0.16.2"
 once_cell = "1.21.3"
 lazy_static = "1.5.0"
+bloomfilter = { version = "1", features = ["serde"] }
+bincode = "1"
 
 datafusion = "^50.0.0"
 geodatafusion = "0.1.1"

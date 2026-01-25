@@ -10,5 +10,11 @@ tokio = { workspace = true }
 arrow = { workspace = true }
 anyhow = { workspace = true }   
 tempfile = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+moka = { workspace = true }
+bloomfilter = { workspace = true }
+bincode = { workspace = true }
+datafusion = { workspace = true }
 
 beacon-nd-arrow = { path = "../beacon-nd-arrow" }
