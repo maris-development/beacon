@@ -37,6 +37,11 @@ export default defineConfig({
         activeMatch: '/changelog'
       },
       {
+        text: 'Blog',
+        link: '/blog/netcdf-performance-tuning',
+        activeMatch: '/blog/'
+      },
+      {
         text: 'Available nodes',
         link: '/available-nodes/available-nodes',
         activeMatch: '/available-nodes/available-nodes'
@@ -208,6 +213,36 @@ export default defineConfig({
               text: 'CLI Tool',
               link: '/docs/1.5.2/libraries-tooling/cli',
             }
+          ]
+        }
+      ],
+      '/blog/': [
+        {
+          text: 'NetCDF Performance Tuning in Beacon 1.5',
+          link: '/blog/netcdf-performance-tuning',
+          collapsed: false,
+          items: [
+          ]
+        },
+        {
+          text: 'Introducing Zarr Support in Beacon 1.4',
+          link: '/blog/zarr-support',
+          collapsed: false,
+          items: [
+          ]
+        },
+        {
+          text: 'Beacon Python SDK: Simplifying Data Lake Queries',
+          link: '/blog/beacon-python-sdk',
+          collapsed: false,
+          items: [
+          ]
+        },
+        {
+          text: 'Beacon 1.3 Released: New Features and Improvements',
+          link: '/blog/beacon-1-3-released',
+          collapsed: false,
+          items: [
           ]
         }
       ],
