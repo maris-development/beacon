@@ -23,10 +23,13 @@ use object_store::ObjectStore;
 use parking_lot::Mutex;
 use tempfile::tempfile;
 
+use crate::IPC_WRITE_OPTS;
+
 const BLOOM_MAX_UNIQUE: usize = 1_000_000;
 const BLOOM_FP_RATE: f64 = 0.01;
 
-type BatchCache = Cache<(String, usize), Arc<RecordBatch>>;
+/// Shared cache for decoded record batches keyed by (path, batch index).
+pub type BatchCache = Cache<(String, usize), Arc<RecordBatch>>;
 
 /// Flush to IPC when estimated batch bytes exceed 4 MiB.
 const BATCH_SIZE: usize = 4 * 1024 * 1024;
@@ -187,7 +190,8 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
         let field =
             nd_column_field("nd_arrays", data_type.clone(), true).map_err(|err| anyhow!(err))?;
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![field]));
-        let writer = FileWriter::try_new(temp_file, &schema).map_err(|err| anyhow!(err))?;
+        let writer = FileWriter::try_new_with_options(temp_file, &schema, IPC_WRITE_OPTS.clone())
+            .map_err(|err| anyhow!(err))?;
         let (pruning_schema, pruning_writer) = if Self::pruning_supported(&data_type) {
             let pruning_schema = Arc::new(arrow::datatypes::Schema::new(vec![
                 arrow::datatypes::Field::new("min", data_type.clone(), true),
@@ -200,8 +204,12 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
                 ),
             ]));
             let pruning_file = tempfile().map_err(|err| anyhow!(err))?;
-            let pruning_writer =
-                FileWriter::try_new(pruning_file, &pruning_schema).map_err(|err| anyhow!(err))?;
+            let pruning_writer = FileWriter::try_new_with_options(
+                pruning_file,
+                &pruning_schema,
+                IPC_WRITE_OPTS.clone(),
+            )
+            .map_err(|err| anyhow!(err))?;
             (Some(pruning_schema), Some(pruning_writer))
         } else {
             (None, None)
@@ -213,7 +221,8 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
             ]));
             let bloom_file = tempfile().map_err(|err| anyhow!(err))?;
             let bloom_writer =
-                FileWriter::try_new(bloom_file, &bloom_schema).map_err(|err| anyhow!(err))?;
+                FileWriter::try_new_with_options(bloom_file, &bloom_schema, IPC_WRITE_OPTS.clone())
+                    .map_err(|err| anyhow!(err))?;
             (Some(bloom_schema), Some(bloom_writer))
         } else {
             (None, None)
@@ -354,7 +363,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
     }
 
     /// Finalize and upload the IPC file to object storage.
-    pub async fn finalize(mut self) -> Result<()> {
+    pub async fn finish(mut self) -> Result<()> {
         self.flush()?;
         let array_path = self.array_path();
         let layout_path = self.layout_path();
@@ -392,9 +401,12 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
             arrow::datatypes::Field::new("end", arrow::datatypes::DataType::Int64, false),
         ]));
         let tmp = tempfile().map_err(|err| anyhow!(err))?;
-        let mut writer =
-            FileWriter::try_new(tmp.try_clone().map_err(|err| anyhow!(err))?, &layout_schema)
-                .map_err(|err| anyhow!(err))?;
+        let mut writer = FileWriter::try_new_with_options(
+            tmp.try_clone().map_err(|err| anyhow!(err))?,
+            &layout_schema,
+            IPC_WRITE_OPTS.clone(),
+        )
+        .map_err(|err| anyhow!(err))?;
 
         if !batch_ranges.is_empty() {
             let starts = batch_ranges
@@ -1097,14 +1109,14 @@ mod tests {
     async fn array_writer_writes_ipc() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/arrays");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
 
         let dims = Dimensions::new(vec![Dimension::try_new("x", 3).unwrap()]);
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![1, 2, 3])), dims).unwrap();
         writer.append_array(arr).unwrap();
         writer.append_null().unwrap();
 
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
         let bytes = store
             .get(&Path::from("nd/arrays/array.arrow"))
             .await
@@ -1151,7 +1163,7 @@ mod tests {
     async fn array_writer_writes_multiple_batches_layout() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/multi");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
 
         let values = vec![1; 1_100_000];
         let dims = Dimensions::new(vec![Dimension::try_new("x", values.len()).unwrap()]);
@@ -1163,7 +1175,7 @@ mod tests {
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(values)), dims).unwrap();
         writer.append_array(arr).unwrap();
 
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let layout_path = Path::from("nd/multi/layout.arrow");
         let layout_bytes = store
@@ -1200,7 +1212,7 @@ mod tests {
     async fn array_writer_writes_bloom_for_utf8() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/bloom");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Utf8).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Utf8, 0).unwrap();
 
         let dims = Dimensions::new(vec![Dimension::try_new("x", 3).unwrap()]);
         let arr = NdArrowArray::new(
@@ -1214,7 +1226,7 @@ mod tests {
         .unwrap();
         writer.append_array(arr).unwrap();
 
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let bloom_path = Path::from("nd/bloom/bloom.arrow");
         let bloom_bytes = store.get(&bloom_path).await.unwrap().bytes().await.unwrap();
@@ -1241,13 +1253,13 @@ mod tests {
     async fn array_writer_skips_bloom_for_non_utf8() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/no-bloom");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
 
         let dims = Dimensions::new(vec![Dimension::try_new("x", 2).unwrap()]);
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![1, 2])), dims).unwrap();
         writer.append_array(arr).unwrap();
 
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let bloom_path = Path::from("nd/no-bloom/bloom.arrow");
         assert!(store.get(&bloom_path).await.is_err());
@@ -1257,9 +1269,9 @@ mod tests {
     async fn array_writer_writes_empty_layout() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/empty");
-        let writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
 
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let layout_path = Path::from("nd/empty/layout.arrow");
         let layout_bytes = store
@@ -1281,7 +1293,7 @@ mod tests {
     async fn array_reader_reads_index() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/read");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
 
         let dims = Dimensions::new(vec![Dimension::try_new("x", 3).unwrap()]);
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![1, 2, 3])), dims).unwrap();
@@ -1291,7 +1303,7 @@ mod tests {
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![4, 5])), dims).unwrap();
         writer.append_array(arr).unwrap();
 
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let reader = ArrayReader::open(store.clone(), path.clone())
             .await
@@ -1308,7 +1320,7 @@ mod tests {
     async fn array_reader_reads_multi_batch_index() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/read_multi");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
 
         let values = vec![1; 1_100_000];
         let dims = Dimensions::new(vec![Dimension::try_new("x", values.len()).unwrap()]);
@@ -1320,7 +1332,7 @@ mod tests {
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(values)), dims).unwrap();
         writer.append_array(arr).unwrap();
 
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let reader = ArrayReader::open(store.clone(), path.clone())
             .await
@@ -1336,11 +1348,11 @@ mod tests {
         let cache = Arc::new(Cache::new(16));
 
         let path = Path::from("nd/cache_a");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
         let dims = Dimensions::new(vec![Dimension::try_new("x", 2).unwrap()]);
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![10, 11])), dims).unwrap();
         writer.append_array(arr).unwrap();
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let reader1 =
             ArrayReader::open_with_cache(store.clone(), path.clone(), Some(cache.clone()))
@@ -1366,18 +1378,20 @@ mod tests {
         let cache = Arc::new(Cache::new(16));
 
         let path_a = Path::from("nd/cache_path_a");
-        let mut writer = ArrayWriter::new(store.clone(), path_a.clone(), DataType::Int32).unwrap();
+        let mut writer =
+            ArrayWriter::new(store.clone(), path_a.clone(), DataType::Int32, 0).unwrap();
         let dims = Dimensions::new(vec![Dimension::try_new("x", 1).unwrap()]);
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![1])), dims).unwrap();
         writer.append_array(arr).unwrap();
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let path_b = Path::from("nd/cache_path_b");
-        let mut writer = ArrayWriter::new(store.clone(), path_b.clone(), DataType::Int32).unwrap();
+        let mut writer =
+            ArrayWriter::new(store.clone(), path_b.clone(), DataType::Int32, 0).unwrap();
         let dims = Dimensions::new(vec![Dimension::try_new("x", 1).unwrap()]);
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![2])), dims).unwrap();
         writer.append_array(arr).unwrap();
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let reader_a =
             ArrayReader::open_with_cache(store.clone(), path_a.clone(), Some(cache.clone()))
@@ -1407,12 +1421,12 @@ mod tests {
     async fn array_reader_loads_pruning_index_lazily() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/pruning-read");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
 
         let dims = Dimensions::new(vec![Dimension::try_new("x", 2).unwrap()]);
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![1, 2])), dims).unwrap();
         writer.append_array(arr).unwrap();
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let reader = ArrayReader::open(store.clone(), path).await.unwrap();
         let pruning = reader.pruning_index().await.unwrap().unwrap();
@@ -1433,7 +1447,7 @@ mod tests {
     async fn array_reader_loads_bloom_index_lazily() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/bloom-read");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Utf8).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Utf8, 0).unwrap();
 
         let dims = Dimensions::new(vec![Dimension::try_new("x", 2).unwrap()]);
         let arr = NdArrowArray::new(
@@ -1445,7 +1459,7 @@ mod tests {
         )
         .unwrap();
         writer.append_array(arr).unwrap();
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let reader = ArrayReader::open(store.clone(), path).await.unwrap();
         let bloom = reader.bloom_index().await.unwrap().unwrap();
@@ -1458,7 +1472,7 @@ mod tests {
     async fn array_writer_writes_pruning_index() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("nd/pruning");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32).unwrap();
+        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 0).unwrap();
 
         let dims = Dimensions::new(vec![Dimension::try_new("x", 3).unwrap()]);
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![1, 2, 3])), dims).unwrap();
@@ -1468,7 +1482,7 @@ mod tests {
         let arr = NdArrowArray::new(Arc::new(Int32Array::from(vec![4, 5])), dims).unwrap();
         writer.append_array(arr).unwrap();
 
-        writer.finalize().await.unwrap();
+        writer.finish().await.unwrap();
 
         let pruning_path = Path::from("nd/pruning/pruning.arrow");
         let pruning_bytes = store

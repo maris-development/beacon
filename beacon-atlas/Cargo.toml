@@ -16,5 +16,8 @@ moka = { workspace = true }
 bloomfilter = { workspace = true }
 bincode = { workspace = true }
 datafusion = { workspace = true }
+indexmap = { workspace = true }
+serde = { workspace = true }
+once_cell = { workspace = true }
 
 beacon-nd-arrow = { path = "../beacon-nd-arrow" }

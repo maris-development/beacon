@@ -829,9 +829,12 @@ dependencies = [
  "bloomfilter",
  "bytes",
  "datafusion",
+ "indexmap 2.13.0",
  "moka",
  "object_store 0.12.4",
+ "once_cell",
  "parking_lot",
+ "serde",
  "tempfile",
  "tokio",
 ]
