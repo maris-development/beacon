@@ -181,6 +181,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
         store: S,
         path: object_store::path::Path,
         data_type: arrow::datatypes::DataType,
+        pre_length: usize,
     ) -> Result<Self> {
         let temp_file = tempfile().map_err(|err| anyhow!(err))?;
         let field =
@@ -222,7 +223,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
             store,
             path,
             data_type,
-            arrays: Vec::new(),
+            arrays: vec![None; pre_length],
             current_batch_size: 0,
             temp_arrow_file: writer,
             pruning_writer,
