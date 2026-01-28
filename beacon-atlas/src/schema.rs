@@ -55,8 +55,51 @@ pub struct VariableField {
     attributes: Vec<AttributeField>,
 }
 
+impl VariableField {
+    pub fn new(name: &str, data_type: DataType) -> Self {
+        Self {
+            name: name.to_string(),
+            data_type,
+            attributes: Vec::new(),
+        }
+    }
+
+    pub fn add_attribute(&mut self, attribute: AttributeField) {
+        self.attributes.push(attribute);
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn data_type(&self) -> &DataType {
+        &self.data_type
+    }
+
+    pub fn attributes(&self) -> &Vec<AttributeField> {
+        &self.attributes
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttributeField {
     name: String,
     data_type: DataType,
+}
+
+impl AttributeField {
+    pub fn new(name: &str, data_type: DataType) -> Self {
+        Self {
+            name: name.to_string(),
+            data_type,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn data_type(&self) -> &DataType {
+        &self.data_type
+    }
 }

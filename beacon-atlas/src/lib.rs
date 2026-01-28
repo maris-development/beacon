@@ -6,6 +6,7 @@ pub mod attribute;
 pub mod dataset;
 pub mod layout;
 pub mod partition;
+pub mod predicate;
 pub mod rle;
 pub mod schema;
 pub mod variable;

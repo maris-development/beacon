@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::array::BooleanArray;
 use beacon_nd_arrow::NdArrowArray;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
@@ -8,6 +9,7 @@ use parking_lot::Mutex;
 use crate::{
     array::{ArrayReader, ArrayWriter, BatchCache},
     attribute::{AttributeReader, AttributeValue, AttributeWriter},
+    predicate::ArrowPredicate,
 };
 
 pub struct VariableWriter<S: ObjectStore + Clone> {
@@ -95,6 +97,14 @@ impl<S: ObjectStore + Clone> VariableWriter<S> {
         Ok(())
     }
 
+    pub fn attribute_writers_mut(&mut self) -> &mut HashMap<String, AttributeWriter<S>> {
+        &mut self.variable_attribute_writers
+    }
+
+    pub fn data_type(&self) -> &arrow::datatypes::DataType {
+        &self.variable_array_writer.data_type
+    }
+
     /// Finalize and persist array + attribute IPC files.
     pub async fn finish(mut self) -> anyhow::Result<()> {
         self.variable_array_writer.finish().await?;
@@ -126,6 +136,11 @@ impl<S: ObjectStore + Clone> VariableReader<S> {
             attribute_prefix,
             attribute_readers: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub async fn prune(&self, predicate: Arc<dyn ArrowPredicate>) -> anyhow::Result<BooleanArray> {
+        // Evaluate the predicate on the variable's pruning index array.
+        todo!()
     }
 
     /// Read the ND array at the logical index.

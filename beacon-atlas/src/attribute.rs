@@ -403,6 +403,10 @@ impl<S: ObjectStore + Clone> AttributeWriter<S> {
         })
     }
 
+    pub fn data_type(&self) -> &DataType {
+        &self.data_type
+    }
+
     pub fn append<V: Into<AttributeValue>>(&mut self, value: V) -> Result<()> {
         self.builder.append_value(value.into())?;
         if self.builder.estimated_bytes() >= BATCH_SIZE {

@@ -18,6 +18,7 @@ bincode = { workspace = true }
 datafusion = { workspace = true }
 indexmap = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 once_cell = { workspace = true }
 
 beacon-nd-arrow = { path = "../beacon-nd-arrow" }
