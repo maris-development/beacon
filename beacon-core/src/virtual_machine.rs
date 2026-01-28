@@ -15,6 +15,7 @@ use datafusion::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
+    physical_optimizer::pruning::PruningPredicate,
     prelude::{SessionConfig, SessionContext},
 };
 use futures::StreamExt;

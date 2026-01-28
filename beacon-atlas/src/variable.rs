@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::BooleanArray;
 use beacon_nd_arrow::NdArrowArray;
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 
 use crate::{
-    array::{ArrayReader, ArrayWriter, BatchCache},
+    array::{ArrayReader, ArrayWriter, BatchCache, PruningIndex},
     attribute::{AttributeReader, AttributeValue, AttributeWriter},
-    predicate::ArrowPredicate,
 };
 
 pub struct VariableWriter<S: ObjectStore + Clone> {
@@ -138,8 +136,11 @@ impl<S: ObjectStore + Clone> VariableReader<S> {
         })
     }
 
-    pub async fn prune(&self, predicate: Arc<dyn ArrowPredicate>) -> anyhow::Result<BooleanArray> {
-        // Evaluate the predicate on the variable's pruning index array.
+    pub async fn variable_pruning_index(&self) -> anyhow::Result<Option<PruningIndex>> {
+        self.array_reader.pruning_index().await
+    }
+
+    pub async fn attribute_pruning_index(&self) -> anyhow::Result<()> {
         todo!()
     }
 

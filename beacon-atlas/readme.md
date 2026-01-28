@@ -1,41 +1,21 @@
 # Layout
 
 collection.atlas/
-    datasets/
-        flat_mask.arrow
-        flat_entries.arrow
-        chunked_mask.arrow
-        chunked_entries.arrow
-    attributes/
-        attribute_1/
-            rle_1.arrow
-            rle_2.arrow
-        attribute_2/
-            rle_1.arrow
-            rle_2.arrow
+    entries_mask.arrow
+    entries.arrow
+    __global_attributes/
+        attr1.arrow
+        attr2.arrow
     variables/
         variable_1/
-            flat/
-                blob_1.arrow
-                blob_2.arrow
-            chunked/
-                blob_1.arrow
-                blob_1_layout.arrow
-                blob_2.arrow
-                blob_2_layout.arrow
-        variable_2/
-            flat/
-                blob_1.arrow
-                blob_2.arrow
-            chunked/
-                blob_1.arrow
-                blob_1_layout.arrow
-                blob_2.arrow
-                blob_2_layout.arrow
+            array.arrow
+            layout.arrow
+            pruning.arrow
+            bloom.arrow
             attributes/
-                attribute_1/
-                    rle_1.arrow
-                    rle_2.arrow
-                attribute_2/
-                    rle_1.arrow
-                    rle_2.arrow
+                attr1.arrow
+                attr2.arrow
+
+# layout.arrow
+[dataset-index: u32] [array-index: FixedSized<u32;2>] [chunk-size: List<List<u32>>]
+
