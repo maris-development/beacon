@@ -2,6 +2,8 @@ use arrow::ipc::CompressionType;
 use once_cell::sync::Lazy;
 
 pub mod array;
+pub mod array_chunked;
+pub mod arrow_object_store;
 pub mod attribute;
 pub mod dataset;
 pub mod layout;

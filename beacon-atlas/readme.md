@@ -17,5 +17,4 @@ collection.atlas/
                 attr2.arrow
 
 # layout.arrow
-[dataset-index: u32] [array-index: FixedSized<u32;2>] [chunk-size: List<List<u32>>]
-
+[dataset-index: u32] [array-index: List<FixedSized<u32;2>>] [chunk-index: List<List<u32>>] [chunk-shape: List<u32>]

@@ -25,6 +25,10 @@ pub enum NdArrayError {
     #[error("Invalid dimensions: {0}")]
     InvalidDimensions(String),
 
+    /// Slice indices are invalid for the current dimensions.
+    #[error("Invalid slice: {0}")]
+    InvalidSlice(String),
+
     /// Wrapper around Arrow-level failures.
     #[error("Arrow Error: {0}")]
     Arrow(#[from] ArrowError),
