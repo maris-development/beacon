@@ -11,6 +11,7 @@ use arrow::datatypes::{DataType, Field};
 
 use crate::arrow_object_store::ArrowObjectStoreReader;
 
+#[derive(Debug, Clone)]
 pub struct DatasetArrayLayout {
     pub dataset_index: u32,
     pub array_indexes: Vec<[u32; 2]>,
