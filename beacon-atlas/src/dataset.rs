@@ -11,6 +11,8 @@ use crate::{
     variable::{VariableReader, VariableWriter},
 };
 
+pub struct Dataset {}
+
 /// Writes datasets within a partition and coordinates variable/global attribute writers.
 pub struct DatasetWriter<'s, S: ObjectStore + Clone> {
     store: S,
