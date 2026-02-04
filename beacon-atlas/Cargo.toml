@@ -21,5 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 once_cell = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
+flume = { workspace = true }
 
 beacon-nd-arrow = { path = "../beacon-nd-arrow" }

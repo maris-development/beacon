@@ -824,11 +824,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "async-trait",
  "beacon-nd-arrow",
  "bincode",
  "bloomfilter",
  "bytes",
  "datafusion",
+ "flume",
  "futures",
  "indexmap 2.13.0",
  "moka",
