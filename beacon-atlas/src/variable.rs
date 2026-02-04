@@ -6,14 +6,15 @@ use object_store::ObjectStore;
 use parking_lot::Mutex;
 
 use crate::{
-    array::{ArrayReader, ArrayWriter, BatchCache, PruningIndex},
+    array::{ArrayReader, BatchCache, PruningIndex},
+    array_chunked::{ChunkedArray, ChunkedArrayProvider, ChunkedArrayWriter},
     attribute::{AttributeReader, AttributeValue, AttributeWriter},
 };
 
 pub struct VariableWriter<S: ObjectStore + Clone> {
     store: S,
     variable_prefix: object_store::path::Path,
-    variable_array_writer: ArrayWriter<S>,
+    variable_array_writer: ChunkedArrayWriter<S>,
     variable_attribute_writers: HashMap<String, AttributeWriter<S>>,
     count: usize,
 }
@@ -34,13 +35,11 @@ impl<S: ObjectStore + Clone> VariableWriter<S> {
         pre_length: usize,
     ) -> Self {
         Self {
-            variable_array_writer: ArrayWriter::new(
+            variable_array_writer: ChunkedArrayWriter::new(
                 store.clone(),
                 variable_prefix.clone(),
                 data_type,
-                pre_length,
-            )
-            .unwrap(),
+            ),
             store,
             variable_prefix,
             variable_attribute_writers: HashMap::new(),
@@ -52,14 +51,20 @@ impl<S: ObjectStore + Clone> VariableWriter<S> {
         self.count
     }
 
-    pub fn write_array(&mut self, array: NdArrowArray) -> anyhow::Result<()> {
-        self.variable_array_writer.append_array(array)?;
+    pub async fn write_array<C: ChunkedArrayProvider>(
+        &mut self,
+        dataset_index: u32,
+        array: ChunkedArray<C>,
+    ) -> anyhow::Result<()> {
+        self.variable_array_writer
+            .append_chunked_array(dataset_index, array)
+            .await?;
         self.count += 1;
         Ok(())
     }
 
-    pub fn write_null(&mut self) -> anyhow::Result<()> {
-        self.variable_array_writer.append_null()?;
+    pub async fn write_null(&mut self) -> anyhow::Result<()> {
+        self.variable_array_writer.append_null().await?;
         self.count += 1;
         Ok(())
     }
@@ -100,12 +105,12 @@ impl<S: ObjectStore + Clone> VariableWriter<S> {
     }
 
     pub fn data_type(&self) -> &arrow::datatypes::DataType {
-        &self.variable_array_writer.data_type
+        self.variable_array_writer.data_type()
     }
 
     /// Finalize and persist array + attribute IPC files.
     pub async fn finish(mut self) -> anyhow::Result<()> {
-        self.variable_array_writer.finish().await?;
+        self.variable_array_writer.finalize().await?;
         for (_, writer) in self.variable_attribute_writers.drain() {
             writer.finish().await?;
         }

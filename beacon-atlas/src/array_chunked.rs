@@ -6,24 +6,30 @@
 
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{Seek, SeekFrom},
     sync::Arc,
 };
 
+use anyhow::{Context, anyhow};
 use arrow::ipc::writer::FileWriter;
-use beacon_nd_arrow::{NdArrowArray, extension::nd_column_data_type};
-use bytes::Bytes;
+use beacon_nd_arrow::{NdArrowArray, column::NdArrowArrayColumn, extension::nd_column_data_type};
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::BoxStream};
 use object_store::ObjectStore;
 
 use crate::{
     IPC_WRITE_OPTS,
     arrow_object_store::ArrowObjectStoreReader,
+    consts,
     layout::{ArrayLayouts, DatasetArrayLayout},
+    pruning::{self, ChunkStatistics, PruningArrayWriter},
+    util,
 };
 
+/// Provides chunked array parts via streaming and random access.
 pub trait ChunkedArrayProvider: Send + Sync {
+    /// Returns a stream of chunked array parts.
     fn chunks(&self) -> BoxStream<'static, anyhow::Result<ChunkedArrayPart>>;
+    /// Fetches a chunk by its logical chunk index.
     fn fetch_chunk(
         &self,
         chunk_index: Vec<usize>,
@@ -46,6 +52,7 @@ where
     }
 }
 
+/// Lazily resolves chunked array parts from object storage using a layout index.
 struct LazyChunkedArrayProvider<S: ObjectStore + Send + Sync> {
     layout: Arc<DatasetArrayLayout>,
     reader: Arc<ArrowObjectStoreReader<S>>,
@@ -53,7 +60,47 @@ struct LazyChunkedArrayProvider<S: ObjectStore + Send + Sync> {
 
 impl<S: ObjectStore + Send + Sync> ChunkedArrayProvider for LazyChunkedArrayProvider<S> {
     fn chunks(&self) -> BoxStream<'static, anyhow::Result<ChunkedArrayPart>> {
-        unimplemented!()
+        let layout = self.layout.clone();
+        let reader = self.reader.clone();
+
+        futures::stream::iter(layout.chunk_indexes.clone())
+            .enumerate()
+            .then(move |(index, chunk_indices)| {
+                let layout = layout.clone();
+                let reader = reader.clone();
+                async move {
+                    let chunk_index = chunk_indices
+                        .iter()
+                        .map(|d| *d as usize)
+                        .collect::<Vec<_>>();
+
+                    let array_index = layout
+                        .array_indexes
+                        .get(index)
+                        .ok_or_else(|| anyhow!("missing array index for chunk {index}"))?;
+                    let batch_index = array_index[0] as usize;
+                    let array_in_batch_index = array_index[1] as usize;
+
+                    let batch = reader
+                        .read_batch(batch_index)
+                        .await?
+                        .ok_or_else(|| anyhow!("missing batch {batch_index}"))?;
+                    let column = NdArrowArrayColumn::try_from_array(batch.column(0).clone())
+                        .map_err(|err| anyhow!(err))
+                        .context("failed to decode ND array column")?;
+
+                    if array_in_batch_index >= column.len() {
+                        return Err(anyhow!("array index {array_in_batch_index} out of bounds"));
+                    }
+
+                    let array = column
+                        .row(array_in_batch_index)
+                        .context("failed to read ND array row")?
+                        .clone();
+                    Ok(ChunkedArrayPart { array, chunk_index })
+                }
+            })
+            .boxed()
     }
 
     fn fetch_chunk(
@@ -62,6 +109,7 @@ impl<S: ObjectStore + Send + Sync> ChunkedArrayProvider for LazyChunkedArrayProv
     ) -> BoxFuture<'static, anyhow::Result<Option<ChunkedArrayPart>>> {
         // Find the index of the chunk in the layout
         let layout = self.layout.clone();
+        let reader = self.reader.clone();
 
         let fut = async move {
             let index = layout.chunk_indexes.iter().position(|idxs| {
@@ -75,19 +123,13 @@ impl<S: ObjectStore + Send + Sync> ChunkedArrayProvider for LazyChunkedArrayProv
                 let batch_index = array_index[0] as usize;
                 let array_in_batch_index = array_index[1] as usize;
 
-                let batch = self.reader.read_batch(batch_index).await?;
+                let batch = reader.read_batch(batch_index).await?;
                 if let Some(batch) = batch {
-                    let column = batch
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<beacon_nd_arrow::column::NdArrowArrayColumn>()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("Failed to downcast to NdArrowArrayColumn")
-                        })?;
+                    let column =
+                        NdArrowArrayColumn::try_from_array(batch.column(0).clone()).unwrap();
 
-                    let arrays = column.to_rows()?;
-                    if array_in_batch_index < arrays.len() {
-                        let array = arrays[array_in_batch_index].clone();
+                    if array_in_batch_index < column.len() {
+                        let array = column.row(array_in_batch_index)?.clone();
                         return Ok(Some(ChunkedArrayPart { array, chunk_index }));
                     } else {
                         return Ok(None);
@@ -102,8 +144,37 @@ impl<S: ObjectStore + Send + Sync> ChunkedArrayProvider for LazyChunkedArrayProv
     }
 }
 
+/// An in-memory provider useful for tests and small arrays.
+pub struct InMemoryChunkedArrayProvider {
+    parts: Vec<ChunkedArrayPart>,
+}
+
+impl InMemoryChunkedArrayProvider {
+    pub fn new(parts: Vec<ChunkedArrayPart>) -> Self {
+        Self { parts }
+    }
+}
+
+impl ChunkedArrayProvider for InMemoryChunkedArrayProvider {
+    fn chunks(&self) -> BoxStream<'static, anyhow::Result<ChunkedArrayPart>> {
+        futures::stream::iter(self.parts.clone().into_iter().map(Ok)).boxed()
+    }
+
+    fn fetch_chunk(
+        &self,
+        chunk_index: Vec<usize>,
+    ) -> BoxFuture<'static, anyhow::Result<Option<ChunkedArrayPart>>> {
+        let part = self
+            .parts
+            .iter()
+            .find(|part| part.chunk_index == chunk_index)
+            .cloned();
+        futures::future::ready(Ok(part)).boxed()
+    }
+}
+
 /// A stream of chunked ND arrays with a shared element type and chunk shape.
-pub struct ChunkedArray<S: ChunkedArrayProvider + Send + Sync> {
+pub struct ChunkedArray<S: ChunkedArrayProvider + Send + Sync = InMemoryChunkedArrayProvider> {
     pub array_datatype: arrow::datatypes::DataType,
     pub chunk_shape: Vec<usize>,
     pub chunk_provider: S,
@@ -117,13 +188,14 @@ impl<S: ChunkedArrayProvider + Send + Sync> ChunkedArray<S> {
 }
 
 /// A single chunk and its chunk index within the overall array.
+#[derive(Debug, Clone)]
 pub struct ChunkedArrayPart {
     pub array: NdArrowArray,
     pub chunk_index: Vec<usize>,
 }
 
 /// Writes chunked ND Arrow arrays to object storage using buffered IPC batches.
-pub struct ChunkedArrayWriter<S: ObjectStore> {
+pub struct ChunkedArrayWriter<S: ObjectStore + Clone> {
     array_datatype: arrow::datatypes::DataType,
     store: S,
     path: object_store::path::Path,
@@ -135,17 +207,19 @@ pub struct ChunkedArrayWriter<S: ObjectStore> {
 
     // Layouts of the arrays written so far.
     layouts: Vec<DatasetArrayLayout>,
+
+    // Pruning Array
+    pruning_writer: PruningArrayWriter<S>,
 }
 
-impl<S: ObjectStore> ChunkedArrayWriter<S> {
+impl<S: ObjectStore + Clone> ChunkedArrayWriter<S> {
     const DEFAULT_FLUSH_SIZE: usize = 8 * 1024 * 1024; // 8 MB
-    const STREAM_CHUNK_SIZE: usize = 1024 * 1024; // 1 MB
 
     /// Create a new chunked array writer.
     pub fn new(
-        array_datatype: arrow::datatypes::DataType,
         store: S,
         path: object_store::path::Path,
+        array_datatype: arrow::datatypes::DataType,
     ) -> Self {
         let field = arrow::datatypes::Field::new(
             "array",
@@ -160,6 +234,12 @@ impl<S: ObjectStore> ChunkedArrayWriter<S> {
         )
         .expect("Failed to create IPC file writer");
 
+        let pruning_writer = PruningArrayWriter::new(
+            store.clone(),
+            path.child("pruning.arrow"),
+            array_datatype.clone(),
+        );
+
         Self {
             array_datatype,
             store,
@@ -170,13 +250,19 @@ impl<S: ObjectStore> ChunkedArrayWriter<S> {
             num_batches: 0,
             buffer_arrays: Vec::new(),
             layouts: Vec::new(),
+            pruning_writer,
         }
+    }
+
+    pub fn data_type(&self) -> &arrow::datatypes::DataType {
+        &self.array_datatype
     }
 
     /// Flush remaining batches and upload the IPC file to object storage.
     pub async fn finalize(mut self) -> anyhow::Result<()> {
         // Flush any remaining data
         self.flush().await?;
+        self.pruning_writer.finish().await?;
 
         self.temp_writer.finish()?;
 
@@ -184,14 +270,24 @@ impl<S: ObjectStore> ChunkedArrayWriter<S> {
         let mut temp_file = self.temp_writer.into_inner()?;
         temp_file.seek(SeekFrom::Start(0))?;
 
-        Self::stream_file_to_store(&self.store, &self.path.child("array.arrow"), &mut temp_file)
-            .await?;
+        util::stream_file_to_store::<S>(
+            &self.store,
+            &self.path.child("array.arrow"),
+            &mut temp_file,
+            consts::STREAM_CHUNK_SIZE,
+        )
+        .await?;
 
         // Create a layout file
         let layout = ArrayLayouts::new(self.layouts);
         let layout_path = self.path.child("layout.arrow");
         layout.save::<S>(self.store, layout_path).await?;
 
+        Ok(())
+    }
+
+    pub async fn append_null(&mut self) -> anyhow::Result<()> {
+        self.pruning_writer.append(None)?;
         Ok(())
     }
 
@@ -213,12 +309,17 @@ impl<S: ObjectStore> ChunkedArrayWriter<S> {
         let chunk_shape: Vec<u32> = array.chunk_shape.iter().map(|d| *d as u32).collect();
 
         let mut chunks = array.chunks();
+        let mut array_statistics = Vec::new();
         while let Some(part) = chunks.next().await {
             let part = part?;
             let array_indice = [self.num_batches as u32, self.buffer_arrays.len() as u32];
 
             self.current_buffer_size += part.array.values().get_array_memory_size();
+            let chunk_statistics = Self::generate_statistics(&part.array);
             self.buffer_arrays.push(part.array);
+            if let Some(stat) = chunk_statistics {
+                array_statistics.push(stat);
+            }
 
             // Check if we need to flush
             if self.current_buffer_size >= self.flush_size {
@@ -237,6 +338,17 @@ impl<S: ObjectStore> ChunkedArrayWriter<S> {
         });
 
         Ok(())
+    }
+
+    fn generate_statistics(nd_array: &NdArrowArray) -> Option<ChunkStatistics> {
+        let values = nd_array.values();
+
+        Some(ChunkStatistics {
+            max: pruning::compute_max_scalar(values).ok().flatten(),
+            min: pruning::compute_min_scalar(values).ok().flatten(),
+            null_count: values.null_count(),
+            row_count: values.len(),
+        })
     }
 
     /// Flush any remaining buffered data to the temp file.
@@ -270,40 +382,13 @@ impl<S: ObjectStore> ChunkedArrayWriter<S> {
 
         Ok(())
     }
-
-    /// Stream a file to object storage using multipart uploads.
-    async fn stream_file_to_store(
-        store: &S,
-        path: &object_store::path::Path,
-        file: &mut File,
-    ) -> anyhow::Result<()> {
-        file.seek(SeekFrom::Start(0))?;
-        let mut buf = vec![0u8; Self::STREAM_CHUNK_SIZE];
-        let mut total_read = 0usize;
-        let mut uploader = store.put_multipart(path).await?;
-
-        loop {
-            let read = file.read(&mut buf)?;
-            if read == 0 {
-                break;
-            }
-            total_read += read;
-            uploader
-                .put_part(Bytes::copy_from_slice(&buf[..read]).into())
-                .await?;
-        }
-
-        if total_read == 0 {
-            store.put(path, Bytes::new().into()).await?;
-        } else {
-            uploader.complete().await?;
-        }
-        Ok(())
-    }
 }
 
+/// Reads chunked ND Arrow arrays and their layout metadata from object storage.
 pub struct ChunkedArrayReader<S: ObjectStore + Clone> {
+    #[allow(dead_code)]
     store: S,
+    #[allow(dead_code)]
     path: object_store::path::Path,
     array_reader: Arc<ArrowObjectStoreReader<S>>,
     layouts: ArrayLayouts,
@@ -331,30 +416,33 @@ impl<S: ObjectStore + Clone> ChunkedArrayReader<S> {
         })
     }
 
+    /// Returns the loaded array layouts.
     pub fn layouts(&self) -> &ArrayLayouts {
         &self.layouts
     }
 
+    /// Returns the array datatype stored in this reader.
     pub fn array_datatype(&self) -> &arrow::datatypes::DataType {
         &self.array_datatype
     }
 
+    /// Returns a chunked array for a dataset index, if present.
     pub fn read_dataset_array(
         &self,
         dataset_index: u32,
-    ) -> anyhow::Result<ChunkedArray<Arc<dyn ChunkedArrayProvider>>> {
-        let layout = self
-            .layouts
-            .find_dataset_array_layout(dataset_index)
-            .ok_or_else(|| anyhow::anyhow!("Dataset index {} not found in layouts", dataset_index))?
-            .clone();
+    ) -> Option<ChunkedArray<Arc<dyn ChunkedArrayProvider>>> {
+        let layout = if let Some(layout) = self.layouts.find_dataset_array_layout(dataset_index) {
+            layout.clone()
+        } else {
+            return None;
+        };
 
         let provider = Arc::new(LazyChunkedArrayProvider {
             layout: Arc::new(layout),
             reader: self.array_reader.clone(),
         });
 
-        Ok(ChunkedArray {
+        Some(ChunkedArray {
             array_datatype: self.array_datatype.clone(),
             chunk_shape: provider
                 .layout
@@ -375,10 +463,13 @@ mod tests {
     use arrow::datatypes::DataType;
     use arrow::ipc::reader::FileReader;
     use beacon_nd_arrow::dimensions::{Dimension, Dimensions};
-    use futures::stream;
+    use futures::TryStreamExt;
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
-    use super::{ChunkedArray, ChunkedArrayPart, ChunkedArrayWriter};
+    use super::{
+        ChunkedArray, ChunkedArrayPart, ChunkedArrayReader, ChunkedArrayWriter,
+        InMemoryChunkedArrayProvider,
+    };
 
     fn make_part(values: Vec<i32>, chunk_index: Vec<usize>) -> ChunkedArrayPart {
         let dims = Dimensions::new(vec![Dimension::try_new("x", values.len()).unwrap()]);
@@ -387,28 +478,80 @@ mod tests {
         ChunkedArrayPart { array, chunk_index }
     }
 
+    fn array_values(array: &beacon_nd_arrow::NdArrowArray) -> Vec<i32> {
+        let values = array
+            .values()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("int32 array");
+        (0..values.len()).map(|i| values.value(i)).collect()
+    }
+
     #[tokio::test]
     async fn chunked_array_writer_streams_ipc_to_store() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("chunked/arrays.arrow");
-        let mut writer = ChunkedArrayWriter::new(DataType::Int32, store.clone(), path.clone());
+        let path = Path::from("chunked");
+        let mut writer = ChunkedArrayWriter::new(store.clone(), path.clone(), DataType::Int32);
 
-        let chunks = stream::iter(vec![
-            make_part(vec![1, 2], vec![0]),
-            make_part(vec![3, 4], vec![1]),
-        ]);
         let chunked = ChunkedArray {
             array_datatype: DataType::Int32,
             chunk_shape: vec![2],
-            chunk_provider: Box::pin(chunks),
+            chunk_provider: InMemoryChunkedArrayProvider::new(vec![
+                make_part(vec![1, 2], vec![0]),
+                make_part(vec![3, 4], vec![1]),
+            ]),
         };
 
         writer.append_chunked_array(0, chunked).await.unwrap();
         writer.finalize().await.unwrap();
 
-        let bytes = store.get(&path).await.unwrap().bytes().await.unwrap();
+        let bytes = store
+            .get(&path.child("array.arrow"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
         let reader = FileReader::try_new(std::io::Cursor::new(bytes.to_vec()), None).unwrap();
         let rows: usize = reader.map(|batch| batch.unwrap().num_rows()).sum();
         assert_eq!(rows, 2);
+    }
+
+    #[tokio::test]
+    async fn chunked_array_reader_roundtrip() -> anyhow::Result<()> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("chunked");
+        let mut writer = ChunkedArrayWriter::new(store.clone(), path.clone(), DataType::Int32);
+
+        let chunked = ChunkedArray {
+            array_datatype: DataType::Int32,
+            chunk_shape: vec![2],
+            chunk_provider: InMemoryChunkedArrayProvider::new(vec![
+                make_part(vec![10, 11], vec![0]),
+                make_part(vec![20, 21], vec![1]),
+            ]),
+        };
+
+        writer.append_chunked_array(7, chunked).await?;
+        writer.finalize().await?;
+
+        let reader = ChunkedArrayReader::new(store.clone(), path.clone()).await?;
+
+        let chunked = reader.read_dataset_array(7).expect("dataset exists");
+        let parts = chunked.chunks().try_collect::<Vec<_>>().await?;
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].chunk_index, vec![0]);
+        assert_eq!(parts[1].chunk_index, vec![1]);
+        assert_eq!(array_values(&parts[0].array), vec![10, 11]);
+        assert_eq!(array_values(&parts[1].array), vec![20, 21]);
+
+        let fetched = chunked
+            .chunk_provider
+            .fetch_chunk(vec![1])
+            .await?
+            .expect("chunk exists");
+        assert_eq!(fetched.chunk_index, vec![1]);
+        assert_eq!(array_values(&fetched.array), vec![20, 21]);
+        Ok(())
     }
 }

@@ -5,12 +5,14 @@ pub mod array;
 pub mod array_chunked;
 pub mod arrow_object_store;
 pub mod attribute;
+pub mod consts;
 pub mod dataset;
 pub mod layout;
 pub mod partition;
-pub mod predicate;
+pub mod pruning;
 pub mod rle;
 pub mod schema;
+pub mod util;
 pub mod variable;
 
 pub static IPC_WRITE_OPTS: Lazy<arrow::ipc::writer::IpcWriteOptions> = Lazy::new(|| {
