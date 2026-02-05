@@ -12,7 +12,7 @@ use arrow::datatypes::{DataType, Field};
 use crate::arrow_object_store::ArrowObjectStoreReader;
 
 #[derive(Debug, Clone)]
-pub struct DatasetArrayLayout {
+pub struct ArrayLayout {
     pub dataset_index: u32,
     pub array_indexes: Vec<[u32; 2]>,
     pub chunk_indexes: Vec<Vec<u32>>,
@@ -31,7 +31,7 @@ pub struct ArrayLayouts {
 
 impl ArrayLayouts {
     /// Creates a new `ArrayLayouts` from the given dataset layouts.
-    pub fn new(layouts: Vec<DatasetArrayLayout>) -> Self {
+    pub fn new(layouts: Vec<ArrayLayout>) -> Self {
         let dataset_index =
             UInt32Array::from(layouts.iter().map(|l| l.dataset_index).collect::<Vec<_>>());
         let array_index =
@@ -303,13 +303,13 @@ impl ArrayLayouts {
     }
 
     /// Finds the dataset index using binary search on sorted `dataset_index` values.
-    pub fn find_dataset_array_layout(&self, dataset_index: u32) -> Option<DatasetArrayLayout> {
+    pub fn find_dataset_array_layout(&self, dataset_index: u32) -> Option<ArrayLayout> {
         let index = self
             .dataset_index
             .values()
             .binary_search(&dataset_index)
             .ok()?;
-        Some(DatasetArrayLayout {
+        Some(ArrayLayout {
             dataset_index,
             array_indexes: self.get_array_indexes(index)?,
             chunk_indexes: self.get_chunk_indexes(index)?,
@@ -402,20 +402,20 @@ impl ArrayLayouts {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArrayLayouts, DatasetArrayLayout};
+    use super::{ArrayLayout, ArrayLayouts};
     use object_store::{ObjectStore, memory::InMemory, path::Path};
     use std::sync::Arc;
 
     fn sample_layout() -> ArrayLayouts {
         ArrayLayouts::new(vec![
-            DatasetArrayLayout {
+            ArrayLayout {
                 dataset_index: 1,
                 array_indexes: vec![[0, 1], [2, 3]],
                 chunk_indexes: vec![vec![10, 11], vec![12, 13]],
                 chunk_shape: vec![2, 2],
                 array_shape: vec![4, 4],
             },
-            DatasetArrayLayout {
+            ArrayLayout {
                 dataset_index: 2,
                 array_indexes: vec![[4, 5]],
                 chunk_indexes: vec![vec![20, 21, 22]],

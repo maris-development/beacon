@@ -2,13 +2,12 @@ use arrow::ipc::CompressionType;
 use once_cell::sync::Lazy;
 
 pub mod array;
-pub mod array_chunked;
-pub mod array_encoding;
 pub mod arrow_dataset;
 pub mod arrow_object_store;
 pub mod attribute;
 pub mod column;
 pub mod column_reader;
+pub mod config;
 pub mod consts;
 pub mod dataset;
 pub mod layout;

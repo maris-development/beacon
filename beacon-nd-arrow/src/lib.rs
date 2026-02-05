@@ -70,12 +70,14 @@
 pub mod batch;
 pub mod broadcast;
 pub mod column;
+pub mod concat;
 pub mod dimensions;
 pub mod error;
 pub mod extension;
 pub mod slice;
 
 pub use slice::NdIndex;
+pub use concat::concat_nd;
 
 #[cfg(feature = "ndarray")]
 pub mod ndarray_convert;

@@ -143,6 +143,11 @@ impl<S: ObjectStore + Send + Sync> ArrowObjectStoreReader<S> {
         self.schema.clone()
     }
 
+    /// Returns the object store path for this reader.
+    pub fn path(&self) -> &object_store::path::Path {
+        &self.path
+    }
+
     /// Reads a record batch by index.
     ///
     /// Returns `Ok(None)` when the index is out of range.
