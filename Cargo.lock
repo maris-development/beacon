@@ -734,6 +734,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-arrow-data-table"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "beacon-arrow-store",
+ "bytes",
+ "datafusion",
+ "object_store 0.12.4",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "beacon-arrow-netcdf"
 version = "1.5.0"
 dependencies = [
@@ -794,6 +809,19 @@ dependencies = [
  "walkdir",
  "zip 2.4.2",
  "zstd",
+]
+
+[[package]]
+name = "beacon-arrow-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "bytes",
+ "object_store 0.12.4",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

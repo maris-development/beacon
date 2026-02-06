@@ -1,0 +1,16 @@
+[package]
+name = "beacon-arrow-data-table"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+arrow = { workspace = true }
+tempfile = { workspace = true }
+object_store = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+datafusion = { workspace = true }
+
+beacon-arrow-store = { path = "../beacon-arrow-store" }
