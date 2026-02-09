@@ -834,6 +834,7 @@ dependencies = [
  "futures",
  "indexmap 2.13.0",
  "moka",
+ "ndarray 0.17.2",
  "object_store 0.12.4",
  "once_cell",
  "parking_lot",

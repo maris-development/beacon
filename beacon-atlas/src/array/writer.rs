@@ -282,10 +282,14 @@ mod tests {
             ArrayPart {
                 array: make_array(vec![1, 2], vec![2], vec!["x"]),
                 chunk_index: vec![0],
+                start: vec![0],
+                shape: vec![2],
             },
             ArrayPart {
                 array: make_array(vec![3, 4], vec![2], vec!["x"]),
                 chunk_index: vec![1],
+                start: vec![2],
+                shape: vec![2],
             },
         ];
 
@@ -319,10 +323,14 @@ mod tests {
             ArrayPart {
                 array: make_array(vec![1, 2], vec![2], vec!["x"]),
                 chunk_index: vec![0],
+                start: vec![0],
+                shape: vec![2],
             },
             ArrayPart {
                 array: make_array(vec![3, 4], vec![2], vec!["x"]),
                 chunk_index: vec![1],
+                start: vec![2],
+                shape: vec![2],
             },
         ];
 

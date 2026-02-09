@@ -1,6 +1,9 @@
-use std::sync::Arc;
-
 use anyhow::anyhow;
+use arrow::{
+    array::{ListArray, PrimitiveArray, StringArray},
+    buffer::ScalarBuffer,
+    datatypes::GenericStringType,
+};
 use beacon_nd_arrow::{
     NdArrowArray, NdIndex, concat_nd,
     dimensions::{Dimension, Dimensions},
@@ -10,8 +13,12 @@ use futures::{StreamExt, stream};
 
 use crate::{array::store::ChunkStore, config};
 
+pub mod buffer;
+pub mod chunk;
+pub mod data_type;
 pub mod io_cache;
 pub mod layout;
+pub mod nd;
 pub mod pruning;
 pub mod reader;
 pub mod store;
@@ -31,6 +38,14 @@ pub struct Array<S: ChunkStore + Send + Sync> {
 pub struct ArrayPart {
     pub array: NdArrowArray,
     pub chunk_index: Vec<usize>,
+    pub start: Vec<usize>, // calculated as chunk_index * chunk_shape, but included here for convenience
+    pub shape: Vec<usize>, // calculated as min(chunk_shape, array_shape - start), but included here for convenience
+}
+
+#[derive(Debug, Clone)]
+pub struct ArraySubset {
+    start: Vec<usize>,
+    shape: Vec<usize>,
 }
 
 impl<S: ChunkStore + Send + Sync> Array<S> {
@@ -39,706 +54,650 @@ impl<S: ChunkStore + Send + Sync> Array<S> {
         self.chunk_provider.chunks()
     }
 
+    /// Returns true if the array is fully chunked (i.e., each chunk covers the entire array).
+    pub fn is_single_chunk(&self) -> bool {
+        self.chunk_shape == self.array_shape
+    }
+
     /// Fetches a chunk by its logical chunk index.
     pub async fn fetch_chunk(&self, chunk_index: Vec<usize>) -> anyhow::Result<Option<ArrayPart>> {
         self.chunk_provider.fetch_chunk(chunk_index).await
     }
 
-    /// Fetches a logical slice by retrieving all intersecting chunks and
-    /// stitching them together, similar to zarr chunk assembly.
-    ///
-    /// Missing chunks are represented as null-filled arrays, and edge chunks
-    /// are allowed to be smaller than the nominal `chunk_shape`.
-    pub async fn fetch_sliced(
-        &self,
-        index: Vec<usize>, // element index to start slicing at along each dimension
-        counts: Vec<usize>, // number of elements to read along each dimension
-    ) -> anyhow::Result<Option<ArrayPart>> {
-        // Determine which chunk indices intersect the requested logical slice.
-        let ranges = compute_chunk_ranges(&index, &counts, &self.chunk_shape, &self.array_shape)?;
-        let chunk_indices = expand_chunk_indices(&ranges);
-
-        if chunk_indices.is_empty() {
-            return Ok(None);
+    pub fn chunk_subsets(&self) -> Vec<ArraySubset> {
+        if self.array_shape.len() != self.chunk_shape.len() {
+            return Vec::new();
+        }
+        if self.array_shape.is_empty() {
+            return vec![ArraySubset {
+                start: Vec::new(),
+                shape: Vec::new(),
+            }];
+        }
+        if self.chunk_shape.contains(&0) {
+            return Vec::new();
         }
 
-        // Fast path: a single chunk can resolve the requested slice.
-        if let Some(chunk_index) = single_chunk_index(&ranges) {
-            return self
-                .fetch_single_chunk_slice(chunk_index, &index, &counts)
-                .await;
+        let chunk_counts: Vec<usize> = self
+            .array_shape
+            .iter()
+            .zip(self.chunk_shape.iter())
+            .map(|(array_dim, chunk_dim)| array_dim.div_ceil(*chunk_dim))
+            .collect();
+
+        let mut indices = vec![0usize; chunk_counts.len()];
+        let mut subsets = Vec::new();
+
+        loop {
+            let mut start = Vec::with_capacity(indices.len());
+            let mut shape = Vec::with_capacity(indices.len());
+            for ((idx, chunk_dim), array_dim) in indices
+                .iter()
+                .zip(self.chunk_shape.iter())
+                .zip(self.array_shape.iter())
+            {
+                let offset = idx * chunk_dim;
+                if offset >= *array_dim {
+                    shape.push(0);
+                } else {
+                    shape.push((*array_dim - offset).min(*chunk_dim));
+                }
+                start.push(offset);
+            }
+            subsets.push(ArraySubset { start, shape });
+
+            let mut dim = indices.len();
+            while dim > 0 {
+                dim -= 1;
+                if indices[dim] + 1 < chunk_counts[dim] {
+                    indices[dim] += 1;
+                    for reset in dim + 1..indices.len() {
+                        indices[reset] = 0;
+                    }
+                    break;
+                }
+                if dim == 0 {
+                    return subsets;
+                }
+            }
         }
-
-        // Fetch all intersecting chunks concurrently to minimize latency.
-        let fetched_parts =
-            fetch_parts_concurrently(self, &chunk_indices, config::chunk_fetch_concurrency())
-                .await?;
-        let dim_names = resolve_dim_names(&fetched_parts, &counts);
-        let dims_from_names = |shape: &[usize]| dims_from_names(&dim_names, shape);
-        let slices = build_chunk_slices(
-            &chunk_indices,
-            fetched_parts,
-            &index,
-            &counts,
-            &self.chunk_shape,
-            &self.array_shape,
-            &self.array_datatype,
-            &dims_from_names,
-        )?;
-
-        let stitched = stitch_slices(slices, &ranges)?;
-        let slice = rebuild_output(stitched, &dim_names, &counts)?;
-
-        // Return the slice with the logical starting chunk index for reference.
-        let start_chunk_index = ranges.iter().map(|(start, _)| *start).collect();
-        Ok(Some(ArrayPart {
-            array: slice,
-            chunk_index: start_chunk_index,
-        }))
     }
 
-    async fn fetch_single_chunk_slice(
+    pub fn determine_chunk_indices(&self, subset: ArraySubset) -> anyhow::Result<Vec<Vec<usize>>> {
+        let num_dims = subset.start.len();
+        if num_dims != subset.shape.len()
+            || num_dims != self.chunk_shape.len()
+            || num_dims != self.array_shape.len()
+        {
+            return Err(anyhow!("subset dimensionality does not match array"));
+        }
+        if num_dims == 0 {
+            return Ok(vec![Vec::new()]);
+        }
+
+        let mut chunk_ranges = Vec::with_capacity(num_dims);
+        for dim in 0..num_dims {
+            let start = subset.start[dim];
+            let len = subset.shape[dim];
+            let array_dim = self.array_shape[dim];
+            let chunk_dim = self.chunk_shape[dim];
+
+            if chunk_dim == 0 {
+                return Err(anyhow!("chunk dimension cannot be zero"));
+            }
+            if len == 0 || start.saturating_add(len) > array_dim {
+                return Err(anyhow!("subset out of bounds"));
+            }
+
+            let first = start / chunk_dim;
+            let last = (start + len - 1) / chunk_dim;
+            chunk_ranges.push((first, last));
+        }
+
+        let mut indices = Vec::with_capacity(num_dims);
+        for (start, _end) in &chunk_ranges {
+            indices.push(*start);
+        }
+        let mut chunk_indices = Vec::new();
+        loop {
+            chunk_indices.push(indices.clone());
+            let mut dim = num_dims;
+            let mut carried = true;
+            while dim > 0 && carried {
+                dim -= 1;
+                let (start, end) = chunk_ranges[dim];
+                if indices[dim] < end {
+                    indices[dim] += 1;
+                    for reset in dim + 1..num_dims {
+                        indices[reset] = chunk_ranges[reset].0;
+                    }
+                    carried = false;
+                } else {
+                    indices[dim] = start;
+                }
+            }
+            if carried {
+                break;
+            }
+        }
+        Ok(chunk_indices)
+    }
+
+    /// Fetches a subset of the array that is fully contained within a single chunk. Returns an error if failed to retreived. None if the chunk is missing.
+    pub async fn subset_within_chunk(
         &self,
         chunk_index: Vec<usize>,
-        index: &[usize],
-        counts: &[usize],
-    ) -> anyhow::Result<Option<ArrayPart>> {
-        // Fetch the single chunk and slice it directly.
-        let part = self.fetch_chunk(chunk_index.clone()).await?;
-        let part = match part {
+        subset: ArraySubset,
+    ) -> anyhow::Result<Option<NdArrowArray>> {
+        let part = match self.fetch_chunk(chunk_index).await? {
             Some(part) => part,
             None => return Ok(None),
         };
 
-        let slice_indices = build_chunk_slice_indices(
-            index,
-            counts,
-            &self.chunk_shape,
-            &self.array_shape,
-            &chunk_index,
-        );
-        let slice_shape: Vec<usize> = slice_indices
-            .iter()
-            .map(|idx| match idx {
-                NdIndex::Slice { len, .. } => *len,
-                NdIndex::Index { .. } => 1,
-            })
-            .collect();
-        let sliced = part
-            .array
-            .slice_nd(&slice_indices)
-            .map_err(|err| anyhow!(err))?;
-
-        let dim_names = part
-            .array
-            .dimensions()
-            .as_multi_dimensional()
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .map(|d| d.name().to_string())
-            .collect::<Vec<_>>();
-        let dims = dims_from_names(&dim_names, &slice_shape)?;
-        let normalized =
-            NdArrowArray::new(sliced.values().clone(), dims).map_err(|err| anyhow!(err))?;
-
-        Ok(Some(ArrayPart {
-            array: normalized,
-            chunk_index,
-        }))
-    }
-}
-
-/// Returns the chunk index when the request maps to a single chunk.
-fn single_chunk_index(ranges: &[(usize, usize)]) -> Option<Vec<usize>> {
-    if ranges.is_empty() {
-        return None;
-    }
-    let mut chunk_index = Vec::with_capacity(ranges.len());
-    for (start, end) in ranges.iter() {
-        if start != end {
-            return None;
+        if subset.start.len() != subset.shape.len()
+            || subset.start.len() != part.start.len()
+            || subset.start.len() != part.shape.len()
+        {
+            return Err(anyhow!("subset dimensionality does not match chunk"));
         }
-        chunk_index.push(*start);
-    }
-    Some(chunk_index)
-}
+        if subset.start.is_empty() {
+            return Ok(Some(part.array));
+        }
 
-async fn fetch_parts_concurrently<S: ChunkStore + Send + Sync>(
-    array: &Array<S>,
-    chunk_indices: &[Vec<usize>],
-    concurrency: usize,
-) -> anyhow::Result<Vec<Option<ArrayPart>>> {
-    let fetches = stream::iter(chunk_indices.iter().cloned().enumerate())
-        .map(|(pos, chunk_index)| async move {
-            let part = array.fetch_chunk(chunk_index).await?;
-            Ok::<_, anyhow::Error>((pos, part))
-        })
-        .buffer_unordered(concurrency)
-        .collect::<Vec<_>>()
-        .await;
+        let mut indices = Vec::with_capacity(subset.start.len());
+        for dim in 0..subset.start.len() {
+            let start = subset.start[dim];
+            let len = subset.shape[dim];
+            let chunk_start = part.start[dim];
+            let chunk_len = part.shape[dim];
 
-    let mut fetched_parts = vec![None; chunk_indices.len()];
-    for result in fetches {
-        let (pos, part) = result?;
-        fetched_parts[pos] = part;
-    }
-    Ok(fetched_parts)
-}
-
-fn resolve_dim_names(fetched_parts: &[Option<ArrayPart>], counts: &[usize]) -> Vec<String> {
-    if let Some(part) = fetched_parts.iter().flatten().next() {
-        return part
-            .array
-            .dimensions()
-            .as_multi_dimensional()
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .map(|d| d.name().to_string())
-            .collect::<Vec<_>>();
-    }
-
-    (0..counts.len()).map(|i| format!("dim_{i}")).collect()
-}
-
-fn dims_from_names(dim_names: &[String], shape: &[usize]) -> anyhow::Result<Dimensions> {
-    if shape.is_empty() {
-        return Ok(Dimensions::new_scalar());
-    }
-    if shape.len() != dim_names.len() {
-        return Err(anyhow!("dimension names do not match slice rank"));
-    }
-    let dims = dim_names
-        .iter()
-        .cloned()
-        .zip(shape.iter().copied())
-        .map(|(name, size)| Dimension::try_new(name, size))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| anyhow!(err))?;
-    Ok(Dimensions::new(dims))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_chunk_slices(
-    chunk_indices: &[Vec<usize>],
-    fetched_parts: Vec<Option<ArrayPart>>,
-    index: &[usize],
-    counts: &[usize],
-    chunk_shape: &[usize],
-    array_shape: &[usize],
-    array_datatype: &arrow::datatypes::DataType,
-    dims_from_names: &impl Fn(&[usize]) -> anyhow::Result<Dimensions>,
-) -> anyhow::Result<Vec<NdArrowArray>> {
-    let mut slices: Vec<NdArrowArray> = Vec::with_capacity(chunk_indices.len());
-    for (chunk_index, part) in chunk_indices.iter().zip(fetched_parts.into_iter()) {
-        // Compute the slice indices for this chunk, accounting for smaller edge chunks.
-        let slice_indices =
-            build_chunk_slice_indices(index, counts, chunk_shape, array_shape, chunk_index);
-        // Convert slice indices to an explicit shape for the chunk sub-slice.
-        let slice_shape: Vec<usize> = slice_indices
-            .iter()
-            .map(|idx| match idx {
-                NdIndex::Slice { len, .. } => *len,
-                NdIndex::Index { .. } => 1,
-            })
-            .collect();
-
-        // Either slice an existing chunk or synthesize a null-filled chunk.
-        let sliced = match part {
-            Some(part) => part
-                .array
-                .slice_nd(&slice_indices)
-                .map_err(|err| anyhow!(err))?,
-            None => {
-                let len = if slice_shape.is_empty() {
-                    1
-                } else {
-                    slice_shape.iter().product()
-                };
-                let values = arrow::array::new_null_array(array_datatype, len);
-                let dims = dims_from_names(&slice_shape)?;
-                NdArrowArray::new(values, dims).map_err(|err| anyhow!(err))?
+            if len == 0
+                || start < chunk_start
+                || start.saturating_add(len) > chunk_start.saturating_add(chunk_len)
+            {
+                return Err(anyhow!("subset out of chunk bounds"));
             }
-        };
 
-        // Normalize dimensions so concatenation can assume consistent names.
-        let dims = dims_from_names(&slice_shape)?;
-        let normalized =
-            NdArrowArray::new(sliced.values().clone(), dims).map_err(|err| anyhow!(err))?;
-        slices.push(normalized);
+            let local_start = start - chunk_start;
+            indices.push(NdIndex::slice(local_start, len));
+        }
+
+        let sliced = part.array.slice_nd(&indices).map_err(|err| anyhow!(err))?;
+        Ok(Some(sliced))
     }
-    Ok(slices)
+
+    // pub async fn subset(&self, subset: ArraySubset) -> anyhow::Result<Option<NdArrowArray>> {
+    //     // Determine which chunk indices intersect the requested subset.
+    //     let chunk_indices: Vec<Vec<usize>> = self.determine_chunk_indices(subset.clone())?;
+
+    //     if chunk_indices.len() == 1 {
+    //         // Fast path for single chunk: just fetch and slice it.
+    //         return self
+    //             .subset_within_chunk(chunk_indices[0].clone(), subset)
+    //             .await;
+    //     } else {
+    //         // For multiple chunks, we need to fetch them all, stitch them together, and then slice the combined array.
+    //         // This is more complex but avoids multiple slicing operations.
+    //     }
+
+    //     // Read all the chunks, stitch them together, and extract the final subset. Use the concat function to stitch together the chunks.
+    //     let num_dims = subset.start.len();
+    //     if num_dims == 0 {
+    //         let part = self
+    //             .fetch_chunk(Vec::new())
+    //             .await?
+    //             .ok_or_else(|| anyhow!("missing scalar chunk"))?;
+    //         return Ok(Some(part.array));
+    //     }
+
+    //     let mut chunk_ranges = Vec::with_capacity(num_dims);
+    //     for dim in 0..num_dims {
+    //         let start = subset.start[dim];
+    //         let len = subset.shape[dim];
+    //         let array_dim = self.array_shape[dim];
+    //         let chunk_dim = self.chunk_shape[dim];
+
+    //         if chunk_dim == 0 {
+    //             return Err(anyhow!("chunk dimension cannot be zero"));
+    //         }
+    //         if len == 0 || start.saturating_add(len) > array_dim {
+    //             return Err(anyhow!("subset out of bounds"));
+    //         }
+
+    //         let first = start / chunk_dim;
+    //         let last = (start + len - 1) / chunk_dim;
+    //         chunk_ranges.push((first, last));
+    //     }
+
+    //     let mut chunks = std::collections::HashMap::new();
+    //     for chunk_index in &chunk_indices {
+    //         let part = self
+    //             .fetch_chunk(chunk_index.clone())
+    //             .await?
+    //             .ok_or_else(|| anyhow!("missing chunk {:?}", chunk_index))?;
+    //         chunks.insert(chunk_index.clone(), part.array);
+    //     }
+
+    //     fn build_combined(
+    //         dim: usize,
+    //         ranges: &[(usize, usize)],
+    //         prefix: &mut Vec<usize>,
+    //         chunks: &std::collections::HashMap<Vec<usize>, NdArrowArray>,
+    //     ) -> anyhow::Result<NdArrowArray> {
+    //         let (start, end) = ranges[dim];
+    //         let mut arrays = Vec::new();
+    //         for idx in start..=end {
+    //             prefix.push(idx);
+    //             let array = if dim + 1 == ranges.len() {
+    //                 chunks
+    //                     .get(prefix)
+    //                     .cloned()
+    //                     .ok_or_else(|| anyhow!("missing chunk {:?}", prefix))?
+    //             } else {
+    //                 build_combined(dim + 1, ranges, prefix, chunks)?
+    //             };
+    //             arrays.push(array);
+    //             prefix.pop();
+    //         }
+    //         if arrays.len() == 1 {
+    //             return Ok(arrays.remove(0));
+    //         }
+    //         concat_nd(&arrays, dim).map_err(|err| anyhow!(err))
+    //     }
+
+    //     let mut prefix = Vec::with_capacity(num_dims);
+    //     let combined = build_combined(0, &chunk_ranges, &mut prefix, &chunks)?;
+
+    //     let indices = chunk_ranges
+    //         .iter()
+    //         .enumerate()
+    //         .map(|(dim, (start_chunk, _))| {
+    //             let combined_start = start_chunk * self.chunk_shape[dim];
+    //             let local_start = subset.start[dim].saturating_sub(combined_start);
+    //             NdIndex::slice(local_start, subset.shape[dim])
+    //         })
+    //         .collect::<Vec<_>>();
+
+    //     combined.slice_nd(&indices).map_err(|err| anyhow!(err))
+    // }
 }
 
-fn stitch_slices(
-    slices: Vec<NdArrowArray>,
-    ranges: &[(usize, usize)],
-) -> anyhow::Result<NdArrowArray> {
-    // Stitch chunks together along each axis, starting from the last axis.
-    let mut current = slices;
-    let chunk_counts: Vec<usize> = ranges.iter().map(|(start, end)| end - start + 1).collect();
+// #[cfg(test)]
+// mod tests {
+//     use super::{Array, ArrayPart, ChunkStore};
+//     use std::collections::HashMap;
+//     use std::sync::Arc;
 
-    for axis in (0..chunk_counts.len()).rev() {
-        let group_size = chunk_counts[axis];
-        let mut next = Vec::new();
-        for group in current.chunks(group_size) {
-            let merged = concat_nd(group, axis).map_err(|err| anyhow!(err))?;
-            next.push(merged);
-        }
-        current = next;
-    }
+//     use arrow::array::Int32Array;
+//     use beacon_nd_arrow::NdArrowArray;
+//     use beacon_nd_arrow::dimensions::{Dimension, Dimensions};
+//     use futures::StreamExt;
+//     use futures::executor::block_on;
+//     use futures::stream::{self, BoxStream};
 
-    current
-        .pop()
-        .ok_or_else(|| anyhow!("missing sliced result"))
-}
+//     #[derive(Debug, Clone)]
+//     struct TestStore {
+//         parts: HashMap<Vec<usize>, ArrayPart>,
+//     }
 
-fn rebuild_output(
-    slice: NdArrowArray,
-    dim_names: &[String],
-    counts: &[usize],
-) -> anyhow::Result<NdArrowArray> {
-    // Rebuild the final array with the requested output shape.
-    let out_shape = counts.to_vec();
-    let dims = if out_shape.is_empty() {
-        Dimensions::new_scalar()
-    } else {
-        let dims = dim_names
-            .iter()
-            .cloned()
-            .zip(out_shape.iter().copied())
-            .map(|(name, size)| Dimension::try_new(name, size))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| anyhow!(err))?;
-        Dimensions::new(dims)
-    };
-    NdArrowArray::new(slice.values().clone(), dims).map_err(|err| anyhow!(err))
-}
+//     #[async_trait::async_trait]
+//     impl ChunkStore for TestStore {
+//         fn chunks(&self) -> BoxStream<'static, anyhow::Result<ArrayPart>> {
+//             let parts: Vec<ArrayPart> = self.parts.values().cloned().collect();
+//             stream::iter(parts.into_iter().map(Ok)).boxed()
+//         }
 
-/// Computes the inclusive chunk-index ranges intersecting the logical slice.
-fn compute_chunk_ranges(
-    index: &[usize],
-    counts: &[usize],
-    chunk_shape: &[usize],
-    array_shape: &[usize],
-) -> anyhow::Result<Vec<(usize, usize)>> {
-    if index.len() != counts.len() {
-        return Err(anyhow!("index and counts must have the same length"));
-    }
-    if index.len() != chunk_shape.len() || index.len() != array_shape.len() {
-        return Err(anyhow!("slice dimensions do not match array shape"));
-    }
+//         async fn fetch_chunk(&self, chunk_index: Vec<usize>) -> anyhow::Result<Option<ArrayPart>> {
+//             Ok(self.parts.get(&chunk_index).cloned())
+//         }
+//     }
 
-    let mut ranges = Vec::with_capacity(index.len());
-    for ((start, count), (chunk_dim, array_dim)) in index
-        .iter()
-        .zip(counts.iter())
-        .zip(chunk_shape.iter().zip(array_shape.iter()))
-    {
-        if *count == 0 {
-            return Err(anyhow!("slice counts must be non-zero"));
-        }
-        if start.saturating_add(*count) > *array_dim {
-            return Err(anyhow!(
-                "slice [{}, {}) out of bounds for array dimension {}",
-                start,
-                start.saturating_add(*count),
-                array_dim
-            ));
-        }
-        let chunk_start = start / chunk_dim;
-        let chunk_end = (start.saturating_add(*count).saturating_sub(1)) / chunk_dim;
-        ranges.push((chunk_start, chunk_end));
-    }
-    Ok(ranges)
-}
+//     fn make_array(values: Vec<i32>, shape: Vec<usize>, names: Vec<&str>) -> NdArrowArray {
+//         let dims = names
+//             .into_iter()
+//             .zip(shape.into_iter())
+//             .map(|(name, size)| Dimension::try_new(name, size).unwrap())
+//             .collect::<Vec<_>>();
+//         NdArrowArray::new(Arc::new(Int32Array::from(values)), Dimensions::new(dims)).unwrap()
+//     }
 
-/// Expands per-dimension chunk ranges into a full list of chunk indices.
-fn expand_chunk_indices(ranges: &[(usize, usize)]) -> Vec<Vec<usize>> {
-    let mut indices = Vec::new();
-    let mut current = vec![0usize; ranges.len()];
-    for (i, (start, _)) in ranges.iter().enumerate() {
-        current[i] = *start;
-    }
+//     fn make_part(
+//         chunk_index: Vec<usize>,
+//         values: Vec<i32>,
+//         shape: Vec<usize>,
+//         names: Vec<&str>,
+//         chunk_shape: &[usize],
+//         array_shape: &[usize],
+//     ) -> ArrayPart {
+//         let start = chunk_index
+//             .iter()
+//             .zip(chunk_shape.iter())
+//             .map(|(idx, dim)| idx * dim)
+//             .collect::<Vec<_>>();
+//         let shape = shape
+//             .into_iter()
+//             .zip(start.iter())
+//             .zip(array_shape.iter())
+//             .map(|((dim, start), array_dim)| (*array_dim - *start).min(dim))
+//             .collect::<Vec<_>>();
 
-    loop {
-        indices.push(current.clone());
-        let mut dim = ranges.len();
-        while dim > 0 {
-            dim -= 1;
-            let (start, end) = ranges[dim];
-            if current[dim] < end {
-                current[dim] += 1;
-                for reset in dim + 1..ranges.len() {
-                    current[reset] = ranges[reset].0;
-                }
-                break;
-            }
-            if dim == 0 {
-                dim = usize::MAX;
-                break;
-            }
-        }
-        if dim == usize::MAX {
-            break;
-        }
-    }
-    indices
-}
+//         ArrayPart {
+//             array: make_array(values, shape.clone(), names),
+//             chunk_index,
+//             start,
+//             shape,
+//         }
+//     }
 
-/// Builds per-dimension slice indices for a specific chunk, respecting edge sizes.
-fn build_chunk_slice_indices(
-    index: &[usize],
-    counts: &[usize],
-    chunk_shape: &[usize],
-    array_shape: &[usize],
-    chunk_index: &[usize],
-) -> Vec<NdIndex> {
-    index
-        .iter()
-        .zip(counts.iter())
-        .zip(chunk_shape.iter().zip(array_shape.iter()))
-        .zip(chunk_index.iter())
-        .map(|(((start, count), (chunk_dim, array_dim)), chunk_idx)| {
-            let chunk_start = chunk_idx * chunk_dim;
-            let chunk_len = if chunk_start >= *array_dim {
-                0
-            } else {
-                (*array_dim - chunk_start).min(*chunk_dim)
-            };
-            let slice_start = start.saturating_sub(chunk_start).min(chunk_len);
-            let slice_end = (start + count).min(chunk_start + chunk_len) - chunk_start;
-            NdIndex::Slice {
-                start: slice_start,
-                len: slice_end - slice_start,
-            }
-        })
-        .collect()
-}
+//     #[test]
+//     fn chunk_subsets_1d() {
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: vec![2],
+//             array_shape: vec![5],
+//             chunk_provider: TestStore {
+//                 parts: HashMap::new(),
+//             },
+//         };
 
-#[cfg(test)]
-mod tests {
-    use super::{Array, ArrayPart, ChunkStore};
-    use std::collections::HashMap;
-    use std::sync::Arc;
+//         let subsets = array.chunk_subsets();
+//         let starts: Vec<Vec<usize>> = subsets.iter().map(|s| s.start.clone()).collect();
+//         let shapes: Vec<Vec<usize>> = subsets.iter().map(|s| s.shape.clone()).collect();
 
-    use arrow::array::Int32Array;
-    use beacon_nd_arrow::NdArrowArray;
-    use beacon_nd_arrow::dimensions::{Dimension, Dimensions};
-    use futures::StreamExt;
-    use futures::stream::{self, BoxStream};
+//         assert_eq!(starts, vec![vec![0], vec![2], vec![4]]);
+//         assert_eq!(shapes, vec![vec![2], vec![2], vec![1]]);
+//     }
 
-    #[derive(Debug, Clone)]
-    struct TestStore {
-        parts: HashMap<Vec<usize>, ArrayPart>,
-    }
+//     #[test]
+//     fn chunk_subsets_2d() {
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: vec![2, 2],
+//             array_shape: vec![3, 5],
+//             chunk_provider: TestStore {
+//                 parts: HashMap::new(),
+//             },
+//         };
 
-    #[async_trait::async_trait]
-    impl ChunkStore for TestStore {
-        fn chunks(&self) -> BoxStream<'static, anyhow::Result<ArrayPart>> {
-            let parts: Vec<ArrayPart> = self.parts.values().cloned().collect();
-            stream::iter(parts.into_iter().map(Ok)).boxed()
-        }
+//         let subsets = array.chunk_subsets();
+//         let starts: Vec<Vec<usize>> = subsets.iter().map(|s| s.start.clone()).collect();
+//         let shapes: Vec<Vec<usize>> = subsets.iter().map(|s| s.shape.clone()).collect();
 
-        async fn fetch_chunk(&self, chunk_index: Vec<usize>) -> anyhow::Result<Option<ArrayPart>> {
-            Ok(self.parts.get(&chunk_index).cloned())
-        }
-    }
+//         assert_eq!(
+//             starts,
+//             vec![
+//                 vec![0, 0],
+//                 vec![0, 2],
+//                 vec![0, 4],
+//                 vec![2, 0],
+//                 vec![2, 2],
+//                 vec![2, 4],
+//             ]
+//         );
+//         assert_eq!(
+//             shapes,
+//             vec![
+//                 vec![2, 2],
+//                 vec![2, 2],
+//                 vec![2, 1],
+//                 vec![1, 2],
+//                 vec![1, 2],
+//                 vec![1, 1],
+//             ]
+//         );
+//     }
 
-    fn make_array(values: Vec<i32>, shape: Vec<usize>, names: Vec<&str>) -> NdArrowArray {
-        let dims = names
-            .into_iter()
-            .zip(shape.into_iter())
-            .map(|(name, size)| Dimension::try_new(name, size).unwrap())
-            .collect::<Vec<_>>();
-        NdArrowArray::new(Arc::new(Int32Array::from(values)), Dimensions::new(dims)).unwrap()
-    }
+//     #[test]
+//     fn chunk_subsets_scalar() {
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: vec![],
+//             array_shape: vec![],
+//             chunk_provider: TestStore {
+//                 parts: HashMap::new(),
+//             },
+//         };
 
-    #[tokio::test]
-    async fn fetch_sliced_across_chunks_1d() -> anyhow::Result<()> {
-        let mut parts = HashMap::new();
-        parts.insert(
-            vec![0],
-            ArrayPart {
-                array: make_array(vec![1, 2], vec![2], vec!["x"]),
-                chunk_index: vec![0],
-            },
-        );
-        parts.insert(
-            vec![1],
-            ArrayPart {
-                array: make_array(vec![3, 4], vec![2], vec!["x"]),
-                chunk_index: vec![1],
-            },
-        );
+//         let subsets = array.chunk_subsets();
+//         assert_eq!(subsets.len(), 1);
+//         assert!(subsets[0].start.is_empty());
+//         assert!(subsets[0].shape.is_empty());
+//     }
 
-        let array = Array {
-            array_datatype: arrow::datatypes::DataType::Int32,
-            chunk_shape: vec![2],
-            array_shape: vec![4],
-            chunk_provider: TestStore { parts },
-        };
+//     #[test]
+//     fn determine_chunk_indices_1d() {
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: vec![2],
+//             array_shape: vec![5],
+//             chunk_provider: TestStore {
+//                 parts: HashMap::new(),
+//             },
+//         };
 
-        let sliced = array
-            .fetch_sliced(vec![1], vec![3])
-            .await?
-            .expect("slice exists");
-        let values = sliced
-            .array
-            .values()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(values.values(), &[2, 3, 4]);
-        Ok(())
-    }
+//         let subset = super::ArraySubset {
+//             start: vec![1],
+//             shape: vec![3],
+//         };
+//         let indices = block_on(array.determine_chunk_indices(subset)).unwrap();
+//         assert_eq!(indices, vec![vec![0], vec![1]]);
+//     }
 
-    #[tokio::test]
-    async fn fetch_sliced_across_chunks_2d() -> anyhow::Result<()> {
-        let mut parts = HashMap::new();
-        for cy in 0..2 {
-            for cx in 0..2 {
-                let mut values = Vec::new();
-                for y in 0..2 {
-                    for x in 0..2 {
-                        let gy = cy * 2 + y;
-                        let gx = cx * 2 + x;
-                        values.push((gy * 4 + gx) as i32);
-                    }
-                }
-                parts.insert(
-                    vec![cy, cx],
-                    ArrayPart {
-                        array: make_array(values, vec![2, 2], vec!["y", "x"]),
-                        chunk_index: vec![cy, cx],
-                    },
-                );
-            }
-        }
+//     #[test]
+//     fn determine_chunk_indices_2d() {
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: vec![2, 2],
+//             array_shape: vec![3, 5],
+//             chunk_provider: TestStore {
+//                 parts: HashMap::new(),
+//             },
+//         };
 
-        let array = Array {
-            array_datatype: arrow::datatypes::DataType::Int32,
-            chunk_shape: vec![2, 2],
-            array_shape: vec![4, 4],
-            chunk_provider: TestStore { parts },
-        };
+//         let subset = super::ArraySubset {
+//             start: vec![1, 2],
+//             shape: vec![2, 3],
+//         };
+//         let indices = block_on(array.determine_chunk_indices(subset)).unwrap();
+//         assert_eq!(
+//             indices,
+//             vec![vec![0, 1], vec![0, 2], vec![1, 1], vec![1, 2]]
+//         );
+//     }
 
-        let sliced = array
-            .fetch_sliced(vec![1, 1], vec![3, 3])
-            .await?
-            .expect("slice exists");
-        let values = sliced
-            .array
-            .values()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(values.values(), &[5, 6, 7, 9, 10, 11, 13, 14, 15]);
-        Ok(())
-    }
+//     #[test]
+//     fn subset_1d() {
+//         let chunk_shape = vec![2];
+//         let array_shape = vec![5];
+//         let names = vec!["x"];
 
-    #[tokio::test]
-    async fn fetch_sliced_single_chunk_partial_slice() -> anyhow::Result<()> {
-        let mut parts = HashMap::new();
-        parts.insert(
-            vec![0],
-            ArrayPart {
-                array: make_array(vec![10, 20, 30, 40], vec![4], vec!["x"]),
-                chunk_index: vec![0],
-            },
-        );
+//         let mut parts = HashMap::new();
+//         parts.insert(
+//             vec![0],
+//             make_part(
+//                 vec![0],
+//                 vec![1, 2],
+//                 vec![2],
+//                 names.clone(),
+//                 &chunk_shape,
+//                 &array_shape,
+//             ),
+//         );
+//         parts.insert(
+//             vec![1],
+//             make_part(
+//                 vec![1],
+//                 vec![3, 4],
+//                 vec![2],
+//                 names.clone(),
+//                 &chunk_shape,
+//                 &array_shape,
+//             ),
+//         );
+//         parts.insert(
+//             vec![2],
+//             make_part(
+//                 vec![2],
+//                 vec![5],
+//                 vec![1],
+//                 names.clone(),
+//                 &chunk_shape,
+//                 &array_shape,
+//             ),
+//         );
 
-        let array = Array {
-            array_datatype: arrow::datatypes::DataType::Int32,
-            chunk_shape: vec![4],
-            array_shape: vec![4],
-            chunk_provider: TestStore { parts },
-        };
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: chunk_shape.clone(),
+//             array_shape: array_shape.clone(),
+//             chunk_provider: TestStore { parts },
+//         };
 
-        let sliced = array
-            .fetch_sliced(vec![1], vec![2])
-            .await?
-            .expect("slice exists");
-        let values = sliced
-            .array
-            .values()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(values.values(), &[20, 30]);
-        Ok(())
-    }
+//         let subset = super::ArraySubset {
+//             start: vec![1],
+//             shape: vec![3],
+//         };
+//         let result = block_on(array.subset(subset)).unwrap();
+//         let values = result
+//             .values()
+//             .as_any()
+//             .downcast_ref::<Int32Array>()
+//             .unwrap();
+//         assert_eq!(values.values(), &[2, 3, 4]);
+//         assert_eq!(result.dimensions().shape(), vec![3]);
+//     }
 
-    #[tokio::test]
-    async fn fetch_sliced_handles_smaller_edge_chunks() -> anyhow::Result<()> {
-        let mut parts = HashMap::new();
-        parts.insert(
-            vec![0],
-            ArrayPart {
-                array: make_array(vec![1, 2], vec![2], vec!["x"]),
-                chunk_index: vec![0],
-            },
-        );
-        parts.insert(
-            vec![1],
-            ArrayPart {
-                array: make_array(vec![3], vec![1], vec!["x"]),
-                chunk_index: vec![1],
-            },
-        );
+//     #[test]
+//     fn subset_2d() {
+//         let chunk_shape = vec![2, 2];
+//         let array_shape = vec![3, 4];
+//         let names = vec!["y", "x"];
 
-        let array = Array {
-            array_datatype: arrow::datatypes::DataType::Int32,
-            chunk_shape: vec![2],
-            array_shape: vec![3],
-            chunk_provider: TestStore { parts },
-        };
+//         let mut parts = HashMap::new();
+//         parts.insert(
+//             vec![0, 0],
+//             make_part(
+//                 vec![0, 0],
+//                 vec![1, 2, 5, 6],
+//                 vec![2, 2],
+//                 names.clone(),
+//                 &chunk_shape,
+//                 &array_shape,
+//             ),
+//         );
+//         parts.insert(
+//             vec![0, 1],
+//             make_part(
+//                 vec![0, 1],
+//                 vec![3, 4, 7, 8],
+//                 vec![2, 2],
+//                 names.clone(),
+//                 &chunk_shape,
+//                 &array_shape,
+//             ),
+//         );
+//         parts.insert(
+//             vec![1, 0],
+//             make_part(
+//                 vec![1, 0],
+//                 vec![9, 10],
+//                 vec![1, 2],
+//                 names.clone(),
+//                 &chunk_shape,
+//                 &array_shape,
+//             ),
+//         );
+//         parts.insert(
+//             vec![1, 1],
+//             make_part(
+//                 vec![1, 1],
+//                 vec![11, 12],
+//                 vec![1, 2],
+//                 names.clone(),
+//                 &chunk_shape,
+//                 &array_shape,
+//             ),
+//         );
 
-        let sliced = array
-            .fetch_sliced(vec![0], vec![3])
-            .await?
-            .expect("slice exists");
-        let values = sliced
-            .array
-            .values()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(values.values(), &[1, 2, 3]);
-        Ok(())
-    }
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: chunk_shape.clone(),
+//             array_shape: array_shape.clone(),
+//             chunk_provider: TestStore { parts },
+//         };
 
-    #[tokio::test]
-    async fn fetch_sliced_handles_smaller_edge_chunks_2d() -> anyhow::Result<()> {
-        let mut parts = HashMap::new();
-        let chunk_shape = vec![2usize, 2usize];
-        let array_shape = vec![3usize, 3usize];
+//         let subset = super::ArraySubset {
+//             start: vec![1, 1],
+//             shape: vec![2, 2],
+//         };
+//         let result = block_on(array.subset(subset)).unwrap();
+//         let values = result
+//             .values()
+//             .as_any()
+//             .downcast_ref::<Int32Array>()
+//             .unwrap();
+//         assert_eq!(values.values(), &[6, 7, 10, 11]);
+//         assert_eq!(result.dimensions().shape(), vec![2, 2]);
+//     }
 
-        for cy in 0..2 {
-            for cx in 0..2 {
-                let chunk_start_y = cy * chunk_shape[0];
-                let chunk_start_x = cx * chunk_shape[1];
-                let chunk_len_y =
-                    (array_shape[0].saturating_sub(chunk_start_y)).min(chunk_shape[0]);
-                let chunk_len_x =
-                    (array_shape[1].saturating_sub(chunk_start_x)).min(chunk_shape[1]);
-                if chunk_len_y == 0 || chunk_len_x == 0 {
-                    continue;
-                }
+//     #[test]
+//     fn subset_within_chunk_ok() {
+//         let chunk_shape = vec![2, 2];
+//         let array_shape = vec![3, 4];
+//         let names = vec!["y", "x"];
 
-                let mut values = Vec::new();
-                for y in 0..chunk_len_y {
-                    for x in 0..chunk_len_x {
-                        let gy = chunk_start_y + y;
-                        let gx = chunk_start_x + x;
-                        values.push((gy * array_shape[1] + gx) as i32);
-                    }
-                }
+//         let mut parts = HashMap::new();
+//         parts.insert(
+//             vec![0, 0],
+//             make_part(
+//                 vec![0, 0],
+//                 vec![1, 2, 5, 6],
+//                 vec![2, 2],
+//                 names.clone(),
+//                 &chunk_shape,
+//                 &array_shape,
+//             ),
+//         );
 
-                parts.insert(
-                    vec![cy, cx],
-                    ArrayPart {
-                        array: make_array(values, vec![chunk_len_y, chunk_len_x], vec!["y", "x"]),
-                        chunk_index: vec![cy, cx],
-                    },
-                );
-            }
-        }
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: chunk_shape.clone(),
+//             array_shape: array_shape.clone(),
+//             chunk_provider: TestStore { parts },
+//         };
 
-        let array = Array {
-            array_datatype: arrow::datatypes::DataType::Int32,
-            chunk_shape,
-            array_shape,
-            chunk_provider: TestStore { parts },
-        };
+//         let subset = super::ArraySubset {
+//             start: vec![0, 1],
+//             shape: vec![2, 1],
+//         };
+//         let result = block_on(array.subset_within_chunk(vec![0, 0], subset))
+//             .unwrap()
+//             .unwrap();
+//         let values = result
+//             .values()
+//             .as_any()
+//             .downcast_ref::<Int32Array>()
+//             .unwrap();
+//         assert_eq!(values.values(), &[2, 6]);
+//         assert_eq!(result.dimensions().shape(), vec![2, 1]);
+//     }
 
-        let sliced = array
-            .fetch_sliced(vec![0, 0], vec![3, 3])
-            .await?
-            .expect("slice exists");
-        let values = sliced
-            .array
-            .values()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(values.values(), &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
-        Ok(())
-    }
+//     #[test]
+//     fn subset_within_chunk_missing() {
+//         let array = Array {
+//             array_datatype: arrow::datatypes::DataType::Int32,
+//             chunk_shape: vec![2, 2],
+//             array_shape: vec![3, 4],
+//             chunk_provider: TestStore {
+//                 parts: HashMap::new(),
+//             },
+//         };
 
-    #[tokio::test]
-    async fn fetch_sliced_handles_smaller_edge_chunks_3d() -> anyhow::Result<()> {
-        let mut parts = HashMap::new();
-        let chunk_shape = vec![2usize, 2usize, 2usize];
-        let array_shape = vec![3usize, 4usize, 3usize];
-
-        for cz in 0..2 {
-            for cy in 0..2 {
-                for cx in 0..2 {
-                    let chunk_start_z = cz * chunk_shape[0];
-                    let chunk_start_y = cy * chunk_shape[1];
-                    let chunk_start_x = cx * chunk_shape[2];
-                    let chunk_len_z =
-                        (array_shape[0].saturating_sub(chunk_start_z)).min(chunk_shape[0]);
-                    let chunk_len_y =
-                        (array_shape[1].saturating_sub(chunk_start_y)).min(chunk_shape[1]);
-                    let chunk_len_x =
-                        (array_shape[2].saturating_sub(chunk_start_x)).min(chunk_shape[2]);
-                    if chunk_len_z == 0 || chunk_len_y == 0 || chunk_len_x == 0 {
-                        continue;
-                    }
-
-                    let mut values = Vec::new();
-                    for z in 0..chunk_len_z {
-                        for y in 0..chunk_len_y {
-                            for x in 0..chunk_len_x {
-                                let gz = chunk_start_z + z;
-                                let gy = chunk_start_y + y;
-                                let gx = chunk_start_x + x;
-                                values.push(
-                                    (gz * array_shape[1] * array_shape[2]
-                                        + gy * array_shape[2]
-                                        + gx) as i32,
-                                );
-                            }
-                        }
-                    }
-
-                    parts.insert(
-                        vec![cz, cy, cx],
-                        ArrayPart {
-                            array: make_array(
-                                values,
-                                vec![chunk_len_z, chunk_len_y, chunk_len_x],
-                                vec!["z", "y", "x"],
-                            ),
-                            chunk_index: vec![cz, cy, cx],
-                        },
-                    );
-                }
-            }
-        }
-
-        let array = Array {
-            array_datatype: arrow::datatypes::DataType::Int32,
-            chunk_shape,
-            array_shape,
-            chunk_provider: TestStore { parts },
-        };
-
-        let sliced = array
-            .fetch_sliced(vec![0, 0, 0], vec![3, 4, 3])
-            .await?
-            .expect("slice exists");
-        let values = sliced
-            .array
-            .values()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let expected: Vec<i32> = (0..(3 * 4 * 3) as i32).collect();
-        assert_eq!(values.values(), expected.as_slice());
-        Ok(())
-    }
-}
+//         let subset = super::ArraySubset {
+//             start: vec![0, 0],
+//             shape: vec![1, 1],
+//         };
+//         let result = block_on(array.subset_within_chunk(vec![0, 0], subset)).unwrap();
+//         assert!(result.is_none());
+//     }
+// }

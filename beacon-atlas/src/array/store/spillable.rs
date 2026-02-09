@@ -28,6 +28,30 @@ pub struct SpillableChunkStore<S: ObjectStore + Send + Sync> {
     pub io_cache: Arc<IoCache>,
 }
 
+fn chunk_start_shape(
+    layout: &ArrayLayout,
+    chunk_index: &[usize],
+) -> anyhow::Result<(Vec<usize>, Vec<usize>)> {
+    if layout.chunk_shape.len() != layout.array_shape.len()
+        || layout.chunk_shape.len() != chunk_index.len()
+    {
+        return Err(anyhow::anyhow!("chunk index dimensionality does not match layout"));
+    }
+
+    let mut start = Vec::with_capacity(chunk_index.len());
+    let mut shape = Vec::with_capacity(chunk_index.len());
+    for (i, idx) in chunk_index.iter().enumerate() {
+        let chunk_dim = layout.chunk_shape[i] as usize;
+        let array_dim = layout.array_shape[i] as usize;
+        let offset = idx.saturating_mul(chunk_dim);
+        let remaining = array_dim.saturating_sub(offset);
+        start.push(offset);
+        shape.push(remaining.min(chunk_dim));
+    }
+
+    Ok((start, shape))
+}
+
 #[async_trait::async_trait]
 impl<S: ObjectStore + Send + Sync> ChunkStore for SpillableChunkStore<S> {
     /// Streams all chunk parts by walking the layout and decoding rows lazily.
@@ -84,7 +108,13 @@ impl<S: ObjectStore + Send + Sync> ChunkStore for SpillableChunkStore<S> {
                         .row(array_in_batch_index)
                         .context("failed to read ND array row")?
                         .clone();
-                    Ok(ArrayPart { array, chunk_index })
+                    let (start, shape) = chunk_start_shape(&layout, &chunk_index)?;
+                    Ok(ArrayPart {
+                        array,
+                        chunk_index,
+                        start,
+                        shape,
+                    })
                 }
             })
             .boxed()
@@ -129,7 +159,13 @@ impl<S: ObjectStore + Send + Sync> ChunkStore for SpillableChunkStore<S> {
                     .row(array_in_batch_index)
                     .context("failed to read ND array row")?
                     .clone();
-                return Ok(Some(ArrayPart { array, chunk_index }));
+                let (start, shape) = chunk_start_shape(&layout, &chunk_index)?;
+                return Ok(Some(ArrayPart {
+                    array,
+                    chunk_index,
+                    start,
+                    shape,
+                }));
             }
         }
 
@@ -215,10 +251,14 @@ mod tests {
             ArrayPart {
                 array: make_array(vec![1, 2], vec![2], vec!["x"]),
                 chunk_index: vec![0],
+                start: vec![0],
+                shape: vec![2],
             },
             ArrayPart {
                 array: make_array(vec![3, 4], vec![2], vec!["x"]),
                 chunk_index: vec![1],
+                start: vec![2],
+                shape: vec![2],
             },
         ];
 

@@ -23,5 +23,6 @@ once_cell = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 flume = { workspace = true }
+ndarray = "0.17.1"
 
 beacon-nd-arrow = { path = "../beacon-nd-arrow" }
