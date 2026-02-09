@@ -34,21 +34,25 @@ Whether you’re a researcher, educator, or ocean enthusiast, this node puts the
 To help you get started, we've provided a [Jupyter notebook example](wod-beacon-node-example.ipynb) that demonstrates how to connect to the beacon node, list datasets, inspect schema, and run queries using the [Beacon Python SDK](https://maris-development.github.io/beacon-py/latest/using/collections/). Here's a quick overview:
 
 - **Install the SDK:**
+
 	```bash
-	pip install beacon-py
+	pip install beacon-api
 	```
 - **Connect and list datasets:**
+
 	```python
 	from beacon_api import Client
     client = Client("https://beacon-wod.maris.nl")
 	```
 - **Inspect schema (and available columns):**
+
 	```python
 	available_columns = client.available_columns_with_data_type()
     list(available_columns)[:50] # Display first 50 available columns
     ```
 
 - **Run a query:**
+
     ```python
     # Here we build the query step by step. First we select the columns we want to retrieve, then we add the filters and finally we specify the output format.
     query_builder = client.query()
@@ -80,7 +84,18 @@ To help you get started, we've provided a [Jupyter notebook example](wod-beacon-
 
 For more details, see the [Beacon Python SDK documentation](https://maris-development.github.io/beacon-py/latest/using/datasets/) and the [World Ocean Database example notebooks](https://github.com/maris-development/beacon-blue-cloud/tree/main/notebook-examples).
 
-With these tools, you can instantly subset and analyze millions of ocean profiles directly from the beacon node, no downloads or special infrastructure required!
+---
+
+### Interested in running your own Beacon node or want to contribute?
+
+**Beacon is open source and available under the AGPL v3 license.**
+
+- **Beacon Data Lake GitHub:** [https://github.com/maris-development/beacon/](https://github.com/maris-development/beacon/)
+- **Beacon Documentation:** [https://maris-development.github.io/beacon/](https://maris-development.github.io/beacon/)
+
+If you encounter any bugs or want to get involved, please visit the GitHub repository or check the documentation for setup instructions and support.
+
+With these tools, you can instantly subset and analyze millions of ocean profiles directly from the beacon node—no downloads or special infrastructure required!
 
 ## Why Open Science Matters
 
