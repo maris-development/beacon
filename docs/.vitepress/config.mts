@@ -218,6 +218,13 @@ export default defineConfig({
       ],
       '/blog/': [
         {
+          text: 'Introducing The World Ocean Database Node in Beacon',
+          link: '/blog/world-ocean-database-node',
+          collapsed: false,
+          items: [
+          ]
+        },
+        {
           text: 'NetCDF Performance Tuning in Beacon 1.5',
           link: '/blog/netcdf-performance-tuning',
           collapsed: false,
