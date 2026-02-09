@@ -1,19 +1,24 @@
-use ndarray::CowArray;
+use std::sync::Arc;
 
-use crate::array::{
-    buffer::{PrimitiveArrayBuffer, VlenArrayBuffer},
-    data_type::{DataType, PrimitiveArrayDataType},
-};
+use crate::array::{data_type::DataType, nd::NdArray};
 
-pub trait ArrayChunk {
-    fn start(&self) -> &[usize];
-    fn shape(&self) -> &[usize];
-    fn chunk_index(&self) -> &[usize];
-    fn data_type(&self) -> &DataType;
-    fn as_primitive_nd_array<'a, T: PrimitiveArrayDataType>(
-        &'a self,
-    ) -> Option<CowArray<'a, T::Native, ndarray::IxDyn>>;
-    fn as_vlen_byte_nd_array<T: PrimitiveArrayDataType, F: AsRef<T::Native>>(
-        &self,
-    ) -> Option<CowArray<T::Native, ndarray::IxDyn>>;
+pub struct ArrayChunk {
+    pub start: Vec<usize>,
+    pub shape: Vec<usize>,
+    pub chunk_index: Vec<usize>,
+    pub nd_array: Arc<dyn NdArray>,
+}
+
+impl ArrayChunk {
+    pub fn data_type(&self) -> DataType {
+        self.nd_array.data_type()
+    }
+
+    pub fn as_array(&self) -> &dyn NdArray {
+        self.nd_array.as_ref()
+    }
+
+    pub fn as_array_cloned(&self) -> Arc<dyn NdArray> {
+        self.nd_array.clone()
+    }
 }

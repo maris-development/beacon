@@ -1,6 +1,5 @@
-use std::sync::Arc;
-
 use ndarray::CowArray;
+use std::sync::Arc;
 
 use crate::array::{
     buffer::{PrimitiveArrayBuffer, VlenArrayBuffer},
@@ -9,35 +8,54 @@ use crate::array::{
 
 pub type NdArrayRef = Arc<dyn NdArray>;
 
-pub fn try_from_arrow(
-    array: arrow::array::ArrayRef,
-    shape: Vec<usize>,
-) -> anyhow::Result<NdArrayRef> {
-    match array.data_type() {
-        _ => anyhow::bail!("Unsupported Arrow data type: {:?}", array.data_type()),
-    }
-}
-
 pub trait NdArray: Send + Sync + 'static {
     fn shape(&self) -> &[usize];
     fn as_any(&self) -> &dyn std::any::Any;
-    // fn dimensions(&self) -> Vec<Dimension>;
+    fn data_type(&self) -> DataType;
+}
+
+pub trait AsNdArray {
     fn as_primitive_nd<'a, T: PrimitiveArrayDataType>(
         &'a self,
     ) -> Option<CowArray<'a, T::Native, ndarray::IxDyn>>;
-    // fn primitive_fill_value<T: PrimitiveArrayDataType>(&self) -> Option<T::Native> {
-    //     None
-    // }
-    // fn as_vlen_byte_nd<'a, T: VLenByteArrayDataType, F: AsRef<T::Native> + 'static>(
-    //     &'a self,
-    // ) -> Option<CowArray<'a, T::Native, ndarray::IxDyn>> {
-    //     None
-    // }
-    // fn vlen_byte_fill_value<T: VLenByteArrayDataType, F: AsRef<T::Native> + 'static>(
-    //     &self,
-    // ) -> Option<T::Native> {
-    //     None
-    // }
+
+    fn as_primitive_fill_value<T: PrimitiveArrayDataType>(&self) -> Option<T::Native>;
+
+    fn as_vlen_byte_nd<'a, T: VLenByteArrayDataType>(
+        &'a self,
+    ) -> Option<CowArray<'a, T::View<'a>, ndarray::IxDyn>>;
+
+    fn as_vlen_byte_fill_value<T: VLenByteArrayDataType>(&self) -> Option<T::OwnedView>;
+}
+
+impl AsNdArray for dyn NdArray {
+    fn as_primitive_nd<'a, T: PrimitiveArrayDataType>(
+        &'a self,
+    ) -> Option<CowArray<'a, T::Native, ndarray::IxDyn>> {
+        self.as_any()
+            .downcast_ref::<PrimitiveArray<T>>()
+            .map(|array| array.as_nd_array())
+    }
+
+    fn as_primitive_fill_value<T: PrimitiveArrayDataType>(&self) -> Option<T::Native> {
+        self.as_any()
+            .downcast_ref::<PrimitiveArray<T>>()
+            .and_then(|array| array.buffer.fill_value)
+    }
+
+    fn as_vlen_byte_nd<'a, T: VLenByteArrayDataType>(
+        &'a self,
+    ) -> Option<CowArray<'a, T::View<'a>, ndarray::IxDyn>> {
+        self.as_any()
+            .downcast_ref::<VlenByteArray<T>>()
+            .map(|array| array.as_nd_array())
+    }
+
+    fn as_vlen_byte_fill_value<T: VLenByteArrayDataType>(&self) -> Option<T::OwnedView> {
+        self.as_any()
+            .downcast_ref::<VlenByteArray<T>>()
+            .and_then(|array| array.buffer.fill_value.as_ref().cloned())
+    }
 }
 
 pub struct PrimitiveArray<T: PrimitiveArrayDataType> {
@@ -53,17 +71,9 @@ impl<T: PrimitiveArrayDataType> NdArray for PrimitiveArray<T> {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-
-    fn as_primitive_nd<'a, U: PrimitiveArrayDataType>(
-        &'a self,
-    ) -> Option<CowArray<'a, U::Native, ndarray::IxDyn>> {
-        todo!()
+    fn data_type(&self) -> DataType {
+        T::DATA_TYPE
     }
-    // fn primitive_fill_value<U: PrimitiveArrayDataType>(&self) -> Option<U::Native> {
-    //     self.as_any()
-    //         .downcast_ref::<PrimitiveArray<U>>()
-    //         .and_then(|array| array.buffer.fill_value)
-    // }
 }
 
 impl<T: PrimitiveArrayDataType> PrimitiveArray<T> {
@@ -76,56 +86,53 @@ impl<T: PrimitiveArrayDataType> PrimitiveArray<T> {
         let buffer = PrimitiveArrayBuffer::<T>::from_arrow(arrow_buffer, fill_value);
         PrimitiveArray { buffer, shape }
     }
+
+    pub fn as_nd_array<'a>(&'a self) -> ndarray::CowArray<'a, T::Native, ndarray::IxDyn> {
+        let slice = self.buffer.as_slice();
+        let array = ndarray::ArrayView::from_shape(self.shape.as_slice(), slice).unwrap();
+        ndarray::CowArray::from(array)
+    }
 }
 
-// pub struct VlenByteArray<T: VLenByteArrayDataType, F: AsRef<T::Native>>
-// where
-//     F: 'static,
-// {
-//     pub buffer: VlenArrayBuffer<T::Native, F>,
-//     pub shape: Vec<usize>,
-// }
+pub struct VlenByteArray<T: VLenByteArrayDataType> {
+    pub buffer: VlenArrayBuffer<T>,
+    pub shape: Vec<usize>,
+}
 
-// impl<T: VLenByteArrayDataType, F: AsRef<T::Native> + Send + Sync> NdArray for VlenByteArray<T, F>
-// where
-//     F: 'static,
-// {
-//     fn shape(&self) -> &[usize] {
-//         &self.shape
-//     }
+impl<T: VLenByteArrayDataType> NdArray for VlenByteArray<T> {
+    fn shape(&self) -> &[usize] {
+        &self.shape
+    }
 
-//     fn as_any(&self) -> &dyn std::any::Any {
-//         self
-//     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn data_type(&self) -> DataType {
+        T::DATA_TYPE
+    }
+}
 
-//     fn as_vlen_byte_nd<'a, U: VLenByteArrayDataType, G: AsRef<U::Native> + 'static>(
-//         &'a self,
-//     ) -> Option<CowArray<'a, U::Native, ndarray::IxDyn>> {
-//         self.as_any()
-//             .downcast_ref::<VlenByteArray<U, G>>()
-//             .map(|array| U::as_array(&array.buffer, &array.shape))
-//     }
+impl<T: VLenByteArrayDataType> VlenByteArray<T> {
+    pub fn from_arrow(
+        array: arrow::array::GenericBinaryArray<i32>,
+        shape: Vec<usize>,
+        fill_value: Option<T::OwnedView>,
+    ) -> Self {
+        let offsets = array.offsets();
+        let values = array.values().clone();
+        Self {
+            buffer: VlenArrayBuffer::from_arrow(offsets.clone(), values, fill_value),
+            shape,
+        }
+    }
 
-//     fn vlen_byte_fill_value<U: VLenByteArrayDataType, G: AsRef<U::Native> + 'static>(
-//         &self,
-//     ) -> Option<U::Native> {
-//         self.as_any()
-//             .downcast_ref::<VlenByteArray<U, G>>()
-//             .and_then(|array| array.buffer.fill_value.as_ref().map(|v| v.as_ref().clone()))
-//     }
-// }
-
-// impl<T: VLenByteArrayDataType, F: AsRef<T::Native> + 'static> VlenByteArray<T, F> {
-//     pub fn from_arrow(
-//         array: arrow::array::GenericBinaryArray<i32>,
-//         shape: Vec<usize>,
-//         fill_value: Option<F>,
-//     ) -> Self {
-//         let offsets = array.offsets();
-//         let values = array.values().clone();
-//         Self {
-//             buffer: VlenArrayBuffer::from_arrow(offsets.clone(), values, fill_value),
-//             shape,
-//         }
-//     }
-// }
+    pub fn as_nd_array<'a>(&'a self) -> ndarray::CowArray<'a, T::View<'a>, ndarray::IxDyn> {
+        let slice: Vec<T::View<'a>> = self.buffer.as_slice();
+        let array = ndarray::ArrayBase::<ndarray::OwnedRepr<T::View<'a>>, _>::from_shape_vec(
+            self.shape.as_slice(),
+            slice,
+        )
+        .unwrap();
+        ndarray::CowArray::from(array)
+    }
+}

@@ -1,17 +1,9 @@
-use anyhow::anyhow;
-use arrow::{
-    array::{ListArray, PrimitiveArray, StringArray},
-    buffer::ScalarBuffer,
-    datatypes::GenericStringType,
-};
-use beacon_nd_arrow::{
-    NdArrowArray, NdIndex, concat_nd,
-    dimensions::{Dimension, Dimensions},
-};
-use futures::stream::BoxStream;
-use futures::{StreamExt, stream};
+use std::sync::Arc;
 
-use crate::{array::store::ChunkStore, config};
+use anyhow::anyhow;
+use futures::stream::BoxStream;
+
+use crate::array::{chunk::ArrayChunk, nd::NdArray, store::ChunkStore};
 
 pub mod buffer;
 pub mod chunk;
@@ -33,15 +25,6 @@ pub struct Array<S: ChunkStore + Send + Sync> {
     pub chunk_provider: S,
 }
 
-/// A single chunk and its chunk index within the overall array.
-#[derive(Debug, Clone)]
-pub struct ArrayPart {
-    pub array: NdArrowArray,
-    pub chunk_index: Vec<usize>,
-    pub start: Vec<usize>, // calculated as chunk_index * chunk_shape, but included here for convenience
-    pub shape: Vec<usize>, // calculated as min(chunk_shape, array_shape - start), but included here for convenience
-}
-
 #[derive(Debug, Clone)]
 pub struct ArraySubset {
     start: Vec<usize>,
@@ -50,7 +33,7 @@ pub struct ArraySubset {
 
 impl<S: ChunkStore + Send + Sync> Array<S> {
     /// Returns the next chunked array part from the stream.
-    pub fn chunks(&self) -> BoxStream<'static, anyhow::Result<ArrayPart>> {
+    pub fn chunks(&self) -> BoxStream<'static, anyhow::Result<ArrayChunk>> {
         self.chunk_provider.chunks()
     }
 
@@ -60,7 +43,7 @@ impl<S: ChunkStore + Send + Sync> Array<S> {
     }
 
     /// Fetches a chunk by its logical chunk index.
-    pub async fn fetch_chunk(&self, chunk_index: Vec<usize>) -> anyhow::Result<Option<ArrayPart>> {
+    pub async fn fetch_chunk(&self, chunk_index: Vec<usize>) -> anyhow::Result<Option<ArrayChunk>> {
         self.chunk_provider.fetch_chunk(chunk_index).await
     }
 
@@ -188,42 +171,8 @@ impl<S: ChunkStore + Send + Sync> Array<S> {
         &self,
         chunk_index: Vec<usize>,
         subset: ArraySubset,
-    ) -> anyhow::Result<Option<NdArrowArray>> {
-        let part = match self.fetch_chunk(chunk_index).await? {
-            Some(part) => part,
-            None => return Ok(None),
-        };
-
-        if subset.start.len() != subset.shape.len()
-            || subset.start.len() != part.start.len()
-            || subset.start.len() != part.shape.len()
-        {
-            return Err(anyhow!("subset dimensionality does not match chunk"));
-        }
-        if subset.start.is_empty() {
-            return Ok(Some(part.array));
-        }
-
-        let mut indices = Vec::with_capacity(subset.start.len());
-        for dim in 0..subset.start.len() {
-            let start = subset.start[dim];
-            let len = subset.shape[dim];
-            let chunk_start = part.start[dim];
-            let chunk_len = part.shape[dim];
-
-            if len == 0
-                || start < chunk_start
-                || start.saturating_add(len) > chunk_start.saturating_add(chunk_len)
-            {
-                return Err(anyhow!("subset out of chunk bounds"));
-            }
-
-            let local_start = start - chunk_start;
-            indices.push(NdIndex::slice(local_start, len));
-        }
-
-        let sliced = part.array.slice_nd(&indices).map_err(|err| anyhow!(err))?;
-        Ok(Some(sliced))
+    ) -> anyhow::Result<Option<Arc<dyn NdArray>>> {
+        todo!()
     }
 
     // pub async fn subset(&self, subset: ArraySubset) -> anyhow::Result<Option<NdArrowArray>> {
