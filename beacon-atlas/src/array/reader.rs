@@ -7,15 +7,10 @@ use crate::{
         Array, ChunkStore, io_cache::IoCache, layout::ArrayLayouts, store::SpillableChunkStore,
     },
     arrow_object_store::ArrowObjectStoreReader,
-    config,
 };
 
 /// Reads chunked ND Arrow arrays and their layout metadata from object storage.
 pub struct ArrayReader<S: ObjectStore + Clone> {
-    #[allow(dead_code)]
-    store: S,
-    #[allow(dead_code)]
-    path: object_store::path::Path,
     array_reader: Arc<ArrowObjectStoreReader<S>>,
     layouts: ArrayLayouts,
     array_datatype: arrow::datatypes::DataType,
@@ -23,20 +18,12 @@ pub struct ArrayReader<S: ObjectStore + Clone> {
 }
 
 impl<S: ObjectStore + Clone> ArrayReader<S> {
-    /// Create a new chunked array reader.
-    pub async fn new(store: S, path: object_store::path::Path) -> anyhow::Result<Self> {
-        let io_cache = Arc::new(IoCache::new(config::io_cache_bytes()));
-        Self::new_with_cache(store, path, io_cache).await
-    }
-
-    /// Create a new chunked array reader using a shared IO cache.
     pub async fn new_with_cache(
         store: S,
-        path: object_store::path::Path,
+        layout_path: object_store::path::Path,
+        array_path: object_store::path::Path,
         io_cache: Arc<IoCache>,
     ) -> anyhow::Result<Self> {
-        let array_path = path.child("array.arrow");
-        let layout_path = path.child("layout.arrow");
         let array_reader = Arc::new(ArrowObjectStoreReader::new(store.clone(), array_path).await?);
 
         let array_field = array_reader.schema();
@@ -45,8 +32,6 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
         );
 
         Ok(Self {
-            store: store.clone(),
-            path,
             array_reader,
             layouts: ArrayLayouts::from_object(store.clone(), layout_path).await?,
             array_datatype,

@@ -4,7 +4,6 @@ use crate::array::{data_type::DataType, nd::NdArray};
 
 pub struct ArrayChunk {
     pub start: Vec<usize>,
-    pub shape: Vec<usize>,
     pub chunk_index: Vec<usize>,
     pub nd_array: Arc<dyn NdArray>,
 }
@@ -20,5 +19,17 @@ impl ArrayChunk {
 
     pub fn as_array_cloned(&self) -> Arc<dyn NdArray> {
         self.nd_array.clone()
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        self.nd_array.shape()
+    }
+
+    pub fn start(&self) -> &[usize] {
+        &self.start
+    }
+
+    pub fn chunk_index(&self) -> &[usize] {
+        &self.chunk_index
     }
 }

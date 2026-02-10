@@ -6,7 +6,6 @@ pub mod arrow_dataset;
 pub mod arrow_object_store;
 pub mod attribute;
 pub mod column;
-pub mod column_reader;
 pub mod config;
 pub mod consts;
 pub mod dataset;
@@ -17,7 +16,6 @@ pub mod rle;
 pub mod schema;
 pub mod stream;
 pub mod util;
-pub mod variable;
 
 pub static IPC_WRITE_OPTS: Lazy<arrow::ipc::writer::IpcWriteOptions> = Lazy::new(|| {
     arrow::ipc::writer::IpcWriteOptions::default()

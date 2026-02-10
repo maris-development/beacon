@@ -16,6 +16,7 @@ pub struct ArrayLayout {
     pub dataset_index: u32,
     pub array_indexes: Vec<[u32; 2]>,
     pub chunk_indexes: Vec<Vec<u32>>,
+    pub dimensions: Vec<String>,
     pub chunk_shape: Vec<u32>,
     pub array_shape: Vec<u32>,
 }
@@ -27,6 +28,7 @@ pub struct ArrayLayouts {
     chunk_index: ListArray,                    // List<List<u32>>
     chunk_shape: ListArray,                    // List<u32>
     array_shape: ListArray,                    // List<u32>
+    dimensions: ListArray, // List<string> (Encoded as DictionaryArray with UInt32 keys and String values)
 }
 
 impl ArrayLayouts {
