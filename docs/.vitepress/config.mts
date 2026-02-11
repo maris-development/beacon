@@ -42,9 +42,31 @@ export default defineConfig({
         activeMatch: '/blog/'
       },
       {
-        text: 'Available nodes',
-        link: '/available-nodes/available-nodes',
-        activeMatch: '/available-nodes/available-nodes'
+        text: 'Use Cases',
+        activeMatch: '/use-cases/',
+        items: [
+          {
+            text: '🌍 World Ocean Database (NetCDF)',
+            link: '/use-cases/world-ocean-database',
+          },
+          {
+            text: '🌊 Blue Cloud 2026',
+            link: '/use-cases/blue-cloud-2026',
+
+          },
+          {
+            text: '🌡️ C3S ERA5 Daily (Zarr)',
+            link: '/use-cases/c3s-era5-daily',
+          },
+          {
+            text: '🐟 Informatiehuis Marien (Parquet)',
+            link: '/use-cases/informatiehuis-marien',
+          },
+          {
+            text: '🗺️ EOSC-Future',
+            link: '/use-cases/marine-data-viewer',
+          }
+        ]
       }
     ],
 
@@ -253,24 +275,80 @@ export default defineConfig({
           ]
         }
       ],
-      '/available-nodes/': [
+      '/use-cases/': [
         {
-          text: 'Euro-Argo',
-          link: '/available-nodes/available-nodes#euro-argo',
-        },
-        {
-          text: 'World Ocean Database',
-          link: '/available-nodes/available-nodes#world-ocean-database',
-        },
-        {
-          text: 'CMEMS CORA',
-          link: '/available-nodes/available-nodes#cora-profiles-time-series',
-        },
-        {
-          text: 'Access token',
-          link: '/available-nodes/available-nodes#obtain-personal-access-token',
+          text: 'Use Cases',
+          link: '/use-cases/',
+          collapsed: false,
+          items: [
+            {
+              text: '🌍 World Ocean Database (NetCDF)',
+              link: '/use-cases/world-ocean-database',
+            },
+            {
+              text: '🌊 Blue Cloud 2026',
+              link: '/use-cases/blue-cloud-2026',
+              collapsed: false,
+              items: [
+                {
+                  text: 'ARGO Floats',
+                  link: '/use-cases/blue-cloud-2026#argo-floats'
+                },
+                {
+                  text: 'CMEMS CORA',
+                  link: '/use-cases/blue-cloud-2026#cora-profiles-time-series'
+                },
+                {
+                  text: 'SeaDataNet',
+                  link: '/use-cases/blue-cloud-2026#seadatanet'
+                },
+                {
+                  text: 'World Ocean Database',
+                  link: '/use-cases/blue-cloud-2026#world-ocean-database'
+                },
+                {
+                  text: 'EMODnet Chemistry',
+                  link: '/use-cases/blue-cloud-2026#emodnet-chemistry'
+                },
+                {
+                  text: 'CMEMS BGC',
+                  link: '/use-cases/blue-cloud-2026#cmems-bgc'
+                }
+              ]
+            },
+            {
+              text: '🌡️ C3S ERA5 Daily (Zarr)',
+              link: '/use-cases/c3s-era5-daily',
+            },
+            {
+              text: '🐟 Informatiehuis Marien (Parquet)',
+              link: '/use-cases/informatiehuis-marien',
+            },
+            {
+              text: '🗺️ EOSC-Future',
+              link: '/use-cases/eosc-future',
+            }
+          ]
         }
       ],
+      // '/available-nodes/': [
+      //   {
+      //     text: 'Euro-Argo',
+      //     link: '/available-nodes/available-nodes#euro-argo',
+      //   },
+      //   {
+      //     text: 'World Ocean Database',
+      //     link: '/available-nodes/available-nodes#world-ocean-database',
+      //   },
+      //   {
+      //     text: 'CMEMS CORA',
+      //     link: '/available-nodes/available-nodes#cora-profiles-time-series',
+      //   },
+      //   {
+      //     text: 'Access token',
+      //     link: '/available-nodes/available-nodes#obtain-personal-access-token',
+      //   }
+      // ],
       '/docs/1.5.0-install': [{
         text: 'Installation Docs (1.5.0)',
         items: [
