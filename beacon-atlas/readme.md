@@ -9,6 +9,25 @@ collection.atlas/
             encoding.json
             layout.arrow
             data.arrow
+            attributes/
+                attribute_0.arrow
+                attribute_1.arrow
         
 # layout.arrow
-[dataset-index: u32] [array-index: List<FixedSized<u32;2>>] [chunk-index: List<List<u32>>] [chunk-shape: List<u32>]
+
+```ascii
+
+[dataset-index: u32] [array-start: u64, array-len: u64] [ shape: List<u32> ] [ dimensions: List<Dictionary<u32, String>> ]
+
+```
+
+```json encoding.json
+
+{
+    "length": 1000000,
+    "size": 1000000,
+    "data_type": "i32",
+    "batch_size": 128_000,
+}
+
+```

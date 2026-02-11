@@ -77,3 +77,25 @@ where
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{Array, Int32Array, RunArray};
+
+    use super::*;
+
+    #[test]
+    fn test_name() {
+        use ndarray::array;
+
+        let a = array![[1., 2., 3.]]; // shape (1, 3)
+
+        let view = a.view(); // ArrayView2
+        let b = view.broadcast((4, 3)).unwrap(); // shape (4, 3)
+    }
+
+    #[test]
+    fn test_t() {}
+}

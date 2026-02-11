@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
-use anyhow::anyhow;
-use futures::stream::BoxStream;
+use futures::StreamExt;
 
-use crate::array::{chunk::ArrayChunk, nd::NdArray, store::ChunkStore};
+use crate::array::{nd::NdArray, store::ChunkStore};
 
 pub mod buffer;
-pub mod chunk;
 pub mod data_type;
 pub mod io_cache;
 pub mod layout;
@@ -20,255 +18,18 @@ pub mod writer;
 #[derive(Debug, Clone)]
 pub struct Array<S: ChunkStore + Send + Sync> {
     pub array_datatype: arrow::datatypes::DataType,
-    pub chunk_shape: Vec<usize>,
     pub array_shape: Vec<usize>,
+    pub dimensions: Vec<String>,
     pub chunk_provider: S,
 }
 
-#[derive(Debug, Clone)]
-pub struct ArraySubset {
-    start: Vec<usize>,
-    shape: Vec<usize>,
-}
-
 impl<S: ChunkStore + Send + Sync> Array<S> {
-    /// Returns the next chunked array part from the stream.
-    pub fn chunks(&self) -> BoxStream<'static, anyhow::Result<ArrayChunk>> {
-        self.chunk_provider.chunks()
-    }
+    pub async fn fetch(&self) -> Arc<dyn NdArray> {
+        //Fetch all chunks, concat using arrow
+        let all_chunks = self.chunk_provider.chunks().collect::<Vec<_>>().await;
 
-    /// Returns true if the array is fully chunked (i.e., each chunk covers the entire array).
-    pub fn is_single_chunk(&self) -> bool {
-        self.chunk_shape == self.array_shape
-    }
-
-    /// Fetches a chunk by its logical chunk index.
-    pub async fn fetch_chunk(&self, chunk_index: Vec<usize>) -> anyhow::Result<Option<ArrayChunk>> {
-        self.chunk_provider.fetch_chunk(chunk_index).await
-    }
-
-    pub fn chunk_subsets(&self) -> Vec<ArraySubset> {
-        if self.array_shape.len() != self.chunk_shape.len() {
-            return Vec::new();
-        }
-        if self.array_shape.is_empty() {
-            return vec![ArraySubset {
-                start: Vec::new(),
-                shape: Vec::new(),
-            }];
-        }
-        if self.chunk_shape.contains(&0) {
-            return Vec::new();
-        }
-
-        let chunk_counts: Vec<usize> = self
-            .array_shape
-            .iter()
-            .zip(self.chunk_shape.iter())
-            .map(|(array_dim, chunk_dim)| array_dim.div_ceil(*chunk_dim))
-            .collect();
-
-        let mut indices = vec![0usize; chunk_counts.len()];
-        let mut subsets = Vec::new();
-
-        loop {
-            let mut start = Vec::with_capacity(indices.len());
-            let mut shape = Vec::with_capacity(indices.len());
-            for ((idx, chunk_dim), array_dim) in indices
-                .iter()
-                .zip(self.chunk_shape.iter())
-                .zip(self.array_shape.iter())
-            {
-                let offset = idx * chunk_dim;
-                if offset >= *array_dim {
-                    shape.push(0);
-                } else {
-                    shape.push((*array_dim - offset).min(*chunk_dim));
-                }
-                start.push(offset);
-            }
-            subsets.push(ArraySubset { start, shape });
-
-            let mut dim = indices.len();
-            while dim > 0 {
-                dim -= 1;
-                if indices[dim] + 1 < chunk_counts[dim] {
-                    indices[dim] += 1;
-                    for reset in dim + 1..indices.len() {
-                        indices[reset] = 0;
-                    }
-                    break;
-                }
-                if dim == 0 {
-                    return subsets;
-                }
-            }
-        }
-    }
-
-    pub fn determine_chunk_indices(&self, subset: ArraySubset) -> anyhow::Result<Vec<Vec<usize>>> {
-        let num_dims = subset.start.len();
-        if num_dims != subset.shape.len()
-            || num_dims != self.chunk_shape.len()
-            || num_dims != self.array_shape.len()
-        {
-            return Err(anyhow!("subset dimensionality does not match array"));
-        }
-        if num_dims == 0 {
-            return Ok(vec![Vec::new()]);
-        }
-
-        let mut chunk_ranges = Vec::with_capacity(num_dims);
-        for dim in 0..num_dims {
-            let start = subset.start[dim];
-            let len = subset.shape[dim];
-            let array_dim = self.array_shape[dim];
-            let chunk_dim = self.chunk_shape[dim];
-
-            if chunk_dim == 0 {
-                return Err(anyhow!("chunk dimension cannot be zero"));
-            }
-            if len == 0 || start.saturating_add(len) > array_dim {
-                return Err(anyhow!("subset out of bounds"));
-            }
-
-            let first = start / chunk_dim;
-            let last = (start + len - 1) / chunk_dim;
-            chunk_ranges.push((first, last));
-        }
-
-        let mut indices = Vec::with_capacity(num_dims);
-        for (start, _end) in &chunk_ranges {
-            indices.push(*start);
-        }
-        let mut chunk_indices = Vec::new();
-        loop {
-            chunk_indices.push(indices.clone());
-            let mut dim = num_dims;
-            let mut carried = true;
-            while dim > 0 && carried {
-                dim -= 1;
-                let (start, end) = chunk_ranges[dim];
-                if indices[dim] < end {
-                    indices[dim] += 1;
-                    for reset in dim + 1..num_dims {
-                        indices[reset] = chunk_ranges[reset].0;
-                    }
-                    carried = false;
-                } else {
-                    indices[dim] = start;
-                }
-            }
-            if carried {
-                break;
-            }
-        }
-        Ok(chunk_indices)
-    }
-
-    /// Fetches a subset of the array that is fully contained within a single chunk. Returns an error if failed to retreived. None if the chunk is missing.
-    pub async fn subset_within_chunk(
-        &self,
-        chunk_index: Vec<usize>,
-        subset: ArraySubset,
-    ) -> anyhow::Result<Option<Arc<dyn NdArray>>> {
         todo!()
     }
-
-    // pub async fn subset(&self, subset: ArraySubset) -> anyhow::Result<Option<NdArrowArray>> {
-    //     // Determine which chunk indices intersect the requested subset.
-    //     let chunk_indices: Vec<Vec<usize>> = self.determine_chunk_indices(subset.clone())?;
-
-    //     if chunk_indices.len() == 1 {
-    //         // Fast path for single chunk: just fetch and slice it.
-    //         return self
-    //             .subset_within_chunk(chunk_indices[0].clone(), subset)
-    //             .await;
-    //     } else {
-    //         // For multiple chunks, we need to fetch them all, stitch them together, and then slice the combined array.
-    //         // This is more complex but avoids multiple slicing operations.
-    //     }
-
-    //     // Read all the chunks, stitch them together, and extract the final subset. Use the concat function to stitch together the chunks.
-    //     let num_dims = subset.start.len();
-    //     if num_dims == 0 {
-    //         let part = self
-    //             .fetch_chunk(Vec::new())
-    //             .await?
-    //             .ok_or_else(|| anyhow!("missing scalar chunk"))?;
-    //         return Ok(Some(part.array));
-    //     }
-
-    //     let mut chunk_ranges = Vec::with_capacity(num_dims);
-    //     for dim in 0..num_dims {
-    //         let start = subset.start[dim];
-    //         let len = subset.shape[dim];
-    //         let array_dim = self.array_shape[dim];
-    //         let chunk_dim = self.chunk_shape[dim];
-
-    //         if chunk_dim == 0 {
-    //             return Err(anyhow!("chunk dimension cannot be zero"));
-    //         }
-    //         if len == 0 || start.saturating_add(len) > array_dim {
-    //             return Err(anyhow!("subset out of bounds"));
-    //         }
-
-    //         let first = start / chunk_dim;
-    //         let last = (start + len - 1) / chunk_dim;
-    //         chunk_ranges.push((first, last));
-    //     }
-
-    //     let mut chunks = std::collections::HashMap::new();
-    //     for chunk_index in &chunk_indices {
-    //         let part = self
-    //             .fetch_chunk(chunk_index.clone())
-    //             .await?
-    //             .ok_or_else(|| anyhow!("missing chunk {:?}", chunk_index))?;
-    //         chunks.insert(chunk_index.clone(), part.array);
-    //     }
-
-    //     fn build_combined(
-    //         dim: usize,
-    //         ranges: &[(usize, usize)],
-    //         prefix: &mut Vec<usize>,
-    //         chunks: &std::collections::HashMap<Vec<usize>, NdArrowArray>,
-    //     ) -> anyhow::Result<NdArrowArray> {
-    //         let (start, end) = ranges[dim];
-    //         let mut arrays = Vec::new();
-    //         for idx in start..=end {
-    //             prefix.push(idx);
-    //             let array = if dim + 1 == ranges.len() {
-    //                 chunks
-    //                     .get(prefix)
-    //                     .cloned()
-    //                     .ok_or_else(|| anyhow!("missing chunk {:?}", prefix))?
-    //             } else {
-    //                 build_combined(dim + 1, ranges, prefix, chunks)?
-    //             };
-    //             arrays.push(array);
-    //             prefix.pop();
-    //         }
-    //         if arrays.len() == 1 {
-    //             return Ok(arrays.remove(0));
-    //         }
-    //         concat_nd(&arrays, dim).map_err(|err| anyhow!(err))
-    //     }
-
-    //     let mut prefix = Vec::with_capacity(num_dims);
-    //     let combined = build_combined(0, &chunk_ranges, &mut prefix, &chunks)?;
-
-    //     let indices = chunk_ranges
-    //         .iter()
-    //         .enumerate()
-    //         .map(|(dim, (start_chunk, _))| {
-    //             let combined_start = start_chunk * self.chunk_shape[dim];
-    //             let local_start = subset.start[dim].saturating_sub(combined_start);
-    //             NdIndex::slice(local_start, subset.shape[dim])
-    //         })
-    //         .collect::<Vec<_>>();
-
-    //     combined.slice_nd(&indices).map_err(|err| anyhow!(err))
-    // }
 }
 
 // #[cfg(test)]

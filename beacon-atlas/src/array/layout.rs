@@ -1,6 +1,6 @@
 use arrow::{
-    array::{Array, ArrayRef, FixedSizeListArray, ListArray, PrimitiveArray, UInt32Array},
-    datatypes::UInt32Type,
+    array::{Array, DictionaryArray, ListArray, PrimitiveArray, StringArray, UInt32Array},
+    datatypes::{UInt32Type, UInt64Type},
 };
 use object_store::ObjectStore;
 use std::sync::Arc;
@@ -8,27 +8,26 @@ use std::sync::Arc;
 use anyhow::Context;
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field};
+use std::collections::HashMap;
 
 use crate::arrow_object_store::ArrowObjectStoreReader;
 
 #[derive(Debug, Clone)]
 pub struct ArrayLayout {
     pub dataset_index: u32,
-    pub array_indexes: Vec<[u32; 2]>,
-    pub chunk_indexes: Vec<Vec<u32>>,
-    pub dimensions: Vec<String>,
-    pub chunk_shape: Vec<u32>,
-    pub array_shape: Vec<u32>,
+    pub array_start: u64,
+    pub array_len: u64,
+    pub array_shape: Vec<u32>, // Shape of the full array (e.g. [100, 100])
+    pub dimensions: Vec<String>, // List of dimension names
 }
 
 /// In-memory representation of dataset layout metadata stored as Arrow IPC.
 pub struct ArrayLayouts {
     dataset_index: PrimitiveArray<UInt32Type>, // u32
-    array_index: ListArray,                    // List<FixedSized<u32;2>>
-    chunk_index: ListArray,                    // List<List<u32>>
-    chunk_shape: ListArray,                    // List<u32>
+    array_start: PrimitiveArray<UInt64Type>,   // u64
+    array_len: PrimitiveArray<UInt64Type>,     // u64>
     array_shape: ListArray,                    // List<u32>
-    dimensions: ListArray, // List<string> (Encoded as DictionaryArray with UInt32 keys and String values)
+    dimensions: ListArray,                     // List<Dictionary<UInt32, Utf8>>
 }
 
 impl ArrayLayouts {
@@ -36,22 +35,23 @@ impl ArrayLayouts {
     pub fn new(layouts: Vec<ArrayLayout>) -> Self {
         let dataset_index =
             UInt32Array::from(layouts.iter().map(|l| l.dataset_index).collect::<Vec<_>>());
-        let array_index =
-            Self::vec_fixed_to_array(layouts.iter().map(|l| l.array_indexes.clone()).collect());
-        let chunk_index = Self::vecvecvec_to_list_array(
-            layouts.iter().map(|l| l.chunk_indexes.clone()).collect(),
+        let array_start = PrimitiveArray::<UInt64Type>::from(
+            layouts.iter().map(|l| l.array_start).collect::<Vec<_>>(),
         );
-        let chunk_shape =
-            Self::vecvec_to_list_array(layouts.iter().map(|l| l.chunk_shape.clone()).collect());
+        let array_len = PrimitiveArray::<UInt64Type>::from(
+            layouts.iter().map(|l| l.array_len).collect::<Vec<_>>(),
+        );
         let array_shape =
             Self::vecvec_to_list_array(layouts.iter().map(|l| l.array_shape.clone()).collect());
+        let dimensions =
+            Self::vecvecstring_to_dict_list(layouts.iter().map(|l| l.dimensions.clone()).collect());
 
         Self {
             dataset_index,
-            array_index,
-            chunk_index,
-            chunk_shape,
+            array_start,
+            array_len,
             array_shape,
+            dimensions,
         }
     }
 
@@ -67,35 +67,20 @@ impl ArrayLayouts {
         // Create RecordBatch
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
             Field::new("dataset_index", DataType::UInt32, false),
-            Field::new(
-                "array_index",
-                DataType::List(Arc::new(Field::new(
-                    "item",
-                    DataType::FixedSizeList(
-                        Arc::new(Field::new("value", DataType::UInt32, false)),
-                        2,
-                    ),
-                    false,
-                ))),
-                false,
-            ),
-            Field::new(
-                "chunk_index",
-                DataType::List(Arc::new(Field::new(
-                    "item",
-                    DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
-                    false,
-                ))),
-                false,
-            ),
-            Field::new(
-                "chunk_shape",
-                DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
-                false,
-            ),
+            Field::new("array_start", DataType::UInt64, false),
+            Field::new("array_len", DataType::UInt64, false),
             Field::new(
                 "array_shape",
                 DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                false,
+            ),
+            Field::new(
+                "dimensions",
+                DataType::List(Arc::new(Field::new(
+                    "item",
+                    DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+                    false,
+                ))),
                 false,
             ),
         ]));
@@ -104,10 +89,10 @@ impl ArrayLayouts {
             schema,
             vec![
                 Arc::new(self.dataset_index.clone()),
-                Arc::new(self.array_index.clone()),
-                Arc::new(self.chunk_index.clone()),
-                Arc::new(self.chunk_shape.clone()),
+                Arc::new(self.array_start.clone()),
+                Arc::new(self.array_len.clone()),
                 Arc::new(self.array_shape.clone()),
+                Arc::new(self.dimensions.clone()),
             ],
         )
         .context("failed to build layout record batch")?;
@@ -132,42 +117,6 @@ impl ArrayLayouts {
             .context("failed to store layout IPC object")?;
 
         Ok(())
-    }
-
-    /// Converts a vector of fixed-size pairs into a `ListArray` of `FixedSizeList` values.
-    fn vec_fixed_to_array(data: Vec<Vec<[u32; 2]>>) -> ListArray {
-        // Flatten values
-        let mut flat_values = Vec::new();
-        let mut offsets = Vec::with_capacity(data.len() + 1);
-        offsets.push(0i32);
-
-        for inner in &data {
-            for item in inner {
-                flat_values.extend_from_slice(item);
-            }
-            offsets.push(flat_values.len() as i32 / 2); // each item has 2 u32s
-        }
-
-        let values_array = UInt32Array::from(flat_values);
-        let value_field = Arc::new(Field::new("value", DataType::UInt32, false));
-        let fixed_values = FixedSizeListArray::try_new(
-            value_field.clone(),
-            2,
-            Arc::new(values_array) as ArrayRef,
-            None,
-        )
-        .expect("failed to build FixedSizeListArray for array_index");
-
-        let offsets_buffer = OffsetBuffer::new(offsets.into());
-
-        let field = Field::new("item", DataType::FixedSizeList(value_field, 2), false);
-
-        ListArray::new(
-            Arc::new(field),
-            offsets_buffer,
-            Arc::new(fixed_values),
-            None, // null bitmap (None = no null lists)
-        )
     }
 
     /// Converts a `Vec<Vec<u32>>` into a `ListArray` of `UInt32` values.
@@ -196,100 +145,44 @@ impl ArrayLayouts {
         )
     }
 
-    /// Converts a `Vec<Vec<Vec<u32>>>` into a `ListArray` of `List<UInt32>` values.
-    fn vecvecvec_to_list_array(data: Vec<Vec<Vec<u32>>>) -> ListArray {
-        let mut values = Vec::new();
-        let mut inner_offsets = Vec::new();
-        inner_offsets.push(0i32);
+    /// Converts a `Vec<Vec<String>>` into a `ListArray` of dictionary-encoded strings.
+    fn vecvecstring_to_dict_list(data: Vec<Vec<String>>) -> ListArray {
+        let mut offsets = Vec::with_capacity(data.len() + 1);
+        offsets.push(0i32);
 
-        for inner_list in data.iter().flatten() {
-            values.extend_from_slice(inner_list);
-            inner_offsets.push(values.len() as i32);
+        let mut dict_values: Vec<String> = Vec::new();
+        let mut keys: Vec<u32> = Vec::new();
+        let mut dict_index = HashMap::<String, u32>::new();
+
+        for inner in &data {
+            for value in inner {
+                let key = match dict_index.get(value) {
+                    Some(key) => *key,
+                    None => {
+                        let key = dict_values.len() as u32;
+                        dict_values.push(value.clone());
+                        dict_index.insert(value.clone(), key);
+                        key
+                    }
+                };
+                keys.push(key);
+            }
+            offsets.push(keys.len() as i32);
         }
 
-        let values_array = UInt32Array::from(values);
-        let inner_offsets_buffer = OffsetBuffer::new(inner_offsets.into());
-        let inner_field = Arc::new(Field::new("item", DataType::UInt32, false));
-        let inner_list_array = ListArray::new(
-            inner_field,
-            inner_offsets_buffer,
-            Arc::new(values_array),
-            None,
-        );
+        let keys_array = UInt32Array::from(keys);
+        let values_array = StringArray::from(dict_values);
+        let dict_array = DictionaryArray::<UInt32Type>::try_new(keys_array, Arc::new(values_array))
+            .expect("failed to build dictionary array for dimensions");
 
-        let mut outer_offsets = Vec::with_capacity(data.len() + 1);
-        outer_offsets.push(0i32);
-        let mut total_lists = 0i32;
-        for lists in &data {
-            total_lists += lists.len() as i32;
-            outer_offsets.push(total_lists);
-        }
-
-        let outer_offsets_buffer = OffsetBuffer::new(outer_offsets.into());
-        let outer_field = Field::new(
+        let offsets_buffer = OffsetBuffer::new(offsets.into());
+        let field = Field::new(
             "item",
-            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
             false,
         );
 
-        ListArray::new(
-            Arc::new(outer_field),
-            outer_offsets_buffer,
-            Arc::new(inner_list_array),
-            None,
-        )
-    }
-
-    /// Returns the array indexes for the dataset at `index`.
-    ///
-    /// Returns `None` when the index is out of range or the data is malformed.
-    pub fn get_array_indexes(&self, index: usize) -> Option<Vec<[u32; 2]>> {
-        if index >= self.array_index.len() {
-            return None;
-        }
-        let list_value = self.array_index.value(index);
-        let inner_list = list_value.as_any().downcast_ref::<FixedSizeListArray>()?;
-
-        let mut result = Vec::with_capacity(inner_list.len());
-        for i in 0..inner_list.len() {
-            let inner_value = inner_list.value(i);
-            let values = inner_value.as_any().downcast_ref::<UInt32Array>()?;
-            if values.len() < 2 {
-                return None;
-            }
-            result.push([values.value(0), values.value(1)]);
-        }
-        Some(result)
-    }
-
-    /// Returns the chunk indexes for the dataset at `index`.
-    ///
-    /// Returns `None` when the index is out of range or the data is malformed.
-    pub fn get_chunk_indexes(&self, index: usize) -> Option<Vec<Vec<u32>>> {
-        if index >= self.chunk_index.len() {
-            return None;
-        }
-        let list_value = self.chunk_index.value(index);
-        let inner_list = list_value.as_any().downcast_ref::<ListArray>()?;
-        let mut result = Vec::with_capacity(inner_list.len());
-        for i in 0..inner_list.len() {
-            let inner_value = inner_list.value(i);
-            let values = inner_value.as_any().downcast_ref::<UInt32Array>()?;
-            result.push((0..values.len()).map(|j| values.value(j)).collect());
-        }
-        Some(result)
-    }
-
-    /// Returns the chunk shape for the dataset at `index`.
-    ///
-    /// Returns `None` when the index is out of range or the data is malformed.
-    pub fn get_chunk_shape(&self, index: usize) -> Option<Vec<u32>> {
-        if index >= self.chunk_shape.len() {
-            return None;
-        }
-        let list_value = self.chunk_shape.value(index);
-        let values = list_value.as_any().downcast_ref::<UInt32Array>()?;
-        Some((0..values.len()).map(|j| values.value(j)).collect())
+        ListArray::new(Arc::new(field), offsets_buffer, Arc::new(dict_array), None)
     }
 
     /// Returns the array shape for the dataset at `index`.
@@ -304,6 +197,31 @@ impl ArrayLayouts {
         Some((0..values.len()).map(|j| values.value(j)).collect())
     }
 
+    /// Returns the dimensions for the dataset at `index`.
+    ///
+    /// Returns `None` when the index is out of range or the data is malformed.
+    pub fn get_dimensions(&self, index: usize) -> Option<Vec<String>> {
+        if index >= self.dimensions.len() {
+            return None;
+        }
+        let list_value = self.dimensions.value(index);
+        let dict_array = list_value
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()?;
+        if dict_array.null_count() > 0 {
+            return None;
+        }
+        let values = dict_array.values();
+        let values = values.as_any().downcast_ref::<StringArray>()?;
+        let mut result = Vec::with_capacity(dict_array.len());
+        let keys = dict_array.keys();
+        for i in 0..dict_array.len() {
+            let key = keys.value(i) as usize;
+            result.push(values.value(key).to_string());
+        }
+        Some(result)
+    }
+
     /// Finds the dataset index using binary search on sorted `dataset_index` values.
     pub fn find_dataset_array_layout(&self, dataset_index: u32) -> Option<ArrayLayout> {
         let index = self
@@ -313,10 +231,10 @@ impl ArrayLayouts {
             .ok()?;
         Some(ArrayLayout {
             dataset_index,
-            array_indexes: self.get_array_indexes(index)?,
-            chunk_indexes: self.get_chunk_indexes(index)?,
-            chunk_shape: self.get_chunk_shape(index)?,
+            array_start: self.array_start.value(index),
+            array_len: self.array_len.value(index),
             array_shape: self.get_array_shape(index)?,
+            dimensions: self.get_dimensions(index)?,
         })
     }
 
@@ -345,10 +263,10 @@ impl ArrayLayouts {
         // Check if the schema is as expected
         let expected_fields = vec![
             "dataset_index",
-            "array_index",
-            "chunk_index",
-            "chunk_shape",
+            "array_start",
+            "array_len",
             "array_shape",
+            "dimensions",
         ];
         for field in expected_fields {
             if batch.schema().field_with_name(field).is_err() {
@@ -364,25 +282,18 @@ impl ArrayLayouts {
             .downcast_ref::<PrimitiveArray<UInt32Type>>()
             .ok_or_else(|| anyhow::anyhow!("Invalid type for dataset_index"))?
             .clone();
-        let array_index = batch
-            .column(batch.schema().index_of("array_index")?)
+        let array_start = batch
+            .column(batch.schema().index_of("array_start")?)
             .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or_else(|| anyhow::anyhow!("Invalid type for array_index"))?
+            .downcast_ref::<PrimitiveArray<UInt64Type>>()
+            .ok_or_else(|| anyhow::anyhow!("Invalid type for array_start"))?
             .clone();
 
-        let chunk_index = batch
-            .column(batch.schema().index_of("chunk_index")?)
+        let array_len = batch
+            .column(batch.schema().index_of("array_len")?)
             .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or_else(|| anyhow::anyhow!("Invalid type for chunk_index"))?
-            .clone();
-
-        let chunk_shape = batch
-            .column(batch.schema().index_of("chunk_shape")?)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or_else(|| anyhow::anyhow!("Invalid type for chunk_shape"))?
+            .downcast_ref::<PrimitiveArray<UInt64Type>>()
+            .ok_or_else(|| anyhow::anyhow!("Invalid type for array_len"))?
             .clone();
 
         let array_shape = batch
@@ -392,12 +303,19 @@ impl ArrayLayouts {
             .ok_or_else(|| anyhow::anyhow!("Invalid type for array_shape"))?
             .clone();
 
+        let dimensions = batch
+            .column(batch.schema().index_of("dimensions")?)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .ok_or_else(|| anyhow::anyhow!("Invalid type for dimensions"))?
+            .clone();
+
         Ok(Self {
             dataset_index,
-            array_index,
-            chunk_index,
-            chunk_shape,
+            array_start,
+            array_len,
             array_shape,
+            dimensions,
         })
     }
 }
@@ -412,17 +330,17 @@ mod tests {
         ArrayLayouts::new(vec![
             ArrayLayout {
                 dataset_index: 1,
-                array_indexes: vec![[0, 1], [2, 3]],
-                chunk_indexes: vec![vec![10, 11], vec![12, 13]],
-                chunk_shape: vec![2, 2],
+                array_start: 0,
+                array_len: 8,
                 array_shape: vec![4, 4],
+                dimensions: vec!["x".to_string(), "y".to_string()],
             },
             ArrayLayout {
                 dataset_index: 2,
-                array_indexes: vec![[4, 5]],
-                chunk_indexes: vec![vec![20, 21, 22]],
-                chunk_shape: vec![3, 3, 3],
+                array_start: 8,
+                array_len: 27,
                 array_shape: vec![9, 9, 9],
+                dimensions: vec!["x".to_string(), "y".to_string(), "z".to_string()],
             },
         ])
     }
@@ -450,24 +368,46 @@ mod tests {
                 .copied()
                 .collect::<Vec<_>>()
         );
-        assert_eq!(layout.get_array_indexes(0), loaded.get_array_indexes(0));
-        assert_eq!(layout.get_array_indexes(1), loaded.get_array_indexes(1));
-        assert_eq!(layout.get_chunk_indexes(0), loaded.get_chunk_indexes(0));
-        assert_eq!(layout.get_chunk_indexes(1), loaded.get_chunk_indexes(1));
-        assert_eq!(layout.get_chunk_shape(0), loaded.get_chunk_shape(0));
-        assert_eq!(layout.get_chunk_shape(1), loaded.get_chunk_shape(1));
+        assert_eq!(
+            layout
+                .array_start
+                .values()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            loaded
+                .array_start
+                .values()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            layout
+                .array_len
+                .values()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            loaded
+                .array_len
+                .values()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        );
         assert_eq!(layout.get_array_shape(0), loaded.get_array_shape(0));
         assert_eq!(layout.get_array_shape(1), loaded.get_array_shape(1));
+        assert_eq!(layout.get_dimensions(0), loaded.get_dimensions(0));
+        assert_eq!(layout.get_dimensions(1), loaded.get_dimensions(1));
         Ok(())
     }
 
     #[tokio::test]
     async fn getters_return_none_out_of_range() -> anyhow::Result<()> {
         let layout = sample_layout();
-        assert!(layout.get_array_indexes(2).is_none());
-        assert!(layout.get_chunk_indexes(2).is_none());
-        assert!(layout.get_chunk_shape(2).is_none());
         assert!(layout.get_array_shape(2).is_none());
+        assert!(layout.get_dimensions(2).is_none());
         Ok(())
     }
 
@@ -476,10 +416,13 @@ mod tests {
         let layout = sample_layout();
         let found = layout.find_dataset_array_layout(2).expect("dataset exists");
         assert_eq!(found.dataset_index, 2);
-        assert_eq!(found.array_indexes, vec![[4, 5]]);
-        assert_eq!(found.chunk_indexes, vec![vec![20, 21, 22]]);
-        assert_eq!(found.chunk_shape, vec![3, 3, 3]);
+        assert_eq!(found.array_start, 8);
+        assert_eq!(found.array_len, 27);
         assert_eq!(found.array_shape, vec![9, 9, 9]);
+        assert_eq!(
+            found.dimensions,
+            vec!["x".to_string(), "y".to_string(), "z".to_string()]
+        );
         Ok(())
     }
 }
