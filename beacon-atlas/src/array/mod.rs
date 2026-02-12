@@ -24,390 +24,99 @@ pub struct Array<S: ChunkStore + Send + Sync> {
 }
 
 impl<S: ChunkStore + Send + Sync> Array<S> {
-    pub async fn fetch(&self) -> Arc<dyn NdArray> {
+    pub async fn fetch(&self) -> anyhow::Result<Arc<dyn NdArray>> {
         //Fetch all chunks, concat using arrow
-        let all_chunks = self.chunk_provider.chunks().collect::<Vec<_>>().await;
+        let all_chunks_res = self.chunk_provider.chunks().collect::<Vec<_>>().await;
+        let all_chunks = all_chunks_res
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-        todo!()
+        // Concat the arrays
+        let array = arrow::compute::concat(
+            &all_chunks
+                .iter()
+                .map(|part| part.as_ref())
+                .collect::<Vec<_>>(),
+        )?;
+
+        nd::try_from_arrow_ref(array, &self.array_shape, &self.dimensions).ok_or(anyhow::anyhow!(
+            "Unable to convert stored array to nd-array using shared arrow buffer."
+        ))
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::{Array, ArrayPart, ChunkStore};
-//     use std::collections::HashMap;
-//     use std::sync::Arc;
+#[cfg(test)]
+mod tests {
+    use super::Array;
+    use crate::array::data_type::I32Type;
+    use crate::array::nd::AsNdArray;
+    use crate::array::store::ChunkStore;
+    use arrow::array::{ArrayRef, Int32Array};
+    use futures::stream::{self, BoxStream, StreamExt};
+    use std::sync::Arc;
 
-//     use arrow::array::Int32Array;
-//     use beacon_nd_arrow::NdArrowArray;
-//     use beacon_nd_arrow::dimensions::{Dimension, Dimensions};
-//     use futures::StreamExt;
-//     use futures::executor::block_on;
-//     use futures::stream::{self, BoxStream};
+    #[derive(Debug, Clone)]
+    struct TestChunkStore {
+        chunks: Vec<ArrayRef>,
+    }
 
-//     #[derive(Debug, Clone)]
-//     struct TestStore {
-//         parts: HashMap<Vec<usize>, ArrayPart>,
-//     }
+    impl TestChunkStore {
+        fn new(chunks: Vec<ArrayRef>) -> Self {
+            Self { chunks }
+        }
+    }
 
-//     #[async_trait::async_trait]
-//     impl ChunkStore for TestStore {
-//         fn chunks(&self) -> BoxStream<'static, anyhow::Result<ArrayPart>> {
-//             let parts: Vec<ArrayPart> = self.parts.values().cloned().collect();
-//             stream::iter(parts.into_iter().map(Ok)).boxed()
-//         }
+    #[async_trait::async_trait]
+    impl ChunkStore for TestChunkStore {
+        fn chunks(&self) -> BoxStream<'static, anyhow::Result<ArrayRef>> {
+            let chunks = self.chunks.clone();
+            stream::iter(chunks.into_iter().map(Ok)).boxed()
+        }
 
-//         async fn fetch_chunk(&self, chunk_index: Vec<usize>) -> anyhow::Result<Option<ArrayPart>> {
-//             Ok(self.parts.get(&chunk_index).cloned())
-//         }
-//     }
+        async fn fetch_chunk(
+            &self,
+            _start: usize,
+            _len: usize,
+        ) -> anyhow::Result<Option<ArrayRef>> {
+            Ok(None)
+        }
+    }
 
-//     fn make_array(values: Vec<i32>, shape: Vec<usize>, names: Vec<&str>) -> NdArrowArray {
-//         let dims = names
-//             .into_iter()
-//             .zip(shape.into_iter())
-//             .map(|(name, size)| Dimension::try_new(name, size).unwrap())
-//             .collect::<Vec<_>>();
-//         NdArrowArray::new(Arc::new(Int32Array::from(values)), Dimensions::new(dims)).unwrap()
-//     }
+    #[tokio::test]
+    async fn fetch_concats_chunks_into_ndarray() -> anyhow::Result<()> {
+        let chunks = vec![
+            Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef,
+            Arc::new(Int32Array::from(vec![3, 4, 5])) as ArrayRef,
+        ];
+        let array = Array {
+            array_datatype: arrow::datatypes::DataType::Int32,
+            array_shape: vec![5],
+            dimensions: vec!["x".to_string()],
+            chunk_provider: TestChunkStore::new(chunks),
+        };
 
-//     fn make_part(
-//         chunk_index: Vec<usize>,
-//         values: Vec<i32>,
-//         shape: Vec<usize>,
-//         names: Vec<&str>,
-//         chunk_shape: &[usize],
-//         array_shape: &[usize],
-//     ) -> ArrayPart {
-//         let start = chunk_index
-//             .iter()
-//             .zip(chunk_shape.iter())
-//             .map(|(idx, dim)| idx * dim)
-//             .collect::<Vec<_>>();
-//         let shape = shape
-//             .into_iter()
-//             .zip(start.iter())
-//             .zip(array_shape.iter())
-//             .map(|((dim, start), array_dim)| (*array_dim - *start).min(dim))
-//             .collect::<Vec<_>>();
+        let nd = array.fetch().await?;
+        assert_eq!(nd.shape(), &[5]);
+        assert_eq!(nd.dimensions(), vec!["x"]);
 
-//         ArrayPart {
-//             array: make_array(values, shape.clone(), names),
-//             chunk_index,
-//             start,
-//             shape,
-//         }
-//     }
+        let values = nd
+            .as_primitive_nd::<I32Type>()
+            .expect("expected i32 ndarray");
+        let collected: Vec<i32> = values.iter().cloned().collect();
+        assert_eq!(collected, vec![1, 2, 3, 4, 5]);
 
-//     #[test]
-//     fn chunk_subsets_1d() {
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: vec![2],
-//             array_shape: vec![5],
-//             chunk_provider: TestStore {
-//                 parts: HashMap::new(),
-//             },
-//         };
+        Ok(())
+    }
 
-//         let subsets = array.chunk_subsets();
-//         let starts: Vec<Vec<usize>> = subsets.iter().map(|s| s.start.clone()).collect();
-//         let shapes: Vec<Vec<usize>> = subsets.iter().map(|s| s.shape.clone()).collect();
+    #[tokio::test]
+    async fn fetch_returns_error_when_no_chunks_available() {
+        let array = Array {
+            array_datatype: arrow::datatypes::DataType::Int32,
+            array_shape: vec![0],
+            dimensions: vec!["x".to_string()],
+            chunk_provider: TestChunkStore::new(Vec::new()),
+        };
 
-//         assert_eq!(starts, vec![vec![0], vec![2], vec![4]]);
-//         assert_eq!(shapes, vec![vec![2], vec![2], vec![1]]);
-//     }
-
-//     #[test]
-//     fn chunk_subsets_2d() {
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: vec![2, 2],
-//             array_shape: vec![3, 5],
-//             chunk_provider: TestStore {
-//                 parts: HashMap::new(),
-//             },
-//         };
-
-//         let subsets = array.chunk_subsets();
-//         let starts: Vec<Vec<usize>> = subsets.iter().map(|s| s.start.clone()).collect();
-//         let shapes: Vec<Vec<usize>> = subsets.iter().map(|s| s.shape.clone()).collect();
-
-//         assert_eq!(
-//             starts,
-//             vec![
-//                 vec![0, 0],
-//                 vec![0, 2],
-//                 vec![0, 4],
-//                 vec![2, 0],
-//                 vec![2, 2],
-//                 vec![2, 4],
-//             ]
-//         );
-//         assert_eq!(
-//             shapes,
-//             vec![
-//                 vec![2, 2],
-//                 vec![2, 2],
-//                 vec![2, 1],
-//                 vec![1, 2],
-//                 vec![1, 2],
-//                 vec![1, 1],
-//             ]
-//         );
-//     }
-
-//     #[test]
-//     fn chunk_subsets_scalar() {
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: vec![],
-//             array_shape: vec![],
-//             chunk_provider: TestStore {
-//                 parts: HashMap::new(),
-//             },
-//         };
-
-//         let subsets = array.chunk_subsets();
-//         assert_eq!(subsets.len(), 1);
-//         assert!(subsets[0].start.is_empty());
-//         assert!(subsets[0].shape.is_empty());
-//     }
-
-//     #[test]
-//     fn determine_chunk_indices_1d() {
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: vec![2],
-//             array_shape: vec![5],
-//             chunk_provider: TestStore {
-//                 parts: HashMap::new(),
-//             },
-//         };
-
-//         let subset = super::ArraySubset {
-//             start: vec![1],
-//             shape: vec![3],
-//         };
-//         let indices = block_on(array.determine_chunk_indices(subset)).unwrap();
-//         assert_eq!(indices, vec![vec![0], vec![1]]);
-//     }
-
-//     #[test]
-//     fn determine_chunk_indices_2d() {
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: vec![2, 2],
-//             array_shape: vec![3, 5],
-//             chunk_provider: TestStore {
-//                 parts: HashMap::new(),
-//             },
-//         };
-
-//         let subset = super::ArraySubset {
-//             start: vec![1, 2],
-//             shape: vec![2, 3],
-//         };
-//         let indices = block_on(array.determine_chunk_indices(subset)).unwrap();
-//         assert_eq!(
-//             indices,
-//             vec![vec![0, 1], vec![0, 2], vec![1, 1], vec![1, 2]]
-//         );
-//     }
-
-//     #[test]
-//     fn subset_1d() {
-//         let chunk_shape = vec![2];
-//         let array_shape = vec![5];
-//         let names = vec!["x"];
-
-//         let mut parts = HashMap::new();
-//         parts.insert(
-//             vec![0],
-//             make_part(
-//                 vec![0],
-//                 vec![1, 2],
-//                 vec![2],
-//                 names.clone(),
-//                 &chunk_shape,
-//                 &array_shape,
-//             ),
-//         );
-//         parts.insert(
-//             vec![1],
-//             make_part(
-//                 vec![1],
-//                 vec![3, 4],
-//                 vec![2],
-//                 names.clone(),
-//                 &chunk_shape,
-//                 &array_shape,
-//             ),
-//         );
-//         parts.insert(
-//             vec![2],
-//             make_part(
-//                 vec![2],
-//                 vec![5],
-//                 vec![1],
-//                 names.clone(),
-//                 &chunk_shape,
-//                 &array_shape,
-//             ),
-//         );
-
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: chunk_shape.clone(),
-//             array_shape: array_shape.clone(),
-//             chunk_provider: TestStore { parts },
-//         };
-
-//         let subset = super::ArraySubset {
-//             start: vec![1],
-//             shape: vec![3],
-//         };
-//         let result = block_on(array.subset(subset)).unwrap();
-//         let values = result
-//             .values()
-//             .as_any()
-//             .downcast_ref::<Int32Array>()
-//             .unwrap();
-//         assert_eq!(values.values(), &[2, 3, 4]);
-//         assert_eq!(result.dimensions().shape(), vec![3]);
-//     }
-
-//     #[test]
-//     fn subset_2d() {
-//         let chunk_shape = vec![2, 2];
-//         let array_shape = vec![3, 4];
-//         let names = vec!["y", "x"];
-
-//         let mut parts = HashMap::new();
-//         parts.insert(
-//             vec![0, 0],
-//             make_part(
-//                 vec![0, 0],
-//                 vec![1, 2, 5, 6],
-//                 vec![2, 2],
-//                 names.clone(),
-//                 &chunk_shape,
-//                 &array_shape,
-//             ),
-//         );
-//         parts.insert(
-//             vec![0, 1],
-//             make_part(
-//                 vec![0, 1],
-//                 vec![3, 4, 7, 8],
-//                 vec![2, 2],
-//                 names.clone(),
-//                 &chunk_shape,
-//                 &array_shape,
-//             ),
-//         );
-//         parts.insert(
-//             vec![1, 0],
-//             make_part(
-//                 vec![1, 0],
-//                 vec![9, 10],
-//                 vec![1, 2],
-//                 names.clone(),
-//                 &chunk_shape,
-//                 &array_shape,
-//             ),
-//         );
-//         parts.insert(
-//             vec![1, 1],
-//             make_part(
-//                 vec![1, 1],
-//                 vec![11, 12],
-//                 vec![1, 2],
-//                 names.clone(),
-//                 &chunk_shape,
-//                 &array_shape,
-//             ),
-//         );
-
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: chunk_shape.clone(),
-//             array_shape: array_shape.clone(),
-//             chunk_provider: TestStore { parts },
-//         };
-
-//         let subset = super::ArraySubset {
-//             start: vec![1, 1],
-//             shape: vec![2, 2],
-//         };
-//         let result = block_on(array.subset(subset)).unwrap();
-//         let values = result
-//             .values()
-//             .as_any()
-//             .downcast_ref::<Int32Array>()
-//             .unwrap();
-//         assert_eq!(values.values(), &[6, 7, 10, 11]);
-//         assert_eq!(result.dimensions().shape(), vec![2, 2]);
-//     }
-
-//     #[test]
-//     fn subset_within_chunk_ok() {
-//         let chunk_shape = vec![2, 2];
-//         let array_shape = vec![3, 4];
-//         let names = vec!["y", "x"];
-
-//         let mut parts = HashMap::new();
-//         parts.insert(
-//             vec![0, 0],
-//             make_part(
-//                 vec![0, 0],
-//                 vec![1, 2, 5, 6],
-//                 vec![2, 2],
-//                 names.clone(),
-//                 &chunk_shape,
-//                 &array_shape,
-//             ),
-//         );
-
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: chunk_shape.clone(),
-//             array_shape: array_shape.clone(),
-//             chunk_provider: TestStore { parts },
-//         };
-
-//         let subset = super::ArraySubset {
-//             start: vec![0, 1],
-//             shape: vec![2, 1],
-//         };
-//         let result = block_on(array.subset_within_chunk(vec![0, 0], subset))
-//             .unwrap()
-//             .unwrap();
-//         let values = result
-//             .values()
-//             .as_any()
-//             .downcast_ref::<Int32Array>()
-//             .unwrap();
-//         assert_eq!(values.values(), &[2, 6]);
-//         assert_eq!(result.dimensions().shape(), vec![2, 1]);
-//     }
-
-//     #[test]
-//     fn subset_within_chunk_missing() {
-//         let array = Array {
-//             array_datatype: arrow::datatypes::DataType::Int32,
-//             chunk_shape: vec![2, 2],
-//             array_shape: vec![3, 4],
-//             chunk_provider: TestStore {
-//                 parts: HashMap::new(),
-//             },
-//         };
-
-//         let subset = super::ArraySubset {
-//             start: vec![0, 0],
-//             shape: vec![1, 1],
-//         };
-//         let result = block_on(array.subset_within_chunk(vec![0, 0], subset)).unwrap();
-//         assert!(result.is_none());
-//     }
-// }
+        assert!(array.fetch().await.is_err());
+    }
+}

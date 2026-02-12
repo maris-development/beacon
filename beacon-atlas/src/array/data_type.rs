@@ -86,7 +86,7 @@ impl_primitive_array_data_type!(F64Type, f64, arrow::datatypes::Float64Type, Dat
 impl_primitive_array_data_type!(
     TimestampType,
     i64,
-    arrow::datatypes::Time64NanosecondType,
+    arrow::datatypes::TimestampNanosecondType,
     DataType::Timestamp
 );
 
