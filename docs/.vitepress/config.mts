@@ -38,7 +38,7 @@ export default defineConfig({
       },
       {
         text: 'Blog',
-        link: '/blog/netcdf-performance-tuning',
+        link: '/blog/world-ocean-database-node',
         activeMatch: '/blog/'
       },
       {
