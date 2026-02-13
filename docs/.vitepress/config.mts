@@ -52,7 +52,6 @@ export default defineConfig({
           {
             text: '🌊 Blue Cloud 2026',
             link: '/use-cases/blue-cloud-2026',
-
           },
           {
             text: '🌡️ C3S ERA5 Daily (Zarr)',
@@ -64,7 +63,7 @@ export default defineConfig({
           },
           {
             text: '🗺️ EOSC-Future',
-            link: '/use-cases/marine-data-viewer',
+            link: '/use-cases/eosc-future',
           }
         ]
       }
@@ -296,7 +295,7 @@ export default defineConfig({
                 },
                 {
                   text: 'CMEMS CORA',
-                  link: '/use-cases/blue-cloud-2026#cora-profiles-time-series'
+                  link: '/use-cases/blue-cloud-2026#cmems-cora-in-situ'
                 },
                 {
                   text: 'SeaDataNet',
@@ -308,11 +307,11 @@ export default defineConfig({
                 },
                 {
                   text: 'EMODnet Chemistry',
-                  link: '/use-cases/blue-cloud-2026#emodnet-chemistry'
+                  link: '/use-cases/blue-cloud-2026#emodnet-chemistry-eutrophication'
                 },
                 {
                   text: 'CMEMS BGC',
-                  link: '/use-cases/blue-cloud-2026#cmems-bgc'
+                  link: '/use-cases/blue-cloud-2026#cmems-bgc-in-situ'
                 }
               ]
             },
