@@ -3,13 +3,11 @@ use std::{fmt::Debug, sync::Arc};
 use arrow::array::ArrayRef;
 use futures::stream::BoxStream;
 
-// use crate::array::ArrayPart;
-
 mod in_memory;
 mod spillable;
 
-// pub use in_memory::InMemoryChunkStore;
-// pub use spillable::SpillableChunkStore;
+pub use in_memory::InMemoryChunkStore;
+pub use spillable::SpillableChunkStore;
 
 #[async_trait::async_trait]
 pub trait ChunkStore: Send + Sync + Debug {

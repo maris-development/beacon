@@ -101,11 +101,6 @@ pub trait VLenByteArrayDataType: Clone + Send + Sync + 'static {
     fn from_bytes<'a>(bytes: &'a [u8]) -> Self::View<'a>;
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct BytesView<'a> {
-    bytes: &'a [u8],
-}
-
 #[derive(Clone)]
 pub struct BytesType;
 
