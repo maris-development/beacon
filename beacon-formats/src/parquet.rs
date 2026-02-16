@@ -1,6 +1,6 @@
 use std::{any::Any, sync::Arc};
 
-use arrow::datatypes::{DataType, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::{
     catalog::Session,
     common::{Column, DFSchema, GetExt, Statistics},
@@ -8,17 +8,16 @@ use datafusion::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         physical_plan::{FileScanConfig, FileSinkConfig, FileSource},
     },
-    execution::SessionState,
-    physical_expr::{LexRequirement, create_physical_expr},
+    physical_expr::LexRequirement,
     physical_plan::{ExecutionPlan, PhysicalExpr, projection::ProjectionExec},
-    prelude::{Expr, cast, col},
+    prelude::{Expr, cast},
 };
 use object_store::{ObjectMeta, ObjectStore};
 
 use beacon_common::super_typing::super_type_schema;
-use futures::future::try_join_all;
+use futures::{StreamExt, TryStreamExt, stream};
 
-use crate::{Dataset, DatasetFormat, FileFormatFactoryExt};
+use crate::{Dataset, DatasetFormat, FileFormatFactoryExt, max_open_fd};
 
 #[derive(Debug)]
 pub struct ParquetFormatFactory;
@@ -119,13 +118,14 @@ impl FileFormat for ParquetFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let schema_futures = objects.iter().map(|object| {
-            let store = Arc::clone(store);
-            let object = object.clone();
-            async move { self.inner.infer_schema(state, &store, &[object]).await }
-        });
-
-        let schemas = try_join_all(schema_futures).await?;
+        let schemas = stream::iter(objects.iter().cloned())
+            .map(|object| {
+                let store = Arc::clone(store);
+                async move { self.inner.infer_schema(state, &store, &[object]).await }
+            })
+            .buffer_unordered(max_open_fd() as usize) // tune this
+            .try_collect::<Vec<_>>()
+            .await?;
 
         //Supertype the schema
         let super_schema = super_type_schema(&schemas).map_err(|e| {
