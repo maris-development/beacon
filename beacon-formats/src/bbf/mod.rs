@@ -1,5 +1,8 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
+use crate::{
+    Dataset, DatasetFormat, FileFormatFactoryExt, bbf::source::BBFSource, file_open_parallelism,
+};
 use arrow::datatypes::SchemaRef;
 use beacon_binary_format::{
     object_store::ArrowBBFObjectReader, reader::async_reader::AsyncBBFReader,
@@ -14,10 +17,8 @@ use datafusion::{
     },
     physical_plan::ExecutionPlan,
 };
-use futures::future::try_join_all;
+use futures::{StreamExt, TryStreamExt, stream};
 use object_store::{ObjectMeta, ObjectStore};
-
-use crate::{Dataset, DatasetFormat, FileFormatFactoryExt, bbf::source::BBFSource};
 
 pub mod metrics;
 pub mod opener;
@@ -108,21 +109,22 @@ impl FileFormat for BBFFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let schema_futures = objects.iter().map(|object| {
-            let store = Arc::clone(store);
-            let object = object.clone();
-            let async_reader = ArrowBBFObjectReader::new(object.location, store);
+        let schemas = stream::iter(objects.iter().cloned())
+            .map(|object| {
+                let store = Arc::clone(store);
+                async move {
+                    let async_reader = ArrowBBFObjectReader::new(object.location, store);
 
-            async move {
-                let reader = AsyncBBFReader::new(Arc::new(async_reader), 128)
-                    .await
-                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                    let reader = AsyncBBFReader::new(Arc::new(async_reader), 128)
+                        .await
+                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
-                Ok::<_, datafusion::error::DataFusionError>(Arc::new(reader.arrow_schema()))
-            }
-        });
-
-        let schemas = try_join_all(schema_futures).await?;
+                    Ok::<_, datafusion::error::DataFusionError>(Arc::new(reader.arrow_schema()))
+                }
+            })
+            .buffer_unordered(file_open_parallelism())
+            .try_collect::<Vec<_>>()
+            .await?;
 
         //Supertype the schema
         let super_schema = super_type_schema(&schemas).map_err(|e| {

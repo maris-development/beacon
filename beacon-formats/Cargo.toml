@@ -41,6 +41,7 @@ which = "8.0.0"
 num-traits = "0.2.19"
 ndarray = { version = "0.17.1" }
 once_cell = "1.21.3"
+rlimit = "0.11.0"
 chrono = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }

@@ -14,9 +14,9 @@ use datafusion::{
 use object_store::{ObjectMeta, ObjectStore};
 
 use beacon_common::super_typing::super_type_schema;
-use futures::future::try_join_all;
+use futures::{StreamExt, TryStreamExt, stream};
 
-use crate::{Dataset, DatasetFormat, FileFormatFactoryExt};
+use crate::{Dataset, DatasetFormat, FileFormatFactoryExt, file_open_parallelism};
 
 #[derive(Debug)]
 pub struct ArrowFormatFactory;
@@ -115,16 +115,18 @@ impl FileFormat for ArrowFormat {
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
         //Retrieve the schema for each object
-        let schemas = try_join_all(objects.iter().map(|object| {
-            let store = Arc::clone(store);
-            let object = object.clone();
-            async move {
-                self.inner_format
-                    .infer_schema(state, &store, &[object])
-                    .await
-            }
-        }))
-        .await?;
+        let schemas = stream::iter(objects.iter().cloned())
+            .map(|object| {
+                let store = Arc::clone(store);
+                async move {
+                    self.inner_format
+                        .infer_schema(state, &store, &[object])
+                        .await
+                }
+            })
+            .buffer_unordered(file_open_parallelism()) // tune this
+            .try_collect::<Vec<_>>()
+            .await?;
 
         let super_schema = super_type_schema(&schemas).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
