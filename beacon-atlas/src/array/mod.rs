@@ -9,7 +9,6 @@ pub mod data_type;
 pub mod io_cache;
 pub mod layout;
 pub mod nd;
-pub mod pruning;
 pub mod reader;
 pub mod store;
 pub mod writer;
