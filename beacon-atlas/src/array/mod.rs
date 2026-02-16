@@ -43,6 +43,12 @@ impl<S: ChunkStore + Send + Sync> Array<S> {
             "Unable to convert stored array to nd-array using shared arrow buffer."
         ))
     }
+
+    pub fn as_chunked_arrow_stream(
+        &self,
+    ) -> impl futures::Stream<Item = anyhow::Result<arrow::array::ArrayRef>> + '_ {
+        self.chunk_provider.chunks()
+    }
 }
 
 #[cfg(test)]
