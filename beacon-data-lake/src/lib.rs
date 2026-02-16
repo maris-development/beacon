@@ -8,10 +8,7 @@ use std::{
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::listing_url::parse_listing_table_url;
-use beacon_formats::{
-    Dataset, FileFormatFactoryExt, file_formats,
-    netcdf::object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
-};
+use beacon_formats::{Dataset, FileFormatFactoryExt, file_formats};
 use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
@@ -24,7 +21,7 @@ use futures::{
     stream::BoxStream,
     {StreamExt, TryFutureExt},
 };
-use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem, path::PathPart};
+use object_store::{ObjectStore, path::PathPart};
 use url::Url;
 
 use crate::{
@@ -263,8 +260,14 @@ impl DataLake {
                         );
                         // Should we remove or keep the table from the list of available tables if it fails to refresh?
                         // For now remove it from the list of available tables, but we could also keep it and just mark it as not refreshable or something like that.
-                        let mut table_providers = data_lake.table_providers.lock();
-                        table_providers.remove(&table_name);
+                        {
+                            let mut tables = data_lake.tables.lock();
+                            tables.remove(&table_name);
+                        }
+                        {
+                            let mut table_providers = data_lake.table_providers.lock();
+                            table_providers.remove(&table_name);
+                        }
                     } else {
                         tracing::info!("Successfully refreshed table {}", table_name);
                     }
