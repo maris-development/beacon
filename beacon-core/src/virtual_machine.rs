@@ -76,6 +76,9 @@ impl VirtualMachine {
             );
         }
 
+        // Spawn the background task to sync tables from the data lake at regular intervals
+        data_lake.spawn_sync_table_refresh(beacon_config::CONFIG.table_sync_interval_secs);
+
         //FINISH INIT FUNCTIONS FROM beacon-functions module
         Ok(Self {
             table_functions,

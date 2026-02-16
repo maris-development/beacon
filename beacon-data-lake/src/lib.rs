@@ -241,6 +241,38 @@ impl DataLake {
         }
     }
 
+    pub fn spawn_sync_table_refresh(self: &Arc<Self>, interval_secs: u64) {
+        let data_lake = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            //Consume the first tick
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                tracing::info!("Refreshing tables...");
+                let table_names: Vec<String> = {
+                    let tables = data_lake.tables.lock();
+                    tables.keys().cloned().collect()
+                };
+                for table_name in table_names {
+                    if let Err(e) = data_lake.refresh_table(&table_name).await {
+                        tracing::error!(
+                            "Failed to refresh table {}: {}. Removing it from the list of available tables.",
+                            table_name,
+                            e
+                        );
+                        // Should we remove or keep the table from the list of available tables if it fails to refresh?
+                        // For now remove it from the list of available tables, but we could also keep it and just mark it as not refreshable or something like that.
+                        let mut table_providers = data_lake.table_providers.lock();
+                        table_providers.remove(&table_name);
+                    } else {
+                        tracing::info!("Successfully refreshed table {}", table_name);
+                    }
+                }
+            }
+        });
+    }
+
     pub async fn list_datasets(
         &self,
         offset: Option<usize>,
@@ -363,6 +395,25 @@ impl DataLake {
         let mut table_providers = self.table_providers.lock();
         table_providers.insert(table.table_name.clone(), table_provider);
         tables.insert(table.table_name.clone(), table);
+        Ok(())
+    }
+
+    pub async fn refresh_table(&self, table_name: &str) -> Result<(), TableError> {
+        let tables = self.tables.lock();
+        let table = tables
+            .get(table_name)
+            .ok_or(TableError::TableNotFound(table_name.to_string()))?;
+
+        let refreshed_table_provider = table
+            .table_provider(
+                self.session_context.clone(),
+                self.data_directory_store_url.clone(),
+                self.table_directory_store_url.clone(),
+            )
+            .await?;
+
+        let mut table_providers = self.table_providers.lock();
+        table_providers.insert(table_name.to_string(), refreshed_table_provider);
         Ok(())
     }
 
