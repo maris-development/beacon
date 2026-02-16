@@ -186,7 +186,7 @@ impl FileSource for NetCDFFileSource {
 
 lazy_static::lazy_static!(
     static ref READER_CACHE: parking_lot::Mutex<lru::LruCache<ReaderCacheKey, Arc<NetCDFArrowReader>>> = {
-        let capacity = NonZeroUsize::new(beacon_config::CONFIG.netcdf_reader_cache_size)
+        let mut capacity = NonZeroUsize::new(beacon_config::CONFIG.netcdf_reader_cache_size)
             .unwrap_or_else(|| NonZeroUsize::new(1).expect("non-zero"));
 
         // If platform unix. then get the rlimit to check the capacity is at best rlimit/2 to avoid hitting the open file limit. This is a soft limit and can be increased by the user, but we want to avoid hitting it by default.
@@ -194,6 +194,7 @@ lazy_static::lazy_static!(
         {
             use rlimit::{getrlimit, Resource};
             if let Ok((soft_limit, _)) = getrlimit(Resource::NOFILE) {
+                tracing::debug!("NetCDF Reader cache rlimit NOFILE soft limit: {}", soft_limit);
                 let max_capacity = (soft_limit / 2) as usize;
                 if capacity.get() > max_capacity {
                     capacity = NonZeroUsize::new(max_capacity).expect("non-zero");
