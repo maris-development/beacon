@@ -22,10 +22,12 @@ pub struct Config {
     pub vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     pub default_table: String,
-    #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
-    pub enable_sql: bool,
+    #[envconfig(from = "BEACON_TABLE_SYNC_INTERVAL_SECS", default = "300")] // 5 minutes
+    pub table_sync_interval_secs: u64,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
     pub sanitize_schema: bool,
+    #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
+    pub enable_sql: bool,
     #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
     pub st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
