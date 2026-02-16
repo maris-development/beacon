@@ -1,6 +1,8 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
-use crate::{Dataset, DatasetFormat, FileFormatFactoryExt, bbf::source::BBFSource, max_open_fd};
+use crate::{
+    Dataset, DatasetFormat, FileFormatFactoryExt, bbf::source::BBFSource, file_open_parallelism,
+};
 use arrow::datatypes::SchemaRef;
 use beacon_binary_format::{
     object_store::ArrowBBFObjectReader, reader::async_reader::AsyncBBFReader,
@@ -120,7 +122,7 @@ impl FileFormat for BBFFormat {
                     Ok::<_, datafusion::error::DataFusionError>(Arc::new(reader.arrow_schema()))
                 }
             })
-            .buffer_unordered(max_open_fd() as usize) // 🔑 limit open readers
+            .buffer_unordered(file_open_parallelism())
             .try_collect::<Vec<_>>()
             .await?;
 

@@ -17,7 +17,7 @@ use object_store::{ObjectMeta, ObjectStore};
 use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
-use crate::{Dataset, DatasetFormat, FileFormatFactoryExt, max_open_fd};
+use crate::{Dataset, DatasetFormat, FileFormatFactoryExt, file_open_parallelism};
 
 #[derive(Debug)]
 pub struct ParquetFormatFactory;
@@ -123,7 +123,7 @@ impl FileFormat for ParquetFormat {
                 let store = Arc::clone(store);
                 async move { self.inner.infer_schema(state, &store, &[object]).await }
             })
-            .buffer_unordered(max_open_fd() as usize) // tune this
+            .buffer_unordered(file_open_parallelism()) // tune this
             .try_collect::<Vec<_>>()
             .await?;
 
