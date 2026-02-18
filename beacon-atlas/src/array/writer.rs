@@ -24,7 +24,8 @@ use crate::{
 pub struct ArrayWriter<S: ObjectStore + Clone> {
     array_datatype: arrow::datatypes::DataType,
     store: S,
-    path: object_store::path::Path,
+    array_path: object_store::path::Path,
+    layout_path: object_store::path::Path,
     temp_writer: FileWriter<File>,
     row_count: usize,  // Total number of rows flushed to the IPC file
     chunk_size: usize, // Target number of rows per buffered batch
@@ -42,7 +43,8 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
     /// `chunk_size` controls when buffered arrays are flushed to the temp IPC file.
     pub fn new(
         store: S,
-        path: object_store::path::Path,
+        array_path: object_store::path::Path,
+        layout_path: object_store::path::Path,
         array_datatype: arrow::datatypes::DataType,
         chunk_size: usize,
     ) -> Self {
@@ -58,7 +60,8 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
         Self {
             array_datatype,
             store,
-            path,
+            array_path,
+            layout_path,
             temp_writer,
             chunk_size,
             row_count: 0,
@@ -88,7 +91,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
 
         util::stream_file_to_store::<S>(
             &self.store,
-            &self.path.child("array.arrow"),
+            &self.array_path,
             &mut temp_file,
             consts::STREAM_CHUNK_SIZE,
         )
@@ -96,8 +99,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
 
         // Create a layout file
         let layout = ArrayLayouts::new(self.layouts);
-        let layout_path = self.path.child("layout.arrow");
-        layout.save::<S>(self.store, layout_path).await?;
+        layout.save::<S>(self.store, self.layout_path).await?;
 
         Ok(())
     }
@@ -245,16 +247,24 @@ mod tests {
     async fn writes_array_and_layout() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("writer/basic");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 3);
+        let array_path = path.child("array.arrow");
+        let layout_path = path.child("layout.arrow");
+        let mut writer = ArrayWriter::new(
+            store.clone(),
+            array_path.clone(),
+            layout_path.clone(),
+            DataType::Int32,
+            3,
+        );
 
         let array = build_array(vec![vec![1, 2], vec![3, 4, 5]], vec![5], vec!["x"]);
         writer.append_array(7, array).await?;
         writer.finalize().await?;
 
-        let values = read_all_rows(store.clone(), &path.child("array.arrow")).await?;
+        let values = read_all_rows(store.clone(), &array_path).await?;
         assert_eq!(values, vec![1, 2, 3, 4, 5]);
 
-        let layout = ArrayLayouts::from_object(store.clone(), path.child("layout.arrow")).await?;
+        let layout = ArrayLayouts::from_object(store.clone(), layout_path).await?;
         let entry = layout.find_dataset_array_layout(7).expect("layout entry");
         assert_eq!(entry.array_start, 0);
         assert_eq!(entry.array_len, 5);
@@ -268,7 +278,15 @@ mod tests {
     async fn tracks_offsets_with_buffered_rows() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("writer/buffered");
-        let mut writer = ArrayWriter::new(store.clone(), path.clone(), DataType::Int32, 10);
+        let array_path = path.child("array.arrow");
+        let layout_path = path.child("layout.arrow");
+        let mut writer = ArrayWriter::new(
+            store.clone(),
+            array_path,
+            layout_path.clone(),
+            DataType::Int32,
+            10,
+        );
 
         let first = build_array(vec![vec![1, 2, 3]], vec![3], vec!["x"]);
         let second = build_array(vec![vec![4, 5]], vec![2], vec!["x"]);
@@ -277,7 +295,7 @@ mod tests {
         writer.append_array(2, second).await?;
         writer.finalize().await?;
 
-        let layout = ArrayLayouts::from_object(store.clone(), path.child("layout.arrow")).await?;
+        let layout = ArrayLayouts::from_object(store.clone(), layout_path).await?;
         let first_entry = layout.find_dataset_array_layout(1).expect("first entry");
         let second_entry = layout.find_dataset_array_layout(2).expect("second entry");
 
@@ -293,7 +311,9 @@ mod tests {
     async fn rejects_mismatched_datatype() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("writer/mismatch");
-        let mut writer = ArrayWriter::new(store, path, DataType::Int32, 4);
+        let array_path = path.child("array.arrow");
+        let layout_path = path.child("layout.arrow");
+        let mut writer = ArrayWriter::new(store, array_path, layout_path, DataType::Int32, 4);
 
         let arrays = vec![chunk_f32(vec![1.0, 2.0])];
         let array = Array {

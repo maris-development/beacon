@@ -27,9 +27,7 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
         let array_reader = Arc::new(ArrowObjectStoreReader::new(store.clone(), array_path).await?);
 
         let array_field = array_reader.schema();
-        let array_datatype = beacon_nd_arrow::extension::nd_column_data_type(
-            array_field.field(0).data_type().clone(),
-        );
+        let array_datatype = array_field.field(0).data_type().clone();
 
         Ok(Self {
             array_reader,
@@ -76,5 +74,113 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
             array_shape: layout.array_shape.iter().map(|d| *d as usize).collect(),
             chunk_provider: provider,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArrayReader;
+    use crate::array::Array;
+    use crate::array::data_type::I32Type;
+    use crate::array::io_cache::IoCache;
+    use crate::array::nd::AsNdArray;
+    use crate::array::store::InMemoryChunkStore;
+    use crate::array::writer::ArrayWriter;
+    use arrow::array::{ArrayRef, Int32Array};
+    use arrow::datatypes::DataType;
+    use object_store::{ObjectStore, memory::InMemory, path::Path};
+    use std::sync::Arc;
+
+    fn chunk(values: Vec<i32>) -> ArrayRef {
+        Arc::new(Int32Array::from(values)) as ArrayRef
+    }
+
+    fn build_array(
+        chunks: Vec<Vec<i32>>,
+        shape: Vec<usize>,
+        dims: Vec<&str>,
+    ) -> Array<InMemoryChunkStore> {
+        let arrays = chunks.into_iter().map(chunk).collect::<Vec<_>>();
+        Array {
+            array_datatype: DataType::Int32,
+            array_shape: shape,
+            dimensions: dims.into_iter().map(|d| d.to_string()).collect(),
+            chunk_provider: InMemoryChunkStore::new(arrays),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_dataset_array_returns_data_and_metadata() -> anyhow::Result<()> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = store.clone();
+        let root = Path::from("reader/basic");
+        let array_path = root.child("array.arrow");
+        let layout_path = root.child("layout.arrow");
+
+        let mut writer = ArrayWriter::new(
+            object_store,
+            array_path.clone(),
+            layout_path.clone(),
+            DataType::Int32,
+            2,
+        );
+        let array = build_array(vec![vec![1, 2], vec![3, 4]], vec![4], vec!["x"]);
+        writer.append_array(7, array).await?;
+        writer.finalize().await?;
+
+        let cache = Arc::new(IoCache::new(1024 * 1024));
+        let reader =
+            ArrayReader::new_with_cache(store.clone(), layout_path, array_path, cache.clone())
+                .await?;
+
+        assert!(Arc::ptr_eq(reader.io_cache(), &cache));
+        let expected_dtype = DataType::Int32;
+        assert_eq!(reader.array_datatype(), &expected_dtype);
+
+        let loaded = reader
+            .read_dataset_array(7)
+            .expect("expected dataset array");
+        assert_eq!(loaded.array_shape, vec![4]);
+        assert_eq!(loaded.dimensions, vec!["x".to_string()]);
+
+        let nd = loaded.fetch().await?;
+        let values = nd
+            .as_primitive_nd::<I32Type>()
+            .expect("expected i32 ndarray");
+        let collected: Vec<i32> = values.iter().cloned().collect();
+        assert_eq!(collected, vec![1, 2, 3, 4]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_dataset_array_returns_none_when_missing() -> anyhow::Result<()> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let object_store = store.clone();
+        let root = Path::from("reader/missing");
+        let array_path = root.child("array.arrow");
+        let layout_path = root.child("layout.arrow");
+
+        let mut writer = ArrayWriter::new(
+            object_store,
+            array_path.clone(),
+            layout_path.clone(),
+            DataType::Int32,
+            4,
+        );
+        let array = build_array(vec![vec![9, 10]], vec![2], vec!["x"]);
+        writer.append_array(1, array).await?;
+        writer.finalize().await?;
+
+        let reader = ArrayReader::new_with_cache(
+            store,
+            layout_path,
+            array_path,
+            Arc::new(IoCache::new(1024 * 1024)),
+        )
+        .await?;
+
+        assert!(reader.read_dataset_array(99).is_none());
+        Ok(())
     }
 }
