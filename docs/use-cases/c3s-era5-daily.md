@@ -1,8 +1,8 @@
 # ERA5 Daily (Zarr)
 
-In this use case, ERA5 Daily data for 1950-2025 is retrieved from the C3S Climate Data Store, converted to Zarr, and published through Beacon.
+Beacon is developed as a high performance data lake technology, supporting direct subsetting (slicing) through large collection of environmental (and other) data collections stored in NetCDF, ASCII, ZARR or databases. But how fast is it when really pushed to the limit by exceptionally large collections, in this use case, ERA5 Daily data (https://cds.climate.copernicus.eu/datasets/reanalysis-era5-single-levels?tab=overview? Public data for 1950-2025 is retrieved from the C3S Climate Data Store, converted to Zarr, and published through Beacon.
 
-This pipeline makes the collection directly queryable, so users can subset and download only the data they need without manual preprocessing.
+This pipeline, which was easy and fast to set up, makes the collection directly queryable, so users can subset and download only the data they need without manual preprocessing.
 
 The published dataset includes the following parameters:
 
@@ -12,6 +12,8 @@ The published dataset includes the following parameters:
 - precipitation
 - mean sea level pressure
 - z500 geopotential
+
+Please test it yourself in a few simple steps.
 
 ## Access
 
@@ -46,3 +48,19 @@ daily_collection = client.list_tables()['daily_single_levels']
 )
 
 ```
+
+Want to go straight into an example notebook? Visit our examples on Github.
+
+Notebook visualizing on the fly 75 years of ERA5 observations in the Netherlands: https://github.com/maris-development/beacon-example/blob/main/notebooks/era5-satellite/daily_temperature_75_years.ipynb
+
+![ERA5 Daily 75 Years Netherlands](/era5-75-year-daily-netherlands.png)
+
+Notebook visualizing global one day values on the fly: https://github.com/maris-development/beacon-example/blob/main/notebooks/era5-satellite/global_single_day.ipynb
+
+![ERA5 Daily Single Day Global](/era5-daily-single-day-globally.png)
+
+## Additional resources
+
+- [Beacon Python SDK Documentation](https://maris-development.github.io/beacon-py/latest/using/datasets/)
+- [Beacon Documentation](https://maris-development.github.io/beacon/)
+- [Beacon GitHub repository](https://github.com/maris-development/beacon/)

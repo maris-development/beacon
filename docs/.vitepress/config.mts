@@ -306,10 +306,6 @@ export default defineConfig({
                   link: '/use-cases/blue-cloud-2026#world-ocean-database'
                 },
                 {
-                  text: 'EMODnet Chemistry',
-                  link: '/use-cases/blue-cloud-2026#emodnet-chemistry-eutrophication'
-                },
-                {
                   text: 'CMEMS BGC',
                   link: '/use-cases/blue-cloud-2026#cmems-bgc-in-situ'
                 }

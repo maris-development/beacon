@@ -1,13 +1,13 @@
 # World Ocean Database
 
-This use case describes how we expose the [World Ocean Database (WOD)](https://www.ncei.noaa.gov/products/world-ocean-database) through Beacon for fast, on-demand subsetting of ocean profile data.
+This use case describes a dedicated Beacon instance for the [World Ocean Database (WOD)](https://www.ncei.noaa.gov/products/world-ocean-database) for fast, on-demand subsetting of ocean profile data.
 
 ![World Ocean Database Beacon Node](/wod-screenshot-2022-2023.png)
 *World Ocean Database temperature data (2022-2023) accessed via Beacon using the notebook example below.*
 
-## Dataset context
+## Datacollection context
 
-WOD is NOAA NCEI's flagship archive of oceanographic profile observations. It aggregates historical and modern measurements into a consistent, quality-controlled collection that supports climate, oceanography, and marine science workflows.
+WOD is NOAA NCEI's flagship archive of oceanographic profile observations, supported by IOC-IODE. It aggregates historical and modern measurements into a consistent, quality-controlled collection that supports climate, oceanography, and marine science workflows.
 
 ## Use case goal
 
@@ -15,11 +15,12 @@ Make WOD profiles directly queryable without downloading or indexing millions of
 
 ## How Beacon is used
 
-WOD NetCDF files are converted into Beacon Binary Format (BBF) collections. BBF consolidates many source files into a small number of optimized datasets that support efficient filtering and projection.
+A Beacon instance is deployed using docker. WOD NetCDF files are converted into Beacon Binary Format (BBF) collections. BBF consolidates many source files into a small number of optimized datasets that support efficient filtering and projection.
 
 Benefits for users:
 
 - Query the full WOD collection with server-side filters.
+- Directly access the WOD from your notebooks on the fly.
 - Retrieve only required columns and rows.
 - Avoid local preprocessing and large downloads.
 
