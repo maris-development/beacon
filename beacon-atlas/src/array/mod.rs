@@ -103,6 +103,7 @@ where
 pub trait ArrayValues {
     fn to_array_ref(self) -> arrow::array::ArrayRef;
     fn data_type() -> arrow::datatypes::DataType;
+    fn len(&self) -> usize;
 }
 
 macro_rules! impl_array_values_primitive {
@@ -114,6 +115,9 @@ macro_rules! impl_array_values_primitive {
 
             fn data_type() -> arrow::datatypes::DataType {
                 $dtype
+            }
+            fn len(&self) -> usize {
+                self.len()
             }
         }
     };
@@ -178,6 +182,9 @@ impl ArrayValues for Vec<bool> {
     fn data_type() -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Boolean
     }
+    fn len(&self) -> usize {
+        self.len()
+    }
 }
 
 impl ArrayValues for Vec<String> {
@@ -187,6 +194,9 @@ impl ArrayValues for Vec<String> {
 
     fn data_type() -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Utf8
+    }
+    fn len(&self) -> usize {
+        self.len()
     }
 }
 
@@ -198,6 +208,9 @@ impl<'a> ArrayValues for Vec<&'a str> {
     fn data_type() -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Utf8
     }
+    fn len(&self) -> usize {
+        self.len()
+    }
 }
 
 impl ArrayValues for Vec<Vec<u8>> {
@@ -208,6 +221,9 @@ impl ArrayValues for Vec<Vec<u8>> {
 
     fn data_type() -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Binary
+    }
+    fn len(&self) -> usize {
+        self.len()
     }
 }
 
@@ -223,6 +239,9 @@ impl ArrayValues for Vec<chrono::DateTime<chrono::Utc>> {
     fn data_type() -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None)
     }
+    fn len(&self) -> usize {
+        self.len()
+    }
 }
 
 impl ArrayValues for Vec<chrono::NaiveDateTime> {
@@ -236,6 +255,9 @@ impl ArrayValues for Vec<chrono::NaiveDateTime> {
 
     fn data_type() -> arrow::datatypes::DataType {
         arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None)
+    }
+    fn len(&self) -> usize {
+        self.len()
     }
 }
 

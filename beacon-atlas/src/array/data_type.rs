@@ -95,6 +95,7 @@ pub trait VLenByteArrayDataType: Clone + Send + Sync + 'static {
     where
         Self: 'a;
     type OwnedView: Send + Sync + Clone;
+    type ArrowNativeType: arrow::datatypes::ByteArrayType;
 
     const DATA_TYPE: DataType;
 
@@ -107,6 +108,7 @@ pub struct BytesType;
 impl VLenByteArrayDataType for BytesType {
     type View<'a> = &'a [u8];
     type OwnedView = Vec<u8>;
+    type ArrowNativeType = arrow::datatypes::BinaryType;
 
     fn from_bytes<'a>(bytes: &'a [u8]) -> Self::View<'a> {
         bytes
@@ -121,6 +123,7 @@ pub struct StrType;
 impl VLenByteArrayDataType for StrType {
     type View<'a> = &'a str;
     type OwnedView = String;
+    type ArrowNativeType = arrow::datatypes::Utf8Type;
 
     const DATA_TYPE: DataType = DataType::Utf8;
 

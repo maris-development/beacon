@@ -7,6 +7,7 @@ pub mod collection;
 pub mod column;
 pub mod config;
 pub mod consts;
+pub mod dataset;
 pub mod ops;
 pub mod pruning;
 pub mod schema;
