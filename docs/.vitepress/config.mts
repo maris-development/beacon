@@ -25,9 +25,9 @@ export default defineConfig({
       {
         text: 'Docs', items: [
           {
-            text: '1.5.2 (latest)',
-            link: '/docs/1.5.2/introduction',
-            activeMatch: '/docs/1.5.2/introduction'
+            text: '1.5.3 (latest)',
+            link: '/docs/1.5.3/introduction',
+            activeMatch: '/docs/1.5.3/introduction'
           },
         ]
       },
@@ -44,100 +44,100 @@ export default defineConfig({
     ],
 
     sidebar: {
-      '/docs/1.5.2/': [
+      '/docs/1.5.3/': [
         {
           text: 'Introduction',
-          link: '/docs/1.5.2/introduction',
+          link: '/docs/1.5.3/introduction',
         },
         {
           text: 'Getting Started',
-          link: '/docs/1.5.2/getting-started',
+          link: '/docs/1.5.3/getting-started',
           collapsed: false,
           items: [
             {
               text: 'Local',
-              link: '/docs/1.5.2/getting-started#local',
+              link: '/docs/1.5.3/getting-started#local',
             },
             {
               text: 'Cloud (S3)',
-              link: '/docs/1.5.2/getting-started#s3-compatible-object-storage',
+              link: '/docs/1.5.3/getting-started#s3-compatible-object-storage',
             }
           ]
         },
         {
           text: 'Data Lake Setup',
-          link: '/docs/1.5.2/data-lake',
+          link: '/docs/1.5.3/data-lake',
           collapsed: false,
           items: [
             {
               text: 'Datasets',
-              link: '/docs/1.5.2/data-lake/datasets',
+              link: '/docs/1.5.3/data-lake/datasets',
               items: [
                 {
                   text: 'Zarr',
-                  link: '/docs/1.5.2/data-lake/datasets#zarr'
+                  link: '/docs/1.5.3/data-lake/datasets#zarr'
                 },
                 {
                   text: 'NetCDF',
-                  link: '/docs/1.5.2/data-lake/datasets#netcdf'
+                  link: '/docs/1.5.3/data-lake/datasets#netcdf'
                 },
                 {
                   text: 'ODV ASCII',
-                  link: '/docs/1.5.2/data-lake/datasets#odv-ascii'
+                  link: '/docs/1.5.3/data-lake/datasets#odv-ascii'
                 },
                 {
                   text: 'Parquet',
-                  link: '/docs/1.5.2/data-lake/datasets#parquet'
+                  link: '/docs/1.5.3/data-lake/datasets#parquet'
                 },
                 {
                   text: 'CSV',
-                  link: '/docs/1.5.2/data-lake/datasets#csv'
+                  link: '/docs/1.5.3/data-lake/datasets#csv'
                 },
                 {
                   text: 'Arrow IPC',
-                  link: '/docs/1.5.2/data-lake/datasets#arrow-ipc'
+                  link: '/docs/1.5.3/data-lake/datasets#arrow-ipc'
                 },
                 {
                   text: 'Beacon Binary Format',
-                  link: '/docs/1.5.2/data-lake/datasets#beacon-binary-format'
+                  link: '/docs/1.5.3/data-lake/datasets#beacon-binary-format'
                 },
               ]
             },
             {
               text: 'Collections',
-              link: '/docs/1.5.2/data-lake/collections',
+              link: '/docs/1.5.3/data-lake/collections',
               collapsed: true,
               items: [
                 {
                   text: 'Logical Collections',
-                  link: '/docs/1.5.2/data-lake/collections#logical-data-tables'
+                  link: '/docs/1.5.3/data-lake/collections#logical-data-tables'
                 },
                 {
                   text: 'Preset Collections',
-                  link: '/docs/1.5.2/data-lake/collections#preset-data-tables'
+                  link: '/docs/1.5.3/data-lake/collections#preset-data-tables'
                 }
               ]
             },
             {
               text: 'Configuration',
-              link: '/docs/1.5.2/data-lake/configuration',
+              link: '/docs/1.5.3/data-lake/configuration',
             },
             {
               text: 'Performance Tuning',
-              link: '/docs/1.5.2/data-lake/performance-tuning',
+              link: '/docs/1.5.3/data-lake/performance-tuning',
               collapsed: true,
               items: [
                 {
                   text: 'Settings',
-                  link: '/docs/1.5.2/data-lake/performance-tuning#beacon-query-engine-settings'
+                  link: '/docs/1.5.3/data-lake/performance-tuning#beacon-query-engine-settings'
                 },
                 {
                   text: 'NetCDF',
-                  link: '/docs/1.5.2/data-lake/performance-tuning#netcdf-tuning'
+                  link: '/docs/1.5.3/data-lake/performance-tuning#netcdf-tuning'
                 },
                 {
                   text: 'Zarr',
-                  link: '/docs/1.5.2/data-lake/performance-tuning#zarr-statistics-predicate-pruning'
+                  link: '/docs/1.5.3/data-lake/performance-tuning#zarr-statistics-predicate-pruning'
                 }
               ]
             }
@@ -145,51 +145,51 @@ export default defineConfig({
         },
         {
           text: 'API',
-          link: '/docs/1.5.2/api/',
+          link: '/docs/1.5.3/api/',
           collapsed: false,
           items: [
             {
               text: 'Introduction',
-              link: '/docs/1.5.2/api/',
+              link: '/docs/1.5.3/api/',
             },
             {
               text: 'Exploring the Data Lake',
-              link: '/docs/1.5.2/api/exploring-data-lake',
+              link: '/docs/1.5.3/api/exploring-data-lake',
             },
             {
               text: 'Querying',
-              link: '/docs/1.5.2/api/querying',
+              link: '/docs/1.5.3/api/querying',
               collapsed: false,
               items: [
                 {
                   text: 'SQL',
-                  link: '/docs/1.5.2/api/querying/sql',
+                  link: '/docs/1.5.3/api/querying/sql',
                 },
                 {
                   text: 'JSON',
-                  link: '/docs/1.5.2/api/querying/json',
+                  link: '/docs/1.5.3/api/querying/json',
                   items: [
                     {
                       text: 'Selecting Columns',
-                      link: '/docs/1.5.2/api/querying/json#selecting-columns'
+                      link: '/docs/1.5.3/api/querying/json#selecting-columns'
                     },
                     {
                       text: 'From',
-                      link: '/docs/1.5.2/api/querying/json#choosing-the-data-source-from'
+                      link: '/docs/1.5.3/api/querying/json#choosing-the-data-source-from'
                     },
                     {
                       text: 'Filtering',
-                      link: '/docs/1.5.2/api/querying/json#filters'
+                      link: '/docs/1.5.3/api/querying/json#filters'
                     },
                     {
                       text: 'Output',
-                      link: '/docs/1.5.2/api/querying/json#output-formats'
+                      link: '/docs/1.5.3/api/querying/json#output-formats'
                     }
                   ]
                 },
                 {
                   text: 'Examples',
-                  link: '/docs/1.5.2/api/querying/examples',
+                  link: '/docs/1.5.3/api/querying/examples',
                 },
               ]
             },
@@ -198,15 +198,15 @@ export default defineConfig({
         },
         {
           text: 'API Libraries & Tooling',
-          link: '/docs/1.5.2/libraries-tooling',
+          link: '/docs/1.5.3/libraries-tooling',
           items: [
             {
               text: 'Python',
-              link: '/docs/1.5.2/libraries-tooling/python-sdk',
+              link: '/docs/1.5.3/libraries-tooling/python-sdk',
             },
             {
               text: 'CLI Tool',
-              link: '/docs/1.5.2/libraries-tooling/cli',
+              link: '/docs/1.5.3/libraries-tooling/cli',
             }
           ]
         }
@@ -554,7 +554,7 @@ export default defineConfig({
           text: 'Changelog',
           items: [
             {
-              text: '1.5.2',
+              text: '1.5.3',
               link: '/docs/changelog'
             },
             {
