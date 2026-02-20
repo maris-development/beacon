@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use arrow::{array::RecordBatch, datatypes::Schema};
-use nd_arrow_array::NdArrowArray;
+use beacon_nd_arrow::NdArrowArray;
 use ndarray::{ArrayBase, ArrayD};
 use netcdf::{
     types::{FloatType, IntType},

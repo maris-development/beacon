@@ -45,6 +45,7 @@ object_store = { version = "0.12.4", features = ["aws"] }
 
 arrow = { version = "^56.0.0", features = ["prettyprint"]}
 arrow-schema = { version = "^56.0.0", features = ["serde"] }
+arrow-ipc = { version = "^56.0.0", features = ["zstd"] }
 parquet = { version = "^56.0.0", features = ["async"] }
 geoarrow = { version = "^0.6.0" }
 geoarrow-array = "^0.6.0"

@@ -1,181 +1,403 @@
-use std::{io::Cursor, sync::Arc};
+use std::sync::Arc;
 
-use arrow::{array::Int32Array, compute::concat, datatypes::Field, record_batch::RecordBatch};
-use arrow_ipc::{writer::IpcWriteOptions, CompressionType};
-use arrow_schema::DataType;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rand::{rngs::StdRng, Rng, SeedableRng};
-
-use beacon_nd_arrow::{
-    column::NdArrowArrayColumn,
-    dimensions::{Dimension, Dimensions},
-    extension,
-    NdArrowArray,
+use arrow::{
+    array::{ArrayRef, Float64Array, Int64Array, StringArray},
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
 };
+use beacon_nd_arrow::{
+    NdArrowArray,
+    dimensions::{Dimension, Dimensions},
+};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-fn ipc_file_bytes(batch: &RecordBatch, compression: Option<CompressionType>) -> Vec<u8> {
-    let schema = batch.schema();
-    let options = IpcWriteOptions::default()
-        .try_with_compression(compression)
-        .expect("valid compression options");
-
-    let mut cursor = Cursor::new(Vec::<u8>::new());
-    let mut writer = arrow_ipc::writer::FileWriter::try_new_with_options(cursor, &schema, options)
-        .expect("create ipc file writer");
-
-    writer.write(batch).expect("write batch");
-    writer.finish().expect("finish writer");
-
-    cursor = writer.into_inner().expect("extract ipc writer buffer");
-    cursor.into_inner()
+#[derive(Clone)]
+struct BenchmarkColumn {
+    name: &'static str,
+    data_type: DataType,
+    array: NdArrowArray,
 }
 
-fn make_nd_column(nrows: usize, y: usize, x: usize, broadcast_inputs: bool) -> NdArrowArrayColumn {
-    let target_dims = Dimensions::new(vec![
-        Dimension::try_new("y", y).unwrap(),
-        Dimension::try_new("x", x).unwrap(),
-    ]);
-
-    let mut rng = StdRng::seed_from_u64(42);
-
-    let small_dims = Dimensions::new(vec![
-        Dimension::try_new("y", 1).unwrap(),
-        Dimension::try_new("x", x).unwrap(),
-    ]);
-
-    let rows = (0..nrows)
-        .map(|i| {
-            if broadcast_inputs && (i % 2 == 0) {
-                let small_vals: Vec<i32> = (0..x)
-                    .map(|_| rng.gen_range(i32::MIN..=i32::MAX))
-                    .collect();
-                NdArrowArray::new(Arc::new(Int32Array::from(small_vals)), small_dims.clone())
-                    .expect("small row")
-            } else {
-                let full_vals: Vec<i32> = (0..(y * x))
-                    .map(|_| rng.gen_range(i32::MIN..=i32::MAX))
-                    .collect();
-                NdArrowArray::new(
-                    Arc::new(Int32Array::from(full_vals)),
-                    target_dims.clone(),
-                )
-                .expect("full row")
-            }
-        })
-        .collect::<Vec<_>>();
-
-    NdArrowArrayColumn::from_rows(rows).expect("build ND column")
+fn dim(name: &str, size: usize) -> Dimension {
+    Dimension::try_new(name, size).expect("invalid benchmark dimension")
 }
 
-fn make_nd_record_batch(col: NdArrowArrayColumn) -> RecordBatch {
-    let field = extension::nd_column_field("v", col.storage_type().clone(), true).unwrap();
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![field]));
-    RecordBatch::try_new(schema, vec![col.into_array_ref()]).unwrap()
+fn make_schema(columns: &[BenchmarkColumn]) -> Arc<Schema> {
+    Arc::new(Schema::new(
+        columns
+            .iter()
+            .map(|column| Field::new(column.name, column.data_type.clone(), true))
+            .collect::<Vec<_>>(),
+    ))
 }
 
-fn make_flat_record_batch(total_elements: usize) -> RecordBatch {
-    let mut rng = StdRng::seed_from_u64(43);
-    let vals: Vec<i32> = (0..total_elements)
-        .map(|_| rng.gen_range(i32::MIN..=i32::MAX))
-        .collect();
-    let arr = Arc::new(Int32Array::from(vals));
-
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
-        "v",
-        DataType::Int32,
-        true,
-    )]));
-    RecordBatch::try_new(schema, vec![arr]).unwrap()
-}
-
-fn flatten_nd_column_to_single_array(
-    col: &NdArrowArrayColumn,
+fn sliced_record_batch_from_broadcast_views(
+    columns: &[BenchmarkColumn],
+    schema: Arc<Schema>,
     target: &Dimensions,
-) -> arrow::error::Result<Arc<dyn arrow::array::Array>> {
-    let mut chunks = Vec::with_capacity(col.len());
-    for row_idx in 0..col.len() {
-        let v = col.row(row_idx).expect("row");
-        let b = v.broadcast_to(target).expect("broadcast");
-        chunks.push(b.values().clone());
-    }
-
-    let chunk_refs = chunks
+    offset: usize,
+    len: usize,
+) -> RecordBatch {
+    let arrays = columns
         .iter()
-        .map(|a| a.as_ref() as &dyn arrow::array::Array)
-        .collect::<Vec<_>>();
-    concat(&chunk_refs)
+        .map(|column| {
+            let view = column
+                .array
+                .broadcast_to(target)
+                .expect("broadcast_to failed in benchmark");
+            view.take(offset, len)
+        })
+        .collect::<Vec<ArrayRef>>();
+
+    RecordBatch::try_new(schema, arrays).expect("failed to construct benchmark record batch")
 }
 
-fn bench_flatten_and_ipc(c: &mut Criterion) {
-    let mut group = c.benchmark_group("nd_flatten");
+fn run_case(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    case_name: &str,
+    columns: Vec<BenchmarkColumn>,
+    target: Dimensions,
+    offset: usize,
+    len: usize,
+) {
+    let schema = make_schema(&columns);
+    let elements_per_iteration = len.saturating_mul(columns.len());
+    group.throughput(Throughput::Elements(elements_per_iteration as u64));
 
-    // A couple of representative sizes (keep these reasonable; flattened expands rows).
-    let cases = [
-        ("rows200_32x32", 200usize, 32usize, 32usize),
-        ("rows1000_16x16", 1000usize, 16usize, 16usize),
+    group.bench_with_input(
+        BenchmarkId::new("record_batch_from_views", case_name),
+        &len,
+        |b, _| {
+            b.iter(|| {
+                let batch = sliced_record_batch_from_broadcast_views(
+                    &columns,
+                    schema.clone(),
+                    &target,
+                    offset,
+                    len,
+                );
+                black_box(batch);
+            });
+        },
+    );
+}
+
+fn bench_broadcast_shared_1d(c: &mut Criterion) {
+    let mut group = c.benchmark_group("broadcast_record_batch_shared_1d");
+
+    let n_time = 8_192usize;
+    let target = Dimensions::new(vec![dim("time", n_time)]);
+
+    let time_values = (0..n_time as i64).collect::<Vec<_>>();
+    let temperature_values = (0..n_time)
+        .map(|i| 8.0 + ((i % 97) as f64 * 0.05))
+        .collect::<Vec<_>>();
+
+    let columns = vec![
+        BenchmarkColumn {
+            name: "time",
+            data_type: DataType::Int64,
+            array: NdArrowArray::new(
+                Arc::new(Int64Array::from(time_values)),
+                Dimensions::new(vec![dim("time", n_time)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "temperature",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(temperature_values)),
+                Dimensions::new(vec![dim("time", n_time)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "platform_name",
+            data_type: DataType::Utf8,
+            array: NdArrowArray::new(
+                Arc::new(StringArray::from(vec!["platform-A"])),
+                Dimensions::Scalar,
+            )
+            .unwrap(),
+        },
     ];
+    let offset = 1_000usize;
+    let len = 2_048usize;
 
-    for (name, nrows, y, x) in cases {
-        let target = Dimensions::new(vec![
-            Dimension::try_new("y", y).unwrap(),
-            Dimension::try_new("x", x).unwrap(),
-        ]);
-
-        // Single-column ND batch where some rows are (1,x) and must be broadcast to (y,x).
-        let nd_col_broadcast = make_nd_column(nrows, y, x, true);
-        let nd_rb = make_nd_record_batch(nd_col_broadcast.clone());
-
-        // Flat batch with the same total element count: nrows * y * x.
-        let total_elements = nrows.saturating_mul(y.saturating_mul(x));
-        let flat_rb = make_flat_record_batch(total_elements);
-
-        // Size comparison (printed once per case). This is the main "batch size vs flattened size".
-        let nd_zstd = ipc_file_bytes(&nd_rb, Some(CompressionType::ZSTD));
-        let flat_zstd = ipc_file_bytes(&flat_rb, Some(CompressionType::ZSTD));
-
-        let nd_rows = nd_rb.num_rows();
-        let flat_rows_actual = flat_rb.num_rows();
-        eprintln!(
-            "[{name}] columns=1 nrows={nrows} shape={y}x{x} nd_rows={nd_rows} nd_elems_total={total_elements} flat_elems_total={flat_rows_actual} nd_ipc_zstd={}B flat_ipc_zstd={}B",
-            nd_zstd.len(),
-            flat_zstd.len(),
-        );
-
-        // Performance: broadcast-to-target + flatten to a single flat array.
-        group.throughput(Throughput::Elements(total_elements as u64));
-        group.bench_with_input(
-            BenchmarkId::new("broadcast_flatten_to_single_array", name),
-            &nd_col_broadcast,
-            |b, col| {
-                b.iter(|| black_box(flatten_nd_column_to_single_array(col, &target).unwrap()));
-            },
-        );
-
-        // Performance: IPC encode ND batch
-        let nd_bytes_len = nd_zstd.len() as u64;
-        group.throughput(Throughput::Bytes(nd_bytes_len));
-        group.bench_with_input(
-            BenchmarkId::new("ipc_encode_nd_zstd", name),
-            &nd_rb,
-            |b, rb| {
-                b.iter(|| black_box(ipc_file_bytes(rb, Some(CompressionType::ZSTD))));
-            },
-        );
-
-        // Performance: IPC encode flattened batch
-        let flat_bytes_len = flat_zstd.len() as u64;
-        group.throughput(Throughput::Bytes(flat_bytes_len));
-        group.bench_with_input(
-            BenchmarkId::new("ipc_encode_flat_zstd", name),
-            &flat_rb,
-            |b, rb| {
-                b.iter(|| black_box(ipc_file_bytes(rb, Some(CompressionType::ZSTD))));
-            },
-        );
-    }
+    run_case(
+        &mut group,
+        "all_1d_plus_scalar",
+        columns,
+        target,
+        offset,
+        len,
+    );
 
     group.finish();
 }
 
-criterion_group!(benches, bench_flatten_and_ipc);
+fn bench_broadcast_shared_2d(c: &mut Criterion) {
+    let mut group = c.benchmark_group("broadcast_record_batch_shared_2d");
+
+    let n_lat = 128usize;
+    let n_lon = 256usize;
+    let n = n_lat * n_lon;
+    let target = Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]);
+
+    let latitude_grid = (0..n)
+        .map(|index| {
+            let lat_idx = index / n_lon;
+            -90.0 + (lat_idx as f64 * 180.0 / (n_lat.saturating_sub(1)) as f64)
+        })
+        .collect::<Vec<_>>();
+
+    let longitude_grid = (0..n)
+        .map(|index| {
+            let lon_idx = index % n_lon;
+            -180.0 + (lon_idx as f64 * 360.0 / (n_lon.saturating_sub(1)) as f64)
+        })
+        .collect::<Vec<_>>();
+
+    let temperature_grid = (0..n)
+        .map(|index| {
+            let lat_idx = index / n_lon;
+            let lon_idx = index % n_lon;
+            12.0 + (lat_idx as f64 * 0.02) + (lon_idx as f64 * 0.01)
+        })
+        .collect::<Vec<_>>();
+
+    let columns = vec![
+        BenchmarkColumn {
+            name: "latitude",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(latitude_grid)),
+                Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "longitude",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(longitude_grid)),
+                Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "temperature",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(temperature_grid)),
+                Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "platform_name",
+            data_type: DataType::Utf8,
+            array: NdArrowArray::new(
+                Arc::new(StringArray::from(vec!["platform-B"])),
+                Dimensions::Scalar,
+            )
+            .unwrap(),
+        },
+    ];
+    let offset = 2_000usize;
+    let len = 8_192usize;
+
+    run_case(
+        &mut group,
+        "all_2d_plus_scalar",
+        columns,
+        target,
+        offset,
+        len,
+    );
+
+    group.finish();
+}
+
+fn bench_broadcast_shared_3d(c: &mut Criterion) {
+    let mut group = c.benchmark_group("broadcast_record_batch_mixed_dims_3d_target");
+
+    let n_time = 24usize;
+    let n_lat = 64usize;
+    let n_lon = 128usize;
+    let n_2d = n_lat * n_lon;
+    let n_3d = n_time * n_2d;
+
+    let target = Dimensions::new(vec![
+        dim("time", n_time),
+        dim("latitude", n_lat),
+        dim("longitude", n_lon),
+    ]);
+
+    let time_values = (0..n_time as i64).collect::<Vec<_>>();
+
+    let latitude_2d = (0..n_2d)
+        .map(|index| {
+            let lat_idx = index / n_lon;
+            -90.0 + (lat_idx as f64 * 180.0 / (n_lat.saturating_sub(1)) as f64)
+        })
+        .collect::<Vec<_>>();
+
+    let longitude_2d = (0..n_2d)
+        .map(|index| {
+            let lon_idx = index % n_lon;
+            -180.0 + (lon_idx as f64 * 360.0 / (n_lon.saturating_sub(1)) as f64)
+        })
+        .collect::<Vec<_>>();
+
+    let temperature_3d = (0..n_3d)
+        .map(|index| {
+            let t = index / n_2d;
+            let rem = index % n_2d;
+            let lat = rem / n_lon;
+            let lon = rem % n_lon;
+            10.0 + (t as f64 * 0.3) + (lat as f64 * 0.02) + (lon as f64 * 0.01)
+        })
+        .collect::<Vec<_>>();
+
+    let columns_mixed_1d_2d_3d = vec![
+        BenchmarkColumn {
+            name: "time",
+            data_type: DataType::Int64,
+            array: NdArrowArray::new(
+                Arc::new(Int64Array::from(time_values)),
+                Dimensions::new(vec![dim("time", n_time)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "latitude",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(latitude_2d)),
+                Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "longitude",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(longitude_2d)),
+                Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "temperature",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(temperature_3d)),
+                Dimensions::new(vec![
+                    dim("time", n_time),
+                    dim("latitude", n_lat),
+                    dim("longitude", n_lon),
+                ]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "platform_name",
+            data_type: DataType::Utf8,
+            array: NdArrowArray::new(
+                Arc::new(StringArray::from(vec!["platform-C"])),
+                Dimensions::Scalar,
+            )
+            .unwrap(),
+        },
+    ];
+
+    let offset = 10_000usize;
+    let len = 16_384usize;
+
+    run_case(
+        &mut group,
+        "mixed_1d_2d_3d_plus_scalar",
+        columns_mixed_1d_2d_3d,
+        target.clone(),
+        offset,
+        len,
+    );
+
+    let temperature_time_1d = (0..n_time)
+        .map(|t| 9.0 + t as f64 * 0.25)
+        .collect::<Vec<_>>();
+    let temperature_3d = (0..n_3d)
+        .map(|index| {
+            let t = index / n_2d;
+            let rem = index % n_2d;
+            let lat = rem / n_lon;
+            let lon = rem % n_lon;
+            10.0 + (t as f64 * 0.3) + (lat as f64 * 0.02) + (lon as f64 * 0.01)
+        })
+        .collect::<Vec<_>>();
+
+    let columns_mixed_1d_3d = vec![
+        BenchmarkColumn {
+            name: "time",
+            data_type: DataType::Int64,
+            array: NdArrowArray::new(
+                Arc::new(Int64Array::from((0..n_time as i64).collect::<Vec<_>>())),
+                Dimensions::new(vec![dim("time", n_time)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "temperature_time",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(temperature_time_1d)),
+                Dimensions::new(vec![dim("time", n_time)]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "temperature_3d",
+            data_type: DataType::Float64,
+            array: NdArrowArray::new(
+                Arc::new(Float64Array::from(temperature_3d)),
+                Dimensions::new(vec![
+                    dim("time", n_time),
+                    dim("latitude", n_lat),
+                    dim("longitude", n_lon),
+                ]),
+            )
+            .unwrap(),
+        },
+        BenchmarkColumn {
+            name: "platform_name",
+            data_type: DataType::Utf8,
+            array: NdArrowArray::new(
+                Arc::new(StringArray::from(vec!["platform-D"])),
+                Dimensions::Scalar,
+            )
+            .unwrap(),
+        },
+    ];
+
+    run_case(
+        &mut group,
+        "mixed_1d_3d_plus_scalar",
+        columns_mixed_1d_3d,
+        target,
+        offset,
+        len,
+    );
+
+    group.finish();
+}
+
+fn criterion_benchmark(c: &mut Criterion) {
+    bench_broadcast_shared_1d(c);
+    bench_broadcast_shared_2d(c);
+    bench_broadcast_shared_3d(c);
+}
+
+criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);

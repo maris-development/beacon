@@ -5,10 +5,10 @@ use arrow::array::{
     StringBuilder, TimestampMillisecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
     UInt64Array, UInt8Array,
 };
-use nd_arrow_array::{dimensions::Dimensions, NdArrowArray};
+use beacon_nd_arrow::{dimensions::Dimensions, NdArrowArray};
 use ndarray::{ArrayBase, ArrayViewD, Axis, Dim, IxDynImpl, OwnedRepr};
 
-use crate::NcChar;
+use crate::{error::ArrowNetCDFError, NcChar, NcResult};
 
 pub struct NetCDFNdArrayBase<T> {
     pub inner: NetCDFNdArrayInnerBase<T>,
@@ -56,16 +56,17 @@ impl NetCDFNdArray {
         Self { dims, array }
     }
 
-    pub fn into_nd_arrow_array(self) -> Result<NdArrowArray, nd_arrow_array::error::NdArrayError> {
-        NdArrowArray::new(
-            self.build_arrow(),
-            Dimensions::new(
-                self.dims
-                    .iter()
-                    .map(|d| (d.name.as_ref(), d.size).into())
-                    .collect::<Vec<_>>(),
-            ),
-        )
+    pub fn into_nd_arrow_array(self) -> Result<NdArrowArray, ArrowNetCDFError> {
+        let dims: Vec<beacon_nd_arrow::dimensions::Dimension> = self
+            .dims
+            .iter()
+            .map(|d| (d.name.as_ref(), d.size).into())
+            .collect::<Vec<_>>();
+        let dimensions = Dimensions::new(dims);
+        let array = self.build_arrow();
+
+        Ok(NdArrowArray::new(array, dimensions)
+            .map_err(|e| ArrowNetCDFError::NdArrowError(e.into()))?)
     }
 
     pub fn build_arrow(&self) -> ArrayRef {

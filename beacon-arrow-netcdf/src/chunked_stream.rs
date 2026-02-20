@@ -1,8 +1,8 @@
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
+use beacon_nd_arrow::NdArrowArray;
 use indexmap::IndexMap;
-use nd_arrow_array::{batch::NdRecordBatch, NdArrowArray};
 use netcdf::Variable;
 
 use crate::{
@@ -291,7 +291,7 @@ struct DimensionHyperSlab {
 }
 
 impl Iterator for Stream {
-    type Item = NcResult<NdRecordBatch>;
+    type Item = NcResult<Vec<NdArrowArray>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.is_done() {
@@ -351,11 +351,7 @@ impl Iterator for Stream {
 
         self.advance_chunk_state();
 
-        let maybe_nd_batch = nd_arrow_array::batch::NdRecordBatch::new(
-            fields.into_iter().map(|f| f.as_ref().clone()).collect(),
-            arrays,
-        )
-        .map_err(|e| ArrowNetCDFError::Stream(format!("Failed to create NdRecordBatch: {}", e)));
+        let arrays = 
 
         Some(maybe_nd_batch)
     }

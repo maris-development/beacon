@@ -740,10 +740,10 @@ dependencies = [
  "anyhow",
  "arrow",
  "arrow-schema 56.2.0",
+ "beacon-nd-arrow",
  "futures",
  "hifitime",
  "indexmap 2.13.0",
- "nd-arrow-array",
  "ndarray 0.17.2",
  "netcdf",
  "netcdf-sys",
@@ -1036,19 +1036,23 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-arrow"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "anyhow",
  "arrow",
  "arrow-ipc 56.2.0",
  "arrow-schema 56.2.0",
+ "async-trait",
  "chrono",
  "criterion 0.5.1",
+ "futures",
  "ndarray 0.17.2",
  "rand 0.8.5",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]

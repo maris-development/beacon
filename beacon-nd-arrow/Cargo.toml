@@ -1,6 +1,6 @@
 [package]
 name = "beacon-nd-arrow"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 readme = "README.md"
 
@@ -16,12 +16,16 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true, optional = true }
 ndarray = { version = "0.17.1", optional = true }
+anyhow = { workspace=true }
+async-trait = { workspace=true }
+futures = { workspace=true }
 
 [dev-dependencies]
-arrow-ipc = { version = "^56.0.0", features = ["zstd"]}
+arrow-ipc = { workspace = true }
 criterion = { version = "0.5", default-features = false, features = ["rayon", "html_reports"] }
 rand = "0.8"
 tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [[bench]]
 name = "flatten"

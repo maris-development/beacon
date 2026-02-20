@@ -112,6 +112,12 @@ impl Dimensions {
     // Construct named dimensions explicitly via `Dimensions::new(vec![Dimension::try_new(...)? , ...])`.
 }
 
+impl From<Vec<Dimension>> for Dimensions {
+    fn from(dims: Vec<Dimension>) -> Self {
+        Dimensions::new(dims)
+    }
+}
+
 /// A single axis of an ND array.
 ///
 /// The `name` is used for xarray-style named broadcasting.
@@ -147,5 +153,11 @@ impl Dimension {
     /// Dimension size.
     pub fn size(&self) -> usize {
         self.size
+    }
+}
+
+impl From<(&str, usize)> for Dimension {
+    fn from((name, size): (&str, usize)) -> Self {
+        Self::new_unchecked(name.to_string(), size)
     }
 }

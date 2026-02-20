@@ -7,16 +7,27 @@
 //! - The relative order of the input axes must be preserved (no implicit transpose).
 //! - Any missing dim in the input is treated as size `1` and will broadcast.
 
-use arrow::array::UInt32Array;
-
 use std::collections::{HashMap, HashSet};
 
 use crate::{
     NdArrowArray,
-    dimensions::Dimension,
-    dimensions::Dimensions,
+    dimensions::{Dimension, Dimensions},
     error::{BroadcastError, NdArrayError},
+    view::ArrayBroadcastView,
 };
+
+pub fn broadcast_arrays(arrays: &[NdArrowArray]) -> Result<Vec<ArrayBroadcastView>, NdArrayError> {
+    let target_dims = find_broadcast_dimensions(
+        &arrays
+            .iter()
+            .map(|a| a.dimensions().clone())
+            .collect::<Vec<_>>(),
+    )?;
+    arrays
+        .iter()
+        .map(|a| broadcast_nd_array(a, &target_dims))
+        .collect()
+}
 
 /// Broadcast an ND array to `target` and materialize it.
 ///
@@ -24,26 +35,19 @@ use crate::{
 pub fn broadcast_nd_array(
     array: &NdArrowArray,
     target: &Dimensions,
-) -> Result<NdArrowArray, NdArrayError> {
+) -> Result<ArrayBroadcastView, NdArrayError> {
     target.validate()?;
-
     let (out_shape, out_strides) = compute_broadcast_shape_and_strides(array.dimensions(), target)?;
-    let out_len = if out_shape.is_empty() {
-        1
-    } else {
-        out_shape.iter().product()
-    };
 
-    let indices = UInt32Array::from_iter_values(
-        (0..out_len)
-            .map(|out_flat| map_out_flat_to_in_flat(out_flat, &out_shape, &out_strides) as u32),
-    );
-    let taken = arrow::compute::take(array.values().as_ref(), &indices, None)?;
-    NdArrowArray::new(taken, target.clone())
+    Ok(ArrayBroadcastView::new(
+        array.clone(),
+        out_shape,
+        out_strides,
+    ))
 }
 
 /// Compute the broadcasted output dimensions for a set of inputs.
-pub fn broadcast_dimensions(dimensions: &[Dimensions]) -> Result<Dimensions, BroadcastError> {
+pub fn find_broadcast_dimensions(dimensions: &[Dimensions]) -> Result<Dimensions, BroadcastError> {
     if dimensions.is_empty() {
         return Ok(Dimensions::Scalar);
     }
@@ -189,23 +193,6 @@ fn compute_broadcast_shape_and_strides(
     Ok((out_shape, out_strides))
 }
 
-fn map_out_flat_to_in_flat(mut out_flat: usize, shape: &[usize], strides: &[isize]) -> usize {
-    if shape.is_empty() {
-        return 0;
-    }
-
-    // Convert out_flat to multi-index, then apply strides.
-    // Row-major multi-index decomposition.
-    let mut in_flat: isize = 0;
-    for (dim_size, stride) in shape.iter().rev().zip(strides.iter().rev()) {
-        let coord = out_flat % *dim_size;
-        out_flat /= *dim_size;
-        in_flat += (*stride) * coord as isize;
-    }
-    debug_assert!(in_flat >= 0);
-    in_flat as usize
-}
-
 /// Compute row-major (C-order) strides for a shape.
 ///
 /// The returned strides map a multi-index into a flat index for a contiguous row-major array.
@@ -220,28 +207,6 @@ fn row_major_strides(shape: &[usize]) -> Vec<isize> {
         stride *= *dim as isize;
     }
     strides
-}
-
-/// Broadcast a list of arrays to a common shape and materialize them.
-///
-/// The common target shape is computed using [`broadcast_dimensions`].
-pub fn broadcast_arrays(
-    arrays: &[crate::NdArrowArray],
-) -> Result<Vec<crate::NdArrowArray>, NdArrayError> {
-    if arrays.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let dims = arrays
-        .iter()
-        .map(|a| a.dimensions().clone())
-        .collect::<Vec<_>>();
-    let target = broadcast_dimensions(&dims).map_err(NdArrayError::BroadcastingError)?;
-
-    arrays
-        .iter()
-        .map(|a| a.broadcast_to(&target))
-        .collect::<Result<Vec<_>, _>>()
 }
 
 #[cfg(test)]
@@ -261,6 +226,16 @@ mod tests {
         Dimension::try_new(name, size).unwrap()
     }
 
+    fn take_all_values(view: &crate::view::ArrayBroadcastView) -> Vec<i32> {
+        let taken = view.take(0, view.len());
+        taken
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .values()
+            .to_vec()
+    }
+
     #[test]
     fn broadcasting_materializes_expected_values() {
         let a = NdArrowArray::new(
@@ -272,10 +247,9 @@ mod tests {
         let b = a
             .broadcast_to(&Dimensions::new(vec![dim("t", 2), dim("x", 3)]))
             .unwrap();
-        let b_arr = b.values().as_any().downcast_ref::<Int32Array>().unwrap();
 
-        assert_eq!(b_arr.values(), &[1, 2, 3, 1, 2, 3]);
-        assert_eq!(b.dimensions().shape(), vec![2, 3]);
+        assert_eq!(b.len(), 6);
+        assert_eq!(take_all_values(&b), vec![1, 2, 3, 1, 2, 3]);
     }
 
     #[test]
@@ -286,43 +260,9 @@ mod tests {
         let b = scalar
             .broadcast_to(&Dimensions::new(vec![dim("y", 2), dim("x", 3)]))
             .unwrap();
-        let b_arr = b.values().as_any().downcast_ref::<Int32Array>().unwrap();
 
-        assert_eq!(b.dimensions().shape(), vec![2, 3]);
-        assert_eq!(b_arr.values(), &[42, 42, 42, 42, 42, 42]);
-    }
-
-    #[test]
-    fn broadcast_arrays_broadcasts_to_common_shape() {
-        let a = NdArrowArray::new(
-            Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6])),
-            Dimensions::new(vec![dim("t", 2), dim("x", 3)]),
-        )
-        .unwrap();
-
-        let b = NdArrowArray::new(
-            Arc::new(Int32Array::from(vec![10, 20, 30])),
-            Dimensions::new(vec![dim("t", 1), dim("x", 3)]),
-        )
-        .unwrap();
-
-        let out = super::broadcast_arrays(&[a.clone(), b.clone()]).unwrap();
-        assert_eq!(out.len(), 2);
-
-        let out_a = out[0]
-            .values()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let out_b = out[1]
-            .values()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(out[0].dimensions().shape(), vec![2, 3]);
-        assert_eq!(out[1].dimensions().shape(), vec![2, 3]);
-        assert_eq!(out_a.values(), &[1, 2, 3, 4, 5, 6]);
-        assert_eq!(out_b.values(), &[10, 20, 30, 10, 20, 30]);
+        assert_eq!(b.len(), 6);
+        assert_eq!(take_all_values(&b), vec![42, 42, 42, 42, 42, 42]);
     }
 
     #[test]
@@ -350,9 +290,8 @@ mod tests {
         // Add a new leading dim "t".
         let target = Dimensions::new(vec![dim("t", 2), dim("x", 3)]);
         let b = a.broadcast_to(&target).unwrap();
-        let b_arr = b.values().as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(b.dimensions().shape(), vec![2, 3]);
-        assert_eq!(b_arr.values(), &[1, 2, 3, 1, 2, 3]);
+        assert_eq!(b.len(), 6);
+        assert_eq!(take_all_values(&b), vec![1, 2, 3, 1, 2, 3]);
 
         // Reordering existing dims is not allowed (would require transpose).
         let dims2 = Dimensions::new(vec![dim("x", 3), dim("y", 2)]);
@@ -381,10 +320,9 @@ mod tests {
                 dim("c", 2),
             ]))
             .unwrap();
-        let b_arr = b.values().as_any().downcast_ref::<Int32Array>().unwrap();
 
-        assert_eq!(b.dimensions().shape(), vec![2, 2, 2]);
-        assert_eq!(b_arr.values(), &[7, 7, 7, 7, 7, 7, 7, 7]);
+        assert_eq!(b.len(), 8);
+        assert_eq!(take_all_values(&b), vec![7, 7, 7, 7, 7, 7, 7, 7]);
     }
 
     #[test]
@@ -403,15 +341,14 @@ mod tests {
                 dim("x", 3),
             ]))
             .unwrap();
-        let b_arr = b.values().as_any().downcast_ref::<Int32Array>().unwrap();
 
-        assert_eq!(b.dimensions().shape(), vec![2, 4, 3]);
+        assert_eq!(b.len(), 24);
         // Expect 8 repeats of [1,2,3] (2*4 = 8 blocks).
         let mut expected = Vec::with_capacity(2 * 4 * 3);
         for _ in 0..8 {
             expected.extend_from_slice(&[1, 2, 3]);
         }
-        assert_eq!(b_arr.values(), expected.as_slice());
+        assert_eq!(take_all_values(&b), expected);
     }
 
     #[test]
@@ -430,10 +367,9 @@ mod tests {
                 dim("x", 3),
             ]))
             .unwrap();
-        let b_arr = b.values().as_any().downcast_ref::<Int32Array>().unwrap();
 
-        assert_eq!(b.dimensions().shape(), vec![2, 1, 3]);
-        assert_eq!(b_arr.values(), &[5, 6, 7, 5, 6, 7]);
+        assert_eq!(b.len(), 6);
+        assert_eq!(take_all_values(&b), vec![5, 6, 7, 5, 6, 7]);
     }
 
     #[test]
@@ -453,11 +389,10 @@ mod tests {
                 dim("c", 1),
             ]))
             .unwrap();
-        let b_arr = b.values().as_any().downcast_ref::<Int32Array>().unwrap();
 
-        assert_eq!(b.dimensions().shape(), vec![2, 3, 1]);
+        assert_eq!(b.len(), 6);
         // Row-major, each of the 2 rows is repeated across the 3 columns.
-        assert_eq!(b_arr.values(), &[10, 10, 10, 20, 20, 20]);
+        assert_eq!(take_all_values(&b), vec![10, 10, 10, 20, 20, 20]);
     }
 
     #[test]
@@ -487,10 +422,9 @@ mod tests {
 
         let target = Dimensions::new(vec![dim("x", 2), dim("y", 3)]);
         let b = a.broadcast_to(&target).unwrap();
-        let b_arr = b.values().as_any().downcast_ref::<Int32Array>().unwrap();
 
-        assert_eq!(b.dimensions().shape(), vec![2, 3]);
-        assert_eq!(b_arr.values(), &[9, 9, 9, 8, 8, 8]);
+        assert_eq!(b.len(), 6);
+        assert_eq!(take_all_values(&b), vec![9, 9, 9, 8, 8, 8]);
     }
 
     #[test]
@@ -507,12 +441,12 @@ mod tests {
         // Add trailing dim z.
         let t1 = Dimensions::new(vec![dim("x", 2), dim("y", 3), dim("z", 4)]);
         let b1 = a.broadcast_to(&t1).unwrap();
-        assert_eq!(b1.dimensions().shape(), vec![2, 3, 4]);
+        assert_eq!(b1.len(), 24);
 
         // Add leading dim z.
         let t2 = Dimensions::new(vec![dim("z", 4), dim("x", 2), dim("y", 3)]);
         let b2 = a.broadcast_to(&t2).unwrap();
-        assert_eq!(b2.dimensions().shape(), vec![4, 2, 3]);
+        assert_eq!(b2.len(), 24);
 
         // Reordering existing dims is still not allowed.
         let bad = Dimensions::new(vec![dim("y", 3), dim("x", 2), dim("z", 4)]);

@@ -28,6 +28,8 @@ pub enum NdArrayError {
     /// Wrapper around Arrow-level failures.
     #[error("Arrow Error: {0}")]
     Arrow(#[from] ArrowError),
+    #[error("Schema mismatch: {0}")]
+    SchemaMismatch(String),
 }
 
 /// Errors specific to broadcasting.
