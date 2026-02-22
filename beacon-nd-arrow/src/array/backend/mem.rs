@@ -2,6 +2,7 @@ use arrow::array::ArrayRef;
 
 use crate::array::backend::ArrayBackend;
 
+#[derive(Debug, Clone)]
 pub struct InMemoryArrayBackend {
     array: ArrayRef,
 }

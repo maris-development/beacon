@@ -19,6 +19,7 @@ ndarray = { version = "0.17.1", optional = true }
 anyhow = { workspace=true }
 async-trait = { workspace=true }
 futures = { workspace=true }
+pin-project = "1.1.10"
 
 [dev-dependencies]
 arrow-ipc = { workspace = true }

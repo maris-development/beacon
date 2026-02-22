@@ -1047,6 +1047,7 @@ dependencies = [
  "criterion 0.5.1",
  "futures",
  "ndarray 0.17.2",
+ "pin-project",
  "rand 0.8.5",
  "serde",
  "serde_json",

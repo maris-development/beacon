@@ -25,12 +25,24 @@ pub mod subset;
 /// - Stride-aware slicing into new materialized arrays
 /// - Lazy chunked reads that respect the current logical view
 /// - Full materialization to `ArrayRef` when needed
+#[derive(Debug, Clone)]
 pub struct NdArrowArray<B: ArrayBackend = InMemoryArrayBackend> {
     pub backend: Arc<B>,
     pub data_type: arrow::datatypes::DataType,
     pub shape: Vec<usize>,
     pub dimensions: Vec<String>,
     pub strides: Vec<isize>,
+}
+
+impl NdArrowArray {
+    pub fn new_in_mem(
+        array: ArrayRef,
+        shape: Vec<usize>,
+        dimensions: Vec<String>,
+    ) -> anyhow::Result<Self> {
+        let backend = InMemoryArrayBackend::new(array.clone());
+        Self::new(backend, array.data_type().clone(), shape, dimensions)
+    }
 }
 
 impl<B: ArrayBackend> NdArrowArray<B> {
@@ -174,7 +186,7 @@ impl<B: ArrayBackend> NdArrowArray<B> {
     ///
     /// # Errors
     /// Returns an immediate error when `chunk_size == 0`.
-    pub async fn read_chunked(
+    pub fn read_chunked(
         &self,
         chunk_size: usize,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<ArrayRef>>> {
@@ -631,6 +643,7 @@ mod tests {
         subset::ArraySubset,
     };
 
+    #[derive(Debug)]
     struct RecordingBackend {
         values: ArrayRef,
         calls: Arc<Mutex<Vec<(usize, usize)>>>,
@@ -975,7 +988,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut stream = array.read_chunked(4).await.unwrap();
+        let mut stream = array.read_chunked(4).unwrap();
         let mut chunks = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
@@ -999,7 +1012,7 @@ mod tests {
             .broadcast(&[2, 3], &["lat".to_string(), "lon".to_string()])
             .unwrap();
 
-        let mut stream = broadcasted.read_chunked(2).await.unwrap();
+        let mut stream = broadcasted.read_chunked(2).unwrap();
         assert!(calls.lock().unwrap().is_empty());
 
         let first = stream.next().await.unwrap().unwrap();
@@ -1036,7 +1049,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut stream = broadcasted.read_chunked(5).await.unwrap();
+        let mut stream = broadcasted.read_chunked(5).unwrap();
         let mut reconstructed = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.unwrap();
@@ -1074,7 +1087,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut stream = broadcasted.read_chunked(4).await.unwrap();
+        let mut stream = broadcasted.read_chunked(4).unwrap();
 
         let c1 = stream.next().await.unwrap().unwrap();
         let c1 = c1.as_any().downcast_ref::<Int32Array>().unwrap();
