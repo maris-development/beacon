@@ -179,15 +179,11 @@ mod tests {
         dimensions: Vec<&str>,
     ) -> NdArrowArray<Arc<dyn ArrayBackend>> {
         let array: Arc<dyn Array> = Arc::new(Int32Array::from(values));
-        let backend: Arc<dyn ArrayBackend> = Arc::new(InMemoryArrayBackend::new(array));
+        let dim_names: Vec<String> = dimensions.into_iter().map(|d| d.to_string()).collect();
+        let backend: Arc<dyn ArrayBackend> =
+            Arc::new(InMemoryArrayBackend::new(array, shape, dim_names));
 
-        NdArrowArray::new(
-            backend,
-            DataType::Int32,
-            shape,
-            dimensions.into_iter().map(|d| d.to_string()).collect(),
-        )
-        .unwrap()
+        NdArrowArray::new(backend, DataType::Int32).unwrap()
     }
 
     fn i32_values(record_batch: &arrow::array::RecordBatch, column_idx: usize) -> Vec<i32> {

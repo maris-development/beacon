@@ -5,10 +5,86 @@ use arrow::array::{
     StringBuilder, TimestampMillisecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
     UInt64Array, UInt8Array,
 };
-use beacon_nd_arrow::{dimensions::Dimensions, NdArrowArray};
+use arrow_schema::{DataType, FieldRef};
+use beacon_nd_arrow::array::backend::ArrayBackend;
 use ndarray::{ArrayBase, ArrayViewD, Axis, Dim, IxDynImpl, OwnedRepr};
+use netcdf::{types::NcVariableType, Extents};
 
-use crate::{error::ArrowNetCDFError, NcChar, NcResult};
+use crate::{
+    error::ArrowNetCDFError,
+    reader::{global_attribute, read_variable, variable_attribute},
+    NcChar, NcResult,
+};
+
+#[derive(Debug, Clone)]
+pub struct NetCDFArrayBackend {
+    nc_file: Arc<netcdf::File>,
+    shape: Vec<usize>,
+    dimensions: Vec<String>,
+    arrow_field: FieldRef,
+}
+
+#[async_trait::async_trait]
+impl ArrayBackend for NetCDFArrayBackend {
+    fn len(&self) -> usize {
+        self.shape.iter().product()
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        self.shape.clone()
+    }
+
+    fn dimensions(&self) -> Vec<String> {
+        self.dimensions.clone()
+    }
+
+    async fn slice(&self, start: usize, length: usize) -> anyhow::Result<ArrayRef> {
+        let nd_array = if self.arrow_field.name().contains('.') {
+            let parts = self.arrow_field.name().split('.').collect::<Vec<_>>();
+            if parts.len() != 2 {
+                return Err(anyhow::anyhow!(
+                    "Invalid field name format for attribute: {}",
+                    self.arrow_field.name()
+                ));
+            }
+            if parts[0].is_empty() {
+                //Global attribute
+                let attr_name = parts[1];
+                let attr_value = global_attribute(&self.nc_file, attr_name)?.ok_or(
+                    anyhow::anyhow!("Attribute not found but was in schema: {}", attr_name),
+                )?;
+                attr_value
+            } else {
+                //Variable attribute
+                let variable = self.nc_file.variable(parts[0]).ok_or(anyhow::anyhow!(
+                    "Variable not found but was in schema: {}",
+                    parts[0]
+                ))?;
+                variable_attribute(&variable, parts[1])?.ok_or(anyhow::anyhow!(
+                    "Attribute not found but was in schema: {}.{}",
+                    parts[0],
+                    parts[1]
+                ))?
+            }
+        } else {
+            let variable =
+                self.nc_file
+                    .variable(self.arrow_field.name())
+                    .ok_or(anyhow::anyhow!(
+                        "Variable not found but was in schema: {}",
+                        self.arrow_field.name()
+                    ))?;
+            let array = read_variable(&variable, None)
+                .map_err(|e| ArrowNetCDFError::VariableReadError(Box::new(e)))?;
+            array
+        };
+
+        let arrow_array = nd_array.build_arrow();
+        // Slice the array according to the requested start and length
+        let sliced_array = arrow_array.slice(start, length);
+        Ok(sliced_array)
+    }
+}
 
 pub struct NetCDFNdArrayBase<T> {
     pub inner: NetCDFNdArrayInnerBase<T>,
@@ -54,19 +130,6 @@ macro_rules! create_array_builder {
 impl NetCDFNdArray {
     pub fn new(dims: Vec<Dimension>, array: NetCDFNdArrayInner) -> Self {
         Self { dims, array }
-    }
-
-    pub fn into_nd_arrow_array(self) -> Result<NdArrowArray, ArrowNetCDFError> {
-        let dims: Vec<beacon_nd_arrow::dimensions::Dimension> = self
-            .dims
-            .iter()
-            .map(|d| (d.name.as_ref(), d.size).into())
-            .collect::<Vec<_>>();
-        let dimensions = Dimensions::new(dims);
-        let array = self.build_arrow();
-
-        Ok(NdArrowArray::new(array, dimensions)
-            .map_err(|e| ArrowNetCDFError::NdArrowError(e.into()))?)
     }
 
     pub fn build_arrow(&self) -> ArrayRef {

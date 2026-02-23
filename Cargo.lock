@@ -740,6 +740,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "arrow-schema 56.2.0",
+ "async-trait",
  "beacon-nd-arrow",
  "futures",
  "hifitime",

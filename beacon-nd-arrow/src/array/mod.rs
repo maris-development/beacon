@@ -40,8 +40,8 @@ impl NdArrowArray {
         shape: Vec<usize>,
         dimensions: Vec<String>,
     ) -> anyhow::Result<Self> {
-        let backend = InMemoryArrayBackend::new(array.clone());
-        Self::new(backend, array.data_type().clone(), shape, dimensions)
+        let backend = InMemoryArrayBackend::new(array.clone(), shape.clone(), dimensions.clone());
+        Self::new(backend, array.data_type().clone())
     }
 }
 
@@ -54,12 +54,9 @@ impl<B: ArrayBackend> NdArrowArray<B> {
     ///
     /// # Errors
     /// Returns an error if validation fails.
-    pub fn new(
-        backend: B,
-        data_type: arrow::datatypes::DataType,
-        shape: Vec<usize>,
-        dimensions: Vec<String>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(backend: B, data_type: arrow::datatypes::DataType) -> anyhow::Result<Self> {
+        let shape = backend.shape();
+        let dimensions = backend.dimensions();
         if shape.len() != dimensions.len() {
             return Err(anyhow::anyhow!(
                 "Shape length {} does not match dimensions length {}",
@@ -415,10 +412,8 @@ impl<B: ArrayBackend> NdArrowArray<B> {
             let values = self.as_arrow_array_ref().await?;
             // Subset is the entire array, return self
             return NdArrowArray::new(
-                InMemoryArrayBackend::new(values),
+                InMemoryArrayBackend::new(values, self.shape.clone(), self.dimensions.clone()),
                 self.data_type.clone(),
-                self.shape.clone(),
-                self.dimensions.clone(),
             );
         }
 
@@ -427,10 +422,8 @@ impl<B: ArrayBackend> NdArrowArray<B> {
         let sliced_values = self.materialize_backend_ranges(&ranges).await?;
 
         NdArrowArray::new(
-            InMemoryArrayBackend::new(sliced_values),
+            InMemoryArrayBackend::new(sliced_values, target_shape.clone(), self.dimensions.clone()),
             self.data_type.clone(),
-            target_shape,
-            self.dimensions.clone(),
         )
     }
 
@@ -646,12 +639,24 @@ mod tests {
     #[derive(Debug)]
     struct RecordingBackend {
         values: ArrayRef,
+        shape: Vec<usize>,
+        dimensions: Vec<String>,
         calls: Arc<Mutex<Vec<(usize, usize)>>>,
     }
 
     impl RecordingBackend {
-        fn new(values: ArrayRef, calls: Arc<Mutex<Vec<(usize, usize)>>>) -> Self {
-            Self { values, calls }
+        fn new(
+            values: ArrayRef,
+            shape: Vec<usize>,
+            dimensions: Vec<String>,
+            calls: Arc<Mutex<Vec<(usize, usize)>>>,
+        ) -> Self {
+            Self {
+                values,
+                shape,
+                dimensions,
+                calls,
+            }
         }
     }
 
@@ -659,6 +664,14 @@ mod tests {
     impl ArrayBackend for RecordingBackend {
         fn len(&self) -> usize {
             self.values.len()
+        }
+
+        fn shape(&self) -> Vec<usize> {
+            self.shape.clone()
+        }
+
+        fn dimensions(&self) -> Vec<String> {
+            self.dimensions.clone()
         }
 
         async fn slice(&self, start: usize, length: usize) -> anyhow::Result<ArrayRef> {
@@ -671,10 +684,12 @@ mod tests {
     async fn slice_3d_subset_returns_expected_values_and_shape() {
         let values = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(
+                values,
+                vec![2, 3, 4],
+                vec!["t".to_string(), "y".to_string(), "x".to_string()],
+            ),
             DataType::Int32,
-            vec![2, 3, 4],
-            vec!["t".to_string(), "y".to_string(), "x".to_string()],
         )
         .unwrap();
 
@@ -698,10 +713,12 @@ mod tests {
     async fn slice_returns_error_for_out_of_bounds_subset() {
         let values = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(
+                values,
+                vec![2, 3, 4],
+                vec!["t".to_string(), "y".to_string(), "x".to_string()],
+            ),
             DataType::Int32,
-            vec![2, 3, 4],
-            vec!["t".to_string(), "y".to_string(), "x".to_string()],
         )
         .unwrap();
 
@@ -719,10 +736,12 @@ mod tests {
     async fn slice_returns_error_for_rank_mismatch() {
         let values = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(
+                values,
+                vec![2, 3, 4],
+                vec!["t".to_string(), "y".to_string(), "x".to_string()],
+            ),
             DataType::Int32,
-            vec![2, 3, 4],
-            vec!["t".to_string(), "y".to_string(), "x".to_string()],
         )
         .unwrap();
 
@@ -740,15 +759,14 @@ mod tests {
     async fn slice_uses_multiple_backend_calls_for_non_aligned_subset() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let values: ArrayRef = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
-        let backend = RecordingBackend::new(values, calls.clone());
-
-        let array = NdArrowArray::new(
-            backend,
-            DataType::Int32,
+        let backend = RecordingBackend::new(
+            values,
             vec![2, 3, 4],
             vec!["t".to_string(), "y".to_string(), "x".to_string()],
-        )
-        .unwrap();
+            calls.clone(),
+        );
+
+        let array = NdArrowArray::new(backend, DataType::Int32).unwrap();
 
         let sliced = array
             .slice(ArraySubset {
@@ -770,10 +788,12 @@ mod tests {
     fn backend_slice_ranges_returns_expected_ranges() {
         let values = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(
+                values,
+                vec![2, 3, 4],
+                vec!["t".to_string(), "y".to_string(), "x".to_string()],
+            ),
             DataType::Int32,
-            vec![2, 3, 4],
-            vec!["t".to_string(), "y".to_string(), "x".to_string()],
         )
         .unwrap();
 
@@ -791,10 +811,8 @@ mod tests {
     async fn broadcast_named_dims_adds_leading_dim_and_repeats_values() {
         let values = Arc::new(Int32Array::from((0..6).collect::<Vec<_>>()));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![2, 3], vec!["x".to_string(), "y".to_string()]),
             DataType::Int32,
-            vec![2, 3],
-            vec!["x".to_string(), "y".to_string()],
         )
         .unwrap();
 
@@ -819,10 +837,8 @@ mod tests {
     async fn broadcast_errors_when_reordering_existing_dimensions() {
         let values = Arc::new(Int32Array::from((0..6).collect::<Vec<_>>()));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![2, 3], vec!["x".to_string(), "y".to_string()]),
             DataType::Int32,
-            vec![2, 3],
-            vec!["x".to_string(), "y".to_string()],
         )
         .unwrap();
 
@@ -836,10 +852,8 @@ mod tests {
     async fn broadcast_errors_on_incompatible_dimension_sizes() {
         let values = Arc::new(Int32Array::from(vec![1, 2]));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![2], vec!["x".to_string()]),
             DataType::Int32,
-            vec![2],
-            vec!["x".to_string()],
         )
         .unwrap();
 
@@ -853,10 +867,8 @@ mod tests {
     async fn slice_after_broadcast_uses_virtual_strides() {
         let values = Arc::new(Int32Array::from(vec![1, 2, 3]));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![3], vec!["x".to_string()]),
             DataType::Int32,
-            vec![3],
-            vec!["x".to_string()],
         )
         .unwrap();
 
@@ -884,10 +896,8 @@ mod tests {
     async fn broadcast_lon_1d_to_lat_lon_time_3d() {
         let values = Arc::new(Int32Array::from(vec![10, 20, 30]));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![3], vec!["lon".to_string()]),
             DataType::Int32,
-            vec![3],
-            vec!["lon".to_string()],
         )
         .unwrap();
 
@@ -921,10 +931,8 @@ mod tests {
     async fn slice_after_broadcast_lon_1d_to_lat_lon_time_3d() {
         let values = Arc::new(Int32Array::from(vec![10, 20, 30]));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![3], vec!["lon".to_string()]),
             DataType::Int32,
-            vec![3],
-            vec!["lon".to_string()],
         )
         .unwrap();
 
@@ -955,14 +963,13 @@ mod tests {
     fn broadcast_is_virtual_and_does_not_touch_backend() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let values: ArrayRef = Arc::new(Int32Array::from((0..6).collect::<Vec<_>>()));
-        let backend = RecordingBackend::new(values, calls.clone());
-        let array = NdArrowArray::new(
-            backend,
-            DataType::Int32,
+        let backend = RecordingBackend::new(
+            values,
             vec![2, 3],
             vec!["x".to_string(), "y".to_string()],
-        )
-        .unwrap();
+            calls.clone(),
+        );
+        let array = NdArrowArray::new(backend, DataType::Int32).unwrap();
 
         let broadcasted = array
             .broadcast(
@@ -981,10 +988,8 @@ mod tests {
     async fn read_chunked_contiguous_reads_expected_chunks() {
         let values = Arc::new(Int32Array::from((0..10).collect::<Vec<_>>()));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![10], vec!["x".to_string()]),
             DataType::Int32,
-            vec![10],
-            vec!["x".to_string()],
         )
         .unwrap();
 
@@ -1003,10 +1008,10 @@ mod tests {
     async fn read_chunked_strided_is_lazy_and_applies_strides() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let values: ArrayRef = Arc::new(Int32Array::from(vec![10, 20, 30]));
-        let backend = RecordingBackend::new(values, calls.clone());
+        let backend =
+            RecordingBackend::new(values, vec![3], vec!["lon".to_string()], calls.clone());
 
-        let array =
-            NdArrowArray::new(backend, DataType::Int32, vec![3], vec!["lon".to_string()]).unwrap();
+        let array = NdArrowArray::new(backend, DataType::Int32).unwrap();
 
         let broadcasted = array
             .broadcast(&[2, 3], &["lat".to_string(), "lon".to_string()])
@@ -1035,10 +1040,8 @@ mod tests {
     async fn read_chunked_after_broadcast_lon_to_lat_lon_time_preserves_order() {
         let values = Arc::new(Int32Array::from(vec![10, 20, 30]));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![3], vec!["lon".to_string()]),
             DataType::Int32,
-            vec![3],
-            vec!["lon".to_string()],
         )
         .unwrap();
 
@@ -1073,10 +1076,8 @@ mod tests {
     async fn read_chunked_after_broadcast_emits_expected_chunk_boundaries() {
         let values = Arc::new(Int32Array::from(vec![1, 2, 3]));
         let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values),
+            InMemoryArrayBackend::new(values, vec![3], vec!["lon".to_string()]),
             DataType::Int32,
-            vec![3],
-            vec!["lon".to_string()],
         )
         .unwrap();
 

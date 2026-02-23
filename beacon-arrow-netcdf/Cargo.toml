@@ -13,6 +13,7 @@ tempfile = { workspace=true}
 futures = { workspace=true }
 indexmap = { workspace=true }
 thiserror = { workspace=true }
+async-trait = { workspace=true }
 ndarray = "0.17.1"
 hifitime = "4.0.2"
 regex = "1.11.1"

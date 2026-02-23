@@ -8,6 +8,8 @@ use arrow::array::ArrayRef;
 #[async_trait::async_trait]
 pub trait ArrayBackend: Send + Sync + 'static + Debug {
     fn len(&self) -> usize;
+    fn shape(&self) -> Vec<usize>;
+    fn dimensions(&self) -> Vec<String>;
     async fn slice(&self, start: usize, length: usize) -> anyhow::Result<ArrayRef>;
 }
 
@@ -15,6 +17,14 @@ pub trait ArrayBackend: Send + Sync + 'static + Debug {
 impl<T: ArrayBackend + ?Sized> ArrayBackend for Arc<T> {
     fn len(&self) -> usize {
         (**self).len()
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        (**self).shape()
+    }
+
+    fn dimensions(&self) -> Vec<String> {
+        (**self).dimensions()
     }
 
     async fn slice(&self, start: usize, length: usize) -> anyhow::Result<ArrayRef> {
