@@ -1,3 +1,4 @@
+pub mod map_country_institute_edmo;
 pub mod map_instrument_l05;
 pub mod map_instrument_l22;
 pub mod map_instrument_l33;
