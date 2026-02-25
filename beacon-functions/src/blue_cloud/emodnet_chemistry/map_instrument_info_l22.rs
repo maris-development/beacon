@@ -57,12 +57,12 @@ fn get_l22_for_p01_token(line: &str, p01_token: &str) -> Option<String> {
     parsed.get(p01_token).cloned()
 }
 
-pub fn map_instrument_info_l22() -> ScalarUDF {
+pub fn map_emodnet_chemistry_instrument_info_l22() -> ScalarUDF {
     create_udf(
-        "map_instrument_info_l22",
+        "map_emodnet_chemistry_instrument_info_l22",
         vec![
-            datafusion::arrow::datatypes::DataType::Utf8,
-            datafusion::arrow::datatypes::DataType::Utf8,
+            datafusion::arrow::datatypes::DataType::Utf8, // line
+            datafusion::arrow::datatypes::DataType::Utf8, // p01
         ],
         datafusion::arrow::datatypes::DataType::Utf8,
         datafusion::logical_expr::Volatility::Immutable,
@@ -74,12 +74,12 @@ fn map_instrument_info_l22_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
     match (&parameters[0], &parameters[1]) {
-        (ColumnarValue::Array(line_array), ColumnarValue::Array(p35_array)) => {
+        (ColumnarValue::Array(line_array), ColumnarValue::Array(p01_array)) => {
             let line_array = line_array
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
-            let p35_array = p35_array
+            let p01_array = p01_array
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
@@ -87,9 +87,9 @@ fn map_instrument_info_l22_impl(
             let array =
                 line_array
                     .iter()
-                    .zip(p35_array.iter())
-                    .map(|(line, p35)| match (line, p35) {
-                        (Some(line), Some(p35)) => get_l22_for_p01_token(line, p35),
+                    .zip(p01_array.iter())
+                    .map(|(line, p01)| match (line, p01) {
+                        (Some(line), Some(p01)) => get_l22_for_p01_token(line, p01),
                         _ => None,
                     });
 
@@ -97,14 +97,14 @@ fn map_instrument_info_l22_impl(
 
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
-        (ColumnarValue::Array(line_array), ColumnarValue::Scalar(ScalarValue::Utf8(p35))) => {
+        (ColumnarValue::Array(line_array), ColumnarValue::Scalar(ScalarValue::Utf8(p01))) => {
             let line_array = line_array
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
 
-            let array = line_array.iter().map(|line| match (line, p35.as_ref()) {
-                (Some(line), Some(p35)) => get_l22_for_p01_token(line, p35),
+            let array = line_array.iter().map(|line| match (line, p01.as_ref()) {
+                (Some(line), Some(p01)) => get_l22_for_p01_token(line, p01),
                 _ => None,
             });
 
@@ -112,14 +112,14 @@ fn map_instrument_info_l22_impl(
 
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
-        (ColumnarValue::Scalar(ScalarValue::Utf8(line)), ColumnarValue::Array(p35_array)) => {
-            let p35_array = p35_array
+        (ColumnarValue::Scalar(ScalarValue::Utf8(line)), ColumnarValue::Array(p01_array)) => {
+            let p01_array = p01_array
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
 
-            let array = p35_array.iter().map(|p35| match (line.as_ref(), p35) {
-                (Some(line), Some(p35)) => get_l22_for_p01_token(line, p35),
+            let array = p01_array.iter().map(|p01| match (line.as_ref(), p01) {
+                (Some(line), Some(p01)) => get_l22_for_p01_token(line, p01),
                 _ => None,
             });
 
@@ -129,10 +129,10 @@ fn map_instrument_info_l22_impl(
         }
         (
             ColumnarValue::Scalar(ScalarValue::Utf8(line)),
-            ColumnarValue::Scalar(ScalarValue::Utf8(p35)),
+            ColumnarValue::Scalar(ScalarValue::Utf8(p01)),
         ) => {
-            let result = match (line.as_ref(), p35.as_ref()) {
-                (Some(line), Some(p35)) => get_l22_for_p01_token(line, p35),
+            let result = match (line.as_ref(), p01.as_ref()) {
+                (Some(line), Some(p01)) => get_l22_for_p01_token(line, p01),
                 _ => None,
             };
 
@@ -143,5 +143,20 @@ fn map_instrument_info_l22_impl(
         _ => Err(datafusion::error::DataFusionError::Execution(
             "Invalid input types".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_instrument_info_l22() {
+        let input = "SDN:P01::PRESPR01 SDN:L22::TOOL0002 | SDN:P01::TEMPPR01 SDN:L22::TOOL0002 | SDN:P01::PSLTZZ01 SDN:L22::TOOL0002 | SDN:P01::DOXYZZXX SDN:L22::TOOL0002 | SDN:P01::DOXMZZXX SDN:L22::TOOL0002";
+        let p01_token = "SDN:P01::TEMPPR01";
+        let expected_l22_token = "SDN:L22::TOOL0002";
+
+        let result = get_l22_for_p01_token(input, p01_token);
+        assert_eq!(result, Some(expected_l22_token.to_string()));
     }
 }

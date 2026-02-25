@@ -7,7 +7,7 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-pub fn extract_parenthesized_values_ref(input: &str) -> Vec<&str> {
+pub fn extract_parenthesized_values_ref(input: &str) -> Vec<String> {
     let mut results = Vec::new();
     let mut start = 0;
 
@@ -19,7 +19,7 @@ pub fn extract_parenthesized_values_ref(input: &str) -> Vec<&str> {
             let value = input[open_idx..close_idx].trim();
 
             if !value.is_empty() {
-                results.push(value);
+                results.push(format!("SDN:L05::{}", value));
             }
 
             start = close_idx + 1;
@@ -54,7 +54,7 @@ fn map_emodnet_chemistry_instrument_l05_multi_impl(
             let array = flag_array.iter().map(|flag| {
                 flag.map(|value| {
                     extract_parenthesized_values_ref(value)
-                        .join(",")
+                        .join("|")
                         .to_string()
                 })
             });
@@ -66,7 +66,7 @@ fn map_emodnet_chemistry_instrument_l05_multi_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value.as_ref().map(|value| {
                 extract_parenthesized_values_ref(value)
-                    .join(",")
+                    .join("|")
                     .to_string()
             });
 

@@ -25,15 +25,18 @@ fn parse_p35_to_p01(line: &str) -> HashMap<String, String> {
         }
 
         let left = parts[0].trim();
-        let p35 = left.strip_prefix("SDN:P35::").map(str::trim);
+        let p35 = left
+            .split_whitespace()
+            .find(|token| token.starts_with("SDN:P35::"))
+            .map(|s| s.trim());
 
         let right = parts[1].trim();
         let right = right.trim_start_matches('[').trim_end_matches(']');
 
         let mut p01_value = None;
         for token in right.split_whitespace() {
-            if let Some(v) = token.strip_prefix("SDN:P01::") {
-                p01_value = Some(v.trim());
+            if token.starts_with("SDN:P01::") {
+                p01_value = Some(token.trim());
                 break;
             }
         }
@@ -67,9 +70,9 @@ pub fn get_p01_for_p35(line: &str, target_p35: &str) -> Option<String> {
     parsed.get(target_p35).cloned()
 }
 
-pub fn map_p35_contributor_codes_p01() -> ScalarUDF {
+pub fn map_emodnet_chemistry_p35_contributor_codes_p01() -> ScalarUDF {
     create_udf(
-        "map_p35_contributor_codes_p01",
+        "map_emodnet_chemistry_p35_contributor_codes_p01",
         vec![
             datafusion::arrow::datatypes::DataType::Utf8,
             datafusion::arrow::datatypes::DataType::Utf8,
@@ -153,5 +156,24 @@ fn map_p35_contributor_codes_p01_impl(
         _ => Err(datafusion::error::DataFusionError::Execution(
             "Invalid input types".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_map_p35_contributor_codes_p01() {
+        let input = "SDN:P35::WATERTEMP = [ SDN:P01::TEMPPR01 SDN:P06::UPAA ], SDN:P35::EPC00001 = [ SDN:P01::PSLTZZ01 SDN:P06::UUUU ], SDN:P35::EPC00002 = [ SDN:P01::DOXYZZXX SDN:P06::UMLL | SDN:P01::DOXMZZXX SDN:P06::KGUM ]";
+
+        assert_eq!(
+            get_p01_for_p35(input, "SDN:P35::WATERTEMP"),
+            Some("SDN:P01::TEMPPR01".to_string())
+        );
+        assert_eq!(
+            get_p01_for_p35(input, "SDN:P35::EPC00001"),
+            Some("SDN:P01::PSLTZZ01".to_string())
+        );
     }
 }
