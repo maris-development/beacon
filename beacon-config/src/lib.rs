@@ -94,6 +94,10 @@ pub struct Config {
     /// Set to `0` to disable timeouts (default).
     #[envconfig(from = "BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS", default = "0")]
     pub netcdf_mpio_request_timeout_ms: u64,
+
+    /// Whether to split streams into 16k row slices for better memory management and parallelism.
+    #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
+    pub bbf_split_streams_slice: bool,
 }
 
 impl Config {
