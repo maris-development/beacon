@@ -698,7 +698,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beacon-api"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "anyhow",
  "arrow",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-netcdf"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "anyhow",
  "arrow",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-netcdf-mpio"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "arrow",
  "beacon-arrow-netcdf",
@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-odv"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "anyhow",
  "arrow",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-zarr"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "arrow",
  "crossbeam",
@@ -855,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "anyhow",
  "arrow",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-config"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "envconfig",
  "lazy_static",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "anyhow",
  "arrow",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-data-lake"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "arrow",
  "async-trait",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-formats"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-functions"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-object-storage"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "async-trait",
  "beacon-config",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-planner"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "anyhow",
  "beacon-config",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-query"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "anyhow",
  "beacon-arrow-odv",
