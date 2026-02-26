@@ -25,7 +25,7 @@ use crate::array::backend::ArrayBackend;
 /// | `chrono::DateTime<chrono::Utc>`  | `Timestamp(Nanosecond, Some("UTC"))`      |
 ///
 /// [`ArrayRef`]: arrow::array::ArrayRef
-pub trait ArrowTypeConversion: Debug + Send + Sync + 'static {
+pub trait ArrowTypeConversion: Debug + Send + Sync + PartialEq + 'static {
     /// Convert a contiguous slice of `Self` values into an Arrow [`ArrayRef`].
     ///
     /// The returned array must contain exactly `array.len()` elements in the
@@ -40,6 +40,60 @@ pub trait ArrowTypeConversion: Debug + Send + Sync + 'static {
     fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>
     where
         Self: Sized;
+
+    /// Convert a contiguous slice of `Self` values into an Arrow [`ArrayRef`],
+    /// treating any element equal to `fill_value` as a null.
+    ///
+    /// # Memory efficiency
+    ///
+    /// The underlying data buffer is **shared** with the result of
+    /// [`arrow_from_array_view`] — no second copy of the values is made.
+    /// Null information is encoded as a compact validity bitmap
+    /// (1 bit per element ≈ `n / 8` bytes of overhead).
+    ///
+    /// When no elements match `fill_value` the result is identical to calling
+    /// [`arrow_from_array_view`] directly.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error returned by [`arrow_from_array_view`].
+    ///
+    /// [`arrow_from_array_view`]: ArrowTypeConversion::arrow_from_array_view
+    fn arrow_from_array_view_with_fill(
+        array: &[Self],
+        fill_value: &Self,
+    ) -> anyhow::Result<arrow::array::ArrayRef>
+    where
+        Self: Sized,
+    {
+        // Build the validity bitmap: `true` (1) = valid, `false` (0) = null.
+        // This is a packed bit-vector — one bit per element.
+        let validity =
+            arrow::buffer::BooleanBuffer::from_iter(array.iter().map(|v| v != fill_value));
+        let null_buffer = arrow::buffer::NullBuffer::new(validity);
+        let null_count = null_buffer.null_count();
+
+        // Obtain the base Arrow array (data buffer only, all slots valid).
+        let base = Self::arrow_from_array_view(array)?;
+
+        // Short-circuit: if nothing matched the fill value, return as-is.
+        if null_count == 0 {
+            return Ok(base);
+        }
+
+        // Attach the null bitmap to the existing ArrayData without copying
+        // the value buffer.  `to_data()` does a shallow clone — the inner
+        // byte buffers are Arc-backed so no data is duplicated.  We then
+        // re-assemble the ArrayData with the null bitmap grafted on.
+        let new_data = base
+            .to_data()
+            .into_builder()
+            .nulls(Some(null_buffer))
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to attach null buffer: {e}"))?;
+
+        Ok(arrow::array::make_array(new_data))
+    }
 }
 
 /// An [`ArrayBackend`] backed by an [`ndarray::ArcArrayD`] in host memory.
@@ -60,18 +114,46 @@ pub struct NdArrayBackend<T: ArrowTypeConversion> {
     data: ndarray::ArcArrayD<T>,
     /// Ordered list of dimension names, one per axis of `data`.
     dimensions: Vec<String>,
+    /// Optional sentinel value.  During [`ArrayBackend::slice`] any element
+    /// that compares equal to this value is emitted as Arrow `null` rather
+    /// than as the raw data value.
+    fill_value: Option<T>,
 }
 
 impl<T: ArrowTypeConversion> NdArrayBackend<T> {
     /// Create a new `NdArrayBackend` from an existing arc array and a matching
-    /// list of dimension names.
+    /// list of dimension names, without a fill value.
     ///
-    /// # Panics
-    ///
-    /// Does not panic; dimension-name / shape mismatches are the caller's
-    /// responsibility to avoid.
+    /// All elements are treated as valid (non-null) during conversion.
     pub fn new(data: ndarray::ArcArrayD<T>, dimensions: Vec<String>) -> Self {
-        Self { data, dimensions }
+        Self {
+            data,
+            dimensions,
+            fill_value: None,
+        }
+    }
+
+    /// Create a new `NdArrayBackend` with a fill value sentinel.
+    ///
+    /// During [`ArrayBackend::slice`] any element that compares equal to
+    /// `fill_value` will be represented as Arrow `null`.  The comparison uses
+    /// [`PartialEq`] — for floating-point types note that `NaN != NaN`, so a
+    /// NaN fill value will **not** match NaN elements.
+    pub fn new_with_fill_value(
+        data: ndarray::ArcArrayD<T>,
+        dimensions: Vec<String>,
+        fill_value: T,
+    ) -> Self {
+        Self {
+            data,
+            dimensions,
+            fill_value: Some(fill_value),
+        }
+    }
+
+    /// Returns the fill value, if one was set.
+    pub fn fill_value(&self) -> Option<&T> {
+        self.fill_value.as_ref()
     }
 }
 
@@ -134,8 +216,12 @@ impl<T: ArrowTypeConversion> ArrayBackend for NdArrayBackend<T> {
             )
         })?;
 
-        // Delegate the actual Rust→Arrow conversion to the type-level impl.
-        T::arrow_from_array_view(&array_slice[start..end])
+        // Delegate to the fill-aware path when a sentinel is configured,
+        // otherwise use the simpler (slightly faster) no-null path.
+        match &self.fill_value {
+            Some(fill) => T::arrow_from_array_view_with_fill(&array_slice[start..end], fill),
+            None => T::arrow_from_array_view(&array_slice[start..end]),
+        }
     }
 }
 
@@ -552,5 +638,173 @@ mod tests {
         assert_eq!(backend.len(), 3);
         assert_eq!(backend.shape(), vec![3]);
         assert_eq!(backend.dimensions(), vec!["dim0".to_string()]);
+    }
+
+    // ── fill value / null tests ────────────────────────────────────────────────
+
+    /// Build a 1-D backend WITH a fill value and slice it.
+    fn slice_backend_with_fill<T: ArrowTypeConversion + Clone>(
+        data: Vec<T>,
+        fill: T,
+        start: usize,
+        length: usize,
+    ) -> arrow::array::ArrayRef {
+        let arc = ndarray::ArcArrayD::from_shape_vec(vec![data.len()], data).unwrap();
+        let backend = NdArrayBackend::new_with_fill_value(arc, vec!["dim0".to_string()], fill);
+        futures::executor::block_on(backend.slice(start, length)).unwrap()
+    }
+
+    #[test]
+    fn test_fill_value_i32_produces_nulls() {
+        // 99 is the fill value; expect positions 1 and 3 to be null.
+        let arr = slice_backend_with_fill::<i32>(vec![1, 99, 3, 99, 5], 99, 0, 5);
+        let typed = arr.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(typed.len(), 5);
+        assert!(typed.is_valid(0));
+        assert!(typed.is_null(1));
+        assert!(typed.is_valid(2));
+        assert!(typed.is_null(3));
+        assert!(typed.is_valid(4));
+        assert_eq!(typed.value(0), 1);
+        assert_eq!(typed.value(2), 3);
+        assert_eq!(typed.value(4), 5);
+    }
+
+    #[test]
+    fn test_fill_value_no_nulls_when_no_match() {
+        // Fill value 0 does not appear in the data — result should have no nulls.
+        let arr = slice_backend_with_fill::<i32>(vec![1, 2, 3], 0, 0, 3);
+        let typed = arr.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(typed.null_count(), 0);
+    }
+
+    #[test]
+    fn test_fill_value_all_null() {
+        let arr = slice_backend_with_fill::<i32>(vec![9, 9, 9], 9, 0, 3);
+        let typed = arr.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(typed.null_count(), 3);
+    }
+
+    #[test]
+    fn test_fill_value_f32() {
+        let fill = -9999.0_f32;
+        let arr = slice_backend_with_fill::<f32>(vec![1.0, fill, 3.0], fill, 0, 3);
+        let typed = arr
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .unwrap();
+        assert!(typed.is_valid(0));
+        assert!(typed.is_null(1));
+        assert!(typed.is_valid(2));
+    }
+
+    #[test]
+    fn test_fill_value_f64() {
+        let fill = f64::MAX;
+        let arr = slice_backend_with_fill::<f64>(vec![1.0, fill, 3.0, fill], fill, 0, 4);
+        let typed = arr
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        assert_eq!(typed.null_count(), 2);
+        assert!(typed.is_null(1));
+        assert!(typed.is_null(3));
+    }
+
+    #[test]
+    fn test_fill_value_string() {
+        let fill = "N/A".to_string();
+        let arr = slice_backend_with_fill::<String>(
+            vec!["hello".to_string(), fill.clone(), "world".to_string()],
+            fill,
+            0,
+            3,
+        );
+        let typed = arr
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert!(typed.is_valid(0));
+        assert!(typed.is_null(1));
+        assert!(typed.is_valid(2));
+        assert_eq!(typed.value(0), "hello");
+        assert_eq!(typed.value(2), "world");
+    }
+
+    #[test]
+    fn test_fill_value_bool() {
+        // Use `false` as the fill / missing-data sentinel.
+        let arr = slice_backend_with_fill::<bool>(vec![true, false, true, false], false, 0, 4);
+        let typed = arr
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
+        assert!(typed.is_valid(0));
+        assert!(typed.is_null(1));
+        assert!(typed.is_valid(2));
+        assert!(typed.is_null(3));
+    }
+
+    #[test]
+    fn test_fill_value_within_slice() {
+        // Fill detection operates on the already-sliced sub-range, not the
+        // full array, so only the sliced window is checked.
+        let arr = slice_backend_with_fill::<i32>(vec![99, 1, 99, 2, 99], 99, 1, 3);
+        let typed = arr.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(typed.len(), 3);
+        // Window is [1, 99, 2] → middle element is null.
+        assert!(typed.is_valid(0));
+        assert!(typed.is_null(1));
+        assert!(typed.is_valid(2));
+        assert_eq!(typed.value(0), 1);
+        assert_eq!(typed.value(2), 2);
+    }
+
+    #[test]
+    fn test_fill_value_accessor() {
+        let arc = ndarray::ArcArrayD::from_shape_vec(vec![2], vec![0_i32, 1]).unwrap();
+        let backend = NdArrayBackend::new_with_fill_value(arc, vec!["dim0".to_string()], -1_i32);
+        assert_eq!(backend.fill_value(), Some(&-1_i32));
+
+        let arc2 = ndarray::ArcArrayD::from_shape_vec(vec![2], vec![0_i32, 1]).unwrap();
+        let backend2 = NdArrayBackend::new(arc2, vec!["dim0".to_string()]);
+        assert_eq!(backend2.fill_value(), None);
+    }
+
+    #[cfg(feature = "ndarray")]
+    #[test]
+    fn test_fill_value_naive_datetime() {
+        use chrono::NaiveDateTime;
+        let sentinel = chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc();
+        let t1 = chrono::DateTime::from_timestamp(1_000, 0)
+            .unwrap()
+            .naive_utc();
+        let t2 = chrono::DateTime::from_timestamp(2_000, 0)
+            .unwrap()
+            .naive_utc();
+        let arr = slice_backend_with_fill::<NaiveDateTime>(vec![t1, sentinel, t2], sentinel, 0, 3);
+        let typed = arr
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampNanosecondArray>()
+            .unwrap();
+        assert!(typed.is_valid(0));
+        assert!(typed.is_null(1));
+        assert!(typed.is_valid(2));
+    }
+
+    #[cfg(feature = "ndarray")]
+    #[test]
+    fn test_fill_value_datetime_utc() {
+        use chrono::{DateTime, TimeZone, Utc};
+        let sentinel: DateTime<Utc> = Utc.timestamp_opt(0, 0).unwrap();
+        let t1: DateTime<Utc> = Utc.timestamp_opt(1_000, 0).unwrap();
+        let arr = slice_backend_with_fill::<DateTime<Utc>>(vec![t1, sentinel, t1], sentinel, 0, 3);
+        let typed = arr
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampNanosecondArray>()
+            .unwrap();
+        assert!(typed.is_valid(0));
+        assert!(typed.is_null(1));
+        assert!(typed.is_valid(2));
     }
 }
