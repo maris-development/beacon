@@ -64,6 +64,3 @@ pub mod stream;
 pub use array::NdArrowArray;
 pub use batch::NdRecordBatch;
 pub use stream::NdSendableBatchStream;
-
-#[cfg(feature = "ndarray")]
-pub mod ndarray_convert;
