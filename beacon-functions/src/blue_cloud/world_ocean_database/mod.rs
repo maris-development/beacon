@@ -14,5 +14,6 @@ pub fn world_ocean_database_udfs() -> Vec<datafusion::logical_expr::ScalarUDF> {
         map_platform_c17::map_wod_platform_c17(),
         map_quality_flag::map_wod_quality_flag(),
         map_country_institute_edmo::map_wod_edmo(),
+        map_wod_edmo_approx::map_wod_edmo_approx(),
     ]
 }
