@@ -1,6 +1,6 @@
 [package]
 name = "beacon-common"
-version = "1.5.3"
+version = "1.5.4"
 edition = "2021"
 
 [dependencies]
