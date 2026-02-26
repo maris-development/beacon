@@ -1,6 +1,6 @@
 [package]
 name = "beacon-api"
-version = "1.5.2"
+version = "1.5.4"
 edition = "2021"
 
 [target.'cfg(not(windows))'.dependencies]

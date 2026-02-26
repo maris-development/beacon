@@ -9,10 +9,10 @@ hero:
   actions:
     - theme: brand
       text: Getting Started
-      link: /docs/1.5.3/getting-started
+      link: /docs/1.5.4/getting-started
     - theme: alt
       text: Documentation
-      link: /docs/1.5.3/introduction
+      link: /docs/1.5.4/introduction
     - theme: alt
       text: Existing Data Lake Nodes
       link: /available-nodes/available-nodes

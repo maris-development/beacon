@@ -1,6 +1,6 @@
 [package]
 name = "beacon-arrow-netcdf"
-version = "1.5.0"
+version = "1.5.4"
 edition = "2021"
 
 [dependencies]
