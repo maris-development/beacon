@@ -15,7 +15,7 @@ const EDMO_MAPPINGS_CSV: &[u8] = include_bytes!("approx_wod_edmo_mappings.csv");
 lazy_static! {
     static ref EDMO_APPROX_MAP: HashMap<String, Option<i64>> = {
         let mappings =
-            read_from_to_mappings_from_reader(EDMO_MAPPINGS_CSV, "WOD_INSTITUTE", "EDMO_CODE")
+            read_from_to_mappings_from_reader(EDMO_MAPPINGS_CSV, "WOD_INSTITUTE", "confirmed EDMO")
                 .unwrap();
         mappings
             .into_iter()
@@ -41,16 +41,16 @@ fn map_wod_edmo_approx_impl(
         ColumnarValue::Array(ref array) => {
             let iter = array.as_string::<i32>().iter().map(|val| match val {
                 Some(v) => map_wod_edmo_scalar(v),
-                None => None,
+                None => 1051, // Default to "Unknown (1051)" if not found
             });
             let result_array = arrow::array::Int64Array::from_iter(iter);
             Ok(ColumnarValue::Array(Arc::new(result_array)))
         }
         ColumnarValue::Scalar(ScalarValue::Utf8(val)) => match val {
-            Some(ref v) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+            Some(ref v) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(
                 map_wod_edmo_scalar(v),
-            ))),
-            None => Ok(ColumnarValue::Scalar(ScalarValue::Int64(None))),
+            )))),
+            None => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(1051)))),
         },
         _ => Err(datafusion::error::DataFusionError::Internal(
             "Invalid argument type for map_wod_edmo".to_string(),
@@ -58,9 +58,35 @@ fn map_wod_edmo_approx_impl(
     }
 }
 
-fn map_wod_edmo_scalar(value: &str) -> Option<i64> {
+fn map_wod_edmo_scalar(value: &str) -> i64 {
     EDMO_APPROX_MAP
         .get(&value.to_lowercase())
         .copied()
         .flatten()
+        .unwrap_or(1051) // Default to "Unknown (1051)" if not found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mapping() {
+        assert_eq!(
+            map_wod_edmo_scalar(
+                "COMMONWEALTH SCIENTIFIC AND INDUSTRIAL RESEARCH ORGANIZATION (CSIRO)"
+            ),
+            3945
+        );
+        assert_eq!(
+            map_wod_edmo_scalar("LOCEAN (LABORATOIRE D'OCEANOGRAPHIE ET DU CLIMAT)"),
+            494
+        );
+        assert_eq!(
+            map_wod_edmo_scalar(
+                "MOSS LANDING MARINE LABORATORIES OF CALIFORNIA STATE UNIVERSITIES (MLML)A"
+            ),
+            1051
+        );
+    }
 }
