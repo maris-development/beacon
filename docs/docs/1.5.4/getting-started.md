@@ -84,6 +84,7 @@ services:
             - AWS_ENDPOINT=http://minio:9000 # Set your S3 endpoint here. Adjust to your S3 provider. // [!code ++]
             - AWS_ACCESS_KEY_ID=minioadmin # Set your S3 access key here. Can be left empty for anonymous access. // [!code ++]
             - AWS_SECRET_ACCESS_KEY=minioadmin # Set your S3 secret key here. Can be left empty for anonymous access. // [!code ++]
+            # AWS_SKIP_SIGNATURE=true # Set to true to skip request signing for anonymous access. Only needed if you are using anonymous access. // [!code ++]
             - BEACON_S3_BUCKET=beacon-bucket # Set your S3 bucket name here. Make sure the bucket exists. // [!code ++]
             - BEACON_S3_DATA_LAKE=true # Enable S3 data lake mode. This will make Beacon use S3 as data lake storage. // [!code ++]
         volumes:
@@ -124,7 +125,7 @@ Make sure to replace the environment variable values such as `BEACON_ADMIN_USERN
 :::
 
 :::tip
-If you are using an S3-compatible service that allows for anonymous access, you can leave the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables empty. Beacon will then attempt to connect to the S3 service without authentication and access the specified bucket. This is useful if the S3 bucket is publicly accessible.
+If you are using an S3-compatible service that allows for anonymous access, you can leave the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables empty. Beacon will then attempt to connect to the S3 service without authentication and access the specified bucket. This is useful if the S3 bucket is publicly accessible. It is important to also set the `AWS_SKIP_SIGNATURE` environment variable to `true` to ensure that Beacon does not attempt to sign requests when connecting to the S3 service.
 :::
 
 Once you have created the `docker-compose.yml` file, you can start the Docker container by running the following command in the directory where the `docker-compose.yml` file is located:
