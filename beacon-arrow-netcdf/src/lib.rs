@@ -12,6 +12,8 @@ pub mod reader;
 pub mod writer;
 pub use netcdf;
 pub use netcdf_sys;
+pub mod backend;
+pub mod decoders;
 
 pub type NcResult<T> = std::result::Result<T, error::ArrowNetCDFError>;
 

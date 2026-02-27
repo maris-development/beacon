@@ -5,15 +5,14 @@ use arrow::array::{
     StringBuilder, TimestampMillisecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
     UInt64Array, UInt8Array,
 };
-use arrow_schema::{DataType, FieldRef};
+use arrow_schema::FieldRef;
 use beacon_nd_arrow::array::backend::ArrayBackend;
 use ndarray::{ArrayBase, ArrayViewD, Axis, Dim, IxDynImpl, OwnedRepr};
-use netcdf::{types::NcVariableType, Extents};
 
 use crate::{
     error::ArrowNetCDFError,
     reader::{global_attribute, read_variable, variable_attribute},
-    NcChar, NcResult,
+    NcChar,
 };
 
 #[derive(Debug, Clone)]

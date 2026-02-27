@@ -13,7 +13,6 @@ use netcdf::{
 
 use crate::{
     cf_time::{decode_cf_time_variable, is_cf_time_variable},
-    chunked_stream::{Chunking, Stream},
     error::ArrowNetCDFError,
     nc_array::{Dimension, NetCDFNdArray, NetCDFNdArrayBase, NetCDFNdArrayInner},
     NcChar, NcResult, NcString,
@@ -116,53 +115,7 @@ impl NetCDFArrowReader {
     }
 
     pub fn read_as_batch<P: AsRef<[usize]>>(&self, projection: Option<P>) -> NcResult<RecordBatch> {
-        let projected_schema = if let Some(projection) = projection {
-            Arc::new(
-                self.file_schema
-                    .project(projection.as_ref())
-                    .map_err(ArrowNetCDFError::ArrowSchemaProjectionError)?,
-            )
-        } else {
-            self.file_schema.clone()
-        };
-        let mut stream = Stream::new(self.file.clone(), None, projected_schema)?;
-        let batch = stream.next().transpose().unwrap().ok_or_else(|| {
-            ArrowNetCDFError::Stream("No data available in the NetCDF file.".to_string())
-        })?;
-        batch.to_arrow_record_batch().map_err(|e| {
-            ArrowNetCDFError::Stream(format!("Failed to flatten to RecordBatch: {}", e))
-        })
-    }
-
-    pub fn read_as_stream<P: AsRef<[usize]>>(
-        &self,
-        projection: Option<P>,
-        chunking: Option<Chunking>,
-    ) -> NcResult<Stream> {
-        let projected_schema = if let Some(projection) = projection {
-            Arc::new(
-                self.file_schema
-                    .project(projection.as_ref())
-                    .map_err(ArrowNetCDFError::ArrowSchemaProjectionError)?,
-            )
-        } else {
-            self.file_schema.clone()
-        };
-        Stream::new(self.file.clone(), chunking, projected_schema)
-    }
-
-    pub fn read_column_as_stream<P: AsRef<str>>(
-        &self,
-        column_name: P,
-        chunking: Option<Chunking>,
-    ) -> NcResult<Stream> {
-        let column_name = column_name.as_ref();
-        let column_index = self
-            .file_schema
-            .index_of(column_name)
-            .map_err(|_| ArrowNetCDFError::InvalidFieldName(column_name.to_string()))?;
-
-        self.read_as_stream(Some(&[column_index]), chunking)
+        todo!()
     }
 
     pub fn read_column(&self, column_name: &str) -> NcResult<NdArrowArray<Arc<dyn ArrayBackend>>> {
