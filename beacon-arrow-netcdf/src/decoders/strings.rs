@@ -7,13 +7,33 @@ use crate::decoders::VariableDecoder;
 
 #[derive(Debug)]
 pub struct StringVariableDecoder {
-    pub arrow_field: arrow::datatypes::Field,
+    pub arrow_field: arrow::datatypes::FieldRef,
     pub nc_type: NcVariableType,
     pub fill_value: Option<arrow::array::ArrayRef>,
     pub string_length: Option<usize>,
 }
 
+impl StringVariableDecoder {
+    pub fn new(
+        arrow_field: arrow::datatypes::FieldRef,
+        nc_type: NcVariableType,
+        fill_value: Option<arrow::array::ArrayRef>,
+        string_length: Option<usize>,
+    ) -> Self {
+        Self {
+            arrow_field,
+            nc_type,
+            fill_value,
+            string_length,
+        }
+    }
+}
+
 impl VariableDecoder for StringVariableDecoder {
+    fn arrow_field(&self) -> &arrow::datatypes::Field {
+        &self.arrow_field
+    }
+
     fn read(
         &self,
         variable: &netcdf::Variable,
@@ -123,7 +143,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Utf8, true),
+            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
             nc_type: NcVariableType::Char,
             fill_value: None,
             string_length: Some(string_len),
@@ -166,7 +186,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Utf8, true),
+            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
             nc_type: NcVariableType::Char,
             fill_value: None,
             string_length: Some(string_len),
@@ -206,7 +226,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Utf8, true),
+            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
             nc_type: NcVariableType::Char,
             fill_value: None,
             string_length: Some(string_len),
@@ -233,7 +253,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Utf8, true),
+            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
             nc_type: NcVariableType::Char,
             fill_value: None,
             string_length: None, // deliberately omitted
@@ -268,7 +288,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Utf8, true),
+            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
             nc_type: NcVariableType::String,
             fill_value: None,
             string_length: None,
@@ -293,7 +313,7 @@ mod tests {
     #[test]
     fn test_string_decoder_variable_name() {
         let decoder = StringVariableDecoder {
-            arrow_field: Field::new("station_name", DataType::Utf8, true),
+            arrow_field: Arc::new(Field::new("station_name", DataType::Utf8, true)),
             nc_type: NcVariableType::Char,
             fill_value: None,
             string_length: Some(10),

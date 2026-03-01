@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use arrow::{
     array::{ArrowPrimitiveType, AsArray, PrimitiveArray},
@@ -7,19 +7,41 @@ use arrow::{
         TimestampNanosecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
+use hifitime::Epoch;
 use num_traits::AsPrimitive;
+use regex::Regex;
 
 use crate::decoders::VariableDecoder;
 
 #[derive(Debug)]
 pub struct CFTimeVariableDecoder {
-    pub arrow_field: arrow::datatypes::Field,
-    pub inner_decoder: Box<dyn VariableDecoder>,
+    pub arrow_field: arrow::datatypes::FieldRef,
+    pub inner_decoder: Arc<dyn VariableDecoder>,
     pub epoch: hifitime::Epoch,
     pub unit: hifitime::Unit,
 }
 
+impl CFTimeVariableDecoder {
+    pub fn new(
+        arrow_field: arrow::datatypes::FieldRef,
+        inner_decoder: Arc<dyn VariableDecoder>,
+        epoch: hifitime::Epoch,
+        unit: hifitime::Unit,
+    ) -> Self {
+        Self {
+            arrow_field,
+            inner_decoder,
+            epoch,
+            unit,
+        }
+    }
+}
+
 impl VariableDecoder for CFTimeVariableDecoder {
+    fn arrow_field(&self) -> &arrow::datatypes::Field {
+        &self.arrow_field
+    }
+
     fn read(
         &self,
         variable: &netcdf::Variable,
@@ -117,8 +139,41 @@ where
     array
 }
 
+pub(crate) fn extract_units(input: &str) -> Option<hifitime::Unit> {
+    let re = Regex::new(r"^(?P<units>\w+) since").unwrap();
+    re.captures(input)
+        .and_then(|caps| match caps["units"].to_string().as_str() {
+            "seconds" => Some(hifitime::Unit::Second),
+            "milliseconds" => Some(hifitime::Unit::Millisecond),
+            "microseconds" => Some(hifitime::Unit::Microsecond),
+            "nanoseconds" => Some(hifitime::Unit::Nanosecond),
+            "days" => Some(hifitime::Unit::Day),
+            "weeks" => Some(hifitime::Unit::Week),
+            _ => None,
+        })
+}
+
+/// Extracts the epoch date from a string like "days since -4713-11-24"
+pub(crate) fn extract_epoch(input: &str) -> Option<Epoch> {
+    let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})").unwrap();
+    let result = re.captures(input).and_then(|caps| {
+        let epoch_str = caps["epoch"].to_string();
+        let mut epoch = Epoch::from_str(&epoch_str).ok();
+
+        if epoch.is_none() && epoch_str == "-4713-01-01" {
+            epoch = Some(Epoch::from_jde_utc(0.0));
+        }
+
+        epoch
+    });
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use arrow::array::AsArray;
     use arrow::datatypes::{DataType, Field, TimestampNanosecondType};
     use netcdf::types::{FloatType, IntType, NcVariableType};
@@ -174,18 +229,18 @@ mod tests {
         let file = netcdf::open(tmp.path()).unwrap();
         let variable = file.variable(var_name).unwrap();
 
-        let inner = Box::new(DefaultVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Float64, true),
+        let inner = Arc::new(DefaultVariableDecoder {
+            arrow_field: Arc::new(Field::new(var_name, DataType::Float64, true)),
             nc_type: NcVariableType::Float(FloatType::F64),
             fill_value: None,
         });
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Field::new(
+            arrow_field: Arc::new(Field::new(
                 var_name,
                 DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
                 true,
-            ),
+            )),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Day,
@@ -220,18 +275,18 @@ mod tests {
         let file = netcdf::open(tmp.path()).unwrap();
         let variable = file.variable(var_name).unwrap();
 
-        let inner = Box::new(DefaultVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Float64, true),
+        let inner = Arc::new(DefaultVariableDecoder {
+            arrow_field: Arc::new(Field::new(var_name, DataType::Float64, true)),
             nc_type: NcVariableType::Float(FloatType::F64),
             fill_value: None,
         });
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Field::new(
+            arrow_field: Arc::new(Field::new(
                 var_name,
                 DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
                 true,
-            ),
+            )),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Second,
@@ -266,18 +321,18 @@ mod tests {
         let file = netcdf::open(tmp.path()).unwrap();
         let variable = file.variable(var_name).unwrap();
 
-        let inner = Box::new(DefaultVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Float64, true),
+        let inner = Arc::new(DefaultVariableDecoder {
+            arrow_field: Arc::new(Field::new(var_name, DataType::Float64, true)),
             nc_type: NcVariableType::Float(FloatType::F64),
             fill_value: None,
         });
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Field::new(
+            arrow_field: Arc::new(Field::new(
                 var_name,
                 DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
                 true,
-            ),
+            )),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Day,
@@ -307,18 +362,18 @@ mod tests {
         let file = netcdf::open(tmp.path()).unwrap();
         let variable = file.variable(var_name).unwrap();
 
-        let inner = Box::new(DefaultVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Int32, true),
+        let inner = Arc::new(DefaultVariableDecoder {
+            arrow_field: Arc::new(Field::new(var_name, DataType::Int32, true)),
             nc_type: NcVariableType::Int(IntType::I32),
             fill_value: None,
         });
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Field::new(
+            arrow_field: Arc::new(Field::new(
                 var_name,
                 DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
                 true,
-            ),
+            )),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Day,
@@ -347,18 +402,18 @@ mod tests {
 
     #[test]
     fn test_cf_time_variable_name() {
-        let inner = Box::new(DefaultVariableDecoder {
-            arrow_field: Field::new("time", DataType::Float64, true),
+        let inner = Arc::new(DefaultVariableDecoder {
+            arrow_field: Arc::new(Field::new("time", DataType::Float64, true)),
             nc_type: NcVariableType::Float(FloatType::F64),
             fill_value: None,
         });
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Field::new(
+            arrow_field: Arc::new(Field::new(
                 "time",
                 DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
                 true,
-            ),
+            )),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Day,

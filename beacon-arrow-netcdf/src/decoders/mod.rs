@@ -15,6 +15,7 @@ pub mod cf_time;
 pub mod strings;
 
 pub trait VariableDecoder: Debug + Send + Sync {
+    fn arrow_field(&self) -> &arrow::datatypes::Field;
     fn read(
         &self,
         variable: &netcdf::Variable,
@@ -62,14 +63,32 @@ pub trait VariableDecoder: Debug + Send + Sync {
 
 #[derive(Debug)]
 pub struct DefaultVariableDecoder {
-    pub arrow_field: arrow::datatypes::Field,
+    pub arrow_field: arrow::datatypes::FieldRef,
     pub nc_type: NcVariableType,
     pub fill_value: Option<arrow::array::ArrayRef>,
+}
+
+impl DefaultVariableDecoder {
+    pub fn new(
+        arrow_field: arrow::datatypes::FieldRef,
+        nc_type: NcVariableType,
+        fill_value: Option<arrow::array::ArrayRef>,
+    ) -> Self {
+        Self {
+            arrow_field,
+            nc_type,
+            fill_value,
+        }
+    }
 }
 
 impl VariableDecoder for DefaultVariableDecoder {
     fn variable_name(&self) -> &str {
         self.arrow_field.name()
+    }
+
+    fn arrow_field(&self) -> &arrow::datatypes::Field {
+        &self.arrow_field
     }
 
     fn read(
@@ -201,7 +220,7 @@ mod tests {
                 let variable = file.variable(var_name).unwrap();
 
                 let decoder = DefaultVariableDecoder {
-                    arrow_field: Field::new(var_name, $arrow_dtype, true),
+                    arrow_field: Arc::new(Field::new(var_name, $arrow_dtype, true)),
                     nc_type: $nc_type,
                     fill_value: None,
                 };
@@ -306,7 +325,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = DefaultVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Float32, true),
+            arrow_field: Arc::new(Field::new(var_name, DataType::Float32, true)),
             nc_type: NcVariableType::Float(FloatType::F32),
             fill_value: None,
         };
@@ -336,7 +355,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = DefaultVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Float64, true),
+            arrow_field: Arc::new(Field::new(var_name, DataType::Float64, true)),
             nc_type: NcVariableType::Float(FloatType::F64),
             fill_value: None,
         };
@@ -369,7 +388,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = DefaultVariableDecoder {
-            arrow_field: Field::new(var_name, DataType::Utf8, true),
+            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
             nc_type: NcVariableType::Char,
             fill_value: None,
         };
@@ -395,7 +414,7 @@ mod tests {
         use arrow::array::{Scalar, UInt8Array};
 
         let decoder = DefaultVariableDecoder {
-            arrow_field: Field::new("x", DataType::UInt8, true),
+            arrow_field: Arc::new(Field::new("x", DataType::UInt8, true)),
             nc_type: NcVariableType::Int(IntType::U8),
             fill_value: None,
         };
@@ -419,7 +438,7 @@ mod tests {
         use arrow::array::{Scalar, UInt8Array};
 
         let decoder = DefaultVariableDecoder {
-            arrow_field: Field::new("x", DataType::UInt8, true),
+            arrow_field: Arc::new(Field::new("x", DataType::UInt8, true)),
             nc_type: NcVariableType::Int(IntType::U8),
             fill_value: None,
         };
@@ -446,7 +465,7 @@ mod tests {
     #[test]
     fn test_variable_name_returns_field_name() {
         let decoder = DefaultVariableDecoder {
-            arrow_field: Field::new("my_variable", DataType::Float64, true),
+            arrow_field: Arc::new(Field::new("my_variable", DataType::Float64, true)),
             nc_type: NcVariableType::Float(FloatType::F64),
             fill_value: None,
         };

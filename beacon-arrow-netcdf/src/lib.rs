@@ -2,20 +2,14 @@ use std::ffi::{CStr, CString};
 
 use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
-pub mod cf_time;
-pub mod chunked_stream;
 pub mod encoders;
-pub mod error;
 pub mod mpio_utils;
-pub mod nc_array;
 pub mod reader;
 pub mod writer;
 pub use netcdf;
 pub use netcdf_sys;
 pub mod backend;
 pub mod decoders;
-
-pub type NcResult<T> = std::result::Result<T, error::ArrowNetCDFError>;
 
 #[repr(transparent)]
 #[derive(Clone)]

@@ -17,6 +17,22 @@ pub struct VariableBackend {
     dimensions: Vec<String>,
 }
 
+impl VariableBackend {
+    pub fn new(
+        decoder: Arc<dyn VariableDecoder>,
+        nc_file: Arc<netcdf::File>,
+        shape: Vec<usize>,
+        dimensions: Vec<String>,
+    ) -> Self {
+        Self {
+            decoder,
+            nc_file,
+            shape,
+            dimensions,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ArrayBackend for VariableBackend {
     fn len(&self) -> usize {
@@ -75,6 +91,15 @@ impl ArrayBackend for VariableBackend {
 pub struct AttributeBackend {
     _field: FieldRef,
     value: Scalar<ArrayRef>,
+}
+
+impl AttributeBackend {
+    pub fn new(field: FieldRef, value: Scalar<ArrayRef>) -> Self {
+        Self {
+            _field: field,
+            value,
+        }
+    }
 }
 
 #[async_trait::async_trait]
