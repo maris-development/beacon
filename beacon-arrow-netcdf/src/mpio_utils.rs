@@ -1,3 +1,5 @@
+use std::io::{Read, Write};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,9 +30,11 @@ pub enum CommandResponse {
         request_id: u32,
         schema: arrow::datatypes::Schema,
     },
-    BatchesStream {
+    ArrowBytes {
         request_id: u32,
         length: usize,
-        has_more: bool,
+    },
+    ArrowStreamEnd {
+        request_id: u32,
     },
 }

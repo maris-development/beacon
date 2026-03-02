@@ -59,6 +59,10 @@ impl NdBatchStreamAdapter {
             pending: vec![None; batch.arrays().len()],
         })
     }
+
+    pub fn schema(&self) -> Arc<arrow::datatypes::Schema> {
+        self.schema.clone()
+    }
 }
 
 impl Stream for NdBatchStreamAdapter {

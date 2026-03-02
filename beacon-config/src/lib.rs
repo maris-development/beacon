@@ -95,6 +95,14 @@ pub struct Config {
     #[envconfig(from = "BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS", default = "0")]
     pub netcdf_mpio_request_timeout_ms: u64,
 
+    /// gRPC address of a running `beacon-arrow-netcdf-mpio` Arrow Flight server.
+    ///
+    /// Used by `beacon_formats::netcdf::source::mpio` for `read_schema`,
+    /// `read_file_as_stream`, and `read_file_as_batch`.
+    /// Example: `http://127.0.0.1:50051`.
+    #[envconfig(from = "BEACON_NETCDF_FLIGHT_ADDR")]
+    pub netcdf_flight_addr: Option<String>,
+
     /// Whether to split streams into 16k row slices for better memory management and parallelism.
     #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
     pub bbf_split_streams_slice: bool,

@@ -328,51 +328,67 @@ impl DefaultFileOpener {
         datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        // Map the file schema into the table schema.
-        // In MPIO mode, schema comes from the worker (and can be cached); otherwise open the local reader.
-        let (reader, file_schema) = if mpio_enabled() {
-            let schema = fetch_schema(datasets_object_store.clone(), object.clone()).await?;
-            (None, schema)
-        } else {
-            let reader = open_reader(datasets_object_store.clone(), object.clone())?;
-            let schema = reader.schema();
-            (Some(reader), schema)
-        };
-        let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+        if mpio_enabled() {
+            // Fetch the file schema from the MPIO server (uses schema cache when enabled).
+            let file_schema = fetch_schema(datasets_object_store.clone(), object.clone()).await?;
+            let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+            let proj = if projection.is_empty() {
+                None
+            } else {
+                Some(projection)
+            };
 
-        // NetCDF reading happens synchronously inside `read_as_batch`.
-        // DataFusion calls the `FileOpenFuture` asynchronously; if we later need
-        // to mitigate blocking, this is the place to `spawn_blocking`.
-        let stream = Box::pin(futures::stream::once(async move {
-            let batch = if mpio_enabled() {
-                mpio::read_file_as_batch(
-                    datasets_object_store.clone(),
-                    object,
-                    Some(projection),
-                    DEFAULT_MPIO_CHUNK_SIZE,
-                    DEFAULT_MPIO_STREAM_SIZE,
-                )
+            // Fetch data as a single concatenated batch from the MPIO server.
+            let batch = mpio::read_file_as_batch(datasets_object_store, object, proj, None)
                 .await
                 .map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "MPIO read_file_as_batch failed: {}",
-                        e
+                        "MPIO read_file_as_batch failed: {e}"
                     ))
-                })?
+                })?;
+            let adapted = schema_mapper.map_batch(batch)?;
+            Ok(Box::pin(futures::stream::once(async move { Ok(adapted) })))
+        } else {
+            // Use the local (cached) NetCDF reader.
+            let reader = open_reader(datasets_object_store, object)?;
+            let file_schema = reader.schema();
+            let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+            let proj = if projection.is_empty() {
+                None
             } else {
-                let reader = reader.expect("reader must be present when MPIO is disabled");
-                reader.read_as_batch(Some(&projection)).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to read NetCDF batch: {}",
-                        e
-                    ))
-                })?
+                Some(projection)
             };
-            let adapted_batch = schema_mapper.map_batch(batch)?;
-            Ok(adapted_batch)
-        })) as BoxStream<'static, datafusion::error::Result<RecordBatch>>;
 
-        Ok(stream)
+            let arrow_stream = reader
+                .read_as_arrow_stream(proj, DEFAULT_MPIO_CHUNK_SIZE)
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to build NetCDF stream: {e}"
+                    ))
+                })?;
+
+            use futures::TryStreamExt as _;
+            let batches: Vec<RecordBatch> = arrow_stream
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to read NetCDF batch: {e}"
+                    ))
+                })
+                .try_collect()
+                .await?;
+
+            if batches.is_empty() {
+                return Ok(Box::pin(futures::stream::empty()));
+            }
+            let schema = batches[0].schema();
+            let batch = arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to concatenate NetCDF batches: {e}"
+                ))
+            })?;
+            let adapted = schema_mapper.map_batch(batch)?;
+            Ok(Box::pin(futures::stream::once(async move { Ok(adapted) })))
+        }
     }
 }
 

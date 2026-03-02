@@ -1,235 +1,222 @@
-use std::collections::HashMap;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::{net::SocketAddr, pin::Pin};
 
-use beacon_arrow_netcdf::mpio_utils::ReadCommand;
+use arrow_flight::{
+    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
+    HandshakeRequest, HandshakeResponse, IpcMessage, PutResult, SchemaAsIpc, SchemaResult, Ticket,
+    encode::FlightDataEncoderBuilder,
+    error::FlightError,
+    flight_service_server::{FlightService, FlightServiceServer},
+};
 use beacon_arrow_netcdf::reader::NetCDFArrowReader;
+use clap::Parser;
+use futures::{Stream, TryStreamExt};
+use tonic::transport::Server;
+use tonic::{Request, Response, Status, Streaming};
 
-fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> io::Result<()> {
-    while !buf.is_empty() {
-        let n = r.read(buf)?;
-        if n == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
+/// Ticket payload for [`FlightService::do_get`].
+///
+/// Serialised as JSON bytes in the Arrow Flight ticket.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DoGetRequest {
+    /// Absolute or relative path to the NetCDF file.
+    path: String,
+    /// Optional zero-based column indices to project.  `None` returns all columns.
+    /// Mutually exclusive with `dimensions`; `dimensions` takes priority if both are set.
+    #[serde(default)]
+    projection: Option<Vec<usize>>,
+    /// Optional NetCDF dimension names to project (e.g. `["N_PROF", "N_LEVELS"]`).
+    /// Selects all variables that have at least one of the listed dimensions.
+    /// Takes priority over `projection` when both are set.
+    #[serde(default)]
+    dimensions: Option<Vec<String>>,
+}
+
+/// Arrow Flight server that streams local Arrow IPC files.
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// Address to listen on.
+    #[arg(long, default_value = "127.0.0.1:50051")]
+    addr: SocketAddr,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    Server::builder()
+        .add_service(FlightServiceServer::new(ReaderService))
+        .serve(args.addr)
+        .await?;
+
+    Ok(())
+}
+
+type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+
+pub struct ReaderService;
+
+#[tonic::async_trait]
+impl FlightService for ReaderService {
+    type HandshakeStream = BoxStream<HandshakeResponse>;
+    type ListFlightsStream = BoxStream<FlightInfo>;
+    type DoGetStream = BoxStream<FlightData>;
+    type DoPutStream = BoxStream<PutResult>;
+    type DoExchangeStream = BoxStream<FlightData>;
+    type DoActionStream = BoxStream<arrow_flight::Result>;
+    type ListActionsStream = BoxStream<ActionType>;
+
+    async fn handshake(
+        &self,
+        _request: Request<Streaming<HandshakeRequest>>,
+    ) -> Result<Response<Self::HandshakeStream>, Status> {
+        Err(Status::unimplemented("handshake not supported"))
+    }
+
+    async fn list_flights(
+        &self,
+        _request: Request<Criteria>,
+    ) -> Result<Response<Self::ListFlightsStream>, Status> {
+        Err(Status::unimplemented("list_flights not supported"))
+    }
+
+    /// Returns a [`FlightInfo`] describing the schema of the NetCDF file at the given path.
+    ///
+    /// The [`FlightDescriptor`] `cmd` field must be a UTF-8 path to a NetCDF file.
+    /// The returned [`FlightInfo`] contains the encoded schema and a [`FlightEndpoint`] whose
+    /// ticket is a JSON-encoded [`DoGetRequest`] (with no projection) that can be passed
+    /// directly to `do_get` to stream all columns.
+    async fn get_flight_info(
+        &self,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+        let descriptor = request.into_inner();
+        let path = String::from_utf8(descriptor.cmd.to_vec())
+            .map_err(|_| Status::invalid_argument("descriptor cmd must be a UTF-8 file path"))?;
+
+        let schema = tokio::task::spawn_blocking(move || {
+            let reader = NetCDFArrowReader::new(&path)
+                .map_err(|e| Status::internal(format!("NetCDF reader error: {e}")))?;
+            Ok::<_, Status>(reader.schema())
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))??;
+
+        // Build a ticket that `do_get` can consume directly.
+        let ticket_bytes = serde_json::to_vec(&DoGetRequest {
+            path: String::from_utf8(descriptor.cmd.to_vec()).unwrap_or_default(),
+            projection: None,
+            dimensions: None,
+        })
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        let info = FlightInfo {
+            flight_descriptor: Some(descriptor.clone()),
+            endpoint: vec![FlightEndpoint {
+                ticket: Some(Ticket {
+                    ticket: ticket_bytes.into(),
+                }),
+                ..Default::default()
+            }],
+            total_records: -1,
+            total_bytes: -1,
+            ..Default::default()
         }
-        buf = &mut buf[n..];
-    }
-    Ok(())
-}
+        .try_with_schema(&schema)
+        .map_err(|e| Status::internal(format!("error building FlightInfo: {e}")))?;
 
-fn read_framed_json<R: Read>(stdin: &mut R) -> io::Result<Option<Vec<u8>>> {
-    let mut len_buf = [0u8; 4];
-    match read_exact(stdin, &mut len_buf) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
+        Ok(Response::new(info))
     }
 
-    let json_len = u32::from_le_bytes(len_buf) as usize;
-    if json_len == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "zero-length frame",
-        ));
+    async fn get_schema(
+        &self,
+        _request: Request<FlightDescriptor>,
+    ) -> Result<Response<SchemaResult>, Status> {
+        Err(Status::unimplemented("get_schema not supported"))
     }
 
-    let mut json_buf = vec![0u8; json_len];
-    read_exact(stdin, &mut json_buf)?;
-    Ok(Some(json_buf))
-}
-
-fn main() -> io::Result<()> {
-    let mut stdin = BufReader::new(io::stdin());
-    let mut stdout = BufWriter::with_capacity(4 * 1024 * 1024, io::stdout());
-    let mut reader_cache: HashMap<String, NetCDFArrowReader> = std::collections::HashMap::new();
-    let mut log_file = std::fs::File::create("mpio.log")?;
-
-    loop {
-        let Some(json_buf) = read_framed_json(&mut stdin)? else {
-            break;
-        };
-
-        let cmd: ReadCommand = match serde_json::from_slice(&json_buf) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("mpio worker: invalid JSON command: {e}");
-                continue;
-            }
-        };
-
-        match &cmd {
-            ReadCommand::ReadArrowSchema { request_id, path } => {
-                writeln!(
-                    log_file,
-                    "mpio worker: received ReadArrowSchema request {} for path {}",
-                    request_id, path
-                )?;
-                let schema = if let Some(reader) = reader_cache.get(path) {
-                    // already cached
-                    reader.schema().clone()
-                } else {
-                    let reader = match NetCDFArrowReader::new(path.as_str()) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            respond_error(
-                                &mut stdout,
-                                *request_id,
-                                format!("Failed to open file: {}", e),
-                            )?;
-                            continue;
-                        }
-                    };
-
-                    let schema = reader.schema();
-                    reader_cache.insert(path.clone(), reader);
-                    schema.clone()
-                };
-
-                let response = beacon_arrow_netcdf::mpio_utils::CommandResponse::ArrowSchema {
-                    request_id: *request_id,
-                    schema: schema.as_ref().clone(),
-                };
-                let response_json = match serde_json::to_vec(&response) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        respond_error(&mut stdout, *request_id, format!("Serialize error: {e}"))?;
-                        continue;
-                    }
-                };
-                let response_len = (response_json.len() as u32).to_le_bytes();
-                stdout.write_all(&response_len)?;
-                stdout.write_all(&response_json)?;
-                stdout.flush()?;
-                writeln!(
-                    log_file,
-                    "mpio worker: sent schema response for request {}",
-                    request_id
-                )?;
-            }
-            ReadCommand::ReadFile {
-                request_id,
-                path,
-                projection,
-                chunk_size: _chunk_size,
-                stream_size: _stream_size,
-            } => {
-                writeln!(
-                    log_file,
-                    "mpio worker: received ReadFile request {} for path {}",
-                    request_id, path
-                )?;
-                let reader = if let Some(reader) = reader_cache.get_mut(path) {
-                    // already cached
-                    reader
-                } else {
-                    let reader = match NetCDFArrowReader::new(path.as_str()) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            respond_error(
-                                &mut stdout,
-                                *request_id,
-                                format!("Failed to open file: {}", e),
-                            )?;
-                            continue;
-                        }
-                    };
-
-                    reader_cache.insert(path.clone(), reader);
-                    reader_cache.get_mut(path).unwrap()
-                };
-
-                let batch = match reader.read_as_batch(projection.clone()) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        respond_error(
-                            &mut stdout,
-                            *request_id,
-                            format!("Failed to read data: {}", e),
-                        )?;
-                        continue;
-                    }
-                };
-
-                // Serialize the batch and send it back
-                let buffer = Vec::new();
-                let mut arrow_stream_writer =
-                    match arrow::ipc::writer::StreamWriter::try_new(buffer, &batch.schema()) {
-                        Ok(w) => w,
-                        Err(e) => {
-                            respond_error(
-                                &mut stdout,
-                                *request_id,
-                                format!("IPC writer init error: {e}"),
-                            )?;
-                            continue;
-                        }
-                    };
-
-                if let Err(e) = arrow_stream_writer.write(&batch) {
-                    respond_error(&mut stdout, *request_id, format!("IPC write error: {e}"))?;
-                    continue;
-                }
-                if let Err(e) = arrow_stream_writer.finish() {
-                    respond_error(&mut stdout, *request_id, format!("IPC finish error: {e}"))?;
-                    continue;
-                }
-                let buffer = match arrow_stream_writer.into_inner() {
-                    Ok(b) => b,
-                    Err(e) => {
-                        respond_error(
-                            &mut stdout,
-                            *request_id,
-                            format!("IPC finalize error: {e}"),
-                        )?;
-                        continue;
-                    }
-                };
-
-                let response = beacon_arrow_netcdf::mpio_utils::CommandResponse::BatchesStream {
-                    request_id: *request_id,
-                    length: buffer.len(),
-                    has_more: false,
-                };
-                let response_json = match serde_json::to_vec(&response) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        respond_error(&mut stdout, *request_id, format!("Serialize error: {e}"))?;
-                        continue;
-                    }
-                };
-                let header_response_len = (response_json.len() as u32).to_le_bytes();
-                stdout.write_all(&header_response_len)?;
-                stdout.write_all(&response_json)?;
-                stdout.write_all(&buffer)?;
-                stdout.flush()?;
-                writeln!(
-                    log_file,
-                    "mpio worker: sent {} bytes for request {}",
-                    buffer.len(),
-                    request_id
-                )?;
-            }
-            ReadCommand::Exit => {
-                writeln!(log_file, "mpio worker: exiting as requested")?;
-                break;
-            }
-        }
+    async fn poll_flight_info(
+        &self,
+        _request: Request<FlightDescriptor>,
+    ) -> Result<Response<arrow_flight::PollInfo>, Status> {
+        Err(Status::unimplemented("poll_flight_info not supported"))
     }
-    writeln!(log_file, "mpio worker: shutting down")?;
-    Ok(())
-}
 
-fn respond_error(
-    stdout: &mut BufWriter<io::Stdout>,
-    request_id: u32,
-    message: String,
-) -> io::Result<()> {
-    let response = beacon_arrow_netcdf::mpio_utils::CommandResponse::Error {
-        request_id,
-        message,
-    };
-    let response_json = serde_json::to_vec(&response).unwrap();
-    let response_len = (response_json.len() as u32).to_le_bytes();
-    stdout.write_all(&response_len)?;
-    stdout.write_all(&response_json)?;
-    stdout.flush()?;
-    Ok(())
+    /// Streams a NetCDF file as Arrow record batches.
+    ///
+    /// The ticket payload must be a JSON-encoded [`DoGetRequest`]:
+    /// ```json
+    /// {"path": "/data/file.nc"}
+    /// {"path": "/data/file.nc", "projection": [0, 2, 5]}
+    /// {"path": "/data/file.nc", "dimensions": ["N_PROF", "N_LEVELS"]}
+    /// ```
+    /// `projection` selects columns by zero-based index; `dimensions` selects all variables
+    /// that have at least one of the named NetCDF dimensions (e.g. `"N_PROF"`, `"N_LEVELS"`).
+    /// `dimensions` takes priority when both are supplied.
+    /// Omit both to stream all columns.  Each batch contains at most 65 536 rows.
+    async fn do_get(
+        &self,
+        request: Request<Ticket>,
+    ) -> Result<Response<Self::DoGetStream>, Status> {
+        let req: DoGetRequest =
+            serde_json::from_slice(&request.into_inner().ticket).map_err(|e| {
+                Status::invalid_argument(format!("ticket must be JSON DoGetRequest: {e}"))
+            })?;
+
+        let (schema, batch_stream) = tokio::task::spawn_blocking(move || {
+            let reader = NetCDFArrowReader::new(&req.path)
+                .map_err(|e| Status::not_found(format!("cannot open NetCDF file: {e}")))?;
+            // Dimension projection takes priority over column-index projection.
+            let stream = if let Some(dims) = req.dimensions {
+                reader
+                    .project_with_dimensions(&dims)
+                    .map_err(|e| Status::internal(format!("dimension projection error: {e}")))?
+                    .read_as_arrow_stream::<&[usize]>(None, 65_536)
+                    .map_err(|e| Status::internal(format!("stream error: {e}")))?
+            } else {
+                reader
+                    .read_as_arrow_stream(req.projection.as_deref(), 65_536)
+                    .map_err(|e| Status::internal(format!("stream error: {e}")))?
+            };
+            let schema = stream.schema();
+            Ok::<_, Status>((schema, stream))
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))??;
+
+        let flight_stream = FlightDataEncoderBuilder::new()
+            .with_schema(schema)
+            .build(batch_stream.map_err(|e| FlightError::ExternalError(e.into())))
+            .map_err(|e| Status::internal(e.to_string()));
+
+        Ok(Response::new(Box::pin(flight_stream)))
+    }
+
+    async fn do_put(
+        &self,
+        _request: Request<Streaming<FlightData>>,
+    ) -> Result<Response<Self::DoPutStream>, Status> {
+        Err(Status::unimplemented("do_put not supported"))
+    }
+
+    async fn do_exchange(
+        &self,
+        _request: Request<Streaming<FlightData>>,
+    ) -> Result<Response<Self::DoExchangeStream>, Status> {
+        Err(Status::unimplemented("do_exchange not supported"))
+    }
+
+    async fn do_action(
+        &self,
+        _request: Request<Action>,
+    ) -> Result<Response<Self::DoActionStream>, Status> {
+        Err(Status::unimplemented("do_action not supported"))
+    }
+
+    async fn list_actions(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<Self::ListActionsStream>, Status> {
+        Err(Status::unimplemented("list_actions not supported"))
+    }
 }

@@ -7,6 +7,7 @@ edition = "2021"
 netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["ndarray"], version = "0.11.1"}
 netcdf-sys = { git ="https://github.com/robinskil/netcdf.git", package = "netcdf-sys" }
 arrow = { workspace = true }
+
 arrow-schema = { workspace = true }
 anyhow = { workspace=true }
 tempfile = { workspace=true}
@@ -20,5 +21,6 @@ regex = "1.11.1"
 num-traits = "0.2.19"
 tracing = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 beacon-nd-arrow = {path = "../beacon-nd-arrow"}

@@ -9,6 +9,13 @@ tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 arrow = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+arrow-flight = { workspace = true }
+
+tonic = "0.13"
+clap = { version = "4", features = ["derive"] }
 
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 
