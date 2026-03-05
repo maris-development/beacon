@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, pin::Pin};
+use std::{net::SocketAddr, num::NonZeroUsize, pin::Pin, sync::Mutex};
 
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
@@ -9,7 +9,10 @@ use arrow_flight::{
 };
 use beacon_arrow_netcdf::reader::NetCDFArrowReader;
 use clap::Parser;
+use futures::future;
 use futures::{Stream, TryStreamExt};
+use lru::LruCache;
+use std::sync::Arc;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -35,26 +38,70 @@ struct DoGetRequest {
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// Address to listen on.
+    /// Base address to listen on.  When `--num-servers` > 1 additional listeners are bound
+    /// on consecutive ports (base+1, base+2, …).  All share the same LRU reader cache.
     #[arg(long, default_value = "127.0.0.1:50051")]
     addr: SocketAddr,
+    /// Maximum number of open [`NetCDFArrowReader`] instances to keep in the LRU cache.
+    #[arg(long, default_value_t = 64)]
+    cache_capacity: usize,
+    /// Number of Arrow Flight listeners to spawn on consecutive ports.
+    #[arg(long, default_value_t = 1)]
+    num_servers: usize,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let n = args.num_servers.max(1);
 
-    Server::builder()
-        .add_service(FlightServiceServer::new(ReaderService))
-        .serve(args.addr)
-        .await?;
+    // All listeners share a single ReaderService (and therefore a single LRU cache).
+    let service = ReaderService::new(args.cache_capacity);
 
+    let servers = (0..n).map(|i| {
+        let mut addr = args.addr;
+        addr.set_port(args.addr.port() + i as u16);
+        let svc = service.clone();
+        async move {
+            Server::builder()
+                .add_service(FlightServiceServer::new(svc))
+                .serve(addr)
+                .await
+        }
+    });
+
+    future::try_join_all(servers).await?;
     Ok(())
 }
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 
-pub struct ReaderService;
+#[derive(Clone)]
+pub struct ReaderService {
+    cache: Arc<Mutex<LruCache<String, Arc<NetCDFArrowReader>>>>,
+}
+
+impl ReaderService {
+    fn new(capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity.max(1)).expect("capacity >= 1");
+        Self {
+            cache: Arc::new(Mutex::new(LruCache::new(cap))),
+        }
+    }
+
+    /// Returns a cached reader for `path`, opening it on first access.
+    fn get_or_open(&self, path: &str) -> Result<Arc<NetCDFArrowReader>, Status> {
+        let mut cache = self.cache.lock().expect("cache lock poisoned");
+        if let Some(reader) = cache.get(path) {
+            return Ok(Arc::clone(reader));
+        }
+        let reader = NetCDFArrowReader::new(path)
+            .map_err(|e| Status::not_found(format!("cannot open NetCDF file: {e}")))?;
+        let reader = Arc::new(reader);
+        cache.put(path.to_owned(), Arc::clone(&reader));
+        Ok(reader)
+    }
+}
 
 #[tonic::async_trait]
 impl FlightService for ReaderService {
@@ -94,13 +141,10 @@ impl FlightService for ReaderService {
         let path = String::from_utf8(descriptor.cmd.to_vec())
             .map_err(|_| Status::invalid_argument("descriptor cmd must be a UTF-8 file path"))?;
 
-        let schema = tokio::task::spawn_blocking(move || {
-            let reader = NetCDFArrowReader::new(&path)
-                .map_err(|e| Status::internal(format!("NetCDF reader error: {e}")))?;
-            Ok::<_, Status>(reader.schema())
-        })
-        .await
-        .map_err(|e| Status::internal(e.to_string()))??;
+        let reader = self.get_or_open(&path)?;
+        let schema = tokio::task::spawn_blocking(move || Ok::<_, Status>(reader.schema()))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))??;
 
         // Build a ticket that `do_get` can consume directly.
         let ticket_bytes = serde_json::to_vec(&DoGetRequest {
@@ -163,9 +207,8 @@ impl FlightService for ReaderService {
                 Status::invalid_argument(format!("ticket must be JSON DoGetRequest: {e}"))
             })?;
 
+        let reader = self.get_or_open(&req.path)?;
         let (schema, batch_stream) = tokio::task::spawn_blocking(move || {
-            let reader = NetCDFArrowReader::new(&req.path)
-                .map_err(|e| Status::not_found(format!("cannot open NetCDF file: {e}")))?;
             // Dimension projection takes priority over column-index projection.
             let stream = if let Some(dims) = req.dimensions {
                 reader

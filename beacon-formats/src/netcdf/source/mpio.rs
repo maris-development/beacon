@@ -1,20 +1,22 @@
-﻿//! NetCDF reader client backed by an Arrow Flight gRPC server.
+﻿//! NetCDF reader client backed by a pool of Arrow Flight gRPC servers.
 //!
-//! This module connects to a running `beacon-arrow-netcdf-mpio` Arrow Flight server
-//! and fetches schemas and record-batch streams over gRPC.  The server address is
-//! read from `beacon_config::CONFIG.netcdf_flight_addr` (env var
-//! `BEACON_NETCDF_FLIGHT_ADDR`, e.g. `http://127.0.0.1:50051`).
+//! This module connects to one or more running `beacon-arrow-netcdf-mpio` Arrow Flight
+//! server processes and fetches schemas and record-batch streams over gRPC.
 //!
-//! **Architecture**
+//! **Configuration**
 //!
+//! * `BEACON_NETCDF_FLIGHT_ADDR` (e.g. `http://127.0.0.1:50051`) — base address of
+//!   the first server.  Additional servers are expected on consecutive ports
+//!   (`50051`, `50052`, …).
+//! * `BEACON_NETCDF_MULTIPLEXER_PROCESSES` — number of Flight servers in the pool
+//!   (default `1`).
 //!
-//! **Connection caching**
+//! **Server pool / first-available routing**
 //!
-//! The underlying `tonic::transport::Channel` is created once (lazily on the first
-//! call) and reused for all subsequent requests.  `Channel` already implements an
-//! internal connection pool, so this is safe and efficient.
-//! Each public function creates a thin `FlightClient` wrapper around a cheap
-//! `.clone()` of the cached channel.
+//! The pool holds one `tonic::transport::Channel` per server.  Before issuing a
+//! request a channel is *checked out* from the pool.  If all channels are currently
+//! in use the caller waits until one is returned.  The channel is returned
+//! automatically when the response (or stream) is fully consumed or dropped.
 
 use std::sync::Arc;
 
@@ -65,11 +67,66 @@ struct FlightDoGetRequest {
     dimensions: Option<Vec<String>>,
 }
 
-/// Process-wide cached `tonic` channel.  Initialised on the first call; cloned cheaply
-/// afterwards (the channel is a connection-pool internally).
-static FLIGHT_CHANNEL: OnceCell<tonic::transport::Channel> = OnceCell::const_new();
+// ── server pool ─────────────────────────────────────────────────────────────
 
-/// Returns the configured server address or `MpioError::NoServerAddress`.
+/// A pool of [`tonic::transport::Channel`]s, one per spawned Flight server.
+///
+/// Channels are *checked out* for the duration of a request and returned
+/// afterwards.  When all channels are in use callers wait until one is free.
+struct FlightPool {
+    tx: tokio::sync::mpsc::Sender<tonic::transport::Channel>,
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<tonic::transport::Channel>>,
+}
+
+impl FlightPool {
+    fn new(channels: Vec<tonic::transport::Channel>) -> Self {
+        let n = channels.len();
+        let (tx, rx) = tokio::sync::mpsc::channel(n);
+        for ch in channels {
+            tx.try_send(ch).expect("fresh channel fits in pool");
+        }
+        Self {
+            tx,
+            rx: tokio::sync::Mutex::new(rx),
+        }
+    }
+
+    /// Waits until a channel is available and returns it.
+    async fn checkout(&self) -> Result<tonic::transport::Channel, MpioError> {
+        self.rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or(MpioError::NoServerAddress)
+    }
+
+    /// Returns a channel to the pool.
+    fn checkin(&self, ch: tonic::transport::Channel) {
+        // `try_send` never blocks; capacity == number of channels that exist.
+        let _ = self.tx.try_send(ch);
+    }
+}
+
+/// RAII guard that returns a channel to the global pool on drop.
+struct PoolGuard {
+    channel: Option<tonic::transport::Channel>,
+}
+
+impl Drop for PoolGuard {
+    fn drop(&mut self) {
+        if let Some(ch) = self.channel.take() {
+            if let Some(pool) = FLIGHT_POOL.get() {
+                pool.checkin(ch);
+            }
+        }
+    }
+}
+
+/// Process-wide pool, initialised lazily on the first request.
+static FLIGHT_POOL: OnceCell<FlightPool> = OnceCell::const_new();
+
+/// Returns the configured base server address or [`MpioError::NoServerAddress`].
 fn flight_addr() -> Result<String, MpioError> {
     CONFIG
         .netcdf_flight_addr
@@ -77,21 +134,40 @@ fn flight_addr() -> Result<String, MpioError> {
         .ok_or(MpioError::NoServerAddress)
 }
 
-/// Returns a `FlightClient` backed by the (lazily initialised, cached) channel.
-async fn flight_client() -> Result<arrow_flight::FlightClient, MpioError> {
-    let addr = flight_addr()?;
-    let channel = FLIGHT_CHANNEL
+/// Derives `n` server URL strings from a base URL by incrementing the port.
+///
+/// `base` must be of the form `scheme://host:port` (e.g. `http://127.0.0.1:50051`).
+fn derive_addrs(base: &str, n: usize) -> Result<Vec<String>, MpioError> {
+    let (prefix, port_str) = base.rsplit_once(':').ok_or(MpioError::NoServerAddress)?;
+    let base_port: u16 = port_str
+        .trim_end_matches('/')
+        .parse()
+        .map_err(|_| MpioError::NoServerAddress)?;
+    Ok((0..n)
+        .map(|i| format!("{}:{}", prefix, base_port + i as u16))
+        .collect())
+}
+
+/// Returns the (lazily initialised) global [`FlightPool`].
+async fn flight_pool() -> Result<&'static FlightPool, MpioError> {
+    FLIGHT_POOL
         .get_or_try_init(|| async {
-            tracing::debug!(%addr, "connecting to Arrow Flight server");
-            tonic::transport::Endpoint::new(addr)
-                .map_err(MpioError::Transport)?
-                .connect()
-                .await
-                .map_err(MpioError::Transport)
+            let base = flight_addr()?;
+            let n = CONFIG.netcdf_multiplexer_processes.unwrap_or(1).max(1);
+            let addrs = derive_addrs(&base, n)?;
+            let mut channels = Vec::with_capacity(n);
+            for addr in &addrs {
+                tracing::debug!(%addr, "connecting to Arrow Flight server");
+                let ch = tonic::transport::Endpoint::new(addr.clone())
+                    .map_err(MpioError::Transport)?
+                    .connect()
+                    .await
+                    .map_err(MpioError::Transport)?;
+                channels.push(ch);
+            }
+            Ok(FlightPool::new(channels))
         })
-        .await?
-        .clone();
-    Ok(arrow_flight::FlightClient::new(channel))
+        .await
 }
 
 /// Decode an Arrow [`Schema`] from the raw IPC bytes stored in [`FlightInfo::schema`].
@@ -103,6 +179,8 @@ fn decode_flight_schema(bytes: Vec<u8>) -> Result<SchemaRef, arrow::error::Arrow
 /// Fetch the Arrow schema for a NetCDF file via the configured Arrow Flight server.
 ///
 /// Calls `GetFlightInfo` with `descriptor.cmd = <local filesystem path bytes>`.
+///
+/// Checks out a server channel from the pool and returns it when the call completes.
 pub async fn read_schema(
     datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
@@ -111,7 +189,14 @@ pub async fn read_schema(
         .translate_netcdf_url_path(&object.location)
         .map_err(MpioError::UrlTranslation)?;
 
-    let mut client = flight_client().await?;
+    let pool = flight_pool().await?;
+    let channel = pool.checkout().await?;
+    let mut client = arrow_flight::FlightClient::new(channel.clone());
+    // Guard returns the channel to the pool when this scope exits.
+    let _guard = PoolGuard {
+        channel: Some(channel),
+    };
+
     let descriptor = arrow_flight::FlightDescriptor::new_cmd(path.into_bytes());
     let info = client.get_flight_info(descriptor).await?;
     let schema = decode_flight_schema(info.schema.to_vec())?;
@@ -122,10 +207,18 @@ pub async fn read_schema(
 ///
 /// Calls `DoGet` with a JSON-encoded [`FlightDoGetRequest`] ticket and returns the
 /// resulting async stream of [`RecordBatch`]es.
+
+/// Stream a NetCDF file as Arrow [`RecordBatch`]es via the configured Arrow Flight server.
+///
+/// Calls `DoGet` with a JSON-encoded [`FlightDoGetRequest`] ticket and returns the
+/// resulting async stream of [`RecordBatch`]es.
+///
+/// A server channel is checked out from the pool for the lifetime of the returned stream;
+/// it is returned to the pool automatically when the stream is exhausted or dropped.
 ///
 /// # Arguments
-/// * `projection` â€“ optional column indices (zero-based); ignored when `dimensions` is set
-/// * `dimensions` â€“ optional NetCDF dimension names; takes priority over `projection`
+/// * `projection` — optional column indices (zero-based); ignored when `dimensions` is set
+/// * `dimensions` — optional NetCDF dimension names; takes priority over `projection`
 pub async fn read_file_as_stream(
     datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
@@ -148,8 +241,20 @@ pub async fn read_file_as_stream(
         ticket: ticket_bytes.into(),
     };
 
-    let mut client = flight_client().await?;
-    let stream = client.do_get(ticket).await?;
+    let pool = flight_pool().await?;
+    let channel = pool.checkout().await?;
+    let mut client = arrow_flight::FlightClient::new(channel.clone());
+    let inner = client.do_get(ticket).await?;
+    let guard = PoolGuard {
+        channel: Some(channel),
+    };
+
+    // Wrap the inner stream so the channel is returned to the pool when the
+    // stream is fully consumed or dropped by the caller.
+    let stream = futures::stream::unfold((inner, guard), |(mut s, g)| async move {
+        use futures::StreamExt as _;
+        s.next().await.map(|item| (item, (s, g)))
+    });
     Ok(stream)
 }
 
@@ -426,11 +531,18 @@ mod tests {
         let lon_index = schema.column_with_name("lon").unwrap().0;
         let lat_index = schema.column_with_name("lat").unwrap().0;
         let time_index = schema.column_with_name("time").unwrap().0;
+        let time_calendar_index = schema.column_with_name("time.calendar").unwrap().0;
         let analysed_sst_index = schema.column_with_name("analysed_sst").unwrap().0;
 
         let ticket_bytes = serde_json::to_vec(&FlightDoGetRequest {
             path: nc_path.to_string_lossy().into_owned(),
-            projection: Some(vec![lon_index, lat_index, time_index, analysed_sst_index]),
+            projection: Some(vec![
+                lon_index,
+                lat_index,
+                analysed_sst_index,
+                time_index,
+                time_calendar_index,
+            ]),
             dimensions: None,
         })
         .unwrap();
@@ -440,14 +552,19 @@ mod tests {
             })
             .await
             .unwrap();
+
+        let mut total_rows = 0;
         while let Some(batch) = stream.try_next().await.unwrap() {
-            println!("got batch with {} columns", batch.num_columns());
-            println!("Rows: {}", batch.num_rows());
-            println!("Batch: {:?}", batch);
-            break;
+            assert_eq!(batch.num_columns(), 5, "batch must have all 5 columns");
+            assert!(batch.num_rows() > 0, "batch must have rows");
+            total_rows += batch.num_rows();
         }
-        // assert!(!batches.is_empty());
-        // assert!(batches[0].num_columns() > 0);
+
+        assert_eq!(
+            total_rows,
+            1208 * 1920,
+            "total rows must match expected size of the test NetCDF file"
+        );
     }
 
     /// `DoGet` with a two-element projection must return exactly two columns.
