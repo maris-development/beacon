@@ -103,6 +103,10 @@ pub struct Config {
     #[envconfig(from = "BEACON_NETCDF_FLIGHT_ADDR")]
     pub netcdf_flight_addr: Option<String>,
 
+    /// The batch size for NetCDF reads, in number of rows. This is used for both local and MPIO reads.
+    #[envconfig(from = "BEACON_NETCDF_BATCH_SIZE", default = "128000")]
+    pub netcdf_batch_size: usize,
+
     /// Whether to split streams into 16k row slices for better memory management and parallelism.
     #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
     pub bbf_split_streams_slice: bool,

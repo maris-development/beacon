@@ -27,9 +27,9 @@ pub trait VariableDecoder: Debug + Send + Sync {
         array: ArrayRef,
         fill_scalar: Scalar<ArrayRef>,
     ) -> anyhow::Result<arrow::array::ArrayRef> {
-        let mask = arrow::compute::kernels::cmp::eq(
+        let mask = arrow::compute::kernels::cmp::neq(
             &array.as_ref() as &dyn Datum,
-            &fill_scalar.into_inner().as_ref() as &dyn Datum,
+            &fill_scalar as &dyn Datum,
         );
 
         match mask {

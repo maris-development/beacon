@@ -197,6 +197,14 @@ impl<B: ArrayBackend> NdArrowArray<B> {
         let shape = self.shape.clone();
         let strides = self.strides.clone();
 
+        // Get the stripped shape which is the shape of the underlying data without the virtual dimensions
+        let base_shape: Vec<usize> = self
+            .shape
+            .iter()
+            .zip(self.strides.iter())
+            .filter_map(|(&dim, &stride)| if stride != 0 { Some(dim) } else { None })
+            .collect();
+
         let stream = stream::unfold(0usize, move |position| {
             let backend = Arc::clone(&backend);
             let shape = shape.clone();
@@ -213,10 +221,14 @@ impl<B: ArrayBackend> NdArrowArray<B> {
                 let chunk_result = if is_contiguous {
                     backend.slice(position, current_chunk_len).await
                 } else {
-                    let indices =
-                        Self::chunk_source_indices(&shape, &strides, position, current_chunk_len);
-                    let ranges = Self::coalesce_linear_indices_to_ranges(&indices);
-                    Self::materialize_backend_ranges_from_backend(&backend, &ranges).await
+                    // translate the position which uses the virtual shape to the corresponding indices in the base shape
+                    let base_position: usize = todo!();
+                    // translate the current_chunk_len which uses the virtual shape to the corresponding length in the base shape. But it should always align to the size of a dimensions which is big enough to cover the chunk size, otherwise we will have to deal with the case where a chunk is split into multiple reads which is more complex to implement.
+                    let base_chunk_len: usize = todo!();
+
+                    //
+
+                    todo!()
                 };
 
                 Some((chunk_result, next_position))
@@ -224,6 +236,26 @@ impl<B: ArrayBackend> NdArrowArray<B> {
         });
 
         Ok(stream.boxed())
+    }
+
+    fn base_shape_position(position: usize, shape: &[usize], strides: &[isize]) -> Vec<usize> {
+        if shape.is_empty() {
+            return Vec::new();
+        }
+
+        let mut remaining = position;
+        let mut coords = Vec::with_capacity(shape.len());
+
+        for (axis, dim) in shape.iter().enumerate() {
+            let stride = strides[axis] as usize;
+            let coord = if stride == 0 { 0 } else { remaining / stride };
+            coords.push(coord % *dim);
+            if stride != 0 {
+                remaining %= stride;
+            }
+        }
+
+        coords
     }
 
     /// Create a virtual broadcasted view with named-dimension alignment.
@@ -538,18 +570,50 @@ impl<B: ArrayBackend> NdArrowArray<B> {
         ranges
     }
 
-    fn chunk_source_indices(
+    fn chunk_source_index_runs(
         shape: &[usize],
         strides: &[isize],
         start: usize,
         len: usize,
-    ) -> Vec<usize> {
+    ) -> Vec<(usize, usize)> {
         let logical_strides = Self::logical_row_major_strides(shape);
-        (start..start + len)
-            .map(|position| {
-                Self::logical_position_to_source_index(position, shape, &logical_strides, strides)
-            })
-            .collect()
+        let mut runs = Vec::new();
+
+        for position in start..start + len {
+            let index =
+                Self::logical_position_to_source_index(position, shape, &logical_strides, strides);
+            match runs.last_mut() {
+                Some((last_index, run_len)) if *last_index == index => {
+                    *run_len += 1;
+                }
+                _ => runs.push((index, 1)),
+            }
+        }
+
+        runs
+    }
+
+    fn coalesce_sorted_indices_to_ranges(sorted_indices: &[usize]) -> Vec<(usize, usize)> {
+        if sorted_indices.is_empty() {
+            return vec![(0, 0)];
+        }
+
+        let mut ranges = Vec::new();
+        let mut current_start = sorted_indices[0];
+        let mut current_len = 1usize;
+
+        for index in sorted_indices.iter().skip(1) {
+            if *index == current_start + current_len {
+                current_len += 1;
+            } else {
+                ranges.push((current_start, current_len));
+                current_start = *index;
+                current_len = 1;
+            }
+        }
+        ranges.push((current_start, current_len));
+
+        ranges
     }
 
     fn logical_row_major_strides(shape: &[usize]) -> Vec<usize> {
@@ -618,6 +682,47 @@ impl<B: ArrayBackend> NdArrowArray<B> {
             let chunk_refs: Vec<&dyn Array> = chunks.iter().map(|c| c.as_ref()).collect();
             Ok(concat(&chunk_refs)?)
         }
+    }
+
+    async fn materialize_backend_index_runs_from_backend(
+        backend: &Arc<B>,
+        index_runs: &[(usize, usize)],
+    ) -> anyhow::Result<ArrayRef> {
+        if index_runs.is_empty() {
+            return backend.slice(0, 0).await;
+        }
+
+        let mut unique_indices = index_runs.iter().map(|(idx, _)| *idx).collect::<Vec<_>>();
+        unique_indices.sort_unstable();
+        unique_indices.dedup();
+
+        let ranges = Self::coalesce_sorted_indices_to_ranges(&unique_indices);
+        let unique_values = Self::materialize_backend_ranges_from_backend(backend, &ranges).await?;
+        // println!(
+        //     "Ranges for unique indices: {:?}, unique indices: {:?}",
+        //     ranges, unique_indices
+        // );
+        let mut index_to_take_position = HashMap::with_capacity(unique_indices.len());
+        let mut offset = 0usize;
+        for (start, len) in &ranges {
+            for delta in 0..*len {
+                index_to_take_position.insert(start + delta, offset + delta);
+            }
+            offset += len;
+        }
+
+        let mut take_indices = Vec::new();
+        for (index, run_len) in index_runs {
+            let take_position = *index_to_take_position.get(index).ok_or_else(|| {
+                anyhow::anyhow!("missing coalesced index for source index {}", index)
+            })? as u64;
+            take_indices.extend(std::iter::repeat_n(take_position, *run_len));
+        }
+        Ok(take(
+            unique_values.as_ref(),
+            &UInt64Array::from(take_indices),
+            None,
+        )?)
     }
 }
 
@@ -1103,5 +1208,56 @@ mod tests {
         assert_eq!(c3.values(), &[2, 2, 3, 3]);
 
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_chunked_strided_coalesces_repeated_indices() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let values: ArrayRef = Arc::new(Int32Array::from(vec![10, 20, 30]));
+        let backend =
+            RecordingBackend::new(values, vec![3], vec!["lon".to_string()], calls.clone());
+
+        let array = NdArrowArray::new(backend, DataType::Int32).unwrap();
+
+        let broadcasted = array
+            .broadcast(
+                &[2, 3, 4],
+                &["lat".to_string(), "lon".to_string(), "time".to_string()],
+            )
+            .unwrap();
+
+        let mut stream = broadcasted.read_chunked(24).unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        let first = first.as_any().downcast_ref::<Int32Array>().unwrap();
+
+        let mut expected = Vec::with_capacity(24);
+        for _lat in 0..2 {
+            for lon in [10, 20, 30] {
+                for _time in 0..4 {
+                    expected.push(lon);
+                }
+            }
+        }
+
+        assert_eq!(first.values(), expected.as_slice());
+        assert!(stream.next().await.is_none());
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn test_base_position_translation() {
+        let shape = vec![2, 3, 4, 6];
+        let strides = vec![12, 4, 1, 0];
+        let base_position = 13;
+
+        let translated = NdArrowArray::<InMemoryArrayBackend>::base_shape_position(
+            base_position,
+            &shape,
+            &strides,
+        );
+
+        println!("Translated position: {:?}", translated);
     }
 }

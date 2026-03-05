@@ -24,6 +24,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use beacon_config::CONFIG;
 use beacon_object_storage::DatasetsStore;
+use futures::StreamExt;
+use futures::stream::BoxStream;
 use object_store::ObjectMeta;
 use tokio::sync::OnceCell;
 
@@ -266,28 +268,19 @@ pub async fn read_file_as_stream(
 /// # Arguments
 /// * `projection` optional column indices (zero-based); ignored when `dimensions` is set
 /// * `dimensions` optional NetCDF dimension names; takes priority over `projection`
-pub async fn read_file_as_batch(
+pub async fn read_file_as_batch_stream(
     datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
     projection: Option<Vec<usize>>,
     dimensions: Option<Vec<String>>,
-) -> Result<RecordBatch, MpioError> {
+) -> Result<BoxStream<'static, Result<RecordBatch, MpioError>>, MpioError> {
     use futures::TryStreamExt as _;
 
     let stream = read_file_as_stream(datasets_object_store, object, projection, dimensions).await?;
 
-    let batches: Vec<RecordBatch> = stream
-        .try_collect()
-        .await
-        .map_err(MpioError::FlightInternal)?;
+    let maybe_stream = stream.map_err(MpioError::FlightInternal);
 
-    if batches.is_empty() {
-        return Err(MpioError::EmptyResult);
-    }
-
-    let schema = batches[0].schema();
-    let batch = arrow::compute::concat_batches(&schema, &batches)?;
-    Ok(batch)
+    Ok(maybe_stream.boxed())
 }
 
 #[cfg(test)]

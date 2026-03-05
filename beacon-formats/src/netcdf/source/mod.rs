@@ -17,12 +17,8 @@ use datafusion::{
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
 use futures::{FutureExt, stream::BoxStream};
+use futures::{StreamExt, TryStreamExt as _};
 use object_store::ObjectMeta;
-
-use crate::netcdf::object_resolver::NetCDFObjectResolver;
-
-const DEFAULT_MPIO_CHUNK_SIZE: usize = 128 * 1024;
-const DEFAULT_MPIO_STREAM_SIZE: usize = 4 * 1024 * 1024;
 
 fn mpio_enabled() -> bool {
     beacon_config::CONFIG.enable_multiplexer_netcdf
@@ -116,6 +112,17 @@ impl FileSource for NetCDFFileSource {
         })
     }
 
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        repartition_file_min_size: usize,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &datafusion::datasource::physical_plan::FileScanConfig,
+    ) -> datafusion::error::Result<Option<datafusion::datasource::physical_plan::FileScanConfig>>
+    {
+        Ok(None)
+    }
+
     fn with_projection(
         &self,
         config: &datafusion::datasource::physical_plan::FileScanConfig,
@@ -147,6 +154,23 @@ impl FileSource for NetCDFFileSource {
             ))
         }
     }
+
+    // fn repartitioned(
+    //     &self,
+    //     target_partitions: usize,
+    //     repartition_file_min_size: usize,
+    //     output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+    //     config: &datafusion::datasource::physical_plan::FileScanConfig,
+    // ) -> datafusion::error::Result<Option<datafusion::datasource::physical_plan::FileScanConfig>>
+    // {
+    //     // Repartitioning is not currently supported for NetCDF files.
+    //     let _ = (
+    //         target_partitions,
+    //         repartition_file_min_size,
+    //         output_ordering,
+    //         config,
+    //     );
+    // }
 
     fn file_type(&self) -> &str {
         "netcdf"
@@ -327,15 +351,42 @@ impl DefaultFileOpener {
             };
 
             // Fetch data as a single concatenated batch from the MPIO server.
-            let batch = mpio::read_file_as_batch(datasets_object_store, object, proj, None)
-                .await
-                .map_err(|e| {
+            let flight_stream =
+                mpio::read_file_as_batch_stream(datasets_object_store, object, proj, None)
+                    .await
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "MPIO read_file_as_batch failed: {e}"
+                        ))
+                    })?;
+
+            let maybe_stream = flight_stream
+                .map_err(|err| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "MPIO read_file_as_batch failed: {e}"
+                        "Error reading NetCDF file as Arrow stream: {err}"
                     ))
-                })?;
-            let adapted = schema_mapper.map_batch(batch)?;
-            Ok(Box::pin(futures::stream::once(async move { Ok(adapted) })))
+                })
+                .and_then(move |batch| {
+                    let adapted_res = schema_mapper.map_batch(batch).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to map NetCDF batch schema: {e}"
+                        ))
+                    });
+                    match adapted_res {
+                        Ok(adapted) => {
+                            println!(
+                                "Emitting batch with {} rows and {} columns",
+                                adapted.num_rows(),
+                                adapted.num_columns()
+                            );
+                            futures::future::ok(adapted)
+                        }
+                        Err(e) => futures::future::err(e),
+                    }
+                })
+                .boxed();
+
+            Ok(maybe_stream)
         } else {
             // Use the local (cached) NetCDF reader.
             let reader = open_reader(datasets_object_store, object)?;
@@ -346,41 +397,42 @@ impl DefaultFileOpener {
             } else {
                 Some(projection)
             };
-            println!("Reading NetCDF file with schema: {:?}", file_schema);
-            println!("Projection indices: {:?}", proj);
 
-            // panic!(
-            //     "Local NetCDF reader path is currently disabled to avoid holding the reader cache lock during IO. Enable MPIO path instead by setting `beacon_config::CONFIG.netcdf_use_mpio = true`."
-            // );
             let arrow_stream = reader
-                .read_as_arrow_stream(proj, DEFAULT_MPIO_CHUNK_SIZE)
+                .read_as_arrow_stream(proj, beacon_config::CONFIG.netcdf_batch_size)
                 .map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
                         "Failed to build NetCDF stream: {e}"
                     ))
                 })?;
 
-            use futures::TryStreamExt as _;
-            let batches: Vec<RecordBatch> = arrow_stream
-                .map_err(|e| {
+            let maybe_stream = arrow_stream
+                .map_err(|err| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to read NetCDF batch: {e}"
+                        "Error reading NetCDF file as Arrow stream: {err}"
                     ))
                 })
-                .try_collect()
-                .await?;
+                .and_then(move |batch| {
+                    let adapted_res = schema_mapper.map_batch(batch).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to map NetCDF batch schema: {e}"
+                        ))
+                    });
+                    match adapted_res {
+                        Ok(adapted) => {
+                            println!(
+                                "Emitting batch with {} rows and {} columns",
+                                adapted.num_rows(),
+                                adapted.num_columns()
+                            );
+                            futures::future::ok(adapted)
+                        }
+                        Err(e) => futures::future::err(e),
+                    }
+                })
+                .boxed();
 
-            if batches.is_empty() {
-                return Ok(Box::pin(futures::stream::empty()));
-            }
-            let schema = batches[0].schema();
-            let batch = arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to concatenate NetCDF batches: {e}"
-                ))
-            })?;
-            let adapted = schema_mapper.map_batch(batch)?;
-            Ok(Box::pin(futures::stream::once(async move { Ok(adapted) })))
+            Ok(maybe_stream)
         }
     }
 }
