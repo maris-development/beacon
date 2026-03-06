@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, UInt64Array};
+use arrow::array::{Array, ArrayRef, UInt32Array, UInt64Array};
 use arrow::compute::{concat, take};
 use futures::future::try_join_all;
 use futures::stream::{self, BoxStream, StreamExt};
@@ -137,6 +137,10 @@ impl<B: ArrayBackend> NdArrowArray<B> {
         &self.shape
     }
 
+    pub fn chunk_shape(&self) -> Vec<usize> {
+        self.backend.chunk_shape()
+    }
+
     pub fn dimensions(&self) -> &[String] {
         &self.dimensions
     }
@@ -167,6 +171,63 @@ impl<B: ArrayBackend> NdArrowArray<B> {
                 .collect::<Vec<_>>(),
         );
         Ok(take(source_values.as_ref(), &indices, None)?)
+    }
+
+    pub async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayRef> {
+        // The subset is provided on an array which might have 0-strides for virtual dimensions. We need to translate the subset which is based on the virtual shape to the corresponding subset on the base shape which is based on the backend data. Then we can slice the backend data with the translated subset and materialize it to get the result.
+        let base_start_subset = subset
+            .start
+            .iter()
+            .zip(self.strides.iter())
+            .filter_map(|(&s, &stride)| if stride == 0 { None } else { Some(s) })
+            .collect::<Vec<_>>();
+
+        let base_shape_subset = subset
+            .shape
+            .iter()
+            .zip(self.strides.iter())
+            .filter_map(|(&s, &stride)| if stride == 0 { None } else { Some(s) })
+            .collect::<Vec<_>>();
+
+        let base_subset = ArraySubset {
+            start: base_start_subset,
+            shape: base_shape_subset,
+        };
+
+        let array = self.backend.subset(base_subset).await?;
+        // Apply strides by using the `take` kernel with the corresponding indices for the subset shape and strides.
+
+        let gather_indices = Self::make_gather_indices(&subset.shape, &self.strides);
+        let new_array = take(&array, &gather_indices, None)?;
+
+        Ok(new_array)
+    }
+
+    fn make_gather_indices(shape: &[usize], strides: &[isize]) -> UInt32Array {
+        let total: usize = shape.iter().product();
+        let ndim = shape.len();
+
+        let mut result = Vec::with_capacity(total);
+        let mut index = vec![0usize; ndim];
+
+        for _ in 0..total {
+            let mut offset: isize = 0;
+            for d in 0..ndim {
+                offset += index[d] as isize * strides[d];
+            }
+            result.push(offset as u32);
+
+            // Row-major increment
+            for d in (0..ndim).rev() {
+                index[d] += 1;
+                if index[d] < shape[d] {
+                    break;
+                }
+                index[d] = 0;
+            }
+        }
+
+        UInt32Array::from(result)
     }
 
     /// Lazily read the logical array in flat row-major chunks.
@@ -238,16 +299,49 @@ impl<B: ArrayBackend> NdArrowArray<B> {
         Ok(stream.boxed())
     }
 
-    fn base_shape_position(position: usize, shape: &[usize], strides: &[isize]) -> Vec<usize> {
+    fn chunk_size_shape(shape: &[usize], chunk_size: usize) -> Vec<usize> {
+        // Calculate a chunk size with is big enough for the chunk size but also align to a dimension size to avoid the case where a chunk is split into multiple reads which is more complex to implement.
+        // For example if the shape is [10,50] and chunk size is 150. Then we should choose a chunk size of [3,50]. If chunk size would be 20. Then we should choose chunk size of [1,20] so it is always aligned to a dimension to avoid spliting chunks.
+        // If chunk size is 120. then we should choose a chunk size of [3,50] because 3*50 = 150 which is the smallest chunk size that is bigger than 120 and also align to the dimension size so we avoid chunking and can read continously (c-row-order).
         if shape.is_empty() {
             return Vec::new();
         }
 
+        if chunk_size == 0 {
+            return vec![0; shape.len()];
+        }
+
+        let mut chunk_shape = vec![0; shape.len()];
+        let mut remaining = chunk_size;
+
+        for axis in (0..shape.len()).rev() {
+            let dim = shape[axis];
+            if dim == 0 {
+                chunk_shape[axis] = 0;
+                continue;
+            }
+
+            let axis_len = dim.min(remaining);
+            chunk_shape[axis] = axis_len;
+
+            remaining = remaining.div_ceil(axis_len);
+        }
+
+        chunk_shape
+    }
+
+    fn base_shape_position(position: usize, shape: &[usize]) -> Vec<usize> {
+        if shape.is_empty() {
+            return Vec::new();
+        }
+
+        let strides = Self::logical_row_major_strides(shape);
         let mut remaining = position;
+
         let mut coords = Vec::with_capacity(shape.len());
 
         for (axis, dim) in shape.iter().enumerate() {
-            let stride = strides[axis] as usize;
+            let stride = strides[axis];
             let coord = if stride == 0 { 0 } else { remaining / stride };
             coords.push(coord % *dim);
             if stride != 0 {
@@ -1247,17 +1341,58 @@ mod tests {
     }
 
     #[test]
+    fn test_chunk_size_shape_examples() {
+        let shape = [10, 50];
+
+        let c1 = NdArrowArray::<InMemoryArrayBackend>::chunk_size_shape(&shape, 150);
+        assert_eq!(c1, vec![3, 50]);
+
+        let c2 = NdArrowArray::<InMemoryArrayBackend>::chunk_size_shape(&shape, 20);
+        assert_eq!(c2, vec![1, 20]);
+
+        let c3 = NdArrowArray::<InMemoryArrayBackend>::chunk_size_shape(&shape, 120);
+        assert_eq!(c3, vec![3, 50]);
+
+        let shape = [100, 200, 300];
+        let c4 = NdArrowArray::<InMemoryArrayBackend>::chunk_size_shape(&shape, 100_000);
+        assert_eq!(c4, vec![2, 200, 300]);
+    }
+
+    #[test]
     fn test_base_position_translation() {
         let shape = vec![2, 3, 4, 6];
         let strides = vec![12, 4, 1, 0];
         let base_position = 13;
 
-        let translated = NdArrowArray::<InMemoryArrayBackend>::base_shape_position(
-            base_position,
-            &shape,
-            &strides,
-        );
+        let translated =
+            NdArrowArray::<InMemoryArrayBackend>::base_shape_position(base_position, &shape);
 
         println!("Translated position: {:?}", translated);
+
+        let length = 10;
+        let shape_from_length = length_to_shape(length, &shape);
+
+        println!("Shape from length: {:?}", shape_from_length);
+    }
+
+    fn length_to_shape(length: usize, shape: &[usize]) -> Vec<usize> {
+        let mut remaining = length;
+        let mut result = Vec::with_capacity(shape.len());
+        for dim in shape {
+            if *dim == 0 {
+                result.push(0);
+            } else {
+                result.push(remaining % dim);
+                remaining /= dim;
+            }
+        }
+        result.reverse();
+        result
+    }
+
+    #[test]
+    fn test_name() {
+        let byte_val = b',';
+        println!("Byte value of ',': {}", byte_val);
     }
 }
