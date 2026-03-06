@@ -174,7 +174,7 @@ You can use the `paths` parameter to specify the paths to the datasets that you 
 The paths can be specified using glob patterns, so you can use wildcards to match multiple datasets.
 
 > [!WARNING]
-> When using CSV files in logical tables, Beacon cannot efficiently prune data based on query predicates. This means that the entire CSV files will be read for each query, which may impact performance for large datasets. Consider using other file formats like Parquet or Zarr for better performance with logical tables.
+> When using CSV files in logical tables, Beacon cannot efficiently prune data based on query predicates. This means that the entire CSV files will be read for each query, which may impact performance for large datasets. Consider using other file formats like Parquet or Zarr for better performance with logical tables. Currently there is also an issue with the delimiter only accepting the ASCII code of the delimiter character, so for example for comma you need to specify `delimiter: 44` in the request body. https://github.com/maris-development/beacon/issues/175
 
 ```http
 POST /api/admin/create-table/
@@ -191,10 +191,11 @@ Content-Type: application/json
           "**/*.csv"
         ],
         "file_format": "csv"
+        "delimiter": 44,
+        "infer_records": 100
     }
   }
 }
-
 ```
 
 :::
