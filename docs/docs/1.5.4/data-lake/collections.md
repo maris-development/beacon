@@ -190,7 +190,7 @@ Content-Type: application/json
           "/folder/*.csv",
           "**/*.csv"
         ],
-        "file_format": "csv"
+        "file_format": "csv",
         "delimiter": 44,
         "infer_records": 100
     }
