@@ -1,18 +1,31 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, UInt32Array, UInt64Array};
-use arrow::compute::{concat, take};
-use futures::future::try_join_all;
-use futures::stream::{self, BoxStream, StreamExt};
+use arrow::array::ArrayRef;
 
+use crate::array::compat_typings::ArrowTypeConversion;
 use crate::array::{
     backend::{ArrayBackend, mem::InMemoryArrayBackend},
     subset::ArraySubset,
 };
 
 pub mod backend;
+pub mod compat_typings;
 pub mod subset;
+
+#[async_trait::async_trait]
+pub trait NdArrowArray {
+    async fn subset(&self, subset: ArraySubset) -> anyhow::Result<Arc<dyn NdArrowArray>>;
+    async fn as_arrow_array_ref(&self) -> anyhow::Result<ArrayRef>;
+    async fn broadcast(
+        &self,
+        target_shape: &[usize],
+        dimensions: &[String],
+    ) -> anyhow::Result<Arc<dyn NdArrowArray>>;
+    fn shape(&self) -> Vec<usize>;
+    fn dimensions(&self) -> Vec<String>;
+    fn data_type(&self) -> arrow::datatypes::DataType;
+}
 
 /// N-dimensional Arrow-backed array with named dimensions and virtual stride support.
 ///
@@ -26,26 +39,27 @@ pub mod subset;
 /// - Lazy chunked reads that respect the current logical view
 /// - Full materialization to `ArrayRef` when needed
 #[derive(Debug, Clone)]
-pub struct NdArrowArray<B: ArrayBackend = InMemoryArrayBackend> {
+pub struct NdArrowArrayDispatch<
+    T: ArrowTypeConversion,
+    B: ArrayBackend<T> = InMemoryArrayBackend<T>,
+> {
+    marker: std::marker::PhantomData<T>,
     pub backend: Arc<B>,
-    pub data_type: arrow::datatypes::DataType,
-    pub shape: Vec<usize>,
-    pub dimensions: Vec<String>,
-    pub strides: Vec<isize>,
 }
 
-impl NdArrowArray {
+impl<T: ArrowTypeConversion> NdArrowArrayDispatch<T> {
     pub fn new_in_mem(
-        array: ArrayRef,
+        array: Vec<T>,
         shape: Vec<usize>,
         dimensions: Vec<String>,
     ) -> anyhow::Result<Self> {
-        let backend = InMemoryArrayBackend::new(array.clone(), shape.clone(), dimensions.clone());
-        Self::new(backend, array.data_type().clone())
+        let nd_array = ndarray::ArrayD::from_shape_vec(shape.clone(), array)?;
+        let backend = InMemoryArrayBackend::new(nd_array, shape.clone(), dimensions.clone());
+        Self::new(backend)
     }
 }
 
-impl<B: ArrayBackend> NdArrowArray<B> {
+impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArrayDispatch<T, B> {
     /// Create a new contiguous row-major ND array view over a backend.
     ///
     /// # Validation
@@ -54,7 +68,7 @@ impl<B: ArrayBackend> NdArrowArray<B> {
     ///
     /// # Errors
     /// Returns an error if validation fails.
-    pub fn new(backend: B, data_type: arrow::datatypes::DataType) -> anyhow::Result<Self> {
+    pub fn new(backend: B) -> anyhow::Result<Self> {
         let shape = backend.shape();
         let dimensions = backend.dimensions();
         if shape.len() != dimensions.len() {
@@ -75,18 +89,13 @@ impl<B: ArrayBackend> NdArrowArray<B> {
             ));
         }
 
-        // Calculate the strides from the shape for row-major order
-        let strides = Self::row_major_strides(&shape);
-
-        Self::from_parts(Arc::new(backend), data_type, shape, dimensions, strides)
+        Self::from_parts(Arc::new(backend), shape, dimensions)
     }
 
     fn from_parts(
         backend: Arc<B>,
-        data_type: arrow::datatypes::DataType,
         shape: Vec<usize>,
         dimensions: Vec<String>,
-        strides: Vec<isize>,
     ) -> anyhow::Result<Self> {
         if shape.len() != dimensions.len() {
             return Err(anyhow::anyhow!(
@@ -95,343 +104,28 @@ impl<B: ArrayBackend> NdArrowArray<B> {
                 dimensions.len()
             ));
         }
-        if shape.len() != strides.len() {
-            return Err(anyhow::anyhow!(
-                "Shape length {} does not match strides length {}",
-                shape.len(),
-                strides.len()
-            ));
-        }
 
         Ok(Self {
             backend,
-            data_type,
-            shape,
-            dimensions,
-            strides,
+            marker: std::marker::PhantomData,
         })
-    }
-
-    /// Compute row-major (C-order) strides for a shape.
-    ///
-    /// The returned strides map a multi-index into a flat index for a contiguous row-major array.
-    fn row_major_strides(shape: &[usize]) -> Vec<isize> {
-        if shape.is_empty() {
-            return vec![];
-        }
-        let mut strides = vec![0isize; shape.len()];
-        let mut stride = 1isize;
-        for (i, dim) in shape.iter().enumerate().rev() {
-            strides[i] = stride;
-            stride *= *dim as isize;
-        }
-        strides
     }
 
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
-        self.shape.iter().product()
+        self.shape().iter().product()
     }
 
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
+    pub fn shape(&self) -> Vec<usize> {
+        self.backend.shape()
     }
 
     pub fn chunk_shape(&self) -> Vec<usize> {
         self.backend.chunk_shape()
     }
 
-    pub fn dimensions(&self) -> &[String] {
-        &self.dimensions
-    }
-
-    pub fn data_type(&self) -> &arrow::datatypes::DataType {
-        &self.data_type
-    }
-
-    /// Materialize the current logical ND view as a flat `ArrayRef`.
-    ///
-    /// For contiguous row-major views, this forwards directly to the backend.
-    /// For virtual/strided views (for example after broadcasting), this gathers
-    /// elements according to logical indices and current strides.
-    ///
-    /// # Errors
-    /// Returns an error if backend access or gather operation fails.
-    pub async fn as_arrow_array_ref(&self) -> anyhow::Result<ArrayRef> {
-        if self.is_contiguous_row_major() {
-            return self.backend.slice(0, self.len()).await;
-        }
-
-        let source_values = self.backend.slice(0, self.backend.len()).await?;
-        let source_indices = Self::broadcast_source_indices(&self.shape, &self.strides);
-        let indices = UInt64Array::from(
-            source_indices
-                .into_iter()
-                .map(|i| i as u64)
-                .collect::<Vec<_>>(),
-        );
-        Ok(take(source_values.as_ref(), &indices, None)?)
-    }
-
-    pub async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayRef> {
-        // The subset is provided on an array which might have 0-strides for virtual dimensions. We need to translate the subset which is based on the virtual shape to the corresponding subset on the base shape which is based on the backend data. Then we can slice the backend data with the translated subset and materialize it to get the result.
-        let base_start_subset = subset
-            .start
-            .iter()
-            .zip(self.strides.iter())
-            .filter_map(|(&s, &stride)| if stride == 0 { None } else { Some(s) })
-            .collect::<Vec<_>>();
-
-        let base_shape_subset = subset
-            .shape
-            .iter()
-            .zip(self.strides.iter())
-            .filter_map(|(&s, &stride)| if stride == 0 { None } else { Some(s) })
-            .collect::<Vec<_>>();
-
-        let base_subset = ArraySubset {
-            start: base_start_subset,
-            shape: base_shape_subset,
-        };
-
-        let array = self.backend.subset(base_subset).await?;
-        // Apply strides by using the `take` kernel with the corresponding indices for the subset shape and strides.
-
-        let gather_indices = Self::make_gather_indices(&subset.shape, &self.strides);
-        let new_array = take(&array, &gather_indices, None)?;
-
-        Ok(new_array)
-    }
-
-    fn make_gather_indices(shape: &[usize], strides: &[isize]) -> UInt32Array {
-        let total: usize = shape.iter().product();
-        let ndim = shape.len();
-
-        let mut result = Vec::with_capacity(total);
-        let mut index = vec![0usize; ndim];
-
-        for _ in 0..total {
-            let mut offset: isize = 0;
-            for d in 0..ndim {
-                offset += index[d] as isize * strides[d];
-            }
-            result.push(offset as u32);
-
-            // Row-major increment
-            for d in (0..ndim).rev() {
-                index[d] += 1;
-                if index[d] < shape[d] {
-                    break;
-                }
-                index[d] = 0;
-            }
-        }
-
-        UInt32Array::from(result)
-    }
-
-    /// Lazily read the logical array in flat row-major chunks.
-    ///
-    /// The stream is lazy: backend reads occur only as the stream is polled.
-    ///
-    /// Behavior:
-    /// - Contiguous views read each chunk with a direct backend slice.
-    /// - Strided/virtual views compute source indices for each chunk and materialize
-    ///   only that chunk.
-    ///
-    /// The returned stream yields per-chunk `Result<ArrayRef>` so backend/materialization
-    /// failures are propagated lazily.
-    ///
-    /// # Errors
-    /// Returns an immediate error when `chunk_size == 0`.
-    pub fn read_chunked(
-        &self,
-        chunk_size: usize,
-    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<ArrayRef>>> {
-        if chunk_size == 0 {
-            return Err(anyhow::anyhow!("chunk_size must be greater than 0"));
-        }
-
-        let total_len = self.len();
-        let is_contiguous = self.is_contiguous_row_major();
-        let backend = Arc::clone(&self.backend);
-        let shape = self.shape.clone();
-        let strides = self.strides.clone();
-
-        // Get the stripped shape which is the shape of the underlying data without the virtual dimensions
-        let base_shape: Vec<usize> = self
-            .shape
-            .iter()
-            .zip(self.strides.iter())
-            .filter_map(|(&dim, &stride)| if stride != 0 { Some(dim) } else { None })
-            .collect();
-
-        let stream = stream::unfold(0usize, move |position| {
-            let backend = Arc::clone(&backend);
-            let shape = shape.clone();
-            let strides = strides.clone();
-
-            async move {
-                if position >= total_len {
-                    return None;
-                }
-
-                let current_chunk_len = chunk_size.min(total_len - position);
-                let next_position = position + current_chunk_len;
-
-                let chunk_result = if is_contiguous {
-                    backend.slice(position, current_chunk_len).await
-                } else {
-                    // translate the position which uses the virtual shape to the corresponding indices in the base shape
-                    let base_position: usize = todo!();
-                    // translate the current_chunk_len which uses the virtual shape to the corresponding length in the base shape. But it should always align to the size of a dimensions which is big enough to cover the chunk size, otherwise we will have to deal with the case where a chunk is split into multiple reads which is more complex to implement.
-                    let base_chunk_len: usize = todo!();
-
-                    //
-
-                    todo!()
-                };
-
-                Some((chunk_result, next_position))
-            }
-        });
-
-        Ok(stream.boxed())
-    }
-
-    fn chunk_size_shape(shape: &[usize], chunk_size: usize) -> Vec<usize> {
-        // Calculate a chunk size with is big enough for the chunk size but also align to a dimension size to avoid the case where a chunk is split into multiple reads which is more complex to implement.
-        // For example if the shape is [10,50] and chunk size is 150. Then we should choose a chunk size of [3,50]. If chunk size would be 20. Then we should choose chunk size of [1,20] so it is always aligned to a dimension to avoid spliting chunks.
-        // If chunk size is 120. then we should choose a chunk size of [3,50] because 3*50 = 150 which is the smallest chunk size that is bigger than 120 and also align to the dimension size so we avoid chunking and can read continously (c-row-order).
-        if shape.is_empty() {
-            return Vec::new();
-        }
-
-        if chunk_size == 0 {
-            return vec![0; shape.len()];
-        }
-
-        let mut chunk_shape = vec![0; shape.len()];
-        let mut remaining = chunk_size;
-
-        for axis in (0..shape.len()).rev() {
-            let dim = shape[axis];
-            if dim == 0 {
-                chunk_shape[axis] = 0;
-                continue;
-            }
-
-            let axis_len = dim.min(remaining);
-            chunk_shape[axis] = axis_len;
-
-            remaining = remaining.div_ceil(axis_len);
-        }
-
-        chunk_shape
-    }
-
-    fn base_shape_position(position: usize, shape: &[usize]) -> Vec<usize> {
-        if shape.is_empty() {
-            return Vec::new();
-        }
-
-        let strides = Self::logical_row_major_strides(shape);
-        let mut remaining = position;
-
-        let mut coords = Vec::with_capacity(shape.len());
-
-        for (axis, dim) in shape.iter().enumerate() {
-            let stride = strides[axis];
-            let coord = if stride == 0 { 0 } else { remaining / stride };
-            coords.push(coord % *dim);
-            if stride != 0 {
-                remaining %= stride;
-            }
-        }
-
-        coords
-    }
-
-    /// Create a virtual broadcasted view with named-dimension alignment.
-    ///
-    /// This operation does not materialize values; it returns a new view sharing
-    /// the same backend while updating `shape` and `strides`.
-    ///
-    /// Named-dimension rules (xarray-style):
-    /// - Input dimensions must be present in target dimensions.
-    /// - Input dimension order must be preserved as a subsequence.
-    /// - Size compatibility per matched dim is `same` or `1 -> N`.
-    /// - Missing target dims are treated as broadcast axes (stride 0).
-    ///
-    /// # Errors
-    /// Returns an error if rank, names, order, or sizes are incompatible.
-    pub fn broadcast(
-        &self,
-        target_shape: &[usize],
-        dimensions: &[String],
-    ) -> anyhow::Result<NdArrowArray<B>> {
-        self.validate_broadcast_request(target_shape, dimensions)?;
-        let out_strides = self.compute_broadcast_out_strides(target_shape, dimensions)?;
-
-        NdArrowArray::from_parts(
-            Arc::clone(&self.backend),
-            self.data_type.clone(),
-            target_shape.to_vec(),
-            dimensions.to_vec(),
-            out_strides,
-        )
-    }
-
-    fn is_contiguous_row_major(&self) -> bool {
-        self.strides == Self::row_major_strides(&self.shape) && self.backend.len() == self.len()
-    }
-
-    fn validate_broadcast_request(
-        &self,
-        target_shape: &[usize],
-        target_dimensions: &[String],
-    ) -> anyhow::Result<()> {
-        if target_shape.len() != target_dimensions.len() {
-            return Err(anyhow::anyhow!(
-                "Target shape rank {} does not match target dimensions rank {}",
-                target_shape.len(),
-                target_dimensions.len()
-            ));
-        }
-
-        Self::validate_unique_dimension_names(&self.dimensions)?;
-        Self::validate_unique_dimension_names(target_dimensions)?;
-
-        let target_positions: HashMap<&str, usize> = target_dimensions
-            .iter()
-            .map(String::as_str)
-            .enumerate()
-            .map(|(idx, name)| (name, idx))
-            .collect();
-
-        for dim in &self.dimensions {
-            if !target_positions.contains_key(dim.as_str()) {
-                return Err(anyhow::anyhow!(
-                    "Input dimension '{}' is missing from target dimensions",
-                    dim
-                ));
-            }
-        }
-
-        let mut last_pos = None;
-        for dim in &self.dimensions {
-            let pos = *target_positions.get(dim.as_str()).unwrap();
-            if let Some(prev) = last_pos {
-                if pos <= prev {
-                    return Err(anyhow::anyhow!(
-                        "Target dimensions reorder input dimensions; expected xarray-like subsequence order"
-                    ));
-                }
-            }
-            last_pos = Some(pos);
-        }
-
-        Ok(())
+    pub fn dimensions(&self) -> Vec<String> {
+        self.backend.dimensions()
     }
 
     fn validate_unique_dimension_names(dimensions: &[String]) -> anyhow::Result<()> {
@@ -443,956 +137,81 @@ impl<B: ArrayBackend> NdArrowArray<B> {
         }
         Ok(())
     }
-
-    fn compute_broadcast_out_strides(
-        &self,
-        target_shape: &[usize],
-        target_dimensions: &[String],
-    ) -> anyhow::Result<Vec<isize>> {
-        let mut input_by_name: HashMap<&str, (usize, isize)> = HashMap::new();
-        for (idx, dim) in self.dimensions.iter().enumerate() {
-            input_by_name.insert(dim.as_str(), (self.shape[idx], self.strides[idx]));
-        }
-
-        let mut out_strides = Vec::with_capacity(target_shape.len());
-        for (target_idx, target_dim) in target_dimensions.iter().enumerate() {
-            let target_size = target_shape[target_idx];
-            match input_by_name.get(target_dim.as_str()) {
-                None => {
-                    out_strides.push(0);
-                }
-                Some((input_size, input_stride)) => {
-                    if *input_size == target_size {
-                        out_strides.push(*input_stride);
-                    } else if *input_size == 1 && target_size >= 1 {
-                        out_strides.push(0);
-                    } else {
-                        return Err(anyhow::anyhow!(
-                            "Dimension '{}' is not broadcast-compatible: input size {}, target size {}",
-                            target_dim,
-                            input_size,
-                            target_size
-                        ));
-                    }
-                }
-            }
-        }
-
-        Ok(out_strides)
-    }
-
-    fn broadcast_source_indices(target_shape: &[usize], out_strides: &[isize]) -> Vec<usize> {
-        let rank = target_shape.len();
-        if rank == 0 {
-            return vec![0usize];
-        }
-
-        let out_len: usize = target_shape.iter().product();
-        if out_len == 0 {
-            return Vec::new();
-        }
-
-        let mut indices = Vec::with_capacity(out_len);
-        let mut offset = vec![0usize; rank];
-
-        loop {
-            let source_idx = offset
-                .iter()
-                .enumerate()
-                .map(|(axis, idx)| *idx as isize * out_strides[axis])
-                .sum::<isize>() as usize;
-            indices.push(source_idx);
-
-            let mut carry_axis = rank;
-            while carry_axis > 0 {
-                let axis = carry_axis - 1;
-                offset[axis] += 1;
-                if offset[axis] < target_shape[axis] {
-                    break;
-                }
-                offset[axis] = 0;
-                carry_axis -= 1;
-            }
-
-            if carry_axis == 0 {
-                break;
-            }
-        }
-
-        indices
-    }
-
-    /// Slices the array according to the provided subset, returning a new NdArrowArray with the sliced data.
-    ///
-    /// This method validates the subset, computes stride-aware source indices,
-    /// coalesces adjacent indices into backend ranges, and materializes the slice.
-    ///
-    /// The result is materialized into an `InMemoryArrayBackend` with a contiguous
-    /// row-major layout for the subset shape.
-    ///
-    /// # Errors
-    /// - Returns an error if the subset is invalid (e.g., out of bounds, rank mismatch).
-    /// - Returns an error if there is an issue with slicing the backend data.
-    pub async fn slice(&self, subset: ArraySubset) -> anyhow::Result<NdArrowArray> {
-        if subset.start.iter().all(|&s| s == 0) && subset.shape == self.shape {
-            let values = self.as_arrow_array_ref().await?;
-            // Subset is the entire array, return self
-            return NdArrowArray::new(
-                InMemoryArrayBackend::new(values, self.shape.clone(), self.dimensions.clone()),
-                self.data_type.clone(),
-            );
-        }
-
-        let target_shape = subset.shape.clone();
-        let ranges = self.backend_slice_ranges(&subset)?;
-        let sliced_values = self.materialize_backend_ranges(&ranges).await?;
-
-        NdArrowArray::new(
-            InMemoryArrayBackend::new(sliced_values, target_shape.clone(), self.dimensions.clone()),
-            self.data_type.clone(),
-        )
-    }
-
-    fn backend_slice_ranges(&self, subset: &ArraySubset) -> anyhow::Result<Vec<(usize, usize)>> {
-        self.validate_subset(subset)?;
-        let linear_indices = self.subset_linear_indices(subset);
-        Ok(Self::coalesce_linear_indices_to_ranges(&linear_indices))
-    }
-
-    fn validate_subset(&self, subset: &ArraySubset) -> anyhow::Result<()> {
-        let rank = self.shape.len();
-        if subset.start.len() != rank {
-            return Err(anyhow::anyhow!(
-                "Subset start rank {} does not match array rank {}",
-                subset.start.len(),
-                rank
-            ));
-        }
-        if subset.shape.len() != rank {
-            return Err(anyhow::anyhow!(
-                "Subset shape rank {} does not match array rank {}",
-                subset.shape.len(),
-                rank
-            ));
-        }
-
-        for axis in 0..rank {
-            let start = subset.start[axis];
-            let length = subset.shape[axis];
-            let size = self.shape[axis];
-            if start > size {
-                return Err(anyhow::anyhow!(
-                    "Subset start {} exceeds axis {} size {}",
-                    start,
-                    axis,
-                    size
-                ));
-            }
-            if length > size.saturating_sub(start) {
-                return Err(anyhow::anyhow!(
-                    "Subset length {} at axis {} with start {} exceeds axis size {}",
-                    length,
-                    axis,
-                    start,
-                    size
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn subset_linear_indices(&self, subset: &ArraySubset) -> Vec<usize> {
-        let rank = self.shape.len();
-        let subset_len: usize = subset.shape.iter().product();
-
-        if rank == 0 {
-            return vec![0usize];
-        }
-        if subset_len == 0 {
-            return Vec::new();
-        }
-
-        let mut linear_indices = Vec::with_capacity(subset_len);
-        let mut offset = vec![0usize; rank];
-
-        loop {
-            let linear_index = (0..rank)
-                .map(|axis| (subset.start[axis] + offset[axis]) as isize * self.strides[axis])
-                .sum::<isize>() as usize;
-            linear_indices.push(linear_index);
-
-            let mut carry_axis = rank;
-            while carry_axis > 0 {
-                let axis = carry_axis - 1;
-                offset[axis] += 1;
-                if offset[axis] < subset.shape[axis] {
-                    break;
-                }
-                offset[axis] = 0;
-                carry_axis -= 1;
-            }
-
-            if carry_axis == 0 {
-                break;
-            }
-        }
-
-        linear_indices
-    }
-
-    fn coalesce_linear_indices_to_ranges(linear_indices: &[usize]) -> Vec<(usize, usize)> {
-        if linear_indices.is_empty() {
-            return vec![(0, 0)];
-        }
-
-        let mut ranges = Vec::new();
-        let mut current_start = linear_indices[0];
-        let mut current_len = 1usize;
-
-        for index in linear_indices.iter().skip(1) {
-            if *index == current_start + current_len {
-                current_len += 1;
-            } else {
-                ranges.push((current_start, current_len));
-                current_start = *index;
-                current_len = 1;
-            }
-        }
-        ranges.push((current_start, current_len));
-
-        ranges
-    }
-
-    fn chunk_source_index_runs(
-        shape: &[usize],
-        strides: &[isize],
-        start: usize,
-        len: usize,
-    ) -> Vec<(usize, usize)> {
-        let logical_strides = Self::logical_row_major_strides(shape);
-        let mut runs = Vec::new();
-
-        for position in start..start + len {
-            let index =
-                Self::logical_position_to_source_index(position, shape, &logical_strides, strides);
-            match runs.last_mut() {
-                Some((last_index, run_len)) if *last_index == index => {
-                    *run_len += 1;
-                }
-                _ => runs.push((index, 1)),
-            }
-        }
-
-        runs
-    }
-
-    fn coalesce_sorted_indices_to_ranges(sorted_indices: &[usize]) -> Vec<(usize, usize)> {
-        if sorted_indices.is_empty() {
-            return vec![(0, 0)];
-        }
-
-        let mut ranges = Vec::new();
-        let mut current_start = sorted_indices[0];
-        let mut current_len = 1usize;
-
-        for index in sorted_indices.iter().skip(1) {
-            if *index == current_start + current_len {
-                current_len += 1;
-            } else {
-                ranges.push((current_start, current_len));
-                current_start = *index;
-                current_len = 1;
-            }
-        }
-        ranges.push((current_start, current_len));
-
-        ranges
-    }
-
-    fn logical_row_major_strides(shape: &[usize]) -> Vec<usize> {
-        if shape.is_empty() {
-            return vec![];
-        }
-        let mut strides = vec![0usize; shape.len()];
-        let mut stride = 1usize;
-        for (axis, dim) in shape.iter().enumerate().rev() {
-            strides[axis] = stride;
-            stride = stride.saturating_mul(*dim);
-        }
-        strides
-    }
-
-    fn logical_position_to_source_index(
-        mut position: usize,
-        shape: &[usize],
-        logical_strides: &[usize],
-        source_strides: &[isize],
-    ) -> usize {
-        if shape.is_empty() {
-            return 0;
-        }
-
-        let mut source_index = 0isize;
-        for axis in 0..shape.len() {
-            let logical_stride = logical_strides[axis];
-            let coord = if logical_stride == 0 {
-                0
-            } else {
-                position / logical_stride
-            };
-            if logical_stride != 0 {
-                position %= logical_stride;
-            }
-            source_index += coord as isize * source_strides[axis];
-        }
-
-        source_index as usize
-    }
-
-    async fn materialize_backend_ranges(
-        &self,
-        ranges: &[(usize, usize)],
-    ) -> anyhow::Result<ArrayRef> {
-        Self::materialize_backend_ranges_from_backend(&self.backend, ranges).await
-    }
-
-    async fn materialize_backend_ranges_from_backend(
-        backend: &Arc<B>,
-        ranges: &[(usize, usize)],
-    ) -> anyhow::Result<ArrayRef> {
-        if ranges.len() == 1 && ranges[0].1 == 0 {
-            return backend.slice(0, 0).await;
-        }
-
-        let chunk_futures = ranges
-            .iter()
-            .map(|(start, len)| backend.slice(*start, *len));
-        let mut chunks = try_join_all(chunk_futures).await?;
-
-        if chunks.len() == 1 {
-            Ok(chunks.remove(0))
-        } else {
-            let chunk_refs: Vec<&dyn Array> = chunks.iter().map(|c| c.as_ref()).collect();
-            Ok(concat(&chunk_refs)?)
-        }
-    }
-
-    async fn materialize_backend_index_runs_from_backend(
-        backend: &Arc<B>,
-        index_runs: &[(usize, usize)],
-    ) -> anyhow::Result<ArrayRef> {
-        if index_runs.is_empty() {
-            return backend.slice(0, 0).await;
-        }
-
-        let mut unique_indices = index_runs.iter().map(|(idx, _)| *idx).collect::<Vec<_>>();
-        unique_indices.sort_unstable();
-        unique_indices.dedup();
-
-        let ranges = Self::coalesce_sorted_indices_to_ranges(&unique_indices);
-        let unique_values = Self::materialize_backend_ranges_from_backend(backend, &ranges).await?;
-        // println!(
-        //     "Ranges for unique indices: {:?}, unique indices: {:?}",
-        //     ranges, unique_indices
-        // );
-        let mut index_to_take_position = HashMap::with_capacity(unique_indices.len());
-        let mut offset = 0usize;
-        for (start, len) in &ranges {
-            for delta in 0..*len {
-                index_to_take_position.insert(start + delta, offset + delta);
-            }
-            offset += len;
-        }
-
-        let mut take_indices = Vec::new();
-        for (index, run_len) in index_runs {
-            let take_position = *index_to_take_position.get(index).ok_or_else(|| {
-                anyhow::anyhow!("missing coalesced index for source index {}", index)
-            })? as u64;
-            take_indices.extend(std::iter::repeat_n(take_position, *run_len));
-        }
-        Ok(take(
-            unique_values.as_ref(),
-            &UInt64Array::from(take_indices),
-            None,
-        )?)
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Mutex;
-
-    use std::sync::Arc;
-
-    use arrow::array::{ArrayRef, Int32Array};
-    use arrow::datatypes::DataType;
-    use futures::StreamExt;
-
-    use crate::array::{
-        NdArrowArray, backend::ArrayBackend, backend::mem::InMemoryArrayBackend,
-        subset::ArraySubset,
-    };
-
-    #[derive(Debug)]
-    struct RecordingBackend {
-        values: ArrayRef,
-        shape: Vec<usize>,
-        dimensions: Vec<String>,
-        calls: Arc<Mutex<Vec<(usize, usize)>>>,
+#[async_trait::async_trait]
+impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDispatch<T, B> {
+    async fn subset(&self, subset: ArraySubset) -> anyhow::Result<Arc<dyn NdArrowArray>> {
+        let subset_array = self.backend.read_subset(subset).await?;
+        let subset_dispatch = NdArrowArrayDispatch::new_in_mem(
+            subset_array.into_raw_vec(),
+            self.shape(),
+            self.dimensions(),
+        )?;
+        Ok(Arc::new(subset_dispatch))
     }
+    async fn as_arrow_array_ref(&self) -> anyhow::Result<ArrayRef> {
+        let subset_array = self
+            .backend
+            .read_subset(ArraySubset {
+                start: vec![0; self.shape().len()],
+                shape: self.shape(),
+            })
+            .await?;
 
-    impl RecordingBackend {
-        fn new(
-            values: ArrayRef,
-            shape: Vec<usize>,
-            dimensions: Vec<String>,
-            calls: Arc<Mutex<Vec<(usize, usize)>>>,
-        ) -> Self {
-            Self {
-                values,
-                shape,
-                dimensions,
-                calls,
-            }
+        let slice = subset_array.to_owned().into_raw_vec();
+
+        match self.backend.fill_value() {
+            Some(fill) => T::arrow_from_array_view_with_fill(&slice, &fill),
+            None => T::arrow_from_array_view(&slice),
         }
     }
 
-    #[async_trait::async_trait]
-    impl ArrayBackend for RecordingBackend {
-        fn len(&self) -> usize {
-            self.values.len()
+    async fn broadcast(
+        &self,
+        target_shape: &[usize],
+        dimensions: &[String],
+    ) -> anyhow::Result<Arc<dyn NdArrowArray>> {
+        if target_shape.len() != dimensions.len() {
+            return Err(anyhow::anyhow!(
+                "Target shape length {} does not match dimensions length {}",
+                target_shape.len(),
+                dimensions.len()
+            ));
         }
 
-        fn shape(&self) -> Vec<usize> {
-            self.shape.clone()
-        }
-
-        fn dimensions(&self) -> Vec<String> {
-            self.dimensions.clone()
-        }
-
-        async fn slice(&self, start: usize, length: usize) -> anyhow::Result<ArrayRef> {
-            self.calls.lock().unwrap().push((start, length));
-            Ok(self.values.slice(start, length))
-        }
-    }
-
-    #[tokio::test]
-    async fn slice_3d_subset_returns_expected_values_and_shape() {
-        let values = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(
-                values,
-                vec![2, 3, 4],
-                vec!["t".to_string(), "y".to_string(), "x".to_string()],
-            ),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let sliced = array
-            .slice(ArraySubset {
-                start: vec![1, 1, 1],
-                shape: vec![1, 2, 2],
+        let nd_array = self
+            .backend
+            .read_subset(ArraySubset {
+                start: vec![0; self.shape().len()],
+                shape: self.shape(),
             })
-            .await
-            .unwrap();
+            .await?;
 
-        assert_eq!(sliced.shape(), &[1, 2, 2]);
-        assert_eq!(sliced.dimensions(), &["t", "y", "x"]);
-
-        let out = sliced.as_arrow_array_ref().await.unwrap();
-        let out = out.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(out.values(), &[17, 18, 21, 22]);
-    }
-
-    #[tokio::test]
-    async fn slice_returns_error_for_out_of_bounds_subset() {
-        let values = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(
-                values,
-                vec![2, 3, 4],
-                vec!["t".to_string(), "y".to_string(), "x".to_string()],
-            ),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let result = array
-            .slice(ArraySubset {
-                start: vec![0, 2, 3],
-                shape: vec![2, 2, 2],
-            })
-            .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn slice_returns_error_for_rank_mismatch() {
-        let values = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(
-                values,
-                vec![2, 3, 4],
-                vec!["t".to_string(), "y".to_string(), "x".to_string()],
-            ),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let result = array
-            .slice(ArraySubset {
-                start: vec![0, 1],
-                shape: vec![1, 2],
-            })
-            .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn slice_uses_multiple_backend_calls_for_non_aligned_subset() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let values: ArrayRef = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
-        let backend = RecordingBackend::new(
-            values,
-            vec![2, 3, 4],
-            vec!["t".to_string(), "y".to_string(), "x".to_string()],
-            calls.clone(),
-        );
-
-        let array = NdArrowArray::new(backend, DataType::Int32).unwrap();
-
-        let sliced = array
-            .slice(ArraySubset {
-                start: vec![0, 1, 1],
-                shape: vec![2, 2, 2],
-            })
-            .await
-            .unwrap();
-
-        let out = sliced.as_arrow_array_ref().await.unwrap();
-        let out = out.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(out.values(), &[5, 6, 9, 10, 17, 18, 21, 22]);
-
-        let recorded = calls.lock().unwrap().clone();
-        assert_eq!(recorded, vec![(5, 2), (9, 2), (17, 2), (21, 2)]);
-    }
-
-    #[test]
-    fn backend_slice_ranges_returns_expected_ranges() {
-        let values = Arc::new(Int32Array::from((0..24).collect::<Vec<_>>()));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(
-                values,
-                vec![2, 3, 4],
-                vec!["t".to_string(), "y".to_string(), "x".to_string()],
-            ),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let ranges = array
-            .backend_slice_ranges(&ArraySubset {
-                start: vec![0, 1, 1],
-                shape: vec![2, 2, 2],
-            })
-            .unwrap();
-
-        assert_eq!(ranges, vec![(5, 2), (9, 2), (17, 2), (21, 2)]);
-    }
-
-    #[tokio::test]
-    async fn broadcast_named_dims_adds_leading_dim_and_repeats_values() {
-        let values = Arc::new(Int32Array::from((0..6).collect::<Vec<_>>()));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![2, 3], vec!["x".to_string(), "y".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let target_shape = vec![4, 2, 3];
-        let target_dims = vec!["t".to_string(), "x".to_string(), "y".to_string()];
-        let broadcasted = array.broadcast(&target_shape, &target_dims).unwrap();
-
-        assert_eq!(broadcasted.shape(), &[4, 2, 3]);
-        assert_eq!(broadcasted.dimensions(), &["t", "x", "y"]);
-
-        let out = broadcasted.as_arrow_array_ref().await.unwrap();
-        let out = out.as_any().downcast_ref::<Int32Array>().unwrap();
-
-        let mut expected = Vec::new();
-        for _ in 0..4 {
-            expected.extend(0..6);
-        }
-        assert_eq!(out.values(), expected.as_slice());
-    }
-
-    #[tokio::test]
-    async fn broadcast_errors_when_reordering_existing_dimensions() {
-        let values = Arc::new(Int32Array::from((0..6).collect::<Vec<_>>()));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![2, 3], vec!["x".to_string(), "y".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let target_shape = vec![3, 2];
-        let target_dims = vec!["y".to_string(), "x".to_string()];
-        let result = array.broadcast(&target_shape, &target_dims);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn broadcast_errors_on_incompatible_dimension_sizes() {
-        let values = Arc::new(Int32Array::from(vec![1, 2]));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![2], vec!["x".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let target_shape = vec![3];
-        let target_dims = vec!["x".to_string()];
-        let result = array.broadcast(&target_shape, &target_dims);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn slice_after_broadcast_uses_virtual_strides() {
-        let values = Arc::new(Int32Array::from(vec![1, 2, 3]));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![3], vec!["x".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let broadcasted = array
-            .broadcast(&[2, 3], &["t".to_string(), "x".to_string()])
-            .unwrap();
-
-        let sliced = broadcasted
-            .slice(ArraySubset {
-                start: vec![0, 1],
-                shape: vec![2, 2],
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(sliced.shape(), &[2, 2]);
-        assert_eq!(sliced.dimensions(), &["t", "x"]);
-
-        let out = sliced.as_arrow_array_ref().await.unwrap();
-        let out = out.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(out.values(), &[2, 3, 2, 3]);
-    }
-
-    #[tokio::test]
-    async fn broadcast_lon_1d_to_lat_lon_time_3d() {
-        let values = Arc::new(Int32Array::from(vec![10, 20, 30]));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![3], vec!["lon".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let broadcasted = array
-            .broadcast(
-                &[2, 3, 4],
-                &["lat".to_string(), "lon".to_string(), "time".to_string()],
+        let broadcasted = nd_array.broadcast(target_shape).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot broadcast array of shape {:?} to target shape {:?}",
+                self.shape(),
+                target_shape
             )
-            .unwrap();
+        })?;
 
-        assert_eq!(broadcasted.shape(), &[2, 3, 4]);
-        assert_eq!(broadcasted.dimensions(), &["lat", "lon", "time"]);
-        assert_eq!(broadcasted.strides, vec![0, 1, 0]);
-
-        let out = broadcasted.as_arrow_array_ref().await.unwrap();
-        let out = out.as_any().downcast_ref::<Int32Array>().unwrap();
-
-        let mut expected = Vec::with_capacity(2 * 3 * 4);
-        for _lat in 0..2 {
-            for lon in [10, 20, 30] {
-                for _time in 0..4 {
-                    expected.push(lon);
-                }
-            }
-        }
-
-        assert_eq!(out.values(), expected.as_slice());
+        let broadcasted_vec = broadcasted.to_owned().into_raw_vec();
+        let broadcasted_dispatch = NdArrowArrayDispatch::new_in_mem(
+            broadcasted_vec,
+            target_shape.to_vec(),
+            dimensions.to_vec(),
+        )?;
+        Ok(Arc::new(broadcasted_dispatch))
+    }
+    fn shape(&self) -> Vec<usize> {
+        self.backend.shape()
+    }
+    fn dimensions(&self) -> Vec<String> {
+        self.backend.dimensions()
     }
 
-    #[tokio::test]
-    async fn slice_after_broadcast_lon_1d_to_lat_lon_time_3d() {
-        let values = Arc::new(Int32Array::from(vec![10, 20, 30]));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![3], vec!["lon".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let broadcasted = array
-            .broadcast(
-                &[2, 3, 4],
-                &["lat".to_string(), "lon".to_string(), "time".to_string()],
-            )
-            .unwrap();
-
-        let sliced = broadcasted
-            .slice(ArraySubset {
-                start: vec![1, 1, 1],
-                shape: vec![1, 2, 2],
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(sliced.shape(), &[1, 2, 2]);
-        assert_eq!(sliced.dimensions(), &["lat", "lon", "time"]);
-
-        let out = sliced.as_arrow_array_ref().await.unwrap();
-        let out = out.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(out.values(), &[20, 20, 30, 30]);
-    }
-
-    #[test]
-    fn broadcast_is_virtual_and_does_not_touch_backend() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let values: ArrayRef = Arc::new(Int32Array::from((0..6).collect::<Vec<_>>()));
-        let backend = RecordingBackend::new(
-            values,
-            vec![2, 3],
-            vec!["x".to_string(), "y".to_string()],
-            calls.clone(),
-        );
-        let array = NdArrowArray::new(backend, DataType::Int32).unwrap();
-
-        let broadcasted = array
-            .broadcast(
-                &[4, 2, 3],
-                &["t".to_string(), "x".to_string(), "y".to_string()],
-            )
-            .unwrap();
-
-        assert_eq!(broadcasted.shape(), &[4, 2, 3]);
-        assert_eq!(broadcasted.dimensions(), &["t", "x", "y"]);
-        assert_eq!(broadcasted.strides, vec![0, 3, 1]);
-        assert!(calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn read_chunked_contiguous_reads_expected_chunks() {
-        let values = Arc::new(Int32Array::from((0..10).collect::<Vec<_>>()));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![10], vec!["x".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let mut stream = array.read_chunked(4).unwrap();
-        let mut chunks = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.unwrap();
-            let chunk = chunk.as_any().downcast_ref::<Int32Array>().unwrap();
-            chunks.push(chunk.values().to_vec());
-        }
-
-        assert_eq!(chunks, vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7], vec![8, 9]]);
-    }
-
-    #[tokio::test]
-    async fn read_chunked_strided_is_lazy_and_applies_strides() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let values: ArrayRef = Arc::new(Int32Array::from(vec![10, 20, 30]));
-        let backend =
-            RecordingBackend::new(values, vec![3], vec!["lon".to_string()], calls.clone());
-
-        let array = NdArrowArray::new(backend, DataType::Int32).unwrap();
-
-        let broadcasted = array
-            .broadcast(&[2, 3], &["lat".to_string(), "lon".to_string()])
-            .unwrap();
-
-        let mut stream = broadcasted.read_chunked(2).unwrap();
-        assert!(calls.lock().unwrap().is_empty());
-
-        let first = stream.next().await.unwrap().unwrap();
-        let first = first.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(first.values(), &[10, 20]);
-        assert!(!calls.lock().unwrap().is_empty());
-
-        let second = stream.next().await.unwrap().unwrap();
-        let second = second.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(second.values(), &[30, 10]);
-
-        let third = stream.next().await.unwrap().unwrap();
-        let third = third.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(third.values(), &[20, 30]);
-
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn read_chunked_after_broadcast_lon_to_lat_lon_time_preserves_order() {
-        let values = Arc::new(Int32Array::from(vec![10, 20, 30]));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![3], vec!["lon".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let broadcasted = array
-            .broadcast(
-                &[2, 3, 4],
-                &["lat".to_string(), "lon".to_string(), "time".to_string()],
-            )
-            .unwrap();
-
-        let mut stream = broadcasted.read_chunked(5).unwrap();
-        let mut reconstructed = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.unwrap();
-            let chunk = chunk.as_any().downcast_ref::<Int32Array>().unwrap();
-            reconstructed.extend_from_slice(chunk.values());
-        }
-
-        let mut expected = Vec::with_capacity(2 * 3 * 4);
-        for _lat in 0..2 {
-            for lon in [10, 20, 30] {
-                for _time in 0..4 {
-                    expected.push(lon);
-                }
-            }
-        }
-
-        assert_eq!(reconstructed, expected);
-    }
-
-    #[tokio::test]
-    async fn read_chunked_after_broadcast_emits_expected_chunk_boundaries() {
-        let values = Arc::new(Int32Array::from(vec![1, 2, 3]));
-        let array = NdArrowArray::new(
-            InMemoryArrayBackend::new(values, vec![3], vec!["lon".to_string()]),
-            DataType::Int32,
-        )
-        .unwrap();
-
-        let broadcasted = array
-            .broadcast(
-                &[2, 3, 2],
-                &["lat".to_string(), "lon".to_string(), "time".to_string()],
-            )
-            .unwrap();
-
-        let mut stream = broadcasted.read_chunked(4).unwrap();
-
-        let c1 = stream.next().await.unwrap().unwrap();
-        let c1 = c1.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(c1.values(), &[1, 1, 2, 2]);
-
-        let c2 = stream.next().await.unwrap().unwrap();
-        let c2 = c2.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(c2.values(), &[3, 3, 1, 1]);
-
-        let c3 = stream.next().await.unwrap().unwrap();
-        let c3 = c3.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(c3.values(), &[2, 2, 3, 3]);
-
-        assert!(stream.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn read_chunked_strided_coalesces_repeated_indices() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let values: ArrayRef = Arc::new(Int32Array::from(vec![10, 20, 30]));
-        let backend =
-            RecordingBackend::new(values, vec![3], vec!["lon".to_string()], calls.clone());
-
-        let array = NdArrowArray::new(backend, DataType::Int32).unwrap();
-
-        let broadcasted = array
-            .broadcast(
-                &[2, 3, 4],
-                &["lat".to_string(), "lon".to_string(), "time".to_string()],
-            )
-            .unwrap();
-
-        let mut stream = broadcasted.read_chunked(24).unwrap();
-        let first = stream.next().await.unwrap().unwrap();
-        let first = first.as_any().downcast_ref::<Int32Array>().unwrap();
-
-        let mut expected = Vec::with_capacity(24);
-        for _lat in 0..2 {
-            for lon in [10, 20, 30] {
-                for _time in 0..4 {
-                    expected.push(lon);
-                }
-            }
-        }
-
-        assert_eq!(first.values(), expected.as_slice());
-        assert!(stream.next().await.is_none());
-
-        let recorded = calls.lock().unwrap().clone();
-        assert_eq!(recorded, vec![(0, 3)]);
-    }
-
-    #[test]
-    fn test_chunk_size_shape_examples() {
-        let shape = [10, 50];
-
-        let c1 = NdArrowArray::<InMemoryArrayBackend>::chunk_size_shape(&shape, 150);
-        assert_eq!(c1, vec![3, 50]);
-
-        let c2 = NdArrowArray::<InMemoryArrayBackend>::chunk_size_shape(&shape, 20);
-        assert_eq!(c2, vec![1, 20]);
-
-        let c3 = NdArrowArray::<InMemoryArrayBackend>::chunk_size_shape(&shape, 120);
-        assert_eq!(c3, vec![3, 50]);
-
-        let shape = [100, 200, 300];
-        let c4 = NdArrowArray::<InMemoryArrayBackend>::chunk_size_shape(&shape, 100_000);
-        assert_eq!(c4, vec![2, 200, 300]);
-    }
-
-    #[test]
-    fn test_base_position_translation() {
-        let shape = vec![2, 3, 4, 6];
-        let strides = vec![12, 4, 1, 0];
-        let base_position = 13;
-
-        let translated =
-            NdArrowArray::<InMemoryArrayBackend>::base_shape_position(base_position, &shape);
-
-        println!("Translated position: {:?}", translated);
-
-        let length = 10;
-        let shape_from_length = length_to_shape(length, &shape);
-
-        println!("Shape from length: {:?}", shape_from_length);
-    }
-
-    fn length_to_shape(length: usize, shape: &[usize]) -> Vec<usize> {
-        let mut remaining = length;
-        let mut result = Vec::with_capacity(shape.len());
-        for dim in shape {
-            if *dim == 0 {
-                result.push(0);
-            } else {
-                result.push(remaining % dim);
-                remaining /= dim;
-            }
-        }
-        result.reverse();
-        result
-    }
-
-    #[test]
-    fn test_name() {
-        let byte_val = b',';
-        println!("Byte value of ',': {}", byte_val);
+    fn data_type(&self) -> arrow::datatypes::DataType {
+        T::data_type()
     }
 }

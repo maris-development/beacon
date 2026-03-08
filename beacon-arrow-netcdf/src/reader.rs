@@ -6,7 +6,7 @@ use arrow::{
 };
 use arrow_schema::{FieldRef, TimeUnit};
 use beacon_nd_arrow::{
-    array::backend::ArrayBackend, stream::NdBatchStreamAdapter, NdArrowArray, NdRecordBatch,
+    array::backend::ArrayBackend, stream::NdBatchStreamAdapter, NdArrowArrayDispatch, NdRecordBatch,
 };
 use futures::Stream;
 use netcdf::{
@@ -46,7 +46,7 @@ use crate::{
 /// ```
 pub struct NetCDFArrowReader {
     file_schema: arrow::datatypes::SchemaRef,
-    file_arrays: Vec<NdArrowArray<Arc<dyn ArrayBackend>>>,
+    file_arrays: Vec<NdArrowArrayDispatch<Arc<dyn ArrayBackend>>>,
     file: Arc<netcdf::File>,
 }
 
@@ -153,7 +153,7 @@ impl NetCDFArrowReader {
                     .collect(),
             )) as Arc<dyn ArrayBackend>;
             let variable_array =
-                NdArrowArray::new(variable_backend, variable_field.data_type().clone())?;
+                NdArrowArrayDispatch::new(variable_backend, variable_field.data_type().clone())?;
 
             file_schema_fields.push(variable_field);
             file_arrays.push(variable_array);
@@ -172,7 +172,7 @@ impl NetCDFArrowReader {
                         as Arc<dyn ArrayBackend>;
 
                 let attribute_array =
-                    NdArrowArray::new(attribute_backend, attr_field.data_type().clone())?;
+                    NdArrowArrayDispatch::new(attribute_backend, attr_field.data_type().clone())?;
 
                 file_schema_fields.push(attr_field);
                 file_arrays.push(attribute_array);
@@ -188,7 +188,7 @@ impl NetCDFArrowReader {
                 as Arc<dyn ArrayBackend>;
 
             let attribute_array =
-                NdArrowArray::new(attribute_backend, attr_field.data_type().clone())?;
+                NdArrowArrayDispatch::new(attribute_backend, attr_field.data_type().clone())?;
 
             file_schema_fields.push(attr_field);
             file_arrays.push(attribute_array);
@@ -370,7 +370,7 @@ impl NetCDFArrowReader {
     pub fn read_columns<P: AsRef<[usize]>>(
         &self,
         projection: Option<P>,
-    ) -> anyhow::Result<Vec<NdArrowArray<Arc<dyn ArrayBackend>>>> {
+    ) -> anyhow::Result<Vec<NdArrowArrayDispatch<Arc<dyn ArrayBackend>>>> {
         let columns = if let Some(projection) = projection {
             projection
                 .as_ref()
@@ -395,7 +395,7 @@ impl NetCDFArrowReader {
     pub fn read_column(
         &self,
         column_name: &str,
-    ) -> anyhow::Result<NdArrowArray<Arc<dyn ArrayBackend>>> {
+    ) -> anyhow::Result<NdArrowArrayDispatch<Arc<dyn ArrayBackend>>> {
         let index = self
             .file_schema
             .fields()

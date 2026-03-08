@@ -6,7 +6,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use beacon_nd_arrow::{
-    NdArrowArray,
+    NdArrowArrayDispatch,
     dimensions::{Dimension, Dimensions},
 };
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -15,7 +15,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 struct BenchmarkColumn {
     name: &'static str,
     data_type: DataType,
-    array: NdArrowArray,
+    array: NdArrowArrayDispatch,
 }
 
 fn dim(name: &str, size: usize) -> Dimension {
@@ -97,7 +97,7 @@ fn bench_broadcast_shared_1d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "time",
             data_type: DataType::Int64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Int64Array::from(time_values)),
                 Dimensions::new(vec![dim("time", n_time)]),
             )
@@ -106,7 +106,7 @@ fn bench_broadcast_shared_1d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "temperature",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(temperature_values)),
                 Dimensions::new(vec![dim("time", n_time)]),
             )
@@ -115,7 +115,7 @@ fn bench_broadcast_shared_1d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "platform_name",
             data_type: DataType::Utf8,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(StringArray::from(vec!["platform-A"])),
                 Dimensions::Scalar,
             )
@@ -171,7 +171,7 @@ fn bench_broadcast_shared_2d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "latitude",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(latitude_grid)),
                 Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
             )
@@ -180,7 +180,7 @@ fn bench_broadcast_shared_2d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "longitude",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(longitude_grid)),
                 Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
             )
@@ -189,7 +189,7 @@ fn bench_broadcast_shared_2d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "temperature",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(temperature_grid)),
                 Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
             )
@@ -198,7 +198,7 @@ fn bench_broadcast_shared_2d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "platform_name",
             data_type: DataType::Utf8,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(StringArray::from(vec!["platform-B"])),
                 Dimensions::Scalar,
             )
@@ -265,7 +265,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "time",
             data_type: DataType::Int64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Int64Array::from(time_values)),
                 Dimensions::new(vec![dim("time", n_time)]),
             )
@@ -274,7 +274,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "latitude",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(latitude_2d)),
                 Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
             )
@@ -283,7 +283,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "longitude",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(longitude_2d)),
                 Dimensions::new(vec![dim("latitude", n_lat), dim("longitude", n_lon)]),
             )
@@ -292,7 +292,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "temperature",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(temperature_3d)),
                 Dimensions::new(vec![
                     dim("time", n_time),
@@ -305,7 +305,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "platform_name",
             data_type: DataType::Utf8,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(StringArray::from(vec!["platform-C"])),
                 Dimensions::Scalar,
             )
@@ -342,7 +342,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "time",
             data_type: DataType::Int64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Int64Array::from((0..n_time as i64).collect::<Vec<_>>())),
                 Dimensions::new(vec![dim("time", n_time)]),
             )
@@ -351,7 +351,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "temperature_time",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(temperature_time_1d)),
                 Dimensions::new(vec![dim("time", n_time)]),
             )
@@ -360,7 +360,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "temperature_3d",
             data_type: DataType::Float64,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(Float64Array::from(temperature_3d)),
                 Dimensions::new(vec![
                     dim("time", n_time),
@@ -373,7 +373,7 @@ fn bench_broadcast_shared_3d(c: &mut Criterion) {
         BenchmarkColumn {
             name: "platform_name",
             data_type: DataType::Utf8,
-            array: NdArrowArray::new(
+            array: NdArrowArrayDispatch::new(
                 Arc::new(StringArray::from(vec!["platform-D"])),
                 Dimensions::Scalar,
             )

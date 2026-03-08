@@ -61,6 +61,6 @@ pub mod array;
 pub mod batch;
 pub mod stream;
 
-pub use array::NdArrowArray;
+pub use array::NdArrowArrayDispatch;
 pub use batch::NdRecordBatch;
-pub use stream::NdSendableBatchStream;
+// pub use stream::NdSendableBatchStream;

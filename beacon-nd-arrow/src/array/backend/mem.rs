@@ -1,16 +1,16 @@
-use arrow::array::ArrayRef;
-
 use crate::array::backend::ArrayBackend;
+use crate::array::compat_typings::ArrowTypeConversion;
+use crate::array::subset::ArraySubset;
 
 #[derive(Debug, Clone)]
-pub struct InMemoryArrayBackend {
-    array: ArrayRef,
+pub struct InMemoryArrayBackend<T: ArrowTypeConversion> {
+    array: ndarray::ArrayD<T>,
     shape: Vec<usize>,
     dimensions: Vec<String>,
 }
 
-impl InMemoryArrayBackend {
-    pub fn new(array: ArrayRef, shape: Vec<usize>, dimensions: Vec<String>) -> Self {
+impl<T: ArrowTypeConversion> InMemoryArrayBackend<T> {
+    pub fn new(array: ndarray::ArrayD<T>, shape: Vec<usize>, dimensions: Vec<String>) -> Self {
         Self {
             array,
             shape,
@@ -20,7 +20,7 @@ impl InMemoryArrayBackend {
 }
 
 #[async_trait::async_trait]
-impl ArrayBackend for InMemoryArrayBackend {
+impl<T: ArrowTypeConversion + Clone> ArrayBackend<T> for InMemoryArrayBackend<T> {
     fn len(&self) -> usize {
         self.array.len()
     }
@@ -33,7 +33,17 @@ impl ArrayBackend for InMemoryArrayBackend {
         self.dimensions.clone()
     }
 
-    async fn slice(&self, start: usize, length: usize) -> anyhow::Result<ArrayRef> {
-        Ok(self.array.slice(start, length))
+    async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<T>> {
+        self.validate_subset(&subset)?;
+
+        let data_view = self.array.view();
+        let sliced = data_view.slice_each_axis(|axis| {
+            let axis_index = axis.axis.index();
+            let start = subset.start[axis_index] as isize;
+            let end = (subset.start[axis_index] + subset.shape[axis_index]) as isize;
+            ndarray::Slice::new(start, Some(end), 1)
+        });
+
+        Ok(sliced.to_owned())
     }
 }

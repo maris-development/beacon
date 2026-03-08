@@ -1,16 +1,11 @@
 pub mod mem;
-#[cfg(feature = "ndarray")]
-// Re-export the `nd_array` module when the "ndarray" feature is enabled.
-pub mod ndarray;
 
 use std::{fmt::Debug, sync::Arc};
 
-use arrow::array::ArrayRef;
-
-use crate::array::subset::ArraySubset;
+use crate::array::{compat_typings::ArrowTypeConversion, subset::ArraySubset};
 
 #[async_trait::async_trait]
-pub trait ArrayBackend: Send + Sync + 'static + Debug {
+pub trait ArrayBackend<T: ArrowTypeConversion>: Send + Sync + 'static + Debug {
     fn len(&self) -> usize;
 
     /// Returns `true` when the array contains no elements.
@@ -24,14 +19,61 @@ pub trait ArrayBackend: Send + Sync + 'static + Debug {
         self.shape()
     }
     fn dimensions(&self) -> Vec<String>;
-    async fn slice(&self, start: usize, length: usize) -> anyhow::Result<ArrayRef>;
-    async fn subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayRef> {
-        anyhow::bail!("Subset operation not implemented for this backend");
+
+    fn validate_subset(&self, subset: &ArraySubset) -> anyhow::Result<()> {
+        let shape = self.shape();
+        if subset.start.len() != shape.len() {
+            return Err(anyhow::anyhow!(
+                "Subset start rank {} does not match array rank {}",
+                subset.start.len(),
+                shape.len()
+            ));
+        }
+
+        if subset.shape.len() != shape.len() {
+            return Err(anyhow::anyhow!(
+                "Subset shape rank {} does not match array rank {}",
+                subset.shape.len(),
+                shape.len()
+            ));
+        }
+
+        for axis in 0..shape.len() {
+            let start = subset.start[axis];
+            let len = subset.shape[axis];
+            let size = shape[axis];
+
+            if start > size {
+                return Err(anyhow::anyhow!(
+                    "Subset start index {} exceeds axis size {} for axis {}",
+                    start,
+                    size,
+                    axis
+                ));
+            }
+
+            if start + len > size {
+                return Err(anyhow::anyhow!(
+                    "Subset end index {} exceeds axis size {} for axis {}",
+                    start + len,
+                    size,
+                    axis
+                ));
+            }
+        }
+
+        Ok(())
     }
+
+    fn fill_value(&self) -> Option<T> {
+        None
+    }
+
+    async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<T>>;
 }
 
 #[async_trait::async_trait]
-impl<T: ArrayBackend + ?Sized> ArrayBackend for Arc<T> {
+impl<T: ArrowTypeConversion, A: ArrayBackend<T> + ?Sized> ArrayBackend<T> for Arc<A> {
     fn len(&self) -> usize {
         (**self).len()
     }
@@ -44,7 +86,11 @@ impl<T: ArrayBackend + ?Sized> ArrayBackend for Arc<T> {
         (**self).dimensions()
     }
 
-    async fn slice(&self, start: usize, length: usize) -> anyhow::Result<ArrayRef> {
-        (**self).slice(start, length).await
+    fn fill_value(&self) -> Option<T> {
+        (**self).fill_value()
+    }
+
+    async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<T>> {
+        (**self).read_subset(subset).await
     }
 }
