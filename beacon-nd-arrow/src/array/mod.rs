@@ -14,7 +14,7 @@ pub mod compat_typings;
 pub mod subset;
 
 #[async_trait::async_trait]
-pub trait NdArrowArray {
+pub trait NdArrowArray: Send + Sync + 'static {
     async fn subset(&self, subset: ArraySubset) -> anyhow::Result<Arc<dyn NdArrowArray>>;
     async fn as_arrow_array_ref(&self) -> anyhow::Result<ArrayRef>;
     async fn broadcast(
@@ -143,9 +143,10 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArrayDispatch<T, B> {
 impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDispatch<T, B> {
     async fn subset(&self, subset: ArraySubset) -> anyhow::Result<Arc<dyn NdArrowArray>> {
         let subset_array = self.backend.read_subset(subset).await?;
+        let subset_shape = subset_array.shape().to_vec();
         let subset_dispatch = NdArrowArrayDispatch::new_in_mem(
             subset_array.into_raw_vec(),
-            self.shape(),
+            subset_shape,
             self.dimensions(),
         )?;
         Ok(Arc::new(subset_dispatch))
