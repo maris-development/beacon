@@ -207,29 +207,29 @@ impl FlightService for ReaderService {
                 Status::invalid_argument(format!("ticket must be JSON DoGetRequest: {e}"))
             })?;
 
-        let reader = self.get_or_open(&req.path)?;
-        let (schema, batch_stream) = tokio::task::spawn_blocking(move || {
-            // Dimension projection takes priority over column-index projection.
-            let stream = if let Some(dims) = req.dimensions {
-                reader
-                    .project_with_dimensions(&dims)
-                    .map_err(|e| Status::internal(format!("dimension projection error: {e}")))?
-                    .read_as_arrow_stream::<&[usize]>(None, 65_536)
-                    .map_err(|e| Status::internal(format!("stream error: {e}")))?
-            } else {
-                reader
-                    .read_as_arrow_stream(req.projection.as_deref(), 65_536)
-                    .map_err(|e| Status::internal(format!("stream error: {e}")))?
-            };
-            let schema = stream.schema();
-            Ok::<_, Status>((schema, stream))
-        })
-        .await
-        .map_err(|e| Status::internal(e.to_string()))??;
+        let file_reader = self.get_or_open(&req.path)?;
+        let arrow_reader = if let Some(dims) = req.dimensions {
+            file_reader
+                .project_with_dimensions(&dims)
+                .map_err(|e| Status::internal(format!("dimension projection error: {e}")))?
+                .into()
+        } else if let Some(proj) = req.projection {
+            file_reader
+                .project(&proj)
+                .map_err(|e| Status::internal(format!("column projection error: {e}")))?
+                .into()
+        } else {
+            file_reader.clone()
+        };
+        let schema = arrow_reader.schema();
+        let stream = arrow_reader
+            .read_as_arrow_stream(64 * 1024)
+            .await
+            .map_err(|e| Status::internal(format!("error reading NetCDF file: {e}")))?;
 
         let flight_stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(batch_stream.map_err(|e| FlightError::ExternalError(e.into())))
+            .build(stream.map_err(|e| FlightError::ExternalError(e.into())))
             .map_err(|e| Status::internal(e.to_string()));
 
         Ok(Response::new(Box::pin(flight_stream)))
