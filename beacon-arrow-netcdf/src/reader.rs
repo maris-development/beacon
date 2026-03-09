@@ -7,10 +7,8 @@ use arrow::{
 use arrow_schema::{FieldRef, TimeUnit};
 use beacon_nd_arrow::{
     array::{backend::ArrayBackend, NdArrowArray},
-    stream::NdBatchStreamAdapter,
     NdArrowArrayDispatch, NdRecordBatch,
 };
-use futures::Stream;
 use netcdf::{
     types::{FloatType, IntType, NcVariableType},
     AttributeValue,
@@ -66,135 +64,16 @@ impl NetCDFArrowReader {
         let file = netcdf::open(path)?;
         let file_ref = Arc::new(file);
 
-        let mut file_schema_fields = Vec::new();
+        let mut file_schema_fields: Vec<arrow::datatypes::Field> = Vec::new();
         let mut file_arrays = Vec::new();
 
         // Process variables and their attributes
         for variable in file_ref.variables() {
-            let mut variable_field = if let Ok(field) = Self::variable_to_field(&variable) {
-                field
-            } else {
-                // Skip variables with unsupported types instead of failing the entire reader.
-                continue;
-            };
-
-            // Get attributes for the variable
-            let variable_attributes = Self::variable_attribute_values(&variable, false)?;
-
-            // Fill Value from attributes
-            let fill_value = variable_attributes
-                .get("_FillValue")
-                .cloned()
-                .map(|a| a.into_inner());
-
-            let mut variable_decoder: Arc<dyn VariableDecoder> =
-                Arc::new(DefaultVariableDecoder::new(
-                    variable_field.clone(),
-                    variable.vartype(),
-                    fill_value.clone(),
-                ));
-
-            let mut variable_dimensions = variable.dimensions().to_vec();
-            let last_dimension = variable.dimensions().last();
-
-            if let Some(last_dim) = last_dimension {
-                // Check for CF string convention and wrap decoder if needed
-                if variable.vartype() == NcVariableType::Char {
-                    let dim_name = last_dim.name().to_lowercase();
-                    if dim_name.starts_with("string")
-                        || dim_name.starts_with("strlen")
-                        || dim_name.starts_with("strnlen")
-                    {
-                        variable_decoder = Arc::new(decoders::strings::StringVariableDecoder::new(
-                            variable_field.clone(),
-                            variable.vartype(),
-                            fill_value,
-                            Some(last_dim.len()),
-                        ));
-                        variable_dimensions.pop(); // Remove the string length dimension
-                    }
-                } else if variable.vartype() == NcVariableType::String {
-                    variable_decoder = Arc::new(decoders::strings::StringVariableDecoder::new(
-                        variable_field.clone(),
-                        variable.vartype(),
-                        fill_value,
-                        None,
-                    ));
-                }
-            }
-
-            // Find CF time variables and decode them
-            if let Some(units_val) = variable_attributes.get("units") {
-                if let Some(units_str) = units_val.clone().into_inner().as_string_opt::<i32>() {
-                    let units_str_l = units_str.value(0).to_lowercase();
-                    let units = extract_units(&units_str_l);
-                    let epoch = extract_epoch(&units_str_l);
-                    if let (Some(units), Some(epoch)) = (units, epoch) {
-                        let ts_field = Arc::new(arrow_schema::Field::new(
-                            variable_field.name(),
-                            DataType::Timestamp(TimeUnit::Nanosecond, None),
-                            variable_field.is_nullable(),
-                        ));
-                        variable_decoder = Arc::new(decoders::cf_time::CFTimeVariableDecoder::new(
-                            ts_field.clone(),
-                            variable_decoder.clone(),
-                            epoch,
-                            units,
-                        ));
-                        variable_field = ts_field;
-                    }
-                }
-            }
-            let variable_backend = Arc::new(VariableBackend::new(
-                variable_decoder,
-                Arc::clone(&file_ref),
-                variable_dimensions.iter().map(|d| d.len()).collect(),
-                variable_dimensions
-                    .iter()
-                    .map(|d| d.name().to_string())
-                    .collect(),
-            )) as Arc<dyn ArrayBackend>;
-            let variable_array =
-                NdArrowArrayDispatch::new(variable_backend, variable_field.data_type().clone())?;
-
-            file_schema_fields.push(variable_field);
-            file_arrays.push(variable_array);
-
-            // Process variable attributes as separate fields
-            for (attr_name, attr_value) in variable_attributes {
-                let attr_type = attr_value.clone().into_inner().data_type().clone();
-                let attr_field = Arc::new(arrow_schema::Field::new(
-                    format!("{}.{}", variable.name(), attr_name),
-                    attr_type,
-                    true,
-                ));
-
-                let attribute_backend =
-                    Arc::new(AttributeBackend::new(attr_field.clone(), attr_value))
-                        as Arc<dyn ArrayBackend>;
-
-                let attribute_array =
-                    NdArrowArrayDispatch::new(attribute_backend, attr_field.data_type().clone())?;
-
-                file_schema_fields.push(attr_field);
-                file_arrays.push(attribute_array);
-            }
+            let variable_attributes = Self::variable_attribute_values(&variable)?;
         }
 
         // Process global attributes as separate fields
-        for (attr_name, attr_value) in Self::global_attribute_values(&file_ref, false)? {
-            let attr_type = attr_value.clone().into_inner().data_type().clone();
-            let attr_field = Arc::new(arrow_schema::Field::new(attr_name.clone(), attr_type, true));
-
-            let attribute_backend = Arc::new(AttributeBackend::new(attr_field.clone(), attr_value))
-                as Arc<dyn ArrayBackend>;
-
-            let attribute_array =
-                NdArrowArrayDispatch::new(attribute_backend, attr_field.data_type().clone())?;
-
-            file_schema_fields.push(attr_field);
-            file_arrays.push(attribute_array);
-        }
+        for (attr_name, attr_value) in Self::global_attribute_values(&file_ref)? {}
 
         let file_schema = Arc::new(Schema::new(file_schema_fields));
 
@@ -338,27 +217,8 @@ impl NetCDFArrowReader {
         &self,
         projection: Option<P>,
         chunk_size: usize,
-    ) -> anyhow::Result<NdBatchStreamAdapter> {
-        let full_schema = self.schema();
-        // Build the schema that matches the (possibly projected) column list.
-        let schema = match &projection {
-            Some(p) => {
-                let fields: Vec<_> = p
-                    .as_ref()
-                    .iter()
-                    .map(|&i| full_schema.field(i).clone())
-                    .collect();
-                Arc::new(Schema::new(fields))
-            }
-            None => full_schema,
-        };
-        let arrays = self.read_columns(projection)?;
-
-        let nd_batch = NdRecordBatch::new(schema, arrays)?;
-
-        let stream = NdBatchStreamAdapter::new(nd_batch, chunk_size)?;
-
-        Ok(stream)
+    ) -> anyhow::Result<NdRecordBatch> {
+        todo!()
     }
 
     /// Return all (or a projected subset of) columns as lazy
@@ -372,7 +232,7 @@ impl NetCDFArrowReader {
     pub fn read_columns<P: AsRef<[usize]>>(
         &self,
         projection: Option<P>,
-    ) -> anyhow::Result<Vec<NdArrowArrayDispatch<Arc<dyn ArrayBackend>>>> {
+    ) -> anyhow::Result<Vec<Arc<dyn NdArrowArray>>> {
         let columns = if let Some(projection) = projection {
             projection
                 .as_ref()
@@ -394,10 +254,7 @@ impl NetCDFArrowReader {
     ///
     /// # Errors
     /// Returns an error if no column with `column_name` exists in the schema.
-    pub fn read_column(
-        &self,
-        column_name: &str,
-    ) -> anyhow::Result<NdArrowArrayDispatch<Arc<dyn ArrayBackend>>> {
+    pub fn read_column(&self, column_name: &str) -> anyhow::Result<Arc<dyn NdArrowArray>> {
         let index = self
             .file_schema
             .fields()
@@ -408,55 +265,15 @@ impl NetCDFArrowReader {
             .map(|mut cols| cols.remove(0))
     }
 
-    /// Map a NetCDF variable type to an Arrow [`DataType`](arrow_schema::DataType).
-    fn variable_to_field(variable: &netcdf::Variable) -> anyhow::Result<FieldRef> {
-        let dtype = match variable.vartype() {
-            NcVariableType::Int(IntType::I8) => Ok(arrow_schema::DataType::Int8),
-            NcVariableType::Int(IntType::I16) => Ok(arrow_schema::DataType::Int16),
-            NcVariableType::Int(IntType::I32) => Ok(arrow_schema::DataType::Int32),
-            NcVariableType::Int(IntType::I64) => Ok(arrow_schema::DataType::Int64),
-            NcVariableType::Int(IntType::U8) => Ok(arrow_schema::DataType::UInt8),
-            NcVariableType::Int(IntType::U16) => Ok(arrow_schema::DataType::UInt16),
-            NcVariableType::Int(IntType::U32) => Ok(arrow_schema::DataType::UInt32),
-            NcVariableType::Int(IntType::U64) => Ok(arrow_schema::DataType::UInt64),
-            NcVariableType::Float(FloatType::F32) => Ok(arrow_schema::DataType::Float32),
-            NcVariableType::Float(FloatType::F64) => Ok(arrow_schema::DataType::Float64),
-            NcVariableType::Char => Ok(arrow_schema::DataType::Utf8),
-            NcVariableType::String => Ok(arrow_schema::DataType::Utf8),
-            _ => Err(anyhow::anyhow!(
-                "Unsupported NetCDF variable type: {:?}",
-                variable.vartype()
-            )),
-        };
-
-        Ok(Arc::new(arrow_schema::Field::new(
-            variable.name(),
-            dtype?,
-            true,
-        )))
-    }
-
     /// Collect every attribute of a NetCDF *file* into a map of Arrow scalars.
     #[allow(dead_code)]
     fn global_attribute_values(
         file: &netcdf::File,
-        fail_unsupported: bool,
-    ) -> anyhow::Result<HashMap<String, Scalar<ArrayRef>>> {
+    ) -> anyhow::Result<HashMap<String, AttributeValue>> {
         let mut attribute_values = HashMap::new();
         for attribute in file.attributes() {
             let value = attribute.value()?;
-            let scalar = match Self::attribute_value_to_scalar(&value) {
-                Ok(scalar) => scalar,
-                Err(err) => {
-                    if fail_unsupported {
-                        return Err(err);
-                    } else {
-                        // Skip unsupported attribute types.
-                        continue;
-                    }
-                }
-            };
-            attribute_values.insert(attribute.name().to_string(), scalar);
+            attribute_values.insert(attribute.name().to_string(), value);
         }
         Ok(attribute_values)
     }
@@ -464,82 +281,13 @@ impl NetCDFArrowReader {
     /// Collect every attribute of a NetCDF *variable* into a map of Arrow scalars.
     fn variable_attribute_values(
         variable: &netcdf::Variable,
-        fail_unsupported: bool,
-    ) -> anyhow::Result<HashMap<String, Scalar<ArrayRef>>> {
+    ) -> anyhow::Result<HashMap<String, AttributeValue>> {
         let mut attribute_values = HashMap::new();
         for attribute in variable.attributes() {
             let value = attribute.value()?;
-            let scalar = match Self::attribute_value_to_scalar(&value) {
-                Ok(scalar) => scalar,
-                Err(err) => {
-                    if fail_unsupported {
-                        return Err(err);
-                    } else {
-                        // Skip unsupported attribute types.
-                        continue;
-                    }
-                }
-            };
-            attribute_values.insert(attribute.name().to_string(), scalar);
+            attribute_values.insert(attribute.name().to_string(), value);
         }
         Ok(attribute_values)
-    }
-
-    /// Convert a single [`AttributeValue`] to a one-element Arrow [`Scalar`].
-    ///
-    /// # Errors
-    /// Returns an error for attribute types that have no Arrow equivalent
-    /// (e.g. opaque / user-defined types).
-    fn attribute_value_to_scalar(value: &AttributeValue) -> anyhow::Result<Scalar<ArrayRef>> {
-        match value {
-            AttributeValue::Uchar(value) => {
-                Ok(Scalar::new(Arc::new(arrow::array::UInt8Array::from(vec![
-                    *value,
-                ]))))
-            }
-            AttributeValue::Schar(value) => {
-                Ok(Scalar::new(Arc::new(arrow::array::Int8Array::from(vec![
-                    *value,
-                ]))))
-            }
-            AttributeValue::Ushort(value) => Ok(Scalar::new(Arc::new(
-                arrow::array::UInt16Array::from(vec![*value]),
-            ))),
-            AttributeValue::Short(value) => {
-                Ok(Scalar::new(Arc::new(arrow::array::Int16Array::from(vec![
-                    *value,
-                ]))))
-            }
-            AttributeValue::Uint(value) => Ok(Scalar::new(Arc::new(
-                arrow::array::UInt32Array::from(vec![*value]),
-            ))),
-            AttributeValue::Int(value) => {
-                Ok(Scalar::new(Arc::new(arrow::array::Int32Array::from(vec![
-                    *value,
-                ]))))
-            }
-            AttributeValue::Ulonglong(value) => Ok(Scalar::new(Arc::new(
-                arrow::array::UInt64Array::from(vec![*value]),
-            ))),
-            AttributeValue::Longlong(value) => {
-                Ok(Scalar::new(Arc::new(arrow::array::Int64Array::from(vec![
-                    *value,
-                ]))))
-            }
-            AttributeValue::Float(value) => Ok(Scalar::new(Arc::new(
-                arrow::array::Float32Array::from(vec![*value]),
-            ))),
-            AttributeValue::Double(value) => Ok(Scalar::new(Arc::new(
-                arrow::array::Float64Array::from(vec![*value]),
-            ))),
-            AttributeValue::Str(value) => Ok(Scalar::new(Arc::new(
-                arrow::array::StringArray::from(vec![value.clone()]),
-            ))),
-            _ => Err(anyhow::anyhow!(
-                "Unsupported NetCDF attribute value type: {:?}",
-                value
-            )),
-        }
     }
 }
 
