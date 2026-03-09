@@ -1,6 +1,9 @@
-use std::ffi::{CStr, CString};
+use std::{
+    ffi::{CStr, CString},
+    sync::Arc,
+};
 
-use beacon_nd_arrow::array::compat_typings::TimestampNanosecond;
+use beacon_nd_arrow::array::compat_typings::{ArrowTypeConversion, TimestampNanosecond};
 use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
 pub mod encoders;
@@ -14,11 +17,30 @@ pub mod compat;
 pub mod decoders;
 
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct NcTimestampNanosecond(pub TimestampNanosecond);
 unsafe impl NcTypeDescriptor for NcTimestampNanosecond {
     fn type_descriptor() -> NcVariableType {
         panic!("Logical type only - not directly readable/writable as a NetCDF variable. Use decoders/encoders to convert to/from an underlying type like i64.")
+    }
+}
+
+impl ArrowTypeConversion for NcTimestampNanosecond {
+    fn data_type() -> arrow::datatypes::DataType
+    where
+        Self: Sized,
+    {
+        arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
+    }
+
+    fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>
+    where
+        Self: Sized,
+    {
+        let primitive_array = arrow::array::PrimitiveArray::<
+            arrow::datatypes::TimestampNanosecondType,
+        >::from_iter(array.iter().map(|x| Some(x.0 .0)));
+        Ok(Arc::new(primitive_array))
     }
 }
 
@@ -27,11 +49,32 @@ unsafe impl NcTypeDescriptor for NcTimestampNanosecond {
 pub struct NcFixedSizedString(Vec<u8>);
 
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct NcChar(u8);
 unsafe impl NcTypeDescriptor for NcChar {
     fn type_descriptor() -> NcVariableType {
         NcVariableType::Char
+    }
+}
+
+impl ArrowTypeConversion for NcChar {
+    fn data_type() -> arrow::datatypes::DataType
+    where
+        Self: Sized,
+    {
+        arrow::datatypes::DataType::Utf8
+    }
+
+    fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>
+    where
+        Self: Sized,
+    {
+        let string_array = arrow::array::StringArray::from_iter(array.iter().map(|x| {
+            let c_char = x.0;
+            let s = (c_char as char).to_string();
+            Some(s)
+        }));
+        Ok(Arc::new(string_array))
     }
 }
 
@@ -57,6 +100,34 @@ impl NcString {
             let string = c_str.to_string_lossy().into_owned();
             string
         }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OwnedNcString(String);
+
+unsafe impl NcTypeDescriptor for OwnedNcString {
+    fn type_descriptor() -> NcVariableType {
+        panic!("Logical type only - not directly readable/writable as a NetCDF variable. Use decoders/encoders to convert to/from NcString or fixed-size string representations.")
+    }
+}
+
+impl ArrowTypeConversion for OwnedNcString {
+    fn data_type() -> arrow::datatypes::DataType
+    where
+        Self: Sized,
+    {
+        arrow::datatypes::DataType::Utf8
+    }
+
+    fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>
+    where
+        Self: Sized,
+    {
+        let string_array =
+            arrow::array::StringArray::from_iter(array.iter().map(|x| Some(x.0.as_str())));
+        Ok(Arc::new(string_array))
     }
 }
 

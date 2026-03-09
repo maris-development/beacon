@@ -805,6 +805,7 @@ dependencies = [
  "arrow-schema 56.2.0",
  "async-trait",
  "beacon-nd-arrow",
+ "bytemuck",
  "futures",
  "hifitime",
  "indexmap 2.13.0",

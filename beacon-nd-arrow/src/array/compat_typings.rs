@@ -272,7 +272,7 @@ impl ArrowTypeConversion for chrono::DateTime<chrono::Utc> {
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct TimestampNanosecond(i64);
+pub struct TimestampNanosecond(pub i64);
 
 impl ArrowTypeConversion for TimestampNanosecond {
     fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>

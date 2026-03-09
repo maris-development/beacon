@@ -6,7 +6,9 @@ use arrow::{
 };
 use arrow_schema::{FieldRef, TimeUnit};
 use beacon_nd_arrow::{
-    array::backend::ArrayBackend, stream::NdBatchStreamAdapter, NdArrowArrayDispatch, NdRecordBatch,
+    array::{backend::ArrayBackend, NdArrowArray},
+    stream::NdBatchStreamAdapter,
+    NdArrowArrayDispatch, NdRecordBatch,
 };
 use futures::Stream;
 use netcdf::{
@@ -46,7 +48,7 @@ use crate::{
 /// ```
 pub struct NetCDFArrowReader {
     file_schema: arrow::datatypes::SchemaRef,
-    file_arrays: Vec<NdArrowArrayDispatch<Arc<dyn ArrayBackend>>>,
+    file_arrays: Vec<Arc<dyn NdArrowArray>>,
     file: Arc<netcdf::File>,
 }
 
