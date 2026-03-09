@@ -304,6 +304,11 @@ pub fn variable_to_nd_arrow_array(
                     string_fill_attr.is_some(),
                 ));
 
+                // The trailing dimension stores fixed string length and is consumed
+                // by StringVariableDecoder; exclude it from the ND logical shape.
+                let logical_shape = shape[..shape.len().saturating_sub(1)].to_vec();
+                let logical_dimensions = dimensions[..dimensions.len().saturating_sub(1)].to_vec();
+
                 let array_backend = VariableBackend::new(
                     Arc::new(StringVariableDecoder::new(
                         field,
@@ -311,8 +316,8 @@ pub fn variable_to_nd_arrow_array(
                         Some(fixed_string_size),
                     )),
                     nc_file.clone(),
-                    shape,
-                    dimensions,
+                    logical_shape,
+                    logical_dimensions,
                 );
 
                 Ok(array_backend.into_dyn_array()?)

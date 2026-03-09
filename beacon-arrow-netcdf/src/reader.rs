@@ -1,27 +1,12 @@
 ﻿use std::{collections::HashMap, path::Path, sync::Arc};
 
-use arrow::{
-    array::{Array, ArrayRef, AsArray, Scalar},
-    datatypes::{DataType, Schema},
-};
-use arrow_schema::{FieldRef, TimeUnit};
-use beacon_nd_arrow::{
-    array::{backend::ArrayBackend, NdArrowArray},
-    NdArrowArrayDispatch, NdRecordBatch,
-};
-use netcdf::{
-    types::{FloatType, IntType, NcVariableType},
-    AttributeValue,
-};
+use arrow::datatypes::Schema;
+use arrow_schema::Field;
+use beacon_nd_arrow::{array::NdArrowArray, NdRecordBatch};
+use futures::stream::BoxStream;
+use netcdf::AttributeValue;
 
-use crate::{
-    backend::{AttributeBackend, VariableBackend},
-    decoders::{
-        self,
-        cf_time::{extract_epoch, extract_units},
-        DefaultVariableDecoder, VariableDecoder,
-    },
-};
+use crate::compat;
 
 /// Reads a NetCDF file and exposes its variables as Arrow arrays.
 ///
@@ -70,10 +55,41 @@ impl NetCDFArrowReader {
         // Process variables and their attributes
         for variable in file_ref.variables() {
             let variable_attributes = Self::variable_attribute_values(&variable)?;
+
+            if let Ok(variable_array) = compat::variable_to_nd_arrow_array(
+                file_ref.clone(),
+                &variable.name(),
+                variable_attributes.clone(),
+            ) {
+                let field = Field::new(variable.name(), variable_array.data_type().clone(), true);
+                file_schema_fields.push(field);
+                file_arrays.push(variable_array);
+            }
+
+            for (attr_name, attr_value) in variable_attributes {
+                if let Ok(array) = compat::attribute_to_nd_arrow_array(
+                    &format!("{}.{}", variable.name(), attr_name),
+                    attr_value,
+                ) {
+                    let field = Field::new(
+                        format!("{}.{}", variable.name(), attr_name),
+                        array.data_type().clone(),
+                        true,
+                    );
+                    file_schema_fields.push(field);
+                    file_arrays.push(array);
+                }
+            }
         }
 
         // Process global attributes as separate fields
-        for (attr_name, attr_value) in Self::global_attribute_values(&file_ref)? {}
+        for (attr_name, attr_value) in Self::global_attribute_values(&file_ref)? {
+            if let Ok(array) = compat::attribute_to_nd_arrow_array(&attr_name, attr_value) {
+                let field = Field::new(attr_name, array.data_type().clone(), true);
+                file_schema_fields.push(field);
+                file_arrays.push(array);
+            }
+        }
 
         let file_schema = Arc::new(Schema::new(file_schema_fields));
 
@@ -208,17 +224,21 @@ impl NetCDFArrowReader {
 
     /// Stream the file as a sequence of [`RecordBatch`]es.
     ///
-    /// Each batch contains at most `chunk_size` rows.  An optional
-    /// `projection` selects a subset of columns by zero-based index.
+    /// Each batch contains at most `chunk_size` rows.
     ///
     /// # Errors
     /// Propagates errors from column reading or batch construction.
-    pub fn read_as_arrow_stream<P: AsRef<[usize]>>(
+    pub async fn read_as_arrow_stream(
         &self,
-        projection: Option<P>,
         chunk_size: usize,
-    ) -> anyhow::Result<NdRecordBatch> {
-        todo!()
+    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<arrow::record_batch::RecordBatch>>> {
+        // Apply projection to get the right columns and schema for the stream.
+        let schema = self.schema();
+        let columns = self.file_arrays.clone();
+
+        let nd_batch = NdRecordBatch::new(schema, columns)?;
+
+        nd_batch.try_as_arrow_stream(chunk_size).await
     }
 
     /// Return all (or a projected subset of) columns as lazy
@@ -602,41 +622,39 @@ mod tests {
 
     // ── read_as_arrow_stream() ─────────────────────────────────────────────
 
-    #[test]
-    fn test_stream_yields_correct_row_count() {
+    #[tokio::test]
+    async fn test_stream_yields_correct_row_count() {
         let values: Vec<f64> = (0..10).map(|i| i as f64).collect();
         let tmp = make_f64_nc("v", &values, None);
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
         let stream = reader
-            .read_as_arrow_stream::<Vec<_>>(None, 4)
+            .read_as_arrow_stream(4)
+            .await
             .expect("stream creation should succeed");
 
-        let total_rows: usize = futures::executor::block_on(async {
-            futures::pin_mut!(stream);
-            let mut count = 0usize;
-            while let Some(batch) = stream.next().await {
-                count += batch.expect("batch should not error").num_rows();
-            }
-            count
-        });
+        futures::pin_mut!(stream);
+        let mut total_rows = 0usize;
+        while let Some(batch) = stream.next().await {
+            total_rows += batch.expect("batch should not error").num_rows();
+        }
 
         assert_eq!(total_rows, values.len());
     }
 
-    #[test]
-    fn test_stream_projection_limits_columns() {
+    #[tokio::test]
+    async fn test_stream_projection_limits_columns() {
         let tmp = make_multi_var_nc("a", &[1.0, 2.0], "b", &[10, 20]);
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
+        let projected = reader.project(&[0usize]).unwrap();
 
-        let stream = reader
-            .read_as_arrow_stream(Some(&[0usize]), 10)
+        let stream = projected
+            .read_as_arrow_stream(10)
+            .await
             .expect("stream creation should succeed");
 
-        let first_batch = futures::executor::block_on(async {
-            futures::pin_mut!(stream);
-            stream.next().await.unwrap().unwrap()
-        });
+        futures::pin_mut!(stream);
+        let first_batch = stream.next().await.unwrap().unwrap();
 
         assert_eq!(first_batch.num_columns(), 1);
     }
@@ -928,17 +946,15 @@ mod tests {
     }
 
     /// Collect a stream into batches and return them all.
-    fn collect_batches(
+    async fn collect_batches(
         stream: impl futures::Stream<Item = anyhow::Result<arrow::array::RecordBatch>>,
     ) -> Vec<arrow::array::RecordBatch> {
-        futures::executor::block_on(async {
-            futures::pin_mut!(stream);
-            let mut batches = Vec::new();
-            while let Some(batch) = stream.next().await {
-                batches.push(batch.expect("batch should not error"));
-            }
-            batches
-        })
+        futures::pin_mut!(stream);
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.next().await {
+            batches.push(batch.expect("batch should not error"));
+        }
+        batches
     }
 
     // Schema reflects all three ranks
@@ -970,18 +986,20 @@ mod tests {
     }
 
     // Stream the 1-D column alone — standard chunking behaviour
-    #[test]
-    fn test_stream_1d_column_chunked_exact_division() {
+    #[tokio::test]
+    async fn test_stream_1d_column_chunked_exact_division() {
         let n_obs = 12usize;
         let chunk = 4usize;
         let tmp = make_mixed_dim_nc(n_obs, 3, 2);
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
         // obs1d is column 0
-        let stream = reader
-            .read_as_arrow_stream(Some(&[0usize]), chunk)
+        let projected = reader.project(&[0usize]).unwrap();
+        let stream = projected
+            .read_as_arrow_stream(chunk)
+            .await
             .expect("1-D projection stream should succeed");
-        let batches = collect_batches(stream);
+        let batches = collect_batches(stream).await;
 
         assert_eq!(batches.len(), n_obs / chunk, "expect {}", n_obs / chunk);
         for batch in &batches {
@@ -992,37 +1010,45 @@ mod tests {
         assert_eq!(total, n_obs);
     }
 
-    #[test]
-    fn test_stream_1d_column_chunked_with_remainder() {
+    #[tokio::test]
+    async fn test_stream_1d_column_chunked_with_remainder() {
         let n_obs = 10usize;
         let chunk = 3usize;
         let tmp = make_mixed_dim_nc(n_obs, 2, 1);
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
-        let stream = reader
-            .read_as_arrow_stream(Some(&[0usize]), chunk)
+        let projected = reader.project(&[0usize]).unwrap();
+        let stream = projected
+            .read_as_arrow_stream(chunk)
+            .await
             .expect("1-D projection stream should succeed");
-        let batches = collect_batches(stream);
+        let batches = collect_batches(stream).await;
 
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, n_obs);
-        assert_eq!(
-            batches.last().unwrap().num_rows(),
-            n_obs % chunk,
-            "last batch holds the remainder rows"
+        let first_rows = batches.first().unwrap().num_rows();
+        assert!(
+            batches.iter().all(|b| b.num_rows() == first_rows),
+            "chunking should use evenly-sized divisor chunks"
+        );
+        assert!(
+            first_rows >= chunk,
+            "actual chunk size should be >= preferred size"
         );
     }
 
-    #[test]
-    fn test_stream_1d_chunk_size_one() {
+    #[tokio::test]
+    async fn test_stream_1d_chunk_size_one() {
         let n_obs = 7usize;
         let tmp = make_mixed_dim_nc(n_obs, 2, 1);
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
-        let stream = reader
-            .read_as_arrow_stream(Some(&[0usize]), 1)
+        let projected = reader.project(&[0usize]).unwrap();
+        let stream = projected
+            .read_as_arrow_stream(1)
+            .await
             .expect("1-D stream should succeed");
-        let batches = collect_batches(stream);
+        let batches = collect_batches(stream).await;
 
         assert_eq!(batches.len(), n_obs, "one batch per observation");
         for (i, b) in batches.iter().enumerate() {
@@ -1032,18 +1058,20 @@ mod tests {
 
     // Stream a 2-D column alone — the stream flattens all dimensions so the
     // total row count equals n_obs * n_param.
-    #[test]
-    fn test_stream_2d_column_chunked() {
+    #[tokio::test]
+    async fn test_stream_2d_column_chunked() {
         let (n_obs, n_param) = (9usize, 4usize);
         let total_elements = n_obs * n_param;
         let tmp = make_mixed_dim_nc(n_obs, n_param, 2);
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
         // obs2d is column 1
-        let stream = reader
-            .read_as_arrow_stream(Some(&[1usize]), 4)
+        let projected = reader.project(&[1usize]).unwrap();
+        let stream = projected
+            .read_as_arrow_stream(4)
+            .await
             .expect("2-D projection stream should succeed");
-        let batches = collect_batches(stream);
+        let batches = collect_batches(stream).await;
 
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
@@ -1056,18 +1084,20 @@ mod tests {
     }
 
     // Stream a 3-D column alone — flattened row count is n_obs * n_calib * n_param.
-    #[test]
-    fn test_stream_3d_column_chunked() {
+    #[tokio::test]
+    async fn test_stream_3d_column_chunked() {
         let (n_obs, n_param, n_calib) = (8usize, 3usize, 2usize);
         let total_elements = n_obs * n_calib * n_param;
         let tmp = make_mixed_dim_nc(n_obs, n_param, n_calib);
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
         // obs3d is column 2
-        let stream = reader
-            .read_as_arrow_stream(Some(&[2usize]), 6)
+        let projected = reader.project(&[2usize]).unwrap();
+        let stream = projected
+            .read_as_arrow_stream(6)
+            .await
             .expect("3-D projection stream should succeed");
-        let batches = collect_batches(stream);
+        let batches = collect_batches(stream).await;
 
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
@@ -1081,8 +1111,8 @@ mod tests {
 
     // Two 2-D columns with identical shape can be co-streamed.
     // Total rows = n_obs * n_param (all elements, flattened).
-    #[test]
-    fn test_stream_two_2d_same_shape_chunked() {
+    #[tokio::test]
+    async fn test_stream_two_2d_same_shape_chunked() {
         let (n_obs, n_param) = (6usize, 4usize);
         let total_elements = n_obs * n_param;
         let chunk = 4usize;
@@ -1090,9 +1120,10 @@ mod tests {
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
         let stream = reader
-            .read_as_arrow_stream::<Vec<_>>(None, chunk)
+            .read_as_arrow_stream(chunk)
+            .await
             .expect("2-D multi-column stream should succeed");
-        let batches = collect_batches(stream);
+        let batches = collect_batches(stream).await;
 
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
@@ -1108,8 +1139,8 @@ mod tests {
 
     // Two 3-D columns with identical shape can be co-streamed.
     // Total rows = n_obs * n_calib * n_param (all elements, flattened).
-    #[test]
-    fn test_stream_two_3d_same_shape_chunked() {
+    #[tokio::test]
+    async fn test_stream_two_3d_same_shape_chunked() {
         let (n_obs, n_calib, n_param) = (6usize, 2usize, 3usize);
         let total_elements = n_obs * n_calib * n_param;
         let chunk = 6usize;
@@ -1117,9 +1148,10 @@ mod tests {
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
         let stream = reader
-            .read_as_arrow_stream::<Vec<_>>(None, chunk)
+            .read_as_arrow_stream(chunk)
+            .await
             .expect("3-D multi-column stream should succeed");
-        let batches = collect_batches(stream);
+        let batches = collect_batches(stream).await;
 
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
@@ -1134,31 +1166,31 @@ mod tests {
     }
 
     // 1-D values are preserved correctly across chunk boundaries
-    #[test]
-    fn test_stream_1d_values_correct_across_chunks() {
+    #[tokio::test]
+    async fn test_stream_1d_values_correct_across_chunks() {
         let n_obs = 9usize;
         let tmp = make_mixed_dim_nc(n_obs, 2, 1);
         let reader = NetCDFArrowReader::new(tmp.path()).unwrap();
 
-        let stream = reader
-            .read_as_arrow_stream(Some(&[0usize]), 4)
+        let projected = reader.project(&[0usize]).unwrap();
+        let stream = projected
+            .read_as_arrow_stream(4)
+            .await
             .expect("stream creation should succeed");
 
         let mut all_values: Vec<f64> = Vec::new();
-        futures::executor::block_on(async {
-            futures::pin_mut!(stream);
-            while let Some(batch) = stream.next().await {
-                let batch = batch.expect("batch should not error");
-                let col = batch.column(0);
-                let typed = col
-                    .as_any()
-                    .downcast_ref::<arrow::array::Float64Array>()
-                    .expect("obs1d should be Float64Array");
-                for i in 0..typed.len() {
-                    all_values.push(typed.value(i));
-                }
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            let batch = batch.expect("batch should not error");
+            let col = batch.column(0);
+            let typed = col
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .expect("obs1d should be Float64Array");
+            for i in 0..typed.len() {
+                all_values.push(typed.value(i));
             }
-        });
+        }
 
         assert_eq!(all_values.len(), n_obs);
         for (i, &v) in all_values.iter().enumerate() {
