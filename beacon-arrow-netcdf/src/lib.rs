@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString};
 
+use beacon_nd_arrow::array::compat_typings::TimestampNanosecond;
 use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
 pub mod encoders;
@@ -9,7 +10,17 @@ pub mod writer;
 pub use netcdf;
 pub use netcdf_sys;
 pub mod backend;
+pub mod compat;
 pub mod decoders;
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct NcTimestampNanosecond(pub TimestampNanosecond);
+unsafe impl NcTypeDescriptor for NcTimestampNanosecond {
+    fn type_descriptor() -> NcVariableType {
+        panic!("Logical type only - not directly readable/writable as a NetCDF variable. Use decoders/encoders to convert to/from an underlying type like i64.")
+    }
+}
 
 #[repr(transparent)]
 #[derive(Clone)]

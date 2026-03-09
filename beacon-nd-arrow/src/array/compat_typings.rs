@@ -19,6 +19,7 @@ use std::{fmt::Debug, sync::Arc};
 /// | `i32` / `u32`                    | `Int32Array` / `UInt32Array`              |
 /// | `i64` / `u64`                    | `Int64Array` / `UInt64Array`              |
 /// | `f32` / `f64`                    | `Float32Array` / `Float64Array`           |
+/// | `TimestampNanosecond`             | `Timestamp(Nanosecond, None)`             |
 /// | `bool`                           | `BooleanArray`                            |
 /// | `String`                         | `StringArray` (UTF-8, 32-bit offsets)     |
 /// | `chrono::NaiveDateTime`          | `Timestamp(Nanosecond, None)`             |
@@ -265,6 +266,31 @@ impl ArrowTypeConversion for chrono::DateTime<chrono::Utc> {
     }
 
     fn data_type() -> arrow::datatypes::DataType {
+        arrow::datatypes::TimestampNanosecondType::DATA_TYPE.clone()
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TimestampNanosecond(i64);
+
+impl ArrowTypeConversion for TimestampNanosecond {
+    fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>
+    where
+        Self: Sized,
+    {
+        // SAFETY: TimestampNanosecond is #[repr(transparent)] over an i64 and
+        // implements bytemuck::Pod, so this is a safe zero-copy transmutation.
+        let nanos: &[i64] = bytemuck::try_cast_slice(array)
+            .map_err(|e| anyhow::anyhow!("Zero cost copy transmutation failed: {e}"))?;
+        let arrow_array = arrow::array::TimestampNanosecondArray::from(nanos.to_vec());
+        Ok(Arc::new(arrow_array))
+    }
+
+    fn data_type() -> arrow::datatypes::DataType
+    where
+        Self: Sized,
+    {
         arrow::datatypes::TimestampNanosecondType::DATA_TYPE.clone()
     }
 }

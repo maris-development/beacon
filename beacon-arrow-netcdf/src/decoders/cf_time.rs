@@ -7,24 +7,32 @@ use arrow::{
         TimestampNanosecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
     },
 };
+use beacon_nd_arrow::array::compat_typings::{ArrowTypeConversion, TimestampNanosecond};
 use hifitime::Epoch;
+use netcdf::NcTypeDescriptor;
 use num_traits::AsPrimitive;
 use regex::Regex;
 
-use crate::decoders::VariableDecoder;
+use crate::{decoders::VariableDecoder, NcTimestampNanosecond};
 
 #[derive(Debug)]
-pub struct CFTimeVariableDecoder {
+pub struct CFTimeVariableDecoder<T>
+where
+    T: ArrowTypeConversion + NcTypeDescriptor + AsPrimitive<f64>,
+{
     pub arrow_field: arrow::datatypes::FieldRef,
-    pub inner_decoder: Arc<dyn VariableDecoder>,
+    pub inner_decoder: Arc<dyn VariableDecoder<T>>,
     pub epoch: hifitime::Epoch,
     pub unit: hifitime::Unit,
 }
 
-impl CFTimeVariableDecoder {
+impl<T> CFTimeVariableDecoder<T>
+where
+    T: ArrowTypeConversion + NcTypeDescriptor + AsPrimitive<f64>,
+{
     pub fn new(
         arrow_field: arrow::datatypes::FieldRef,
-        inner_decoder: Arc<dyn VariableDecoder>,
+        inner_decoder: Arc<dyn VariableDecoder<T>>,
         epoch: hifitime::Epoch,
         unit: hifitime::Unit,
     ) -> Self {
@@ -37,7 +45,10 @@ impl CFTimeVariableDecoder {
     }
 }
 
-impl VariableDecoder for CFTimeVariableDecoder {
+impl<T> VariableDecoder<NcTimestampNanosecond> for CFTimeVariableDecoder<T>
+where
+    T: ArrowTypeConversion + NcTypeDescriptor + AsPrimitive<f64>,
+{
     fn arrow_field(&self) -> &arrow::datatypes::Field {
         &self.arrow_field
     }
@@ -47,75 +58,9 @@ impl VariableDecoder for CFTimeVariableDecoder {
         variable: &netcdf::Variable,
         extents: netcdf::Extents,
     ) -> anyhow::Result<arrow::array::ArrayRef> {
-        if self.arrow_field.data_type().is_primitive() {
-            let array = self.inner_decoder.read(variable, extents)?;
-
-            match array.data_type() {
-                arrow::datatypes::DataType::Int8 => {
-                    let array = array.as_primitive::<Int8Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::Int16 => {
-                    let array = array.as_primitive::<Int16Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::Int32 => {
-                    let array = array.as_primitive::<Int32Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::Int64 => {
-                    let array = array.as_primitive::<Int64Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::UInt8 => {
-                    let array = array.as_primitive::<UInt8Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::UInt16 => {
-                    let array = array.as_primitive::<UInt16Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::UInt32 => {
-                    let array = array.as_primitive::<UInt32Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::UInt64 => {
-                    let array = array.as_primitive::<UInt64Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::Float32 => {
-                    let array = array.as_primitive::<Float32Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                arrow::datatypes::DataType::Float64 => {
-                    let array = array.as_primitive::<Float64Type>();
-                    let array = convert_to_timestamp_nanoseconds(array, self.epoch, self.unit);
-                    Ok(Arc::new(array))
-                }
-                _ => {
-                    anyhow::bail!(
-                        "Unsupported data type for CF time variable decoder: {:?} on variable {}",
-                        array.data_type(),
-                        self.arrow_field.name()
-                    );
-                }
-            }
-        } else {
-            anyhow::bail!(
-                "Unsupported data type for CF time variable decoder: {:?} on variable {}",
-                self.arrow_field.data_type(),
-                self.arrow_field.name()
-            );
-        }
+        let array = self.inner_decoder.read(variable, extents)?;
+        let ts_array =
+            convert_to_timestamp_nanoseconds(&array.as_primitive::<T>(), self.epoch, self.unit)?;
     }
 
     fn variable_name(&self) -> &str {
@@ -123,8 +68,8 @@ impl VariableDecoder for CFTimeVariableDecoder {
     }
 }
 
-fn convert_to_timestamp_nanoseconds<T: ArrowPrimitiveType>(
-    array: &arrow::array::PrimitiveArray<T>,
+fn convert_to_timestamp_nanoseconds<T>(
+    array: &ndarray::ArrayViewD<T>,
     epoch: hifitime::Epoch,
     unit: hifitime::Unit,
 ) -> arrow::array::PrimitiveArray<TimestampNanosecondType>

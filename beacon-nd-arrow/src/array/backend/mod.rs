@@ -2,10 +2,20 @@ pub mod mem;
 
 use std::{fmt::Debug, sync::Arc};
 
-use crate::array::{compat_typings::ArrowTypeConversion, subset::ArraySubset};
+use crate::{
+    NdArrowArrayDispatch,
+    array::{NdArrowArray, compat_typings::ArrowTypeConversion, subset::ArraySubset},
+};
 
 #[async_trait::async_trait]
 pub trait ArrayBackend<T: ArrowTypeConversion>: Send + Sync + 'static + Debug {
+    fn into_dyn_array(self) -> anyhow::Result<Arc<dyn NdArrowArray>>
+    where
+        Self: Sized + 'static,
+    {
+        Ok(Arc::new(NdArrowArrayDispatch::new(self)?))
+    }
+
     fn len(&self) -> usize;
 
     /// Returns `true` when the array contains no elements.

@@ -20,6 +20,7 @@ anyhow = { workspace=true }
 async-trait = { workspace=true }
 futures = { workspace=true }
 pin-project = "1.1.10"
+bytemuck = {version = "1.25.0", features = ["derive"]}
 
 [dev-dependencies]
 arrow-ipc = { workspace = true }
