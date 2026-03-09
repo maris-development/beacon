@@ -5,9 +5,61 @@ use netcdf::AttributeValue;
 
 use crate::{
     backend::{AttributeBackend, VariableBackend},
-    decoders::{strings::StringVariableDecoder, DefaultVariableDecoder},
+    decoders::{
+        cf_time::{parse_time_units, CFTimeVariableDecoder},
+        strings::StringVariableDecoder,
+        DefaultVariableDecoder, VariableDecoder,
+    },
     NcChar, OwnedNcString,
 };
+
+fn numeric_variable_to_nd_arrow_array<T>(
+    nc_file: Arc<netcdf::File>,
+    variable_name: &str,
+    shape: Vec<usize>,
+    dimensions: Vec<String>,
+    cf_time_epoch_unit: Option<(hifitime::Epoch, hifitime::Unit)>,
+) -> anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>>
+where
+    T: ArrowTypeConversion
+        + netcdf::NcTypeDescriptor
+        + Copy
+        + num_traits::AsPrimitive<f64>
+        + 'static,
+{
+    let default_decoder: Arc<dyn VariableDecoder<T>> = Arc::new(DefaultVariableDecoder::<T>::new(
+        Arc::new(arrow_schema::Field::new(
+            variable_name,
+            T::data_type(),
+            false,
+        )),
+        None,
+    ));
+
+    if let Some((epoch, unit)) = cf_time_epoch_unit {
+        let field = Arc::new(arrow_schema::Field::new(
+            variable_name,
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+            false,
+        ));
+        let time_backend = VariableBackend::new(
+            Arc::new(CFTimeVariableDecoder::new(
+                field,
+                default_decoder,
+                epoch,
+                unit,
+            )),
+            nc_file,
+            shape,
+            dimensions,
+        );
+
+        return Ok(time_backend.into_dyn_array()?);
+    }
+
+    let variable_backend = VariableBackend::new(default_decoder, nc_file, shape, dimensions);
+    Ok(variable_backend.into_dyn_array()?)
+}
 
 pub fn attribute_to_nd_arrow_array(
     attr_name: &str,
@@ -122,6 +174,11 @@ pub fn variable_to_nd_arrow_array(
         .collect::<Vec<_>>();
     let var_type = var.vartype();
 
+    let cf_time_epoch_unit = match attributes.get("units") {
+        Some(AttributeValue::Str(units_str)) => parse_time_units(units_str),
+        _ => None,
+    };
+
     match var_type {
         netcdf::types::NcVariableType::String => {
             let string_fill_attr =
@@ -145,18 +202,78 @@ pub fn variable_to_nd_arrow_array(
             Ok(array_backend.into_dyn_array()?)
         }
         netcdf::types::NcVariableType::Int(int_type) => match int_type {
-            netcdf::types::IntType::U8 => todo!(),
-            netcdf::types::IntType::U16 => todo!(),
-            netcdf::types::IntType::U32 => todo!(),
-            netcdf::types::IntType::U64 => todo!(),
-            netcdf::types::IntType::I8 => todo!(),
-            netcdf::types::IntType::I16 => todo!(),
-            netcdf::types::IntType::I32 => todo!(),
-            netcdf::types::IntType::I64 => todo!(),
+            netcdf::types::IntType::U8 => numeric_variable_to_nd_arrow_array::<u8>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
+            netcdf::types::IntType::U16 => numeric_variable_to_nd_arrow_array::<u16>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
+            netcdf::types::IntType::U32 => numeric_variable_to_nd_arrow_array::<u32>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
+            netcdf::types::IntType::U64 => numeric_variable_to_nd_arrow_array::<u64>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
+            netcdf::types::IntType::I8 => numeric_variable_to_nd_arrow_array::<i8>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
+            netcdf::types::IntType::I16 => numeric_variable_to_nd_arrow_array::<i16>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
+            netcdf::types::IntType::I32 => numeric_variable_to_nd_arrow_array::<i32>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
+            netcdf::types::IntType::I64 => numeric_variable_to_nd_arrow_array::<i64>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
         },
         netcdf::types::NcVariableType::Float(float_type) => match float_type {
-            netcdf::types::FloatType::F32 => todo!(),
-            netcdf::types::FloatType::F64 => todo!(),
+            netcdf::types::FloatType::F32 => numeric_variable_to_nd_arrow_array::<f32>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
+            netcdf::types::FloatType::F64 => numeric_variable_to_nd_arrow_array::<f64>(
+                nc_file.clone(),
+                variable_name,
+                shape.clone(),
+                dimensions.clone(),
+                cf_time_epoch_unit,
+            ),
         },
         netcdf::types::NcVariableType::Char => {
             // For char variables, we can treat them as fixed-size strings where the last dimension is the string length

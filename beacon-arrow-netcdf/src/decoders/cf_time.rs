@@ -79,6 +79,12 @@ where
     array
 }
 
+pub(crate) fn parse_time_units(units_str: &str) -> Option<(hifitime::Epoch, hifitime::Unit)> {
+    let unit = extract_units(units_str)?;
+    let epoch = extract_epoch(units_str)?;
+    Some((epoch, unit))
+}
+
 pub(crate) fn extract_units(input: &str) -> Option<hifitime::Unit> {
     let re = Regex::new(r"^(?P<units>\w+) since").unwrap();
     re.captures(input)
