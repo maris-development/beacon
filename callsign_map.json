@@ -851,6 +851,13 @@
       "decommissioned": null
     }
   ],
+  "OW2353": [
+    {
+      "c17": "SDN:C17::26WF",
+      "commissioned": "1999-01-01T00:00:00Z",
+      "decommissioned": "2006-10-25T00:00:00Z"
+    }
+  ],
   "ELJP4": [
     {
       "c17": "SDN:C17::54OT",
@@ -3279,6 +3286,13 @@
       "c17": "SDN:C17::67NN",
       "commissioned": "1982-01-01T00:00:00Z",
       "decommissioned": null
+    }
+  ],
+  "9VND": [
+    {
+      "c17": "SDN:C17::SIRI",
+      "commissioned": "1998-01-01T00:00:00Z",
+      "decommissioned": "2023-01-01T00:00:00Z"
     }
   ],
   "9HA4640": [
@@ -12329,6 +12343,13 @@
       "decommissioned": "2018-01-01T00:00:00Z"
     }
   ],
+  "OPHH": [
+    {
+      "c17": "SDN:C17::11AP",
+      "commissioned": "1970-01-01T00:00:00Z",
+      "decommissioned": null
+    }
+  ],
   "XPC3772": [
     {
       "c17": "SDN:C17::26OY",
@@ -12545,13 +12566,6 @@
   "NHRZ": [
     {
       "c17": "SDN:C17::31N6",
-      "commissioned": null,
-      "decommissioned": null
-    }
-  ],
-  "NBOB": [
-    {
-      "c17": "SDN:C17::3234",
       "commissioned": null,
       "decommissioned": null
     }
@@ -14582,6 +14596,13 @@
       "decommissioned": null
     }
   ],
+  "VRWP6": [
+    {
+      "c17": "SDN:C17::HK6G",
+      "commissioned": "2025-01-01T00:00:00Z",
+      "decommissioned": null
+    }
+  ],
   "C6VW6": [
     {
       "c17": "SDN:C17::BHQ5",
@@ -14717,6 +14738,13 @@
     {
       "c17": "SDN:C17::14MS",
       "commissioned": "2000-01-01T00:00:00Z",
+      "decommissioned": null
+    }
+  ],
+  "D9NL": [
+    {
+      "c17": "SDN:C17::32OI",
+      "commissioned": "1983-01-01T00:00:00Z",
       "decommissioned": null
     }
   ],
@@ -17918,6 +17946,13 @@
       "decommissioned": "2014-01-01T00:00:00Z"
     }
   ],
+  "D5CS7": [
+    {
+      "c17": "SDN:C17::54I9",
+      "commissioned": "2012-01-01T00:00:00Z",
+      "decommissioned": null
+    }
+  ],
   "NTMR": [
     {
       "c17": "SDN:C17::3138",
@@ -18863,13 +18898,6 @@
       "c17": "SDN:C17::49RI",
       "commissioned": null,
       "decommissioned": null
-    }
-  ],
-  "OW 2353": [
-    {
-      "c17": "SDN:C17::26WF",
-      "commissioned": "1999-01-01T00:00:00Z",
-      "decommissioned": "2006-10-25T00:00:00Z"
     }
   ],
   "LXMF": [
@@ -21904,6 +21932,13 @@
       "decommissioned": null
     }
   ],
+  "D5BM4": [
+    {
+      "c17": "SDN:C17::546U",
+      "commissioned": "2012-01-01T00:00:00Z",
+      "decommissioned": null
+    }
+  ],
   "A8SI4": [
     {
       "c17": "SDN:C17::5476",
@@ -22367,13 +22402,6 @@
       "c17": "SDN:C17::54FB",
       "commissioned": "2013-01-01T00:00:00Z",
       "decommissioned": "2016-01-01T00:00:00Z"
-    }
-  ],
-  "NAET": [
-    {
-      "c17": "SDN:C17::310A",
-      "commissioned": null,
-      "decommissioned": null
     }
   ],
   "CGAD": [
@@ -28730,13 +28758,6 @@
       "decommissioned": null
     }
   ],
-  "9VND": [
-    {
-      "c17": "SDN:C17::SIRI",
-      "commissioned": null,
-      "decommissioned": null
-    }
-  ],
   "NQLA": [
     {
       "c17": "SDN:C17::328G",
@@ -29306,6 +29327,13 @@
     {
       "c17": "SDN:C17::31ZO",
       "commissioned": null,
+      "decommissioned": null
+    }
+  ],
+  "MAYN7": [
+    {
+      "c17": "SDN:C17::746O",
+      "commissioned": "2016-01-01T00:00:00Z",
       "decommissioned": null
     }
   ],
@@ -37522,6 +37550,13 @@
       "decommissioned": null
     }
   ],
+  "NAET": [
+    {
+      "c17": "SDN:C17::310A",
+      "commissioned": "1963-09-07T00:00:00Z",
+      "decommissioned": "1996-09-30T00:00:00Z"
+    }
+  ],
   "MVDG": [
     {
       "c17": "SDN:C17::74C5",
@@ -40702,6 +40737,13 @@
       "decommissioned": null
     }
   ],
+  "SFE4267": [
+    {
+      "c17": "SDN:C17::77Q2",
+      "commissioned": null,
+      "decommissioned": null
+    }
+  ],
   "ORBU": [
     {
       "c17": "SDN:C17::11PP",
@@ -41822,6 +41864,13 @@
     {
       "c17": "SDN:C17::58PC",
       "commissioned": null,
+      "decommissioned": null
+    }
+  ],
+  "DASP": [
+    {
+      "c17": "SDN:C17::06FT",
+      "commissioned": "2024-11-18T00:00:00Z",
       "decommissioned": null
     }
   ],
@@ -44150,18 +44199,18 @@
       "decommissioned": null
     }
   ],
-  "GZOR": [
-    {
-      "c17": "SDN:C17::74LR",
-      "commissioned": "1995-08-01T00:00:00Z",
-      "decommissioned": "1997-08-28T00:00:00Z"
-    }
-  ],
   "MENE6": [
     {
       "c17": "SDN:C17::74M3",
       "commissioned": "2004-01-01T00:00:00Z",
       "decommissioned": null
+    }
+  ],
+  "GZOR": [
+    {
+      "c17": "SDN:C17::74LR",
+      "commissioned": "1995-08-01T00:00:00Z",
+      "decommissioned": "1997-08-28T00:00:00Z"
     }
   ],
   "WDG3928": [
