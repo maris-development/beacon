@@ -103,6 +103,22 @@ impl DataLake {
         None
     }
 
+    fn ordered_table_names_for_refresh(tables: &HashMap<String, Table>) -> Vec<String> {
+        let mut non_merged = Vec::new();
+        let mut merged = Vec::new();
+
+        for (name, table) in tables {
+            if matches!(table.table_type, TableType::Merged(_)) {
+                merged.push(name.clone());
+            } else {
+                non_merged.push(name.clone());
+            }
+        }
+
+        non_merged.extend(merged);
+        non_merged
+    }
+
     #[inline(always)]
     pub fn try_create_listing_url(
         &self,
@@ -302,7 +318,7 @@ impl DataLake {
                 tracing::info!("Refreshing tables...");
                 let table_names: Vec<String> = {
                     let tables = data_lake.tables.lock();
-                    tables.keys().cloned().collect()
+                    Self::ordered_table_names_for_refresh(&tables)
                 };
                 for table_name in table_names {
                     if let Err(e) = data_lake.refresh_table(&table_name).await {
@@ -455,9 +471,11 @@ impl DataLake {
     }
 
     pub async fn refresh_table(&self, table_name: &str) -> Result<(), TableError> {
-        let tables = self.tables.lock();
-        let table = tables
+        let table = self
+            .tables
+            .lock()
             .get(table_name)
+            .cloned()
             .ok_or(TableError::TableNotFound(table_name.to_string()))?;
 
         let refreshed_table_provider = table
@@ -615,6 +633,34 @@ impl DataLake {
     }
 }
 
+#[async_trait::async_trait]
+impl SchemaProvider for DataLake {
+    /// Returns true if table exist in the schema provider, false otherwise.
+    fn table_exist(&self, name: &str) -> bool {
+        let tables = self.tables.lock();
+        tables.contains_key(name)
+    }
+
+    /// Returns this `SchemaProvider` as [`Any`] so that it can be downcast to a
+    /// specific implementation.
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    /// Retrieves the list of available table names in this schema.
+    fn table_names(&self) -> Vec<String> {
+        let tables = self.tables.lock();
+        tables.keys().cloned().collect()
+    }
+
+    /// Retrieves a specific table from the schema by name, if it exists,
+    /// otherwise returns `None`.
+    async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
+        let table_providers = self.table_providers.lock();
+        Ok(table_providers.get(name).cloned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,32 +695,62 @@ mod tests {
         let dependent = DataLake::merged_table_references(&tables, "base_table");
         assert_eq!(dependent, Some("merged_table".to_string()));
     }
-}
 
-#[async_trait::async_trait]
-impl SchemaProvider for DataLake {
-    /// Returns true if table exist in the schema provider, false otherwise.
-    fn table_exist(&self, name: &str) -> bool {
-        let tables = self.tables.lock();
-        tables.contains_key(name)
-    }
+    #[test]
+    fn ordered_table_names_for_refresh_puts_merged_last() {
+        let mut tables = HashMap::new();
 
-    /// Returns this `SchemaProvider` as [`Any`] so that it can be downcast to a
-    /// specific implementation.
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+        tables.insert(
+            "base_a".to_string(),
+            Table {
+                table_directory: vec![],
+                table_name: "base_a".to_string(),
+                table_type: TableType::Empty(EmptyTable::new()),
+                description: None,
+            },
+        );
 
-    /// Retrieves the list of available table names in this schema.
-    fn table_names(&self) -> Vec<String> {
-        let tables = self.tables.lock();
-        tables.keys().cloned().collect()
-    }
+        tables.insert(
+            "base_b".to_string(),
+            Table {
+                table_directory: vec![],
+                table_name: "base_b".to_string(),
+                table_type: TableType::Empty(EmptyTable::new()),
+                description: None,
+            },
+        );
 
-    /// Retrieves a specific table from the schema by name, if it exists,
-    /// otherwise returns `None`.
-    async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
-        let table_providers = self.table_providers.lock();
-        Ok(table_providers.get(name).cloned())
+        tables.insert(
+            "merged_x".to_string(),
+            Table {
+                table_directory: vec![],
+                table_name: "merged_x".to_string(),
+                table_type: TableType::Merged(MergedTable {
+                    table_names: vec!["base_a".to_string(), "base_b".to_string()],
+                }),
+                description: None,
+            },
+        );
+
+        let order = DataLake::ordered_table_names_for_refresh(&tables);
+
+        let merged_positions = order
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, name)| (name == "merged_x").then_some(idx))
+            .collect::<Vec<_>>();
+        let base_positions = order
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, name)| ((name == "base_a") || (name == "base_b")).then_some(idx))
+            .collect::<Vec<_>>();
+
+        assert_eq!(merged_positions.len(), 1);
+        assert_eq!(base_positions.len(), 2);
+        assert!(
+            base_positions
+                .into_iter()
+                .all(|idx| idx < merged_positions[0])
+        );
     }
 }
