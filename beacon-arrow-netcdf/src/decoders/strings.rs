@@ -1,16 +1,8 @@
 //! String decoding for NetCDF `String` and fixed-size char arrays.
 
-use std::{
-    ffi::{CStr, CString},
-    sync::Arc,
-};
-
-use arrow::array::Scalar;
-use beacon_nd_arrow::array::compat_typings::ArrowTypeConversion;
-use ndarray::Axis;
-use netcdf::{types::NcVariableType, Extent, NcTypeDescriptor};
-
 use crate::{decoders::VariableDecoder, NcChar, OwnedNcString};
+use ndarray::Axis;
+use netcdf::Extent;
 
 /// Decoder for string-like NetCDF variables.
 ///
@@ -68,13 +60,7 @@ impl VariableDecoder<OwnedNcString> for StringVariableDecoder {
                     let string_array = array.map_axis(Axis(ndim - 1), |slice| {
                         let nc_char_bytes: &[NcChar] = slice.as_slice().unwrap_or(&[]);
                         let char_bytes: &[u8] = bytemuck::cast_slice(nc_char_bytes);
-                        OwnedNcString(
-                            CStr::from_bytes_until_nul(char_bytes)
-                                .unwrap()
-                                .to_string_lossy()
-                                .trim()
-                                .to_string(),
-                        )
+                        OwnedNcString(String::from_utf8_lossy(char_bytes).trim().to_string())
                     });
 
                     return Ok(string_array);
@@ -83,20 +69,25 @@ impl VariableDecoder<OwnedNcString> for StringVariableDecoder {
             None => {
                 let dims = variable.dimensions();
                 let shape: Vec<usize> = match &extents {
-                    netcdf::Extents::All => variable.dimensions().iter().map(|d| d.len()).collect(),
-                    netcdf::Extents::Extent(extents) => extents
-                        .iter()
-                        .map(|e| match e {
-                            Extent::Slice { start, stride } => todo!(),
-                            Extent::SliceEnd { start, end, stride } => todo!(),
-                            Extent::SliceCount {
-                                start,
-                                count,
-                                stride,
-                            } => todo!(),
-                            Extent::Index(_) => todo!(),
-                        })
-                        .collect(),
+                    netcdf::Extents::All => dims.iter().map(|d| d.len()).collect(),
+                    netcdf::Extents::Extent(extents) => {
+                        let mut shape = Vec::with_capacity(extents.len());
+                        for (axis, extent) in extents.iter().enumerate() {
+                            let Some(dimension) = dims.get(axis) else {
+                                anyhow::bail!(
+                                    "Extent axis {} is out of bounds for variable '{}' with {} dimensions",
+                                    axis,
+                                    variable.name(),
+                                    dims.len()
+                                );
+                            };
+
+                            if let Some(axis_len) = selected_axis_len(extent, dimension.len())? {
+                                shape.push(axis_len);
+                            }
+                        }
+                        shape
+                    }
                 };
                 let array = variable.get_strings(extents)?;
                 let owned_array: Vec<OwnedNcString> =
@@ -113,14 +104,53 @@ impl VariableDecoder<OwnedNcString> for StringVariableDecoder {
     }
 }
 
+fn selected_axis_len(extent: &Extent, dim_len: usize) -> anyhow::Result<Option<usize>> {
+    let len_for_bounds =
+        |start: usize, end_exclusive: usize, stride: isize| -> anyhow::Result<usize> {
+            if stride <= 0 {
+                anyhow::bail!("Invalid stride {}. Stride must be > 0", stride);
+            }
+
+            let stride = stride as usize;
+            let start = start.min(dim_len);
+            let end_exclusive = end_exclusive.min(dim_len);
+
+            if start >= end_exclusive {
+                return Ok(0);
+            }
+
+            let span = end_exclusive - start;
+            Ok(span.div_ceil(stride))
+        };
+
+    match extent {
+        Extent::Slice { start, stride } => len_for_bounds(*start, dim_len, *stride).map(Some),
+        Extent::SliceEnd { start, end, stride } => len_for_bounds(*start, *end, *stride).map(Some),
+        Extent::SliceCount {
+            start: _,
+            count,
+            stride,
+        } => {
+            if *stride <= 0 {
+                anyhow::bail!("Invalid stride {}. Stride must be > 0", stride);
+            }
+            Ok(Some(*count))
+        }
+        Extent::Index(_) => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::{decoders::VariableDecoder, OwnedNcString};
     use arrow::datatypes::{DataType, Field};
+    use netcdf::Extents;
     use tempfile::Builder;
 
-    use crate::NcChar;
+    use crate::{NcChar, NcString};
 
     // ── NcVariableType::Char (fixed-length char arrays) ────────────────────
 
@@ -283,8 +313,6 @@ mod tests {
 
     #[test]
     fn test_string_decoder_nc_string_type() {
-        use crate::NcString;
-
         let var_name = "names";
         let input = ["alpha", "beta", "gamma"];
         let tmp = Builder::new().suffix(".nc").tempfile().unwrap();
@@ -315,6 +343,94 @@ mod tests {
         assert_eq!(values[0].0, "alpha");
         assert_eq!(values[1].0, "beta");
         assert_eq!(values[2].0, "gamma");
+    }
+
+    #[test]
+    fn test_selected_axis_len_variants() {
+        assert_eq!(
+            selected_axis_len(
+                &Extent::Slice {
+                    start: 1,
+                    stride: 2
+                },
+                7
+            )
+            .unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            selected_axis_len(
+                &Extent::SliceEnd {
+                    start: 1,
+                    end: 6,
+                    stride: 2
+                },
+                10
+            )
+            .unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            selected_axis_len(
+                &Extent::SliceCount {
+                    start: 2,
+                    count: 4,
+                    stride: 1
+                },
+                10
+            )
+            .unwrap(),
+            Some(4)
+        );
+        assert_eq!(selected_axis_len(&Extent::Index(3), 10).unwrap(), None);
+    }
+
+    #[test]
+    fn test_string_decoder_nc_string_with_index_and_slice_count() {
+        let var_name = "grid";
+        let tmp = Builder::new().suffix(".nc").tempfile().unwrap();
+        {
+            let mut nc = netcdf::create(tmp.path()).unwrap();
+            nc.add_dimension("x", 2).unwrap();
+            nc.add_dimension("y", 3).unwrap();
+            let mut var = nc.add_variable::<NcString>(var_name, &["x", "y"]).unwrap();
+
+            let values: Vec<NcString> = ["x0y0", "x0y1", "x0y2", "x1y0", "x1y1", "x1y2"]
+                .iter()
+                .map(|s| NcString::new(s))
+                .collect();
+
+            var.put_values::<NcString, _>(&values, Extents::All)
+                .unwrap();
+        }
+
+        let file = netcdf::open(tmp.path()).unwrap();
+        let variable = file.variable(var_name).unwrap();
+
+        let decoder = StringVariableDecoder {
+            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
+            fill_value: None,
+            fixed_sized_string: None,
+        };
+
+        let array = decoder
+            .read(
+                &variable,
+                Extents::Extent(vec![
+                    Extent::Index(1),
+                    Extent::SliceCount {
+                        start: 0,
+                        count: 2,
+                        stride: 1,
+                    },
+                ]),
+            )
+            .expect("StringVariableDecoder::read with index + slice_count failed");
+
+        assert_eq!(array.shape(), &[2]);
+        let values: Vec<OwnedNcString> = array.iter().cloned().collect();
+        assert_eq!(values[0].0, "x1y0");
+        assert_eq!(values[1].0, "x1y1");
     }
 
     // ── variable_name ──────────────────────────────────────────────────────
