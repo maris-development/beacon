@@ -401,7 +401,7 @@ impl DefaultFileOpener {
             };
 
             let arrow_stream = match reader
-                .read_as_arrow_stream(beacon_config::CONFIG.netcdf_batch_size)
+                .read_as_arrow_stream(beacon_config::CONFIG.beacon_batch_size)
                 .await
             {
                 Ok(stream) => stream,

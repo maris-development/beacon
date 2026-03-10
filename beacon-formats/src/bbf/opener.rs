@@ -148,7 +148,8 @@ impl FileOpener for BBFOpener {
                 stream_proxy
                     .flat_map(|batch| {
                         if let Ok(batch) = batch {
-                            let split_batches = split_record_batch(batch, 16_000);
+                            let split_batches =
+                                split_record_batch(batch, beacon_config::CONFIG.beacon_batch_size);
                             let split_batches_res =
                                 split_batches.into_iter().map(Ok).collect::<Vec<_>>();
                             futures::stream::iter(split_batches_res)
