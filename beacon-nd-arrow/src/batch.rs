@@ -544,30 +544,45 @@ mod tests {
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
 
+        let array_time = Arc::new(
+            NdArrowArrayDispatch::new(InMemoryArrayBackend::new(
+                ndarray::ArrayD::from_shape_vec(vec![2], vec![7, 8]).unwrap(),
+                vec![2],
+                vec!["time".to_string()],
+            ))
+            .unwrap(),
+        ) as Arc<dyn NdArrowArray>;
+
         let schema = Arc::new(Schema::new(vec![
             Field::new("main", DataType::Int32, false),
             Field::new("lat_only", DataType::Int32, false),
+            Field::new("time_only", DataType::Int32, false),
         ]));
 
-        let record_batch = NdRecordBatch::new(schema, vec![array_main, array_lat]).unwrap();
+        let record_batch =
+            NdRecordBatch::new(schema, vec![array_main, array_lat, array_time]).unwrap();
         let batches = record_batch
-            .try_as_arrow_stream(2)
+            .try_as_arrow_stream(200)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
 
-        assert_eq!(batches.len(), 4);
-        assert_eq!(int32_values(batches[0].column(0)), vec![0, 1]);
-        assert_eq!(int32_values(batches[1].column(0)), vec![2, 3]);
-        assert_eq!(int32_values(batches[2].column(0)), vec![4, 5]);
-        assert_eq!(int32_values(batches[3].column(0)), vec![6, 7]);
-
-        assert_eq!(int32_values(batches[0].column(1)), vec![100, 200]);
-        assert_eq!(int32_values(batches[1].column(1)), vec![300, 400]);
-        assert_eq!(int32_values(batches[2].column(1)), vec![100, 200]);
-        assert_eq!(int32_values(batches[3].column(1)), vec![300, 400]);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 8);
+        assert_eq!(
+            int32_values(batches[0].column(0)),
+            vec![0, 1, 2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(
+            int32_values(batches[0].column(1)),
+            vec![100, 200, 300, 400, 100, 200, 300, 400]
+        );
+        assert_eq!(
+            int32_values(batches[0].column(2)),
+            vec![7, 7, 7, 7, 8, 8, 8, 8]
+        );
     }
 
     #[tokio::test]

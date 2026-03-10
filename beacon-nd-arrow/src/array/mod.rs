@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
+use ndarray::Axis;
 
 use crate::array::compat_typings::ArrowTypeConversion;
 use crate::array::{
@@ -181,6 +182,25 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
             ));
         }
 
+        let source_dims = self.dimensions();
+        Self::validate_unique_dimension_names(dimensions)?;
+        Self::validate_unique_dimension_names(&source_dims)?;
+
+        // Reorder source axes into target-dimension order and insert singleton
+        // axes for missing dimensions before applying ndarray broadcasting.
+        let source_axis_order: Vec<usize> = dimensions
+            .iter()
+            .filter_map(|target_dim| source_dims.iter().position(|d| d == target_dim))
+            .collect();
+
+        if source_axis_order.len() != source_dims.len() {
+            return Err(anyhow::anyhow!(
+                "Source dimensions {:?} are not a subset of target dimensions {:?}",
+                source_dims,
+                dimensions
+            ));
+        }
+
         let nd_array = self
             .backend
             .read_subset(ArraySubset {
@@ -188,12 +208,15 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
                 shape: self.shape(),
             })
             .await?;
-        let nd_shape = nd_array.shape();
-        println!(
-            "Broadcasting from shape {:?} to target shape {:?}",
-            nd_shape, target_shape
-        );
-        let broadcasted = nd_array.broadcast(target_shape).ok_or_else(|| {
+
+        let mut aligned = nd_array.view().permuted_axes(source_axis_order).into_dyn();
+        for (target_axis, target_dim) in dimensions.iter().enumerate() {
+            if !source_dims.iter().any(|d| d == target_dim) {
+                aligned = aligned.insert_axis(Axis(target_axis));
+            }
+        }
+
+        let broadcasted = aligned.broadcast(target_shape).ok_or_else(|| {
             anyhow::anyhow!(
                 "Cannot broadcast array of shape {:?} to target shape {:?}",
                 self.shape(),
