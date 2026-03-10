@@ -63,4 +63,4 @@ pub mod stream;
 
 pub use array::NdArrowArrayDispatch;
 pub use batch::NdRecordBatch;
-// pub use stream::NdSendableBatchStream;
+pub use stream::{NdToArrowPipeOptions, pipe_nd_record_batch_stream};
