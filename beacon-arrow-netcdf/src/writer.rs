@@ -1,3 +1,5 @@
+//! High-level writers for serializing Arrow record batches into NetCDF.
+
 use std::{
     collections::HashMap,
     marker::PhantomData,
@@ -14,37 +16,41 @@ use arrow::{
 };
 use tempfile::SpooledTempFile;
 
-use crate::{encoders::Encoder, error::ArrowNetCDFError, NcResult};
+use crate::encoders::Encoder;
 
+/// Generic writer backed by an [`Encoder`] implementation.
 pub struct Writer<E: Encoder> {
     encoder: E,
 }
 
 impl<E: Encoder> Writer<E> {
-    pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> NcResult<Self> {
-        let nc_file = netcdf::create(path).map_err(|e| {
-            ArrowNetCDFError::NetCDFWriterError(Box::new(ArrowNetCDFError::NetCDFError(e)))
-        })?;
+    /// Create a writer for `path` using the provided Arrow `schema`.
+    pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
+        let nc_file = netcdf::create(path).map_err(|e| anyhow::anyhow!(e))?;
 
-        let encoder = E::create(nc_file, schema).map_err(|e| {
-            ArrowNetCDFError::EncoderCreationError(Box::new(ArrowNetCDFError::EncoderError(e)))
-        })?;
+        let encoder = E::create(nc_file, schema).map_err(|e| anyhow::anyhow!(e))?;
 
         Ok(Self { encoder })
     }
 
+    /// Write one Arrow record batch into the target NetCDF file.
     pub fn write_record_batch(
         &mut self,
         record_batch: arrow::record_batch::RecordBatch,
-    ) -> NcResult<()> {
+    ) -> anyhow::Result<()> {
         self.encoder
             .write_record_batch(record_batch)
-            .map_err(ArrowNetCDFError::EncoderError)?;
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         Ok(())
     }
 }
 
+/// Buffered Arrow IPC writer that converts to NetCDF on [`finish`](Self::finish).
+///
+/// This writer collects Arrow batches in a temporary IPC file first, allowing
+/// post-processing of schema details (such as fixed-size string columns)
+/// before materializing the NetCDF output.
 pub struct ArrowRecordBatchWriter<E: Encoder> {
     path: PathBuf,
     writer: FileWriter<SpooledTempFile>,
@@ -53,13 +59,12 @@ pub struct ArrowRecordBatchWriter<E: Encoder> {
 }
 
 impl<E: Encoder> ArrowRecordBatchWriter<E> {
-    pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> NcResult<Self> {
+    /// Create a buffered writer targeting `path`.
+    pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         // 256 MB spooled temp file
         let file = SpooledTempFile::new(256 * 1024 * 1024);
-        let writer = FileWriter::try_new(file, &schema).map_err(|e| {
-            ArrowNetCDFError::NetCDFWriterError(Box::new(ArrowNetCDFError::IpcBufferFileError(e)))
-        })?;
+        let writer = FileWriter::try_new(file, &schema).map_err(|e| anyhow::anyhow!(e))?;
         let fixed_string_sizes = HashMap::new();
 
         Ok(Self {
@@ -70,31 +75,24 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         })
     }
 
+    /// Append an Arrow record batch to the buffered stream.
     pub fn write_record_batch(
         &mut self,
         record_batch: arrow::record_batch::RecordBatch,
-    ) -> NcResult<()> {
-        self.writer.write(&record_batch).map_err(|e| {
-            ArrowNetCDFError::RecordBatchWriteError(Box::new(
-                ArrowNetCDFError::IpcBufferWriteError(e),
-            ))
-        })?;
+    ) -> anyhow::Result<()> {
+        self.writer
+            .write(&record_batch)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         Ok(())
     }
 
-    pub fn finish(&mut self) -> NcResult<()> {
-        self.writer.finish().map_err(|e| {
-            ArrowNetCDFError::RecordBatchWriteError(Box::new(
-                ArrowNetCDFError::IpcBufferCloseError(e),
-            ))
-        })?;
+    /// Finalize buffered data and write the NetCDF file.
+    pub fn finish(&mut self) -> anyhow::Result<()> {
+        self.writer.finish().map_err(|e| anyhow::anyhow!(e))?;
         let inner_f = self.writer.get_mut();
-        let reader = arrow::ipc::reader::FileReader::try_new(inner_f, None).map_err(|e| {
-            ArrowNetCDFError::RecordBatchReadError(Box::new(ArrowNetCDFError::IpcBufferReadError(
-                e,
-            )))
-        })?;
+        let reader = arrow::ipc::reader::FileReader::try_new(inner_f, None)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         let mut updated_schema_fields = vec![];
         for field in reader.schema().fields() {
@@ -118,11 +116,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         let mut nc_writer = Writer::<E>::new(&self.path, updated_schema.clone())?;
 
         for batch in reader {
-            let batch = batch.map_err(|e| {
-                ArrowNetCDFError::RecordBatchReadError(Box::new(
-                    ArrowNetCDFError::IpcBufferReadError(e),
-                ))
-            })?;
+            let batch = batch.map_err(|e| anyhow::anyhow!(e))?;
             let updated_batch = Self::map_record_batch(batch, updated_schema.clone());
             nc_writer.write_record_batch(updated_batch)?;
         }

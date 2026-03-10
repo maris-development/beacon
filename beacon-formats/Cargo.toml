@@ -54,6 +54,8 @@ nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.gi
 
 # Add beacon binary format
 beacon-binary-format = { path = "../beacon-binary-format" }
-
+arrow-flight = { workspace = true }
+tonic = "0.13"
+prost = "0.13"
 [dev-dependencies]
 tempfile = "3.10"

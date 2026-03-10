@@ -195,7 +195,10 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let source = NetCDFFileSource::new(self.datasets_object_store.clone());
+        let source = NetCDFFileSource::new(
+            self.datasets_object_store.clone(),
+            beacon_config::CONFIG.enable_multiplexer_netcdf,
+        );
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -253,6 +256,9 @@ impl FileFormat for NetcdfFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(NetCDFFileSource::new(self.datasets_object_store.clone()))
+        Arc::new(NetCDFFileSource::new(
+            self.datasets_object_store.clone(),
+            beacon_config::CONFIG.enable_multiplexer_netcdf,
+        ))
     }
 }
