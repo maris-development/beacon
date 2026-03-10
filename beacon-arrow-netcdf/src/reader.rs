@@ -1026,14 +1026,12 @@ mod tests {
 
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, n_obs);
-        let first_rows = batches.first().unwrap().num_rows();
-        assert!(
-            batches.iter().all(|b| b.num_rows() == first_rows),
-            "chunking should use evenly-sized divisor chunks"
-        );
-        assert!(
-            first_rows >= chunk,
-            "actual chunk size should be >= preferred size"
+
+        let chunk_rows: Vec<usize> = batches.iter().map(|b| b.num_rows()).collect();
+        assert_eq!(
+            chunk_rows,
+            vec![3, 3, 3, 1],
+            "chunking should emit full preferred-size chunks and a final remainder chunk"
         );
     }
 

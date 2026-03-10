@@ -1,3 +1,5 @@
+//! Array backend implementations used by NetCDF readers.
+
 use std::sync::Arc;
 
 use arrow_schema::FieldRef;
@@ -8,6 +10,7 @@ use netcdf::NcTypeDescriptor;
 
 use crate::decoders::VariableDecoder;
 
+/// Backend that reads variable data lazily from a NetCDF file.
 #[derive(Debug)]
 pub struct VariableBackend<T: ArrowTypeConversion + NcTypeDescriptor + 'static> {
     decoder: Arc<dyn VariableDecoder<T>>,
@@ -17,6 +20,7 @@ pub struct VariableBackend<T: ArrowTypeConversion + NcTypeDescriptor + 'static> 
 }
 
 impl<T: ArrowTypeConversion + NcTypeDescriptor + 'static> VariableBackend<T> {
+    /// Create a lazy variable backend.
     pub fn new(
         decoder: Arc<dyn VariableDecoder<T>>,
         nc_file: Arc<netcdf::File>,
@@ -67,6 +71,7 @@ impl<T: ArrowTypeConversion + NcTypeDescriptor + 'static> ArrayBackend<T> for Va
     }
 }
 
+/// Backend for scalar attribute values surfaced as rank-0 arrays.
 #[derive(Debug)]
 pub struct AttributeBackend<T: ArrowTypeConversion> {
     _field: FieldRef,
@@ -74,6 +79,7 @@ pub struct AttributeBackend<T: ArrowTypeConversion> {
 }
 
 impl<T: ArrowTypeConversion> AttributeBackend<T> {
+    /// Create an attribute backend from a single scalar value.
     pub fn new(field: FieldRef, value: T) -> Self {
         Self {
             _field: field,

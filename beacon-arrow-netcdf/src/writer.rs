@@ -1,3 +1,5 @@
+//! High-level writers for serializing Arrow record batches into NetCDF.
+
 use std::{
     collections::HashMap,
     marker::PhantomData,
@@ -16,11 +18,13 @@ use tempfile::SpooledTempFile;
 
 use crate::encoders::Encoder;
 
+/// Generic writer backed by an [`Encoder`] implementation.
 pub struct Writer<E: Encoder> {
     encoder: E,
 }
 
 impl<E: Encoder> Writer<E> {
+    /// Create a writer for `path` using the provided Arrow `schema`.
     pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
         let nc_file = netcdf::create(path).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -29,6 +33,7 @@ impl<E: Encoder> Writer<E> {
         Ok(Self { encoder })
     }
 
+    /// Write one Arrow record batch into the target NetCDF file.
     pub fn write_record_batch(
         &mut self,
         record_batch: arrow::record_batch::RecordBatch,
@@ -41,6 +46,11 @@ impl<E: Encoder> Writer<E> {
     }
 }
 
+/// Buffered Arrow IPC writer that converts to NetCDF on [`finish`](Self::finish).
+///
+/// This writer collects Arrow batches in a temporary IPC file first, allowing
+/// post-processing of schema details (such as fixed-size string columns)
+/// before materializing the NetCDF output.
 pub struct ArrowRecordBatchWriter<E: Encoder> {
     path: PathBuf,
     writer: FileWriter<SpooledTempFile>,
@@ -49,6 +59,7 @@ pub struct ArrowRecordBatchWriter<E: Encoder> {
 }
 
 impl<E: Encoder> ArrowRecordBatchWriter<E> {
+    /// Create a buffered writer targeting `path`.
     pub fn new<P: AsRef<Path>>(path: P, schema: SchemaRef) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         // 256 MB spooled temp file
@@ -64,6 +75,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         })
     }
 
+    /// Append an Arrow record batch to the buffered stream.
     pub fn write_record_batch(
         &mut self,
         record_batch: arrow::record_batch::RecordBatch,
@@ -75,6 +87,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
         Ok(())
     }
 
+    /// Finalize buffered data and write the NetCDF file.
     pub fn finish(&mut self) -> anyhow::Result<()> {
         self.writer.finish().map_err(|e| anyhow::anyhow!(e))?;
         let inner_f = self.writer.get_mut();

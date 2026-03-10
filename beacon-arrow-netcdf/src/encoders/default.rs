@@ -1,3 +1,5 @@
+//! Default Arrow-to-NetCDF encoder.
+
 use std::collections::HashMap;
 
 use arrow::{
@@ -11,6 +13,7 @@ use crate::{NcChar, NcString};
 
 use super::{Encoder, EncoderError};
 
+/// Default encoder mapping common Arrow scalar arrays into NetCDF variables.
 pub struct DefaultEncoder {
     nc_file: FileMut,
     schema: SchemaRef,
@@ -18,6 +21,7 @@ pub struct DefaultEncoder {
 }
 
 impl DefaultEncoder {
+    /// Name of the record-axis dimension in produced NetCDF files.
     const OBS_DIM_NAME: &'static str = "obs";
 }
 

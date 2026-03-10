@@ -1,3 +1,5 @@
+//! Compatibility helpers between NetCDF types and ND Arrow arrays.
+
 use std::{collections::HashMap, sync::Arc};
 
 use beacon_nd_arrow::array::{backend::ArrayBackend, compat_typings::ArrowTypeConversion};
@@ -26,13 +28,8 @@ where
         + netcdf::NcTypeDescriptor
         + Copy
         + num_traits::AsPrimitive<f64>
-        + std::fmt::Debug
         + 'static,
 {
-    println!(
-        "Creating variable array for '{}'. With shape {:?} and dimensions {:?} and fill value {:?}",
-        variable_name, shape, dimensions, fill_value
-    );
     let default_decoder: Arc<dyn VariableDecoder<T>> = Arc::new(DefaultVariableDecoder::<T>::new(
         Arc::new(arrow_schema::Field::new(
             variable_name,
@@ -67,6 +64,9 @@ where
     Ok(variable_backend.into_dyn_array()?)
 }
 
+/// Convert a NetCDF attribute value into an ND Arrow scalar array.
+///
+/// Returns an error when the attribute type is not currently supported.
 pub fn attribute_to_nd_arrow_array(
     attr_name: &str,
     attr_value: AttributeValue,
@@ -160,6 +160,13 @@ pub fn attribute_to_nd_arrow_array(
     }
 }
 
+/// Convert a NetCDF variable into an ND Arrow array.
+///
+/// The conversion applies special handling for:
+/// - CF-time numeric variables (`units` attribute).
+/// - NetCDF string variables.
+/// - Char arrays with trailing string-length dimensions.
+/// - `_FillValue` for supported numeric and string types.
 pub fn variable_to_nd_arrow_array(
     nc_file: Arc<netcdf::File>,
     variable_name: &str,
