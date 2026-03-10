@@ -41,6 +41,8 @@ pub fn map_emodnet_chemistry_instrument_l05_multi() -> ScalarUDF {
     )
 }
 
+const SEPARATOR: &str = " | ";
+
 fn map_emodnet_chemistry_instrument_l05_multi_impl(
     parameters: &[ColumnarValue],
 ) -> datafusion::error::Result<ColumnarValue> {
@@ -54,7 +56,7 @@ fn map_emodnet_chemistry_instrument_l05_multi_impl(
             let array = flag_array.iter().map(|flag| {
                 flag.map(|value| {
                     extract_parenthesized_values_ref(value)
-                        .join("|")
+                        .join(SEPARATOR)
                         .to_string()
                 })
             });
@@ -66,7 +68,7 @@ fn map_emodnet_chemistry_instrument_l05_multi_impl(
         ColumnarValue::Scalar(ScalarValue::Utf8(value)) => {
             let sdn_flag = value.as_ref().map(|value| {
                 extract_parenthesized_values_ref(value)
-                    .join("|")
+                    .join(SEPARATOR)
                     .to_string()
             });
 
