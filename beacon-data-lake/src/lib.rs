@@ -26,7 +26,7 @@ use url::Url;
 
 use crate::{
     files::{collection::FileCollection, temp_output_file::TempOutputFile},
-    table::{Table, empty::EmptyTable, error::TableError},
+    table::{_type::TableType, Table, empty::EmptyTable, error::TableError},
 };
 
 pub mod files;
@@ -81,6 +81,28 @@ pub static INDEX_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
     LazyLock::new(|| ObjectStoreUrl::parse("index://").expect("Failed to parse index URL")); // ToDo: implement indexing on top of existing files utilizing the notified storage events.
 
 impl DataLake {
+    fn merged_table_references(
+        tables: &HashMap<String, Table>,
+        table_name: &str,
+    ) -> Option<String> {
+        for (candidate_name, candidate) in tables {
+            if candidate_name == table_name {
+                continue;
+            }
+
+            if let TableType::Merged(merged_table) = &candidate.table_type
+                && merged_table
+                    .table_names
+                    .iter()
+                    .any(|name| name == table_name)
+            {
+                return Some(candidate_name.clone());
+            }
+        }
+
+        None
+    }
+
     #[inline(always)]
     pub fn try_create_listing_url(
         &self,
@@ -193,6 +215,7 @@ impl DataLake {
             .object_store(&tables_object_store_url)
             .unwrap();
 
+        let mut merged_tables = Vec::new();
         let mut entry_stream = tables_object_store.list(None);
         while let Some(entry) = entry_stream.next().await {
             tracing::info!("Found table entry: {:?}", entry);
@@ -211,29 +234,55 @@ impl DataLake {
                 // Open the table
                 match Table::open(tables_object_store.clone(), table_directory).await {
                     Ok(table) => {
-                        let provider = table
-                            .table_provider(
-                                session_context.clone(),
-                                data_directory_store_url.clone(),
-                                tables_object_store_url.clone(),
-                            )
-                            .await;
-
-                        if let Ok(provider) = provider {
-                            table_providers.insert(table.table_name.clone(), provider);
-                            tables.insert(table.table_name.clone(), table);
+                        if matches!(table.table_type, table::_type::TableType::Merged(_)) {
+                            merged_tables.push(table);
                         } else {
-                            tracing::error!(
-                                "Failed to create table provider for {}: {}",
-                                table.table_name,
-                                provider.unwrap_err()
-                            );
+                            let provider = table
+                                .table_provider(
+                                    session_context.clone(),
+                                    data_directory_store_url.clone(),
+                                    tables_object_store_url.clone(),
+                                )
+                                .await;
+
+                            if let Ok(provider) = provider {
+                                table_providers.insert(table.table_name.clone(), provider);
+                                tables.insert(table.table_name.clone(), table);
+                            } else {
+                                tracing::error!(
+                                    "Failed to create table provider for {}: {}",
+                                    table.table_name,
+                                    provider.unwrap_err()
+                                );
+                            }
                         }
                     }
                     Err(e) => {
                         eprintln!("Failed to open table: {}", e);
                     }
                 }
+            }
+        }
+
+        // Resolve merged tables after all other tables so named dependencies already exist.
+        for table in merged_tables {
+            let provider = table
+                .table_provider(
+                    session_context.clone(),
+                    data_directory_store_url.clone(),
+                    tables_object_store_url.clone(),
+                )
+                .await;
+
+            if let Ok(provider) = provider {
+                table_providers.insert(table.table_name.clone(), provider);
+                tables.insert(table.table_name.clone(), table);
+            } else {
+                tracing::error!(
+                    "Failed to create merged table provider for {}: {}",
+                    table.table_name,
+                    provider.unwrap_err()
+                );
             }
         }
     }
@@ -534,12 +583,24 @@ impl DataLake {
     }
 
     pub async fn remove_table(&self, table_name: &str) -> Result<(), TableError> {
+        let mut tables = self.tables.lock();
+        if !tables.contains_key(table_name) {
+            return Err(TableError::TableNotFound(table_name.to_string()));
+        }
+
+        if let Some(merged_table) = Self::merged_table_references(&tables, table_name) {
+            return Err(TableError::TableReferencedByMerged {
+                table_name: table_name.to_string(),
+                merged_table,
+            });
+        }
+
+        let table = tables.remove(table_name);
+        drop(tables); // Release the lock before async call
+
         let mut table_providers = self.table_providers.lock();
         table_providers.remove(table_name);
         drop(table_providers); // Release the lock before deleting the table
-        let mut tables = self.tables.lock();
-        let table = tables.remove(table_name);
-        drop(tables); // Release the lock before async call
 
         if let Some(table) = table {
             let table_object_store_url = self.table_directory_store_url.clone();
@@ -551,6 +612,42 @@ impl DataLake {
         } else {
             Err(TableError::TableNotFound(table_name.to_string()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::{_type::TableType, merged::MergedTable};
+
+    #[test]
+    fn merged_table_references_detects_dependency() {
+        let mut tables = HashMap::new();
+
+        tables.insert(
+            "base_table".to_string(),
+            Table {
+                table_directory: vec![],
+                table_name: "base_table".to_string(),
+                table_type: TableType::Empty(EmptyTable::new()),
+                description: None,
+            },
+        );
+
+        tables.insert(
+            "merged_table".to_string(),
+            Table {
+                table_directory: vec![],
+                table_name: "merged_table".to_string(),
+                table_type: TableType::Merged(MergedTable {
+                    table_names: vec!["base_table".to_string()],
+                }),
+                description: None,
+            },
+        );
+
+        let dependent = DataLake::merged_table_references(&tables, "base_table");
+        assert_eq!(dependent, Some("merged_table".to_string()));
     }
 }
 

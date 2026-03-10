@@ -91,6 +91,9 @@ impl PresetTable {
             TableType::GeoSpatial(geo_spatial_table) => {
                 Box::pin(geo_spatial_table.create(table_directory, session_ctx)).await?
             }
+            TableType::Merged(merged_table) => {
+                Box::pin(merged_table.create(table_directory, session_ctx)).await?
+            }
             TableType::Empty(default_table) => {
                 Box::pin(default_table.create(table_directory, session_ctx)).await?
             }

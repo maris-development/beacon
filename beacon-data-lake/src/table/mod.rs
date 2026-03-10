@@ -16,6 +16,7 @@ pub mod empty;
 pub mod error;
 pub mod geospatial;
 pub mod logical;
+pub mod merged;
 pub mod preset;
 pub mod table_formats;
 
