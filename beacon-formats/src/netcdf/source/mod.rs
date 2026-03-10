@@ -389,17 +389,23 @@ impl DefaultFileOpener {
             Ok(maybe_stream)
         } else {
             // Use the local (cached) NetCDF reader.
-            let reader = open_reader(datasets_object_store, object)?;
+            let mut reader = open_reader(datasets_object_store, object)?;
             let file_schema = reader.schema();
             let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
-            let proj = if projection.is_empty() {
-                None
-            } else {
-                Some(projection)
+            if !projection.is_empty() {
+                reader = reader
+                    .project::<&[usize]>(projection.as_ref())
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to project NetCDF reader: {e}"
+                        ))
+                    })?
+                    .into();
             };
 
             let arrow_stream = reader
-                .read_as_arrow_stream(proj, beacon_config::CONFIG.netcdf_batch_size)
+                .read_as_arrow_stream(beacon_config::CONFIG.netcdf_batch_size)
+                .await
                 .map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
                         "Failed to build NetCDF stream: {e}"

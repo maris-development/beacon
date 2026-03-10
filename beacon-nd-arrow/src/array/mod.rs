@@ -188,7 +188,11 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
                 shape: self.shape(),
             })
             .await?;
-
+        let nd_shape = nd_array.shape();
+        println!(
+            "Broadcasting from shape {:?} to target shape {:?}",
+            nd_shape, target_shape
+        );
         let broadcasted = nd_array.broadcast(target_shape).ok_or_else(|| {
             anyhow::anyhow!(
                 "Cannot broadcast array of shape {:?} to target shape {:?}",
@@ -214,5 +218,28 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
 
     fn data_type(&self) -> arrow::datatypes::DataType {
         T::data_type()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_broadcasting() {
+        let array = vec![1, 2, 3];
+        let shape = vec![3, 1];
+        let dimensions = vec!["x".to_string(), "y".to_string()];
+        let nd_array = NdArrowArrayDispatch::new_in_mem(array, shape, dimensions).unwrap();
+
+        let target_shape = vec![3, 4];
+        let target_dimensions = vec!["x".to_string(), "y".to_string()];
+        let broadcasted = nd_array
+            .broadcast(&target_shape, &target_dimensions)
+            .await
+            .unwrap();
+
+        assert_eq!(broadcasted.shape(), target_shape);
+        assert_eq!(broadcasted.dimensions(), target_dimensions);
     }
 }
