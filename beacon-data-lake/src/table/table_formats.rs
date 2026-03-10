@@ -50,13 +50,21 @@ impl TableFileFormat for ParquetFileFormat {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct CSVFileFormat {
-    pub delimiter: u8,
+    pub delimiter: char,
     pub infer_records: usize,
 }
 #[typetag::serde(name = "csv")]
 impl TableFileFormat for CSVFileFormat {
     fn file_ext(&self) -> String {
         "csv".to_string()
+    }
+
+    fn file_format(&self) -> Option<Arc<dyn FileFormat>> {
+        Some(Arc::new(
+            datafusion::datasource::file_format::csv::CsvFormat::default()
+                .with_delimiter(self.delimiter as u8)
+                .with_schema_infer_max_rec(self.infer_records),
+        ))
     }
 }
 
