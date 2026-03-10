@@ -18,6 +18,7 @@ fn numeric_variable_to_nd_arrow_array<T>(
     variable_name: &str,
     shape: Vec<usize>,
     dimensions: Vec<String>,
+    fill_value: Option<T>,
     cf_time_epoch_unit: Option<(hifitime::Epoch, hifitime::Unit)>,
 ) -> anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>>
 where
@@ -25,15 +26,20 @@ where
         + netcdf::NcTypeDescriptor
         + Copy
         + num_traits::AsPrimitive<f64>
+        + std::fmt::Debug
         + 'static,
 {
+    println!(
+        "Creating variable array for '{}'. With shape {:?} and dimensions {:?} and fill value {:?}",
+        variable_name, shape, dimensions, fill_value
+    );
     let default_decoder: Arc<dyn VariableDecoder<T>> = Arc::new(DefaultVariableDecoder::<T>::new(
         Arc::new(arrow_schema::Field::new(
             variable_name,
             T::data_type(),
             false,
         )),
-        None,
+        fill_value,
     ));
 
     if let Some((epoch, unit)) = cf_time_epoch_unit {
@@ -207,6 +213,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Uchar(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
             netcdf::types::IntType::U16 => numeric_variable_to_nd_arrow_array::<u16>(
@@ -214,6 +224,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Ushort(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
             netcdf::types::IntType::U32 => numeric_variable_to_nd_arrow_array::<u32>(
@@ -221,6 +235,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Uint(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
             netcdf::types::IntType::U64 => numeric_variable_to_nd_arrow_array::<u64>(
@@ -228,6 +246,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Ulonglong(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
             netcdf::types::IntType::I8 => numeric_variable_to_nd_arrow_array::<i8>(
@@ -235,6 +257,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Schar(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
             netcdf::types::IntType::I16 => numeric_variable_to_nd_arrow_array::<i16>(
@@ -242,6 +268,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Short(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
             netcdf::types::IntType::I32 => numeric_variable_to_nd_arrow_array::<i32>(
@@ -249,6 +279,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Int(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
             netcdf::types::IntType::I64 => numeric_variable_to_nd_arrow_array::<i64>(
@@ -256,6 +290,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Longlong(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
         },
@@ -265,6 +303,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Float(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
             netcdf::types::FloatType::F64 => numeric_variable_to_nd_arrow_array::<f64>(
@@ -272,6 +314,10 @@ pub fn variable_to_nd_arrow_array(
                 variable_name,
                 shape.clone(),
                 dimensions.clone(),
+                match attributes.get("_FillValue") {
+                    Some(AttributeValue::Double(value)) => Some(*value),
+                    _ => None,
+                },
                 cf_time_epoch_unit,
             ),
         },

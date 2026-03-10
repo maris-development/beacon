@@ -71,4 +71,8 @@ impl<T: ArrowTypeConversion + NcTypeDescriptor + Copy> VariableDecoder<T>
         let array = variable.get::<T, _>(extents)?;
         Ok(array)
     }
+
+    fn fill_value(&self) -> Option<T> {
+        self.fill_value
+    }
 }

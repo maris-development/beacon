@@ -53,9 +53,11 @@ impl<T: ArrowTypeConversion> NdArrowArrayDispatch<T> {
         array: Vec<T>,
         shape: Vec<usize>,
         dimensions: Vec<String>,
+        fill_value: Option<T>,
     ) -> anyhow::Result<Self> {
         let nd_array = ndarray::ArrayD::from_shape_vec(shape.clone(), array)?;
-        let backend = InMemoryArrayBackend::new(nd_array, shape.clone(), dimensions.clone());
+        let backend =
+            InMemoryArrayBackend::new(nd_array, shape.clone(), dimensions.clone(), fill_value);
         Self::new(backend)
     }
 }
@@ -149,6 +151,7 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
             subset_array.into_raw_vec(),
             subset_shape,
             self.dimensions(),
+            self.backend.fill_value(),
         )?;
         Ok(Arc::new(subset_dispatch))
     }
@@ -229,6 +232,7 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
             broadcasted_vec,
             target_shape.to_vec(),
             dimensions.to_vec(),
+            self.backend.fill_value(),
         )?;
         Ok(Arc::new(broadcasted_dispatch))
     }
@@ -253,7 +257,7 @@ mod tests {
         let array = vec![1, 2, 3];
         let shape = vec![3, 1];
         let dimensions = vec!["x".to_string(), "y".to_string()];
-        let nd_array = NdArrowArrayDispatch::new_in_mem(array, shape, dimensions).unwrap();
+        let nd_array = NdArrowArrayDispatch::new_in_mem(array, shape, dimensions, None).unwrap();
 
         let target_shape = vec![3, 4];
         let target_dimensions = vec!["x".to_string(), "y".to_string()];

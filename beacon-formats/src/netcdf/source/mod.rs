@@ -373,14 +373,7 @@ impl DefaultFileOpener {
                         ))
                     });
                     match adapted_res {
-                        Ok(adapted) => {
-                            println!(
-                                "Emitting batch with {} rows and {} columns",
-                                adapted.num_rows(),
-                                adapted.num_columns()
-                            );
-                            futures::future::ok(adapted)
-                        }
+                        Ok(adapted) => futures::future::ok(adapted),
                         Err(e) => futures::future::err(e),
                     }
                 })
@@ -425,14 +418,7 @@ impl DefaultFileOpener {
                         ))
                     });
                     match adapted_res {
-                        Ok(adapted) => {
-                            println!(
-                                "Emitting batch with {} rows and {} columns",
-                                adapted.num_rows(),
-                                adapted.num_columns()
-                            );
-                            futures::future::ok(adapted)
-                        }
+                        Ok(adapted) => futures::future::ok(adapted),
                         Err(e) => futures::future::err(e),
                     }
                 })

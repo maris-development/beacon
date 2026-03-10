@@ -1,3 +1,67 @@
+//! Chunking strategy for `NdRecordBatch`.
+//!
+//! This module converts n-dimensional arrays into a stream of Arrow `RecordBatch` values.
+//! When `preferred_chunk_size` is smaller than the full logical array size, data is split
+//! into deterministic chunks before conversion.
+//!
+//! # How chunk shape is chosen
+//! - `generate_chunk_shape` computes one chunk extent per axis, iterating from the last axis
+//!   to the first axis (C-order aware).
+//! - For each axis, it estimates how many elements are needed on that axis to approach
+//!   `preferred_chunk_size` given the chunk product already chosen for trailing axes.
+//! - The chosen extent is clamped to `1..=axis_len` (or `0` if `axis_len == 0`).
+//! - This does **not** require chunk extents to evenly divide axis lengths.
+//!
+//! # How chunk subsets are generated
+//! - `generate_chunk_subsets` computes `chunk_count = ceil(axis_len / axis_chunk)` per axis.
+//! - It enumerates all chunk indices in row-major (C-order) traversal.
+//! - Each chunk `start` is `chunk_index * axis_chunk`.
+//! - Each chunk `shape` is `min(axis_chunk, axis_len - start)`, so boundary chunks naturally
+//!   become smaller remainder chunks.
+//!
+//! # How this is applied during streaming
+//! - `try_as_arrow_stream` determines a common broadcast target shape/dimensions.
+//! - For each chunk subset, each array is first sliced to relevant dimensions and then
+//!   broadcast to the chunk shape.
+//! - The per-array chunk views are converted to Arrow arrays and assembled into one
+//!   `RecordBatch` per subset.
+//!
+//! The result is stable chunk ordering, predictable memory use, and correct remainder handling
+//! at chunk boundaries.
+//!
+//! # Examples
+//!
+//! ## Example 1: 2D array with remainder on first axis
+//! Given `shape = [10474, 4381]` and `preferred_chunk_size = 64 * 1024`:
+//! - Last axis (`4381`) gets full extent because it is already smaller than target.
+//! - First axis extent becomes `15`, so `chunk_shape = [15, 4381]`.
+//! - Number of chunks is `ceil(10474 / 15) * ceil(4381 / 4381) = 699 * 1 = 699`.
+//!
+//! Produced subsets start like this:
+//! - `start=[0, 0], shape=[15, 4381]`
+//! - `start=[15, 0], shape=[15, 4381]`
+//! - `start=[30, 0], shape=[15, 4381]`
+//! and end with:
+//! - `start=[10470, 0], shape=[4, 4381]` (remainder chunk)
+//!
+//! Why: we keep row-major traversal and fixed-size chunks where possible, then shrink only at
+//! the boundary where remaining rows are fewer than `15`.
+//!
+//! ## Example 2: 3D array where middle axis is split
+//! Given `shape = [30, 10, 5]` and `preferred_chunk_size = 40`:
+//! - Computed `chunk_shape = [1, 8, 5]`.
+//! - Counts are `ceil(30/1)=30`, `ceil(10/8)=2`, `ceil(5/5)=1`.
+//! - Total chunks: `30 * 2 * 1 = 60`.
+//!
+//! First subsets are:
+//! - `start=[0, 0, 0], shape=[1, 8, 5]`
+//! - `start=[0, 8, 0], shape=[1, 2, 5]` (middle-axis remainder)
+//! - `start=[1, 0, 0], shape=[1, 8, 5]`
+//! - `start=[1, 8, 0], shape=[1, 2, 5]`
+//!
+//! Why: the strategy prefers full trailing-axis reads (`lat/lon`-like dimensions) and slices
+//! earlier axes to approach the target chunk element count while preserving C-order locality.
+
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::array::ArrayRef;
@@ -250,27 +314,6 @@ impl NdRecordBatch {
             a.div_ceil(b)
         }
 
-        fn smallest_divisor_at_least(n: usize, min_value: usize) -> usize {
-            if n == 0 {
-                return 0;
-            }
-
-            let min_value = min_value.max(1);
-            if min_value >= n {
-                return n;
-            }
-
-            let mut divisor = min_value;
-            while divisor <= n {
-                if n % divisor == 0 {
-                    return divisor;
-                }
-                divisor += 1;
-            }
-
-            n
-        }
-
         let mut chunk_shape = vec![1usize; shape.len()];
         let mut tail_product = 1usize;
 
@@ -283,7 +326,7 @@ impl NdRecordBatch {
             }
 
             let required_on_axis = ceil_div(preferred_chunk_size, tail_product.max(1));
-            let axis_chunk = smallest_divisor_at_least(axis_len, required_on_axis);
+            let axis_chunk = required_on_axis.max(1).min(axis_len);
 
             chunk_shape[axis] = axis_chunk;
             tail_product = tail_product.saturating_mul(axis_chunk.max(1));
@@ -309,68 +352,20 @@ mod tests {
             .values()
             .to_vec()
     }
-
-    #[test]
-    fn generate_chunk_shape_tests() {
-        let shape = vec![1000, 500, 200];
-        let preferred_chunk_size = 500;
-        assert_eq!(
-            NdRecordBatch::generate_chunk_shape(&shape, preferred_chunk_size),
-            vec![1, 4, 200]
-        );
-
-        let shape = vec![1000, 500, 200];
-        let preferred_chunk_size = 1000;
-        assert_eq!(
-            NdRecordBatch::generate_chunk_shape(&shape, preferred_chunk_size),
-            vec![1, 5, 200]
-        );
-
-        let shape = vec![20, 50, 20];
-        let preferred_chunk_size = 128;
-        assert_eq!(
-            NdRecordBatch::generate_chunk_shape(&shape, preferred_chunk_size),
-            vec![1, 10, 20]
-        );
-
-        let shape = vec![20, 50, 20];
-        let preferred_chunk_size = 5000;
-        assert_eq!(
-            NdRecordBatch::generate_chunk_shape(&shape, preferred_chunk_size),
-            vec![5, 50, 20]
-        );
-
-        let shape = vec![20, 50, 20];
-        let preferred_chunk_size = 3000;
-        assert_eq!(
-            NdRecordBatch::generate_chunk_shape(&shape, preferred_chunk_size),
-            vec![4, 50, 20]
-        );
-
-        let shape = vec![20, 50, 20];
-        let preferred_chunk_size = 128000;
-        assert_eq!(
-            NdRecordBatch::generate_chunk_shape(&shape, preferred_chunk_size),
-            vec![20, 50, 20]
-        );
-    }
-
     #[test]
     fn generate_chunk_subsets_c_order_and_remainder() {
-        let shape = [2, 4];
-        let chunk_shape = NdRecordBatch::generate_chunk_shape(&shape, 2);
+        let shape = [10474, 4381];
+        let chunk_shape = NdRecordBatch::generate_chunk_shape(&shape, 64 * 1024);
         let subsets: Vec<ArraySubset> =
             NdRecordBatch::generate_chunk_subsets(shape.to_vec(), chunk_shape).collect();
 
-        assert_eq!(subsets.len(), 4);
+        assert_eq!(subsets.len(), 699);
         assert_eq!(subsets[0].start, vec![0, 0]);
-        assert_eq!(subsets[0].shape, vec![1, 2]);
-        assert_eq!(subsets[1].start, vec![0, 2]);
-        assert_eq!(subsets[1].shape, vec![1, 2]);
-        assert_eq!(subsets[2].start, vec![1, 0]);
-        assert_eq!(subsets[2].shape, vec![1, 2]);
-        assert_eq!(subsets[3].start, vec![1, 2]);
-        assert_eq!(subsets[3].shape, vec![1, 2]);
+        assert_eq!(subsets[0].shape, vec![15, 4381]);
+        assert_eq!(subsets[1].start, vec![15, 0]);
+        assert_eq!(subsets[1].shape, vec![15, 4381]);
+        assert_eq!(subsets[698].start, vec![10470, 0]);
+        assert_eq!(subsets[698].shape, vec![4, 4381]);
     }
 
     #[test]
@@ -386,21 +381,41 @@ mod tests {
 
     #[test]
     fn generate_chunk_subsets_large_dimensions() {
-        let shape = [48, 24, 12, 6];
-        let chunk_shape = NdRecordBatch::generate_chunk_shape(&shape, 256);
-        assert_eq!(chunk_shape, vec![1, 4, 12, 6]);
+        let shape = [30, 10, 5];
+        let chunk_shape = NdRecordBatch::generate_chunk_shape(&shape, 200);
+        assert_eq!(chunk_shape, vec![4, 10, 5]);
 
         let subsets: Vec<ArraySubset> =
             NdRecordBatch::generate_chunk_subsets(shape.to_vec(), chunk_shape).collect();
 
-        assert_eq!(subsets.len(), 288);
-        assert_eq!(subsets[0].start, vec![0, 0, 0, 0]);
-        assert_eq!(subsets[0].shape, vec![1, 4, 12, 6]);
-        assert_eq!(subsets[1].start, vec![0, 4, 0, 0]);
-        assert_eq!(subsets[5].start, vec![0, 20, 0, 0]);
-        assert_eq!(subsets[6].start, vec![1, 0, 0, 0]);
-        assert_eq!(subsets[287].start, vec![47, 20, 0, 0]);
-        assert_eq!(subsets[287].shape, vec![1, 4, 12, 6]);
+        assert_eq!(subsets.len(), 8);
+        assert_eq!(subsets[0].start, vec![0, 0, 0]);
+        assert_eq!(subsets[0].shape, vec![4, 10, 5]);
+        assert_eq!(subsets[1].start, vec![4, 0, 0]);
+        assert_eq!(subsets[1].shape, vec![4, 10, 5]);
+        assert_eq!(subsets[2].start, vec![8, 0, 0]);
+        assert_eq!(subsets[2].shape, vec![4, 10, 5]);
+        assert_eq!(subsets[7].start, vec![28, 0, 0]);
+        assert_eq!(subsets[7].shape, vec![2, 10, 5]);
+    }
+
+    #[test]
+    fn generate_chunk_subsets_half_dimensions_chunk() {
+        let shape = [30, 10, 5];
+        let chunk_shape = NdRecordBatch::generate_chunk_shape(&shape, 40);
+        assert_eq!(chunk_shape, vec![1, 8, 5]);
+
+        let subsets: Vec<ArraySubset> =
+            NdRecordBatch::generate_chunk_subsets(shape.to_vec(), chunk_shape).collect();
+
+        assert_eq!(subsets[0].start, vec![0, 0, 0]);
+        assert_eq!(subsets[0].shape, vec![1, 8, 5]);
+        assert_eq!(subsets[1].start, vec![0, 8, 0]);
+        assert_eq!(subsets[1].shape, vec![1, 2, 5]);
+        assert_eq!(subsets[2].start, vec![1, 0, 0]);
+        assert_eq!(subsets[2].shape, vec![1, 8, 5]);
+        assert_eq!(subsets[3].start, vec![1, 8, 0]);
+        assert_eq!(subsets[3].shape, vec![1, 2, 5]);
     }
 
     #[tokio::test]
@@ -410,6 +425,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2, 3, 4], (0..24).collect()).unwrap(),
                 vec![2, 3, 4],
                 vec!["time".to_string(), "lat".to_string(), "lon".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -436,6 +452,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![3, 2], (0..6).collect()).unwrap(),
                 vec![3, 2],
                 vec!["lon".to_string(), "time".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -462,6 +479,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2, 5], (0..10).collect()).unwrap(),
                 vec![2, 5],
                 vec!["time".to_string(), "depth".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -488,6 +506,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2, 3], vec![1, 2, 3, 4, 5, 6]).unwrap(),
                 vec![2, 3],
                 vec!["time".to_string(), "lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -497,6 +516,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![3], vec![10, 20, 30]).unwrap(),
                 vec![3],
                 vec!["lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -531,6 +551,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2, 4], vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap(),
                 vec![2, 4],
                 vec!["time".to_string(), "lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -540,6 +561,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![4], vec![100, 200, 300, 400]).unwrap(),
                 vec![4],
                 vec!["lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -549,6 +571,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2], vec![7, 8]).unwrap(),
                 vec![2],
                 vec!["time".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -608,6 +631,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2, 4], vec![0, 1, 2, 3, 4, 5, 6, 7]).unwrap(),
                 vec![2, 4],
                 vec!["time".to_string(), "lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -617,6 +641,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![4], vec![10, 20, 30, 40]).unwrap(),
                 vec![4],
                 vec!["lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -626,6 +651,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2], vec![7, 8]).unwrap(),
                 vec![2],
                 vec!["time".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -671,6 +697,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2, 2], vec![1, 2, 3, 4]).unwrap(),
                 vec![2, 2],
                 vec!["time".to_string(), "lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -708,6 +735,7 @@ mod tests {
                 ndarray::ArrayD::from_shape_vec(vec![2, 4], vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap(),
                 vec![2, 4],
                 vec!["time".to_string(), "lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -718,6 +746,7 @@ mod tests {
                     .unwrap(),
                 vec![2, 4],
                 vec!["time".to_string(), "lat".to_string()],
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -761,6 +790,7 @@ mod tests {
                 .unwrap(),
                 vec![2, 3, 2],
                 dims.clone(),
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -774,6 +804,7 @@ mod tests {
                 .unwrap(),
                 vec![2, 3, 2],
                 dims.clone(),
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -787,6 +818,7 @@ mod tests {
                 .unwrap(),
                 vec![2, 3, 2],
                 dims,
+                None,
             ))
             .unwrap(),
         ) as Arc<dyn NdArrowArray>;
@@ -807,29 +839,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(batches.len(), 2);
-        assert_eq!(int32_values(batches[0].column(0)), vec![1, 2, 3, 4, 5, 6]);
-        assert_eq!(
-            int32_values(batches[1].column(0)),
-            vec![7, 8, 9, 10, 11, 12]
-        );
+        assert_eq!(batches.len(), 4);
+        assert_eq!(int32_values(batches[0].column(0)), vec![1, 2, 3, 4]);
+        assert_eq!(int32_values(batches[1].column(0)), vec![5, 6]);
+        assert_eq!(int32_values(batches[2].column(0)), vec![7, 8, 9, 10]);
+        assert_eq!(int32_values(batches[3].column(0)), vec![11, 12]);
 
-        assert_eq!(
-            int32_values(batches[0].column(1)),
-            vec![101, 102, 103, 104, 105, 106]
-        );
-        assert_eq!(
-            int32_values(batches[1].column(1)),
-            vec![107, 108, 109, 110, 111, 112]
-        );
+        assert_eq!(int32_values(batches[0].column(1)), vec![101, 102, 103, 104]);
+        assert_eq!(int32_values(batches[1].column(1)), vec![105, 106]);
+        assert_eq!(int32_values(batches[2].column(1)), vec![107, 108, 109, 110]);
+        assert_eq!(int32_values(batches[3].column(1)), vec![111, 112]);
 
-        assert_eq!(
-            int32_values(batches[0].column(2)),
-            vec![201, 202, 203, 204, 205, 206]
-        );
-        assert_eq!(
-            int32_values(batches[1].column(2)),
-            vec![207, 208, 209, 210, 211, 212]
-        );
+        assert_eq!(int32_values(batches[0].column(2)), vec![201, 202, 203, 204]);
+        assert_eq!(int32_values(batches[1].column(2)), vec![205, 206]);
+        assert_eq!(int32_values(batches[2].column(2)), vec![207, 208, 209, 210]);
+        assert_eq!(int32_values(batches[3].column(2)), vec![211, 212]);
     }
 }
