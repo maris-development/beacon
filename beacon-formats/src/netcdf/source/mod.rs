@@ -345,7 +345,8 @@ impl DefaultFileOpener {
                     .await?;
             let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
             let proj = if projection.is_empty() {
-                None
+                // return an empty stream if no columns are projected, to avoid unnecessary reads.
+                return Ok(futures::stream::empty().boxed());
             } else {
                 Some(projection)
             };
@@ -382,7 +383,7 @@ impl DefaultFileOpener {
             Ok(maybe_stream)
         } else {
             // Use the local (cached) NetCDF reader.
-            let mut reader = open_reader(datasets_object_store, object)?;
+            let mut reader = open_reader(datasets_object_store, object.clone())?;
             let file_schema = reader.schema();
             let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
             if !projection.is_empty() {
@@ -394,16 +395,25 @@ impl DefaultFileOpener {
                         ))
                     })?
                     .into();
+            } else {
+                // No columns found, so we should return an empty stream.
+                return Ok(futures::stream::empty().boxed());
             };
 
-            let arrow_stream = reader
+            let arrow_stream = match reader
                 .read_as_arrow_stream(beacon_config::CONFIG.netcdf_batch_size)
                 .await
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to build NetCDF stream: {e}"
-                    ))
-                })?;
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    // Skip for now. but warn about it and return an empty stream to avoid failing the whole query.
+                    tracing::warn!(
+                        "Failed to read NetCDF file {0} as Arrow stream: {error}",
+                        object.location
+                    );
+                    futures::stream::empty().boxed()
+                }
+            };
 
             let maybe_stream = arrow_stream
                 .map_err(|err| {

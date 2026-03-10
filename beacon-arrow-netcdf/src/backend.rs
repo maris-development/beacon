@@ -62,8 +62,16 @@ impl<T: ArrowTypeConversion + NcTypeDescriptor + 'static> ArrayBackend<T> for Va
         // translate subset to netcdf extents
         let mut extents = vec![];
         for axis in 0..self.shape.len() {
-            let start = subset.start[axis];
-            let len = subset.shape[axis];
+            let start = subset.start.get(axis).copied().ok_or(anyhow::anyhow!(
+                "Variable '{}' subset is missing start for axis {}",
+                var_name,
+                axis
+            ))?;
+            let len = subset.shape.get(axis).copied().ok_or(anyhow::anyhow!(
+                "Variable '{}' subset is missing length for axis {}",
+                var_name,
+                axis
+            ))?;
             extents.push(netcdf::Extent::from(start..start + len));
         }
 

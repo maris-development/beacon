@@ -96,7 +96,7 @@ mod tests {
         ) as Arc<dyn NdArrowArray>;
 
         let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
-        NdRecordBatch::new(schema, vec![array]).unwrap()
+        NdRecordBatch::new("batch".to_string(), schema, vec![array]).unwrap()
     }
 
     #[tokio::test]

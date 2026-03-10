@@ -70,6 +70,7 @@ use futures::{StreamExt, stream::BoxStream};
 use crate::array::{NdArrowArray, subset::ArraySubset};
 
 pub struct NdRecordBatch {
+    pub batch_name: String,
     pub schema: Arc<arrow_schema::Schema>,
     pub arrays: Vec<Arc<dyn NdArrowArray>>,
     pub dimensions: Vec<String>,
@@ -78,6 +79,7 @@ pub struct NdRecordBatch {
 
 impl NdRecordBatch {
     pub fn new(
+        name: String,
         schema: Arc<arrow_schema::Schema>,
         arrays: Vec<Arc<dyn NdArrowArray>>,
     ) -> anyhow::Result<Self> {
@@ -122,6 +124,7 @@ impl NdRecordBatch {
         }
 
         Ok(Self {
+            batch_name: name,
             schema,
             arrays,
             dimensions: unique_dims.keys().cloned().collect(),
@@ -147,6 +150,19 @@ impl NdRecordBatch {
 
         match max_dims_opt {
             Some((max_dims, max_shape)) => {
+                // Check to ensure all arrays can be broadcast to the max shape and dimensions before starting the stream.
+                // This can be done by check if each array's dimensions are a subset of the max dimensions.
+                for array in &self.arrays {
+                    let array_dims = array.dimensions();
+                    if !array_dims.iter().all(|d| max_dims.contains(d)) {
+                        return Err(anyhow::anyhow!(
+                            "Array with dimensions {:?} cannot be broadcast to target dimensions {:?}",
+                            array_dims,
+                            max_dims
+                        ));
+                    }
+                }
+
                 let chunk_shape =
                     NdRecordBatch::generate_chunk_shape(&max_shape, preferred_chunk_size);
 
@@ -171,21 +187,44 @@ impl NdRecordBatch {
                     NdRecordBatch::generate_chunk_subsets(max_shape.clone(), chunk_shape.clone());
                 let arrays = self.arrays.clone();
                 let schema = self.schema.clone();
+                let batch_name = self.batch_name.clone();
 
                 let stream = futures::stream::iter(subsets).then(move |subset| {
                     let max_dims = max_dims.clone();
                     let arrays = arrays.clone();
                     let schema = schema.clone();
-
+                    let batch_name = batch_name.clone();
                     async move {
                         let mut broadcasted_arrays: Vec<ArrayRef> = vec![];
                         for array in &arrays {
                             let array_subset = NdRecordBatch::generate_array_subset_from_chunk(
                                 &subset, &max_dims, array,
                             );
-                            let array = array.subset(array_subset).await?;
-                            let broadcasted = array.broadcast(&subset.shape, &max_dims).await?;
-                            let arrow_array = broadcasted.as_arrow_array_ref().await?;
+                            let array = array.subset(array_subset).await.map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to subset array for batch '{}': {}",
+                                    batch_name,
+                                    e
+                                )
+                            })?;
+                            let broadcasted = array
+                                .broadcast(&subset.shape, &max_dims)
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to broadcast array for batch '{}': {}",
+                                        batch_name,
+                                        e
+                                    )
+                                })?;
+                            let arrow_array =
+                                broadcasted.as_arrow_array_ref().await.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to convert array to Arrow array for batch '{}': {}",
+                                        batch_name,
+                                        e
+                                    )
+                                })?;
                             broadcasted_arrays.push(arrow_array);
                         }
 
@@ -526,7 +565,8 @@ mod tests {
             Field::new("lat_only", DataType::Int32, false),
         ]));
 
-        let record_batch = NdRecordBatch::new(schema, vec![array_main, array_lat]).unwrap();
+        let record_batch =
+            NdRecordBatch::new("".to_string(), schema, vec![array_main, array_lat]).unwrap();
         let batches = record_batch
             .try_as_arrow_stream(10_000)
             .await
@@ -582,8 +622,12 @@ mod tests {
             Field::new("time_only", DataType::Int32, false),
         ]));
 
-        let record_batch =
-            NdRecordBatch::new(schema, vec![array_main, array_lat, array_time]).unwrap();
+        let record_batch = NdRecordBatch::new(
+            "".to_string(),
+            schema,
+            vec![array_main, array_lat, array_time],
+        )
+        .unwrap();
         let batches = record_batch
             .try_as_arrow_stream(200)
             .await
@@ -611,7 +655,7 @@ mod tests {
     #[tokio::test]
     async fn try_as_arrow_stream_empty_batch_returns_empty_stream() {
         let schema = Arc::new(Schema::new(Vec::<Field>::new()));
-        let record_batch = NdRecordBatch::new(schema, vec![]).unwrap();
+        let record_batch = NdRecordBatch::new("".to_string(), schema, vec![]).unwrap();
 
         let batches = record_batch
             .try_as_arrow_stream(128)
@@ -662,8 +706,12 @@ mod tests {
             Field::new("time_only", DataType::Int32, false),
         ]));
 
-        let record_batch =
-            NdRecordBatch::new(schema, vec![array_main, array_lat, array_time]).unwrap();
+        let record_batch = NdRecordBatch::new(
+            "".to_string(),
+            schema,
+            vec![array_main, array_lat, array_time],
+        )
+        .unwrap();
         let batches = record_batch
             .try_as_arrow_stream(2)
             .await
@@ -707,7 +755,7 @@ mod tests {
             DataType::Int32,
             false,
         )]));
-        let record_batch = NdRecordBatch::new(schema, vec![array_main]).unwrap();
+        let record_batch = NdRecordBatch::new("".to_string(), schema, vec![array_main]).unwrap();
 
         let batches = record_batch
             .try_as_arrow_stream(0)
@@ -756,7 +804,8 @@ mod tests {
             Field::new("b", DataType::Int32, false),
         ]));
 
-        let record_batch = NdRecordBatch::new(schema, vec![array_a, array_b]).unwrap();
+        let record_batch =
+            NdRecordBatch::new("".to_string(), schema, vec![array_a, array_b]).unwrap();
         let batches = record_batch
             .try_as_arrow_stream(2)
             .await
@@ -829,8 +878,12 @@ mod tests {
             Field::new("lat", DataType::Int32, false),
         ]));
 
-        let record_batch =
-            NdRecordBatch::new(schema, vec![time_array, lon_array, lat_array]).unwrap();
+        let record_batch = NdRecordBatch::new(
+            "".to_string(),
+            schema,
+            vec![time_array, lon_array, lat_array],
+        )
+        .unwrap();
         let batches = record_batch
             .try_as_arrow_stream(4)
             .await

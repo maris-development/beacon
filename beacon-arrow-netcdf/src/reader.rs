@@ -30,6 +30,7 @@ use crate::compat;
 /// let columns = reader.read_columns::<Vec<_>>(None).unwrap();
 /// ```
 pub struct NetCDFArrowReader {
+    file_name: String,
     file_schema: arrow::datatypes::SchemaRef,
     file_arrays: Vec<Arc<dyn NdArrowArray>>,
     file: Arc<netcdf::File>,
@@ -46,7 +47,7 @@ impl NetCDFArrowReader {
     /// Returns an error if the file cannot be opened or if the schema cannot
     /// be built (e.g. an unsupported NetCDF variable type is encountered).
     pub fn new<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let file = netcdf::open(path)?;
+        let file = netcdf::open(&path)?;
         let file_ref = Arc::new(file);
 
         let mut file_schema_fields: Vec<arrow::datatypes::Field> = Vec::new();
@@ -94,6 +95,7 @@ impl NetCDFArrowReader {
         let file_schema = Arc::new(Schema::new(file_schema_fields));
 
         Ok(Self {
+            file_name: path.as_ref().to_string_lossy().to_string(),
             file_schema,
             file_arrays,
             file: file_ref,
@@ -173,6 +175,7 @@ impl NetCDFArrowReader {
         }
 
         Ok(Self {
+            file_name: self.file_name.clone(),
             file_schema: Arc::new(Schema::new(new_fields)),
             file_arrays: new_arrays,
             file: Arc::clone(&self.file),
@@ -216,6 +219,7 @@ impl NetCDFArrowReader {
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         Ok(Self {
+            file_name: self.file_name.clone(),
             file_schema: Arc::new(new_schema),
             file_arrays: new_arrays,
             file: Arc::clone(&self.file),
@@ -236,7 +240,7 @@ impl NetCDFArrowReader {
         let schema = self.schema();
         let columns = self.file_arrays.clone();
 
-        let nd_batch = NdRecordBatch::new(schema, columns)?;
+        let nd_batch = NdRecordBatch::new(self.file_name.clone(), schema, columns)?;
 
         nd_batch.try_as_arrow_stream(chunk_size).await
     }
