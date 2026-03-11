@@ -10,8 +10,7 @@ use datafusion::{
     logical_expr::{Expr, ExprSchemable, TableProviderFilterPushDown},
     physical_expr::create_physical_expr,
     physical_plan::{
-        ExecutionPlan, empty::EmptyExec, filter::FilterExec, projection::ProjectionExec,
-        union::UnionExec,
+        ExecutionPlan, empty::EmptyExec, projection::ProjectionExec, union::UnionExec,
     },
     prelude::{SessionContext, lit},
     scalar::ScalarValue,
@@ -160,23 +159,37 @@ impl TableProvider for MergedTableProvider {
                 .cloned()
                 .collect::<Vec<_>>();
 
-            let scan = provider.scan(state, None, &child_filters, None).await?;
+            let child_projection = projection.map(|projection_indices| {
+                let mut required_columns = std::collections::BTreeSet::new();
+
+                for index in projection_indices {
+                    required_columns.insert(self.merged_schema.field(*index).name().clone());
+                }
+
+                for filter in &child_filters {
+                    for column in filter.column_refs() {
+                        required_columns.insert(column.name().to_string());
+                    }
+                }
+
+                child_schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, field)| {
+                        required_columns.contains(field.name()).then_some(index)
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let scan = provider
+                .scan(state, child_projection.as_ref(), &child_filters, _limit)
+                .await?;
             let aligned = self.aligned_projection_exec(state, scan)?;
             plans.push(aligned);
         }
 
         let mut merged_plan: Arc<dyn ExecutionPlan> = Arc::new(UnionExec::new(plans));
-
-        if !filters.is_empty() {
-            let merged_df_schema = DFSchema::try_from(merged_plan.schema())?;
-            let execution_props = state.execution_props();
-
-            for filter in filters {
-                let physical_filter =
-                    create_physical_expr(filter, &merged_df_schema, execution_props)?;
-                merged_plan = Arc::new(FilterExec::try_new(physical_filter, merged_plan)?);
-            }
-        }
 
         if let Some(projection_indices) = projection {
             let merged_df_schema = DFSchema::try_from(merged_plan.schema())?;

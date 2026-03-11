@@ -42,6 +42,8 @@ impl VirtualMachine {
             .unwrap()
             .register_schema("public", data_lake.clone())?;
 
+        data_lake.init_tables(session_ctx.clone()).await?;
+
         // INIT Functions from geodatafusion
         geodatafusion::register(&session_ctx);
 
@@ -89,6 +91,7 @@ impl VirtualMachine {
 
     fn init_ctx(mem_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
         let mut config = SessionConfig::new()
+            .with_batch_size(beacon_config::CONFIG.beacon_batch_size)
             .with_coalesce_batches(true)
             .with_information_schema(true)
             .with_collect_statistics(true);
@@ -98,6 +101,11 @@ impl VirtualMachine {
             .options_mut()
             .execution
             .listing_table_ignore_subdirectory = false;
+        config
+            .options_mut()
+            .execution
+            .parquet
+            .allow_single_file_parallelism = true;
 
         let disk_manager_conf = DiskManagerConfig::NewOs;
 
