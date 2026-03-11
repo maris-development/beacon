@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use arrow::array::ArrayRef;
 use futures::{StreamExt, stream::BoxStream};
-use ndarray::IxDyn;
 use object_store::ObjectStore;
 
 use crate::{
@@ -71,8 +70,7 @@ impl DatasetView {
         if let Some(view) = view {
             match array.data_type() {
                 DataType::I8 => {
-                    let stream = Self::array_view_primitive_stream::<I8Type>(view, chunk_size);
-                    return Ok(stream);
+                    todo!()
                 }
                 // Handle other data types similarly...
                 _ => {

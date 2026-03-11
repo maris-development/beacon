@@ -18,17 +18,18 @@ impl<S: ObjectStore + Clone> ColumnWriter<S> {
         data_type: arrow::datatypes::DataType,
         chunk_size: usize,
     ) -> Self {
-        Self {
-            array_writer: ArrayWriter::new(
-                object_store.clone(),
-                column_directory.child("array.arrow"),
-                column_directory.child("layout.arrow"),
-                data_type,
-                chunk_size,
-            ),
-            object_store,
-            column_directory,
-        }
+        // Self {
+        //     array_writer: ArrayWriter::new(
+        //         object_store.clone(),
+        //         column_directory.child("array.arrow"),
+        //         column_directory.child("layout.arrow"),
+        //         data_type,
+        //         chunk_size,
+        //     ),
+        //     object_store,
+        //     column_directory,
+        // }
+        todo!()
     }
 
     pub async fn write_column_array(
@@ -36,7 +37,8 @@ impl<S: ObjectStore + Clone> ColumnWriter<S> {
         dataset_index: u32,
         array: Array<Arc<dyn ChunkStore>>,
     ) -> anyhow::Result<()> {
-        self.array_writer.append_array(dataset_index, array).await
+        todo!()
+        // self.array_writer.append_array(dataset_index, array).await
     }
 
     pub fn data_type(&self) -> &arrow::datatypes::DataType {

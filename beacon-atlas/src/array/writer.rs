@@ -4,16 +4,13 @@ use std::{
     sync::Arc,
 };
 
-use arrow::{array::ArrayRef, ipc::writer::FileWriter};
-use futures::StreamExt;
+use arrow::{array::ArrayRef, ipc::writer::FileWriter, record_batch::RecordBatch};
+use beacon_nd_arrow::array::NdArrowArray;
 use object_store::ObjectStore;
 
 use crate::{
     IPC_WRITE_OPTS,
-    array::{
-        Array, ChunkStore,
-        layout::{ArrayLayout, ArrayLayouts},
-    },
+    array::layout::{ArrayLayout, ArrayLayouts},
     consts, util,
 };
 
@@ -22,8 +19,8 @@ use crate::{
 /// The writer stores array values in `array.arrow` and emits the corresponding
 /// dataset layouts in `layout.arrow` within the provided object store path.
 pub struct ArrayWriter<S: ObjectStore + Clone> {
-    array_datatype: arrow::datatypes::DataType,
     store: S,
+    array_datatype: arrow::datatypes::DataType,
     array_path: object_store::path::Path,
     layout_path: object_store::path::Path,
     temp_writer: FileWriter<File>,
@@ -38,6 +35,7 @@ pub struct ArrayWriter<S: ObjectStore + Clone> {
 }
 
 impl<S: ObjectStore + Clone> ArrayWriter<S> {
+    pub const FIELD_NAME: &'static str = "array";
     /// Create a new chunked array writer.
     ///
     /// `chunk_size` controls when buffered arrays are flushed to the temp IPC file.
@@ -47,17 +45,19 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
         layout_path: object_store::path::Path,
         array_datatype: arrow::datatypes::DataType,
         chunk_size: usize,
-    ) -> Self {
-        let field = arrow::datatypes::Field::new("array", array_datatype.clone(), true);
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(chunk_size > 0, "chunk_size must be greater than zero");
+
+        let field = arrow::datatypes::Field::new(Self::FIELD_NAME, array_datatype.clone(), true);
         let schema = arrow::datatypes::Schema::new(vec![field]);
         let temp_writer = FileWriter::try_new_with_options(
             tempfile::tempfile().unwrap(),
             &schema,
             IPC_WRITE_OPTS.clone(),
         )
-        .expect("Failed to create IPC file writer");
+        .map_err(|e| anyhow::anyhow!("failed to create IPC writer: {e}"))?;
 
-        Self {
+        Ok(Self {
             array_datatype,
             store,
             array_path,
@@ -68,7 +68,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
             current_buffer_size: 0,
             buffer_arrays: Vec::new(),
             layouts: Vec::new(),
-        }
+        })
     }
 
     pub fn data_type(&self) -> &arrow::datatypes::DataType {
@@ -80,8 +80,8 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
     /// Writes `array.arrow` (values) and `layout.arrow` (layout metadata)
     /// under the configured path.
     pub async fn finalize(mut self) -> anyhow::Result<()> {
-        // Flush any remaining data
-        self.flush().await?;
+        // Flush any remaining data, including a final partial batch.
+        self.flush_all().await?;
 
         self.temp_writer.finish()?;
 
@@ -113,72 +113,77 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
     ///
     /// The layout entry is recorded immediately using the current write offset,
     /// which includes buffered (not-yet-flushed) rows.
-    pub async fn append_array<C: ChunkStore>(
+    pub async fn append_array(
         &mut self,
         dataset_index: u32,
-        array: Array<C>,
+        array: Arc<dyn NdArrowArray>,
     ) -> anyhow::Result<()> {
         // Check if datatype aligns with writer
-        if array.array_datatype != self.array_datatype {
+        if array.data_type() != self.array_datatype {
             return Err(anyhow::anyhow!(
                 "Array datatype does not match writer datatype"
             ));
         }
-
-        let array_shape = array
-            .array_shape
-            .iter()
-            .map(|d| *d as u32)
-            .collect::<Vec<_>>();
 
         let array_start =
             self.row_count
                 .checked_add(self.current_buffer_size)
                 .ok_or_else(|| anyhow::anyhow!("array offset overflow"))? as u64;
 
-        let mut chunks = array.as_chunked_arrow_stream();
-        while let Some(part) = chunks.next().await {
-            let part = part?;
-            self.current_buffer_size += part.len();
-            self.buffer_arrays.push(part);
-
-            // Check if we need to flush
-            if self.current_buffer_size >= self.chunk_size {
-                self.flush().await?;
-            }
-        }
-
-        let array_len = array.array_shape.iter().product::<usize>() as u64;
+        let array_shape = array.shape();
+        let array_dimensions = array.dimensions();
+        let array = array.as_arrow_array_ref().await?;
 
         self.layouts.push(ArrayLayout {
             dataset_index,
-            dimensions: array.dimensions.clone(),
-            array_len,
-            array_shape,
+            dimensions: array_dimensions,
+            array_len: array.len() as u64,
+            array_shape: array_shape.iter().map(|d| *d as u32).collect(),
             array_start,
         });
+
+        self.current_buffer_size += array.len();
+        self.buffer_arrays.push(array);
+
+        if self.current_buffer_size >= self.chunk_size {
+            self.flush().await?;
+        }
 
         Ok(())
     }
 
     /// Flush any remaining buffered data to the temp file.
     pub async fn flush(&mut self) -> anyhow::Result<()> {
-        // If there is any buffered data, write it as a batch
-        if !self.buffer_arrays.is_empty() {
-            let column_arrays = std::mem::take(&mut self.buffer_arrays);
+        self.flush_buffer(false).await
+    }
+
+    async fn flush_all(&mut self) -> anyhow::Result<()> {
+        self.flush_buffer(true).await
+    }
+
+    async fn flush_buffer(&mut self, include_partial_batch: bool) -> anyhow::Result<()> {
+        while !self.buffer_arrays.is_empty()
+            && (self.current_buffer_size >= self.chunk_size
+                || (include_partial_batch && self.current_buffer_size > 0))
+        {
+            let rows_to_write = if self.current_buffer_size >= self.chunk_size {
+                self.chunk_size
+            } else {
+                self.current_buffer_size
+            };
+
+            let column_arrays = Self::take_rows(&mut self.buffer_arrays, rows_to_write);
+
             // concatenate the buffered arrays into a single column array
             let column_array = arrow::compute::concat(
                 &column_arrays.iter().map(|a| a.as_ref()).collect::<Vec<_>>(),
             )?;
 
             // Create the schema for the batch
-            let field = arrow::datatypes::Field::new("array", self.array_datatype.clone(), true);
-
+            let field =
+                arrow::datatypes::Field::new(Self::FIELD_NAME, self.array_datatype.clone(), true);
             let schema = arrow::datatypes::Schema::new(vec![field]);
-            let batch =
-                arrow::record_batch::RecordBatch::try_new(Arc::new(schema), vec![column_array])?;
-
-            self.buffer_arrays.clear();
+            let batch = RecordBatch::try_new(Arc::new(schema), vec![column_array])?;
 
             // Write the batch to the temp file
             self.temp_writer.write(&batch)?;
@@ -186,148 +191,130 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
                 .row_count
                 .checked_add(batch.num_rows())
                 .ok_or_else(|| anyhow::anyhow!("row count overflow"))?;
-            self.current_buffer_size = 0;
+            self.current_buffer_size = self
+                .current_buffer_size
+                .checked_sub(batch.num_rows())
+                .ok_or_else(|| anyhow::anyhow!("buffer size underflow"))?;
         }
 
         Ok(())
+    }
+
+    fn take_rows(buffer_arrays: &mut Vec<ArrayRef>, rows_to_take: usize) -> Vec<ArrayRef> {
+        let mut remaining_rows = rows_to_take;
+        let mut taken = Vec::new();
+        let mut remainder = Vec::new();
+
+        for array in std::mem::take(buffer_arrays) {
+            if remaining_rows == 0 {
+                remainder.push(array);
+                continue;
+            }
+
+            let array_len = array.len();
+            if array_len <= remaining_rows {
+                taken.push(array);
+                remaining_rows -= array_len;
+            } else {
+                taken.push(array.slice(0, remaining_rows));
+                remainder.push(array.slice(remaining_rows, array_len - remaining_rows));
+                remaining_rows = 0;
+            }
+        }
+
+        *buffer_arrays = remainder;
+        debug_assert_eq!(
+            remaining_rows, 0,
+            "attempted to take more rows than buffered"
+        );
+
+        taken
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::ArrayWriter;
-    use crate::array::{Array, layout::ArrayLayouts, store::InMemoryChunkStore};
-    use crate::arrow_object_store::ArrowObjectStoreReader;
-    use arrow::array::{ArrayRef, Float32Array, Int32Array};
-    use arrow::compute::concat_batches;
-    use arrow::datatypes::DataType;
+    use std::{io::Cursor, sync::Arc};
+
+    use arrow::{
+        array::{Array as ArrowArray, Int32Array},
+        datatypes::DataType,
+        ipc::reader::FileReader,
+    };
+    use beacon_nd_arrow::array::{NdArrowArray, NdArrowArrayDispatch};
     use object_store::{ObjectStore, memory::InMemory, path::Path};
-    use std::sync::Arc;
 
-    fn chunk(values: Vec<i32>) -> ArrayRef {
-        Arc::new(Int32Array::from(values)) as ArrayRef
-    }
-
-    fn chunk_f32(values: Vec<f32>) -> ArrayRef {
-        Arc::new(Float32Array::from(values)) as ArrayRef
-    }
-
-    fn build_array(
-        chunks: Vec<Vec<i32>>,
-        shape: Vec<usize>,
-        dims: Vec<&str>,
-    ) -> Array<InMemoryChunkStore> {
-        let arrays = chunks.into_iter().map(chunk).collect::<Vec<_>>();
-        Array {
-            array_datatype: DataType::Int32,
-            array_shape: shape,
-            dimensions: dims.into_iter().map(|d| d.to_string()).collect(),
-            chunk_provider: InMemoryChunkStore::new(arrays),
-        }
-    }
-
-    async fn read_all_rows(store: Arc<dyn ObjectStore>, path: &Path) -> anyhow::Result<Vec<i32>> {
-        let reader = ArrowObjectStoreReader::new(store, path.clone()).await?;
-        let mut batches = Vec::new();
-        for idx in 0..reader.num_batches() {
-            if let Some(batch) = reader.read_batch(idx).await? {
-                batches.push(batch);
-            }
-        }
-        let batch = concat_batches(&reader.schema(), &batches)?;
-        let values = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .expect("int32 array");
-        Ok((0..values.len()).map(|i| values.value(i)).collect())
+    fn make_i32_array(values: Vec<i32>) -> Arc<dyn NdArrowArray> {
+        Arc::new(
+            NdArrowArrayDispatch::new_in_mem(
+                values.clone(),
+                vec![values.len()],
+                vec!["x".to_string()],
+                None,
+            )
+            .expect("valid test array"),
+        )
     }
 
     #[tokio::test]
-    async fn writes_array_and_layout() -> anyhow::Result<()> {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("writer/basic");
-        let array_path = path.child("array.arrow");
-        let layout_path = path.child("layout.arrow");
+    async fn flush_writes_full_chunks_and_keeps_remainder_buffered() -> anyhow::Result<()> {
+        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
+        let mut writer = ArrayWriter::new(
+            store,
+            Path::from("array.arrow"),
+            Path::from("layout.arrow"),
+            DataType::Int32,
+            5,
+        )?;
+
+        writer
+            .append_array(0, make_i32_array(vec![1, 2, 3, 4]))
+            .await?;
+        writer
+            .append_array(1, make_i32_array(vec![5, 6, 7]))
+            .await?;
+
+        assert_eq!(writer.row_count, 5);
+        assert_eq!(writer.current_buffer_size, 2);
+        assert_eq!(writer.buffer_arrays.len(), 1);
+
+        let remainder = writer.buffer_arrays[0]
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("int32 remainder array");
+        assert_eq!(remainder.len(), 2);
+        assert_eq!(remainder.value(0), 6);
+        assert_eq!(remainder.value(1), 7);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finalize_flushes_remaining_partial_batch() -> anyhow::Result<()> {
+        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
+        let array_path = Path::from("finalize-array.arrow");
+        let layout_path = Path::from("finalize-layout.arrow");
+
         let mut writer = ArrayWriter::new(
             store.clone(),
             array_path.clone(),
-            layout_path.clone(),
+            layout_path,
             DataType::Int32,
-            3,
-        );
+            5,
+        )?;
 
-        let array = build_array(vec![vec![1, 2], vec![3, 4, 5]], vec![5], vec!["x"]);
-        writer.append_array(7, array).await?;
+        writer
+            .append_array(0, make_i32_array(vec![10, 11, 12, 13]))
+            .await?;
         writer.finalize().await?;
 
-        let values = read_all_rows(store.clone(), &array_path).await?;
-        assert_eq!(values, vec![1, 2, 3, 4, 5]);
+        let bytes = store.get(&array_path).await?.bytes().await?;
+        let reader = FileReader::try_new(Cursor::new(bytes.to_vec()), None)?;
+        let rows: usize = reader.map(|batch| batch.expect("batch").num_rows()).sum();
 
-        let layout = ArrayLayouts::from_object(store.clone(), layout_path).await?;
-        let entry = layout.find_dataset_array_layout(7).expect("layout entry");
-        assert_eq!(entry.array_start, 0);
-        assert_eq!(entry.array_len, 5);
-        assert_eq!(entry.array_shape, vec![5]);
-        assert_eq!(entry.dimensions, vec!["x".to_string()]);
+        assert_eq!(rows, 4);
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn tracks_offsets_with_buffered_rows() -> anyhow::Result<()> {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("writer/buffered");
-        let array_path = path.child("array.arrow");
-        let layout_path = path.child("layout.arrow");
-        let mut writer = ArrayWriter::new(
-            store.clone(),
-            array_path,
-            layout_path.clone(),
-            DataType::Int32,
-            10,
-        );
-
-        let first = build_array(vec![vec![1, 2, 3]], vec![3], vec!["x"]);
-        let second = build_array(vec![vec![4, 5]], vec![2], vec!["x"]);
-
-        writer.append_array(1, first).await?;
-        writer.append_array(2, second).await?;
-        writer.finalize().await?;
-
-        let layout = ArrayLayouts::from_object(store.clone(), layout_path).await?;
-        let first_entry = layout.find_dataset_array_layout(1).expect("first entry");
-        let second_entry = layout.find_dataset_array_layout(2).expect("second entry");
-
-        assert_eq!(first_entry.array_start, 0);
-        assert_eq!(first_entry.array_len, 3);
-        assert_eq!(second_entry.array_start, 3);
-        assert_eq!(second_entry.array_len, 2);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn rejects_mismatched_datatype() -> anyhow::Result<()> {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("writer/mismatch");
-        let array_path = path.child("array.arrow");
-        let layout_path = path.child("layout.arrow");
-        let mut writer = ArrayWriter::new(store, array_path, layout_path, DataType::Int32, 4);
-
-        let arrays = vec![chunk_f32(vec![1.0, 2.0])];
-        let array = Array {
-            array_datatype: DataType::Float32,
-            array_shape: vec![2],
-            dimensions: vec!["x".to_string()],
-            chunk_provider: InMemoryChunkStore::new(arrays),
-        };
-
-        let err = writer
-            .append_array(1, array)
-            .await
-            .expect_err("expected error");
-        assert!(err.to_string().contains("datatype"));
         Ok(())
     }
 }

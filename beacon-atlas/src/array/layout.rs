@@ -21,6 +21,34 @@ pub struct ArrayLayout {
     pub dimensions: Vec<String>, // List of dimension names
 }
 
+impl ArrayLayout {
+    pub fn new(
+        dataset_index: u32,
+        array_start: u64,
+        array_len: u64,
+        array_shape: Vec<u32>,
+        dimensions: Vec<String>,
+    ) -> Self {
+        Self {
+            dataset_index,
+            array_start,
+            array_len,
+            array_shape,
+            dimensions,
+        }
+    }
+
+    pub fn new_empty(dataset_index: u32) -> Self {
+        Self {
+            dataset_index,
+            array_start: 0,
+            array_len: 0,
+            array_shape: Vec::new(),
+            dimensions: Vec::new(),
+        }
+    }
+}
+
 /// In-memory representation of dataset layout metadata stored as Arrow IPC.
 pub struct ArrayLayouts {
     dataset_index: PrimitiveArray<UInt32Type>, // u32
