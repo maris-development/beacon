@@ -500,10 +500,17 @@ impl DataLake {
     }
 
     pub async fn create_table(&self, mut table: Table) -> Result<(), TableError> {
-        let mut tables = self.tables.lock();
-        if tables.contains_key(&table.table_name) {
+        if self.tables.lock().contains_key(&table.table_name) {
             return Err(TableError::TableAlreadyExists(table.table_name));
         }
+
+        let table_provider = table
+            .table_provider(
+                self.session_context.clone(),
+                self.data_directory_store_url.clone(),
+                self.table_directory_store_url.clone(),
+            )
+            .await?;
 
         let table_object_store = self
             .session_context
@@ -513,17 +520,9 @@ impl DataLake {
 
         let table_directory: Vec<PathPart<'static>> =
             vec![PathPart::from(table.table_name.clone())];
-        drop(tables); // Release the lock before saving the table as to not deadlock across the async call
         table.save(table_object_store, table_directory).await;
-        let table_provider = table
-            .table_provider(
-                self.session_context.clone(),
-                self.data_directory_store_url.clone(),
-                self.table_directory_store_url.clone(),
-            )
-            .await?;
-        // Re-acquire the lock to insert the table
-        tables = self.tables.lock();
+
+        let mut tables = self.tables.lock();
         let mut table_providers = self.table_providers.lock();
         table_providers.insert(table.table_name.clone(), table_provider);
         tables.insert(table.table_name.clone(), table);
