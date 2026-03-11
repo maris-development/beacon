@@ -22,10 +22,12 @@ pub struct Config {
     pub vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     pub default_table: String,
-    #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
-    pub enable_sql: bool,
+    #[envconfig(from = "BEACON_TABLE_SYNC_INTERVAL_SECS", default = "300")] // 5 minutes
+    pub table_sync_interval_secs: u64,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
     pub sanitize_schema: bool,
+    #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
+    pub enable_sql: bool,
     #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
     pub st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
@@ -80,18 +82,21 @@ pub struct Config {
     #[envconfig(from = "BEACON_NETCDF_MULTIPLEXER_PROCESSES")]
     pub netcdf_multiplexer_processes: Option<usize>,
 
-    /// Optional path to the NetCDF MPIO worker executable.
+    /// gRPC address of a running `beacon-arrow-netcdf-mpio` Arrow Flight server.
     ///
-    /// When set, Beacon will spawn this executable (instead of resolving
-    /// `beacon-arrow-netcdf-mpio` from `PATH`) when MPIO is enabled.
-    #[envconfig(from = "BEACON_NETCDF_MPIO_WORKER")]
-    pub netcdf_mpio_worker: Option<PathBuf>,
+    /// Used by `beacon_formats::netcdf::source::mpio` for `read_schema`,
+    /// `read_file_as_stream`, and `read_file_as_batch`.
+    /// Example: `http://127.0.0.1:50051`.
+    #[envconfig(from = "BEACON_NETCDF_FLIGHT_ADDR")]
+    pub netcdf_flight_addr: Option<String>,
 
-    /// Per-request timeout (in milliseconds) for the NetCDF MPIO worker pool.
-    ///
-    /// Set to `0` to disable timeouts (default).
-    #[envconfig(from = "BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS", default = "0")]
-    pub netcdf_mpio_request_timeout_ms: u64,
+    /// The batch size for NetCDF reads, in number of rows. This is used for both local and MPIO reads.
+    #[envconfig(from = "BEACON_BATCH_SIZE", default = "64000")]
+    pub beacon_batch_size: usize,
+
+    /// Whether to split streams into 16k row slices for better memory management and parallelism.
+    #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
+    pub bbf_split_streams_slice: bool,
 }
 
 impl Config {

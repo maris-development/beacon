@@ -1,6 +1,6 @@
 [package]
 name = "beacon-data-lake"
-version = "1.5.2"
+version = "1.5.4"
 edition = "2024"
 
 [dependencies]
@@ -9,6 +9,7 @@ datafusion = { workspace = true }
 geoarrow = { workspace = true }
 geoarrow-array = { workspace = true }
 geoparquet = { workspace = true }
+anyhow = { workspace = true }
 parquet = { version = "^55"}
 
 object_store = { version = "0.12.3", features = ["aws"] }

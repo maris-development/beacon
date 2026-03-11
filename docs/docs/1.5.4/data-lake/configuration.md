@@ -21,6 +21,7 @@ Some of the configuration options can be set using environment variables. The fo
 - `BEACON_VM_MEMORY_SIZE` - The amount of memory to allocate to the Beacon Virtual Machine in MB (default is 4096MB). More is better for performance, especially when working with larger datasets and performing actions such as spatial joins and group by.
 - `BEACON_ENABLE_SQL` - Whether to enable the SQL query engine. Set to `true` to enable. Default is `false`.
 - `BEACON_WORKER_THREADS` - Number of worker threads to use (default is 8).
+- `BEACON_TABLE_SYNC_INTERVAL_SECS` - Interval in seconds for syncing tables from the data lake (default is 300 seconds, i.e., 5 minutes). This controls how often Beacon will check for updates in the underlying data lake and refresh its table metadata accordingly.
 - `BEACON_ST_WITHIN_POINT_CACHE_SIZE` - Size of the cache for ST_WithinPoint queries (default is 10000).
 - `BEACON_DEFAULT_TABLE` - The default table to use when no table is specified in the `from` clause of a query.
 - `BEACON_LOG_LEVEL` - Log level [`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`]. Default is `INFO`.
@@ -56,3 +57,7 @@ Some of the configuration options can be set using environment variables. The fo
 - `BEACON_NETCDF_MULTIPLEXER_PROCESSES` - Number of worker processes to spawn when NetCDF multiplexer is enabled (default is half of CPU cores).
 - `BEACON_NETCDF_MPIO_WORKER` - Optional path to the `beacon-arrow-netcdf-mpio` executable (used when NetCDF MPIO is enabled).
 - `BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS` - Per-request timeout (in milliseconds) for NetCDF MPIO worker requests. Set to `0` to disable (default is `0`).
+
+### Beacon Binary Format
+
+- `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` - Whether to enable splitting large batches into smaller batches to better manage memory and parallelism for queries in the Beacon Binary Format (BBF). Set to `true` to enable. Default is `false`. When enabled, this allows for more efficient handling of large queries by splitting the data into multiple streams.

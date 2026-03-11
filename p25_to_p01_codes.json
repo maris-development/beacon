@@ -1,0 +1,250 @@
+{
+  "current": [],
+  "ARCOV": [
+    "POLSHCOV"
+  ],
+  "ATEMP": [
+    "ATEMP2MM",
+    "CATAVT10",
+    "CATAVTO2",
+    "CDTASS02",
+    "CDTASSMS",
+    "CDTAZZ01",
+    "CDTBSS01",
+    "CDTBZZ01",
+    "CTMP1001",
+    "CTMPDMNA",
+    "CTMPDMNB",
+    "CTMPDMXA",
+    "CTMPDMXB",
+    "CTMPMN01",
+    "CTMPMX01",
+    "CTMPZZ02"
+  ],
+  "CDIAM": [
+    "DIAMETRE"
+  ],
+  "CHLA": [
+    "CHLAMSAT",
+    "CHLMEAL1",
+    "CHLMEOC5",
+    "CHLMOOC5",
+    "CPHLFLP1",
+    "CPHLFLPZ",
+    "CPHLHPP1",
+    "CPHLHPPZ",
+    "CPHLMMMO",
+    "CPHLPR01",
+    "CPHLUA01",
+    "CPHLUB01",
+    "CPHLYMP1",
+    "CPHLZZXX",
+    "FLUOZZZZ"
+  ],
+  "DOXY": [
+    "DOXMZZXX",
+    "DOXYZZXX"
+  ],
+  "ELEV": [
+    "BATHDPTH",
+    "BATHHGHT",
+    "HGHTALAT",
+    "MBANBLAT",
+    "MBANGB08",
+    "MBANGBCE",
+    "MBHTGB08"
+  ],
+  "ICEBERG": [],
+  "ICECOV": [
+    "SICEAMSR",
+    "SICECMOD",
+    "SICECSAT"
+  ],
+  "ICEDIR": [],
+  "ICEDISP": [
+    "ICEXDISP",
+    "ICEYDISP"
+  ],
+  "ICEEDGE": [
+    "ICEEDGEX"
+  ],
+  "ICESPD": [],
+  "ICESSALIN": [],
+  "ICETEMP": [],
+  "ICETHICK": [
+    "ICESDP01",
+    "ICESFB01",
+    "ICESTOT1"
+  ],
+  "ICETYPE": [
+    "ICETYPEX"
+  ],
+  "KVISC": [
+    "SPLTVISC"
+  ],
+  "LTHICK": [
+    "SPLTTHCK"
+  ],
+  "NO2": [
+    "MDMAP007",
+    "NO2UFLIC",
+    "NTRIAATX",
+    "NTRIAAZX",
+    "NTRILWTX",
+    "NTRIMATX",
+    "NTRIYYDZ",
+    "NTRIZZXX"
+  ],
+  "NO3": [
+    "CHEMM012",
+    "MDMAP005",
+    "NO3UFLIC",
+    "NTRAYYDZ",
+    "NTRAZZXX",
+    "NTRZLWTX"
+  ],
+  "NO3NO2": [
+    "MDMAP006",
+    "NTKGAATX",
+    "NTRAMS01",
+    "NTRZAATX",
+    "NTRZAAZX",
+    "NTRZMATX",
+    "NTRZMAZX",
+    "NTRZNNTX",
+    "NTRZNS01",
+    "NTRZYYDZ",
+    "NTRZZZXX"
+  ],
+  "OXYS": [
+    "OXYSZZ01"
+  ],
+  "PHAEO": [
+    "PHAEFLP1",
+    "PHAEFMP1",
+    "PHAEZZXX"
+  ],
+  "PHYTABUND": [
+    "P197M10A",
+    "P197M10B",
+    "P197M10Z",
+    "P203M00A",
+    "P203M00B",
+    "P219M01A",
+    "P219M01Z",
+    "P219M12Z"
+  ],
+  "PO4": [
+    "MDMAP906",
+    "PHKGAATX",
+    "PHOSAATX",
+    "PHOSAAZX",
+    "PHOSLWTX",
+    "PHOSMATX",
+    "PHOSMAZX",
+    "PHOSMS01",
+    "PHOSYYDZ",
+    "PHOSZZXX"
+  ],
+  "SALIN": [
+    "ASLTZZ01",
+    "ODSDM021",
+    "PPSUZZ01",
+    "PSALBRBR",
+    "PSALBSTX",
+    "PSALMV01",
+    "PSALST01",
+    "PSALST02",
+    "PSALSZ01",
+    "PSALZZXX",
+    "PSLTZZ01",
+    "SSALAGT1",
+    "SSALBSTX",
+    "SSALSG01",
+    "SSALSL01",
+    "SSALST01"
+  ],
+  "SLCA": [
+    "MDMAP012",
+    "SLCAAATX",
+    "SLCAAAZX",
+    "SLCAMATX",
+    "SLCAMAZX",
+    "SLCAMS01",
+    "SLCANS01",
+    "SLCAZZXX",
+    "SLKGAATX"
+  ],
+  "SNWLR": [
+    "RXXX412N",
+    "RXXX413N",
+    "RXXX443N",
+    "RXXX488N",
+    "RXXX490N",
+    "RXXX510N",
+    "RXXX531N",
+    "RXXX551N",
+    "RXXX555N",
+    "RXXX560N",
+    "RXXX619N",
+    "RXXX667N",
+    "RXXX670N"
+  ],
+  "TURB": [
+    "NEPHIF01",
+    "SPMIMEXX",
+    "SPMIMOXX",
+    "SPMIMSAT",
+    "TSEDBVOL",
+    "TSEDZZZZ",
+    "TURBMOXX",
+    "TURBXXXX"
+  ],
+  "VOL": [
+    "POLOBVOL"
+  ],
+  "WCONT": [
+    "SPLTWATC"
+  ],
+  "WINDF": [
+    "WIND10DF"
+  ],
+  "WINDS": [
+    "WIND10SP",
+    "WINDSSAR"
+  ],
+  "WINDT": [
+    "WIND10DT"
+  ],
+  "WINDX": [
+    "WINDXMOD"
+  ],
+  "WINDY": [
+    "WINDYMOD"
+  ],
+  "WTEMP": [
+    "TEMPAPRT",
+    "TEMPAV01",
+    "TEMPBT01",
+    "TEMPDTNX",
+    "TEMPET01",
+    "TEMPHGNX",
+    "TEMPMT01",
+    "TEMPMV01",
+    "TEMPMWRD",
+    "TEMPP901",
+    "TEMPPP01",
+    "TEMPPR01",
+    "TEMPPR02",
+    "TEMPR601",
+    "TEMPR901",
+    "TEMPRTNX",
+    "TEMPS601",
+    "TEMPS901",
+    "TEMPS902",
+    "TEMPST01",
+    "TEMPST02",
+    "TEMPSZ01",
+    "TEMPTB01"
+  ]
+}

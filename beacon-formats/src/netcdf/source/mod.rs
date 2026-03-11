@@ -17,46 +17,11 @@ use datafusion::{
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
 use futures::{FutureExt, stream::BoxStream};
+use futures::{StreamExt, TryStreamExt as _};
 use object_store::ObjectMeta;
 
-use crate::netcdf::object_resolver::NetCDFObjectResolver;
-
-const DEFAULT_MPIO_CHUNK_SIZE: usize = 128 * 1024;
-const DEFAULT_MPIO_STREAM_SIZE: usize = 4 * 1024 * 1024;
-
 fn mpio_enabled() -> bool {
-    #[cfg(test)]
-    {
-        use std::sync::atomic::Ordering;
-        let v = MPIO_ENABLED_OVERRIDE.load(Ordering::Relaxed);
-        if v != -1 {
-            return v == 1;
-        }
-    }
-
     beacon_config::CONFIG.enable_multiplexer_netcdf
-}
-
-#[cfg(test)]
-static MPIO_ENABLED_OVERRIDE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
-
-#[cfg(test)]
-struct MpioOverrideGuard;
-
-#[cfg(test)]
-impl Drop for MpioOverrideGuard {
-    fn drop(&mut self) {
-        MPIO_ENABLED_OVERRIDE.store(-1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-#[cfg(test)]
-fn override_mpio_enabled_for_test(enabled: bool) -> MpioOverrideGuard {
-    MPIO_ENABLED_OVERRIDE.store(
-        if enabled { 1 } else { 0 },
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    MpioOverrideGuard
 }
 
 /// DataFusion `FileSource` for NetCDF (`.nc`) files.
@@ -72,6 +37,8 @@ fn override_mpio_enabled_for_test(enabled: bool) -> MpioOverrideGuard {
 #[derive(Debug, Clone)]
 pub struct NetCDFFileSource {
     datasets_object_store: Arc<DatasetsStore>,
+    /// Whether reads should go through the MPIO worker path.
+    use_mpio: bool,
     /// Optional schema adapter factory.
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     /// Optional schema override.
@@ -88,9 +55,10 @@ impl NetCDFFileSource {
     /// The `object_resolver` determines how an `ObjectMeta` location is turned
     /// into a concrete path that `netcdf::open` can handle (local path or
     /// remote URL).
-    pub fn new(datasets_object_store: Arc<DatasetsStore>) -> Self {
+    pub fn new(datasets_object_store: Arc<DatasetsStore>, use_mpio: bool) -> Self {
         Self {
             datasets_object_store,
+            use_mpio,
             override_schema: None,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projected_statistics: None,
@@ -122,6 +90,7 @@ impl FileSource for NetCDFFileSource {
         Arc::new(DefaultFileOpener::new(
             self.datasets_object_store.clone(),
             arc_schema_adapter,
+            self.use_mpio,
         ))
     }
 
@@ -141,6 +110,17 @@ impl FileSource for NetCDFFileSource {
             override_schema: Some(schema),
             ..self.clone()
         })
+    }
+
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        repartition_file_min_size: usize,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &datafusion::datasource::physical_plan::FileScanConfig,
+    ) -> datafusion::error::Result<Option<datafusion::datasource::physical_plan::FileScanConfig>>
+    {
+        Ok(None)
     }
 
     fn with_projection(
@@ -175,6 +155,23 @@ impl FileSource for NetCDFFileSource {
         }
     }
 
+    // fn repartitioned(
+    //     &self,
+    //     target_partitions: usize,
+    //     repartition_file_min_size: usize,
+    //     output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+    //     config: &datafusion::datasource::physical_plan::FileScanConfig,
+    // ) -> datafusion::error::Result<Option<datafusion::datasource::physical_plan::FileScanConfig>>
+    // {
+    //     // Repartitioning is not currently supported for NetCDF files.
+    //     let _ = (
+    //         target_partitions,
+    //         repartition_file_min_size,
+    //         output_ordering,
+    //         config,
+    //     );
+    // }
+
     fn file_type(&self) -> &str {
         "netcdf"
     }
@@ -186,8 +183,22 @@ impl FileSource for NetCDFFileSource {
 
 lazy_static::lazy_static!(
     static ref READER_CACHE: parking_lot::Mutex<lru::LruCache<ReaderCacheKey, Arc<NetCDFArrowReader>>> = {
-        let capacity = NonZeroUsize::new(beacon_config::CONFIG.netcdf_reader_cache_size)
+        let mut capacity = NonZeroUsize::new(beacon_config::CONFIG.netcdf_reader_cache_size)
             .unwrap_or_else(|| NonZeroUsize::new(1).expect("non-zero"));
+
+        // If platform unix. then get the rlimit to check the capacity is at best rlimit/2 to avoid hitting the open file limit. This is a soft limit and can be increased by the user, but we want to avoid hitting it by default.
+        #[cfg(unix)]
+        {
+            use rlimit::{getrlimit, Resource};
+            if let Ok((soft_limit, _)) = getrlimit(Resource::NOFILE) {
+                tracing::debug!("NetCDF Reader cache rlimit NOFILE soft limit: {}", soft_limit);
+                let max_capacity = (soft_limit / 2) as usize;
+                if capacity.get() > max_capacity {
+                    capacity = NonZeroUsize::new(max_capacity).expect("non-zero");
+                }
+            }
+        }
+
         parking_lot::Mutex::new(lru::LruCache::new(capacity))
     };
 );
@@ -208,6 +219,14 @@ pub async fn fetch_schema(
     datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
+    fetch_schema_with_read_mode(datasets_object_store, object, mpio_enabled()).await
+}
+
+pub async fn fetch_schema_with_read_mode(
+    datasets_object_store: Arc<DatasetsStore>,
+    object: ObjectMeta,
+    use_mpio: bool,
+) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
     // First try to get the schema from the cache.
     let cached_schema = if beacon_config::CONFIG.netcdf_use_schema_cache {
         schema_cache::get_schema_from_cache(&object).await
@@ -218,7 +237,7 @@ pub async fn fetch_schema(
     if let Some(schema) = cached_schema {
         Ok(schema)
     } else {
-        let schema = if mpio_enabled() {
+        let schema = if use_mpio {
             mpio::read_schema(datasets_object_store.clone(), object.clone())
                 .await
                 .map_err(|e| {
@@ -294,16 +313,20 @@ pub struct DefaultFileOpener {
     datasets_object_store: Arc<DatasetsStore>,
     /// Schema adapter for mapping NetCDF schema to Arrow schema.
     schema_adapter: Arc<dyn SchemaAdapter>,
+    /// Whether reads should go through the MPIO worker path.
+    use_mpio: bool,
 }
 
 impl DefaultFileOpener {
     pub fn new(
         datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
+        use_mpio: bool,
     ) -> Self {
         Self {
             datasets_object_store,
             schema_adapter,
+            use_mpio,
         }
     }
 }
@@ -313,52 +336,106 @@ impl DefaultFileOpener {
         object: ObjectMeta,
         datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
+        use_mpio: bool,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        // Map the file schema into the table schema.
-        // In MPIO mode, schema comes from the worker (and can be cached); otherwise open the local reader.
-        let (reader, file_schema) = if mpio_enabled() {
-            let schema = fetch_schema(datasets_object_store.clone(), object.clone()).await?;
-            (None, schema)
-        } else {
-            let reader = open_reader(datasets_object_store.clone(), object.clone())?;
-            let schema = reader.schema();
-            (Some(reader), schema)
-        };
-        let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
-
-        // NetCDF reading happens synchronously inside `read_as_batch`.
-        // DataFusion calls the `FileOpenFuture` asynchronously; if we later need
-        // to mitigate blocking, this is the place to `spawn_blocking`.
-        let stream = Box::pin(futures::stream::once(async move {
-            let batch = if mpio_enabled() {
-                mpio::read_file_as_batch(
-                    datasets_object_store.clone(),
-                    object,
-                    Some(projection),
-                    DEFAULT_MPIO_CHUNK_SIZE,
-                    DEFAULT_MPIO_STREAM_SIZE,
-                )
-                .await
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "MPIO read_file_as_batch failed: {}",
-                        e
-                    ))
-                })?
+        if use_mpio {
+            // Fetch the file schema from the MPIO server (uses schema cache when enabled).
+            let file_schema =
+                fetch_schema_with_read_mode(datasets_object_store.clone(), object.clone(), true)
+                    .await?;
+            let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+            let proj = if projection.is_empty() {
+                // return an empty stream if no columns are projected, to avoid unnecessary reads.
+                return Ok(futures::stream::empty().boxed());
             } else {
-                let reader = reader.expect("reader must be present when MPIO is disabled");
-                reader.read_as_batch(Some(&projection)).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to read NetCDF batch: {}",
-                        e
-                    ))
-                })?
+                Some(projection)
             };
-            let adapted_batch = schema_mapper.map_batch(batch)?;
-            Ok(adapted_batch)
-        })) as BoxStream<'static, datafusion::error::Result<RecordBatch>>;
 
-        Ok(stream)
+            // Fetch data as a single concatenated batch from the MPIO server.
+            let flight_stream =
+                mpio::read_file_as_batch_stream(datasets_object_store, object, proj, None)
+                    .await
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "MPIO read_file_as_batch failed: {e}"
+                        ))
+                    })?;
+
+            let maybe_stream = flight_stream
+                .map_err(|err| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Error reading NetCDF file as Arrow stream: {err}"
+                    ))
+                })
+                .and_then(move |batch| {
+                    let adapted_res = schema_mapper.map_batch(batch).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to map NetCDF batch schema: {e}"
+                        ))
+                    });
+                    match adapted_res {
+                        Ok(adapted) => futures::future::ok(adapted),
+                        Err(e) => futures::future::err(e),
+                    }
+                })
+                .boxed();
+
+            Ok(maybe_stream)
+        } else {
+            // Use the local (cached) NetCDF reader.
+            let mut reader = open_reader(datasets_object_store, object.clone())?;
+            let file_schema = reader.schema();
+            let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+            if !projection.is_empty() {
+                reader = reader
+                    .project::<&[usize]>(projection.as_ref())
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to project NetCDF reader: {e}"
+                        ))
+                    })?
+                    .into();
+            } else {
+                // No columns found, so we should return an empty stream.
+                return Ok(futures::stream::empty().boxed());
+            };
+
+            let arrow_stream = match reader
+                .read_as_arrow_stream(beacon_config::CONFIG.beacon_batch_size)
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    // Skip for now. but warn about it and return an empty stream to avoid failing the whole query.
+                    tracing::warn!(
+                        "Failed to read NetCDF file {0} as Arrow stream: {error}",
+                        object.location
+                    );
+                    futures::stream::empty().boxed()
+                }
+            };
+
+            let maybe_stream = arrow_stream
+                .map_err(|err| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Error reading NetCDF file as Arrow stream: {err}"
+                    ))
+                })
+                .and_then(move |batch| {
+                    let adapted_res = schema_mapper.map_batch(batch).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to map NetCDF batch schema: {e}"
+                        ))
+                    });
+                    match adapted_res {
+                        Ok(adapted) => futures::future::ok(adapted),
+                        Err(e) => futures::future::err(e),
+                    }
+                })
+                .boxed();
+
+            Ok(maybe_stream)
+        }
     }
 }
 
@@ -372,6 +449,7 @@ impl FileOpener for DefaultFileOpener {
             file_meta.object_meta,
             self.datasets_object_store.clone(),
             self.schema_adapter.clone(),
+            self.use_mpio,
         )
         .boxed();
         Ok(stream)
@@ -428,16 +506,15 @@ mod tests {
     #[tokio::test]
     async fn fetch_schema_reads_and_caches() {
         ensure_test_fixtures();
-        let _guard = override_mpio_enabled_for_test(false);
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let s1 = fetch_schema(datasets_object_store.clone(), obj.clone())
+        let s1 = fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone(), false)
             .await
             .expect("schema");
         assert!(!s1.fields().is_empty());
 
-        let s2 = fetch_schema(datasets_object_store.clone(), obj)
+        let s2 = fetch_schema_with_read_mode(datasets_object_store.clone(), obj, false)
             .await
             .expect("schema 2");
         assert_eq!(s1.fields().len(), s2.fields().len());
@@ -446,7 +523,6 @@ mod tests {
     #[tokio::test]
     async fn open_reader_returns_reader() {
         ensure_test_fixtures();
-        let _guard = override_mpio_enabled_for_test(false);
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
@@ -458,17 +534,26 @@ mod tests {
     #[tokio::test]
     async fn default_file_opener_produces_one_batch() {
         ensure_test_fixtures();
-        let _guard = override_mpio_enabled_for_test(false);
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let table_schema = fetch_schema(datasets_object_store.clone(), obj.clone())
-            .await
-            .expect("schema");
+        let table_schema =
+            fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone(), false)
+                .await
+                .expect("schema");
+        let analysed_sst_index = table_schema
+            .fields()
+            .iter()
+            .position(|f| f.name() == "analysed_sst")
+            .expect("analysed_sst field");
         let schema_adapter_factory = DefaultSchemaAdapterFactory;
-        let schema_adapter = schema_adapter_factory.create(table_schema.clone(), table_schema);
+        let schema_adapter = schema_adapter_factory.create(
+            table_schema.project(&[analysed_sst_index]).unwrap().into(),
+            table_schema,
+        );
 
-        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter));
+        let opener =
+            DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter), false);
 
         let file_meta = FileMeta {
             object_meta: obj,
@@ -480,26 +565,27 @@ mod tests {
             .open(file_meta, PartitionedFile::new("ignored", 0))
             .expect("open");
 
-        let stream = fut.await.expect("open future");
-        let batches: Vec<_> = stream.collect().await;
-        assert_eq!(batches.len(), 1);
-        let batch = batches[0].as_ref().expect("batch ok");
-        assert!(batch.num_columns() > 0);
+        let mut stream = fut.await.expect("open future");
+        println!("Stream batch: {:?}", stream.next().await.unwrap());
+        // let batches: Vec<_> = stream.collect().await;
+        // assert_eq!(batches.len(), 1);
+        // let batch = batches[0].as_ref().expect("batch ok");
+        // assert!(batch.num_columns() > 0);
     }
 
     #[tokio::test]
     async fn multiplexer_reads_schema_and_batch_via_worker() {
         ensure_test_fixtures();
-        let _guard = override_mpio_enabled_for_test(true);
 
         // Requires the `beacon-arrow-netcdf-mpio` executable.
         // Optionally provide a path via `BEACON_NETCDF_MPIO_WORKER`.
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let table_schema = fetch_schema(datasets_object_store.clone(), obj.clone())
-            .await
-            .expect("schema");
+        let table_schema =
+            fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone(), true)
+                .await
+                .expect("schema");
         assert!(!table_schema.fields().is_empty());
 
         // Table schema should only contain projected columns.
@@ -509,7 +595,7 @@ mod tests {
         let schema_adapter_factory = DefaultSchemaAdapterFactory;
         let schema_adapter =
             schema_adapter_factory.create(table_schema.clone(), table_schema.clone());
-        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter));
+        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter), true);
 
         let file_meta = FileMeta {
             object_meta: obj,

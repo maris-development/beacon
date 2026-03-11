@@ -45,44 +45,45 @@ Add datasets by placing files (e.g., .nc, .zarr, .parquet, .csv) into ./datasets
 
 ### SQL
 
-```bash
-curl -X POST http://localhost:8080/api/query \
-  -H 'Content-Type: application/json' \
-  --output results.parquet \
-  --data-binary @- <<'JSON'
+```http
+POST http://localhost:8080/api/query
+Content-Type: application/json
+
 {
   "sql": "SELECT TEMP, PSAL, LONGITUDE, LATITUDE FROM read_netcdf(['data/2020.nc', 'data/2021.nc']) WHERE time > '2020-01-01T00:00:00'",
-  "output": {"format": "parquet"}
+  "output": { "format": "parquet" }
 }
-JSON
+
 ```
 
 ### JSON
 
-```bash
-curl -X POST http://localhost:8080/api/query \
-  -H 'Content-Type: application/json' \
-  --data-binary @- <<'JSON'
+```http
+POST http://localhost:8080/api/query
+Content-Type: application/json
+
 {
   "query_parameters": [
-    {"column_name": "TEMP", "alias": "temperature"},
-    {"column_name": "PSAL", "alias": "salinity"},
-    {"column_name": "TIME"},
-    {"column_name": "LONGITUDE"},
-    {"column_name": "LATITUDE"}
+    { "column_name": "TEMP", "alias": "temperature" },
+    { "column_name": "PSAL", "alias": "salinity" },
+    { "column_name": "TIME" },
+    { "column_name": "LONGITUDE" },
+    { "column_name": "LATITUDE" }
   ],
   "filters": [
-    {"for_query_parameter": "temperature", "min": -2, "max": 35},
-    {"for_query_parameter": "salinity", "min": 30, "max": 42},
-    {"and": [
-      {"for_query_parameter": "LONGITUDE", "min": -20, "max": 20},
-      {"for_query_parameter": "LATITUDE", "min": 40, "max": 65}
-    ]}
+    { "for_query_parameter": "temperature", "min": -2, "max": 35 },
+    { "for_query_parameter": "salinity", "min": 30, "max": 42 },
+    {
+      "and": [
+        { "for_query_parameter": "LONGITUDE", "min": -20, "max": 20 },
+        { "for_query_parameter": "LATITUDE", "min": 40, "max": 65 }
+      ]
+    }
   ],
   "from": {
-    "netcdf": {"paths": ["data/2020.nc", "data/2021.nc"]}
+    "netcdf": { "paths": ["data/2020.nc", "data/2021.nc"] }
   },
-  "output": {"format": "csv"}
+  "output": { "format": "csv" }
 }
-JSON
+
 ```
