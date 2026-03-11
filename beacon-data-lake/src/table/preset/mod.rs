@@ -85,7 +85,7 @@ impl PresetTable {
     fn insert_exposed_field(
         exposed_fields: &mut Vec<arrow::datatypes::Field>,
         exposed_names: &mut HashSet<String>,
-        renames: &mut IndexMap<String, String>,
+        source_columns: &mut HashMap<String, String>,
         field: &arrow::datatypes::Field,
         column_name: &str,
         alias: Option<&String>,
@@ -101,10 +101,11 @@ impl PresetTable {
 
         if let Some(alias) = alias {
             exposed_fields.push(field.clone().with_name(alias));
-            renames.insert(column_name.to_string(), alias.clone());
         } else {
             exposed_fields.push(field.clone());
         }
+
+        source_columns.insert(exposed_name, column_name.to_string());
 
         Ok(())
     }
@@ -151,14 +152,14 @@ impl PresetTable {
 
         let mut exposed_fields = Vec::new();
         let mut exposed_names = HashSet::new();
-        let mut renames = IndexMap::new();
+        let mut source_columns = HashMap::new();
 
         for column in self.data_columns.iter() {
             if let Ok(field) = current_schema.field_with_name(&column.column_name) {
                 Self::insert_exposed_field(
                     &mut exposed_fields,
                     &mut exposed_names,
-                    &mut renames,
+                    &mut source_columns,
                     field,
                     &column.column_name,
                     column.alias.as_ref(),
@@ -172,7 +173,7 @@ impl PresetTable {
                             Self::insert_exposed_field(
                                 &mut exposed_fields,
                                 &mut exposed_names,
-                                &mut renames,
+                                &mut source_columns,
                                 nested_field,
                                 &nested_column.column_name,
                                 nested_column.alias.as_ref(),
@@ -198,7 +199,7 @@ impl PresetTable {
                 Self::insert_exposed_field(
                     &mut exposed_fields,
                     &mut exposed_names,
-                    &mut renames,
+                    &mut source_columns,
                     field,
                     &column.column_name,
                     column.alias.as_ref(),
@@ -214,7 +215,7 @@ impl PresetTable {
         let schema = SchemaRef::new(arrow::datatypes::Schema::new(exposed_fields));
 
         let preset_table_provider =
-            PresetTableProvider::new(current_provider, schema.clone(), renames);
+            PresetTableProvider::new(current_provider, schema.clone(), source_columns);
 
         Ok(Arc::new(preset_table_provider))
     }
@@ -224,19 +225,19 @@ impl PresetTable {
 struct PresetTableProvider {
     inner: Arc<dyn TableProvider>,
     exposed_schema: SchemaRef,
-    renames: IndexMap<String, String>,
+    source_columns: HashMap<String, String>,
 }
 
 impl PresetTableProvider {
     pub fn new(
         inner: Arc<dyn TableProvider>,
         exposed_schema: SchemaRef,
-        renames: IndexMap<String, String>,
+        source_columns: HashMap<String, String>,
     ) -> Self {
         Self {
             inner,
             exposed_schema,
-            renames,
+            source_columns,
         }
     }
 }
@@ -263,39 +264,42 @@ impl TableProvider for PresetTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let inverted_renames: HashMap<_, _> = self
-            .renames
-            .iter()
-            .map(|(k, v)| (v.clone(), k.clone()))
-            .collect();
-
         let alias_exprs = filters
             .iter()
-            .map(|e| remap_filter(e.clone(), &inverted_renames))
+            .map(|e| remap_filter(e.clone(), &self.source_columns))
             .collect::<Result<Vec<_>, _>>()?;
 
         let projection = projection
             .cloned()
             .unwrap_or_else(|| (0..self.exposed_schema.fields().len()).collect::<Vec<_>>());
 
-        let mut source_projection = Vec::with_capacity(projection.len());
-
-        // Translate the projection indices to the actual column names
         let source_schema = self.inner.schema();
+        let mut source_projection = Vec::new();
+        let mut projected_columns = Vec::with_capacity(projection.len());
+        let mut projected_source_indices = IndexMap::new();
 
         for column_index in projection {
             let exposed_column_name = self.exposed_schema.field(column_index).name();
-            let source_name = inverted_renames
+            let source_name = self
+                .source_columns
                 .get(exposed_column_name)
                 .unwrap_or(exposed_column_name);
-            if let Ok(source_column_index) = source_schema.index_of(source_name) {
-                source_projection.push(source_column_index);
-            } else {
-                return Err(datafusion::error::DataFusionError::Configuration(format!(
+            let source_column_index = source_schema.index_of(source_name).map_err(|_| {
+                datafusion::error::DataFusionError::Configuration(format!(
                     "Column '{}' not found in the source schema",
-                    exposed_column_name
-                )));
-            }
+                    source_name
+                ))
+            })?;
+
+            let scan_column_index = *projected_source_indices
+                .entry(source_name.clone())
+                .or_insert_with(|| {
+                    let next_index = source_projection.len();
+                    source_projection.push(source_column_index);
+                    next_index
+                });
+
+            projected_columns.push((scan_column_index, exposed_column_name.clone()));
         }
 
         let scan = self
@@ -308,24 +312,19 @@ impl TableProvider for PresetTableProvider {
 
         let props = state.execution_props();
 
-        let mut proj_exprs = Vec::with_capacity(self.renames.len());
+        let mut proj_exprs = Vec::with_capacity(projected_columns.len());
 
-        for field in df_schema.fields() {
-            // Check if the field is in the renames map
-            if let Some(alias) = self.renames.get(field.name()) {
-                // Make a logical Expr::Column against the real name
-                let log_expr: Expr = Expr::Column(Column::new_unqualified(field.name().clone()));
-                // Plan it into a PhysicalExpr
-                let phys_expr = create_physical_expr(&log_expr, &df_schema, props).unwrap();
-                // Now alias it in the ProjectionExec
-                proj_exprs.push((phys_expr, alias.clone()));
+        for (scan_column_index, exposed_name) in projected_columns {
+            let scan_field = scan_schema.field(scan_column_index);
+            let log_expr: Expr = Expr::Column(Column::new_unqualified(scan_field.name().clone()));
+            let phys_expr = create_physical_expr(&log_expr, &df_schema, props).unwrap();
+            proj_exprs.push((phys_expr, exposed_name.clone()));
 
-                tracing::debug!(
-                    "Adding projection for column '{}' with alias '{}'",
-                    field.name(),
-                    alias
-                );
-            }
+            tracing::debug!(
+                "Adding projection for source column '{}' as '{}'",
+                scan_field.name(),
+                exposed_name
+            );
         }
 
         let phys_pushdown_filters = create_physical_exprs(alias_exprs.iter(), &df_schema, props);
@@ -386,7 +385,7 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use datafusion::{catalog::MemTable, prelude::SessionContext};
+    use datafusion::{catalog::MemTable, physical_plan::collect, prelude::SessionContext};
     use futures::StreamExt;
 
     use crate::{DataLake, TABLES_OBJECT_STORE_URL, table::Table};
@@ -529,5 +528,63 @@ mod tests {
             .unwrap();
         let mut entries = object_store.list(Some(&object_store::path::Path::from(table_name)));
         assert!(entries.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn preset_table_provider_supports_multiple_aliases_for_same_source_column() {
+        let provider = preset_provider_result(preset_table(
+            vec![
+                mapping("a", Some("a_first")),
+                mapping("a", Some("a_second")),
+                mapping("b", None),
+                mapping("a", None),
+            ],
+            vec![],
+        ))
+        .await
+        .expect("preset provider should be created");
+
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+        let plan = provider
+            .scan(&state, None, &[], None)
+            .await
+            .expect("scan should succeed");
+        let batches = collect(plan, ctx.task_ctx())
+            .await
+            .expect("collect should succeed");
+
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.schema().field(0).name(), "a_first");
+        assert_eq!(batch.schema().field(1).name(), "a_second");
+        assert_eq!(batch.schema().field(2).name(), "b");
+        assert_eq!(batch.schema().field(3).name(), "a");
+
+        let a_first = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("first alias should be Int32Array");
+        let a_second = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("second alias should be Int32Array");
+        let b = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("unaliased column should be Int32Array");
+        let a_unaliased = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("unaliased column should be Int32Array");
+
+        assert_eq!(a_first.value(0), 1);
+        assert_eq!(a_second.value(0), 1);
+        assert_eq!(b.value(0), 2);
+        assert_eq!(a_unaliased.value(0), 1);
     }
 }
