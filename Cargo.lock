@@ -999,6 +999,7 @@ dependencies = [
 name = "beacon-data-lake"
 version = "1.5.4"
 dependencies = [
+ "anyhow",
  "arrow",
  "async-trait",
  "beacon-arrow-zarr",
