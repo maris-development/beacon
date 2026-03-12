@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 
-use crate::array::{Array, io_cache::IoCache, reader::ArrayReader, store::ChunkStore};
+use crate::array::{io_cache::IoCache, reader::ArrayReader};
 
 pub struct ColumnReader<S: ObjectStore + Clone> {
     object_store: S,
@@ -33,7 +33,10 @@ impl<S: ObjectStore + Clone> ColumnReader<S> {
         })
     }
 
-    pub fn read_column_array(&self, dataset_index: u32) -> Option<Array<Arc<dyn ChunkStore>>> {
+    pub fn read_column_array(
+        &self,
+        dataset_index: u32,
+    ) -> Option<anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>>> {
         self.reader.read_dataset_array(dataset_index)
     }
 }

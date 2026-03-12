@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 
-use crate::array::{Array, store::ChunkStore, writer::ArrayWriter};
+use crate::array::writer::ArrayWriter;
 
 pub struct ColumnWriter<S: ObjectStore + Clone> {
     object_store: S,
     column_directory: object_store::path::Path,
-
     array_writer: ArrayWriter<S>,
 }
 
@@ -17,28 +16,34 @@ impl<S: ObjectStore + Clone> ColumnWriter<S> {
         column_directory: object_store::path::Path,
         data_type: arrow::datatypes::DataType,
         chunk_size: usize,
-    ) -> Self {
-        // Self {
-        //     array_writer: ArrayWriter::new(
-        //         object_store.clone(),
-        //         column_directory.child("array.arrow"),
-        //         column_directory.child("layout.arrow"),
-        //         data_type,
-        //         chunk_size,
-        //     ),
-        //     object_store,
-        //     column_directory,
-        // }
-        todo!()
+    ) -> anyhow::Result<Self> {
+        let array_path = column_directory.child("array.arrow");
+        let layout_path = column_directory.child("layout.arrow");
+        let array_writer = ArrayWriter::new(
+            object_store.clone(),
+            array_path,
+            layout_path,
+            data_type,
+            chunk_size,
+        )?;
+
+        Ok(Self {
+            object_store,
+            column_directory,
+            array_writer,
+        })
+    }
+
+    pub fn column_directory(&self) -> &object_store::path::Path {
+        &self.column_directory
     }
 
     pub async fn write_column_array(
         &mut self,
         dataset_index: u32,
-        array: Array<Arc<dyn ChunkStore>>,
+        array: Arc<dyn beacon_nd_arrow::array::NdArrowArray>,
     ) -> anyhow::Result<()> {
-        todo!()
-        // self.array_writer.append_array(dataset_index, array).await
+        self.array_writer.append_array(dataset_index, array).await
     }
 
     pub fn data_type(&self) -> &arrow::datatypes::DataType {

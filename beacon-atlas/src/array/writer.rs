@@ -235,6 +235,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
 #[cfg(test)]
 mod tests {
     use super::ArrayWriter;
+    use crate::array::{io_cache::IoCache, reader::ArrayReader};
     use std::{io::Cursor, sync::Arc};
 
     use arrow::{
@@ -242,7 +243,7 @@ mod tests {
         datatypes::DataType,
         ipc::reader::FileReader,
     };
-    use beacon_nd_arrow::array::{NdArrowArray, NdArrowArrayDispatch};
+    use beacon_nd_arrow::array::{NdArrowArray, NdArrowArrayDispatch, subset::ArraySubset};
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
     fn make_i32_array(values: Vec<i32>) -> Arc<dyn NdArrowArray> {
@@ -314,6 +315,89 @@ mod tests {
         let rows: usize = reader.map(|batch| batch.expect("batch").num_rows()).sum();
 
         assert_eq!(rows, 4);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finalize_writes_layouts_and_subset_reads_across_chunked_batches() -> anyhow::Result<()>
+    {
+        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
+        let array_path = Path::from("pipeline-array.arrow");
+        let layout_path = Path::from("pipeline-layout.arrow");
+
+        let mut writer = ArrayWriter::new(
+            store.clone(),
+            array_path.clone(),
+            layout_path.clone(),
+            DataType::Int32,
+            4,
+        )?;
+
+        writer
+            .append_array(10, make_i32_array(vec![1, 2, 3]))
+            .await?;
+        writer
+            .append_array(
+                11,
+                Arc::new(NdArrowArrayDispatch::new_in_mem(
+                    vec![100, 101, 102, 103, 104, 105],
+                    vec![2, 3],
+                    vec!["lat".to_string(), "lon".to_string()],
+                    None,
+                )?),
+            )
+            .await?;
+        writer.finalize().await?;
+
+        let reader = ArrayReader::new_with_cache(
+            store,
+            layout_path,
+            array_path,
+            Arc::new(IoCache::new(1024 * 1024)),
+        )
+        .await?;
+
+        let first_layout = reader
+            .layouts()
+            .find_dataset_array_layout(10)
+            .expect("first layout exists");
+        assert_eq!(first_layout.array_start, 0);
+        assert_eq!(first_layout.array_len, 3);
+
+        let second_layout = reader
+            .layouts()
+            .find_dataset_array_layout(11)
+            .expect("second layout exists");
+        assert_eq!(second_layout.array_start, 3);
+        assert_eq!(second_layout.array_shape, vec![2, 3]);
+        assert_eq!(
+            second_layout.dimensions,
+            vec!["lat".to_string(), "lon".to_string()]
+        );
+
+        let array = reader
+            .read_dataset_array(11)
+            .transpose()?
+            .expect("dataset array exists");
+        let subset = array
+            .subset(ArraySubset {
+                start: vec![0, 1],
+                shape: vec![2, 2],
+            })
+            .await?;
+        let materialized = subset.as_arrow_array_ref().await?;
+        let values = materialized
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("int32 subset");
+
+        assert_eq!(subset.shape(), vec![2, 2]);
+        assert_eq!(
+            subset.dimensions(),
+            vec!["lat".to_string(), "lon".to_string()]
+        );
+        assert_eq!(values.values(), &[101, 102, 104, 105]);
 
         Ok(())
     }

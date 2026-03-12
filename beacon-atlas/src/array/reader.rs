@@ -1,10 +1,16 @@
 use std::sync::Arc;
 
+use arrow::datatypes::TimeUnit;
+use beacon_nd_arrow::array::backend::ArrayBackend;
+use beacon_nd_arrow::array::compat_typings::TimestampNanosecond;
 use object_store::ObjectStore;
 
 use crate::{
     array::{
-        Array, ChunkStore, io_cache::IoCache, layout::ArrayLayouts, store::SpillableChunkStore,
+        AtlasArrayBackend,
+        compat::AtlasArrowCompat,
+        io_cache::IoCache,
+        layout::{ArrayLayout, ArrayLayouts},
     },
     arrow_object_store::ArrowObjectStoreReader,
 };
@@ -52,8 +58,24 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
         &self.io_cache
     }
 
+    fn lazy_dataset_array<A: AtlasArrowCompat>(
+        &self,
+        layout: Arc<ArrayLayout>,
+    ) -> anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>> {
+        let array = AtlasArrayBackend::<S, A>::new(
+            self.array_reader.clone(),
+            self.io_cache.clone(),
+            layout,
+        );
+
+        array.into_dyn_array()
+    }
+
     /// Returns a chunked array for a dataset index, if present.
-    pub fn read_dataset_array(&self, dataset_index: u32) -> Option<Array<Arc<dyn ChunkStore>>> {
+    pub fn read_dataset_array(
+        &self,
+        dataset_index: u32,
+    ) -> Option<anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>>> {
         let layout = if let Some(layout) = self.layouts.find_dataset_array_layout(dataset_index) {
             layout.clone()
         } else {
@@ -61,126 +83,155 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
         };
         let layout = Arc::new(layout);
 
-        let provider = Arc::new(SpillableChunkStore {
-            layout: layout.clone(),
-            reader: self.array_reader.clone(),
-            io_cache: self.io_cache.clone(),
-            array_batch_len: self.array_reader.num_batches(),
-        });
-
-        Some(Array {
-            array_datatype: self.array_datatype.clone(),
-            dimensions: layout.dimensions.clone(),
-            array_shape: layout.array_shape.iter().map(|d| *d as usize).collect(),
-            chunk_provider: provider,
-        })
+        match &self.array_datatype {
+            arrow::datatypes::DataType::Boolean => Some(self.lazy_dataset_array::<bool>(layout)),
+            arrow::datatypes::DataType::Int8 => Some(self.lazy_dataset_array::<i8>(layout)),
+            arrow::datatypes::DataType::Int16 => Some(self.lazy_dataset_array::<i16>(layout)),
+            arrow::datatypes::DataType::Int32 => Some(self.lazy_dataset_array::<i32>(layout)),
+            arrow::datatypes::DataType::Int64 => Some(self.lazy_dataset_array::<i64>(layout)),
+            arrow::datatypes::DataType::UInt8 => Some(self.lazy_dataset_array::<u8>(layout)),
+            arrow::datatypes::DataType::UInt16 => Some(self.lazy_dataset_array::<u16>(layout)),
+            arrow::datatypes::DataType::UInt32 => Some(self.lazy_dataset_array::<u32>(layout)),
+            arrow::datatypes::DataType::UInt64 => Some(self.lazy_dataset_array::<u64>(layout)),
+            arrow::datatypes::DataType::Float32 => Some(self.lazy_dataset_array::<f32>(layout)),
+            arrow::datatypes::DataType::Float64 => Some(self.lazy_dataset_array::<f64>(layout)),
+            arrow::datatypes::DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                Some(self.lazy_dataset_array::<TimestampNanosecond>(layout))
+            }
+            arrow::datatypes::DataType::Utf8 => Some(self.lazy_dataset_array::<String>(layout)),
+            _ => {
+                return Some(Err(anyhow::anyhow!(
+                    "unsupported array datatype: {:?}",
+                    self.array_datatype
+                )));
+            }
+        }
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::ArrayReader;
-//     use crate::array::Array;
-//     use crate::array::data_type::I32Type;
-//     use crate::array::io_cache::IoCache;
-//     use crate::array::nd::AsNdArray;
-//     use crate::array::store::InMemoryChunkStore;
-//     use crate::array::writer::ArrayWriter;
-//     use arrow::array::{ArrayRef, Int32Array};
-//     use arrow::datatypes::DataType;
-//     use object_store::{ObjectStore, memory::InMemory, path::Path};
-//     use std::sync::Arc;
+#[cfg(test)]
+mod tests {
+    use super::ArrayReader;
+    use crate::array::{io_cache::IoCache, writer::ArrayWriter};
+    use arrow::array::{Array as ArrowArray, BooleanArray, Int32Array, TimestampNanosecondArray};
+    use beacon_nd_arrow::array::compat_typings::TimestampNanosecond;
+    use beacon_nd_arrow::array::{NdArrowArray, NdArrowArrayDispatch, subset::ArraySubset};
+    use object_store::{ObjectStore, memory::InMemory, path::Path};
+    use std::sync::Arc;
 
-//     fn chunk(values: Vec<i32>) -> ArrayRef {
-//         Arc::new(Int32Array::from(values)) as ArrayRef
-//     }
+    async fn build_reader(
+        array: Arc<dyn NdArrowArray>,
+        chunk_size: usize,
+    ) -> anyhow::Result<ArrayReader<Arc<dyn ObjectStore>>> {
+        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
+        let array_path = Path::from("test-array.arrow");
+        let layout_path = Path::from("test-layout.arrow");
 
-//     fn build_array(
-//         chunks: Vec<Vec<i32>>,
-//         shape: Vec<usize>,
-//         dims: Vec<&str>,
-//     ) -> Array<InMemoryChunkStore> {
-//         let arrays = chunks.into_iter().map(chunk).collect::<Vec<_>>();
-//         Array {
-//             array_datatype: DataType::Int32,
-//             array_shape: shape,
-//             dimensions: dims.into_iter().map(|d| d.to_string()).collect(),
-//             chunk_provider: InMemoryChunkStore::new(arrays),
-//         }
-//     }
+        let mut writer = ArrayWriter::new(
+            store.clone(),
+            array_path.clone(),
+            layout_path.clone(),
+            array.data_type(),
+            chunk_size,
+        )?;
+        writer.append_array(7, array).await?;
+        writer.finalize().await?;
 
-//     #[tokio::test]
-//     async fn read_dataset_array_returns_data_and_metadata() -> anyhow::Result<()> {
-//         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-//         let object_store = store.clone();
-//         let root = Path::from("reader/basic");
-//         let array_path = root.child("array.arrow");
-//         let layout_path = root.child("layout.arrow");
+        ArrayReader::new_with_cache(
+            store,
+            layout_path,
+            array_path,
+            Arc::new(IoCache::new(1024 * 1024)),
+        )
+        .await
+    }
 
-//         let mut writer = ArrayWriter::new(
-//             object_store,
-//             array_path.clone(),
-//             layout_path.clone(),
-//             DataType::Int32,
-//             2,
-//         );
-//         let array = build_array(vec![vec![1, 2], vec![3, 4]], vec![4], vec!["x"]);
-//         writer.append_array(7, array).await?;
-//         writer.finalize().await?;
+    #[tokio::test]
+    async fn read_dataset_array_returns_lazy_boolean_array() -> anyhow::Result<()> {
+        let source = Arc::new(NdArrowArrayDispatch::new_in_mem(
+            vec![true, false, true],
+            vec![3],
+            vec!["x".to_string()],
+            None,
+        )?) as Arc<dyn NdArrowArray>;
+        let reader = build_reader(source, 2).await?;
 
-//         let cache = Arc::new(IoCache::new(1024 * 1024));
-//         let reader =
-//             ArrayReader::new_with_cache(store.clone(), layout_path, array_path, cache.clone())
-//                 .await?;
+        let array = reader
+            .read_dataset_array(7)
+            .transpose()?
+            .expect("dataset array exists");
+        let materialized = array.as_arrow_array_ref().await?;
+        let values = materialized
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .expect("boolean array");
 
-//         assert!(Arc::ptr_eq(reader.io_cache(), &cache));
-//         let expected_dtype = DataType::Int32;
-//         assert_eq!(reader.array_datatype(), &expected_dtype);
+        assert_eq!(values.len(), 3);
+        assert!(values.value(0));
+        assert!(!values.value(1));
+        assert!(values.value(2));
 
-//         let loaded = reader
-//             .read_dataset_array(7)
-//             .expect("expected dataset array");
-//         assert_eq!(loaded.array_shape, vec![4]);
-//         assert_eq!(loaded.dimensions, vec!["x".to_string()]);
+        Ok(())
+    }
 
-//         let nd = loaded.fetch().await?;
-//         let values = nd
-//             .as_primitive_nd::<I32Type>()
-//             .expect("expected i32 ndarray");
-//         let collected: Vec<i32> = values.iter().cloned().collect();
-//         assert_eq!(collected, vec![1, 2, 3, 4]);
+    #[tokio::test]
+    async fn read_dataset_array_returns_lazy_timestamp_array() -> anyhow::Result<()> {
+        let source = Arc::new(NdArrowArrayDispatch::new_in_mem(
+            vec![TimestampNanosecond(100), TimestampNanosecond(200)],
+            vec![2],
+            vec!["time".to_string()],
+            None,
+        )?) as Arc<dyn NdArrowArray>;
+        let reader = build_reader(source, 2).await?;
 
-//         Ok(())
-//     }
+        let array = reader
+            .read_dataset_array(7)
+            .transpose()?
+            .expect("dataset array exists");
+        let materialized = array.as_arrow_array_ref().await?;
+        let values = materialized
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .expect("timestamp nanosecond array");
 
-//     #[tokio::test]
-//     async fn read_dataset_array_returns_none_when_missing() -> anyhow::Result<()> {
-//         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-//         let object_store = store.clone();
-//         let root = Path::from("reader/missing");
-//         let array_path = root.child("array.arrow");
-//         let layout_path = root.child("layout.arrow");
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.value(0), 100);
+        assert_eq!(values.value(1), 200);
 
-//         let mut writer = ArrayWriter::new(
-//             object_store,
-//             array_path.clone(),
-//             layout_path.clone(),
-//             DataType::Int32,
-//             4,
-//         );
-//         let array = build_array(vec![vec![9, 10]], vec![2], vec!["x"]);
-//         writer.append_array(1, array).await?;
-//         writer.finalize().await?;
+        Ok(())
+    }
 
-//         let reader = ArrayReader::new_with_cache(
-//             store,
-//             layout_path,
-//             array_path,
-//             Arc::new(IoCache::new(1024 * 1024)),
-//         )
-//         .await?;
+    #[tokio::test]
+    async fn read_dataset_array_subset_spans_chunk_boundaries() -> anyhow::Result<()> {
+        let source = Arc::new(NdArrowArrayDispatch::new_in_mem(
+            (0..12).collect::<Vec<i32>>(),
+            vec![3, 4],
+            vec!["x".to_string(), "y".to_string()],
+            None,
+        )?) as Arc<dyn NdArrowArray>;
+        let reader = build_reader(source, 5).await?;
 
-//         assert!(reader.read_dataset_array(99).is_none());
-//         Ok(())
-//     }
-// }
+        let array = reader
+            .read_dataset_array(7)
+            .transpose()?
+            .expect("dataset array exists");
+        let subset = array
+            .subset(ArraySubset {
+                start: vec![1, 1],
+                shape: vec![2, 2],
+            })
+            .await?;
+        let materialized = subset.as_arrow_array_ref().await?;
+        let values = materialized
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("int32 array");
+
+        assert_eq!(subset.shape(), vec![2, 2]);
+        assert_eq!(subset.dimensions(), vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(values.len(), 4);
+        assert_eq!(values.values(), &[5, 6, 9, 10]);
+
+        Ok(())
+    }
+}
