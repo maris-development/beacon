@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field};
-use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_formats::netcdf::{
-    object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
-    NetcdfFormat,
+use arrow::{
+    array::AsArray,
+    datatypes::{DataType, Field},
 };
+use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
+use beacon_formats::netcdf::{NetcdfFormat, NetcdfOptions};
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -75,37 +75,61 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
         let mut glob_paths: Vec<String> = vec![];
-        if let Some(glob_path_arg) = args.first() {
-            match glob_path_arg {
-                Expr::Literal(ScalarValue::List(values), _) => {
-                    let string_array = values.as_ref().values();
-                    match string_array
-                        .as_any()
-                        .downcast_ref::<arrow::array::StringArray>()
-                    {
-                        Some(str_arr) => {
-                            str_arr.iter().for_each(|opt_str| {
-                                if let Some(s) = opt_str {
-                                    glob_paths.push(s.to_string());
-                                }
-                            });
-                        }
-                        None => {
-                            return plan_err!(
-                                "read_netcdf first argument must be a List<Utf8> of glob paths"
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    return plan_err!(
-                        "read_netcdf first argument must be a List<Utf8> of glob paths"
-                    );
-                }
-            }
+        let glob_arg_path = if let Some(arg) = args.first() {
+            arg
         } else {
             return plan_err!("read_netcdf requires at least 1 argument: glob_paths : List<Utf8>");
+        };
+        match glob_arg_path {
+            Expr::Literal(ScalarValue::List(values), _) => {
+                let string_array = values.as_ref().values();
+                match string_array.as_string_opt::<i32>() {
+                    Some(str_arr) => {
+                        str_arr.iter().for_each(|opt_str| {
+                            if let Some(s) = opt_str {
+                                glob_paths.push(s.to_string());
+                            }
+                        });
+                    }
+                    None => {
+                        return plan_err!(
+                            "read_netcdf first argument must be a List<Utf8> of glob paths"
+                        );
+                    }
+                }
+            }
+            _ => {
+                return plan_err!("read_netcdf first argument must be a List<Utf8> of glob paths");
+            }
         }
+
+        let dimensions_projection = match args.get(1) {
+            Some(Expr::Literal(ScalarValue::List(values), _)) => {
+                let string_array = values.as_ref().values();
+                match string_array.as_string_opt::<i32>() {
+                    Some(str_arr) => {
+                        let mut projection = vec![];
+                        str_arr.iter().for_each(|opt_str| {
+                            if let Some(s) = opt_str {
+                                projection.push(s.to_string());
+                            }
+                        });
+                        Some(projection)
+                    }
+                    None => {
+                        return plan_err!(
+                            "read_netcdf second argument must be a List<Utf8> of dimension names"
+                        );
+                    }
+                }
+            }
+            Some(_) => {
+                return plan_err!(
+                    "read_netcdf second argument must be a List<Utf8> of dimension names"
+                );
+            }
+            None => None,
+        };
 
         tracing::debug!("read_netcdf glob paths: {:?}", glob_paths);
 
@@ -114,8 +138,12 @@ impl TableFunctionImpl for ReadNetCDFFunc {
             tracing::debug!("read_netcdf processing path: {}", path);
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
+        let netcdf_options = NetcdfOptions {
+            dimensions_projection,
+            ..Default::default()
+        };
 
-        let file_format = NetcdfFormat::new(self.datasets_object_store.clone(), Default::default());
+        let file_format = NetcdfFormat::new(self.datasets_object_store.clone(), netcdf_options);
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

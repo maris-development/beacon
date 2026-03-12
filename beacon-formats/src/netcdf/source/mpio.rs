@@ -178,6 +178,13 @@ fn decode_flight_schema(bytes: Vec<u8>) -> Result<SchemaRef, arrow::error::Arrow
     Ok(Arc::new(schema))
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SchemaRequest {
+    path: String,
+    #[serde(default)]
+    dimensions_projection: Option<Vec<String>>,
+}
+
 /// Fetch the Arrow schema for a NetCDF file via the configured Arrow Flight server.
 ///
 /// Calls `GetFlightInfo` with `descriptor.cmd = <local filesystem path bytes>`.
@@ -186,6 +193,7 @@ fn decode_flight_schema(bytes: Vec<u8>) -> Result<SchemaRef, arrow::error::Arrow
 pub async fn read_schema(
     datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
+    dimensions_projection: Option<Vec<String>>,
 ) -> Result<SchemaRef, MpioError> {
     let path = datasets_object_store
         .translate_netcdf_url_path(&object.location)
@@ -199,7 +207,10 @@ pub async fn read_schema(
         channel: Some(channel),
     };
 
-    let descriptor = arrow_flight::FlightDescriptor::new_cmd(path.into_bytes());
+    let descriptor = arrow_flight::FlightDescriptor::new_cmd(serde_json::to_vec(&SchemaRequest {
+        path,
+        dimensions_projection,
+    })?);
     let info = client.get_flight_info(descriptor).await?;
     let schema = decode_flight_schema(info.schema.to_vec())?;
     Ok(schema)
@@ -209,7 +220,6 @@ pub async fn read_schema(
 ///
 /// Calls `DoGet` with a JSON-encoded [`FlightDoGetRequest`] ticket and returns the
 /// resulting async stream of [`RecordBatch`]es.
-
 /// Stream a NetCDF file as Arrow [`RecordBatch`]es via the configured Arrow Flight server.
 ///
 /// Calls `DoGet` with a JSON-encoded [`FlightDoGetRequest`] ticket and returns the

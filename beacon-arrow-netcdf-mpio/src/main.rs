@@ -16,6 +16,13 @@ use std::sync::Arc;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SchemaRequest {
+    path: String,
+    #[serde(default)]
+    dimensions_projection: Option<Vec<String>>,
+}
+
 /// Ticket payload for [`FlightService::do_get`].
 ///
 /// Serialised as JSON bytes in the Arrow Flight ticket.
@@ -138,19 +145,31 @@ impl FlightService for ReaderService {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         let descriptor = request.into_inner();
-        let path = String::from_utf8(descriptor.cmd.to_vec())
-            .map_err(|_| Status::invalid_argument("descriptor cmd must be a UTF-8 file path"))?;
+        let json_info: SchemaRequest = serde_json::from_slice(&descriptor.cmd).map_err(|e| {
+            Status::invalid_argument(format!(
+                "FlightDescriptor cmd must be JSON SchemaRequest: {e}"
+            ))
+        })?;
 
-        let reader = self.get_or_open(&path)?;
-        let schema = tokio::task::spawn_blocking(move || Ok::<_, Status>(reader.schema()))
-            .await
-            .map_err(|e| Status::internal(e.to_string()))??;
+        let mut reader = self.get_or_open(&json_info.path)?;
+        // Apply dimension projection if requested, which also projects the schema accordingly.
+        if let Some(ref dimensions) = json_info.dimensions_projection {
+            reader = reader
+                .project_with_dimensions(dimensions)
+                .map_err(|e| {
+                    Status::internal(format!(
+                        "dimension projection error for get_flight_info: {e}"
+                    ))
+                })?
+                .into();
+        }
+        let schema = reader.schema();
 
         // Build a ticket that `do_get` can consume directly.
         let ticket_bytes = serde_json::to_vec(&DoGetRequest {
-            path: String::from_utf8(descriptor.cmd.to_vec()).unwrap_or_default(),
+            path: json_info.path,
             projection: None,
-            dimensions: None,
+            dimensions: json_info.dimensions_projection,
         })
         .map_err(|e| Status::internal(e.to_string()))?;
 
