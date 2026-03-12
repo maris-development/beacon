@@ -1,7 +1,5 @@
 //! Serializable command/response types for MPIO request handling.
 
-use std::io::{Read, Write};
-
 use serde::{Deserialize, Serialize};
 
 /// Commands accepted by the MPIO bridge.

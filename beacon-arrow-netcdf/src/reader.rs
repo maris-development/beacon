@@ -141,14 +141,14 @@ impl NetCDFArrowReader {
         let dimension_set: std::collections::HashSet<&str> =
             dimensions.iter().map(String::as_str).collect();
 
-        // Collect the names of variables that have at least one requested dimension.
+        // Collect the names of variables that have all requested dimensions.
         let kept_variables: std::collections::HashSet<String> = self
             .file
             .variables()
             .filter(|var| {
                 var.dimensions()
                     .iter()
-                    .any(|d| dimension_set.contains(d.name().as_str()))
+                    .all(|d| dimension_set.contains(d.name().as_str()))
             })
             .map(|var| var.name().to_string())
             .collect();
