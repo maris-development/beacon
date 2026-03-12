@@ -3,73 +3,46 @@ pub mod writer;
 
 use std::sync::Arc;
 
+use beacon_nd_arrow::{
+    NdArrowArrayDispatch,
+    array::{NdArrowArray, compat_typings::ArrowTypeConversion},
+};
 pub use reader::ColumnReader;
 pub use writer::ColumnWriter;
 
-// pub struct Column {
-//     pub array: Array<Arc<dyn ChunkStore>>,
-//     pub name: String,
-// }
+pub struct Column {
+    name: String,
+    array: Arc<dyn NdArrowArray>,
+}
 
-// impl Column {
-//     pub fn new(array: Array<Arc<dyn ChunkStore>>, name: String) -> Self {
-//         Self { array, name }
-//     }
+impl Column {
+    pub fn new(name: String, array: Arc<dyn NdArrowArray>) -> Self {
+        Self { name, array }
+    }
 
-//     /// Creates a single-chunk column from owned values with an inferred Arrow data type.
-//     /// The shape and dimensions are used to determine the structure of the array, but the actual data is stored in a single chunk.
-//     /// The shape is used for validation to ensure that the number of values matches the expected structure, but it does not affect how the data is stored in the column.
-//     ///
-//     /// Scalar values (shape is empty) are treated as single-element arrays, allowing for consistent handling of both scalar and array data.
-//     pub fn new_from_vec<T: ArrayValues>(
-//         values: T,
-//         dimensions: Vec<String>,
-//         shape: Vec<usize>,
-//         name: String,
-//     ) -> anyhow::Result<Self> {
-//         if values.len() == 0 {
-//             anyhow::bail!("Values cannot be empty");
-//         }
+    pub fn new_from_vec<T: ArrowTypeConversion>(
+        name: String,
+        data: Vec<T>,
+        shape: Vec<usize>,
+        dimensions: Vec<String>,
+        fill_value: Option<T>,
+    ) -> anyhow::Result<Self> {
+        let array = NdArrowArrayDispatch::new_in_mem(data, shape, dimensions, fill_value)?;
+        Ok(Self {
+            name,
+            array: Arc::new(array),
+        })
+    }
 
-//         // Check if it is a scalar value (shape is empty) and if so, treat it as a single-element array.
-//         if values.len() == 1 {
-//             // Shape is allowed to be empty for scalar values
-//             return Self::new_from_vec(values, dimensions, shape, name);
-//         }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 
-//         if shape.len() != dimensions.len() {
-//             anyhow::bail!(
-//                 "Shape length ({}) does not match dimensions length ({})",
-//                 shape.len(),
-//                 dimensions.len()
-//             );
-//         }
+    pub fn data_type(&self) -> arrow::datatypes::DataType {
+        self.array.data_type()
+    }
 
-//         if shape.iter().product::<usize>() != values.len() {
-//             anyhow::bail!(
-//                 "Product of shape dimensions ({}) does not match number of values ({})",
-//                 shape.iter().product::<usize>(),
-//                 values.len()
-//             );
-//         }
-
-//         let array = array::from_vec_auto(values, dimensions.clone(), shape.clone());
-
-//         Ok(Self { array, name })
-//     }
-
-//     pub fn from_ndarray<T, S, D>(
-//         array: ndarray::ArrayBase<S, D>,
-//         dimensions: Vec<String>,
-//         name: String,
-//     ) -> anyhow::Result<Self>
-//     where
-//         S: ndarray::Data<Elem = T>,
-//         D: ndarray::Dimension,
-//         Vec<T>: ArrayValues,
-//         T: Clone,
-//     {
-//         let array = array::from_ndarray(array, dimensions)?;
-//         Ok(Self { array, name })
-//     }
-// }
+    pub fn array(&self) -> Arc<dyn NdArrowArray> {
+        self.array.clone()
+    }
+}

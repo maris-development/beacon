@@ -5,9 +5,6 @@ use object_store::ObjectStore;
 use crate::array::{io_cache::IoCache, reader::ArrayReader};
 
 pub struct ColumnReader<S: ObjectStore + Clone> {
-    object_store: S,
-    column_directory: object_store::path::Path,
-
     // Array Reader
     reader: Arc<ArrayReader<S>>,
 }
@@ -26,11 +23,7 @@ impl<S: ObjectStore + Clone> ColumnReader<S> {
                 .await?,
         );
 
-        Ok(Self {
-            object_store,
-            column_directory,
-            reader,
-        })
+        Ok(Self { reader })
     }
 
     pub fn read_column_array(
