@@ -899,6 +899,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
+ "beacon-common",
  "beacon-nd-arrow",
  "bincode",
  "bloomfilter",

@@ -1,4 +1,8 @@
 pub const STREAM_CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
+pub(crate) const COLLECTION_METADATA_FILE: &str = "atlas.json";
+pub(crate) const PARTITION_METADATA_FILE: &str = "atlas_partition.json";
+pub(crate) const ENTRIES_FILE: &str = "entries.arrow";
+pub(crate) const ENTRIES_COLUMN_NAME: &str = "__entry_key";
 
 /// Returns a recommended row count per Arrow IPC batch for the given data type.
 ///

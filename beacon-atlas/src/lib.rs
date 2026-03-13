@@ -1,14 +1,15 @@
 use arrow::ipc::CompressionType;
 use once_cell::sync::Lazy;
 
+use crate::column::Column;
+
 pub mod array;
 pub mod arrow_object_store;
 pub mod collection;
 pub mod column;
 pub mod config;
 pub mod consts;
-pub mod dataset;
-pub mod ops;
+pub mod partition;
 pub mod pruning;
 pub mod schema;
 pub mod stream;
@@ -20,3 +21,17 @@ pub static IPC_WRITE_OPTS: Lazy<arrow::ipc::writer::IpcWriteOptions> = Lazy::new
         .unwrap()
         .with_dictionary_handling(arrow::ipc::writer::DictionaryHandling::Delta)
 });
+
+pub struct Dataset {
+    pub name: String,
+    pub columns: Vec<Column>,
+}
+
+impl Dataset {
+    pub fn new(name: impl Into<String>, columns: Vec<Column>) -> Self {
+        Self {
+            name: name.into(),
+            columns,
+        }
+    }
+}

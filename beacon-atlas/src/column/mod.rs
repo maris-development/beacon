@@ -10,6 +10,7 @@ use beacon_nd_arrow::{
 pub use reader::ColumnReader;
 pub use writer::ColumnWriter;
 
+#[derive(Clone)]
 pub struct Column {
     name: String,
     array: Arc<dyn NdArrowArray>,
