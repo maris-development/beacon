@@ -1,13 +1,14 @@
+use beacon_nd_arrow::array::NdArrowArray;
+use object_store::ObjectStore;
 use std::sync::Arc;
 
-use beacon_nd_arrow::array::NdArrowArray;
-use futures::StreamExt;
-use futures::stream::BoxStream;
-use object_store::ObjectStore;
-use tokio::sync::OnceCell;
-
 use crate::{
-    array::io_cache::IoCache, column::ColumnReader, partition::Partition, schema::AtlasSchema,
+    array::io_cache::IoCache,
+    column::ColumnReader,
+    partition::{
+        Partition,
+        ops::read::{Dataset, init_column_reader, read_dataset_columns_by_index},
+    },
 };
 
 pub struct PartitionStreamReaderBuilder<S: ObjectStore + Clone> {
@@ -44,103 +45,149 @@ impl<S: ObjectStore + Clone> PartitionStreamReaderBuilder<S> {
         self
     }
 
-    pub fn stream(self, buffer_size: usize) -> ShareableCollectionStream<S> {
-        let (dataset_indexes_tx, dataset_indexes_rx) = flume::unbounded();
-        for dataset_index in self.dataset_indexes {
-            let _ = dataset_indexes_tx.send(dataset_index);
+    pub async fn create_shareable_stream(
+        self,
+        buffer_size: usize,
+    ) -> anyhow::Result<ShareableCollectionStream<S>> {
+        // ToDo: Maybe move to array queue?
+        let dataset_indexes = crossbeam::queue::SegQueue::new();
+        for dataset_index in &self.dataset_indexes {
+            dataset_indexes.push(*dataset_index);
         }
-        drop(dataset_indexes_tx);
-
-        let column_readers = self
-            .partition
-            .schema()
-            .columns
-            .iter()
-            .map(|_| OnceCell::new())
-            .collect::<Vec<_>>();
-
         let io_cache = self
             .io_cache
             .unwrap_or_else(|| Arc::new(IoCache::new(256 * 1024 * 1024)));
 
-        ShareableCollectionStream {
-            partition: self.partition.clone(),
-            dataset_indexes_rx,
-            columns_readers: column_readers,
-            schema: Arc::new(self.partition.schema().clone()),
-            io_cache,
-            buffer_size: buffer_size.max(1),
+        let mut column_readers: Vec<Arc<ColumnReader<S>>> = Vec::new();
+        for column in &self.partition.schema().columns {
+            let column_name = column.name.clone();
+            let object_store = self.object_store.clone();
+            let partition_directory = self.partition.directory().clone();
+            let column_reader = init_column_reader(
+                object_store,
+                &partition_directory,
+                &column_name,
+                io_cache.clone(),
+            )
+            .await?;
+            column_readers.push(column_reader);
         }
+
+        Ok(ShareableCollectionStream {
+            dataset_indexes_queue: Arc::new(dataset_indexes),
+            columns_readers: column_readers,
+            schema: Arc::new(self.partition.arrow_schema()),
+            _buffer_size: buffer_size.max(1),
+        })
     }
 }
 
 pub type DatasetReadResult = anyhow::Result<Vec<Option<Arc<dyn NdArrowArray>>>>;
-pub type ShareableDatasetStream = BoxStream<'static, DatasetReadResult>;
 
 #[derive(Clone)]
 pub struct ShareableCollectionStream<S: ObjectStore + Clone> {
-    partition: Arc<Partition>,
-    dataset_indexes_rx: flume::Receiver<u32>,
+    dataset_indexes_queue: Arc<crossbeam::queue::SegQueue<u32>>,
     columns_readers: Vec<Arc<ColumnReader<S>>>,
-    schema: Arc<AtlasSchema>,
-    buffer_size: usize,
-    io_cache: Arc<crate::array::io_cache::IoCache>,
+    schema: Arc<arrow::datatypes::Schema>,
+    _buffer_size: usize,
 }
 
 impl<S: ObjectStore + Clone + 'static> ShareableCollectionStream<S> {
-    pub fn with_io_cache(mut self, io_cache: Arc<crate::array::io_cache::IoCache>) -> Self {
-        self.io_cache = io_cache;
-        self
-    }
-
-    pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
-        self.buffer_size = buffer_size.max(1);
-        self
-    }
-
-    pub fn buffer_size(&self) -> usize {
-        self.buffer_size
-    }
-
-    pub fn stream(&self) -> ShareableDatasetStream {
-        let partition = self.partition.clone();
-        let dataset_indexes_rx = self.dataset_indexes_rx.clone();
+    pub fn stream_ref(&self) -> Box<dyn Iterator<Item = anyhow::Result<Dataset>>> {
+        let dataset_indexes_queue = self.dataset_indexes_queue.clone();
         let column_readers = self.columns_readers.clone();
         let schema = self.schema.clone();
-        let io_cache = self.io_cache.clone();
 
-        futures::stream::unfold(
-            (
-                dataset_indexes_rx,
-                column_readers,
-                schema,
-                io_cache,
-                partition.directory().clone(),
-            ),
-            |(dataset_indexes_rx, column_readers, schema, io_cache, partition_path)| async move {
-                let dataset_index = dataset_indexes_rx.recv_async().await.ok()?;
+        Box::new(std::iter::from_fn(move || {
+            let dataset_index = dataset_indexes_queue.pop();
+            dataset_index.map(|dataset_index| {
+                let columns = read_dataset_columns_by_index(&column_readers, dataset_index)?;
+                let dataset = Dataset::new_unaligned("dataset", schema.clone(), columns)?;
+                Ok(dataset)
+            })
+        }))
+    }
+}
 
-                let mut arrays = Vec::new();
-                for column_reader_cell in &column_readers {
-                    let task = column_reader_cell
-                        .read_column_array(dataset_index)
-                        .transpose()
-                        .unwrap();
-                    arrays.push(task);
-                }
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
 
-                Some((
-                    Ok(arrays),
-                    (
-                        dataset_indexes_rx,
-                        column_readers,
-                        schema,
-                        io_cache,
-                        partition_path,
-                    ),
-                ))
-            },
-        )
-        .boxed()
+    use arrow::array::{Float32Array, StringArray};
+    use futures::stream;
+    use object_store::{ObjectStore, memory::InMemory, path::Path};
+
+    use super::PartitionStreamReaderBuilder;
+    use crate::{column::Column, partition::ops::write::PartitionWriter};
+
+    #[tokio::test]
+    async fn stream_reads_multiple_datasets_with_missing_partition_columns() -> anyhow::Result<()> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let partition_path = Path::from("collections/example/partitions/part-00000");
+        let mut writer = PartitionWriter::new(store.clone(), partition_path, "part-00000", None)?;
+
+        writer
+            .write_dataset_columns(
+                "dataset-0",
+                stream::iter(vec![Column::new_from_vec(
+                    "temperature".to_string(),
+                    vec![10.0f32],
+                    vec![1],
+                    vec!["x".to_string()],
+                    None,
+                )?]),
+            )
+            .await?;
+
+        writer
+            .write_dataset_columns(
+                "dataset-1",
+                stream::iter(vec![Column::new_from_vec(
+                    "salinity".to_string(),
+                    vec![35.0f32],
+                    vec![1],
+                    vec!["x".to_string()],
+                    None,
+                )?]),
+            )
+            .await?;
+
+        let partition = Arc::new(writer.finish().await?);
+        let shareable_stream = PartitionStreamReaderBuilder::new(store, partition)
+            .with_dataset_indexes(vec![0, 1])
+            .create_shareable_stream(2)
+            .await?;
+
+        let mut stream = shareable_stream.stream_ref();
+
+        let dataset_0 = stream.next().expect("first dataset")?;
+        assert_eq!(dataset_0.0.schema.fields().len(), 2);
+        assert_eq!(dataset_0.0.schema.field(0).name(), "__entry_key");
+        assert_eq!(dataset_0.0.schema.field(1).name(), "temperature");
+
+        let entry_0 = dataset_0.0.arrays[0].as_arrow_array_ref().await?;
+        let entry_0 = entry_0.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(entry_0.value(0), "dataset-0");
+
+        let temp_0 = dataset_0.0.arrays[1].as_arrow_array_ref().await?;
+        let temp_0 = temp_0.as_any().downcast_ref::<Float32Array>().unwrap();
+        assert_eq!(temp_0.value(0), 10.0);
+
+        let dataset_1 = stream.next().expect("second dataset")?;
+        assert_eq!(dataset_1.0.schema.fields().len(), 2);
+        assert_eq!(dataset_1.0.schema.field(0).name(), "__entry_key");
+        assert_eq!(dataset_1.0.schema.field(1).name(), "salinity");
+
+        let entry_1 = dataset_1.0.arrays[0].as_arrow_array_ref().await?;
+        let entry_1 = entry_1.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(entry_1.value(0), "dataset-1");
+
+        let sal_1 = dataset_1.0.arrays[1].as_arrow_array_ref().await?;
+        let sal_1 = sal_1.as_any().downcast_ref::<Float32Array>().unwrap();
+        assert_eq!(sal_1.value(0), 35.0);
+
+        assert!(stream.next().is_none());
+
+        Ok(())
     }
 }
