@@ -3,6 +3,11 @@ pub(crate) const COLLECTION_METADATA_FILE: &str = "atlas.json";
 pub(crate) const PARTITION_METADATA_FILE: &str = "atlas_partition.json";
 pub(crate) const ENTRIES_FILE: &str = "entries.arrow";
 pub(crate) const ENTRIES_COLUMN_NAME: &str = "__entry_key";
+pub(crate) const ARRAY_FILE_NAME: &str = "array.arrow";
+pub(crate) const LAYOUT_FILE_NAME: &str = "layout.arrow";
+pub(crate) const STATISTICS_FILE_NAME: &str = "statistics.arrow";
+pub(crate) const DEFAULT_IO_CACHE_BYTES: usize = 256 * 1024 * 1024; // 64 MiB
+pub(crate) const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 16;
 
 /// Returns a recommended row count per Arrow IPC batch for the given data type.
 ///

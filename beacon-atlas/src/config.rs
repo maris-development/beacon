@@ -4,13 +4,11 @@
 
 use std::env;
 
+use crate::consts::{DEFAULT_CHUNK_FETCH_CONCURRENCY, DEFAULT_IO_CACHE_BYTES};
 /// Env var for IO cache size in bytes.
 pub const IO_CACHE_BYTES_ENV: &str = "BEACON_ATLAS_IO_CACHE_BYTES";
 /// Env var for chunk fetch concurrency.
 pub const CHUNK_FETCH_CONCURRENCY_ENV: &str = "BEACON_ATLAS_CHUNK_FETCH_CONCURRENCY";
-
-const DEFAULT_IO_CACHE_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
-const DEFAULT_CHUNK_FETCH_CONCURRENCY: usize = 16;
 
 /// Returns the configured IO cache size in bytes.
 pub fn io_cache_bytes() -> usize {

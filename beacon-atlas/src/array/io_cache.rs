@@ -44,13 +44,16 @@ impl IoCache {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
 
-    use super::{IoCache, CacheKey};
+    use super::{CacheKey, IoCache};
 
     fn make_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));

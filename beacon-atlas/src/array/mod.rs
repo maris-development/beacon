@@ -12,6 +12,7 @@ pub mod compat;
 pub mod io_cache;
 pub mod layout;
 pub mod reader;
+pub mod statistics;
 pub mod writer;
 
 /// Translate an n-dimensional subset into flat half-open ranges `(start, end)`.

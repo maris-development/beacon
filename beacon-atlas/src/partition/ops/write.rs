@@ -160,14 +160,17 @@ mod tests {
 
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    use futures::stream;
     use beacon_nd_arrow::array::NdArrowArray;
+    use futures::stream;
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
     use super::PartitionWriter;
     use crate::{
         column::Column,
-        partition::{load_partition, ops::read::{Dataset, ReaderBuilder}},
+        partition::{
+            load_partition,
+            ops::read::{Dataset, ReaderBuilder},
+        },
     };
 
     #[tokio::test]
@@ -283,7 +286,10 @@ mod tests {
         assert_eq!(partition.name(), "part-00123");
         assert_eq!(partition.directory(), &partition_path);
         assert_eq!(partition.metadata().name, "part-00123");
-        assert_eq!(partition.metadata().description.as_deref(), Some(description));
+        assert_eq!(
+            partition.metadata().description.as_deref(),
+            Some(description)
+        );
 
         assert_eq!(loaded.name(), "part-00123");
         assert_eq!(loaded.directory(), &partition_path);
@@ -297,7 +303,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_dataset_uses_dataset_name_and_assigns_sequential_indexes() -> anyhow::Result<()> {
+    async fn write_dataset_uses_dataset_name_and_assigns_sequential_indexes() -> anyhow::Result<()>
+    {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let partition_path = Path::from("collections/example/partitions/part-00042");
         let mut writer =

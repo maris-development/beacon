@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 
-use crate::array::writer::ArrayWriter;
+use crate::{
+    array::writer::ArrayWriter,
+    consts::{ARRAY_FILE_NAME, LAYOUT_FILE_NAME, STATISTICS_FILE_NAME},
+};
 
 pub struct ColumnWriter<S: ObjectStore + Clone> {
     object_store: S,
@@ -17,12 +20,14 @@ impl<S: ObjectStore + Clone> ColumnWriter<S> {
         data_type: arrow::datatypes::DataType,
         chunk_size: usize,
     ) -> anyhow::Result<Self> {
-        let array_path = column_directory.child("array.arrow");
-        let layout_path = column_directory.child("layout.arrow");
+        let array_path = column_directory.child(ARRAY_FILE_NAME);
+        let layout_path = column_directory.child(LAYOUT_FILE_NAME);
+        let statistics_path = column_directory.child(STATISTICS_FILE_NAME);
         let array_writer = ArrayWriter::new(
             object_store.clone(),
             array_path,
             layout_path,
+            statistics_path,
             data_type,
             chunk_size,
         )?;

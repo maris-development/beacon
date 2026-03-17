@@ -10,7 +10,10 @@ use object_store::ObjectStore;
 
 use crate::{
     IPC_WRITE_OPTS,
-    array::layout::{ArrayLayout, ArrayLayouts},
+    array::{
+        layout::{ArrayLayout, ArrayLayouts},
+        statistics::StatisticsWriter,
+    },
     consts, util,
 };
 
@@ -23,7 +26,9 @@ pub struct ArrayWriter<S: ObjectStore + Clone> {
     array_datatype: arrow::datatypes::DataType,
     array_path: object_store::path::Path,
     layout_path: object_store::path::Path,
+    statistics_path: object_store::path::Path,
     temp_writer: FileWriter<File>,
+    statistics_writer: StatisticsWriter,
     row_count: usize,  // Total number of rows flushed to the IPC file
     chunk_size: usize, // Target number of rows per buffered batch
 
@@ -43,6 +48,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
         store: S,
         array_path: object_store::path::Path,
         layout_path: object_store::path::Path,
+        statistics_path: object_store::path::Path,
         array_datatype: arrow::datatypes::DataType,
         chunk_size: usize,
     ) -> anyhow::Result<Self> {
@@ -58,10 +64,12 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
         .map_err(|e| anyhow::anyhow!("failed to create IPC writer: {e}"))?;
 
         Ok(Self {
-            array_datatype,
+            array_datatype: array_datatype.clone(),
+            statistics_writer: StatisticsWriter::new(array_datatype.clone()),
             store,
             array_path,
             layout_path,
+            statistics_path,
             temp_writer,
             chunk_size,
             row_count: 0,
@@ -99,9 +107,41 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
 
         // Create a layout file
         let layout = ArrayLayouts::new(self.layouts);
-        layout.save::<S>(self.store, self.layout_path).await?;
+        layout
+            .save::<S>(self.store.clone(), self.layout_path)
+            .await?;
+
+        let store = self.store.clone();
+        let statistics_path = self.statistics_path.clone();
+        let statistics_batch = self.statistics_writer.finish()?;
+        Self::write_statistics_to_store(&store, &statistics_path, statistics_batch).await?;
 
         Ok(())
+    }
+
+    async fn write_statistics_to_store(
+        store: &S,
+        statistics_path: &object_store::path::Path,
+        statistics_batch: RecordBatch,
+    ) -> anyhow::Result<()> {
+        let schema = statistics_batch.schema();
+        let mut writer = FileWriter::try_new_with_options(
+            tempfile::tempfile()?,
+            &schema,
+            IPC_WRITE_OPTS.clone(),
+        )?;
+        writer.write(&statistics_batch)?;
+        writer.finish()?;
+
+        let mut file = writer.into_inner()?;
+        file.seek(SeekFrom::Start(0))?;
+        util::stream_file_to_store::<S>(
+            store,
+            statistics_path,
+            &mut file,
+            consts::STREAM_CHUNK_SIZE,
+        )
+        .await
     }
 
     pub async fn append_null(&mut self) -> anyhow::Result<()> {
@@ -133,6 +173,8 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
         let array_shape = array.shape();
         let array_dimensions = array.dimensions();
         let array = array.as_arrow_array_ref().await?;
+
+        self.statistics_writer.append(&array)?;
 
         self.layouts.push(ArrayLayout {
             dataset_index,
@@ -265,6 +307,7 @@ mod tests {
             store,
             Path::from("array.arrow"),
             Path::from("layout.arrow"),
+            Path::from("statistics.arrow"),
             DataType::Int32,
             5,
         )?;
@@ -301,6 +344,7 @@ mod tests {
             store.clone(),
             array_path.clone(),
             layout_path,
+            Path::from("finalize-statistics.arrow"),
             DataType::Int32,
             5,
         )?;
@@ -330,6 +374,7 @@ mod tests {
             store.clone(),
             array_path.clone(),
             layout_path.clone(),
+            Path::from("pipeline-statistics.arrow"),
             DataType::Int32,
             4,
         )?;
@@ -398,6 +443,77 @@ mod tests {
             vec!["lat".to_string(), "lon".to_string()]
         );
         assert_eq!(values.values(), &[101, 102, 104, 105]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finalize_writes_statistics_with_one_row_per_appended_nd_array() -> anyhow::Result<()> {
+        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
+        let array_path = Path::from("stats-array.arrow");
+        let layout_path = Path::from("stats-layout.arrow");
+        let statistics_path = Path::from("stats-statistics.arrow");
+
+        let mut writer = ArrayWriter::new(
+            store.clone(),
+            array_path,
+            layout_path,
+            statistics_path.clone(),
+            DataType::Int32,
+            8,
+        )?;
+
+        writer
+            .append_array(0, make_i32_array(vec![1, 2, 3]))
+            .await?;
+        writer
+            .append_array(1, make_i32_array(vec![7, 8, 9]))
+            .await?;
+
+        writer.finalize().await?;
+
+        let bytes = store.get(&statistics_path).await?.bytes().await?;
+        let reader = FileReader::try_new(Cursor::new(bytes.to_vec()), None)?;
+        let schema = reader.schema();
+        let batches = reader.collect::<Result<Vec<_>, arrow::error::ArrowError>>()?;
+        let batch = arrow::compute::concat_batches(&schema, &batches)?;
+
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.schema().field(0).name(), "min");
+        assert_eq!(batch.schema().field(1).name(), "max");
+        assert_eq!(batch.schema().field(2).name(), "null_count");
+        assert_eq!(batch.schema().field(3).name(), "row_count");
+
+        let min = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let max = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let null_count = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        let row_count = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+
+        assert_eq!(min.value(0), 1);
+        assert_eq!(max.value(0), 3);
+        assert_eq!(null_count.value(0), 0);
+        assert_eq!(row_count.value(0), 3);
+
+        assert_eq!(min.value(1), 7);
+        assert_eq!(max.value(1), 9);
+        assert_eq!(null_count.value(1), 0);
+        assert_eq!(row_count.value(1), 3);
 
         Ok(())
     }

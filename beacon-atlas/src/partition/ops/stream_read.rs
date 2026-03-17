@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::{
     array::io_cache::IoCache,
     column::ColumnReader,
+    consts::DEFAULT_IO_CACHE_BYTES,
     partition::{
         Partition,
         ops::read::{Dataset, init_column_reader, read_dataset_columns_by_index},
@@ -56,7 +57,7 @@ impl<S: ObjectStore + Clone> PartitionStreamReaderBuilder<S> {
         }
         let io_cache = self
             .io_cache
-            .unwrap_or_else(|| Arc::new(IoCache::new(256 * 1024 * 1024)));
+            .unwrap_or_else(|| Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES)));
 
         let mut column_readers: Vec<Arc<ColumnReader<S>>> = Vec::new();
         for column in &self.partition.schema().columns {

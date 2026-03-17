@@ -266,6 +266,11 @@ impl ArrayLayouts {
         })
     }
 
+    /// Returns all dataset indices in stored row order.
+    pub fn dataset_indices(&self) -> Vec<u32> {
+        self.dataset_index.values().to_vec()
+    }
+
     /// Loads a `Layout` from an Arrow IPC object.
     ///
     /// # Errors

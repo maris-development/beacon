@@ -8,6 +8,7 @@ use tokio::sync::OnceCell;
 use crate::{
     array::io_cache::IoCache,
     column::ColumnReader,
+    consts::DEFAULT_IO_CACHE_BYTES,
     partition::{Partition, column_name_to_path},
 };
 
@@ -31,7 +32,7 @@ impl<S: ObjectStore + Clone> ReaderBuilder<S> {
             object_store,
             partition,
             column_readers,
-            io_cache: Arc::new(crate::array::io_cache::IoCache::new(256 * 1024 * 1024)),
+            io_cache: Arc::new(crate::array::io_cache::IoCache::new(DEFAULT_IO_CACHE_BYTES)),
         }
     }
 

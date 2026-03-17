@@ -10,9 +10,7 @@ pub mod column;
 pub mod config;
 pub mod consts;
 pub mod partition;
-pub mod pruning;
 pub mod schema;
-pub mod stream;
 pub mod util;
 
 pub static IPC_WRITE_OPTS: Lazy<arrow::ipc::writer::IpcWriteOptions> = Lazy::new(|| {
