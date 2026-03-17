@@ -144,11 +144,6 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
         .await
     }
 
-    pub async fn append_null(&mut self) -> anyhow::Result<()> {
-        // Placeholder for future support of null datasets.
-        Ok(())
-    }
-
     /// Append a stream of chunked arrays for a dataset index.
     ///
     /// The layout entry is recorded immediately using the current write offset,

@@ -109,6 +109,11 @@ fn super_type_for_mode(
     right: &DataType,
     mode: AtlasSuperTypingMode,
 ) -> Option<DataType> {
+    // fast path for identical types, which should be common in practice and avoids unnecessary super type checks
+    if left == right {
+        return Some(left.clone());
+    }
+
     match mode {
         AtlasSuperTypingMode::General => beacon_common::super_typing::super_type_arrow(left, right),
         AtlasSuperTypingMode::GroupBased => {
