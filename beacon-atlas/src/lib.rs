@@ -10,6 +10,7 @@ pub mod column;
 pub mod config;
 pub mod consts;
 pub mod partition;
+pub mod prelude;
 pub mod schema;
 pub mod util;
 
