@@ -8,6 +8,7 @@ use crate::{IPC_WRITE_OPTS, consts::ENTRIES_FILE};
 pub mod cast;
 pub mod delete;
 pub mod read;
+pub mod statistics;
 pub mod stream_read;
 pub mod write;
 
