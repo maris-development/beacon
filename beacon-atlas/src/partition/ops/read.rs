@@ -40,7 +40,7 @@ impl<S: ObjectStore + Clone> ReaderBuilder<S> {
         Arc::new(self.partition.arrow_schema())
     }
 
-    pub async fn dataset(self, dataset_index: usize) -> anyhow::Result<Dataset> {
+    pub async fn dataset(&self, dataset_index: usize) -> anyhow::Result<Dataset> {
         let mut columns = Vec::with_capacity(self.partition.schema().columns.len());
 
         for (column_index, column) in self.partition.schema().columns.iter().enumerate() {
