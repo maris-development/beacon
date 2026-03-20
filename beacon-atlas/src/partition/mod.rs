@@ -1,9 +1,15 @@
 pub mod ops;
 
+use std::{collections::HashMap, sync::Arc};
+
 use arrow::{array::AsArray, datatypes::UInt32Type};
 
 use crate::{
-    consts::PARTITION_METADATA_FILE, partition::ops::load_partition_entries, schema::AtlasSchema,
+    array::io_cache::IoCache,
+    column::ColumnReader,
+    consts::PARTITION_METADATA_FILE,
+    partition::ops::{load_partition_entries, read::init_column_reader},
+    schema::AtlasSchema,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -14,26 +20,36 @@ pub struct PartitionMetadata {
 }
 
 #[derive(Debug, Clone)]
-pub struct Partition {
+pub struct Partition<S: object_store::ObjectStore + Clone> {
+    store: S,
     name: String,
     directory: object_store::path::Path,
     metadata: PartitionMetadata,
     state: PartitionState,
+    reader_cache:
+        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Arc<ColumnReader<S>>>>>>>,
+    io_cache: Arc<IoCache>,
 }
 
-impl Partition {
+impl<S: object_store::ObjectStore + Clone> Partition<S> {
     pub(crate) fn new(
+        store: S,
         name: String,
         directory: object_store::path::Path,
         metadata: PartitionMetadata,
         state: PartitionState,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
+        io_cache: Arc<IoCache>,
+    ) -> Self {
+        let reader_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        Self {
+            store,
             name,
             directory,
             metadata,
             state,
-        })
+            reader_cache,
+            io_cache,
+        }
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -54,6 +70,28 @@ impl Partition {
 
     pub(crate) fn arrow_schema(&self) -> arrow::datatypes::Schema {
         self.schema().to_arrow_schema()
+    }
+
+    pub(crate) async fn column_reader(
+        &self,
+        column_name: &str,
+    ) -> anyhow::Result<Arc<ColumnReader<S>>> {
+        let mut cache = self.reader_cache.blocking_lock();
+        let cell = cache
+            .entry(column_name.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+            .clone();
+        let store = self.store.clone();
+        let partition_path = self.directory.clone();
+        let io_cache = self.io_cache.clone();
+
+        let reader_result = cell
+            .get_or_try_init(|| async move {
+                init_column_reader(store, &partition_path, column_name, io_cache).await
+            })
+            .await;
+
+        reader_result.cloned()
     }
 
     pub(crate) fn state(&self) -> &PartitionState {
@@ -129,18 +167,26 @@ impl PartitionState {
 pub async fn load_partition<S: object_store::ObjectStore + Clone>(
     object_store: S,
     partition_directory: object_store::path::Path,
-) -> anyhow::Result<Partition> {
+    io_cache: Arc<IoCache>,
+) -> anyhow::Result<Partition<S>> {
     let metadata_path = partition_directory.child(PARTITION_METADATA_FILE);
     let metadata_bytes = object_store.get(&metadata_path).await?.bytes().await?;
     let metadata: PartitionMetadata = serde_json::from_slice(&metadata_bytes)?;
     let state = load_partition_state(
-        object_store,
+        object_store.clone(),
         partition_directory.clone(),
         metadata.name.clone(),
     )
     .await?;
 
-    Partition::new(metadata.name.clone(), partition_directory, metadata, state)
+    Ok(Partition::new(
+        object_store,
+        metadata.name.clone(),
+        partition_directory,
+        metadata,
+        state,
+        io_cache,
+    ))
 }
 
 pub(crate) async fn load_partition_state<S: object_store::ObjectStore + Clone>(

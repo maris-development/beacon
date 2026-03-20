@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use futures::{Stream, StreamExt};
 use object_store::ObjectStore;
 
 use crate::{
+    array::io_cache::IoCache,
     column::{Column, ColumnWriter},
     consts::{ENTRIES_COLUMN_NAME, PARTITION_METADATA_FILE, arrow_chunk_size_by_type},
     partition::{
@@ -109,7 +112,7 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
         column_writer.write_column_array(dataset_index, array).await
     }
 
-    pub async fn finish(mut self) -> anyhow::Result<Partition> {
+    pub async fn finish(mut self, io_cache: Arc<IoCache>) -> anyhow::Result<Partition<S>> {
         self.metadata.schema.columns = self
             .column_writers
             .iter()
@@ -145,12 +148,14 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
             entry_keys: self.dataset_names.clone(),
         };
 
-        Partition::new(
+        Ok(Partition::new(
+            self.object_store.clone(),
             self.metadata.name.clone(),
             self.partition_directory.clone(),
             self.metadata.clone(),
             partiton_state,
-        )
+            io_cache,
+        ))
     }
 }
 
@@ -165,6 +170,8 @@ mod tests {
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
     use super::PartitionWriter;
+    use crate::array::io_cache::IoCache;
+    use crate::consts::DEFAULT_IO_CACHE_BYTES;
     use crate::{
         column::Column,
         partition::{
@@ -239,8 +246,9 @@ mod tests {
             )
             .await?;
 
-        let partition = writer.finish().await?;
-        let loaded = load_partition(store.clone(), partition_path).await?;
+        let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
+        let partition = writer.finish(io_cache.clone()).await?;
+        let loaded = load_partition(store.clone(), partition_path, io_cache).await?;
 
         assert_eq!(partition.name(), "part-00000");
         assert_eq!(loaded.name(), "part-00000");
@@ -270,6 +278,7 @@ mod tests {
     #[tokio::test]
     async fn finish_creates_partition_with_name_description_and_directory() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
         let partition_path = Path::from("collections/example/partitions/part-00123");
         let description = "test partition";
 
@@ -280,8 +289,8 @@ mod tests {
             Some(description),
         )?;
 
-        let partition = writer.finish().await?;
-        let loaded = load_partition(store, partition_path.clone()).await?;
+        let partition = writer.finish(io_cache.clone()).await?;
+        let loaded = load_partition(store, partition_path.clone(), io_cache).await?;
 
         assert_eq!(partition.name(), "part-00123");
         assert_eq!(partition.directory(), &partition_path);

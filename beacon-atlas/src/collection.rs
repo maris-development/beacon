@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use futures::io;
+
 use crate::consts::COLLECTION_METADATA_FILE;
 use crate::partition::load_partition;
 use crate::partition::ops::write::PartitionWriter;
@@ -37,6 +39,7 @@ pub struct AtlasCollection<S: object_store::ObjectStore + Clone> {
     collection_directory: object_store::path::Path,
     state: Option<AtlasCollectionState>,
     super_typing_mode: AtlasSuperTypingMode,
+    io_cache: Arc<crate::array::io_cache::IoCache>,
 }
 
 /// Scoped partition writer tied to a mutable collection reference.
@@ -65,7 +68,7 @@ impl<'a, S: object_store::ObjectStore + Clone> CollectionPartitionWriter<'a, S> 
             .ok_or_else(|| anyhow::anyhow!("partition writer is no longer available"))
     }
 
-    pub async fn finish(mut self) -> anyhow::Result<crate::partition::Partition> {
+    pub async fn finish(mut self) -> anyhow::Result<crate::partition::Partition<S>> {
         let writer = self
             .writer
             .take()
@@ -124,6 +127,7 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
             collection_directory,
             state: None,
             super_typing_mode: AtlasSuperTypingMode::General,
+            io_cache: Arc::new(crate::array::io_cache::IoCache::new(256 * 1024 * 1024)),
         }
     }
 
@@ -149,9 +153,12 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
     }
 
     pub async fn load(&mut self) -> anyhow::Result<()> {
-        let state =
-            load_collection_state(self.object_store.clone(), self.collection_directory.clone())
-                .await?;
+        let state = load_collection_state(
+            self.object_store.clone(),
+            self.collection_directory.clone(),
+            self.io_cache.clone(),
+        )
+        .await?;
         self.super_typing_mode = state.metadata().super_typing_mode;
         self.state = Some(state);
         Ok(())
@@ -240,16 +247,19 @@ fn default_super_typing_mode() -> AtlasSuperTypingMode {
 pub(crate) async fn load_collection_state<S: object_store::ObjectStore + Clone>(
     object_store: S,
     collection_directory: object_store::path::Path,
+    io_cache: Arc<crate::array::io_cache::IoCache>,
 ) -> anyhow::Result<AtlasCollectionState> {
     let metadata_path = collection_directory.child(COLLECTION_METADATA_FILE);
     let metadata_bytes = object_store.get(&metadata_path).await?.bytes().await?;
     let metadata: CollectionMetadata = serde_json::from_slice(&metadata_bytes)?;
-    load_collection_state_with_metadata(object_store, collection_directory, metadata).await
+    load_collection_state_with_metadata(object_store, collection_directory, io_cache, metadata)
+        .await
 }
 
 async fn load_collection_state_with_metadata<S: object_store::ObjectStore + Clone>(
     object_store: S,
     collection_directory: object_store::path::Path,
+    io_cache: Arc<crate::array::io_cache::IoCache>,
     metadata: CollectionMetadata,
 ) -> anyhow::Result<AtlasCollectionState> {
     let mut partition_schemas = Vec::with_capacity(metadata.partitions.len());
@@ -259,7 +269,7 @@ async fn load_collection_state_with_metadata<S: object_store::ObjectStore + Clon
             .clone()
             .child("partitions")
             .child(partition_name.clone());
-        match load_partition(object_store.clone(), partition_directory).await {
+        match load_partition(object_store.clone(), partition_directory, io_cache.clone()).await {
             Ok(partition) => partition_schemas.push(partition.schema().clone()),
             Err(error) if is_object_not_found_error(&error) => {
                 // Partition metadata can be temporarily absent when a writer was dropped before finish.

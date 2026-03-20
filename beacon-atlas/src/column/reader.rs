@@ -8,6 +8,7 @@ use crate::{
     consts::{ARRAY_FILE_NAME, LAYOUT_FILE_NAME, STATISTICS_FILE_NAME},
 };
 
+#[derive(Debug, Clone)]
 pub struct ColumnReader<S: ObjectStore + Clone> {
     // Array Reader
     reader: Arc<ArrayReader<S>>,
@@ -44,8 +45,8 @@ impl<S: ObjectStore + Clone> ColumnReader<S> {
         self.reader.read_dataset_array(dataset_index)
     }
 
-    pub fn read_column_statistics(&self) -> anyhow::Result<Option<RecordBatch>> {
-        self.reader.read_statistics_batch()
+    pub async fn read_column_statistics(&self) -> anyhow::Result<Option<RecordBatch>> {
+        self.reader.read_statistics_batch().await
     }
 }
 
@@ -102,7 +103,8 @@ mod tests {
             ColumnReader::new(store, column_directory, Arc::new(IoCache::new(1024 * 1024))).await?;
 
         let statistics = column_reader
-            .read_column_statistics()?
+            .read_column_statistics()
+            .await?
             .expect("statistics should be present");
 
         let dataset_index = statistics

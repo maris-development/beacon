@@ -14,25 +14,14 @@ use crate::{
 
 pub struct ReaderBuilder<S: ObjectStore + Clone> {
     object_store: S,
-    partition: Partition,
-    column_readers: Vec<OnceCell<Arc<ColumnReader<S>>>>,
-    io_cache: Arc<crate::array::io_cache::IoCache>,
+    partition: Partition<S>,
 }
 
 impl<S: ObjectStore + Clone> ReaderBuilder<S> {
-    pub fn new(object_store: S, partition: Partition) -> Self {
-        let column_readers = partition
-            .schema()
-            .columns
-            .iter()
-            .map(|_| OnceCell::new())
-            .collect();
-
+    pub fn new(object_store: S, partition: Partition<S>) -> Self {
         Self {
             object_store,
             partition,
-            column_readers,
-            io_cache: Arc::new(crate::array::io_cache::IoCache::new(DEFAULT_IO_CACHE_BYTES)),
         }
     }
 
@@ -43,26 +32,9 @@ impl<S: ObjectStore + Clone> ReaderBuilder<S> {
     pub async fn dataset(&self, dataset_index: usize) -> anyhow::Result<Dataset> {
         let mut columns = Vec::with_capacity(self.partition.schema().columns.len());
 
-        for (column_index, column) in self.partition.schema().columns.iter().enumerate() {
-            let reader_cell = self
-                .column_readers
-                .get(column_index)
-                .ok_or_else(|| anyhow::anyhow!("column reader missing at index {column_index}"))?;
-
-            let reader = reader_cell
-                .get_or_try_init(|| async {
-                    init_column_reader(
-                        self.object_store.clone(),
-                        self.partition.directory(),
-                        &column.name,
-                        self.io_cache.clone(),
-                    )
-                    .await
-                })
-                .await?;
-
+        for (_, column) in self.partition.schema().columns.iter().enumerate() {
+            let reader = self.partition.column_reader(&column.name).await?;
             let array = reader.read_column_array(dataset_index as u32).transpose()?;
-
             columns.push(array);
         }
 

@@ -22,11 +22,21 @@ use crate::{
 
 /// Reads chunked ND Arrow arrays and their layout metadata from object storage.
 pub struct ArrayReader<S: ObjectStore + Clone> {
+    store: S,
     array_reader: Arc<ArrowObjectStoreReader<S>>,
     layouts: ArrayLayouts,
     array_datatype: arrow::datatypes::DataType,
     io_cache: Arc<IoCache>,
-    statistics_reader: Option<StatisticsReader>,
+    statistics_reader: tokio::sync::OnceCell<Option<StatisticsReader>>,
+    statistics_path: Option<object_store::path::Path>,
+}
+
+impl<S: ObjectStore + Clone> std::fmt::Debug for ArrayReader<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArrayReader")
+            .field("array_datatype", &self.array_datatype)
+            .finish()
+    }
 }
 
 impl<S: ObjectStore + Clone> ArrayReader<S> {
@@ -42,11 +52,13 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
         let array_datatype = array_field.field(0).data_type().clone();
 
         Ok(Self {
+            store: store.clone(),
             array_reader,
             layouts: ArrayLayouts::from_object(store.clone(), layout_path).await?,
             array_datatype,
             io_cache,
-            statistics_reader: None,
+            statistics_reader: tokio::sync::OnceCell::new(),
+            statistics_path: None,
         })
     }
 
@@ -59,12 +71,7 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
     ) -> anyhow::Result<Self> {
         let mut reader =
             Self::new_with_cache(store.clone(), layout_path, array_path, io_cache).await?;
-
-        reader.statistics_reader = match store.head(&statistics_path).await {
-            Ok(_) => Some(StatisticsReader::new(store.clone(), statistics_path).await?),
-            Err(object_store::Error::NotFound { .. }) => None,
-            Err(err) => return Err(anyhow::anyhow!(err)),
-        };
+        reader.statistics_path = Some(statistics_path.clone());
 
         Ok(reader)
     }
@@ -87,8 +94,25 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
     /// Returns statistics for all datasets in this column, if available.
     ///
     /// The resulting batch includes a `dataset_index` column appended from layout metadata.
-    pub fn read_statistics_batch(&self) -> anyhow::Result<Option<RecordBatch>> {
-        let Some(statistics_reader) = &self.statistics_reader else {
+    pub async fn read_statistics_batch(&self) -> anyhow::Result<Option<RecordBatch>> {
+        let Some(statistics_path) = &self.statistics_path else {
+            return Ok(None);
+        };
+        let store = self.store.clone();
+
+        let Some(statistics_reader) = self
+            .statistics_reader
+            .get_or_try_init(|| async move {
+                match store.head(statistics_path).await {
+                    Ok(_) => {
+                        Some(StatisticsReader::new(store.clone(), statistics_path.clone()).await)
+                            .transpose()
+                    }
+                    Err(err) => Err(anyhow::anyhow!(err)),
+                }
+            })
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -361,7 +385,8 @@ mod tests {
 
         let reader = build_reader_with_statistics(vec![(7, first), (15, second)], 8).await?;
         let statistics = reader
-            .read_statistics_batch()?
+            .read_statistics_batch()
+            .await?
             .expect("statistics batch should be present");
 
         assert_eq!(statistics.num_rows(), 2);
@@ -412,7 +437,7 @@ mod tests {
         )
         .await?;
 
-        assert!(reader.read_statistics_batch()?.is_none());
+        assert!(reader.read_statistics_batch().await?.is_none());
 
         Ok(())
     }

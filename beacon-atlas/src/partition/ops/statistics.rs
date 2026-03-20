@@ -2,155 +2,60 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::{
-    array::{ArrayRef, AsArray, Int32Array, UInt32Array, new_null_array},
+    array::{ArrayRef, AsArray, BooleanArray, Int32Array, UInt32Array, new_null_array},
     compute::take,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
 use object_store::ObjectStore;
 
-use crate::{
-    array::io_cache::IoCache,
-    consts::DEFAULT_IO_CACHE_BYTES,
-    partition::{Partition, ops::read::init_column_reader},
-};
+use crate::partition::Partition;
 
-pub struct PartitionStatisticsBuilder<S: ObjectStore + Clone> {
+pub async fn partition_statistics<S: ObjectStore + Clone>(
     object_store: S,
-    partition: Arc<Partition>,
-    io_cache: Option<Arc<IoCache>>,
-    projection: Option<Vec<usize>>,
+    partition: &Partition<S>,
+    columns: &[String],
+) -> PartitionStatistics {
+    PartitionStatistics::new(partition, columns).await
 }
 
-impl<S: ObjectStore + Clone> PartitionStatisticsBuilder<S> {
-    pub fn new(object_store: S, partition: Arc<Partition>) -> Self {
-        Self {
-            object_store,
-            partition,
-            io_cache: None,
-            projection: None,
-        }
-    }
+pub struct PartitionStatistics {
+    fetched_statistics: HashMap<String, RecordBatch>,
+}
 
-    pub fn with_projection(mut self, projection: Vec<usize>) -> Self {
-        self.projection = Some(projection);
-        self
-    }
-
-    pub fn with_io_cache(mut self, io_cache: Arc<IoCache>) -> Self {
-        self.io_cache = Some(io_cache);
-        self
-    }
-
-    pub async fn read_statistics_batches(self) -> anyhow::Result<Vec<RecordBatch>> {
-        let partition_schema = self.partition.schema();
-        let selected_columns = match &self.projection {
-            Some(projection) => projection.clone(),
-            None => (0..partition_schema.columns.len()).collect(),
-        };
-
-        let io_cache = self
-            .io_cache
-            .unwrap_or_else(|| Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES)));
-        let target_dataset_indexes = self.partition.undeleted_dataset_indexes();
-
-        let mut output = Vec::with_capacity(selected_columns.len());
-        for &column_index in &selected_columns {
-            let column = partition_schema
-                .columns
-                .get(column_index)
-                .ok_or_else(|| anyhow::anyhow!("column index {} out of bounds", column_index))?;
-
-            let reader = init_column_reader(
-                self.object_store.clone(),
-                self.partition.directory(),
-                &column.name,
-                io_cache.clone(),
-            )
-            .await?;
-
-            let aligned = align_statistics_batch(
-                reader.read_column_statistics()?,
-                &target_dataset_indexes,
-                column.data_type.clone(),
-            )?;
-
-            output.push(aligned);
+impl PartitionStatistics {
+    pub async fn new<S: ObjectStore + Clone>(partition: &Partition<S>, columns: &[String]) -> Self {
+        // Fetch the statistics for the requested columns and cache them in memory for later alignment and projection.
+        let mut fetched_statistics = HashMap::new();
+        for column_name in columns {
+            if let Ok(reader) = partition.column_reader(column_name).await {
+                if let Ok(Some(stats_batch)) = reader.read_column_statistics().await {
+                    fetched_statistics.insert(column_name.clone(), stats_batch);
+                }
+            }
         }
 
-        Ok(output)
+        Self { fetched_statistics }
+    }
+
+    pub fn statistics_for_column(&self, column_name: &str) -> Option<RecordBatch> {
+        self.fetched_statistics.get(column_name).cloned()
     }
 }
 
 fn align_statistics_batch(
-    source: Option<RecordBatch>,
-    target_dataset_indexes: &[u32],
+    array_statistics: RecordBatch,
+    expected_total_rows: usize,
     column_data_type: DataType,
 ) -> anyhow::Result<RecordBatch> {
-    let Some(source) = source else {
-        return build_synthetic_batch(target_dataset_indexes, &column_data_type);
-    };
-
-    let dataset_index_column = source.schema().index_of("dataset_index").map_err(|_| {
-        anyhow::anyhow!("statistics batch is missing required 'dataset_index' column")
-    })?;
-
-    let dataset_index_array = source
-        .column(dataset_index_column)
-        .as_primitive::<arrow::datatypes::UInt32Type>();
-
-    let mut dataset_index_to_row = HashMap::with_capacity(dataset_index_array.len());
-    for (row, dataset_index) in dataset_index_array.values().iter().copied().enumerate() {
-        if dataset_index_to_row.insert(dataset_index, row).is_some() {
-            anyhow::bail!(
-                "statistics batch contains duplicate dataset_index '{}'",
-                dataset_index
-            );
-        }
-    }
-
-    let take_indices = Int32Array::from(
-        target_dataset_indexes
-            .iter()
-            .map(|dataset_index| {
-                dataset_index_to_row
-                    .get(dataset_index)
-                    .map(|row| *row as i32)
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let mut output_columns: Vec<ArrayRef> = Vec::with_capacity(source.num_columns());
-    let mut output_fields: Vec<Field> = Vec::with_capacity(source.num_columns());
-
-    for (column_index, field) in source.schema().fields().iter().enumerate() {
-        if column_index == dataset_index_column {
-            output_columns
-                .push(Arc::new(UInt32Array::from(target_dataset_indexes.to_vec())) as ArrayRef);
-            output_fields.push(Field::new(field.name(), DataType::UInt32, false));
-            continue;
-        }
-
-        output_columns.push(take(
-            source.column(column_index).as_ref(),
-            &take_indices,
-            None,
-        )?);
-        output_fields.push(Field::new(field.name(), field.data_type().clone(), true));
-    }
-
-    Ok(RecordBatch::try_new(
-        Arc::new(Schema::new(output_fields)),
-        output_columns,
-    )?)
+    // the array statistics batch contains a dataset_index row that indicated in which dataset the statistics are valid for. When datasets are missing, we need to emit null statistics for those datasets, which requires us to build a new batch with the expected dataset_index backbone and take values from the original batch where possible.
+    todo!()
 }
 
 fn build_synthetic_batch(
-    target_dataset_indexes: &[u32],
+    total_rows: usize,
     column_data_type: &DataType,
 ) -> anyhow::Result<RecordBatch> {
-    let row_count = target_dataset_indexes.len();
-
     let schema = Arc::new(Schema::new(vec![
         Field::new("min", column_data_type.clone(), true),
         Field::new("max", column_data_type.clone(), true),
@@ -159,11 +64,12 @@ fn build_synthetic_batch(
         Field::new("dataset_index", DataType::UInt32, false),
     ]));
 
-    let min = new_null_array(column_data_type, row_count);
-    let max = new_null_array(column_data_type, row_count);
-    let null_count = new_null_array(&DataType::UInt64, row_count);
-    let row_count = new_null_array(&DataType::UInt64, row_count);
-    let dataset_index = Arc::new(UInt32Array::from(target_dataset_indexes.to_vec())) as ArrayRef;
+    let min = new_null_array(column_data_type, total_rows);
+    let max = new_null_array(column_data_type, total_rows);
+    let null_count = new_null_array(&DataType::UInt64, total_rows);
+    let row_count = new_null_array(&DataType::UInt64, total_rows);
+    let dataset_indexes = (0..total_rows as u32).collect::<Vec<_>>();
+    let dataset_index = Arc::new(UInt32Array::from(dataset_indexes)) as ArrayRef;
 
     Ok(RecordBatch::try_new(
         schema,
@@ -185,7 +91,7 @@ mod tests {
         partition::{
             column_name_to_path, load_partition,
             ops::{
-                delete::DeleteDatasetsPartition, statistics::PartitionStatisticsBuilder,
+                delete::DeleteDatasetsPartition, statistics::PartitionStatistics,
                 write::PartitionWriter,
             },
         },
@@ -194,7 +100,7 @@ mod tests {
     async fn build_sparse_partition(
         store: Arc<dyn ObjectStore>,
         partition_path: &Path,
-    ) -> anyhow::Result<crate::partition::Partition> {
+    ) -> anyhow::Result<crate::partition::Partition<Arc<dyn ObjectStore>>> {
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
 
@@ -234,7 +140,7 @@ mod tests {
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let partition = Arc::new(build_sparse_partition(store.clone(), &partition_path).await?);
 
-        let aligned = PartitionStatisticsBuilder::new(store, partition)
+        let aligned = PartitionStatistics::new(store, partition)
             .with_projection(vec![1, 2])
             .read_statistics_batches()
             .await?;
@@ -298,7 +204,7 @@ mod tests {
         store.delete(&stats_path).await?;
 
         let loaded = Arc::new(load_partition(store.clone(), partition_path).await?);
-        let aligned = PartitionStatisticsBuilder::new(store, loaded)
+        let aligned = PartitionStatistics::new(store, loaded)
             .with_projection(vec![1])
             .read_statistics_batches()
             .await?;
@@ -338,7 +244,7 @@ mod tests {
                 .await?,
         );
 
-        let aligned = PartitionStatisticsBuilder::new(store, partition)
+        let aligned = PartitionStatistics::new(store, partition)
             .with_projection(vec![1, 2])
             .read_statistics_batches()
             .await?;

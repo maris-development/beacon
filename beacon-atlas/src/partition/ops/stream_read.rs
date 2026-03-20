@@ -14,14 +14,14 @@ use crate::{
 
 pub struct PartitionStreamReaderBuilder<S: ObjectStore + Clone> {
     object_store: S,
-    partition: Arc<Partition>,
+    partition: Arc<Partition<S>>,
     io_cache: Option<Arc<IoCache>>,
     projection: Option<Vec<usize>>,
     dataset_indexes: Vec<u32>,
 }
 
 impl<S: ObjectStore + Clone> PartitionStreamReaderBuilder<S> {
-    pub fn new(object_store: S, partition: Arc<Partition>) -> Self {
+    pub fn new(object_store: S, partition: Arc<Partition<S>>) -> Self {
         Self {
             object_store,
             partition: partition.clone(),

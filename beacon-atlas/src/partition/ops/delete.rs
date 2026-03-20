@@ -9,13 +9,13 @@ use crate::{
 
 pub struct DeleteDatasetsPartition<S: ObjectStore + Clone> {
     object_store: S,
-    partition: Partition,
+    partition: Partition<S>,
     pending_dataset_names: Vec<String>,
     pending_dataset_indexes: Vec<u32>,
 }
 
 impl<S: ObjectStore + Clone> DeleteDatasetsPartition<S> {
-    pub fn new(object_store: S, partition: Partition) -> Self {
+    pub fn new(object_store: S, partition: Partition<S>) -> Self {
         Self {
             object_store,
             partition,
@@ -34,7 +34,7 @@ impl<S: ObjectStore + Clone> DeleteDatasetsPartition<S> {
         self
     }
 
-    pub async fn execute(self) -> anyhow::Result<Partition> {
+    pub async fn execute(self) -> anyhow::Result<Partition<S>> {
         if self.pending_dataset_names.is_empty() && self.pending_dataset_indexes.is_empty() {
             return Ok(self.partition);
         }
@@ -97,7 +97,12 @@ impl<S: ObjectStore + Clone> DeleteDatasetsPartition<S> {
         )
         .await?;
 
-        load_partition(self.object_store, partition_directory).await
+        load_partition(
+            self.object_store,
+            partition_directory,
+            self.partition.io_cache,
+        )
+        .await
     }
 }
 
@@ -111,17 +116,19 @@ mod tests {
 
     use super::DeleteDatasetsPartition;
     use crate::{
+        array::io_cache::IoCache,
         column::Column,
+        consts::DEFAULT_IO_CACHE_BYTES,
         partition::{
-            load_partition, ops::stream_read::PartitionStreamReaderBuilder,
-            ops::write::PartitionWriter,
+            load_partition,
+            ops::{stream_read::PartitionStreamReaderBuilder, write::PartitionWriter},
         },
     };
 
     async fn build_two_dataset_partition(
         store: Arc<dyn ObjectStore>,
         partition_path: &Path,
-    ) -> anyhow::Result<crate::partition::Partition> {
+    ) -> anyhow::Result<crate::partition::Partition<Arc<dyn ObjectStore>>> {
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
 
@@ -262,7 +269,12 @@ mod tests {
                 .contains("dataset index '99' not found in partition")
         );
 
-        let partition = load_partition(store, partition_path).await?;
+        let partition = load_partition(
+            store,
+            partition_path,
+            Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES)),
+        )
+        .await?;
         assert_eq!(partition.deletion_flags(), &[false, false]);
 
         Ok(())
