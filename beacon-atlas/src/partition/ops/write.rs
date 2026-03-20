@@ -315,6 +315,7 @@ mod tests {
     async fn write_dataset_uses_dataset_name_and_assigns_sequential_indexes() -> anyhow::Result<()>
     {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
         let partition_path = Path::from("collections/example/partitions/part-00042");
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00042", None)?;
