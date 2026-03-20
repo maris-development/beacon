@@ -76,7 +76,7 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
         &self,
         column_name: &str,
     ) -> anyhow::Result<Arc<ColumnReader<S>>> {
-        let mut cache = self.reader_cache.blocking_lock();
+        let mut cache = self.reader_cache.lock().await;
         let cell = cache
             .entry(column_name.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))

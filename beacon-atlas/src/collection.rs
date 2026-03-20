@@ -73,7 +73,7 @@ impl<'a, S: object_store::ObjectStore + Clone> CollectionPartitionWriter<'a, S> 
             .writer
             .take()
             .ok_or_else(|| anyhow::anyhow!("partition writer is no longer available"))?;
-        let partition = writer.finish().await?;
+        let partition = writer.finish(self.collection.io_cache.clone()).await?;
         self.collection.load().await?;
         self.finished = true;
         Ok(partition)
@@ -366,7 +366,7 @@ mod tests {
         .await?;
 
         let writer = collection
-            .create_partition_writer("part-00000", Some("first partition"))
+            .create_partition("part-00000", Some("first partition"))
             .await?;
         let partition = writer.finish().await?;
 

@@ -38,6 +38,10 @@ impl<S: ObjectStore + Clone> ColumnReader<S> {
         Ok(Self { reader })
     }
 
+    pub fn column_array_dataset_indexes(&self) -> Vec<u32> {
+        self.reader.layouts().dataset_indices()
+    }
+
     pub fn read_column_array(
         &self,
         dataset_index: u32,
@@ -47,6 +51,10 @@ impl<S: ObjectStore + Clone> ColumnReader<S> {
 
     pub async fn read_column_statistics(&self) -> anyhow::Result<Option<RecordBatch>> {
         self.reader.read_statistics_batch().await
+    }
+
+    pub fn column_data_type(&self) -> arrow::datatypes::DataType {
+        self.reader.array_datatype().clone()
     }
 }
 

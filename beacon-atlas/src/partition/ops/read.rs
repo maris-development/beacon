@@ -132,11 +132,15 @@ mod tests {
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
     use super::ReaderBuilder;
-    use crate::{column::Column, partition::ops::write::PartitionWriter};
+    use crate::{
+        array::io_cache::IoCache, column::Column, consts::DEFAULT_IO_CACHE_BYTES,
+        partition::ops::write::PartitionWriter,
+    };
 
     #[tokio::test]
     async fn reader_builder_reads_dataset_by_index() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let mut writer = PartitionWriter::new(store.clone(), partition_path, "part-00000", None)?;
 
@@ -165,7 +169,7 @@ mod tests {
             )
             .await?;
 
-        let partition = writer.finish().await?;
+        let partition = writer.finish(io_cache).await?;
         let schema = ReaderBuilder::new(store.clone(), partition.clone()).arrow_schema();
         assert_eq!(schema.fields().len(), 2);
 

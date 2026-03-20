@@ -12,128 +12,103 @@ use object_store::ObjectStore;
 use crate::{
     array::{compat::AtlasArrowCompat, io_cache::IoCache},
     column::{ColumnReader, ColumnWriter},
-    consts::{ENTRIES_COLUMN_NAME, PARTITION_METADATA_FILE, arrow_chunk_size_by_type},
-    partition::{Partition, column_name_to_path, load_partition},
+    consts::{
+        DEFAULT_IO_CACHE_BYTES, ENTRIES_COLUMN_NAME, PARTITION_METADATA_FILE,
+        arrow_chunk_size_by_type,
+    },
+    partition::{Partition, column_name_to_path},
 };
 
-pub struct CastPartition<S: ObjectStore + Clone> {
-    object_store: S,
-    partition: Partition<S>,
-    pending_casts: Vec<(String, DataType)>,
-}
+/// Cast one partition column to a new Arrow data type.
+///
+/// This operation rewrites the backing column arrays, updates in-memory schema
+/// metadata, persists partition metadata to object storage, and invalidates the
+/// cached column reader for the casted column so subsequent reads see the new
+/// type.
+pub async fn cast_partition_column<S: ObjectStore + Clone>(
+    partition: &mut Partition<S>,
+    column_name: &str,
+    target_data_type: DataType,
+    safe_cast: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        column_name != ENTRIES_COLUMN_NAME,
+        "column '{}' is reserved and cannot be cast",
+        ENTRIES_COLUMN_NAME
+    );
 
-impl<S: ObjectStore + Clone> CastPartition<S> {
-    pub fn new(object_store: S, partition: Partition<S>) -> Self {
-        Self {
-            object_store,
-            partition,
-            pending_casts: Vec::new(),
-        }
+    let source_column = partition
+        .metadata
+        .schema
+        .columns
+        .iter()
+        .find(|column| column.name == column_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "column '{}' not found in partition '{}'",
+                column_name,
+                partition.name()
+            )
+        })?;
+
+    if source_column.data_type == target_data_type {
+        return Ok(());
     }
 
-    pub fn cast_column(
-        mut self,
-        column_name: impl Into<String>,
-        target_data_type: DataType,
-    ) -> Self {
-        self.pending_casts
-            .push((column_name.into(), target_data_type));
-        self
-    }
+    let cast_options = CastOptions {
+        safe: safe_cast,
+        ..Default::default()
+    };
+    cast_column_data(partition, column_name, &target_data_type, &cast_options).await?;
 
-    pub async fn execute(self) -> anyhow::Result<Partition<S>> {
-        if self.pending_casts.is_empty() {
-            return Ok(self.partition);
-        }
+    let column = partition
+        .metadata
+        .schema
+        .columns
+        .iter_mut()
+        .find(|column| column.name == column_name)
+        .expect("column already validated to exist");
+    column.data_type = target_data_type;
 
-        let partition_directory = self.partition.directory().clone();
-        let mut metadata = self.partition.metadata().clone();
-        let io_cache = Arc::new(IoCache::new(256 * 1024 * 1024));
-
-        let cast_options = CastOptions {
-            safe: true,
-            format_options: Default::default(),
-        };
-
-        for (column_name, target_data_type) in self.pending_casts {
-            anyhow::ensure!(
-                column_name != ENTRIES_COLUMN_NAME,
-                "column '{}' is reserved and cannot be cast",
-                ENTRIES_COLUMN_NAME
-            );
-
-            let source_column = metadata
-                .schema
-                .columns
-                .iter()
-                .find(|column| column.name == column_name)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "column '{}' not found in partition '{}'",
-                        column_name,
-                        self.partition.name()
-                    )
-                })?;
-
-            if source_column.data_type == target_data_type {
-                continue;
-            }
-
-            cast_column_data(
-                self.object_store.clone(),
-                partition_directory.clone(),
-                self.partition.dataset_indexes(),
-                &column_name,
-                &target_data_type,
-                io_cache.clone(),
-                &cast_options,
-            )
-            .await?;
-
-            let column = metadata
-                .schema
-                .columns
-                .iter_mut()
-                .find(|column| column.name == column_name)
-                .expect("column already validated to exist");
-            column.data_type = target_data_type;
-        }
-
-        self.object_store
-            .put(
-                &partition_directory.child(PARTITION_METADATA_FILE),
-                serde_json::to_vec(&metadata)?.into(),
-            )
-            .await?;
-
-        load_partition(
-            self.object_store,
-            partition_directory,
-            self.partition.io_cache,
+    partition
+        .store
+        .put(
+            &partition.directory.child(PARTITION_METADATA_FILE),
+            serde_json::to_vec(&partition.metadata)?.into(),
         )
-        .await
-    }
+        .await?;
+
+    // Reset caches so follow-up reads cannot observe stale pre-cast buffers.
+    partition.io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
+    let mut cache = partition.reader_cache.lock().await;
+    cache.clear();
+
+    Ok(())
 }
 
+/// Rewrite one column's persisted arrays by casting each dataset array.
 async fn cast_column_data<S: ObjectStore + Clone>(
-    object_store: S,
-    partition_directory: object_store::path::Path,
-    dataset_indexes: &[u32],
+    partition: &mut Partition<S>,
     column_name: &str,
     target_data_type: &DataType,
-    io_cache: Arc<IoCache>,
     cast_options: &CastOptions<'_>,
 ) -> anyhow::Result<()> {
-    let column_path = column_name_to_path(partition_directory, column_name);
-    let reader = ColumnReader::new(object_store.clone(), column_path.clone(), io_cache).await?;
+    let column_path = column_name_to_path(partition.directory.clone(), column_name);
+    let source_io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
+    let reader = ColumnReader::new(
+        partition.store.clone(),
+        column_path.clone(),
+        source_io_cache,
+    )
+    .await?;
     let mut writer = ColumnWriter::new(
-        object_store,
+        partition.store.clone(),
         column_path,
         target_data_type.clone(),
         arrow_chunk_size_by_type(target_data_type),
     )?;
 
-    for dataset_index in dataset_indexes.iter().copied() {
+    for dataset_index in reader.column_array_dataset_indexes().iter().copied() {
         let Some(array) = reader.read_column_array(dataset_index).transpose()? else {
             continue;
         };
@@ -154,6 +129,7 @@ async fn cast_column_data<S: ObjectStore + Clone>(
     Ok(())
 }
 
+/// Build an ND array from a casted Arrow array while preserving shape metadata.
 fn nd_array_from_arrow(
     array: Arc<dyn arrow::array::Array>,
     shape: Vec<usize>,
@@ -250,23 +226,29 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::Float64Array;
+    use arrow::datatypes::DataType;
     use futures::stream;
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
-    use super::CastPartition;
+    use super::cast_partition_column;
     use crate::{
         array::io_cache::IoCache,
         column::Column,
+        consts::DEFAULT_IO_CACHE_BYTES,
         partition::{
             load_partition,
             ops::{read::ReaderBuilder, write::PartitionWriter},
         },
     };
 
+    fn test_io_cache() -> Arc<IoCache> {
+        Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES))
+    }
+
     #[tokio::test]
     async fn cast_partition_updates_schema_and_values() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let io_cache = Arc::new(IoCache::new(256 * 1024 * 1024));
+        let io_cache = test_io_cache();
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
@@ -283,13 +265,11 @@ mod tests {
                 )?]),
             )
             .await?;
-        writer.finish().await?;
+        writer.finish(io_cache.clone()).await?;
 
-        let partition = load_partition(store.clone(), partition_path.clone(), io_cache).await?;
-        let partition = CastPartition::new(store.clone(), partition)
-            .cast_column("temperature", arrow::datatypes::DataType::Float64)
-            .execute()
-            .await?;
+        let mut partition =
+            load_partition(store.clone(), partition_path.clone(), io_cache.clone()).await?;
+        cast_partition_column(&mut partition, "temperature", DataType::Float64, true).await?;
 
         let temp_col = partition
             .schema()
@@ -297,7 +277,17 @@ mod tests {
             .iter()
             .find(|column| column.name == "temperature")
             .expect("temperature column exists");
-        assert_eq!(temp_col.data_type, arrow::datatypes::DataType::Float64);
+        assert_eq!(temp_col.data_type, DataType::Float64);
+
+        // Reload to verify metadata was persisted to object store.
+        let reloaded = load_partition(store.clone(), partition_path, io_cache).await?;
+        let reloaded_temp_col = reloaded
+            .schema()
+            .columns
+            .iter()
+            .find(|column| column.name == "temperature")
+            .expect("temperature column exists");
+        assert_eq!(reloaded_temp_col.data_type, DataType::Float64);
 
         let dataset = ReaderBuilder::new(store, partition).dataset(0).await?;
         let temp_values = dataset.0.arrays[1].as_arrow_array_ref().await?;
@@ -310,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn cast_partition_preserves_missing_arrays() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let io_cache = Arc::new(IoCache::new(256 * 1024 * 1024));
+        let io_cache = test_io_cache();
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
@@ -339,13 +329,10 @@ mod tests {
                 )?]),
             )
             .await?;
-        writer.finish().await?;
+        writer.finish(io_cache.clone()).await?;
 
-        let partition = load_partition(store.clone(), partition_path, io_cache).await?;
-        let partition = CastPartition::new(store.clone(), partition)
-            .cast_column("temperature", arrow::datatypes::DataType::Float64)
-            .execute()
-            .await?;
+        let mut partition = load_partition(store.clone(), partition_path, io_cache).await?;
+        cast_partition_column(&mut partition, "temperature", DataType::Float64, true).await?;
 
         let dataset_0 = ReaderBuilder::new(store.clone(), partition.clone())
             .dataset(0)
@@ -365,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn cast_partition_casts_multiple_columns() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let io_cache = Arc::new(IoCache::new(256 * 1024 * 1024));
+        let io_cache = test_io_cache();
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
@@ -391,14 +378,11 @@ mod tests {
                 ]),
             )
             .await?;
-        writer.finish().await?;
+        writer.finish(io_cache.clone()).await?;
 
-        let partition = load_partition(store.clone(), partition_path.clone(), io_cache).await?;
-        let partition = CastPartition::new(store.clone(), partition)
-            .cast_column("temperature", arrow::datatypes::DataType::Float64)
-            .cast_column("salinity", arrow::datatypes::DataType::Float64)
-            .execute()
-            .await?;
+        let mut partition = load_partition(store.clone(), partition_path, io_cache).await?;
+        cast_partition_column(&mut partition, "temperature", DataType::Float64, true).await?;
+        cast_partition_column(&mut partition, "salinity", DataType::Float64, true).await?;
 
         let temperature = partition
             .schema()
@@ -412,8 +396,8 @@ mod tests {
             .iter()
             .find(|column| column.name == "salinity")
             .expect("salinity column exists");
-        assert_eq!(temperature.data_type, arrow::datatypes::DataType::Float64);
-        assert_eq!(salinity.data_type, arrow::datatypes::DataType::Float64);
+        assert_eq!(temperature.data_type, DataType::Float64);
+        assert_eq!(salinity.data_type, DataType::Float64);
 
         Ok(())
     }
@@ -421,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn cast_partition_errors_for_missing_column() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let io_cache = Arc::new(IoCache::new(256 * 1024 * 1024));
+        let io_cache = test_io_cache();
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
@@ -438,13 +422,11 @@ mod tests {
                 )?]),
             )
             .await?;
-        writer.finish().await?;
+        writer.finish(io_cache.clone()).await?;
 
-        let partition =
+        let mut partition =
             load_partition(store.clone(), partition_path.clone(), io_cache.clone()).await?;
-        let error = CastPartition::new(store.clone(), partition)
-            .cast_column("pressure", arrow::datatypes::DataType::Float64)
-            .execute()
+        let error = cast_partition_column(&mut partition, "pressure", DataType::Float64, true)
             .await
             .expect_err("missing column should return an error");
         assert!(error.to_string().contains("column 'pressure' not found"));
@@ -456,7 +438,7 @@ mod tests {
             .iter()
             .find(|column| column.name == "temperature")
             .expect("temperature column exists");
-        assert_eq!(temp_col.data_type, arrow::datatypes::DataType::Int32);
+        assert_eq!(temp_col.data_type, DataType::Int32);
 
         Ok(())
     }
@@ -464,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn cast_partition_rejects_reserved_entry_column() -> anyhow::Result<()> {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let io_cache = Arc::new(IoCache::new(256 * 1024 * 1024));
+        let io_cache = test_io_cache();
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
@@ -481,15 +463,12 @@ mod tests {
                 )?]),
             )
             .await?;
-        writer.finish().await?;
+        writer.finish(io_cache.clone()).await?;
 
-        let partition = load_partition(store, partition_path, io_cache).await?;
-        let error =
-            CastPartition::new(Arc::new(InMemory::new()) as Arc<dyn ObjectStore>, partition)
-                .cast_column("__entry_key", arrow::datatypes::DataType::Float64)
-                .execute()
-                .await
-                .expect_err("reserved entry key should return an error");
+        let mut partition = load_partition(store, partition_path, io_cache).await?;
+        let error = cast_partition_column(&mut partition, "__entry_key", DataType::Float64, true)
+            .await
+            .expect_err("reserved entry key should return an error");
 
         assert!(
             error

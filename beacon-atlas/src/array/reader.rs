@@ -108,6 +108,7 @@ impl<S: ObjectStore + Clone> ArrayReader<S> {
                         Some(StatisticsReader::new(store.clone(), statistics_path.clone()).await)
                             .transpose()
                     }
+                    Err(object_store::Error::NotFound { .. }) => Ok(None),
                     Err(err) => Err(anyhow::anyhow!(err)),
                 }
             })

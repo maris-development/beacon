@@ -129,6 +129,7 @@ mod tests {
         store: Arc<dyn ObjectStore>,
         partition_path: &Path,
     ) -> anyhow::Result<crate::partition::Partition<Arc<dyn ObjectStore>>> {
+        let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
         let mut writer =
             PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
 
@@ -157,7 +158,7 @@ mod tests {
             )
             .await?;
 
-        writer.finish().await
+        writer.finish(io_cache).await
     }
 
     #[tokio::test]

@@ -359,8 +359,8 @@ mod tests {
         writer.write_dataset(dataset_0).await?;
         writer.write_dataset(dataset_1).await?;
 
-        let partition = writer.finish().await?;
-        let loaded = load_partition(store, partition_path).await?;
+        let partition = writer.finish(io_cache.clone()).await?;
+        let loaded = load_partition(store, partition_path, io_cache).await?;
 
         assert_eq!(partition.logical_entries(), vec!["dataset-a", "dataset-b"]);
         assert_eq!(partition.dataset_indexes(), &[0, 1]);

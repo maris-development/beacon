@@ -118,6 +118,14 @@ fn append_null_to_builder(
     data_type: &DataType,
 ) -> anyhow::Result<()> {
     match data_type {
+        DataType::Boolean => {
+            let boolean_builder = builder
+                .as_any_mut()
+                .downcast_mut::<BooleanBuilder>()
+                .ok_or_else(|| anyhow::anyhow!("failed to downcast boolean builder"))?;
+            boolean_builder.append_null();
+            Ok(())
+        }
         DataType::Int8 => append_null_primitive::<Int8Type>(builder),
         DataType::Int16 => append_null_primitive::<Int16Type>(builder),
         DataType::Int32 => append_null_primitive::<Int32Type>(builder),
@@ -168,6 +176,20 @@ fn append_scalar_to_builder(
     scalar: Scalar<ArrayRef>,
 ) -> anyhow::Result<()> {
     match data_type {
+        DataType::Boolean => {
+            let boolean_builder = builder
+                .as_any_mut()
+                .downcast_mut::<BooleanBuilder>()
+                .ok_or_else(|| anyhow::anyhow!("failed to downcast boolean builder"))?;
+            let values = scalar.into_inner();
+            let array = values.as_boolean();
+            if array.is_null(0) {
+                boolean_builder.append_null();
+            } else {
+                boolean_builder.append_value(array.value(0));
+            }
+            Ok(())
+        }
         DataType::Int8 => append_primitive::<Int8Type>(builder, scalar),
         DataType::Int16 => append_primitive::<Int16Type>(builder, scalar),
         DataType::Int32 => append_primitive::<Int32Type>(builder, scalar),
@@ -228,6 +250,18 @@ where
 pub(crate) fn compute_min_scalar(values: &ArrayRef) -> Option<Scalar<ArrayRef>> {
     let data_type = values.data_type();
     match data_type {
+        DataType::Boolean => {
+            let boolean_values = values.as_boolean();
+            let mut min_value: Option<bool> = None;
+            for value in boolean_values.iter().flatten() {
+                min_value = Some(match min_value {
+                    Some(current) => current & value,
+                    None => value,
+                });
+            }
+            min_value
+                .map(|value| Scalar::new(Arc::new(BooleanArray::from(vec![value])) as ArrayRef))
+        }
         DataType::Int8 => scalar_from_min::<Int8Type>(values),
         DataType::Int16 => scalar_from_min::<Int16Type>(values),
         DataType::Int32 => scalar_from_min::<Int32Type>(values),
@@ -256,6 +290,18 @@ pub(crate) fn compute_min_scalar(values: &ArrayRef) -> Option<Scalar<ArrayRef>> 
 pub(crate) fn compute_max_scalar(values: &ArrayRef) -> Option<Scalar<ArrayRef>> {
     let data_type = values.data_type();
     match data_type {
+        DataType::Boolean => {
+            let boolean_values = values.as_boolean();
+            let mut max_value: Option<bool> = None;
+            for value in boolean_values.iter().flatten() {
+                max_value = Some(match max_value {
+                    Some(current) => current | value,
+                    None => value,
+                });
+            }
+            max_value
+                .map(|value| Scalar::new(Arc::new(BooleanArray::from(vec![value])) as ArrayRef))
+        }
         DataType::Int8 => scalar_from_max::<Int8Type>(values),
         DataType::Int16 => scalar_from_max::<Int16Type>(values),
         DataType::Int32 => scalar_from_max::<Int32Type>(values),
