@@ -34,7 +34,9 @@ impl AtlasCollectionState {
 }
 
 #[derive(Debug, Clone)]
-pub struct AtlasCollection<S: object_store::ObjectStore + Clone> {
+pub struct AtlasCollection<
+    S: object_store::ObjectStore + Clone = Arc<dyn object_store::ObjectStore>,
+> {
     object_store: S,
     collection_directory: object_store::path::Path,
     state: Option<AtlasCollectionState>,

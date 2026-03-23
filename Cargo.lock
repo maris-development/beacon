@@ -922,6 +922,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-atlas-toolbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-ipc 56.2.0",
+ "beacon-arrow-netcdf",
+ "beacon-atlas",
+ "beacon-nd-arrow",
+ "clap 4.5.54",
+ "futures",
+ "glob",
+ "object_store 0.12.4",
+ "parquet 56.2.0",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "beacon-binary-format"
 version = "2.1.3"
 dependencies = [

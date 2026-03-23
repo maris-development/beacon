@@ -2,7 +2,6 @@
 //!
 //! This prelude focuses on creating and managing collections and partitions.
 
-pub use crate::Dataset;
 pub use crate::collection::{
     AtlasCollection, AtlasCollectionState, CollectionMetadata, CollectionPartitionWriter,
 };

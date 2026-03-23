@@ -20,17 +20,3 @@ pub static IPC_WRITE_OPTS: Lazy<arrow::ipc::writer::IpcWriteOptions> = Lazy::new
         .unwrap()
         .with_dictionary_handling(arrow::ipc::writer::DictionaryHandling::Delta)
 });
-
-pub struct Dataset {
-    pub name: String,
-    pub columns: Vec<Column>,
-}
-
-impl Dataset {
-    pub fn new(name: impl Into<String>, columns: Vec<Column>) -> Self {
-        Self {
-            name: name.into(),
-            columns,
-        }
-    }
-}
