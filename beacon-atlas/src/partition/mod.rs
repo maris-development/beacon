@@ -52,23 +52,23 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
         }
     }
 
-    pub(crate) fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub(crate) fn directory(&self) -> &object_store::path::Path {
+    pub fn directory(&self) -> &object_store::path::Path {
         &self.directory
     }
 
-    pub(crate) fn metadata(&self) -> &PartitionMetadata {
+    pub fn metadata(&self) -> &PartitionMetadata {
         &self.metadata
     }
 
-    pub(crate) fn schema(&self) -> &AtlasSchema {
+    pub fn schema(&self) -> &AtlasSchema {
         &self.metadata.schema
     }
 
-    pub(crate) fn arrow_schema(&self) -> arrow::datatypes::Schema {
+    pub fn arrow_schema(&self) -> arrow::datatypes::Schema {
         self.schema().to_arrow_schema()
     }
 
@@ -98,23 +98,23 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
         &self.state
     }
 
-    pub(crate) fn entry_keys(&self) -> &[String] {
+    pub fn entry_keys(&self) -> &[String] {
         self.state().entry_keys()
     }
 
-    pub(crate) fn dataset_indexes(&self) -> &[u32] {
+    pub fn dataset_indexes(&self) -> &[u32] {
         self.state().dataset_indexes()
     }
 
-    pub(crate) fn deletion_flags(&self) -> &[bool] {
+    pub fn deletion_flags(&self) -> &[bool] {
         self.state().deletion_flags()
     }
 
-    pub(crate) fn undeleted_dataset_indexes(&self) -> Vec<u32> {
+    pub fn undeleted_dataset_indexes(&self) -> Vec<u32> {
         self.state().undeleted_dataset_indexes()
     }
 
-    pub(crate) fn logical_entries(&self) -> Vec<&str> {
+    pub fn logical_entries(&self) -> Vec<&str> {
         self.state().logical_entries()
     }
 }

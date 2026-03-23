@@ -240,6 +240,45 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("collection state is not loaded"))
     }
+
+    /// Load and return a partition handle by name.
+    ///
+    /// This validates that the partition exists in collection metadata and then
+    /// returns a fully loaded [`crate::partition::Partition`] handle that can be
+    /// explored (schema, dataset indexes, deletion flags, entry keys, etc.).
+    pub async fn get_partition(
+        &mut self,
+        partition_name: &str,
+    ) -> anyhow::Result<crate::partition::Partition<S>> {
+        if self.state.is_none() {
+            self.load().await?;
+        }
+
+        let snapshot = self.snapshot()?;
+        anyhow::ensure!(
+            snapshot
+                .metadata()
+                .partitions
+                .iter()
+                .any(|name| name == partition_name),
+            "partition '{}' does not exist in collection '{}'",
+            partition_name,
+            snapshot.metadata().name
+        );
+
+        let partition_directory = self
+            .collection_directory
+            .clone()
+            .child("partitions")
+            .child(partition_name);
+
+        load_partition(
+            self.object_store.clone(),
+            partition_directory,
+            self.io_cache.clone(),
+        )
+        .await
+    }
 }
 
 fn default_super_typing_mode() -> AtlasSuperTypingMode {

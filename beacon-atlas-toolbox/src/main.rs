@@ -88,9 +88,9 @@ async fn handle_inspect_schema(command: cli::InspectSchemaCommand) -> anyhow::Re
 
 async fn handle_inspect_partition(command: cli::InspectPartitionCommand) -> anyhow::Result<()> {
     let store = local_store();
-    let collection =
+    let mut collection =
         create::open_collection_from_directory(store, &command.collection_path).await?;
-    let inspection = inspect_partition(&collection, &command.partition_name)?;
+    let inspection = inspect_partition(&mut collection, &command.partition_name).await?;
 
     println!("Partition: {}", inspection.metadata.name);
     println!(
