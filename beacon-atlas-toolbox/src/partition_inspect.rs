@@ -2,8 +2,8 @@ use std::path::Path;
 
 use arrow::array::AsArray;
 use arrow::ipc::reader::FileReader;
-use beacon_atlas::prelude::AtlasCollection;
 use beacon_atlas::partition::PartitionMetadata;
+use beacon_atlas::prelude::AtlasCollection;
 
 const PARTITION_METADATA_FILE: &str = "atlas_partition.json";
 const PARTITION_ENTRIES_FILE: &str = "entries.arrow";
