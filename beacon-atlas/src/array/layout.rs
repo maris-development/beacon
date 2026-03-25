@@ -18,6 +18,7 @@ pub struct ArrayLayout {
     pub array_start: u64,
     pub array_len: u64,
     pub array_shape: Vec<u32>, // Shape of the full array (e.g. [100, 100])
+    pub chunk_shape: Vec<u32>, // Chunking used while writing/reading storage
     pub dimensions: Vec<String>, // List of dimension names
 }
 
@@ -27,13 +28,16 @@ impl ArrayLayout {
         array_start: u64,
         array_len: u64,
         array_shape: Vec<u32>,
+        chunk_shape: Option<Vec<u32>>,
         dimensions: Vec<String>,
     ) -> Self {
+        let chunk_shape = chunk_shape.unwrap_or_else(|| array_shape.clone());
         Self {
             dataset_index,
             array_start,
             array_len,
             array_shape,
+            chunk_shape,
             dimensions,
         }
     }
@@ -44,6 +48,7 @@ impl ArrayLayout {
             array_start: 0,
             array_len: 0,
             array_shape: Vec::new(),
+            chunk_shape: Vec::new(),
             dimensions: Vec::new(),
         }
     }
@@ -55,6 +60,7 @@ pub struct ArrayLayouts {
     array_start: PrimitiveArray<UInt64Type>,   // u64
     array_len: PrimitiveArray<UInt64Type>,     // u64>
     array_shape: ListArray,                    // List<u32>
+    chunk_shape: ListArray,                    // List<u32>
     dimensions: ListArray,                     // List<Dictionary<UInt32, Utf8>>
 }
 
@@ -71,6 +77,18 @@ impl ArrayLayouts {
         );
         let array_shape =
             Self::vecvec_to_list_array(layouts.iter().map(|l| l.array_shape.clone()).collect());
+        let chunk_shape = Self::vecvec_to_list_array(
+            layouts
+                .iter()
+                .map(|l| {
+                    if l.chunk_shape.is_empty() {
+                        l.array_shape.clone()
+                    } else {
+                        l.chunk_shape.clone()
+                    }
+                })
+                .collect(),
+        );
         let dimensions =
             Self::vecvecstring_to_dict_list(layouts.iter().map(|l| l.dimensions.clone()).collect());
 
@@ -79,6 +97,7 @@ impl ArrayLayouts {
             array_start,
             array_len,
             array_shape,
+            chunk_shape,
             dimensions,
         }
     }
@@ -103,6 +122,11 @@ impl ArrayLayouts {
                 false,
             ),
             Field::new(
+                "chunk_shape",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                false,
+            ),
+            Field::new(
                 "dimensions",
                 DataType::List(Arc::new(Field::new(
                     "item",
@@ -120,6 +144,7 @@ impl ArrayLayouts {
                 Arc::new(self.array_start.clone()),
                 Arc::new(self.array_len.clone()),
                 Arc::new(self.array_shape.clone()),
+                Arc::new(self.chunk_shape.clone()),
                 Arc::new(self.dimensions.clone()),
             ],
         )
@@ -225,6 +250,18 @@ impl ArrayLayouts {
         Some((0..values.len()).map(|j| values.value(j)).collect())
     }
 
+    /// Returns the chunk shape for the dataset at `index`.
+    ///
+    /// Returns `None` when the index is out of range or the data is malformed.
+    pub fn get_chunk_shape(&self, index: usize) -> Option<Vec<u32>> {
+        if index >= self.chunk_shape.len() {
+            return None;
+        }
+        let list_value = self.chunk_shape.value(index);
+        let values = list_value.as_any().downcast_ref::<UInt32Array>()?;
+        Some((0..values.len()).map(|j| values.value(j)).collect())
+    }
+
     /// Returns the dimensions for the dataset at `index`.
     ///
     /// Returns `None` when the index is out of range or the data is malformed.
@@ -262,6 +299,9 @@ impl ArrayLayouts {
             array_start: self.array_start.value(index),
             array_len: self.array_len.value(index),
             array_shape: self.get_array_shape(index)?,
+            chunk_shape: self
+                .get_chunk_shape(index)
+                .or_else(|| self.get_array_shape(index))?,
             dimensions: self.get_dimensions(index)?,
         })
     }
@@ -336,6 +376,16 @@ impl ArrayLayouts {
             .ok_or_else(|| anyhow::anyhow!("Invalid type for array_shape"))?
             .clone();
 
+        let chunk_shape = match batch.schema().index_of("chunk_shape") {
+            Ok(index) => batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| anyhow::anyhow!("Invalid type for chunk_shape"))?
+                .clone(),
+            Err(_) => array_shape.clone(),
+        };
+
         let dimensions = batch
             .column(batch.schema().index_of("dimensions")?)
             .as_any()
@@ -348,6 +398,7 @@ impl ArrayLayouts {
             array_start,
             array_len,
             array_shape,
+            chunk_shape,
             dimensions,
         })
     }
@@ -366,6 +417,7 @@ mod tests {
                 array_start: 0,
                 array_len: 8,
                 array_shape: vec![4, 4],
+                chunk_shape: vec![4, 4],
                 dimensions: vec!["x".to_string(), "y".to_string()],
             },
             ArrayLayout {
@@ -373,6 +425,7 @@ mod tests {
                 array_start: 8,
                 array_len: 27,
                 array_shape: vec![9, 9, 9],
+                chunk_shape: vec![3, 3, 3],
                 dimensions: vec!["x".to_string(), "y".to_string(), "z".to_string()],
             },
         ])
@@ -431,6 +484,8 @@ mod tests {
         );
         assert_eq!(layout.get_array_shape(0), loaded.get_array_shape(0));
         assert_eq!(layout.get_array_shape(1), loaded.get_array_shape(1));
+        assert_eq!(layout.get_chunk_shape(0), loaded.get_chunk_shape(0));
+        assert_eq!(layout.get_chunk_shape(1), loaded.get_chunk_shape(1));
         assert_eq!(layout.get_dimensions(0), loaded.get_dimensions(0));
         assert_eq!(layout.get_dimensions(1), loaded.get_dimensions(1));
         Ok(())
@@ -440,6 +495,7 @@ mod tests {
     async fn getters_return_none_out_of_range() -> anyhow::Result<()> {
         let layout = sample_layout();
         assert!(layout.get_array_shape(2).is_none());
+        assert!(layout.get_chunk_shape(2).is_none());
         assert!(layout.get_dimensions(2).is_none());
         Ok(())
     }
@@ -452,6 +508,7 @@ mod tests {
         assert_eq!(found.array_start, 8);
         assert_eq!(found.array_len, 27);
         assert_eq!(found.array_shape, vec![9, 9, 9]);
+        assert_eq!(found.chunk_shape, vec![3, 3, 3]);
         assert_eq!(
             found.dimensions,
             vec!["x".to_string(), "y".to_string(), "z".to_string()]

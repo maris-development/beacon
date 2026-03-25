@@ -176,6 +176,7 @@ impl<S: ObjectStore + Clone> ArrayWriter<S> {
             dimensions: array_dimensions,
             array_len: array.len() as u64,
             array_shape: array_shape.iter().map(|d| *d as u32).collect(),
+            chunk_shape: array_shape.iter().map(|d| *d as u32).collect(),
             array_start,
         });
 
@@ -411,6 +412,7 @@ mod tests {
             .expect("second layout exists");
         assert_eq!(second_layout.array_start, 3);
         assert_eq!(second_layout.array_shape, vec![2, 3]);
+        assert_eq!(second_layout.chunk_shape, vec![2, 3]);
         assert_eq!(
             second_layout.dimensions,
             vec!["lat".to_string(), "lon".to_string()]

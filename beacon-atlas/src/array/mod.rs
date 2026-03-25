@@ -430,6 +430,7 @@ mod tests {
                 array_start: 0,
                 array_len: 8,
                 array_shape: vec![8],
+                chunk_shape: vec![8],
                 dimensions: vec!["x".to_string()],
             },
         )
@@ -457,6 +458,7 @@ mod tests {
                 array_start: 2,
                 array_len: 8,
                 array_shape: vec![2, 4],
+                chunk_shape: vec![2, 4],
                 dimensions: vec!["x".to_string(), "y".to_string()],
             },
         )
