@@ -1,11 +1,19 @@
 use arrow::array::RecordBatch;
 
+use crate::consts::DEFAULT_IO_CACHE_BYTES;
+
 pub type CacheKey = (object_store::path::Path, usize); // (array path, batch index)
 
 /// Async cache for Arrow IPC `RecordBatch` values keyed by (path, batch index).
 #[derive(Debug)]
 pub struct IoCache {
     inner_cache: moka::future::Cache<CacheKey, RecordBatch>,
+}
+
+impl Default for IoCache {
+    fn default() -> Self {
+        Self::new(DEFAULT_IO_CACHE_BYTES)
+    }
 }
 
 impl IoCache {
@@ -17,6 +25,11 @@ impl IoCache {
                 .max_capacity(max_bytes_size as u64)
                 .build(),
         }
+    }
+
+    /// Create a new cache with the default byte capacity.
+    pub fn new_default() -> Self {
+        Self::default()
     }
 
     /// Fetches a batch from the cache or inserts it using `fetch_fn`.

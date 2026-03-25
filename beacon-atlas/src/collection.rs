@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use futures::io;
-
 use crate::consts::COLLECTION_METADATA_FILE;
 use crate::partition::load_partition;
 use crate::partition::ops::write::PartitionWriter;
@@ -11,6 +9,10 @@ use crate::schema::{AtlasSchema, AtlasSuperTypingMode};
 pub struct CollectionMetadata {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default = "default_collection_version")]
+    pub version: String,
+    #[serde(default = "default_endianness")]
+    pub endianness: String,
     #[serde(default = "default_super_typing_mode")]
     pub super_typing_mode: AtlasSuperTypingMode,
     #[serde(default)]
@@ -102,6 +104,8 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
         let metadata = CollectionMetadata {
             name: name.into(),
             description,
+            version: default_collection_version(),
+            endianness: default_endianness(),
             super_typing_mode,
             partitions: Vec::new(),
         };
@@ -285,6 +289,18 @@ fn default_super_typing_mode() -> AtlasSuperTypingMode {
     AtlasSuperTypingMode::General
 }
 
+fn default_collection_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn default_endianness() -> String {
+    if cfg!(target_endian = "little") {
+        "little".to_string()
+    } else {
+        "big".to_string()
+    }
+}
+
 pub(crate) async fn load_collection_state<S: object_store::ObjectStore + Clone>(
     object_store: S,
     collection_directory: object_store::path::Path,
@@ -357,7 +373,7 @@ mod tests {
 
     use crate::{column::Column, schema::AtlasSuperTypingMode};
 
-    use super::AtlasCollection;
+    use super::{AtlasCollection, default_endianness};
 
     #[tokio::test]
     async fn create_collection_writes_metadata_and_loads_state() -> anyhow::Result<()> {
@@ -383,11 +399,21 @@ mod tests {
             snapshot.metadata().super_typing_mode,
             AtlasSuperTypingMode::General
         );
+        assert_eq!(snapshot.metadata().version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(snapshot.metadata().endianness, default_endianness());
         assert!(snapshot.metadata().partitions.is_empty());
 
         let opened = AtlasCollection::open(store, collection_path).await?;
         assert_eq!(opened.snapshot()?.metadata().name, "example");
         assert_eq!(opened.super_typing_mode(), AtlasSuperTypingMode::General);
+        assert_eq!(
+            opened.snapshot()?.metadata().version,
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            opened.snapshot()?.metadata().endianness,
+            default_endianness()
+        );
 
         Ok(())
     }
