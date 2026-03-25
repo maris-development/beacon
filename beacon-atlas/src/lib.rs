@@ -1,8 +1,6 @@
 use arrow::ipc::CompressionType;
 use once_cell::sync::Lazy;
 
-use crate::column::Column;
-
 pub mod array;
 pub mod arrow_object_store;
 pub mod collection;

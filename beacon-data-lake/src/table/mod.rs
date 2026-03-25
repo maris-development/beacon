@@ -12,6 +12,7 @@ use object_store::{
 use crate::table::{_type::TableType, error::TableError};
 
 pub mod _type;
+pub mod atlas;
 pub mod empty;
 pub mod error;
 pub mod geospatial;

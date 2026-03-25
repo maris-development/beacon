@@ -33,3 +33,14 @@ tokio = { workspace = true }
 name = "flatten"
 harness = false
 
+[[bench]]
+name = "broadcast"
+harness = false
+
+[[bench]]
+name = "convert"
+harness = false
+
+[[bench]]
+name = "subset"
+harness = false

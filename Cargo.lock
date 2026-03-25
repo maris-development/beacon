@@ -1051,6 +1051,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-arrow-zarr",
+ "beacon-atlas",
  "beacon-binary-format",
  "beacon-common",
  "beacon-config",
