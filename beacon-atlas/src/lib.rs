@@ -7,6 +7,7 @@ pub mod collection;
 pub mod column;
 pub mod config;
 pub mod consts;
+pub mod datafusion;
 pub mod partition;
 pub mod prelude;
 pub mod schema;

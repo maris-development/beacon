@@ -1091,6 +1091,7 @@ dependencies = [
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
  "beacon-arrow-zarr",
+ "beacon-atlas",
  "beacon-binary-format",
  "beacon-common",
  "beacon-config",

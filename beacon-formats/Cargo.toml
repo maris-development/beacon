@@ -54,6 +54,7 @@ nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.gi
 
 # Add beacon binary format
 beacon-binary-format = { path = "../beacon-binary-format" }
+beacon-atlas = { path = "../beacon-atlas" }
 arrow-flight = { workspace = true }
 tonic = "0.13"
 prost = "0.13"
