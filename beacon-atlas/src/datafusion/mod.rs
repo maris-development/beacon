@@ -1,3 +1,59 @@
+//! DataFusion integration for Atlas collections.
+//!
+//! Atlas stores data as collections containing partition directories, where each
+//! partition holds column chunks and metadata. DataFusion discovers top-level
+//! `atlas.json` files through listing, and this module translates that metadata
+//! layout into executable scan tasks.
+//!
+//! Execution flow:
+//! 1. Listing finds one or more collection metadata files (`atlas.json`).
+//! 2. `create_physical_plan` expands those collection files into partition
+//!    metadata scan tasks (`atlas_partition.json`).
+//! 3. Tasks are grouped to match DataFusion target partitions, including
+//!    round-robin duplication when there are fewer partitions than workers.
+//! 4. `AtlasSource` creates openers that share per-partition dataset queues,
+//!    allowing concurrent workers to cooperatively drain remaining work.
+//!
+//! This design keeps the physical plan simple while enabling practical
+//! work-stealing behavior for skewed collections.
+//!
+//! ASCII flow graph:
+//! ```text
+//! ListingTable scan input
+//!          |
+//!          v
+//!   atlas.json files
+//!          |
+//!          v
+//! +---------------------------+
+//! | create_physical_plan      |
+//! | - find collections        |
+//! | - expand partitions       |
+//! +---------------------------+
+//!          |
+//!          v
+//! atlas_partition.json tasks
+//!          |
+//!          v
+//! +---------------------------+
+//! | build_target_partition_   |
+//! | file_groups               |
+//! | - balance N over T        |
+//! | - round-robin duplicate   |
+//! +---------------------------+
+//!          |
+//!          v
+//! DataSourceExec (FileGroups)
+//!          |
+//!          v
+//! AtlasSource -> AtlasOpener
+//!          |
+//!          v
+//! Shared per-partition queues
+//!          |
+//!          v
+//! RecordBatch stream to DataFusion
+//! ```
 use std::{any::Any, collections::HashMap, fmt::Debug, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
@@ -32,6 +88,8 @@ fn execution_error(message: impl Into<String>) -> DataFusionError {
 }
 
 fn collect_atlas_metadata_files(conf: &FileScanConfig) -> Vec<ObjectMeta> {
+    // DataFusion passes listing results as file groups; flatten to raw metadata
+    // so Atlas-specific planning can re-group by partition work.
     conf.file_groups
         .iter()
         .flat_map(|group| group.files().iter())
@@ -39,12 +97,17 @@ fn collect_atlas_metadata_files(conf: &FileScanConfig) -> Vec<ObjectMeta> {
         .collect()
 }
 
+/// Expand discovered Atlas collections into partition metadata scan groups.
+///
+/// The returned groups are aligned with DataFusion worker parallelism so that
+/// all target partitions can remain busy when possible.
 async fn build_partition_file_groups(
     object_store: Arc<dyn ObjectStore>,
     atlas_metas: &[ObjectMeta],
     io_cache: Arc<IoCache>,
+    target_partitions: usize,
 ) -> datafusion::error::Result<Vec<FileGroup>> {
-    let mut file_groups: Vec<FileGroup> = Vec::new();
+    let mut partition_files: Vec<PartitionedFile> = Vec::new();
 
     for meta in find_atlas_collections(atlas_metas) {
         let collection_dir = collection_directory_from_meta(&meta);
@@ -61,22 +124,63 @@ async fn build_partition_file_groups(
             ))
         })?;
 
-        let mut files: Vec<PartitionedFile> = Vec::new();
         for partition_name in &collection_state.metadata().partitions {
             // Each partition is represented by its atlas_partition.json metadata file.
             let partition_meta_path = collection_dir
                 .child("partitions")
                 .child(partition_name.as_str())
                 .child(crate::consts::PARTITION_METADATA_FILE);
-            files.push(PartitionedFile::new(partition_meta_path.to_string(), 0));
-        }
-
-        if !files.is_empty() {
-            file_groups.push(FileGroup::new(files));
+            partition_files.push(PartitionedFile::new(partition_meta_path.to_string(), 0));
         }
     }
 
-    Ok(file_groups)
+    // Convert the discovered partition files into worker-sized file groups.
+    Ok(build_target_partition_file_groups(
+        partition_files,
+        target_partitions,
+    ))
+}
+
+/// Build worker-oriented file groups for Atlas partition metadata scans.
+///
+/// When there are fewer unique partitions than workers, file paths are
+/// duplicated in round-robin order. Openers then coordinate through shared
+/// per-partition queues to avoid duplicate dataset processing.
+fn build_target_partition_file_groups(
+    partition_files: Vec<PartitionedFile>,
+    target_partitions: usize,
+) -> Vec<FileGroup> {
+    if partition_files.is_empty() {
+        return Vec::new();
+    }
+
+    let effective_target_partitions = target_partitions.max(1);
+    let partition_count = partition_files.len();
+
+    if partition_count < effective_target_partitions {
+        // Duplicate partition metadata tasks in round-robin so all workers can
+        // cooperate on the shared per-partition dataset queues.
+        return (0..effective_target_partitions)
+            .map(|i| FileGroup::new(vec![partition_files[i % partition_count].clone()]))
+            .collect();
+    }
+
+    // Evenly spread unique partition metadata files across target workers.
+    let groups = effective_target_partitions;
+    let base_group_size = partition_count / groups;
+    let remainder = partition_count % groups;
+    let mut offset = 0;
+    let mut file_groups = Vec::with_capacity(groups);
+
+    for group_idx in 0..groups {
+        // Spread the remainder across the earliest groups for stable balancing.
+        let group_size = base_group_size + usize::from(group_idx < remainder);
+        let end = offset + group_size;
+        file_groups.push(FileGroup::new(partition_files[offset..end].to_vec()));
+        offset = end;
+    }
+
+    file_groups
 }
 
 /// Check if this ObjectMeta represents an Atlas metadata file ("atlas.json").
@@ -231,14 +335,19 @@ impl FileFormat for AtlasFormat {
         state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // Expand collection metadata files into per-partition metadata files.
+        // DataFusion lists collection metadata files; Atlas executes at the
+        // partition level, so we first convert listing results into partition
+        // metadata tasks and then rebalance them by target worker count.
         let atlas_metas = collect_atlas_metadata_files(&conf);
 
         let object_store = state
             .runtime_env()
             .object_store(conf.object_store_url.clone())?;
         let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
-        let file_groups = build_partition_file_groups(object_store, &atlas_metas, io_cache).await?;
+        let target_partitions = state.config_options().execution.target_partitions;
+        let file_groups =
+            build_partition_file_groups(object_store, &atlas_metas, io_cache, target_partitions)
+                .await?;
 
         let source = AtlasSource::new();
         let conf = FileScanConfigBuilder::from(conf)
@@ -261,16 +370,110 @@ mod tests {
     use datafusion::{
         datasource::{
             file_format::FileFormat,
-            listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
+            listing::{
+                ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl, PartitionedFile,
+            },
+            physical_plan::FileGroup,
         },
-        prelude::SessionContext,
+        prelude::{SessionConfig, SessionContext},
     };
     use futures::stream;
     use object_store::{ObjectStore, local::LocalFileSystem, path::Path};
 
     use crate::{collection::AtlasCollection, column::Column, schema::AtlasSuperTypingMode};
 
-    use super::{ATLAS_FILE_EXTENSION, AtlasFormat};
+    use super::{ATLAS_FILE_EXTENSION, AtlasFormat, build_target_partition_file_groups};
+
+    fn group_paths(file_groups: &[FileGroup]) -> Vec<Vec<String>> {
+        file_groups
+            .iter()
+            .map(|group| {
+                group
+                    .files()
+                    .iter()
+                    .map(|file| file.object_meta.location.to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn planner_returns_empty_groups_for_empty_input() {
+        let file_groups = build_target_partition_file_groups(Vec::new(), 8);
+        assert!(file_groups.is_empty());
+    }
+
+    #[test]
+    fn planner_balances_when_partitions_exceed_target() {
+        let files = (0..10)
+            .map(|idx| {
+                PartitionedFile::new(
+                    format!("collections/c/partitions/p-{idx}/atlas_partition.json"),
+                    0,
+                )
+            })
+            .collect();
+
+        let file_groups = build_target_partition_file_groups(files, 4);
+        assert_eq!(file_groups.len(), 4);
+
+        let mut sizes: Vec<usize> = file_groups
+            .iter()
+            .map(|group| group.files().len())
+            .collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![2, 2, 3, 3]);
+
+        let all_paths: Vec<String> = file_groups
+            .iter()
+            .flat_map(|group| group.files().iter())
+            .map(|file| file.object_meta.location.to_string())
+            .collect();
+        assert_eq!(all_paths.len(), 10);
+    }
+
+    #[test]
+    fn planner_creates_one_group_per_partition_when_counts_match() {
+        let files = (0..3)
+            .map(|idx| {
+                PartitionedFile::new(
+                    format!("collections/c/partitions/p-{idx}/atlas_partition.json"),
+                    0,
+                )
+            })
+            .collect();
+
+        let file_groups = build_target_partition_file_groups(files, 3);
+        assert_eq!(file_groups.len(), 3);
+        assert!(file_groups.iter().all(|group| group.files().len() == 1));
+    }
+
+    #[test]
+    fn planner_duplicates_round_robin_when_target_exceeds_partitions() {
+        let files = vec![
+            PartitionedFile::new("collections/c/partitions/p-0/atlas_partition.json", 0),
+            PartitionedFile::new("collections/c/partitions/p-1/atlas_partition.json", 0),
+        ];
+
+        let file_groups = build_target_partition_file_groups(files, 5);
+        assert_eq!(file_groups.len(), 5);
+        assert!(file_groups.iter().all(|group| group.files().len() == 1));
+
+        let paths = group_paths(&file_groups)
+            .into_iter()
+            .map(|group| group[0].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                "collections/c/partitions/p-0/atlas_partition.json".to_string(),
+                "collections/c/partitions/p-1/atlas_partition.json".to_string(),
+                "collections/c/partitions/p-0/atlas_partition.json".to_string(),
+                "collections/c/partitions/p-1/atlas_partition.json".to_string(),
+                "collections/c/partitions/p-0/atlas_partition.json".to_string(),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn datafusion_reads_atlas_collection_with_multiple_partitions() -> anyhow::Result<()> {
@@ -320,7 +523,7 @@ mod tests {
             .await?;
         writer.finish().await?;
 
-        let ctx = SessionContext::new();
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(8));
         let state = ctx.state();
 
         let file_format: Arc<dyn FileFormat> = Arc::new(AtlasFormat);
