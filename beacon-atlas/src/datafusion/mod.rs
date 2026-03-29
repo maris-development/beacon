@@ -57,6 +57,7 @@
 use std::{any::Any, collections::HashMap, fmt::Debug, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
+use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -250,6 +251,30 @@ impl FileFormatFactory for AtlasFormatFactory {
     }
 }
 
+impl FileFormatFactoryExt for AtlasFormatFactory {
+    fn discover_datasets(
+        &self,
+        objects: &[ObjectMeta],
+    ) -> datafusion::error::Result<Vec<beacon_datafusion_ext::format_ext::DatasetMetadata>> {
+        let datasets = objects
+            .iter()
+            .filter(|meta| is_atlas_metadata(meta))
+            .map(|meta| {
+                beacon_datafusion_ext::format_ext::DatasetMetadata::new(
+                    meta.location.to_string(),
+                    self.file_format_name(),
+                )
+            })
+            .collect();
+
+        Ok(datasets)
+    }
+
+    fn file_format_name(&self) -> String {
+        "atlas".to_string()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 /// DataFusion file format implementation for Atlas collection metadata files.
 pub struct AtlasFormat;
@@ -367,6 +392,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Int32Array, StringArray};
+    use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
     use datafusion::{
         datasource::{
             file_format::FileFormat,
@@ -378,11 +404,23 @@ mod tests {
         prelude::{SessionConfig, SessionContext},
     };
     use futures::stream;
-    use object_store::{ObjectStore, local::LocalFileSystem, path::Path};
+    use object_store::{ObjectMeta, ObjectStore, local::LocalFileSystem, path::Path};
 
     use crate::{collection::AtlasCollection, column::Column, schema::AtlasSuperTypingMode};
 
-    use super::{ATLAS_FILE_EXTENSION, AtlasFormat, build_target_partition_file_groups};
+    use super::{
+        ATLAS_FILE_EXTENSION, AtlasFormat, AtlasFormatFactory, build_target_partition_file_groups,
+    };
+
+    fn meta(path: &str) -> ObjectMeta {
+        ObjectMeta {
+            location: Path::from(path),
+            last_modified: Default::default(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        }
+    }
 
     fn group_paths(file_groups: &[FileGroup]) -> Vec<Vec<String>> {
         file_groups
@@ -473,6 +511,36 @@ mod tests {
                 "collections/c/partitions/p-0/atlas_partition.json".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn discover_datasets_returns_only_atlas_metadata_files() {
+        let factory = AtlasFormatFactory::new();
+        let objects = vec![
+            meta("collections/a/atlas.json"),
+            meta("collections/a/partitions/p0/atlas_partition.json"),
+            meta("collections/b/atlas.json"),
+            meta("collections/b/data.bin"),
+        ];
+
+        let discovered = factory
+            .discover_datasets(&objects)
+            .expect("discover datasets");
+
+        let mut paths = discovered
+            .iter()
+            .map(|dataset| dataset.file_path.clone())
+            .collect::<Vec<_>>();
+        paths.sort();
+
+        assert_eq!(
+            paths,
+            vec![
+                "collections/a/atlas.json".to_string(),
+                "collections/b/atlas.json".to_string(),
+            ]
+        );
+        assert!(discovered.iter().all(|dataset| dataset.format == "atlas"));
     }
 
     #[tokio::test]

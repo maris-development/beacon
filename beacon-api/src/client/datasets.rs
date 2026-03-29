@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
-use beacon_formats::Dataset;
+use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
@@ -67,7 +67,7 @@ pub(crate) async fn datasets(
 pub(crate) async fn list_datasets(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListDatasetsQuery>,
-) -> Result<Json<Vec<Dataset>>, (StatusCode, String)> {
+) -> Result<Json<Vec<DatasetMetadata>>, (StatusCode, String)> {
     let result = state
         .list_datasets(query.pattern, query.offset, query.limit)
         .await;

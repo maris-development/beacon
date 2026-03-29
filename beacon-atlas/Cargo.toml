@@ -26,5 +26,6 @@ ndarray = "0.17.1"
 chrono = { workspace = true }
 crossbeam = { workspace = true }
 
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-nd-arrow = { path = "../beacon-nd-arrow" }
 beacon-common = { path = "../beacon-common" }

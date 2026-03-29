@@ -5,17 +5,15 @@ use arrow::{
     datatypes::{SchemaRef, UInt64Type},
 };
 use beacon_data_lake::{table::Table, DataLake};
-use beacon_formats::{Dataset, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
 use beacon_planner::{metrics::ConsolidatedMetrics, plan::BeaconQueryPlan};
 use datafusion::{
     catalog::{SchemaProvider, TableFunctionImpl},
-    datasource::listing::ListingTableUrl,
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
-    physical_optimizer::pruning::PruningPredicate,
     prelude::{SessionConfig, SessionContext},
 };
 use futures::StreamExt;
@@ -269,7 +267,7 @@ impl VirtualMachine {
         pattern: Option<String>,
         offset: Option<usize>,
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<Dataset>> {
+    ) -> anyhow::Result<Vec<DatasetMetadata>> {
         Ok(self.data_lake.list_datasets(offset, limit, pattern).await?)
     }
 

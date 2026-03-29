@@ -772,6 +772,7 @@ dependencies = [
  "beacon-config",
  "beacon-core",
  "beacon-data-lake",
+ "beacon-datafusion-ext",
  "beacon-formats",
  "beacon-functions",
  "beacon-planner",
@@ -900,6 +901,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-common",
+ "beacon-datafusion-ext",
  "beacon-nd-arrow",
  "bincode",
  "bloomfilter",
@@ -1016,6 +1018,7 @@ dependencies = [
  "beacon-arrow-odv",
  "beacon-config",
  "beacon-data-lake",
+ "beacon-datafusion-ext",
  "beacon-formats",
  "beacon-functions",
  "beacon-object-storage",
@@ -1055,6 +1058,7 @@ dependencies = [
  "beacon-binary-format",
  "beacon-common",
  "beacon-config",
+ "beacon-datafusion-ext",
  "beacon-formats",
  "beacon-object-storage",
  "bytes",
@@ -1081,6 +1085,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-datafusion-ext"
+version = "0.1.0"
+dependencies = [
+ "datafusion",
+ "serde",
+]
+
+[[package]]
 name = "beacon-formats"
 version = "1.5.4"
 dependencies = [
@@ -1095,6 +1107,7 @@ dependencies = [
  "beacon-binary-format",
  "beacon-common",
  "beacon-config",
+ "beacon-datafusion-ext",
  "beacon-object-storage",
  "chrono",
  "datafusion",

@@ -8,7 +8,8 @@ use std::{
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::listing_url::parse_listing_table_url;
-use beacon_formats::{Dataset, FileFormatFactoryExt, file_formats};
+use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_formats::file_formats;
 use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
@@ -410,7 +411,7 @@ impl DataLake {
         offset: Option<usize>,
         limit: Option<usize>,
         pattern: Option<String>,
-    ) -> datafusion::error::Result<Vec<Dataset>> {
+    ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
         let state = self.session_context.state();
         let object_store = self
             .session_context

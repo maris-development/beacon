@@ -1,0 +1,8 @@
+[package]
+name = "beacon-datafusion-ext"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+datafusion = { workspace = true }
+serde = { workspace = true }

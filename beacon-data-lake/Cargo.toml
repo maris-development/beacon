@@ -42,3 +42,4 @@ beacon-formats = { path = "../beacon-formats" }
 beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }
 beacon-binary-format = { path = "../beacon-binary-format" }
 beacon-atlas = { path = "../beacon-atlas" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
