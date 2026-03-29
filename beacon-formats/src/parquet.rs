@@ -1,6 +1,7 @@
 use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use datafusion::{
     catalog::Session,
     common::{Column, DFSchema, GetExt, Statistics},
@@ -17,7 +18,7 @@ use object_store::{ObjectMeta, ObjectStore};
 use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
-use crate::{Dataset, DatasetFormat, FileFormatFactoryExt, file_open_parallelism};
+use crate::{FileFormatFactoryExt, file_open_parallelism};
 
 #[derive(Debug)]
 pub struct ParquetFormatFactory;
@@ -50,7 +51,7 @@ impl FileFormatFactoryExt for ParquetFormatFactory {
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
-    ) -> datafusion::error::Result<Vec<crate::Dataset>> {
+    ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
         let datasets = objects
             .iter()
             .filter(|obj| {
@@ -59,12 +60,13 @@ impl FileFormatFactoryExt for ParquetFormatFactory {
                     .map(|ext| ext == "parquet")
                     .unwrap_or(false)
             })
-            .map(|obj| Dataset {
-                file_path: obj.location.to_string(),
-                format: DatasetFormat::Parquet,
-            })
+            .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
             .collect();
         Ok(datasets)
+    }
+
+    fn file_format_name(&self) -> String {
+        self.get_ext()
     }
 }
 

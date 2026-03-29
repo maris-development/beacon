@@ -233,6 +233,7 @@ pub fn super_type_arrow(left: &DataType, right: &DataType) -> Option<DataType> {
         (DataType::LargeUtf8, _) => DataType::LargeUtf8,
         (_, DataType::LargeUtf8) => DataType::LargeUtf8,
         (DataType::Utf8, _) => DataType::Utf8,
+        (_, DataType::Utf8) => DataType::Utf8,
 
         (DataType::Timestamp(_, _), DataType::Int8) => DataType::Int64,
         (DataType::Timestamp(_, _), DataType::Int16) => DataType::Int64,

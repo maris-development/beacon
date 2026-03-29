@@ -1,12 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use beacon_binary_format::object_store::ArrowBBFObjectWriter;
 use beacon_formats::zarr::{ZarrFormat, statistics::ZarrStatisticsSelection};
 use datafusion::{
-    datasource::{
-        file_format::FileFormat,
-        listing::{ListingTable, ListingTableUrl},
-    },
+    datasource::{file_format::FileFormat, listing::ListingTableUrl},
     prelude::SessionContext,
 };
 use futures::StreamExt;

@@ -1,6 +1,7 @@
 use std::{fmt::Debug, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
+use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -17,7 +18,7 @@ use zarrs_object_store::AsyncObjectStore;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::{
-    Dataset, DatasetFormat, FileFormatFactoryExt,
+    FileFormatFactoryExt,
     zarr::{
         source::{ZarrSource, fetch_schema},
         statistics::ZarrStatisticsSelection,
@@ -54,7 +55,7 @@ impl Default for ZarrFormatFactory {
 
 impl GetExt for ZarrFormatFactory {
     fn get_ext(&self) -> String {
-        "zarr.json".to_string()
+        "zarr".to_string()
     }
 }
 
@@ -81,7 +82,7 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
-    ) -> datafusion::error::Result<Vec<crate::Dataset>> {
+    ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
         let datasets: Vec<ObjectMeta> = objects
             .iter()
             .filter(|obj| {
@@ -101,14 +102,15 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
             .collect();
 
         // Now we can use the ZarrPath objects to create the datasets
-        let datasets: Vec<Dataset> = zarr_paths
+        let datasets: Vec<DatasetMetadata> = zarr_paths
             .into_iter()
-            .map(|path| Dataset {
-                file_path: path.as_zarr_json_path(),
-                format: DatasetFormat::Zarr,
-            })
+            .map(|path| DatasetMetadata::new(path.as_zarr_json_path(), self.get_ext()))
             .collect();
         Ok(datasets)
+    }
+
+    fn file_format_name(&self) -> String {
+        self.get_ext()
     }
 }
 

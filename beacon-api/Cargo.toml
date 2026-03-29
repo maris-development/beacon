@@ -41,3 +41,4 @@ beacon-planner = { path = "../beacon-planner" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-formats = { path = "../beacon-formats" }
 beacon-data-lake = { path = "../beacon-data-lake" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }

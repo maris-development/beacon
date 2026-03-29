@@ -7,7 +7,7 @@ use crate::{
 };
 use arrow::datatypes::SchemaRef;
 use beacon_data_lake::{table::Table, DataLake};
-use beacon_formats::Dataset;
+use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
 use beacon_query::{parser::Parser, Query};
@@ -112,7 +112,7 @@ impl Runtime {
         pattern: Option<String>,
         offset: Option<usize>,
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<Dataset>> {
+    ) -> anyhow::Result<Vec<DatasetMetadata>> {
         self.virtual_machine
             .list_datasets(pattern, offset, limit)
             .await

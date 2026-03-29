@@ -132,6 +132,22 @@ impl NdRecordBatch {
         })
     }
 
+    pub fn project<P: AsRef<[usize]>>() -> anyhow::Result<Self> {
+        anyhow::bail!("Projection not yet implemented for NdRecordBatch")
+    }
+
+    pub fn dimensions(&self) -> &[String] {
+        &self.dimensions
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn columns(&self) -> &[Arc<dyn NdArrowArray>] {
+        &self.arrays
+    }
+
     pub fn schema(&self) -> &arrow_schema::Schema {
         &self.schema
     }

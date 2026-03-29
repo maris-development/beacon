@@ -28,11 +28,13 @@ COPY beacon-arrow-netcdf/ /beacon-arrow-netcdf/
 COPY beacon-arrow-netcdf-mpio/ /beacon-arrow-netcdf-mpio/
 COPY beacon-arrow-zarr/ /beacon-arrow-zarr/
 COPY beacon-arrow-odv/ /beacon-arrow-odv/
+COPY beacon-atlas/ /beacon-atlas/
 COPY beacon-binary-format/ /beacon-binary-format/
 COPY beacon-common/ /beacon-common/
 COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
 COPY beacon-data-lake/ /beacon-data-lake/
+COPY beacon-datafusion-ext/ /beacon-datafusion-ext/
 COPY beacon-formats/ /beacon-formats/
 COPY beacon-functions/ /beacon-functions/
 COPY beacon-nd-arrow/ /beacon-nd-arrow/

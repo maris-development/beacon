@@ -772,6 +772,7 @@ dependencies = [
  "beacon-config",
  "beacon-core",
  "beacon-data-lake",
+ "beacon-datafusion-ext",
  "beacon-formats",
  "beacon-functions",
  "beacon-planner",
@@ -893,6 +894,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-atlas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "beacon-nd-arrow",
+ "bincode",
+ "bloomfilter",
+ "bytes",
+ "chrono",
+ "crossbeam",
+ "datafusion",
+ "flume",
+ "futures",
+ "indexmap 2.13.0",
+ "moka",
+ "ndarray 0.17.2",
+ "object_store 0.12.4",
+ "once_cell",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "beacon-atlas-toolbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-ipc 56.2.0",
+ "beacon-arrow-netcdf",
+ "beacon-atlas",
+ "beacon-nd-arrow",
+ "clap 4.5.54",
+ "futures",
+ "glob",
+ "object_store 0.12.4",
+ "parquet 56.2.0",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "beacon-binary-format"
 version = "2.1.3"
 dependencies = [
@@ -968,6 +1018,7 @@ dependencies = [
  "beacon-arrow-odv",
  "beacon-config",
  "beacon-data-lake",
+ "beacon-datafusion-ext",
  "beacon-formats",
  "beacon-functions",
  "beacon-object-storage",
@@ -1003,9 +1054,11 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-arrow-zarr",
+ "beacon-atlas",
  "beacon-binary-format",
  "beacon-common",
  "beacon-config",
+ "beacon-datafusion-ext",
  "beacon-formats",
  "beacon-object-storage",
  "bytes",
@@ -1032,6 +1085,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-datafusion-ext"
+version = "0.1.0"
+dependencies = [
+ "datafusion",
+ "serde",
+]
+
+[[package]]
 name = "beacon-formats"
 version = "1.5.4"
 dependencies = [
@@ -1042,9 +1103,11 @@ dependencies = [
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
  "beacon-arrow-zarr",
+ "beacon-atlas",
  "beacon-binary-format",
  "beacon-common",
  "beacon-config",
+ "beacon-datafusion-ext",
  "beacon-object-storage",
  "chrono",
  "datafusion",
@@ -1221,6 +1284,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2c54ff287cfc0a34f38a6b832ea1bd8e448a330b3e40a50859e6488bee07f22"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1262,6 +1343,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array 0.14.7",
+]
+
+[[package]]
+name = "bloomfilter"
+version = "1.0.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c541c70a910b485670304fd420f0eab8f7bde68439db6a8d98819c3d2774d7e2"
+dependencies = [
+ "bit-vec",
+ "getrandom 0.2.17",
+ "siphasher",
 ]
 
 [[package]]
@@ -5931,6 +6023,9 @@ name = "siphasher"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "slab"
