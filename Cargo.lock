@@ -1088,6 +1088,8 @@ dependencies = [
 name = "beacon-datafusion-ext"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "beacon-common",
  "datafusion",
  "serde",
 ]

@@ -10,17 +10,21 @@ use beacon_atlas::datafusion::AtlasFormat;
 use beacon_atlas::partition::ops::delete::DeleteDatasetsPartition;
 use beacon_atlas::schema::AtlasSuperTypingMode;
 use beacon_common::listing_url::parse_listing_table_url;
-use datafusion::catalog::{Session, TableProvider};
-use datafusion::common::Statistics;
-use datafusion::datasource::TableType as DataFusionTableType;
-use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
+use datafusion::datasource::{TableType as DataFusionTableType, listing::ListingTableUrl};
+use datafusion::datasource::{
+    file_format::parquet::ParquetFormatFactory,
+    listing::{ListingOptions, ListingTable, ListingTableConfig},
+};
 use datafusion::error::DataFusionError;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::logical_expr::{TableProviderFilterPushDown, dml::InsertOp};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 use datafusion::prelude::SessionContext;
-use futures::StreamExt;
+use datafusion::{
+    catalog::{Session, TableProvider},
+    physical_expr_adapter::DefaultPhysicalExprAdapter,
+};
 use object_store::ObjectStore;
 
 pub mod feed;
@@ -81,7 +85,7 @@ impl AtlasTable {
         Ok(())
     }
 
-    pub async fn resync(&self) -> anyhow::Result<()> {
+    pub async fn resync(&self, session: Arc<dyn Session>) -> anyhow::Result<()> {
         todo!()
     }
 
@@ -103,49 +107,86 @@ impl AtlasTable {
             chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
         }
     }
+
+    pub async fn table_provider(
+        &self,
+        session: &dyn Session,
+        object_store_url: &ObjectStoreUrl,
+    ) -> anyhow::Result<Arc<dyn TableProvider>> {
+        let atlas_path =
+            object_store::path::Path::parse(&self.atlas_directory)?.child("atlas.json");
+        let listing_url = parse_listing_table_url(object_store_url, atlas_path.as_ref())?;
+        // Listing Table
+        let listing_options = ListingOptions::new(Arc::new(AtlasFormat::default()));
+        let schema = listing_options.infer_schema(session, &listing_url).await?;
+        let config = ListingTableConfig::new(listing_url)
+            .with_listing_options(listing_options)
+            .with_schema(schema);
+        let table = ListingTable::try_new(config)?;
+
+        Ok(Arc::new(table))
+    }
 }
 
-pub struct AtlasTableProvider {
-    atlas_table: Arc<AtlasTable>,
-    session_ctx: Arc<SessionContext>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[async_trait::async_trait]
-impl TableProvider for AtlasTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+    use datafusion::assert_batches_eq;
+    use datafusion::datasource::listing_table_factory::ListingTableFactory;
+    use datafusion::error::Result;
+    use datafusion::prelude::SessionContext;
+    use tempfile::TempDir;
 
-    fn schema(&self) -> SchemaRef {
-        todo!()
-    }
+    #[tokio::test]
+    async fn create_external_parquet_table_before_files_exist() -> Result<()> {
+        let ctx = SessionContext::new();
 
-    fn table_type(&self) -> DataFusionTableType {
-        DataFusionTableType::Base
-    }
+        // Create an empty directory. No parquet files exist yet.
+        let tmp = TempDir::new()?;
+        let table_dir = tmp.path().join("parquet_table");
+        std::fs::create_dir_all(&table_dir)?;
 
-    async fn scan(
-        &self,
-        state: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        todo!()
-    }
+        // Important:
+        // - use an explicit schema
+        // - point LOCATION at the directory, with trailing slash
+        let sql = format!(
+            "CREATE EXTERNAL TABLE t
+            STORED AS PARQUET
+            LOCATION '{}'",
+            format!("{}", table_dir.display())
+        );
 
-    fn supports_filters_pushdown(
-        &self,
-        filters: &[&Expr],
-    ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
-        // Since the AtlasTable itself doesn't implement filter pushdown, we return "Unsupported" for all filters. The actual filter pushdown capabilities will be determined by the runtime provider during query execution.
-        Ok(vec![
-            TableProviderFilterPushDown::Unsupported;
-            filters.len()
-        ])
-    }
+        ctx.sql(&sql).await.unwrap().collect().await.unwrap();
 
-    fn statistics(&self) -> Option<Statistics> {
-        None
+        // The table should exist and be queryable even though no parquet files exist yet.
+        let df = ctx.sql("DESCRIBE t").await.unwrap();
+        let batches = df.collect().await.unwrap();
+        println!(
+            "{}",
+            arrow::util::pretty::pretty_format_batches(&batches).unwrap()
+        );
+
+        // // Optional: prove inserts work and create parquet output in that location
+        // ctx.sql("INSERT INTO t VALUES (1, 'a'), (2, 'b')")
+        //     .await?
+        //     .collect()
+        //     .await?;
+
+        // let df = ctx.sql("SELECT id, name FROM t ORDER BY id").await?;
+        // let batches = df.collect().await?;
+        // assert_batches_eq!(
+        //     &[
+        //         "+----+------+",
+        //         "| id | name |",
+        //         "+----+------+",
+        //         "| 1  | a    |",
+        //         "| 2  | b    |",
+        //         "+----+------+",
+        //     ],
+        //     &batches
+        // );
+
+        Ok(())
     }
 }

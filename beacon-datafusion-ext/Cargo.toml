@@ -5,4 +5,8 @@ edition = "2024"
 
 [dependencies]
 datafusion = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
+
+
+beacon-common = { path = "../beacon-common" }

@@ -82,7 +82,7 @@ use crate::{
 pub mod opener;
 pub mod source;
 
-const ATLAS_FILE_EXTENSION: &str = "atlas.json";
+const ATLAS_FILE_EXTENSION: &str = "atlas";
 
 fn execution_error(message: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(message.into())
@@ -306,6 +306,7 @@ impl FileFormat for AtlasFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
+        println!("Files: {:#?}", objects);
         let atlas_objects = find_atlas_collections(objects);
         if atlas_objects.is_empty() {
             return Err(execution_error("No atlas.json files found to infer schema"));
@@ -392,7 +393,9 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Int32Array, StringArray};
-    use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+    use beacon_datafusion_ext::{
+        format_ext::FileFormatFactoryExt, listing_table_factory_ext::ListingTableFactoryExt,
+    };
     use datafusion::{
         datasource::{
             file_format::FileFormat,
@@ -401,9 +404,10 @@ mod tests {
             },
             physical_plan::FileGroup,
         },
+        execution::object_store::ObjectStoreUrl,
         prelude::{SessionConfig, SessionContext},
     };
-    use futures::stream;
+    use futures::{TryStreamExt, stream};
     use object_store::{ObjectMeta, ObjectStore, local::LocalFileSystem, path::Path};
 
     use crate::{collection::AtlasCollection, column::Column, schema::AtlasSuperTypingMode};
@@ -650,6 +654,103 @@ mod tests {
             vec!["dataset-a", "dataset-a", "dataset-b", "dataset-b"]
         );
         assert_eq!(temperatures, vec![10, 20, 30, 40]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_external_table_sql_registers_and_queries_atlas_collection() -> anyhow::Result<()>
+    {
+        let temp_dir = tempfile::tempdir()?;
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(LocalFileSystem::new_with_prefix(temp_dir.path())?);
+        let collection_path = Path::from("collections/sensor");
+
+        let mut collection = AtlasCollection::create(
+            store.clone(),
+            collection_path.clone(),
+            "sensor",
+            None,
+            AtlasSuperTypingMode::General,
+        )
+        .await?;
+
+        let mut writer = collection.create_partition("part-00000", None).await?;
+        writer
+            .writer_mut()?
+            .write_dataset_columns(
+                "reading-1",
+                futures::stream::iter(vec![Column::new_from_vec(
+                    "value".to_string(),
+                    vec![1_i32, 2_i32],
+                    vec![2],
+                    vec!["x".to_string()],
+                    None,
+                )?]),
+            )
+            .await?;
+        writer.finish().await?;
+
+        let mut files = vec![];
+        let mut stream = store.list(None);
+        while let Some(result) = stream.try_next().await? {
+            files.push(result);
+        }
+        // println!("Files: {:#?}", files);
+        let store_url = ObjectStoreUrl::parse("file://")?;
+
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+        ctx.register_object_store(store_url.as_ref(), store.clone());
+        {
+            let state_ref = ctx.state_ref();
+            let mut state = state_ref.write();
+            state.register_file_format(Arc::new(AtlasFormatFactory::new()), true)?;
+
+            state.table_factories_mut().insert(
+                "ATLAS".to_owned(),
+                Arc::new(ListingTableFactoryExt::new(store_url)),
+            );
+        }
+
+        let sql = format!(
+            "CREATE EXTERNAL TABLE sensor_data STORED AS ATLAS LOCATION '/collections/sensor/atlas.json'",
+        );
+        println!("Executing SQL:\n{}", sql);
+        ctx.sql(&sql).await?.collect().await?;
+
+        let batches = ctx
+            .sql("SELECT __entry_key, value FROM sensor_data")
+            .await?
+            .collect()
+            .await?;
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+
+        let mut entry_keys = Vec::new();
+        let mut values = Vec::new();
+        for batch in &batches {
+            let entry = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("entry key should be Utf8");
+            let value = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("value should be Int32");
+
+            for row in 0..batch.num_rows() {
+                entry_keys.push(entry.value(row).to_string());
+                values.push(value.value(row));
+            }
+        }
+
+        entry_keys.sort();
+        values.sort();
+        assert_eq!(entry_keys, vec!["reading-1", "reading-1"]);
+        assert_eq!(values, vec![1, 2]);
 
         Ok(())
     }

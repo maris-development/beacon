@@ -57,7 +57,8 @@ impl TableType {
                 .await
             }
             TableType::Atlas(atlas_table) => {
-                Box::pin(atlas_table.table_provider(session_ctx, data_directory_store_url)).await
+                // Box::pin(atlas_table.table_provider(session_ctx, data_directory_store_url)).await
+                todo!()
             }
             TableType::Empty(default_table) => {
                 Box::pin(default_table.table_provider(
