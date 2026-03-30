@@ -43,6 +43,7 @@ impl<S: ObjectStore + Clone> DeleteDatasetsPartition<S> {
         let entry_keys = self.partition.entry_keys().to_vec();
         let dataset_indexes = self.partition.dataset_indexes().to_vec();
         let mut deletion_flags = self.partition.deletion_flags().to_vec();
+        let insert_timestamps = self.partition.insert_timestamps().to_vec();
 
         let mut dataset_index_to_position = HashMap::with_capacity(dataset_indexes.len());
         for (position, dataset_index) in dataset_indexes.iter().copied().enumerate() {
@@ -94,6 +95,7 @@ impl<S: ObjectStore + Clone> DeleteDatasetsPartition<S> {
             &entry_keys,
             &dataset_indexes,
             &deletion_flags,
+            &insert_timestamps,
         )
         .await?;
 
@@ -166,6 +168,7 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let partition = build_two_dataset_partition(store.clone(), &partition_path).await?;
+        let original_insert_timestamps = partition.insert_timestamps().to_vec();
 
         let partition = DeleteDatasetsPartition::new(store.clone(), partition)
             .delete_dataset("dataset-1")
@@ -175,6 +178,7 @@ mod tests {
         assert_eq!(partition.deletion_flags(), &[false, true]);
         assert_eq!(partition.logical_entries(), vec!["dataset-0"]);
         assert_eq!(partition.undeleted_dataset_indexes(), vec![0]);
+        assert_eq!(partition.insert_timestamps(), original_insert_timestamps);
 
         let stream = PartitionStreamReaderBuilder::new(store, Arc::new(partition))
             .create_shareable_stream(1)
@@ -194,6 +198,7 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let partition_path = Path::from("collections/example/partitions/part-00000");
         let partition = build_two_dataset_partition(store.clone(), &partition_path).await?;
+        let original_insert_timestamps = partition.insert_timestamps().to_vec();
 
         let partition = DeleteDatasetsPartition::new(store, partition)
             .delete_dataset_index(0)
@@ -203,6 +208,7 @@ mod tests {
         assert_eq!(partition.deletion_flags(), &[true, false]);
         assert_eq!(partition.logical_entries(), vec!["dataset-1"]);
         assert_eq!(partition.undeleted_dataset_indexes(), vec![1]);
+        assert_eq!(partition.insert_timestamps(), original_insert_timestamps);
 
         Ok(())
     }

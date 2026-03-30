@@ -4,6 +4,7 @@ use crate::consts::COLLECTION_METADATA_FILE;
 use crate::partition::load_partition;
 use crate::partition::ops::write::PartitionWriter;
 use crate::schema::{AtlasSchema, AtlasSuperTypingMode};
+use futures::StreamExt;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CollectionMetadata {
@@ -158,6 +159,10 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
         &self.collection_directory
     }
 
+    pub fn io_cache(&self) -> Arc<crate::array::io_cache::IoCache> {
+        self.io_cache.clone()
+    }
+
     pub async fn load(&mut self) -> anyhow::Result<()> {
         let state = load_collection_state(
             self.object_store.clone(),
@@ -282,6 +287,58 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
             self.io_cache.clone(),
         )
         .await
+    }
+
+    /// Remove a partition from collection metadata and delete its persisted files.
+    pub async fn remove_partition(&mut self, partition_name: &str) -> anyhow::Result<()> {
+        if self.state.is_none() {
+            self.load().await?;
+        }
+
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("collection state is not loaded"))?;
+
+        if !state
+            .metadata
+            .partitions
+            .iter()
+            .any(|name| name == partition_name)
+        {
+            return Ok(());
+        }
+
+        let partition_directory = self
+            .collection_directory
+            .clone()
+            .child("partitions")
+            .child(partition_name);
+
+        let mut objects = self.object_store.list(Some(&partition_directory));
+        while let Some(next_object) = objects.next().await {
+            let object_meta = next_object?;
+            if let Err(error) = self.object_store.delete(&object_meta.location).await
+                && !matches!(error, object_store::Error::NotFound { .. })
+            {
+                return Err(error.into());
+            }
+        }
+
+        state
+            .metadata
+            .partitions
+            .retain(|name| name != partition_name);
+
+        save_collection_metadata(
+            self.object_store.clone(),
+            self.collection_directory.clone(),
+            &state.metadata,
+        )
+        .await?;
+
+        self.load().await?;
+        Ok(())
     }
 }
 

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt};
 use object_store::ObjectStore;
 
@@ -20,6 +21,7 @@ pub struct PartitionWriter<S: ObjectStore + Clone> {
     column_writers: indexmap::IndexMap<String, ColumnWriter<S>>,
     metadata: PartitionMetadata,
     dataset_names: Vec<String>,
+    dataset_insert_timestamps: Vec<DateTime<Utc>>,
 }
 
 impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
@@ -50,6 +52,7 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
                 name: name.to_string(),
             },
             dataset_names: vec![],
+            dataset_insert_timestamps: vec![],
         })
     }
 
@@ -76,6 +79,7 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
     ) -> anyhow::Result<()> {
         let dataset_index = self.dataset_names.len() as u32;
         self.dataset_names.push(name.to_string());
+        self.dataset_insert_timestamps.push(Utc::now());
 
         let entry_name_column = Column::new_from_vec(
             ENTRIES_COLUMN_NAME.to_string(),
@@ -139,6 +143,7 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
             &self.dataset_names,
             &local_indexes,
             &deletion_flags,
+            &self.dataset_insert_timestamps,
         )
         .await?;
 
@@ -146,6 +151,7 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
             dataset_indexes: local_indexes,
             deletion_flags,
             entry_keys: self.dataset_names.clone(),
+            insert_timestamps: self.dataset_insert_timestamps.clone(),
         };
 
         Ok(Partition::new(
@@ -255,6 +261,8 @@ mod tests {
         assert_eq!(loaded.logical_entries(), vec!["dataset-0"]);
         assert_eq!(loaded.dataset_indexes(), &[0]);
         assert_eq!(loaded.deletion_flags(), &[false]);
+        assert_eq!(loaded.insert_timestamps().len(), 1);
+        assert_eq!(partition.insert_timestamps(), loaded.insert_timestamps());
 
         let schema = loaded.arrow_schema();
         assert_eq!(schema.fields().len(), 2);
@@ -307,6 +315,10 @@ mod tests {
         assert_eq!(loaded.logical_entries(), Vec::<&str>::new());
         assert_eq!(loaded.dataset_indexes(), &[] as &[u32]);
         assert_eq!(loaded.deletion_flags(), &[] as &[bool]);
+        assert_eq!(
+            loaded.insert_timestamps(),
+            &[] as &[chrono::DateTime<chrono::Utc>]
+        );
 
         Ok(())
     }
@@ -365,10 +377,13 @@ mod tests {
         assert_eq!(partition.logical_entries(), vec!["dataset-a", "dataset-b"]);
         assert_eq!(partition.dataset_indexes(), &[0, 1]);
         assert_eq!(partition.deletion_flags(), &[false, false]);
+        assert_eq!(partition.insert_timestamps().len(), 2);
 
         assert_eq!(loaded.logical_entries(), vec!["dataset-a", "dataset-b"]);
         assert_eq!(loaded.dataset_indexes(), &[0, 1]);
         assert_eq!(loaded.deletion_flags(), &[false, false]);
+        assert_eq!(loaded.insert_timestamps().len(), 2);
+        assert_eq!(partition.insert_timestamps(), loaded.insert_timestamps());
 
         Ok(())
     }
