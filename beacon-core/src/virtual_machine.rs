@@ -12,14 +12,17 @@ use datafusion::{
     catalog::{SchemaProvider, TableFunctionImpl},
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
-        runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
+        runtime_env::RuntimeEnvBuilder, SendableRecordBatchStream, SessionStateBuilder,
     },
-    prelude::{SessionConfig, SessionContext},
+    prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
 };
-use futures::StreamExt;
+use futures::{stream::BoxStream, StreamExt};
 use parking_lot::Mutex;
 
-use crate::query_result::{ArrowOutputStream, QueryOutput, QueryResult};
+use crate::{
+    parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
+    query_result::{ArrowOutputStream, QueryOutput, QueryResult},
+};
 
 pub struct VirtualMachine {
     table_functions: Vec<Arc<dyn BeaconTableFunctionImpl>>,
@@ -285,5 +288,45 @@ impl VirtualMachine {
         op: serde_json::Value,
     ) -> Result<(), anyhow::Error> {
         Ok(self.data_lake.apply_operation(table_name, op).await?)
+    }
+
+    pub async fn run_sql(&self, sql: String) -> anyhow::Result<SendableRecordBatchStream> {
+        let sql_options = SQLOptions::new()
+            .with_allow_ddl(false)
+            .with_allow_dml(false)
+            .with_allow_statements(false);
+
+        let mut parser = BeaconParser::new(&sql)?;
+        let statement = parser.parse_statement()?;
+
+        match statement {
+            BeaconStatement::DFStatement(statement) => {
+                let state = self.session_ctx.state();
+                let plan = state.statement_to_plan(*statement).await?;
+
+                sql_options.verify_plan(&plan)?;
+
+                let df = DataFrame::new(state, plan);
+                let stream = df.execute_stream().await?;
+
+                Ok(stream)
+            }
+            BeaconStatement::Ingest(ingest_statement) => {
+                // Ingest data into the specified atlas collection and return an empty stream (since INGEST statements do not return results)
+                todo!()
+            }
+            BeaconStatement::DeleteAtlasDatasets(delete_atlas_datasets_statement) => {
+                // Delete datasets from the specified atlas collection and return an empty stream (since DELETE statements do not return results)
+                todo!()
+            }
+            BeaconStatement::CreateAtlasTable(create_atlas_table_statement) => {
+                // Create a new atlas collection and return an empty stream (since CREATE TABLE statements do not return results)
+                todo!()
+            }
+            BeaconStatement::ApplyAtlasOperation(alter_atlas_table_statement) => {
+                // Apply the specified operation to the atlas collection and return an empty stream (since ALTER TABLE statements do not return results)
+                todo!()
+            }
+        }
     }
 }

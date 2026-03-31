@@ -126,7 +126,6 @@ impl PresetTable {
             TableType::Merged(merged_table) => {
                 Box::pin(merged_table.create(table_directory, session_ctx)).await?
             }
-            TableType::Atlas(_) => {}
             TableType::Empty(default_table) => {
                 Box::pin(default_table.create(table_directory, session_ctx)).await?
             }

@@ -7,6 +7,13 @@ edition = "2024"
 datafusion = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
-
+serde_json = { workspace = true }
+typetag =  { workspace=true}
+anyhow = { workspace = true }
+arrow = { workspace = true }
+arrow-schema = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
+
+[dev-dependencies]
+tokio = { workspace = true }

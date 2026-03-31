@@ -1088,10 +1088,16 @@ dependencies = [
 name = "beacon-datafusion-ext"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-schema 56.2.0",
  "async-trait",
  "beacon-common",
  "datafusion",
  "serde",
+ "serde_json",
+ "tokio",
+ "typetag",
 ]
 
 [[package]]
