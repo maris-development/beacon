@@ -1,7 +1,14 @@
+//! Serializable table definitions used to rebuild DataFusion table providers.
+//!
+//! This module contains persisted definitions for listing tables and SQL view tables,
+//! together with helper logic that normalizes schema and partition metadata during
+//! provider creation.
+
 use std::sync::Arc;
 
 use beacon_common::listing_url::parse_listing_table_url;
 use datafusion::common::DataFusionError;
+use datafusion::datasource::ViewTable;
 use datafusion::{
     arrow::datatypes::{DataType, SchemaRef},
     catalog::TableProvider,
@@ -13,7 +20,12 @@ use datafusion::{
 
 #[typetag::serde(tag = "type")]
 #[async_trait::async_trait]
+/// A serializable table definition that can materialize a DataFusion provider.
 pub trait TableDefinition {
+    /// Builds a concrete [`TableProvider`] from this definition.
+    ///
+    /// Implementations use the provided session context and store URL to resolve
+    /// formats, schemas, and physical locations.
     async fn build_provider(
         &self,
         context: Arc<SessionContext>,
@@ -22,17 +34,27 @@ pub trait TableDefinition {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+/// Persisted configuration for a DataFusion [`ListingTable`].
 pub struct ListingTableDefinition {
+    /// Logical table name.
     pub name: String,
-    pub location: String, // The URL of the physical file, e.g., "/path/to/file.parquet"
-    pub file_type: String, // The file format, e.g., "parquet", "csv", etc.
-    pub schema: SchemaRef, // Optional schema; if not provided, it will be inferred
-    pub definition: Option<String>, // Optional additional sql definition for the table
-    pub partition_cols: Vec<String>, // Optional list of partition columns
-    pub options: std::collections::HashMap<String, String>, // Optional additional options for the listing table
-    pub if_not_exists: bool, // Whether to create the table only if it does not already exist
+    /// Data location, relative to the object-store base URL, optionally with a glob.
+    pub location: String,
+    /// File format identifier, such as `parquet`, `csv`, or `json`.
+    pub file_type: String,
+    /// Optional explicit schema; empty means infer from files.
+    pub schema: SchemaRef,
+    /// Optional SQL text associated with the table definition.
+    pub definition: Option<String>,
+    /// Partition column names encoded in folder paths.
+    pub partition_cols: Vec<String>,
+    /// Additional file-format specific options.
+    pub options: std::collections::HashMap<String, String>,
+    /// If true, creation should no-op when the target table already exists.
+    pub if_not_exists: bool,
 }
 
+/// Partition column declarations represented as `(name, data_type)` tuples.
 type PartitionCols = Vec<(String, DataType)>;
 
 /// Resolve the user-provided schema and partition columns for CREATE EXTERNAL TABLE.
@@ -132,6 +154,7 @@ fn fallback_file_glob(file_type: &str) -> String {
 #[async_trait::async_trait]
 #[typetag::serde(name = "listing_table")]
 impl TableDefinition for ListingTableDefinition {
+    /// Builds a [`ListingTable`] provider from the persisted listing-table definition.
     async fn build_provider(
         &self,
         context: Arc<SessionContext>,
@@ -173,7 +196,9 @@ impl TableDefinition for ListingTableDefinition {
             Some(s) => s,
         };
 
-        let config = ListingTableConfig::new(listing_table_url).with_schema(resolved_schema);
+        let config = ListingTableConfig::new(listing_table_url)
+            .with_listing_options(options)
+            .with_schema(resolved_schema);
         let provider = ListingTable::try_new(config)?.with_cache(
             session_state
                 .runtime_env()
@@ -182,5 +207,242 @@ impl TableDefinition for ListingTableDefinition {
         );
         let table = provider.with_definition(self.definition.clone());
         Ok(Arc::new(table))
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+/// Persisted configuration for a SQL-defined [`ViewTable`].
+pub struct ViewTableDefinition {
+    /// Logical view name.
+    pub name: String,
+    /// SQL query used to materialize the view.
+    pub definition: String,
+}
+
+impl ViewTableDefinition {
+    /// Builds a serializable view definition from an existing [`ViewTable`].
+    ///
+    /// Returns an error when the input view has no persisted SQL definition.
+    pub fn try_from_view(table: ViewTable) -> anyhow::Result<Self> {
+        match table.definition() {
+            Some(def) => Ok(Self {
+                name: "view".to_string(), // Name is not used for view tables, so we can set a default value here
+                definition: def.clone(),
+            }),
+            None => Err(anyhow::anyhow!(
+                "ViewTableDefinition requires a SQL definition to be created from a ViewTable without a definition"
+            )),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+#[typetag::serde(name = "view_table")]
+impl TableDefinition for ViewTableDefinition {
+    /// Compiles the stored SQL and returns a DataFusion [`ViewTable`] provider.
+    async fn build_provider(
+        &self,
+        context: Arc<SessionContext>,
+        _data_store_url: &ObjectStoreUrl,
+    ) -> anyhow::Result<Arc<dyn TableProvider>> {
+        // Compile the SQL definition into a DataFusion logical plan and use it to create a ViewTable provider.
+        let state = context.state();
+        let plan = state.create_logical_plan(&self.definition).await?;
+
+        Ok(Arc::new(ViewTable::new(
+            plan,
+            Some(self.definition.clone()),
+        )))
+    }
+}
+
+#[cfg(test)]
+/// Unit tests covering listing-table and view-table definition behavior.
+mod tests {
+    use super::{ListingTableDefinition, TableDefinition, ViewTableDefinition};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion::datasource::ViewTable;
+    use datafusion::execution::object_store::ObjectStoreUrl;
+    use datafusion::prelude::SessionContext;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Creates a unique temporary directory for table fixture data.
+    fn create_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        dir.push(format!("{prefix}_{}_{}", std::process::id(), ts));
+        fs::create_dir_all(&dir).expect("temporary directory should be created");
+        dir
+    }
+
+    /// Converts an absolute local path into a location relative to `file://` root.
+    fn to_store_relative_location(path: &std::path::Path) -> String {
+        path.to_string_lossy().trim_start_matches('/').to_string()
+    }
+
+    #[tokio::test]
+    /// Verifies listing providers can infer schema from folder-backed files.
+    async fn listing_table_definition_build_provider_infers_schema_from_folder() {
+        let root = create_temp_dir("table_ext_listing_infer");
+        let data_file = root.join("part-0.csv");
+        fs::write(&data_file, "1\n2\n").expect("csv fixture should be written");
+
+        let definition = ListingTableDefinition {
+            name: "t_csv".to_string(),
+            location: format!("{}/", to_store_relative_location(&root)),
+            file_type: "csv".to_string(),
+            schema: Arc::new(Schema::empty()),
+            definition: Some("SELECT value FROM t_csv".to_string()),
+            partition_cols: vec![],
+            options: HashMap::new(),
+            if_not_exists: false,
+        };
+
+        let context = Arc::new(SessionContext::new());
+        let store_url = ObjectStoreUrl::parse("file://").unwrap();
+
+        let provider = definition
+            .build_provider(context, &store_url)
+            .await
+            .expect("listing provider should be built from inferred schema");
+
+        let schema = provider.schema();
+        assert_eq!(schema.fields().len(), 1);
+        assert!(!schema.field(0).name().is_empty());
+
+        fs::remove_dir_all(&root).expect("temporary directory should be cleaned up");
+    }
+
+    #[tokio::test]
+    /// Verifies explicit schemas and partition metadata produce a valid provider schema.
+    async fn listing_table_definition_build_provider_projects_partition_columns() {
+        let root = create_temp_dir("table_ext_listing_partition");
+        let partitioned = root.join("year=2026");
+        fs::create_dir_all(&partitioned).expect("partition folder should be created");
+        fs::write(partitioned.join("part-0.csv"), "1\n")
+            .expect("partition csv fixture should be written");
+
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int32, true),
+            Field::new("year", DataType::Utf8, true),
+        ]));
+
+        let definition = ListingTableDefinition {
+            name: "t_partitioned".to_string(),
+            location: format!("{}/", to_store_relative_location(&root)),
+            file_type: "csv".to_string(),
+            schema,
+            definition: None,
+            partition_cols: vec!["year".to_string()],
+            options: HashMap::new(),
+            if_not_exists: false,
+        };
+
+        let context = Arc::new(SessionContext::new());
+        let store_url = ObjectStoreUrl::parse("file://").unwrap();
+
+        let provider = definition
+            .build_provider(context, &store_url)
+            .await
+            .expect("listing provider should be built from explicit schema");
+
+        let schema = provider.schema();
+        assert_eq!(schema.fields().len(), 2);
+        assert_eq!(schema.field(0).name(), "value");
+        assert_eq!(schema.field(0).data_type(), &DataType::Int32);
+        assert_eq!(schema.field(1).name(), "year");
+        assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
+
+        fs::remove_dir_all(&root).expect("temporary directory should be cleaned up");
+    }
+
+    #[tokio::test]
+    /// Verifies unknown file formats fail provider construction with a clear error.
+    async fn listing_table_definition_build_provider_rejects_unknown_file_type() {
+        let definition = ListingTableDefinition {
+            name: "t_bad".to_string(),
+            location: "tmp".to_string(),
+            file_type: "not_a_real_format".to_string(),
+            schema: Arc::new(Schema::empty()),
+            definition: None,
+            partition_cols: vec![],
+            options: HashMap::new(),
+            if_not_exists: false,
+        };
+
+        let context = Arc::new(SessionContext::new());
+        let store_url = ObjectStoreUrl::parse("file://").unwrap();
+
+        let err = definition
+            .build_provider(context, &store_url)
+            .await
+            .expect_err("unknown file type should fail");
+        let msg = err.to_string();
+
+        assert!(msg.contains("Could not find FileFormat"), "error: {msg}");
+    }
+
+    #[tokio::test]
+    /// Verifies extracting a definition from a view succeeds when SQL is present.
+    async fn view_table_definition_try_from_view_reads_definition() {
+        let context = SessionContext::new();
+        let plan = context
+            .state()
+            .create_logical_plan("SELECT 1 AS x")
+            .await
+            .unwrap();
+        let view = ViewTable::new(plan, Some("SELECT 1 AS x".to_string()));
+
+        let definition = ViewTableDefinition::try_from_view(view).unwrap();
+        assert_eq!(definition.name, "view");
+        assert_eq!(definition.definition, "SELECT 1 AS x");
+    }
+
+    #[tokio::test]
+    /// Verifies extracting a definition from a view fails when SQL is absent.
+    async fn view_table_definition_try_from_view_requires_definition() {
+        let context = SessionContext::new();
+        let plan = context
+            .state()
+            .create_logical_plan("SELECT 1 AS x")
+            .await
+            .unwrap();
+        let view = ViewTable::new(plan, None);
+
+        let err = ViewTableDefinition::try_from_view(view).expect_err("missing definition");
+        assert!(err.to_string().contains("requires a SQL definition"));
+    }
+
+    #[tokio::test]
+    /// Verifies building a view definition yields a downcastable [`ViewTable`].
+    async fn view_table_definition_build_provider_creates_view_table() {
+        let definition = ViewTableDefinition {
+            name: "my_view".to_string(),
+            definition: "SELECT 42 AS answer".to_string(),
+        };
+
+        let context = Arc::new(SessionContext::new());
+        let store_url = ObjectStoreUrl::parse("file://").unwrap();
+
+        let provider = definition
+            .build_provider(context, &store_url)
+            .await
+            .expect("view provider should be built");
+
+        let view = provider
+            .as_any()
+            .downcast_ref::<ViewTable>()
+            .expect("provider should be a ViewTable");
+        assert_eq!(
+            view.definition().cloned(),
+            Some("SELECT 42 AS answer".to_string())
+        );
     }
 }
