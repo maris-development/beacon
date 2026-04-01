@@ -8,13 +8,14 @@ pub enum BeaconStatement {
     Ingest(IngestStatement),
     DeleteAtlasDatasets(DeleteAtlasDatasetsStatement),
     CreateAtlasTable(CreateAtlasTableStatement),
-    ApplyAtlasOperation(AlterAtlasTableStatement),
+    AlterAtlas(AlterAtlasTableStatement),
 }
 
-/// ALTER ATLAS TABLE <table_name> ALTER COLUMN <column_name> SET DATA TYPE <data_type>
+/// ALTER ATLAS TABLE <table_name> ON PARTITION <partition_name> ALTER COLUMN <column_name> SET DATA TYPE <data_type>
 #[derive(Debug, Clone)]
 pub struct AlterAtlasTableStatement {
     pub table_name: ObjectName,
+    pub partition_name: String,
     pub op: AtlasOp,
 }
 
@@ -34,8 +35,8 @@ impl Display for AlterAtlasTableStatement {
                 data_type,
             } => write!(
                 f,
-                "ALTER ATLAS TABLE {} ALTER COLUMN {} SET DATA TYPE {}",
-                self.table_name, column_name, data_type
+                "ALTER ATLAS TABLE {} ON PARTITION {} ALTER COLUMN {} SET DATA TYPE {}",
+                self.table_name, self.partition_name, column_name, data_type
             ),
         }
     }
@@ -58,11 +59,12 @@ impl Display for CreateAtlasTableStatement {
     }
 }
 
-/// DELETE ATLAS DATASETS [dataset_name1, dataset_name2, ...] FROM <table_name>
+/// DELETE ATLAS DATASETS [dataset_name1, dataset_name2, ...] FROM <table_name> ON PARTITION <partition_name>
 #[derive(Debug, Clone)]
 pub struct DeleteAtlasDatasetsStatement {
     pub dataset_names: Option<Vec<String>>,
     pub table_name: ObjectName,
+    pub partition_name: String,
 }
 
 impl Display for DeleteAtlasDatasetsStatement {
@@ -72,16 +74,21 @@ impl Display for DeleteAtlasDatasetsStatement {
             let quoted: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
             write!(f, "{} ", quoted.join(", "))?;
         }
-        write!(f, "FROM {}", self.table_name)
+        write!(
+            f,
+            "FROM {} ON PARTITION {}",
+            self.table_name, self.partition_name
+        )
     }
 }
 
-/// INGEST INTO ATLAS <table_name> FROM '<glob_pattern>' WITH <format>
+/// INGEST INTO ATLAS <table_name> ON PARTITION <partition_name> FROM '<glob_pattern>' WITH <format>
 #[derive(Debug, Clone)]
 pub struct IngestStatement {
     pub glob_pattern: String,
     pub format: String,
     pub table_name: ObjectName,
+    pub partition_name: String,
 }
 
 impl Display for BeaconStatement {
@@ -91,7 +98,7 @@ impl Display for BeaconStatement {
             Self::Ingest(s) => write!(f, "{s}"),
             Self::DeleteAtlasDatasets(s) => write!(f, "{s}"),
             Self::CreateAtlasTable(s) => write!(f, "{s}"),
-            Self::ApplyAtlasOperation(s) => write!(f, "{s}"),
+            Self::AlterAtlas(s) => write!(f, "{s}"),
         }
     }
 }
@@ -100,8 +107,8 @@ impl Display for IngestStatement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "INGEST INTO ATLAS {} FROM '{}' WITH {}",
-            self.table_name, self.glob_pattern, self.format
+            "INGEST INTO ATLAS {} ON PARTITION {} FROM '{}' WITH {}",
+            self.table_name, self.partition_name, self.glob_pattern, self.format
         )
     }
 }

@@ -323,7 +323,7 @@ impl VirtualMachine {
                 // Create a new atlas collection and return an empty stream (since CREATE TABLE statements do not return results)
                 todo!()
             }
-            BeaconStatement::ApplyAtlasOperation(alter_atlas_table_statement) => {
+            BeaconStatement::AlterAtlas(alter_atlas_table_statement) => {
                 // Apply the specified operation to the atlas collection and return an empty stream (since ALTER TABLE statements do not return results)
                 todo!()
             }

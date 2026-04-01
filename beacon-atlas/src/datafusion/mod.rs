@@ -81,6 +81,7 @@ use crate::{
 
 pub mod opener;
 pub mod source;
+pub mod table;
 
 const ATLAS_FILE_EXTENSION: &str = "atlas";
 

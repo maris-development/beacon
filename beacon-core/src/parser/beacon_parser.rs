@@ -50,7 +50,31 @@ impl<'a> BeaconParser<'a> {
         matches!(t1, Token::Word(w) if w.value.to_uppercase() == "INGEST")
     }
 
-    /// Parse: INGEST INTO ATLAS <table_name> FROM '<glob_pattern>' WITH <format>
+    fn parse_required_partition_name(&mut self) -> Result<String> {
+        self.df_parser
+            .parser
+            .expect_keyword(Keyword::ON)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let t = &self.df_parser.parser.peek_nth_token(0).token;
+        if !matches!(t, Token::Word(w) if w.value.to_uppercase() == "PARTITION") {
+            return Err(DataFusionError::Plan(
+                "Expected PARTITION after ON".to_string(),
+            ));
+        }
+        self.df_parser.parser.next_token();
+
+        let partition_name = self
+            .df_parser
+            .parser
+            .parse_identifier()
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+            .value;
+
+        Ok(partition_name)
+    }
+
+    /// Parse: INGEST INTO ATLAS <table_name> ON PARTITION <partition_name> FROM '<glob_pattern>' WITH <format>
     fn parse_ingest(&mut self) -> Result<BeaconStatement> {
         // Consume INGEST
         self.df_parser.parser.next_token();
@@ -76,6 +100,8 @@ impl<'a> BeaconParser<'a> {
             .parser
             .parse_object_name(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let partition_name = self.parse_required_partition_name()?;
 
         // Expect FROM
         self.df_parser
@@ -108,6 +134,7 @@ impl<'a> BeaconParser<'a> {
             glob_pattern,
             format,
             table_name,
+            partition_name,
         }))
     }
 
@@ -122,7 +149,7 @@ impl<'a> BeaconParser<'a> {
             && matches!(t3, Token::Word(w) if w.value.to_uppercase() == "DATASETS")
     }
 
-    /// Parse: DELETE ATLAS DATASETS [name1, name2, ...] FROM <table_name>
+    /// Parse: DELETE ATLAS DATASETS [name1, name2, ...] FROM <table_name> ON PARTITION <partition_name>
     fn parse_delete_atlas_datasets(&mut self) -> Result<BeaconStatement> {
         // Consume DELETE ATLAS DATASETS
         for _ in 0..3 {
@@ -162,10 +189,13 @@ impl<'a> BeaconParser<'a> {
             .parse_object_name(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
+        let partition_name = self.parse_required_partition_name()?;
+
         Ok(BeaconStatement::DeleteAtlasDatasets(
             DeleteAtlasDatasetsStatement {
                 dataset_names,
                 table_name,
+                partition_name,
             },
         ))
     }
@@ -232,7 +262,7 @@ impl<'a> BeaconParser<'a> {
             && matches!(t3, Token::Word(w) if w.keyword == Keyword::TABLE)
     }
 
-    /// Parse: ALTER ATLAS TABLE <table_name> ALTER COLUMN <column_name> SET DATA TYPE <data_type>
+    /// Parse: ALTER ATLAS TABLE <table_name> ON PARTITION <partition_name> ALTER COLUMN <column_name> SET DATA TYPE <data_type>
     fn parse_alter_atlas_table(&mut self) -> Result<BeaconStatement> {
         // Consume ALTER ATLAS TABLE
         for _ in 0..3 {
@@ -245,6 +275,8 @@ impl<'a> BeaconParser<'a> {
             .parser
             .parse_object_name(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let partition_name = self.parse_required_partition_name()?;
 
         // Expect ALTER
         self.df_parser
@@ -292,15 +324,14 @@ impl<'a> BeaconParser<'a> {
             .map_err(|e| DataFusionError::External(Box::new(e)))?
             .value;
 
-        Ok(BeaconStatement::ApplyAtlasOperation(
-            AlterAtlasTableStatement {
-                table_name,
-                op: AtlasOp::CastColumn {
-                    column_name,
-                    data_type,
-                },
+        Ok(BeaconStatement::AlterAtlas(AlterAtlasTableStatement {
+            table_name,
+            partition_name,
+            op: AtlasOp::CastColumn {
+                column_name,
+                data_type,
             },
-        ))
+        }))
     }
 }
 
@@ -310,13 +341,14 @@ mod tests {
 
     #[test]
     fn test_parse_ingest_statement() {
-        let sql = "INGEST INTO ATLAS my_table FROM '/data/**/*.csv' WITH csv";
+        let sql = "INGEST INTO ATLAS my_table ON PARTITION p0 FROM '/data/**/*.csv' WITH csv";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
 
         match stmt {
             BeaconStatement::Ingest(ingest) => {
                 assert_eq!(ingest.table_name.to_string(), "my_table");
+                assert_eq!(ingest.partition_name, "p0");
                 assert_eq!(ingest.glob_pattern, "/data/**/*.csv");
                 assert_eq!(ingest.format, "csv");
             }
@@ -326,12 +358,13 @@ mod tests {
 
     #[test]
     fn test_parse_ingest_display() {
-        let sql = "INGEST INTO ATLAS schema.table FROM '/data/*.parquet' WITH parquet";
+        let sql =
+            "INGEST INTO ATLAS schema.table ON PARTITION p1 FROM '/data/*.parquet' WITH parquet";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
         assert_eq!(
             stmt.to_string(),
-            "INGEST INTO ATLAS schema.table FROM '/data/*.parquet' WITH parquet"
+            "INGEST INTO ATLAS schema.table ON PARTITION p1 FROM '/data/*.parquet' WITH parquet"
         );
     }
 
@@ -345,21 +378,29 @@ mod tests {
 
     #[test]
     fn test_parse_ingest_missing_from() {
-        let sql = "INGEST INTO ATLAS my_table '/data/*.csv' WITH csv";
+        let sql = "INGEST INTO ATLAS my_table ON PARTITION p0 '/data/*.csv' WITH csv";
         let mut parser = BeaconParser::new(sql).unwrap();
         assert!(parser.parse_statement().is_err());
     }
 
     #[test]
     fn test_parse_ingest_missing_with() {
-        let sql = "INGEST INTO ATLAS my_table FROM '/data/*.csv'";
+        let sql = "INGEST INTO ATLAS my_table ON PARTITION p0 FROM '/data/*.csv'";
+        let mut parser = BeaconParser::new(sql).unwrap();
+        assert!(parser.parse_statement().is_err());
+    }
+
+    #[test]
+    fn test_parse_ingest_missing_partition_clause() {
+        let sql = "INGEST INTO ATLAS my_table FROM '/data/*.csv' WITH csv";
         let mut parser = BeaconParser::new(sql).unwrap();
         assert!(parser.parse_statement().is_err());
     }
 
     #[test]
     fn test_parse_delete_atlas_datasets_with_names() {
-        let sql = "DELETE ATLAS DATASETS 'dataset.nc', 'some_path/test.nc' FROM my_table";
+        let sql =
+            "DELETE ATLAS DATASETS 'dataset.nc', 'some_path/test.nc' FROM my_table ON PARTITION p0";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
 
@@ -373,6 +414,7 @@ mod tests {
                     ])
                 );
                 assert_eq!(s.table_name.to_string(), "my_table");
+                assert_eq!(s.partition_name, "p0");
             }
             _ => panic!("Expected DeleteAtlasDatasets statement"),
         }
@@ -380,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_parse_delete_atlas_datasets_without_names() {
-        let sql = "DELETE ATLAS DATASETS FROM my_table";
+        let sql = "DELETE ATLAS DATASETS FROM my_table ON PARTITION p1";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
 
@@ -388,6 +430,7 @@ mod tests {
             BeaconStatement::DeleteAtlasDatasets(s) => {
                 assert_eq!(s.dataset_names, None);
                 assert_eq!(s.table_name.to_string(), "my_table");
+                assert_eq!(s.partition_name, "p1");
             }
             _ => panic!("Expected DeleteAtlasDatasets statement"),
         }
@@ -395,21 +438,31 @@ mod tests {
 
     #[test]
     fn test_parse_delete_atlas_datasets_display() {
-        let sql = "DELETE ATLAS DATASETS 'ds1.nc', 'path/ds2.nc' FROM schema.table";
+        let sql = "DELETE ATLAS DATASETS 'ds1.nc', 'path/ds2.nc' FROM schema.table ON PARTITION p2";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
         assert_eq!(
             stmt.to_string(),
-            "DELETE ATLAS DATASETS 'ds1.nc', 'path/ds2.nc' FROM schema.table"
+            "DELETE ATLAS DATASETS 'ds1.nc', 'path/ds2.nc' FROM schema.table ON PARTITION p2"
         );
     }
 
     #[test]
     fn test_parse_delete_atlas_datasets_display_no_names() {
-        let sql = "DELETE ATLAS DATASETS FROM my_table";
+        let sql = "DELETE ATLAS DATASETS FROM my_table ON PARTITION p0";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
-        assert_eq!(stmt.to_string(), "DELETE ATLAS DATASETS FROM my_table");
+        assert_eq!(
+            stmt.to_string(),
+            "DELETE ATLAS DATASETS FROM my_table ON PARTITION p0"
+        );
+        assert!(parser.parse_statement().is_err());
+    }
+
+    #[test]
+    fn test_parse_delete_atlas_datasets_missing_partition_clause() {
+        let sql = "DELETE ATLAS DATASETS FROM my_table";
+        let mut parser = BeaconParser::new(sql).unwrap();
         assert!(parser.parse_statement().is_err());
     }
 
@@ -448,13 +501,15 @@ mod tests {
 
     #[test]
     fn test_parse_alter_atlas_table_cast() {
-        let sql = "ALTER ATLAS TABLE my_table ALTER COLUMN temperature SET DATA TYPE FLOAT";
+        let sql =
+            "ALTER ATLAS TABLE my_table ON PARTITION p0 ALTER COLUMN temperature SET DATA TYPE FLOAT";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
 
         match stmt {
-            BeaconStatement::ApplyAtlasOperation(s) => {
+            BeaconStatement::AlterAtlas(s) => {
                 assert_eq!(s.table_name.to_string(), "my_table");
+                assert_eq!(s.partition_name, "p0");
                 match s.op {
                     AtlasOp::CastColumn {
                         column_name,
@@ -471,18 +526,26 @@ mod tests {
 
     #[test]
     fn test_parse_alter_atlas_table_cast_display() {
-        let sql = "ALTER ATLAS TABLE schema.table ALTER COLUMN depth SET DATA TYPE INT";
+        let sql =
+            "ALTER ATLAS TABLE schema.table ON PARTITION p9 ALTER COLUMN depth SET DATA TYPE INT";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
         assert_eq!(
             stmt.to_string(),
-            "ALTER ATLAS TABLE schema.table ALTER COLUMN depth SET DATA TYPE INT"
+            "ALTER ATLAS TABLE schema.table ON PARTITION p9 ALTER COLUMN depth SET DATA TYPE INT"
         );
     }
 
     #[test]
     fn test_parse_alter_atlas_table_missing_set_data_type() {
-        let sql = "ALTER ATLAS TABLE my_table ALTER COLUMN col";
+        let sql = "ALTER ATLAS TABLE my_table ON PARTITION p0 ALTER COLUMN col";
+        let mut parser = BeaconParser::new(sql).unwrap();
+        assert!(parser.parse_statement().is_err());
+    }
+
+    #[test]
+    fn test_parse_alter_atlas_table_missing_partition_clause() {
+        let sql = "ALTER ATLAS TABLE my_table ALTER COLUMN col SET DATA TYPE INT";
         let mut parser = BeaconParser::new(sql).unwrap();
         assert!(parser.parse_statement().is_err());
     }
