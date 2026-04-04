@@ -1,18 +1,20 @@
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
 use arrow::{
     array::StringArray,
-    datatypes::{DataType, Field, Schema},
+    datatypes::{DataType, Field, Schema, SchemaRef},
     record_batch::RecordBatch,
 };
-use beacon_datafusion_ext::table_ext::{ListingTableDefinition, TableDefinition};
+use beacon_datafusion_ext::table_ext::{ExternalTableDefinition, TableDefinition};
 use datafusion::{
-    catalog::TableProvider,
-    datasource::MemTable,
+    catalog::{Session, TableProvider},
+    common::{Constraints, Statistics},
+    datasource::{MemTable, TableType, listing::ListingTable},
     error::DataFusionError,
     execution::{SendableRecordBatchStream, object_store::ObjectStoreUrl},
-    physical_plan::stream::RecordBatchStreamAdapter,
-    prelude::SessionContext,
+    logical_expr::TableProviderFilterPushDown,
+    physical_plan::{ExecutionPlan, stream::RecordBatchStreamAdapter},
+    prelude::{Expr, SessionContext},
 };
 use futures::{StreamExt, stream::BoxStream};
 
@@ -70,21 +72,99 @@ fn ingestion_result_batch(
     .map_err(DataFusionError::from)
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AtlasTable {
+    name: String,
+    inner: ListingTable,
+}
+
+impl AtlasTable {
+    pub fn definition(&self) -> AtlasTableDefinition {
+        let location = self.inner.table_paths()[0].to_string();
+        let table_name = self.name.clone();
+
+        AtlasTableDefinition {
+            name: table_name,
+            location,
+        }
+    }
+
+    pub async fn from_definition(
+        definition: AtlasTableDefinition,
+        context: Arc<SessionContext>,
+        data_store_url: &ObjectStoreUrl,
+    ) -> anyhow::Result<Self> {
+        let provider = definition.build_provider(context, data_store_url).await?;
+        let inner = provider
+            .as_any()
+            .downcast_ref::<ListingTable>()
+            .ok_or_else(|| anyhow::anyhow!("expected provider to be a ListingTable"))?
+            .clone();
+
+        Ok(Self {
+            name: definition.name,
+            inner,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TableProvider for AtlasTable {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    /// Get a reference to the schema for this table
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+
+    fn constraints(&self) -> Option<&Constraints> {
+        self.inner.constraints()
+    }
+
+    /// Get the type of this table for metadata/catalog purposes.
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        self.inner.scan(state, projection, filters, limit).await
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
+        self.inner.supports_filters_pushdown(filters)
+    }
+
+    fn statistics(&self) -> Option<Statistics> {
+        self.inner.statistics()
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AtlasTableDefinition {
     pub name: String,
     pub location: String,
 }
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "atlas_table")]
-impl TableDefinition for AtlasTable {
+impl TableDefinition for AtlasTableDefinition {
     async fn build_provider(
         &self,
         context: Arc<SessionContext>,
         data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
-        let definition = ListingTableDefinition {
+        let definition = ExternalTableDefinition {
             name: self.name.clone(),
             location: atlas_metadata_location(&self.location),
             file_type: "atlas".to_string(),
@@ -99,7 +179,7 @@ impl TableDefinition for AtlasTable {
     }
 }
 
-impl AtlasTable {
+impl AtlasTableDefinition {
     pub async fn create(
         context: Arc<SessionContext>,
         data_store_url: &ObjectStoreUrl,
@@ -149,7 +229,7 @@ impl AtlasTable {
         context: Arc<SessionContext>,
         data_store_url: &ObjectStoreUrl,
         partition_name: &str,
-        ingestion: BoxStream<'static, Dataset>,
+        ingestion: BoxStream<'static, anyhow::Result<Dataset>>,
         fail_fast: bool,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let mut collection = self
@@ -162,7 +242,7 @@ impl AtlasTable {
         let result_schema = ingestion_result_schema();
         let stream_schema = result_schema.clone();
         let partition_name = partition_name.to_string();
-        let initial_state: (BoxStream<'static, Dataset>, Option<_>, bool) =
+        let initial_state: (BoxStream<'static, anyhow::Result<Dataset>>, Option<_>, bool) =
             (ingestion, Some(writer), false);
 
         let stream = futures::stream::unfold(
@@ -201,6 +281,20 @@ impl AtlasTable {
                         return None;
                     };
 
+                    let dataset = match dataset {
+                        Ok(dataset) => dataset,
+                        Err(error) => {
+                            stop_requested = fail_fast;
+                            let batch = ingestion_result_batch(
+                                schema,
+                                partition_name,
+                                "<unknown>".to_string(),
+                                "error".to_string(),
+                                format!("failed to read dataset from stream: {error}"),
+                            );
+                            return Some((batch, (ingestion, writer, stop_requested)));
+                        }
+                    };
                     let dataset_name = dataset.0.batch_name.clone();
                     let write_result = match writer.as_mut() {
                         Some(writer) => writer.write_dataset(dataset).await,

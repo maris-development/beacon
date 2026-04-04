@@ -333,9 +333,8 @@ impl FileFormat for AtlasFormat {
         }
 
         if schemas.is_empty() {
-            return Err(execution_error(
-                "No partitions found in Atlas collection(s) to infer schema",
-            ));
+            // No partitions found in any discovered collections; return an empty schema with no tables.
+            return Ok(Arc::new(arrow::datatypes::Schema::empty()));
         }
 
         let merged = AtlasSchema::merge_all_with_mode(

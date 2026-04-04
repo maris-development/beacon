@@ -11,6 +11,7 @@ use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
 use beacon_query::{parser::Parser, Query};
+use datafusion::execution::SendableRecordBatchStream;
 use parking_lot::Mutex;
 
 pub struct Runtime {
@@ -128,5 +129,13 @@ impl Runtime {
 
     pub fn data_lake(&self) -> Arc<DataLake> {
         self.virtual_machine.data_lake()
+    }
+
+    pub async fn run_sql(
+        &self,
+        sql: String,
+        is_super_user: bool,
+    ) -> anyhow::Result<SendableRecordBatchStream> {
+        self.virtual_machine.run_sql(sql, is_super_user).await
     }
 }

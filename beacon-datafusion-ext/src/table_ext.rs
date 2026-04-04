@@ -4,11 +4,17 @@
 //! together with helper logic that normalizes schema and partition metadata during
 //! provider creation.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use beacon_common::listing_url::parse_listing_table_url;
-use datafusion::common::DataFusionError;
-use datafusion::datasource::ViewTable;
+use datafusion::catalog::Session;
+use datafusion::common::{Constraints, DataFusionError, Statistics, not_impl_err};
+use datafusion::datasource::{TableType, ViewTable};
+use datafusion::logical_expr::dml::InsertOp;
+use datafusion::logical_expr::{LogicalPlan, TableProviderFilterPushDown};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::prelude::{Expr, SQLOptions};
 use datafusion::{
     arrow::datatypes::{DataType, SchemaRef},
     catalog::TableProvider,
@@ -33,9 +39,93 @@ pub trait TableDefinition {
     ) -> anyhow::Result<Arc<dyn TableProvider>>;
 }
 
+#[derive(Clone, Debug)]
+pub struct ExternalTable {
+    definition: ExternalTableDefinition,
+    inner: ListingTable,
+}
+
+impl ExternalTable {
+    pub fn new(definition: ExternalTableDefinition, inner: ListingTable) -> Self {
+        Self { definition, inner }
+    }
+
+    pub fn definition(&self) -> &ExternalTableDefinition {
+        &self.definition
+    }
+}
+
+#[async_trait::async_trait]
+impl TableProvider for ExternalTable {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+
+    fn constraints(&self) -> Option<&Constraints> {
+        self.inner.constraints()
+    }
+
+    /// Get the type of this table for metadata/catalog purposes.
+    fn table_type(&self) -> TableType {
+        self.inner.table_type()
+    }
+
+    /// Get the create statement used to create this table, if available.
+    fn get_table_definition(&self) -> Option<&str> {
+        self.definition.definition.as_deref()
+    }
+
+    /// Get the [`LogicalPlan`] of this table, if available.
+    fn get_logical_plan(&'_ self) -> Option<Cow<'_, LogicalPlan>> {
+        self.inner.get_logical_plan()
+    }
+
+    /// Get the default value for a column, if available.
+    fn get_column_default(&self, column: &str) -> Option<&Expr> {
+        self.inner.get_column_default(column)
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        self.inner
+            .scan(state, projection, filters, limit)
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("ExternalTable scan error: {e}")))
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
+        self.inner.supports_filters_pushdown(filters)
+    }
+
+    fn statistics(&self) -> Option<Statistics> {
+        self.inner.statistics()
+    }
+
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        _input: Arc<dyn ExecutionPlan>,
+        _insert_op: InsertOp,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        not_impl_err!("Insert into ExternalTable is not supported")
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-/// Persisted configuration for a DataFusion [`ListingTable`].
-pub struct ListingTableDefinition {
+/// Persisted configuration for an External Table.
+pub struct ExternalTableDefinition {
     /// Logical table name.
     pub name: String,
     /// Data location, relative to the object-store base URL, optionally with a glob.
@@ -52,6 +142,72 @@ pub struct ListingTableDefinition {
     pub options: std::collections::HashMap<String, String>,
     /// If true, creation should no-op when the target table already exists.
     pub if_not_exists: bool,
+}
+
+/// Converts a concrete listing table path into the location format expected by `parse_listing_table_url`.
+fn listing_location_from_table_path(
+    table_path: &datafusion::datasource::listing::ListingTableUrl,
+) -> anyhow::Result<String> {
+    let full = table_path.as_str();
+    let store_url = table_path.object_store().to_string();
+
+    let mut location = full
+        .strip_prefix(&store_url)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ListingTable path '{}' does not start with object store URL '{}'",
+                full,
+                store_url
+            )
+        })?
+        .to_string();
+
+    if table_path.scheme() != "file" {
+        location = location.trim_start_matches('/').to_string();
+    }
+
+    if let Some(glob) = table_path.get_glob() {
+        if !location.is_empty() && !location.ends_with('/') {
+            location.push('/');
+        }
+        location.push_str(&glob.to_string());
+    }
+
+    anyhow::ensure!(
+        !location.is_empty(),
+        "Derived empty location from ListingTable path '{}'",
+        full
+    );
+
+    Ok(location)
+}
+
+/// Best-effort file type inference for serialized listing table definitions.
+fn infer_file_type(options: &ListingOptions) -> String {
+    let from_file_extension = options
+        .file_extension
+        .trim()
+        .trim_start_matches('.')
+        .to_string();
+    if !from_file_extension.is_empty() {
+        return from_file_extension;
+    }
+
+    if let Some(compression) = options.format.compression_type()
+        && let Ok(ext) = options.format.get_ext_with_compression(&compression)
+    {
+        let inferred = ext.trim().trim_start_matches('.').to_string();
+        if !inferred.is_empty() {
+            return inferred;
+        }
+    }
+
+    options
+        .format
+        .get_ext()
+        .trim()
+        .trim_start_matches('.')
+        .to_string()
 }
 
 /// Partition column declarations represented as `(name, data_type)` tuples.
@@ -153,7 +309,7 @@ fn fallback_file_glob(file_type: &str) -> String {
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "listing_table")]
-impl TableDefinition for ListingTableDefinition {
+impl TableDefinition for ExternalTableDefinition {
     /// Builds a [`ListingTable`] provider from the persisted listing-table definition.
     async fn build_provider(
         &self,
@@ -206,7 +362,7 @@ impl TableDefinition for ListingTableDefinition {
                 .get_file_statistic_cache(),
         );
         let table = provider.with_definition(self.definition.clone());
-        Ok(Arc::new(table))
+        Ok(Arc::new(ExternalTable::new(self.clone(), table)))
     }
 }
 
@@ -223,7 +379,7 @@ impl ViewTableDefinition {
     /// Builds a serializable view definition from an existing [`ViewTable`].
     ///
     /// Returns an error when the input view has no persisted SQL definition.
-    pub fn try_from_view(table: ViewTable) -> anyhow::Result<Self> {
+    pub fn try_from_view(table: &ViewTable) -> anyhow::Result<Self> {
         match table.definition() {
             Some(def) => Ok(Self {
                 name: "view".to_string(), // Name is not used for view tables, so we can set a default value here
@@ -233,6 +389,15 @@ impl ViewTableDefinition {
                 "ViewTableDefinition requires a SQL definition to be created from a ViewTable without a definition"
             )),
         }
+    }
+
+    pub async fn into_view_table(self, context: Arc<SessionContext>) -> anyhow::Result<ViewTable> {
+        let options = SQLOptions::new().with_allow_ddl(true);
+        let df = context.sql_with_options(&self.definition, options).await?;
+        Ok(ViewTable::new(
+            df.logical_plan().clone(),
+            Some(self.definition),
+        ))
     }
 }
 
@@ -259,7 +424,7 @@ impl TableDefinition for ViewTableDefinition {
 #[cfg(test)]
 /// Unit tests covering listing-table and view-table definition behavior.
 mod tests {
-    use super::{ListingTableDefinition, TableDefinition, ViewTableDefinition};
+    use super::{ExternalTableDefinition, TableDefinition, ViewTableDefinition};
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datafusion::datasource::ViewTable;
     use datafusion::execution::object_store::ObjectStoreUrl;
@@ -294,7 +459,7 @@ mod tests {
         let data_file = root.join("part-0.csv");
         fs::write(&data_file, "1\n2\n").expect("csv fixture should be written");
 
-        let definition = ListingTableDefinition {
+        let definition = ExternalTableDefinition {
             name: "t_csv".to_string(),
             location: format!("{}/", to_store_relative_location(&root)),
             file_type: "csv".to_string(),
@@ -334,7 +499,7 @@ mod tests {
             Field::new("year", DataType::Utf8, true),
         ]));
 
-        let definition = ListingTableDefinition {
+        let definition = ExternalTableDefinition {
             name: "t_partitioned".to_string(),
             location: format!("{}/", to_store_relative_location(&root)),
             file_type: "csv".to_string(),
@@ -366,7 +531,7 @@ mod tests {
     #[tokio::test]
     /// Verifies unknown file formats fail provider construction with a clear error.
     async fn listing_table_definition_build_provider_rejects_unknown_file_type() {
-        let definition = ListingTableDefinition {
+        let definition = ExternalTableDefinition {
             name: "t_bad".to_string(),
             location: "tmp".to_string(),
             file_type: "not_a_real_format".to_string(),
@@ -400,7 +565,7 @@ mod tests {
             .unwrap();
         let view = ViewTable::new(plan, Some("SELECT 1 AS x".to_string()));
 
-        let definition = ViewTableDefinition::try_from_view(view).unwrap();
+        let definition = ViewTableDefinition::try_from_view(&view).unwrap();
         assert_eq!(definition.name, "view");
         assert_eq!(definition.definition, "SELECT 1 AS x");
     }
@@ -416,7 +581,7 @@ mod tests {
             .unwrap();
         let view = ViewTable::new(plan, None);
 
-        let err = ViewTableDefinition::try_from_view(view).expect_err("missing definition");
+        let err = ViewTableDefinition::try_from_view(&view).expect_err("missing definition");
         assert!(err.to_string().contains("requires a SQL definition"));
     }
 

@@ -28,6 +28,12 @@ pub struct Config {
     pub sanitize_schema: bool,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
     pub enable_sql: bool,
+    #[envconfig(from = "BEACON_WS_SQL_ENABLE", default = "false")]
+    pub ws_sql_enable: bool,
+    #[envconfig(from = "BEACON_WS_SQL_TICKET_TTL_SECS", default = "60")]
+    pub ws_sql_ticket_ttl_secs: u64,
+    #[envconfig(from = "BEACON_WS_SQL_MAX_SQL_BYTES", default = "1048576")]
+    pub ws_sql_max_sql_bytes: usize,
     #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
     pub st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]

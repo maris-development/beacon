@@ -7,13 +7,17 @@ use std::{
 };
 
 use arrow::datatypes::SchemaRef;
+use beacon_atlas::datafusion::table::AtlasTable;
 use beacon_common::listing_url::parse_listing_table_url;
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::{
+    format_ext::{DatasetMetadata, FileFormatFactoryExt},
+    table_ext::{ExternalTable, ViewTableDefinition},
+};
 use beacon_formats::file_formats;
 use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
-    datasource::listing::ListingTableUrl,
+    datasource::{ViewTable, listing::ListingTableUrl},
     error::DataFusionError,
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
@@ -45,6 +49,8 @@ pub struct Config {
 }
 
 pub struct DataLake {
+    runtime_handle: tokio::runtime::Handle,
+
     data_directory_store_url: ObjectStoreUrl,
     table_directory_store_url: ObjectStoreUrl,
 
@@ -206,6 +212,7 @@ impl DataLake {
             file_formats(session_context.clone(), get_datasets_object_store().await).unwrap();
 
         Self {
+            runtime_handle: tokio::runtime::Handle::current(),
             data_directory_store_url: datasets_object_store_url,
             table_directory_store_url: tables_object_store_url,
             session_context,
@@ -556,10 +563,13 @@ impl DataLake {
         table_name: &str,
         _op: serde_json::Value,
     ) -> Result<(), TableError> {
-        let tables = self.tables.lock();
-        let table = tables
-            .get(table_name)
-            .ok_or(TableError::TableNotFound(table_name.to_string()))?;
+        let table = {
+            let tables = self.tables.lock();
+            tables
+                .get(table_name)
+                .cloned()
+                .ok_or(TableError::TableNotFound(table_name.to_string()))?
+        };
 
         table
             .table_type
@@ -660,25 +670,101 @@ impl DataLake {
         Ok(())
     }
 
-    pub async fn remove_table(&self, table_name: &str) -> Result<(), TableError> {
-        let mut tables = self.tables.lock();
-        if !tables.contains_key(table_name) {
-            return Err(TableError::TableNotFound(table_name.to_string()));
-        }
-
-        if let Some(merged_table) = Self::merged_table_references(&tables, table_name) {
-            return Err(TableError::TableReferencedByMerged {
-                table_name: table_name.to_string(),
-                merged_table,
+    fn serialize_table_provider_definition(
+        table_name: &str,
+        table: &dyn TableProvider,
+    ) -> datafusion::error::Result<String> {
+        if let Some(table) = table.as_any().downcast_ref::<AtlasTable>() {
+            let definition = table.definition();
+            return serde_json::to_string_pretty(&definition).map_err(|e| {
+                DataFusionError::Plan(format!(
+                    "Failed to serialize AtlasTable definition for table {}: {}",
+                    table_name, e
+                ))
             });
         }
 
-        let table = tables.remove(table_name);
-        drop(tables); // Release the lock before async call
+        if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {
+            return serde_json::to_string_pretty(table.definition()).map_err(|e| {
+                DataFusionError::Plan(format!(
+                    "Failed to serialize ExternalTable definition for table {}: {}",
+                    table_name, e
+                ))
+            });
+        }
 
-        let mut table_providers = self.table_providers.lock();
-        table_providers.remove(table_name);
-        drop(table_providers); // Release the lock before deleting the table
+        if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
+            let definition = ViewTableDefinition::try_from_view(table).map_err(|e| {
+                DataFusionError::Plan(format!(
+                    "Failed to create ViewTableDefinition for table {}: {}",
+                    table_name, e
+                ))
+            })?;
+            return serde_json::to_string_pretty(&definition).map_err(|e| {
+                DataFusionError::Plan(format!(
+                    "Failed to serialize ViewTableDefinition for table {}: {}",
+                    table_name, e
+                ))
+            });
+        }
+
+        Err(DataFusionError::Plan(format!(
+            "Unsupported table provider type for table {}",
+            table_name
+        )))
+    }
+
+    async fn persist_table_definition_json(
+        &self,
+        table_name: &str,
+        table_json: String,
+    ) -> datafusion::error::Result<()> {
+        let path = object_store::path::Path::from(format!("{}/table.json", table_name));
+        let table_object_store = self
+            .session_context
+            .runtime_env()
+            .object_store(&self.table_directory_store_url)
+            .map_err(|e| {
+                DataFusionError::Plan(format!(
+                    "Failed to get table object store for registering table {}: {}",
+                    table_name, e
+                ))
+            })?;
+
+        table_object_store
+            .put(&path, table_json.into_bytes().into())
+            .await
+            .map_err(|e| {
+                DataFusionError::Plan(format!(
+                    "Failed to store table definition for table {}: {}",
+                    table_name, e
+                ))
+            })?;
+
+        Ok(())
+    }
+
+    pub async fn remove_table(&self, table_name: &str) -> Result<(), TableError> {
+        let table = {
+            let mut tables = self.tables.lock();
+            if !tables.contains_key(table_name) {
+                return Err(TableError::TableNotFound(table_name.to_string()));
+            }
+
+            if let Some(merged_table) = Self::merged_table_references(&tables, table_name) {
+                return Err(TableError::TableReferencedByMerged {
+                    table_name: table_name.to_string(),
+                    merged_table,
+                });
+            }
+
+            tables.remove(table_name)
+        };
+
+        {
+            let mut table_providers = self.table_providers.lock();
+            table_providers.remove(table_name);
+        }
 
         if let Some(table) = table {
             let table_object_store_url = self.table_directory_store_url.clone();
@@ -718,6 +804,87 @@ impl SchemaProvider for DataLake {
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
         let table_providers = self.table_providers.lock();
         Ok(table_providers.get(name).cloned())
+    }
+
+    fn register_table(
+        &self,
+        name: String,
+        table: Arc<dyn TableProvider>,
+    ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+        let handle = self.runtime_handle.clone();
+        let cloned_table = table.clone();
+        tokio::task::block_in_place(|| {
+            handle.block_on(async move {
+                let table_json = Self::serialize_table_provider_definition(&name, table.as_ref())?;
+                self.persist_table_definition_json(&name, table_json)
+                    .await?;
+
+                // If we successfully stored the table definition, we can now add it to the in-memory map of tables.
+                self.table_providers.lock().insert(name, table);
+
+                Ok::<(), DataFusionError>(())
+            })
+        })?;
+
+        Ok(Some(cloned_table))
+    }
+
+    /// If supported by the implementation, removes the `name` table from this
+    /// schema and returns the previously registered [`TableProvider`], if any.
+    ///
+    /// If no `name` table exists, returns Ok(None).
+    #[allow(unused_variables)]
+    fn deregister_table(
+        &self,
+        name: &str,
+    ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+        let handle = self.runtime_handle.clone();
+        tokio::task::block_in_place(|| {
+            handle.block_on(async move {
+                // Remove the entire table directory for the table, not just the table.json file, to ensure that all metadata and related files are also removed.
+                let path = object_store::path::Path::from(name);
+                let table_object_store = self
+                    .session_context
+                    .runtime_env()
+                    .object_store(&self.table_directory_store_url)
+                    .map_err(|e| {
+                        DataFusionError::Plan(format!(
+                            "Failed to get table object store for deregistering table {}: {}",
+                            name, e
+                        ))
+                    })?;
+
+                let mut removable_files = table_object_store.list(Some(&path));
+                while let Some(file) = removable_files.next().await {
+                    match file {
+                        Ok(file) => {
+                            if let Err(e) = table_object_store.delete(&file.location).await {
+                                tracing::error!(
+                                    "Failed to delete file {:?} for table {}: {}",
+                                    file.location,
+                                    name,
+                                    e
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to list files for table {} during deregistration: {}",
+                                name,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Remove the table from the in-memory map of tables.
+                self.table_providers.lock().remove(name);
+
+                Ok::<(), DataFusionError>(())
+            })
+        })?;
+
+        Ok(None)
     }
 }
 

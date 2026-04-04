@@ -14,14 +14,15 @@ use datafusion::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SendableRecordBatchStream, SessionStateBuilder,
     },
-    prelude::{DataFrame, SQLOptions, SessionConfig, SessionContext},
+    prelude::{SQLOptions, SessionConfig, SessionContext},
 };
-use futures::{stream::BoxStream, StreamExt};
+use futures::StreamExt;
 use parking_lot::Mutex;
 
 use crate::{
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
     query_result::{ArrowOutputStream, QueryOutput, QueryResult},
+    statement_handlers::SqlStatementExecutor,
 };
 
 pub struct VirtualMachine {
@@ -290,43 +291,25 @@ impl VirtualMachine {
         Ok(self.data_lake.apply_operation(table_name, op).await?)
     }
 
-    pub async fn run_sql(&self, sql: String) -> anyhow::Result<SendableRecordBatchStream> {
+    pub async fn run_sql(
+        &self,
+        sql: String,
+        is_super_user: bool,
+    ) -> anyhow::Result<SendableRecordBatchStream> {
         let sql_options = SQLOptions::new()
-            .with_allow_ddl(false)
-            .with_allow_dml(false)
-            .with_allow_statements(false);
+            .with_allow_ddl(true)
+            .with_allow_dml(true)
+            .with_allow_statements(true);
 
-        let mut parser = BeaconParser::new(&sql)?;
-        let statement = parser.parse_statement()?;
+        let statement = Self::parse_beacon_statement(&sql)?;
+        let statement_executor =
+            SqlStatementExecutor::new(self.session_ctx.clone(), self.data_lake.clone());
 
-        match statement {
-            BeaconStatement::DFStatement(statement) => {
-                let state = self.session_ctx.state();
-                let plan = state.statement_to_plan(*statement).await?;
+        statement_executor.execute(statement, &sql_options).await
+    }
 
-                sql_options.verify_plan(&plan)?;
-
-                let df = DataFrame::new(state, plan);
-                let stream = df.execute_stream().await?;
-
-                Ok(stream)
-            }
-            BeaconStatement::Ingest(ingest_statement) => {
-                // Ingest data into the specified atlas collection and return an empty stream (since INGEST statements do not return results)
-                todo!()
-            }
-            BeaconStatement::DeleteAtlasDatasets(delete_atlas_datasets_statement) => {
-                // Delete datasets from the specified atlas collection and return an empty stream (since DELETE statements do not return results)
-                todo!()
-            }
-            BeaconStatement::CreateAtlasTable(create_atlas_table_statement) => {
-                // Create a new atlas collection and return an empty stream (since CREATE TABLE statements do not return results)
-                todo!()
-            }
-            BeaconStatement::AlterAtlas(alter_atlas_table_statement) => {
-                // Apply the specified operation to the atlas collection and return an empty stream (since ALTER TABLE statements do not return results)
-                todo!()
-            }
-        }
+    fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
+        let mut parser = BeaconParser::new(sql)?;
+        parser.parse_statement().map_err(Into::into)
     }
 }

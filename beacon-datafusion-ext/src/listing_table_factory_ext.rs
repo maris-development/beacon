@@ -57,8 +57,6 @@ impl TableProviderFactory for ListingTableFactoryExt {
 
         let mut listing_table_url = parse_listing_table_url(&self.store_url, &cmd.location)?;
 
-        println!("Creating listing table with URL: {listing_table_url}");
-
         let options = ListingOptions::new(file_format)
             .with_file_extension("") // file extension is not needed for listing table factory since the file format will handle it in `infer_schema` and `infer_partition_schema`
             .with_session_config_options(session_state.config())

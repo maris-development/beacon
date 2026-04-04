@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use datafusion::{
-    catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
+    catalog::TableProvider, datasource::provider::DefaultTableFactory,
+    execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 use futures::StreamExt;
 use object_store::{

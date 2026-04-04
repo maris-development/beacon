@@ -14,6 +14,8 @@ use utoipa::{
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use crate::auth::verify_basic_auth_header;
+
 mod check;
 mod file;
 mod tables;
@@ -27,34 +29,8 @@ async fn basic_auth(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let auth_header = headers
-        .get("Authorization")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let auth_str = auth_header.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    if !auth_str.starts_with("Basic ") {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    let credentials = base64::decode(&auth_str[6..]).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let credentials = String::from_utf8(credentials).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let parts: Vec<&str> = credentials.split(':').collect();
-    if parts.len() != 2 {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    let (username, password) = (parts[0], parts[1]);
-
-    if username == beacon_config::CONFIG.admin_username
-        && password == beacon_config::CONFIG.admin_password
-    {
-        Ok(next.run(request).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
-    }
+    verify_basic_auth_header(&headers)?;
+    Ok(next.run(request).await)
 }
 
 pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
