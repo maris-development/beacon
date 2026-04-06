@@ -14,6 +14,7 @@ use crate::{
         loaders::register_default_ingest_loaders,
         payload::StatementPayload,
         registry::{IngestFormatLoaderRegistry, StatementRegistry},
+        stream_coalescer::coalesce_sql_stream,
     },
 };
 
@@ -46,7 +47,8 @@ impl SqlStatementExecutor {
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let payload: StatementPayload = statement.into();
         let handler = self.statement_registry.get_handler(payload.kind())?;
+        let stream = handler.execute(payload, &self.context, sql_options).await?;
 
-        handler.execute(payload, &self.context, sql_options).await
+        Ok(coalesce_sql_stream(stream))
     }
 }
