@@ -33,7 +33,7 @@ impl IngestFormatLoader for NetcdfIngestFormatLoader {
             .await?;
 
         let datasets = objects.into_iter().map(move |obj| {
-            let file_path = datasets_store.object_url_path(&obj.location)?;
+            let file_path = datasets_store.translate_netcdf_url_path(&obj.location)?;
             let reader = NetCDFArrowReader::new(&file_path)?;
             let arrays = reader.read_columns::<Vec<_>>(None)?;
             let schema = reader.schema();
