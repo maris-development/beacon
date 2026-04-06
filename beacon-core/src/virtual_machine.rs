@@ -4,12 +4,15 @@ use arrow::{
     array::AsArray,
     datatypes::{SchemaRef, UInt64Type},
 };
-use beacon_data_lake::{table::Table, DataLake};
+use beacon_data_lake::{
+    table::{Table, TableFormat},
+    DataLake, FileManager, TableManager,
+};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
 use beacon_planner::{metrics::ConsolidatedMetrics, plan::BeaconQueryPlan};
 use datafusion::{
-    catalog::{SchemaProvider, TableFunctionImpl},
+    catalog::TableFunctionImpl,
     execution::{
         disk_manager::DiskManagerConfig, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SendableRecordBatchStream, SessionStateBuilder,
@@ -28,7 +31,8 @@ use crate::{
 pub struct VirtualMachine {
     table_functions: Vec<Arc<dyn BeaconTableFunctionImpl>>,
     session_ctx: Arc<SessionContext>,
-    data_lake: Arc<DataLake>,
+    table_manager: Arc<TableManager>,
+    file_manager: Arc<FileManager>,
 }
 
 impl VirtualMachine {
@@ -39,13 +43,15 @@ impl VirtualMachine {
 
         let session_ctx = Self::init_ctx(memory_pool.clone())?;
         let data_lake = Arc::new(DataLake::new(session_ctx.clone()).await);
+        let table_manager = data_lake.table_manager();
+        let file_manager = data_lake.file_manager();
 
         session_ctx
             .catalog("datafusion")
             .unwrap()
-            .register_schema("public", data_lake.clone())?;
+            .register_schema("public", table_manager.clone())?;
 
-        data_lake.init_tables(session_ctx.clone()).await?;
+        table_manager.init_tables().await?;
 
         // INIT Functions from geodatafusion
         geodatafusion::register(&session_ctx);
@@ -70,7 +76,7 @@ impl VirtualMachine {
         let table_functions = beacon_functions::file_formats::register_table_functions(
             tokio::runtime::Handle::current(),
             session_ctx.clone(),
-            data_lake.data_object_store_url(),
+            file_manager.data_object_store_url(),
             beacon_object_storage::get_datasets_object_store().await,
         );
 
@@ -81,14 +87,29 @@ impl VirtualMachine {
             );
         }
 
-        // Spawn the background task to sync tables from the data lake at regular intervals
-        data_lake.spawn_sync_table_refresh(beacon_config::CONFIG.table_sync_interval_secs);
+        // Periodically refresh table registry from table metadata storage.
+        let refresh_table_manager = table_manager.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                beacon_config::CONFIG.table_sync_interval_secs,
+            ));
+
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                tracing::info!("Refreshing tables...");
+                if let Err(error) = refresh_table_manager.init_tables().await {
+                    tracing::error!("Failed to refresh tables: {}", error);
+                }
+            }
+        });
 
         //FINISH INIT FUNCTIONS FROM beacon-functions module
         Ok(Self {
             table_functions,
             session_ctx,
-            data_lake,
+            table_manager,
+            file_manager,
         })
     }
 
@@ -132,8 +153,12 @@ impl VirtualMachine {
         self.session_ctx.clone()
     }
 
-    pub fn data_lake(&self) -> Arc<DataLake> {
-        self.data_lake.clone()
+    pub fn table_manager(&self) -> Arc<TableManager> {
+        self.table_manager.clone()
+    }
+
+    pub fn file_manager(&self) -> Arc<FileManager> {
+        self.file_manager.clone()
     }
 
     pub fn list_functions(&self) -> Vec<FunctionDoc> {
@@ -165,7 +190,7 @@ impl VirtualMachine {
     }
 
     pub fn list_tables(&self) -> Vec<String> {
-        self.data_lake.table_names()
+        self.table_manager.table_names()
     }
 
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
@@ -190,11 +215,12 @@ impl VirtualMachine {
     }
 
     pub async fn add_table(&self, table: Table) -> anyhow::Result<()> {
-        Ok(self.data_lake.create_table(table).await?)
+        Ok(self.table_manager.create_table(table).await?)
     }
 
     pub async fn delete_table(&self, table_name: &str) -> anyhow::Result<()> {
-        Ok(self.data_lake.remove_table(table_name).await?)
+        self.table_manager.deregister_table(table_name)?;
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, beacon_plan, query_metrics))]
@@ -263,7 +289,7 @@ impl VirtualMachine {
     }
 
     pub async fn list_dataset_schema(&self, dataset: String) -> anyhow::Result<SchemaRef> {
-        Ok(self.data_lake.list_dataset_schema(&dataset).await?)
+        Ok(self.file_manager.list_dataset_schema(&dataset).await?)
     }
 
     pub async fn list_datasets(
@@ -272,15 +298,18 @@ impl VirtualMachine {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<DatasetMetadata>> {
-        Ok(self.data_lake.list_datasets(offset, limit, pattern).await?)
+        Ok(self
+            .file_manager
+            .list_datasets(offset, limit, pattern)
+            .await?)
     }
 
     pub async fn total_datasets(&self) -> anyhow::Result<usize> {
         self.list_datasets(None, None, None).await.map(|v| v.len())
     }
 
-    pub(crate) async fn list_table_config(&self, table_name: String) -> Option<Table> {
-        self.data_lake.list_table(&table_name)
+    pub(crate) async fn list_table_config(&self, table_name: String) -> Option<TableFormat> {
+        self.table_manager.list_table(&table_name)
     }
 
     pub(crate) async fn apply_table_operation(
@@ -288,7 +317,39 @@ impl VirtualMachine {
         table_name: &str,
         op: serde_json::Value,
     ) -> Result<(), anyhow::Error> {
-        Ok(self.data_lake.apply_operation(table_name, op).await?)
+        Ok(self.table_manager.apply_operation(table_name, op).await?)
+    }
+
+    pub async fn upload_file<S>(
+        &self,
+        file_path: &str,
+        stream: S,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        S: futures::Stream<Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>
+            + Unpin,
+    {
+        self.file_manager.upload_file(file_path, stream).await
+    }
+
+    pub async fn download_file(
+        &self,
+        file_path: &str,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>,
+        >,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        self.file_manager.download_file(file_path).await
+    }
+
+    pub async fn delete_file(
+        &self,
+        file_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.file_manager.delete_file(file_path).await
     }
 
     pub async fn run_sql(
@@ -303,7 +364,7 @@ impl VirtualMachine {
 
         let statement = Self::parse_beacon_statement(&sql)?;
         let statement_executor =
-            SqlStatementExecutor::new(self.session_ctx.clone(), self.data_lake.clone());
+            SqlStatementExecutor::new(self.session_ctx.clone(), self.file_manager.clone());
 
         statement_executor.execute(statement, &sql_options).await
     }

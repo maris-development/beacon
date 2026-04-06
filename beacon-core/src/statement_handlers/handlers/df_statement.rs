@@ -31,7 +31,6 @@ impl DFStatementHandler {
         if drop_table_statement.if_exists {
             return Ok(());
         }
-
         let exists = session_ctx.table_exist(drop_table_statement.name.clone())?;
         if exists {
             Ok(())

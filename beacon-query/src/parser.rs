@@ -1,4 +1,4 @@
-use beacon_data_lake::DataLake;
+use beacon_data_lake::{FileManager, TableManager};
 use datafusion::{
     logical_expr::LogicalPlan,
     prelude::{SQLOptions, SessionContext},
@@ -13,15 +13,16 @@ pub struct Parser;
 impl Parser {
     pub async fn parse(
         session: &SessionContext,
-        data_lake: &DataLake,
+        table_manager: &TableManager,
+        file_manager: &FileManager,
         query: Query,
     ) -> anyhow::Result<ParsedPlan> {
         let datafusion_logical_plan =
-            Self::parse_to_logical_plan(session, data_lake, query.inner).await?;
+            Self::parse_to_logical_plan(session, table_manager, file_manager, query.inner).await?;
 
         if let Some(output) = &query.output {
             let (plan, output_file) = output
-                .parse(session, data_lake, datafusion_logical_plan)
+                .parse(session, file_manager, datafusion_logical_plan)
                 .await?;
 
             Ok(ParsedPlan::new(plan, Some(output_file)))
@@ -32,7 +33,8 @@ impl Parser {
 
     pub async fn parse_to_logical_plan(
         session: &SessionContext,
-        data_lake: &DataLake,
+        table_manager: &TableManager,
+        file_manager: &FileManager,
         inner_query: InnerQuery,
     ) -> anyhow::Result<LogicalPlan> {
         let datafusion_logical_plan = match inner_query {
@@ -56,7 +58,7 @@ impl Parser {
             }
             InnerQuery::Json(query_body) => {
                 let datafusion_plan =
-                    Self::parse_json_query(query_body, session, data_lake).await?;
+                    Self::parse_json_query(query_body, session, table_manager, file_manager).await?;
                 datafusion_plan
             }
         };
@@ -67,7 +69,8 @@ impl Parser {
     pub async fn parse_json_query(
         query_body: QueryBody,
         session: &SessionContext,
-        data_lake: &DataLake,
+        table_manager: &TableManager,
+        file_manager: &FileManager,
     ) -> anyhow::Result<LogicalPlan> {
         let mut builder = if beacon_config::CONFIG.enable_pushdown_projection {
             let mut all_columns = vec![];
@@ -80,13 +83,13 @@ impl Parser {
             query_body
                 .from
                 .unwrap_or_default()
-                .init_builder(session, data_lake, Some(&all_columns))
+                .init_builder(session, table_manager, file_manager, Some(&all_columns))
                 .await?
         } else {
             query_body
                 .from
                 .unwrap_or_default()
-                .init_builder(session, data_lake, None)
+                .init_builder(session, table_manager, file_manager, None)
                 .await?
         };
 

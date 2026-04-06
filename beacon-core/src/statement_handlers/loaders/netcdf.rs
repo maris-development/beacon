@@ -21,7 +21,7 @@ impl IngestFormatLoader for NetcdfIngestFormatLoader {
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<Dataset>>> {
         let session_ctx = context.session_ctx();
         let session_state = session_ctx.state();
-        let object_store_url = context.data_lake().data_object_store_url();
+        let object_store_url = context.data_object_store_url();
         let store = session_ctx.runtime_env().object_store(&object_store_url)?;
         let datasets_store = beacon_object_storage::get_datasets_object_store().await;
         let listing_table_url = parse_listing_table_url(&object_store_url, glob_pattern)?;

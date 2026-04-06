@@ -22,8 +22,11 @@ impl StatementHandler for IngestStatementHandler {
         _sql_options: &SQLOptions,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let statement = payload.into_ingest()?;
-        let table = context.resolve_table_provider(&statement.table_name).await?;
-        let atlas_table = context.as_atlas_table(table.as_ref())?;
+        let table = context
+            .resolve_table_provider(&statement.table_name)
+            .await?;
+        let atlas_table = context.as_atlas_table(table.as_ref()).unwrap();
+        let data_store_url = context.data_object_store_url();
 
         let loader = context.ingest_loader(&statement.format).ok_or_else(|| {
             anyhow::anyhow!(
@@ -32,12 +35,13 @@ impl StatementHandler for IngestStatementHandler {
             )
         })?;
 
+        let definition = atlas_table.definition();
         let ingestion = loader.load(context, &statement.glob_pattern).await?;
 
-        atlas_table
+        definition
             .ingest_into_partition(
                 context.session_ctx(),
-                &context.data_lake().data_object_store_url(),
+                &data_store_url,
                 &statement.partition_name,
                 ingestion,
                 false,

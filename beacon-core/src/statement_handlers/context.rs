@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use arrow::datatypes::Schema;
-use beacon_atlas::datafusion::table::AtlasTableDefinition;
-use beacon_data_lake::DataLake;
+use beacon_atlas::datafusion::table::{AtlasTable, AtlasTableDefinition};
+use beacon_data_lake::FileManager;
 use datafusion::{
     datasource::TableProvider,
+    execution::object_store::ObjectStoreUrl,
     execution::SendableRecordBatchStream,
     physical_plan::stream::RecordBatchStreamAdapter,
     prelude::SessionContext,
@@ -15,19 +16,19 @@ use crate::statement_handlers::{registry::IngestFormatLoaderRegistry, traits::In
 
 pub(crate) struct HandlerContext {
     session_ctx: Arc<SessionContext>,
-    data_lake: Arc<DataLake>,
+    file_manager: Arc<FileManager>,
     loader_registry: IngestFormatLoaderRegistry,
 }
 
 impl HandlerContext {
     pub(crate) fn new(
         session_ctx: Arc<SessionContext>,
-        data_lake: Arc<DataLake>,
+        file_manager: Arc<FileManager>,
         loader_registry: IngestFormatLoaderRegistry,
     ) -> Self {
         Self {
             session_ctx,
-            data_lake,
+            file_manager,
             loader_registry,
         }
     }
@@ -36,8 +37,13 @@ impl HandlerContext {
         self.session_ctx.clone()
     }
 
-    pub(crate) fn data_lake(&self) -> Arc<DataLake> {
-        self.data_lake.clone()
+    #[cfg(test)]
+    pub(crate) fn file_manager(&self) -> Arc<FileManager> {
+        self.file_manager.clone()
+    }
+
+    pub(crate) fn data_object_store_url(&self) -> ObjectStoreUrl {
+        self.file_manager.data_object_store_url()
     }
 
     pub(crate) fn ingest_loader(&self, format: &str) -> Option<Arc<dyn IngestFormatLoader>> {
@@ -58,10 +64,10 @@ impl HandlerContext {
     pub(crate) fn as_atlas_table<'a>(
         &self,
         table: &'a dyn TableProvider,
-    ) -> anyhow::Result<&'a AtlasTableDefinition> {
+    ) -> anyhow::Result<&'a AtlasTable> {
         table
             .as_any()
-            .downcast_ref::<AtlasTableDefinition>()
+            .downcast_ref::<AtlasTable>()
             .ok_or_else(|| anyhow::anyhow!("Table is not an AtlasTable"))
     }
 
@@ -72,5 +78,60 @@ impl HandlerContext {
         );
 
         Box::pin(stream) as SendableRecordBatchStream
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use beacon_data_lake::FileManager;
+    use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
+    use futures::StreamExt;
+
+    use crate::statement_handlers::registry::IngestFormatLoaderRegistry;
+
+    use super::HandlerContext;
+
+    #[tokio::test]
+    async fn handler_context_exposes_manager_references() {
+        let session_ctx = Arc::new(SessionContext::new());
+        let data_store_url =
+            ObjectStoreUrl::parse("datasets://").expect("datasets url should parse");
+        let file_manager = Arc::new(FileManager::new(
+            session_ctx.clone(),
+            data_store_url,
+            vec![],
+        ));
+
+        let context = HandlerContext::new(
+            session_ctx,
+            file_manager.clone(),
+            IngestFormatLoaderRegistry::new(),
+        );
+
+        assert!(Arc::ptr_eq(&context.file_manager(), &file_manager));
+        assert_eq!(
+            context.data_object_store_url().as_str(),
+            file_manager.data_object_store_url().as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_record_batch_stream_is_empty() {
+        let session_ctx = Arc::new(SessionContext::new());
+        let data_store_url =
+            ObjectStoreUrl::parse("datasets://").expect("datasets url should parse");
+        let file_manager = Arc::new(FileManager::new(
+            session_ctx.clone(),
+            data_store_url,
+            vec![],
+        ));
+
+        let context =
+            HandlerContext::new(session_ctx, file_manager, IngestFormatLoaderRegistry::new());
+
+        let mut stream = context.empty_record_batch_stream();
+        assert!(stream.next().await.is_none());
     }
 }

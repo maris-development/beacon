@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use beacon_data_lake::DataLake;
+use beacon_data_lake::FileManager;
 use datafusion::{
     execution::SendableRecordBatchStream,
     prelude::{SQLOptions, SessionContext},
@@ -23,7 +23,10 @@ pub(crate) struct SqlStatementExecutor {
 }
 
 impl SqlStatementExecutor {
-    pub(crate) fn new(session_ctx: Arc<SessionContext>, data_lake: Arc<DataLake>) -> Self {
+    pub(crate) fn new(
+        session_ctx: Arc<SessionContext>,
+        file_manager: Arc<FileManager>,
+    ) -> Self {
         let mut loader_registry = IngestFormatLoaderRegistry::new();
         register_default_ingest_loaders(&mut loader_registry);
 
@@ -31,7 +34,7 @@ impl SqlStatementExecutor {
         register_default_statement_handlers(&mut statement_registry);
 
         Self {
-            context: HandlerContext::new(session_ctx, data_lake, loader_registry),
+            context: HandlerContext::new(session_ctx, file_manager, loader_registry),
             statement_registry,
         }
     }

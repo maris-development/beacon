@@ -25,10 +25,11 @@ impl StatementHandler for CreateAtlasTableStatementHandler {
         _sql_options: &SQLOptions,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let statement = payload.into_create_atlas_table()?;
+        let data_store_url = context.data_object_store_url();
 
         let definition = AtlasTableDefinition::create(
             context.session_ctx(),
-            &context.data_lake().data_object_store_url(),
+            &data_store_url,
             statement.table_name.to_string(),
             statement.location,
         )
@@ -37,7 +38,7 @@ impl StatementHandler for CreateAtlasTableStatementHandler {
         let table = AtlasTable::from_definition(
             definition,
             context.session_ctx(),
-            &context.data_lake().data_object_store_url(),
+            &data_store_url,
         )
         .await?;
 

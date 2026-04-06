@@ -5,6 +5,7 @@
 //! provider creation.
 
 use std::borrow::Cow;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use beacon_common::listing_url::parse_listing_table_url;
@@ -24,10 +25,10 @@ use datafusion::{
     prelude::SessionContext,
 };
 
-#[typetag::serde(tag = "type")]
+#[typetag::serde(tag = "definition_type")]
 #[async_trait::async_trait]
 /// A serializable table definition that can materialize a DataFusion provider.
-pub trait TableDefinition {
+pub trait TableDefinition: Debug + Send + Sync {
     /// Builds a concrete [`TableProvider`] from this definition.
     ///
     /// Implementations use the provided session context and store URL to resolve
@@ -37,6 +38,16 @@ pub trait TableDefinition {
         context: Arc<SessionContext>,
         data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>>;
+
+    fn depends_on(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn table_name(&self) -> &str;
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +63,10 @@ impl ExternalTable {
 
     pub fn definition(&self) -> &ExternalTableDefinition {
         &self.definition
+    }
+
+    pub fn inner(&self) -> &ListingTable {
+        &self.inner
     }
 }
 
@@ -364,6 +379,10 @@ impl TableDefinition for ExternalTableDefinition {
         let table = provider.with_definition(self.definition.clone());
         Ok(Arc::new(ExternalTable::new(self.clone(), table)))
     }
+
+    fn table_name(&self) -> &str {
+        &self.name
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -373,6 +392,9 @@ pub struct ViewTableDefinition {
     pub name: String,
     /// SQL query used to materialize the view.
     pub definition: String,
+    /// Dependencies on other tables, used to determine rebuild order.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
 }
 
 impl ViewTableDefinition {
@@ -380,15 +402,35 @@ impl ViewTableDefinition {
     ///
     /// Returns an error when the input view has no persisted SQL definition.
     pub fn try_from_view(table: &ViewTable) -> anyhow::Result<Self> {
+        let plan = table.logical_plan();
+        let mut dependencies = Vec::new();
+        Self::traverse_logical_plan_for_dependencies(plan, &mut dependencies);
+
         match table.definition() {
             Some(def) => Ok(Self {
                 name: "view".to_string(), // Name is not used for view tables, so we can set a default value here
                 definition: def.clone(),
+                dependencies,
             }),
             None => Err(anyhow::anyhow!(
                 "ViewTableDefinition requires a SQL definition to be created from a ViewTable without a definition"
             )),
         }
+    }
+
+    fn traverse_logical_plan_for_dependencies(plan: &LogicalPlan, dependencies: &mut Vec<String>) {
+        let _ = plan.apply_with_subqueries(|node| {
+            if let LogicalPlan::TableScan(table_scan) = node {
+                let table_name = table_scan.table_name.to_string();
+                if !dependencies.contains(&table_name) {
+                    dependencies.push(table_name);
+                }
+            }
+
+            Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+        });
+
+        dependencies.sort();
     }
 
     pub async fn into_view_table(self, context: Arc<SessionContext>) -> anyhow::Result<ViewTable> {
@@ -419,6 +461,18 @@ impl TableDefinition for ViewTableDefinition {
             Some(self.definition.clone()),
         )))
     }
+
+    fn table_name(&self) -> &str {
+        &self.name
+    }
+
+    fn depends_on(&self) -> Vec<String> {
+        self.dependencies.clone()
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::View
+    }
 }
 
 #[cfg(test)]
@@ -426,7 +480,8 @@ impl TableDefinition for ViewTableDefinition {
 mod tests {
     use super::{ExternalTableDefinition, TableDefinition, ViewTableDefinition};
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-    use datafusion::datasource::ViewTable;
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::datasource::{MemTable, TableType, ViewTable};
     use datafusion::execution::object_store::ObjectStoreUrl;
     use datafusion::prelude::SessionContext;
     use std::collections::HashMap;
@@ -591,6 +646,7 @@ mod tests {
         let definition = ViewTableDefinition {
             name: "my_view".to_string(),
             definition: "SELECT 42 AS answer".to_string(),
+            dependencies: vec![],
         };
 
         let context = Arc::new(SessionContext::new());
@@ -608,6 +664,109 @@ mod tests {
         assert_eq!(
             view.definition().cloned(),
             Some("SELECT 42 AS answer".to_string())
+        );
+    }
+
+    #[test]
+    /// Verifies legacy view JSON without dependencies remains deserializable.
+    fn view_table_definition_deserializes_without_dependencies_for_compatibility() {
+        let legacy_json = r#"{
+  "type": "view_table",
+  "name": "legacy_view",
+  "definition": "SELECT 1 AS x"
+}"#;
+
+        let definition: Arc<dyn TableDefinition> =
+            serde_json::from_str(legacy_json).expect("legacy view JSON should deserialize");
+
+        assert_eq!(definition.table_name(), "legacy_view");
+        assert_eq!(definition.table_type(), TableType::View);
+        assert!(definition.depends_on().is_empty());
+    }
+
+    #[test]
+    /// Verifies trait-level table_type defaults to Base unless overridden.
+    fn table_definition_table_type_defaults_and_overrides() {
+        let external = ExternalTableDefinition {
+            name: "ext_table".to_string(),
+            location: "tmp/path".to_string(),
+            file_type: "parquet".to_string(),
+            schema: Arc::new(Schema::empty()),
+            definition: None,
+            partition_cols: vec![],
+            options: HashMap::new(),
+            if_not_exists: false,
+        };
+        let view = ViewTableDefinition {
+            name: "view_table".to_string(),
+            definition: "SELECT 1".to_string(),
+            dependencies: vec![],
+        };
+
+        assert_eq!(external.table_type(), TableType::Base);
+        assert_eq!(view.table_type(), TableType::View);
+    }
+
+    #[tokio::test]
+    /// Verifies dependency extraction from direct table scans is stable and deduplicated.
+    async fn view_table_dependency_traversal_collects_direct_scans() {
+        let context = SessionContext::new();
+        let schema: SchemaRef =
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]));
+        let batch = RecordBatch::new_empty(schema.clone());
+
+        for table_name in ["t1", "t2"] {
+            let table = MemTable::try_new(schema.clone(), vec![vec![batch.clone()]])
+                .expect("mem table should be created");
+            context
+                .register_table(table_name, Arc::new(table))
+                .expect("table should be registered");
+        }
+
+        let plan = context
+            .state()
+            .create_logical_plan(
+                "SELECT t1.id FROM t1 JOIN t2 ON t1.id = t2.id WHERE t1.id IN (SELECT id FROM t1)",
+            )
+            .await
+            .expect("logical plan should be created");
+
+        let mut dependencies = Vec::new();
+        ViewTableDefinition::traverse_logical_plan_for_dependencies(&plan, &mut dependencies);
+
+        assert_eq!(dependencies, vec!["t1".to_string(), "t2".to_string()]);
+    }
+
+    #[tokio::test]
+    /// Verifies dependency extraction traverses nested subquery plans embedded in expressions.
+    async fn view_table_dependency_traversal_collects_nested_subqueries() {
+        let context = SessionContext::new();
+        let schema: SchemaRef =
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]));
+        let batch = RecordBatch::new_empty(schema.clone());
+
+        for table_name in ["t1", "t2", "t3"] {
+            let table = MemTable::try_new(schema.clone(), vec![vec![batch.clone()]])
+                .expect("mem table should be created");
+            context
+                .register_table(table_name, Arc::new(table))
+                .expect("table should be registered");
+        }
+
+        let plan = context
+            .state()
+            .create_logical_plan(
+                "SELECT id FROM t1 WHERE id IN (SELECT id FROM t2 WHERE EXISTS (SELECT 1 FROM t3 WHERE t3.id = t2.id))",
+            )
+            .await
+            .expect("logical plan should be created");
+
+        let mut dependencies = Vec::new();
+        ViewTableDefinition::traverse_logical_plan_for_dependencies(&plan, &mut dependencies);
+
+        assert_eq!(
+            dependencies,
+            vec!["t1".to_string(), "t2".to_string(), "t3".to_string()]
         );
     }
 }

@@ -307,7 +307,6 @@ impl FileFormat for AtlasFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        println!("Files: {:#?}", objects);
         let atlas_objects = find_atlas_collections(objects);
         if atlas_objects.is_empty() {
             return Err(execution_error("No atlas.json files found to infer schema"));

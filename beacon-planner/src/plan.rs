@@ -26,14 +26,16 @@ pub struct BeaconQueryPlan {
 ///
 /// # Arguments
 /// * `session_ctx` - DataFusion session context.
-/// * `data_lake` - Reference to the data lake.
+/// * `table_manager` - Reference to the table manager.
+/// * `file_manager` - Reference to the file manager.
 /// * `query` - The query to plan.
 ///
 /// # Returns
 /// * `BeaconQueryPlan` containing the planned query and associated metadata.
 pub async fn plan_query(
     session_ctx: Arc<SessionContext>,
-    data_lake: &beacon_data_lake::DataLake,
+    table_manager: &beacon_data_lake::TableManager,
+    file_manager: &beacon_data_lake::FileManager,
     query: Query,
 ) -> anyhow::Result<BeaconQueryPlan> {
     let query_id = uuid::Uuid::new_v4();
@@ -43,7 +45,9 @@ pub async fn plan_query(
     let query_json_value = serde_json::to_value(&query).unwrap();
 
     // Parse the query into a logical plan.
-    let parsed_plan = beacon_query::parser::Parser::parse(&session_ctx, data_lake, query).await?;
+    let parsed_plan =
+        beacon_query::parser::Parser::parse(&session_ctx, table_manager, file_manager, query)
+            .await?;
 
     // Optimize the logical plan.
     let optimized_plan = state.optimize(&parsed_plan.datafusion_plan)?;

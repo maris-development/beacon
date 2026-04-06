@@ -5,7 +5,7 @@ use arrow::{
     datatypes::{DataType, Field, Schema, SchemaRef},
     record_batch::RecordBatch,
 };
-use beacon_datafusion_ext::table_ext::{ExternalTableDefinition, TableDefinition};
+use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, TableDefinition};
 use datafusion::{
     catalog::{Session, TableProvider},
     common::{Constraints, Statistics},
@@ -75,12 +75,12 @@ fn ingestion_result_batch(
 #[derive(Debug, Clone)]
 pub struct AtlasTable {
     name: String,
-    inner: ListingTable,
+    inner: ExternalTable,
 }
 
 impl AtlasTable {
     pub fn definition(&self) -> AtlasTableDefinition {
-        let location = self.inner.table_paths()[0].to_string();
+        let location = self.inner.definition().location.clone();
         let table_name = self.name.clone();
 
         AtlasTableDefinition {
@@ -95,16 +95,13 @@ impl AtlasTable {
         data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Self> {
         let provider = definition.build_provider(context, data_store_url).await?;
-        let inner = provider
+        let table = provider
             .as_any()
-            .downcast_ref::<ListingTable>()
-            .ok_or_else(|| anyhow::anyhow!("expected provider to be a ListingTable"))?
+            .downcast_ref::<AtlasTable>()
+            .ok_or_else(|| anyhow::anyhow!("expected provider to be an AtlasTable"))?
             .clone();
 
-        Ok(Self {
-            name: definition.name,
-            inner,
-        })
+        Ok(table)
     }
 }
 
@@ -175,7 +172,20 @@ impl TableDefinition for AtlasTableDefinition {
             if_not_exists: false,
         };
 
-        definition.build_provider(context, data_store_url).await
+        let external_provider = definition.build_provider(context, data_store_url).await?;
+        let atlas_provider = AtlasTable {
+            inner: external_provider
+                .as_any()
+                .downcast_ref::<ExternalTable>()
+                .ok_or_else(|| anyhow::anyhow!("expected provider to be an ExternalTable"))?
+                .clone(),
+            name: self.name.clone(),
+        };
+        Ok(Arc::new(atlas_provider))
+    }
+
+    fn table_name(&self) -> &str {
+        &self.name
     }
 }
 
