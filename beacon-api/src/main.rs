@@ -20,6 +20,7 @@ use utoipa_scalar::{Scalar, Servable};
 use utoipa_swagger_ui::SwaggerUi;
 
 mod admin;
+mod auth;
 mod client;
 
 #[cfg(not(target_env = "msvc"))]

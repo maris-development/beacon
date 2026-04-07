@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
+use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::{
     catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 use futures::StreamExt;
-use object_store::{
-    ObjectStore, PutPayload,
-    path::{Path, PathPart},
-};
+use object_store::{ObjectStore, PutPayload, path::Path};
 
 use crate::table::{_type::TableType, error::TableError};
 
@@ -19,6 +17,52 @@ pub mod logical;
 pub mod merged;
 pub mod preset;
 pub mod table_formats;
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum TableFormat {
+    #[serde(untagged)]
+    Legacy(Table),
+    #[serde(untagged)]
+    DefinitionBased(Arc<dyn TableDefinition>),
+}
+
+impl TableFormat {
+    pub async fn try_open(
+        store: Arc<dyn ObjectStore>,
+        table_json: object_store::path::Path,
+    ) -> anyhow::Result<Self> {
+        // Read the table config
+        let json_bytes = store
+            .get(&table_json)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read table config: {:?}", e))?
+            .bytes()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read table config bytes: {:?}", e))?;
+
+        // Try parse as legacy table format first
+        if let Ok(table) = serde_json::from_slice::<Table>(&json_bytes) {
+            return Ok(Self::Legacy(table));
+        } // If that fails, try parse as definition-based format
+        let definition =
+            serde_json::from_slice::<Arc<dyn TableDefinition>>(&json_bytes).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse table config as definition-based format: {:?}",
+                    e
+                )
+            })?;
+
+        Ok(Self::DefinitionBased(definition))
+    }
+
+    pub fn table_name(&self) -> &str {
+        match self {
+            Self::Legacy(table) => table.table_name(),
+            Self::DefinitionBased(definition) => definition.table_name(),
+        }
+    }
+}
 
 /// Represents a table configuration along with its associated provider.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -53,30 +97,6 @@ impl Table {
             .unwrap();
 
         self.table_directory = table_directory;
-    }
-
-    pub async fn open(
-        store: Arc<dyn ObjectStore>,
-        mut table_directory: Vec<PathPart<'static>>,
-    ) -> Result<Self, TableError> {
-        table_directory.push("table.json".into());
-        let table_directory_path: object_store::path::Path =
-            Path::from_iter(table_directory.clone());
-
-        // Read the table config
-        let json_bytes = store
-            .get(&table_directory_path)
-            .await
-            .map_err(TableError::FailedToReadTableConfig)?
-            .bytes()
-            .await
-            .map_err(TableError::FailedToReadTableConfig)?;
-
-        let mut table: Table =
-            serde_json::from_slice(&json_bytes).map_err(TableError::InvalidTableConfig)?;
-        table.table_directory = table_directory;
-
-        Ok(table)
     }
 
     pub async fn table_provider(

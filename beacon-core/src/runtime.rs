@@ -6,11 +6,13 @@ use crate::{
     virtual_machine,
 };
 use arrow::datatypes::SchemaRef;
-use beacon_data_lake::{table::Table, DataLake};
-use beacon_formats::Dataset;
+use beacon_data_lake::table::{Table, TableFormat};
+use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::metrics::ConsolidatedMetrics;
 use beacon_query::{parser::Parser, Query};
+use datafusion::execution::SendableRecordBatchStream;
+use futures::stream::BoxStream;
 use parking_lot::Mutex;
 
 pub struct Runtime {
@@ -28,10 +30,12 @@ impl Runtime {
     }
 
     pub async fn run_client_query(&self, query: Query) -> anyhow::Result<QueryResult> {
-        let data_lake = self.virtual_machine.data_lake();
+        let table_manager = self.virtual_machine.table_manager();
+        let file_manager = self.virtual_machine.file_manager();
         let plan = beacon_planner::prelude::plan_query(
             self.virtual_machine.session_ctx(),
-            &data_lake,
+            table_manager.as_ref(),
+            file_manager.as_ref(),
             query,
         )
         .await?;
@@ -50,10 +54,12 @@ impl Runtime {
     }
 
     pub async fn explain_client_query(&self, query: Query) -> anyhow::Result<String> {
-        let data_lake = self.virtual_machine.data_lake();
+        let table_manager = self.virtual_machine.table_manager();
+        let file_manager = self.virtual_machine.file_manager();
         let plan = Parser::parse(
             self.virtual_machine.session_ctx().as_ref(),
-            &data_lake,
+            table_manager.as_ref(),
+            file_manager.as_ref(),
             query,
         )
         .await?;
@@ -95,7 +101,7 @@ impl Runtime {
         self.virtual_machine.default_table()
     }
 
-    pub async fn list_table_config(&self, table_name: String) -> Option<Table> {
+    pub async fn list_table_config(&self, table_name: String) -> Option<TableFormat> {
         self.virtual_machine.list_table_config(table_name).await
     }
 
@@ -112,7 +118,7 @@ impl Runtime {
         pattern: Option<String>,
         offset: Option<usize>,
         limit: Option<usize>,
-    ) -> anyhow::Result<Vec<Dataset>> {
+    ) -> anyhow::Result<Vec<DatasetMetadata>> {
         self.virtual_machine
             .list_datasets(pattern, offset, limit)
             .await
@@ -126,7 +132,40 @@ impl Runtime {
         self.virtual_machine.list_dataset_schema(file).await
     }
 
-    pub fn data_lake(&self) -> Arc<DataLake> {
-        self.virtual_machine.data_lake()
+    pub async fn upload_file<S>(
+        &self,
+        file_path: &str,
+        stream: S,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        S: futures::Stream<Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>
+            + Unpin,
+    {
+        self.virtual_machine.upload_file(file_path, stream).await
+    }
+
+    pub async fn download_file(
+        &self,
+        file_path: &str,
+    ) -> Result<
+        BoxStream<'static, Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        self.virtual_machine.download_file(file_path).await
+    }
+
+    pub async fn delete_file(
+        &self,
+        file_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.virtual_machine.delete_file(file_path).await
+    }
+
+    pub async fn run_sql(
+        &self,
+        sql: String,
+        is_super_user: bool,
+    ) -> anyhow::Result<SendableRecordBatchStream> {
+        self.virtual_machine.run_sql(sql, is_super_user).await
     }
 }

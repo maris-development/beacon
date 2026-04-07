@@ -75,8 +75,7 @@ pub async fn upload_file(
 
                 let boxed_stream = Box::pin(stream);
                 // Stream into storage
-                let data_lake = state.data_lake();
-                data_lake
+                state
                     .upload_file(&full_path, boxed_stream)
                     .await
                     .map_err(|e| Json(format!("Failed to upload file: {e}")))?;
@@ -118,7 +117,7 @@ pub async fn download_handler(
     tracing::info!("📥 Download request for `{}`", query.file_path);
     let file_path = query.file_path.clone();
 
-    match state.data_lake().download_file(&file_path).await {
+    match state.download_file(&file_path).await {
         Ok(stream) => {
             // Convert object_store stream into Axum-compatible stream
             let body_stream = stream.map(|result| {
@@ -185,7 +184,7 @@ pub async fn delete_file(
     tracing::info!("📤 Delete request for `{}`", query.file_path);
     let file_path = query.file_path.clone();
 
-    match state.data_lake().delete_file(&file_path).await {
+    match state.delete_file(&file_path).await {
         Ok(_) => {
             tracing::info!("✅ Deleted `{}`", file_path);
             (StatusCode::OK, format!("File deleted: {file_path}")).into_response()

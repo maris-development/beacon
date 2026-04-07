@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
-use beacon_data_lake::table::Table;
+use beacon_data_lake::table::{Table, TableFormat};
 use utoipa::{IntoParams, ToSchema};
 
 #[tracing::instrument(level = "info", skip(state))]
@@ -120,7 +120,7 @@ pub struct ListTableConfigQuery {
 pub(crate) async fn list_table_config(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListTableConfigQuery>,
-) -> Result<Json<Table>, (StatusCode, String)> {
+) -> Result<Json<TableFormat>, (StatusCode, String)> {
     let result = state.list_table_config(query.table_name.clone()).await;
 
     match result {

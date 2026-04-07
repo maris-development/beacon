@@ -7,6 +7,18 @@ use crate::{
     array::{NdArrowArray, compat_typings::ArrowTypeConversion, subset::ArraySubset},
 };
 
+#[derive(Debug, Clone)]
+pub struct BackendSubsetResult<T: ArrowTypeConversion> {
+    pub values: ndarray::ArrayD<T>,
+    pub validity: Option<ndarray::ArrayD<bool>>,
+}
+
+impl<T: ArrowTypeConversion> BackendSubsetResult<T> {
+    pub fn new(values: ndarray::ArrayD<T>, validity: Option<ndarray::ArrayD<bool>>) -> Self {
+        Self { values, validity }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ArrayBackend<T: ArrowTypeConversion>: Send + Sync + 'static + Debug {
     fn into_dyn_array(self) -> anyhow::Result<Arc<dyn NdArrowArray>>
@@ -79,6 +91,14 @@ pub trait ArrayBackend<T: ArrowTypeConversion>: Send + Sync + 'static + Debug {
         None
     }
 
+    async fn read_subset_with_validity(
+        &self,
+        subset: ArraySubset,
+    ) -> anyhow::Result<BackendSubsetResult<T>> {
+        let values = self.read_subset(subset).await?;
+        Ok(BackendSubsetResult::new(values, None))
+    }
+
     async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<T>>;
 }
 
@@ -98,6 +118,13 @@ impl<T: ArrowTypeConversion, A: ArrayBackend<T> + ?Sized> ArrayBackend<T> for Ar
 
     fn fill_value(&self) -> Option<T> {
         (**self).fill_value()
+    }
+
+    async fn read_subset_with_validity(
+        &self,
+        subset: ArraySubset,
+    ) -> anyhow::Result<BackendSubsetResult<T>> {
+        (**self).read_subset_with_validity(subset).await
     }
 
     async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<T>> {

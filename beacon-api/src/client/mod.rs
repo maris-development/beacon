@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::{routing::post, Router};
+use axum::{routing::get, routing::post, Router};
 use beacon_core::runtime::Runtime;
 use datasets::total_datasets;
 use query::{available_columns, query_metrics};
@@ -12,6 +12,7 @@ mod functions;
 mod info;
 mod query;
 mod tables;
+mod ws_sql;
 
 #[derive(utoipa::OpenApi)]
 #[openapi()]
@@ -38,6 +39,10 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(functions::list_table_functions))
         .routes(routes!(info::system_info))
         .split_for_parts();
+
+    let client_router = client_router
+        .route("/api/ws/sql", get(ws_sql::ws_sql_handler))
+        .route("/api/ws/sql-ticket", post(ws_sql::create_ws_sql_ticket));
 
     (client_router, client_api)
 }
