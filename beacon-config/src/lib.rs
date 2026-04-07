@@ -98,7 +98,7 @@ pub struct Config {
 
     /// gRPC address of a running `beacon-arrow-netcdf-mpio` Arrow Flight server.
     ///
-    /// Used by `beacon_formats::netcdf::source::mpio` for `read_schema`,
+    /// Used by `beacon_arrow_netcdf::mpio_utils` for Flight-based NetCDF reads,
     /// `read_file_as_stream`, and `read_file_as_batch`.
     /// Example: `http://127.0.0.1:50051`.
     #[envconfig(from = "BEACON_NETCDF_FLIGHT_ADDR")]

@@ -7,6 +7,8 @@ edition = "2021"
 netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["ndarray"], version = "0.11.1"}
 netcdf-sys = { git ="https://github.com/robinskil/netcdf.git", package = "netcdf-sys" }
 arrow = { workspace = true }
+object_store = { workspace = true }
+datafusion = { workspace = true }
 
 arrow-schema = { workspace = true }
 anyhow = { workspace=true }
@@ -15,6 +17,12 @@ futures = { workspace=true }
 indexmap = { workspace=true }
 thiserror = { workspace=true }
 async-trait = { workspace=true }
+ordered-float = { workspace = true }
+parking_lot = { workspace = true }
+lazy_static = { workspace = true }
+moka = { workspace = true }
+lru = { workspace = true }
+chrono = { workspace = true }
 ndarray = "0.17.1"
 hifitime = "4.0.2"
 regex = "1.11.1"
@@ -24,6 +32,10 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 beacon-nd-arrow = {path = "../beacon-nd-arrow"}
+beacon-common = { path = "../beacon-common" }
+beacon-config = { path = "../beacon-config" }
+beacon-object-storage = { path = "../beacon-object-storage" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 
 [dev-dependencies]
 tokio = { workspace = true }

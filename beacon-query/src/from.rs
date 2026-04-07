@@ -4,11 +4,10 @@
 
 use std::sync::Arc;
 
+use beacon_arrow_netcdf::datafusion::{NetcdfFormat, NetcdfOptions};
 use beacon_data_lake::{
     FileManager, TableManager, files::collection::FileCollection,
-    table::table_formats::NetCDFFileFormat,
 };
-use beacon_formats::netcdf::NetcdfOptions;
 use beacon_formats::zarr::statistics::ZarrStatisticsSelection;
 use beacon_formats::{
     arrow::ArrowFormat, csv::CsvFormat, odv_ascii::OdvFormat, parquet::ParquetFormat,
@@ -159,7 +158,7 @@ impl FromFormat {
             ))),
             FromFormat::Parquet { .. } => Ok(Arc::new(ParquetFormat::new())),
             FromFormat::Arrow { .. } => Ok(Arc::new(ArrowFormat::new())),
-            FromFormat::NetCDF { .. } => Ok(Arc::new(beacon_formats::netcdf::NetcdfFormat::new(
+            FromFormat::NetCDF { .. } => Ok(Arc::new(NetcdfFormat::new(
                 beacon_object_storage::get_datasets_object_store().await,
                 NetcdfOptions::default(),
             ))),

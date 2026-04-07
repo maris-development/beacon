@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_formats::netcdf::{
-    object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
-    NetcdfFormat,
-};
+use beacon_formats::netcdf::NetcdfFormat;
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,

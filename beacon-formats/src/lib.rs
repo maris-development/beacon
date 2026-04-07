@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, NetcdfOptions};
 use beacon_atlas::datafusion::AtlasFormatFactory;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::DatasetsStore;
@@ -8,7 +9,6 @@ use datafusion::prelude::SessionContext;
 use crate::{
     arrow::ArrowFormatFactory,
     csv::CsvFormatFactory,
-    netcdf::{NetCDFFormatFactory, NetcdfOptions},
     parquet::ParquetFormatFactory,
     zarr::ZarrFormatFactory,
 };

@@ -9,10 +9,7 @@ use beacon_formats::{
     arrow::ArrowFormat,
     bbf::BBFFormat,
     csv::CsvFormat,
-    netcdf::{
-        object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
-        NetcdfFormat,
-    },
+    netcdf::NetcdfFormat,
     parquet::ParquetFormat,
     zarr::ZarrFormat,
 };

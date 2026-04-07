@@ -35,6 +35,8 @@ pub use netcdf_sys;
 pub mod backend;
 /// Conversion helpers from NetCDF values to ND Arrow arrays.
 pub mod compat;
+/// DataFusion compatibility layer for NetCDF file reading.
+pub mod datafusion;
 /// Decoder implementations and decoder traits.
 pub mod decoders;
 
