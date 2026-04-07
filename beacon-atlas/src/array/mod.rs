@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use beacon_nd_arrow::array::{backend::ArrayBackend, subset::ArraySubset};
+use beacon_nd_arrow::array::{
+    backend::{ArrayBackend, BackendSubsetResult},
+    subset::ArraySubset,
+};
 use object_store::ObjectStore;
 
 use crate::{
@@ -159,17 +162,21 @@ impl<S: ObjectStore + Clone, A: AtlasArrowCompat> ArrayBackend<A> for AtlasArray
     ///
     /// The implementation first converts the logical subset into flat ranges,
     /// then slices the necessary IPC record batches, concatenates those slices,
-    /// converts the Arrow array into `Vec<A>`, and finally reshapes the result
-    /// into the requested subset shape.
-    async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<A>> {
+    /// converts the Arrow array into `Vec<A>` plus an optional validity mask,
+    /// and finally reshapes both into the requested subset shape.
+    async fn read_subset_with_validity(
+        &self,
+        subset: ArraySubset,
+    ) -> anyhow::Result<BackendSubsetResult<A>> {
         self.validate_subset(&subset)?;
 
         let subset_shape = subset.shape.clone();
         let ranges = Self::translate_subset_to_ranges(&subset, &self.shape());
 
         if ranges.is_empty() {
-            return ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&subset_shape), Vec::new())
-                .map_err(|err| anyhow::anyhow!("failed to build empty subset array: {err}"));
+            let values = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&subset_shape), Vec::new())
+                .map_err(|err| anyhow::anyhow!("failed to build empty subset array: {err}"))?;
+            return Ok(BackendSubsetResult::new(values, None));
         }
 
         let batch_size = self.batch_size().await?;
@@ -214,9 +221,21 @@ impl<S: ObjectStore + Clone, A: AtlasArrowCompat> ArrayBackend<A> for AtlasArray
                 .map_err(|err| anyhow::anyhow!("failed to concatenate subset chunks: {err}"))?
         };
 
-        let values = A::from_arrow_array(concatenated.as_ref())?;
-        ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&subset_shape), values)
-            .map_err(|err| anyhow::anyhow!("failed to build subset ndarray: {err}"))
+        let converted = A::from_arrow_array_with_validity(concatenated.as_ref())?;
+        let values =
+            ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&subset_shape), converted.values)
+                .map_err(|err| anyhow::anyhow!("failed to build subset ndarray: {err}"))?;
+        let validity = converted
+            .validity
+            .map(|mask| ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&subset_shape), mask))
+            .transpose()
+            .map_err(|err| anyhow::anyhow!("failed to build subset validity ndarray: {err}"))?;
+
+        Ok(BackendSubsetResult::new(values, validity))
+    }
+
+    async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<A>> {
+        Ok(self.read_subset_with_validity(subset).await?.values)
     }
 }
 

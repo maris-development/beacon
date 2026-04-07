@@ -4,9 +4,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use arrow::{
-    ipc::{writer::{IpcWriteOptions, StreamWriter}, CompressionType},
+    ipc::{
+        writer::{IpcWriteOptions, StreamWriter},
+        CompressionType,
+    },
     record_batch::RecordBatch,
 };
 use axum::{
@@ -26,6 +29,7 @@ use uuid::Uuid;
 use crate::auth::verify_basic_auth_header;
 
 static WS_TICKET_STORE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+const WS_SQL_MAX_BINARY_MESSAGE_BYTES: usize = 1024 * 1024;
 
 fn ticket_store() -> &'static Mutex<HashMap<String, Instant>> {
     WS_TICKET_STORE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -174,29 +178,33 @@ async fn handle_ws_connection(
                         loop {
                             match stream.try_next().await {
                                 Ok(Some(batch)) => {
-                                    let row_count = batch.num_rows();
-                                    total_rows += row_count as u64;
-
-                                    let arrow_payload =
-                                        encode_batch_to_arrow_stream(&batch).with_context(|| {
+                                    let payload_chunks =
+                                        encode_batch_to_arrow_stream_chunks(
+                                            &batch,
+                                            WS_SQL_MAX_BINARY_MESSAGE_BYTES,
+                                        )
+                                        .with_context(|| {
                                             format!(
                                                 "failed to encode batch {batch_index} for request {request_id}"
                                             )
                                         })?;
 
-                                    socket.send(Message::Binary(arrow_payload.into())).await?;
+                                    for (row_count, arrow_payload) in payload_chunks {
+                                        socket.send(Message::Binary(arrow_payload.into())).await?;
 
-                                    send_event(
-                                        &mut socket,
-                                        WsServerEvent::Chunk {
-                                            request_id: request_id.clone(),
-                                            batch_index,
-                                            row_count,
-                                        },
-                                    )
-                                    .await?;
+                                        send_event(
+                                            &mut socket,
+                                            WsServerEvent::Chunk {
+                                                request_id: request_id.clone(),
+                                                batch_index,
+                                                row_count,
+                                            },
+                                        )
+                                        .await?;
 
-                                    batch_index += 1;
+                                        total_rows += row_count as u64;
+                                        batch_index += 1;
+                                    }
                                 }
                                 Ok(None) => {
                                     send_event(
@@ -268,10 +276,66 @@ async fn handle_ws_connection(
 fn encode_batch_to_arrow_stream(batch: &RecordBatch) -> anyhow::Result<Vec<u8>> {
     let mut payload = Vec::new();
     let options = IpcWriteOptions::default().try_with_compression(Some(CompressionType::ZSTD))?;
-    let mut writer = StreamWriter::try_new_with_options(&mut payload, batch.schema().as_ref(), options)?;
+    let mut writer =
+        StreamWriter::try_new_with_options(&mut payload, batch.schema().as_ref(), options)?;
     writer.write(batch)?;
     writer.finish()?;
     Ok(payload)
+}
+
+fn encode_batch_to_arrow_stream_chunks(
+    batch: &RecordBatch,
+    max_payload_bytes: usize,
+) -> anyhow::Result<Vec<(usize, Vec<u8>)>> {
+    if max_payload_bytes == 0 {
+        return Err(anyhow!("max_payload_bytes must be greater than zero"));
+    }
+
+    let full_payload = encode_batch_to_arrow_stream(batch)?;
+    if full_payload.len() <= max_payload_bytes {
+        return Ok(vec![(batch.num_rows(), full_payload)]);
+    }
+
+    let mut chunks = Vec::new();
+    let mut offset = 0usize;
+    let row_count = batch.num_rows();
+
+    while offset < row_count {
+        let mut lo = 1usize;
+        let mut hi = row_count - offset;
+        let mut best_fit: Option<(usize, Vec<u8>)> = None;
+
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let payload = encode_batch_to_arrow_stream(&batch.slice(offset, mid))?;
+
+            if payload.len() <= max_payload_bytes {
+                best_fit = Some((mid, payload));
+                lo = mid + 1;
+            } else if mid == 1 {
+                hi = 0;
+            } else {
+                hi = mid - 1;
+            }
+        }
+
+        let (chunk_rows, chunk_payload) = match best_fit {
+            Some(result) => result,
+            None => {
+                let oversized_payload = encode_batch_to_arrow_stream(&batch.slice(offset, 1))?;
+                return Err(anyhow!(
+                    "single-row payload of {} bytes exceeds configured websocket max payload size {} bytes",
+                    oversized_payload.len(),
+                    max_payload_bytes
+                ));
+            }
+        };
+
+        chunks.push((chunk_rows, chunk_payload));
+        offset += chunk_rows;
+    }
+
+    Ok(chunks)
 }
 
 async fn send_event(socket: &mut WebSocket, event: WsServerEvent) -> anyhow::Result<()> {
@@ -309,5 +373,83 @@ fn consume_ticket(ticket: &str) -> Result<(), StatusCode> {
     match store.remove(ticket) {
         Some(expiry) if expiry > Instant::now() => Ok(()),
         _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_batch_to_arrow_stream, encode_batch_to_arrow_stream_chunks};
+    use arrow::{
+        array::{Int32Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use std::sync::Arc;
+
+    fn build_batch(row_count: usize) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("idx", DataType::Int32, false),
+            Field::new("payload", DataType::Utf8, false),
+        ]));
+
+        let idx_values: Vec<i32> = (0..row_count as i32).collect();
+        let payload_values: Vec<String> = (0..row_count)
+            .map(|i| format!("row-{i:04}-{}", "x".repeat(128)))
+            .collect();
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(idx_values)),
+                Arc::new(StringArray::from(payload_values)),
+            ],
+        )
+        .expect("failed to build test batch")
+    }
+
+    #[test]
+    fn keeps_single_chunk_when_payload_fits_limit() {
+        let batch = build_batch(64);
+        let full_payload = encode_batch_to_arrow_stream(&batch).expect("encode should succeed");
+
+        let chunks = encode_batch_to_arrow_stream_chunks(&batch, full_payload.len())
+            .expect("chunking should succeed");
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].0, batch.num_rows());
+        assert_eq!(chunks[0].1.len(), full_payload.len());
+    }
+
+    #[test]
+    fn splits_payload_when_batch_exceeds_limit() {
+        let batch = build_batch(512);
+        let full_payload = encode_batch_to_arrow_stream(&batch).expect("encode should succeed");
+        let max_payload_bytes = full_payload.len().saturating_sub(1);
+
+        let chunks = encode_batch_to_arrow_stream_chunks(&batch, max_payload_bytes)
+            .expect("chunking should succeed");
+
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|(_, payload)| payload.len() <= max_payload_bytes));
+        assert_eq!(
+            chunks.iter().map(|(rows, _)| *rows).sum::<usize>(),
+            batch.num_rows()
+        );
+    }
+
+    #[test]
+    fn errors_when_single_row_exceeds_limit() {
+        let batch = build_batch(1);
+        let full_payload = encode_batch_to_arrow_stream(&batch).expect("encode should succeed");
+
+        let err = encode_batch_to_arrow_stream_chunks(&batch, full_payload.len().saturating_sub(1))
+            .expect_err("single row should not fit reduced limit");
+
+        assert!(
+            err.to_string().contains("single-row payload"),
+            "unexpected error: {err}"
+        );
     }
 }

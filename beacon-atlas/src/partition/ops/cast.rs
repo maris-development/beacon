@@ -135,85 +135,36 @@ fn nd_array_from_arrow(
     shape: Vec<usize>,
     dimensions: Vec<String>,
 ) -> anyhow::Result<Arc<dyn NdArrowArray>> {
+    fn from_typed<T: AtlasArrowCompat>(
+        array: &Arc<dyn arrow::array::Array>,
+        shape: Vec<usize>,
+        dimensions: Vec<String>,
+    ) -> anyhow::Result<Arc<dyn NdArrowArray>> {
+        let converted = T::from_arrow_array_with_validity(array.as_ref())?;
+        Ok(Arc::new(NdArrowArrayDispatch::new_in_mem_with_validity(
+            converted.values,
+            shape,
+            dimensions,
+            None,
+            converted.validity,
+        )?))
+    }
+
     match array.data_type() {
-        DataType::Boolean => {
-            let values = <bool as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::Int8 => {
-            let values = <i8 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::Int16 => {
-            let values = <i16 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::Int32 => {
-            let values = <i32 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::Int64 => {
-            let values = <i64 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::UInt8 => {
-            let values = <u8 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::UInt16 => {
-            let values = <u16 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::UInt32 => {
-            let values = <u32 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::UInt64 => {
-            let values = <u64 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::Float32 => {
-            let values = <f32 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::Float64 => {
-            let values = <f64 as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            let values = <String as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
-        }
+        DataType::Boolean => from_typed::<bool>(&array, shape, dimensions),
+        DataType::Int8 => from_typed::<i8>(&array, shape, dimensions),
+        DataType::Int16 => from_typed::<i16>(&array, shape, dimensions),
+        DataType::Int32 => from_typed::<i32>(&array, shape, dimensions),
+        DataType::Int64 => from_typed::<i64>(&array, shape, dimensions),
+        DataType::UInt8 => from_typed::<u8>(&array, shape, dimensions),
+        DataType::UInt16 => from_typed::<u16>(&array, shape, dimensions),
+        DataType::UInt32 => from_typed::<u32>(&array, shape, dimensions),
+        DataType::UInt64 => from_typed::<u64>(&array, shape, dimensions),
+        DataType::Float32 => from_typed::<f32>(&array, shape, dimensions),
+        DataType::Float64 => from_typed::<f64>(&array, shape, dimensions),
+        DataType::Utf8 | DataType::LargeUtf8 => from_typed::<String>(&array, shape, dimensions),
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-            let values =
-                <TimestampNanosecond as AtlasArrowCompat>::from_arrow_array(array.as_ref())?;
-            Ok(Arc::new(NdArrowArrayDispatch::new_in_mem(
-                values, shape, dimensions, None,
-            )?))
+            from_typed::<TimestampNanosecond>(&array, shape, dimensions)
         }
         data_type => {
             anyhow::bail!("unsupported cast target datatype for partition cast: {data_type:?}")
@@ -225,8 +176,9 @@ fn nd_array_from_arrow(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::Float64Array;
+    use arrow::array::{Array, Float64Array};
     use arrow::datatypes::DataType;
+    use beacon_nd_arrow::NdArrowArrayDispatch;
     use futures::stream;
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
@@ -398,6 +350,46 @@ mod tests {
             .expect("salinity column exists");
         assert_eq!(temperature.data_type, DataType::Float64);
         assert_eq!(salinity.data_type, DataType::Float64);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cast_partition_preserves_nulls() -> anyhow::Result<()> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let io_cache = test_io_cache();
+        let partition_path = Path::from("collections/example/partitions/part-00000");
+        let mut writer =
+            PartitionWriter::new(store.clone(), partition_path.clone(), "part-00000", None)?;
+
+        let nullable_temp = NdArrowArrayDispatch::<i32>::new_in_mem_with_validity(
+            vec![10, 0, 30],
+            vec![3],
+            vec!["x".to_string()],
+            None,
+            Some(vec![true, false, true]),
+        )?;
+
+        writer
+            .write_dataset_columns(
+                "dataset-0",
+                stream::iter(vec![Column::new(
+                    "temperature".to_string(),
+                    Arc::new(nullable_temp),
+                )]),
+            )
+            .await?;
+        writer.finish(io_cache.clone()).await?;
+
+        let mut partition = load_partition(store.clone(), partition_path, io_cache).await?;
+        cast_partition_column(&mut partition, "temperature", DataType::Float64, true).await?;
+
+        let dataset_0 = ReaderBuilder::new(store, partition).dataset(0).await?;
+        let temp_values = dataset_0.0.arrays[1].as_arrow_array_ref().await?;
+        let temp_values = temp_values.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(temp_values.value(0), 10.0);
+        assert!(temp_values.is_null(1));
+        assert_eq!(temp_values.value(2), 30.0);
 
         Ok(())
     }
