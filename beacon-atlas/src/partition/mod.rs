@@ -3,6 +3,7 @@ pub mod ops;
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::{array::AsArray, datatypes::UInt32Type};
+use chrono::{DateTime, Utc};
 
 use crate::{
     array::io_cache::IoCache,
@@ -110,6 +111,10 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
         self.state().deletion_flags()
     }
 
+    pub fn insert_timestamps(&self) -> &[DateTime<Utc>] {
+        self.state().insert_timestamps()
+    }
+
     pub fn undeleted_dataset_indexes(&self) -> Vec<u32> {
         self.state().undeleted_dataset_indexes()
     }
@@ -124,6 +129,7 @@ pub(crate) struct PartitionState {
     entry_keys: Vec<String>,
     dataset_indexes: Vec<u32>,
     deletion_flags: Vec<bool>,
+    insert_timestamps: Vec<DateTime<Utc>>,
 }
 
 impl PartitionState {
@@ -132,6 +138,7 @@ impl PartitionState {
             entry_keys: vec![],
             dataset_indexes: vec![],
             deletion_flags: vec![],
+            insert_timestamps: vec![],
         }
     }
 
@@ -145,6 +152,10 @@ impl PartitionState {
 
     pub(crate) fn deletion_flags(&self) -> &[bool] {
         &self.deletion_flags
+    }
+
+    pub(crate) fn insert_timestamps(&self) -> &[DateTime<Utc>] {
+        &self.insert_timestamps
     }
 
     pub(crate) fn logical_entries(&self) -> Vec<&str> {
@@ -218,9 +229,34 @@ pub(crate) async fn load_partition_state<S: object_store::ObjectStore + Clone>(
         .iter()
         .map(|flag| flag.unwrap_or(false))
         .collect::<Vec<_>>();
+    let insert_timestamps = if entries_batch.num_columns() > 3 {
+        let insert_timestamps = entries_batch
+            .column(3)
+            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+
+        insert_timestamps
+            .iter()
+            .enumerate()
+            .map(|(index, timestamp)| {
+                timestamp
+                    .map(DateTime::from_timestamp_nanos)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "null insert timestamp at dataset index {index} in partition {}",
+                            partition_name
+                        )
+                    })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        let legacy_fallback = DateTime::from_timestamp_nanos(0);
+        vec![legacy_fallback; entry_keys.len()]
+    };
 
     anyhow::ensure!(
-        entry_keys.len() == dataset_indexes.len() && entry_keys.len() == deletion_flags.len(),
+        entry_keys.len() == dataset_indexes.len()
+            && entry_keys.len() == deletion_flags.len()
+            && entry_keys.len() == insert_timestamps.len(),
         "entries file is inconsistent for partition {}",
         partition_name
     );
@@ -229,6 +265,7 @@ pub(crate) async fn load_partition_state<S: object_store::ObjectStore + Clone>(
         entry_keys,
         dataset_indexes,
         deletion_flags,
+        insert_timestamps,
     })
 }
 
@@ -250,5 +287,74 @@ pub(crate) fn column_name_to_path(
         path
     } else {
         partition_directory.child("columns").child(column_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, Schema};
+    use chrono::DateTime;
+    use object_store::{ObjectStore, memory::InMemory, path::Path};
+
+    use crate::{IPC_WRITE_OPTS, consts::ENTRIES_FILE, partition::load_partition_state};
+
+    #[tokio::test]
+    async fn load_partition_state_supports_legacy_entries_without_insert_timestamp()
+    -> anyhow::Result<()> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let partition_directory = Path::from("collections/example/partitions/part-legacy");
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("dataset_name", DataType::Utf8, false),
+            Field::new("dataset_index", DataType::UInt32, false),
+            Field::new("deletion", DataType::Boolean, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec![
+                    "dataset-0",
+                    "dataset-1",
+                ])) as Arc<dyn arrow::array::Array>,
+                Arc::new(arrow::array::UInt32Array::from(vec![0, 1]))
+                    as Arc<dyn arrow::array::Array>,
+                Arc::new(arrow::array::BooleanArray::from(vec![false, true]))
+                    as Arc<dyn arrow::array::Array>,
+            ],
+        )?;
+
+        let mut encoded = Vec::new();
+        let mut writer = arrow::ipc::writer::FileWriter::try_new_with_options(
+            &mut encoded,
+            &schema,
+            IPC_WRITE_OPTS.clone(),
+        )?;
+        writer.write(&batch)?;
+        writer.finish()?;
+
+        store
+            .put(&partition_directory.child(ENTRIES_FILE), encoded.into())
+            .await?;
+
+        let state =
+            load_partition_state(store, partition_directory, "part-legacy".to_string()).await?;
+
+        assert_eq!(
+            state.entry_keys(),
+            &["dataset-0".to_string(), "dataset-1".to_string()]
+        );
+        assert_eq!(state.dataset_indexes(), &[0, 1]);
+        assert_eq!(state.deletion_flags(), &[false, true]);
+        assert_eq!(
+            state.insert_timestamps(),
+            &[
+                DateTime::from_timestamp_nanos(0),
+                DateTime::from_timestamp_nanos(0)
+            ]
+        );
+
+        Ok(())
     }
 }

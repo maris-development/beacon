@@ -7,6 +7,7 @@ use ndarray::Axis;
 use crate::array::compat_typings::ArrowTypeConversion;
 use crate::array::{
     backend::{ArrayBackend, mem::InMemoryArrayBackend},
+    compat_typings::attach_validity_mask,
     subset::ArraySubset,
 };
 
@@ -55,9 +56,27 @@ impl<T: ArrowTypeConversion> NdArrowArrayDispatch<T> {
         dimensions: Vec<String>,
         fill_value: Option<T>,
     ) -> anyhow::Result<Self> {
+        Self::new_in_mem_with_validity(array, shape, dimensions, fill_value, None)
+    }
+
+    pub fn new_in_mem_with_validity(
+        array: Vec<T>,
+        shape: Vec<usize>,
+        dimensions: Vec<String>,
+        fill_value: Option<T>,
+        validity: Option<Vec<bool>>,
+    ) -> anyhow::Result<Self> {
+        let validity = validity
+            .map(|values| ndarray::ArrayD::from_shape_vec(shape.clone(), values))
+            .transpose()?;
         let nd_array = ndarray::ArrayD::from_shape_vec(shape.clone(), array)?;
-        let backend =
-            InMemoryArrayBackend::new(nd_array, shape.clone(), dimensions.clone(), fill_value);
+        let backend = InMemoryArrayBackend::new_with_validity(
+            nd_array,
+            shape.clone(),
+            dimensions.clone(),
+            fill_value,
+            validity,
+        );
         Self::new(backend)
     }
 }
@@ -145,26 +164,39 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArrayDispatch<T, B> {
 #[async_trait::async_trait]
 impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDispatch<T, B> {
     async fn subset(&self, subset: ArraySubset) -> anyhow::Result<Arc<dyn NdArrowArray>> {
-        let subset_array = self.backend.read_subset(subset).await?;
-        let subset_shape = subset_array.shape().to_vec();
-        let subset_dispatch = NdArrowArrayDispatch::new_in_mem(
-            subset_array.into_raw_vec(),
+        let subset_data = self.backend.read_subset_with_validity(subset).await?;
+        let subset_shape = subset_data.values.shape().to_vec();
+        let subset_validity = subset_data
+            .validity
+            .map(|mask| mask.into_raw_vec_and_offset().0);
+
+        let subset_dispatch = NdArrowArrayDispatch::new_in_mem_with_validity(
+            subset_data.values.into_raw_vec_and_offset().0,
             subset_shape,
             self.dimensions(),
             self.backend.fill_value(),
+            subset_validity,
         )?;
         Ok(Arc::new(subset_dispatch))
     }
     async fn as_arrow_array_ref(&self) -> anyhow::Result<ArrayRef> {
-        let subset_array = self
+        let subset_data = self
             .backend
-            .read_subset(ArraySubset {
+            .read_subset_with_validity(ArraySubset {
                 start: vec![0; self.shape().len()],
                 shape: self.shape(),
             })
             .await?;
 
-        let slice = subset_array.to_owned().into_raw_vec();
+        let slice = subset_data.values.into_raw_vec_and_offset().0;
+        let validity = subset_data
+            .validity
+            .map(|mask| mask.into_raw_vec_and_offset().0);
+
+        if let Some(validity) = validity {
+            let array = T::arrow_from_array_view(&slice)?;
+            return attach_validity_mask(array, &validity);
+        }
 
         match self.backend.fill_value() {
             Some(fill) => T::arrow_from_array_view_with_fill(&slice, &fill),
@@ -204,15 +236,21 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
             ));
         }
 
-        let nd_array = self
+        let subset_data = self
             .backend
-            .read_subset(ArraySubset {
+            .read_subset_with_validity(ArraySubset {
                 start: vec![0; self.shape().len()],
                 shape: self.shape(),
             })
             .await?;
 
-        let mut aligned = nd_array.view().permuted_axes(source_axis_order).into_dyn();
+        let nd_array = subset_data.values;
+        let validity = subset_data.validity;
+
+        let mut aligned = nd_array
+            .view()
+            .permuted_axes(source_axis_order.clone())
+            .into_dyn();
         for (target_axis, target_dim) in dimensions.iter().enumerate() {
             if !source_dims.iter().any(|d| d == target_dim) {
                 aligned = aligned.insert_axis(Axis(target_axis));
@@ -227,12 +265,38 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
             )
         })?;
 
-        let broadcasted_vec = broadcasted.to_owned().into_raw_vec();
-        let broadcasted_dispatch = NdArrowArrayDispatch::new_in_mem(
+        let broadcasted_vec = broadcasted.to_owned().into_raw_vec_and_offset().0;
+        let broadcasted_validity = validity
+            .map(|validity| {
+                let mut aligned_validity = validity
+                    .view()
+                    .permuted_axes(source_axis_order.clone())
+                    .into_dyn();
+                for (target_axis, target_dim) in dimensions.iter().enumerate() {
+                    if !source_dims.iter().any(|d| d == target_dim) {
+                        aligned_validity = aligned_validity.insert_axis(Axis(target_axis));
+                    }
+                }
+
+                aligned_validity
+                    .broadcast(target_shape)
+                    .map(|mask| mask.to_owned().into_raw_vec_and_offset().0)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Cannot broadcast validity mask of shape {:?} to target shape {:?}",
+                            self.shape(),
+                            target_shape
+                        )
+                    })
+            })
+            .transpose()?;
+
+        let broadcasted_dispatch = NdArrowArrayDispatch::new_in_mem_with_validity(
             broadcasted_vec,
             target_shape.to_vec(),
             dimensions.to_vec(),
             self.backend.fill_value(),
+            broadcasted_validity,
         )?;
         Ok(Arc::new(broadcasted_dispatch))
     }

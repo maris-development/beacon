@@ -119,6 +119,8 @@ impl AtlasGlobalMetrics {
 struct PartitionReadContext {
     /// Native partition schema before DataFusion projection/mapping.
     partition_schema: SchemaRef,
+    /// Projected schema after applying projection.
+    projected_schema: SchemaRef,
     /// Maps partition batches into the table schema expected by DataFusion.
     schema_mapper: Arc<dyn SchemaMapper>,
     /// Projected column readers resolved from the partition.
@@ -252,6 +254,12 @@ async fn build_partition_read_context(
 
     let partition_schema = Arc::new(partition.arrow_schema());
     let (schema_mapper, projection) = schema_adapter.map_schema(&partition_schema)?;
+    let projected_schema = partition_schema.project(&projection).map_err(|e| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "Failed to project partition schema for '{}': {}",
+            file_path, e
+        ))
+    })?;
 
     let schema = partition.schema();
     let projected_columns: Vec<String> = projection
@@ -272,7 +280,7 @@ async fn build_partition_read_context(
 
     let dataset_queue = get_or_init_dataset_queue(
         &shared_dataset_queues,
-        &partition_path.to_string(),
+        partition_path.as_ref(),
         partition.undeleted_dataset_indexes(),
         &metrics,
     )
@@ -280,6 +288,7 @@ async fn build_partition_read_context(
 
     Ok(PartitionReadContext {
         partition_schema,
+        projected_schema: Arc::new(projected_schema),
         schema_mapper,
         column_readers,
         dataset_queue,
@@ -335,13 +344,13 @@ fn dataset_to_record_batch_stream(
     dataset_indexes
         .then(move |dataset_index| {
             let column_readers = context.column_readers.clone();
-            let partition_schema = context.partition_schema.clone();
+            let projected_schema = context.projected_schema.clone();
             let schema_mapper = context.schema_mapper.clone();
             let metrics = metrics_for_then.clone();
 
             async move {
                 let columns = read_dataset_columns(&column_readers, dataset_index)?;
-                let dataset = build_dataset(partition_schema, columns, dataset_index)?;
+                let dataset = build_dataset(projected_schema, columns, dataset_index)?;
                 metrics.add_dataset();
 
                 // Stream chunks per dataset to keep memory bounded.
@@ -371,9 +380,8 @@ fn dataset_to_record_batch_stream(
                                 e
                             ))
                         })?;
-                        let mapped = schema_mapper.map_batch(batch).map_err(|e| {
+                        let mapped = schema_mapper.map_batch(batch).inspect_err(|_e| {
                             metrics.add_error();
-                            e
                         })?;
                         metrics.add_batch();
                         metrics.add_rows(mapped.num_rows());

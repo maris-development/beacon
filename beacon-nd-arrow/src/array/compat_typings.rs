@@ -100,6 +100,34 @@ pub trait ArrowTypeConversion: Debug + Clone + Send + Sync + PartialEq + 'static
     }
 }
 
+pub fn attach_validity_mask(
+    base: arrow::array::ArrayRef,
+    validity: &[bool],
+) -> anyhow::Result<arrow::array::ArrayRef> {
+    if validity.len() != base.len() {
+        anyhow::bail!(
+            "validity length {} does not match array length {}",
+            validity.len(),
+            base.len()
+        );
+    }
+
+    let validity_buffer = arrow::buffer::BooleanBuffer::from_iter(validity.iter().copied());
+    let null_buffer = arrow::buffer::NullBuffer::new(validity_buffer);
+    if null_buffer.null_count() == 0 {
+        return Ok(base);
+    }
+
+    let array_data = base
+        .to_data()
+        .into_builder()
+        .nulls(Some(null_buffer))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to attach validity mask: {e}"))?;
+
+    Ok(arrow::array::make_array(array_data))
+}
+
 /// Generates a boilerplate [`ArrowTypeConversion`] implementation for any
 /// fixed-width primitive type that Arrow represents with a single,
 /// homogeneous `PrimitiveArray`.

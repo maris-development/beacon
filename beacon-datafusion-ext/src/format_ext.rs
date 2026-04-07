@@ -6,6 +6,9 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>>;
     fn file_format_name(&self) -> String;
+    fn list_with_file_extension(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

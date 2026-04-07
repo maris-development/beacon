@@ -1,14 +1,11 @@
 use std::{
     any::Any,
-    collections::HashMap,
     fmt::Debug,
-    path::Path,
     sync::{Arc, LazyLock},
 };
 
 use arrow::datatypes::SchemaRef;
-use beacon_common::listing_url::parse_listing_table_url;
-use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_formats::file_formats;
 use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
@@ -18,46 +15,44 @@ use datafusion::{
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
-use futures::{
-    stream::BoxStream,
-    {StreamExt, TryFutureExt},
-};
-use object_store::{ObjectStore, path::PathPart};
+use futures::stream::BoxStream;
 use url::Url;
 
 use crate::{
-    files::{collection::FileCollection, temp_output_file::TempOutputFile},
-    table::{_type::TableType, Table, empty::EmptyTable, error::TableError},
+    files::temp_output_file::TempOutputFile,
+    table::{Table, TableFormat, error::TableError},
 };
+
+#[cfg(test)]
+use crate::table::_type::TableType;
+#[cfg(test)]
+use crate::table::empty::EmptyTable;
+#[cfg(test)]
+use object_store::path::PathPart;
+#[cfg(test)]
+use std::collections::HashMap;
 
 pub mod files;
 pub mod table;
+mod table_runtime;
 pub mod util;
+
+pub use files::manager::FileManager;
+pub use table_runtime::table_manager::TableManager;
 
 pub mod prelude {
     pub use super::DataLake;
+    pub use super::FileManager;
+    pub use super::TableManager;
     pub use super::files::*;
-}
-
-#[derive(Debug)]
-pub struct Config {
-    read_only: bool,
 }
 
 pub struct DataLake {
     data_directory_store_url: ObjectStoreUrl,
     table_directory_store_url: ObjectStoreUrl,
 
-    /// The session context used for executing queries and managing the session state.
-    session_context: Arc<SessionContext>,
-
-    config: Config,
-    // Map of tables
-    tables: parking_lot::Mutex<HashMap<String, Table>>,
-    table_providers: parking_lot::Mutex<HashMap<String, Arc<dyn TableProvider>>>,
-
-    // File formats
-    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
+    table_manager: Arc<TableManager>,
+    file_manager: Arc<FileManager>,
 }
 
 impl Debug for DataLake {
@@ -65,8 +60,7 @@ impl Debug for DataLake {
         f.debug_struct("DataLake")
             .field("data_directory_store_url", &self.data_directory_store_url)
             .field("table_directory_store_url", &self.table_directory_store_url)
-            .field("config", &self.config)
-            .field("tables", &self.tables)
+            .field("table_count", &self.table_manager.table_names().len())
             .finish()
     }
 }
@@ -81,6 +75,7 @@ pub static INDEX_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
     LazyLock::new(|| ObjectStoreUrl::parse("index://").expect("Failed to parse index URL")); // ToDo: implement indexing on top of existing files utilizing the notified storage events.
 
 impl DataLake {
+    #[cfg(test)]
     fn table_directory_from_location(
         location: &object_store::path::Path,
     ) -> Option<Vec<PathPart<'static>>> {
@@ -97,21 +92,7 @@ impl DataLake {
         Some(table_directory)
     }
 
-    fn partition_tables_for_initialization(tables: Vec<Table>) -> (Vec<Table>, Vec<Table>) {
-        let mut regular_tables = Vec::new();
-        let mut merged_tables = Vec::new();
-
-        for table in tables {
-            if matches!(table.table_type, TableType::Merged(_)) {
-                merged_tables.push(table);
-            } else {
-                regular_tables.push(table);
-            }
-        }
-
-        (regular_tables, merged_tables)
-    }
-
+    #[cfg(test)]
     fn merged_table_references(
         tables: &HashMap<String, Table>,
         table_name: &str,
@@ -134,20 +115,9 @@ impl DataLake {
         None
     }
 
-    fn ordered_table_names_for_refresh(tables: &HashMap<String, Table>) -> Vec<String> {
-        let mut non_merged = Vec::new();
-        let mut merged = Vec::new();
-
-        for (name, table) in tables {
-            if matches!(table.table_type, TableType::Merged(_)) {
-                merged.push(name.clone());
-            } else {
-                non_merged.push(name.clone());
-            }
-        }
-
-        non_merged.extend(merged);
-        non_merged
+    #[cfg(test)]
+    async fn order_tables(tables: &HashMap<String, TableFormat>) -> Vec<TableFormat> {
+        table_runtime::ordering::order_tables(tables).await
     }
 
     #[inline(always)]
@@ -155,18 +125,27 @@ impl DataLake {
         &self,
         path: String,
     ) -> datafusion::error::Result<ListingTableUrl> {
-        parse_listing_table_url(&self.data_directory_store_url, &path)
+        self.file_manager.try_create_listing_url(path)
     }
 
     pub fn data_object_store_url(&self) -> ObjectStoreUrl {
-        self.data_directory_store_url.clone()
+        self.file_manager.data_object_store_url()
     }
 
     pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {
-        Self::create_temp_output_file(extension)
+        self.file_manager.try_create_temp_output_file(extension)
     }
+
     pub fn create_temp_output_file(extension: &str) -> TempOutputFile {
-        TempOutputFile::new(extension)
+        FileManager::create_temp_output_file(extension)
+    }
+
+    pub fn table_manager(&self) -> Arc<TableManager> {
+        self.table_manager.clone()
+    }
+
+    pub fn file_manager(&self) -> Arc<FileManager> {
+        self.file_manager.clone()
     }
 
     pub async fn new(session_context: Arc<SessionContext>) -> Self {
@@ -197,171 +176,32 @@ impl DataLake {
             tmp_object_store,
         );
 
-        let config = Self::read_config();
-
-        let table_providers = HashMap::new();
-        let tables = HashMap::new();
-
         let file_formats =
             file_formats(session_context.clone(), get_datasets_object_store().await).unwrap();
+        let runtime_handle = tokio::runtime::Handle::current();
+
+        let table_manager = Arc::new(TableManager::new(
+            runtime_handle,
+            session_context.clone(),
+            datasets_object_store_url.clone(),
+            tables_object_store_url.clone(),
+        ));
+        let file_manager = Arc::new(FileManager::new(
+            session_context,
+            datasets_object_store_url.clone(),
+            file_formats,
+        ));
 
         Self {
             data_directory_store_url: datasets_object_store_url,
             table_directory_store_url: tables_object_store_url,
-            session_context,
-            config,
-            file_formats,
-            table_providers: parking_lot::Mutex::new(table_providers),
-            tables: parking_lot::Mutex::new(tables),
+            table_manager,
+            file_manager,
         }
     }
 
-    fn read_config() -> Config {
-        // Read the config from environment variables or a config file
-        Config {
-            read_only: false, // Example value, replace with actual logic
-        }
-    }
-
-    async fn ensure_default_table(&self) -> anyhow::Result<()> {
-        if self.table_exist("default") {
-            return Ok(());
-        }
-
-        let table = Table {
-            table_directory: vec![],
-            table_name: "default".to_string(),
-            table_type: table::_type::TableType::Empty(EmptyTable::new()),
-            description: Some("Default Table.".to_string()),
-        };
-
-        self.create_table(table)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create default table: {}", e))
-    }
-
-    async fn load_tables_from_object_store(
-        tables_object_store: Arc<dyn ObjectStore>,
-    ) -> Vec<Table> {
-        let mut discovered_tables = Vec::new();
-        let mut entry_stream = tables_object_store.list(None);
-
-        while let Some(entry) = entry_stream.next().await {
-            tracing::info!("Found table entry: {:?}", entry);
-
-            let Ok(entry) = entry else {
-                continue;
-            };
-
-            let Some(table_directory) = Self::table_directory_from_location(&entry.location) else {
-                continue;
-            };
-
-            match Table::open(tables_object_store.clone(), table_directory).await {
-                Ok(table) => discovered_tables.push(table),
-                Err(e) => {
-                    tracing::error!("Failed to open table at {:?}: {}", entry.location, e);
-                }
-            }
-        }
-
-        discovered_tables
-    }
-
-    async fn register_tables(
-        tables_to_register: Vec<Table>,
-        tables_object_store_url: &ObjectStoreUrl,
-        data_directory_store_url: &ObjectStoreUrl,
-        session_context: &Arc<SessionContext>,
-        table_providers: &mut HashMap<String, Arc<dyn TableProvider>>,
-        tables: &mut HashMap<String, Table>,
-        table_kind: &str,
-    ) {
-        for table in tables_to_register {
-            let provider = table
-                .table_provider(
-                    session_context.clone(),
-                    data_directory_store_url.clone(),
-                    tables_object_store_url.clone(),
-                )
-                .await;
-
-            if let Ok(provider) = provider {
-                table_providers.insert(table.table_name.clone(), provider);
-                tables.insert(table.table_name.clone(), table);
-            } else {
-                tracing::error!(
-                    "Failed to create {} provider for {}: {}",
-                    table_kind,
-                    table.table_name,
-                    provider.unwrap_err()
-                );
-            }
-        }
-    }
-
-    fn replace_registered_tables(
-        &self,
-        table_providers: HashMap<String, Arc<dyn TableProvider>>,
-        tables: HashMap<String, Table>,
-    ) {
-        *self.table_providers.lock() = table_providers;
-        *self.tables.lock() = tables;
-    }
-
-    pub async fn init_tables(&self, session_context: Arc<SessionContext>) -> anyhow::Result<()> {
-        let (regular_tables, merged_tables) = Self::init_tables_impl(
-            self.table_directory_store_url.clone(),
-            self.data_directory_store_url.clone(),
-            session_context,
-        )
-        .await?;
-
-        let mut table_providers = HashMap::new();
-        let mut tables = HashMap::new();
-
-        Self::register_tables(
-            regular_tables,
-            &self.table_directory_store_url,
-            &self.data_directory_store_url,
-            &self.session_context,
-            &mut table_providers,
-            &mut tables,
-            "table",
-        )
-        .await;
-
-        self.replace_registered_tables(table_providers.clone(), tables.clone());
-
-        Self::register_tables(
-            merged_tables,
-            &self.table_directory_store_url,
-            &self.data_directory_store_url,
-            &self.session_context,
-            &mut table_providers,
-            &mut tables,
-            "merged table",
-        )
-        .await;
-
-        self.replace_registered_tables(table_providers, tables);
-
-        self.ensure_default_table().await
-    }
-
-    async fn init_tables_impl(
-        tables_object_store_url: ObjectStoreUrl,
-        _data_directory_store_url: ObjectStoreUrl,
-        session_context: Arc<SessionContext>,
-    ) -> anyhow::Result<(Vec<Table>, Vec<Table>)> {
-        tracing::info!("Initializing tables from object store");
-        let tables_object_store = session_context
-            .runtime_env()
-            .object_store(&tables_object_store_url)
-            .map_err(|e| anyhow::anyhow!("Failed to get tables object store: {}", e))?;
-
-        let discovered_tables = Self::load_tables_from_object_store(tables_object_store).await;
-        Ok(Self::partition_tables_for_initialization(discovered_tables))
+    pub async fn init_tables(&self) -> anyhow::Result<()> {
+        self.table_manager.init_tables().await
     }
 
     pub fn spawn_sync_table_refresh(self: &Arc<Self>, interval_secs: u64) {
@@ -377,30 +217,8 @@ impl DataLake {
             loop {
                 interval.tick().await;
                 tracing::info!("Refreshing tables...");
-                let table_names: Vec<String> = {
-                    let tables = data_lake.tables.lock();
-                    Self::ordered_table_names_for_refresh(&tables)
-                };
-                for table_name in table_names {
-                    if let Err(e) = data_lake.refresh_table(&table_name).await {
-                        tracing::error!(
-                            "Failed to refresh table {}: {}. Removing it from the list of available tables.",
-                            table_name,
-                            e
-                        );
-                        // Should we remove or keep the table from the list of available tables if it fails to refresh?
-                        // For now remove it from the list of available tables, but we could also keep it and just mark it as not refreshable or something like that.
-                        {
-                            let mut tables = data_lake.tables.lock();
-                            tables.remove(&table_name);
-                        }
-                        {
-                            let mut table_providers = data_lake.table_providers.lock();
-                            table_providers.remove(&table_name);
-                        }
-                    } else {
-                        tracing::info!("Successfully refreshed table {}", table_name);
-                    }
+                if let Err(e) = data_lake.init_tables().await {
+                    tracing::error!("Failed to refresh tables: {}", e);
                 }
             }
         });
@@ -412,203 +230,56 @@ impl DataLake {
         limit: Option<usize>,
         pattern: Option<String>,
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        let state = self.session_context.state();
-        let object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(self.data_directory_store_url.clone())?;
-
-        let listing_url =
-            self.try_create_listing_url(pattern.unwrap_or_else(|| "*".to_string()))?;
-
-        let mut objects = Vec::new();
-        let mut entry_stream = listing_url
-            .list_all_files(&state, &object_store, "")
-            .await?;
-
-        while let Some(entry) = entry_stream.next().await {
-            if let Ok(entry) = entry {
-                objects.push(entry);
-            }
-        }
-
-        let mut datasets = vec![];
-
-        for file_format in self.file_formats.iter() {
-            let format_datasets = file_format.discover_datasets(&objects)?;
-            datasets.extend(format_datasets);
-        }
-
-        // Apply offset and limit
-        let start = offset.unwrap_or(0);
-        let end = limit.map(|l| start + l).unwrap_or(datasets.len());
-        let datasets = datasets.into_iter().skip(start).take(end - start).collect();
-
-        Ok(datasets)
+        self.file_manager
+            .list_datasets(offset, limit, pattern)
+            .await
     }
 
     pub async fn list_dataset_schema(
         &self,
         file_pattern: &str,
     ) -> datafusion::error::Result<SchemaRef> {
-        let session_state = self.session_context.state();
-        let extension = if file_pattern.ends_with("zarr.json") {
-            "zarr.json".to_string()
-        } else {
-            match Path::new(file_pattern).extension() {
-                Some(ext) => {
-                    // Fetch file format from extension
-                    ext.to_string_lossy().to_string()
-                }
-                None => {
-                    return Err(DataFusionError::Plan(format!(
-                        "No file extension found for {}. No file type information available.",
-                        file_pattern
-                    )));
-                }
-            }
-        };
-        tracing::debug!("Interpreted file extension: {}", extension);
-        let listing_url = self.try_create_listing_url(file_pattern.to_string())?;
-
-        let file_format_factory = session_state
-            .get_file_format_factory(&extension)
-            .ok_or_else(|| {
-                DataFusionError::Plan(format!("No file format reader found for {}", extension))
-            })?;
-        let file_format = file_format_factory.create(&session_state, &HashMap::new())?;
-        tracing::debug!("Using file format: {:?}", file_format);
-
-        let file_collection =
-            FileCollection::new(&session_state, file_format, vec![listing_url]).await?;
-
-        Ok(file_collection.schema())
+        self.file_manager.list_dataset_schema(file_pattern).await
     }
 
     pub fn list_table_schema(&self, table_name: &str) -> Option<SchemaRef> {
-        let table_providers = self.table_providers.lock();
-        table_providers.get(table_name).map(|t| t.schema())
+        self.table_manager.list_table_schema(table_name)
     }
 
-    pub fn list_table(&self, table_name: &str) -> Option<Table> {
-        let tables = self.tables.lock();
-        tables.get(table_name).cloned()
+    pub fn list_table(&self, table_name: &str) -> Option<TableFormat> {
+        self.table_manager.list_table(table_name)
     }
 
     pub async fn update_table(&self, table: Table) -> Result<(), TableError> {
-        self.remove_table(&table.table_name).await?;
-        self.create_table(table).await
+        self.table_manager.update_table(table).await
     }
 
-    pub async fn create_table(&self, mut table: Table) -> Result<(), TableError> {
-        if self.tables.lock().contains_key(&table.table_name) {
-            return Err(TableError::TableAlreadyExists(table.table_name));
-        }
-
-        let table_provider = table
-            .table_provider(
-                self.session_context.clone(),
-                self.data_directory_store_url.clone(),
-                self.table_directory_store_url.clone(),
-            )
-            .await?;
-
-        let table_object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.table_directory_store_url)
-            .unwrap();
-
-        let table_directory: Vec<PathPart<'static>> =
-            vec![PathPart::from(table.table_name.clone())];
-        table.save(table_object_store, table_directory).await;
-
-        let mut tables = self.tables.lock();
-        let mut table_providers = self.table_providers.lock();
-        table_providers.insert(table.table_name.clone(), table_provider);
-        tables.insert(table.table_name.clone(), table);
-        Ok(())
+    pub async fn create_table(&self, table: Table) -> Result<(), TableError> {
+        self.table_manager.create_table(table).await
     }
 
-    pub async fn refresh_table(&self, table_name: &str) -> Result<(), TableError> {
-        let table = self
-            .tables
-            .lock()
-            .get(table_name)
-            .cloned()
-            .ok_or(TableError::TableNotFound(table_name.to_string()))?;
-
-        let refreshed_table_provider = table
-            .table_provider(
-                self.session_context.clone(),
-                self.data_directory_store_url.clone(),
-                self.table_directory_store_url.clone(),
-            )
-            .await?;
-
-        let mut table_providers = self.table_providers.lock();
-        table_providers.insert(table_name.to_string(), refreshed_table_provider);
-        Ok(())
+    pub async fn refresh_table(&self, table_name: &str) -> anyhow::Result<()> {
+        self.table_manager.refresh_table(table_name).await
     }
 
     pub async fn apply_operation(
         &self,
         table_name: &str,
-        _op: serde_json::Value,
-    ) -> Result<(), TableError> {
-        let tables = self.tables.lock();
-        let table = tables
-            .get(table_name)
-            .ok_or(TableError::TableNotFound(table_name.to_string()))?;
-
-        table
-            .table_type
-            .apply_operation(
-                _op,
-                self.session_context.clone(),
-                &self.data_directory_store_url,
-            )
-            .map_err(|e| TableError::GenericTableError(format!("Failed to apply operation: {}", e)))
-            .await
+        op: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.table_manager.apply_operation(table_name, op).await
     }
 
     pub async fn upload_file<S>(
         &self,
         file_path: &str,
-        mut stream: S,
+        stream: S,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     where
         S: futures::Stream<Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>
             + Unpin,
     {
-        let object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.data_directory_store_url)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let upload_path = object_store::path::Path::from(file_path);
-
-        let mut writer = object_store
-            .put_multipart(&upload_path)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        while let Some(chunk) = stream.next().await {
-            let bytes = chunk?;
-            writer
-                .put_part(bytes.into())
-                .await
-                .map_err(|e: object_store::Error| Box::new(e))?;
-        }
-
-        // Finalize the upload
-        writer
-            .complete()
-            .await
-            .map_err(|e: object_store::Error| Box::new(e))?;
-
-        Ok(())
+        self.file_manager.upload_file(file_path, stream).await
     }
 
     pub async fn download_file(
@@ -618,78 +289,14 @@ impl DataLake {
         BoxStream<'static, Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.data_directory_store_url)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let file_path = object_store::path::Path::from(file_path);
-
-        let get_result = object_store
-            .get(&file_path)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let stream = get_result.into_stream();
-
-        let file_stream = Box::pin(stream.map(|result| {
-            result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-        }));
-
-        Ok(file_stream)
+        self.file_manager.download_file(file_path).await
     }
 
     pub async fn delete_file(
         &self,
         file_path: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.data_directory_store_url)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let file_path = object_store::path::Path::from(file_path);
-
-        object_store
-            .delete(&file_path)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        Ok(())
-    }
-
-    pub async fn remove_table(&self, table_name: &str) -> Result<(), TableError> {
-        let mut tables = self.tables.lock();
-        if !tables.contains_key(table_name) {
-            return Err(TableError::TableNotFound(table_name.to_string()));
-        }
-
-        if let Some(merged_table) = Self::merged_table_references(&tables, table_name) {
-            return Err(TableError::TableReferencedByMerged {
-                table_name: table_name.to_string(),
-                merged_table,
-            });
-        }
-
-        let table = tables.remove(table_name);
-        drop(tables); // Release the lock before async call
-
-        let mut table_providers = self.table_providers.lock();
-        table_providers.remove(table_name);
-        drop(table_providers); // Release the lock before deleting the table
-
-        if let Some(table) = table {
-            let table_object_store_url = self.table_directory_store_url.clone();
-
-            table
-                .delete_table(self.session_context.clone(), table_object_store_url)
-                .await;
-            Ok(())
-        } else {
-            Err(TableError::TableNotFound(table_name.to_string()))
-        }
+        self.file_manager.delete_file(file_path).await
     }
 }
 
@@ -697,8 +304,7 @@ impl DataLake {
 impl SchemaProvider for DataLake {
     /// Returns true if table exist in the schema provider, false otherwise.
     fn table_exist(&self, name: &str) -> bool {
-        let tables = self.tables.lock();
-        tables.contains_key(name)
+        self.table_manager.table_exist(name)
     }
 
     /// Returns this `SchemaProvider` as [`Any`] so that it can be downcast to a
@@ -709,15 +315,33 @@ impl SchemaProvider for DataLake {
 
     /// Retrieves the list of available table names in this schema.
     fn table_names(&self) -> Vec<String> {
-        let tables = self.tables.lock();
-        tables.keys().cloned().collect()
+        self.table_manager.table_names()
     }
 
     /// Retrieves a specific table from the schema by name, if it exists,
     /// otherwise returns `None`.
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
-        let table_providers = self.table_providers.lock();
-        Ok(table_providers.get(name).cloned())
+        Ok(self.table_manager.table_provider(name))
+    }
+
+    fn register_table(
+        &self,
+        name: String,
+        table: Arc<dyn TableProvider>,
+    ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+        self.table_manager.register_table(name, table)
+    }
+
+    /// If supported by the implementation, removes the `name` table from this
+    /// schema and returns the previously registered [`TableProvider`], if any.
+    ///
+    /// If no `name` table exists, returns Ok(None).
+    #[allow(unused_variables)]
+    fn deregister_table(
+        &self,
+        name: &str,
+    ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+        self.table_manager.deregister_table(name)
     }
 }
 
@@ -725,6 +349,7 @@ impl SchemaProvider for DataLake {
 mod tests {
     use super::*;
     use crate::table::{_type::TableType, merged::MergedTable};
+    use beacon_datafusion_ext::table_ext::{ExternalTableDefinition, ViewTableDefinition};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_table(name: &str, table_type: TableType) -> Table {
@@ -734,6 +359,10 @@ mod tests {
             table_type,
             description: None,
         }
+    }
+
+    fn test_legacy_table_format(name: &str, table_type: TableType) -> TableFormat {
+        TableFormat::Legacy(test_table(name, table_type))
     }
 
     #[test]
@@ -755,43 +384,6 @@ mod tests {
         let location = object_store::path::Path::from("folder/example/not-a-table.json");
 
         assert!(DataLake::table_directory_from_location(&location).is_none());
-    }
-
-    #[test]
-    fn partition_tables_for_initialization_keeps_merged_tables_separate() {
-        let tables = vec![
-            test_table("base_a", TableType::Empty(EmptyTable::new())),
-            test_table(
-                "merged_x",
-                TableType::Merged(MergedTable {
-                    table_names: vec!["base_a".to_string()],
-                }),
-            ),
-            test_table("base_b", TableType::Empty(EmptyTable::new())),
-            test_table(
-                "merged_y",
-                TableType::Merged(MergedTable {
-                    table_names: vec!["base_b".to_string()],
-                }),
-            ),
-        ];
-
-        let (regular_tables, merged_tables) = DataLake::partition_tables_for_initialization(tables);
-
-        assert_eq!(
-            regular_tables
-                .into_iter()
-                .map(|table| table.table_name)
-                .collect::<Vec<_>>(),
-            vec!["base_a", "base_b"]
-        );
-        assert_eq!(
-            merged_tables
-                .into_iter()
-                .map(|table| table.table_name)
-                .collect::<Vec<_>>(),
-            vec!["merged_x", "merged_y"]
-        );
     }
 
     #[test]
@@ -817,23 +409,23 @@ mod tests {
         assert_eq!(dependent, Some("merged_table".to_string()));
     }
 
-    #[test]
-    fn ordered_table_names_for_refresh_puts_merged_last() {
+    #[tokio::test]
+    async fn ordered_table_names_for_refresh_puts_merged_last() {
         let mut tables = HashMap::new();
 
         tables.insert(
             "base_a".to_string(),
-            test_table("base_a", TableType::Empty(EmptyTable::new())),
+            test_legacy_table_format("base_a", TableType::Empty(EmptyTable::new())),
         );
 
         tables.insert(
             "base_b".to_string(),
-            test_table("base_b", TableType::Empty(EmptyTable::new())),
+            test_legacy_table_format("base_b", TableType::Empty(EmptyTable::new())),
         );
 
         tables.insert(
             "merged_x".to_string(),
-            test_table(
+            test_legacy_table_format(
                 "merged_x",
                 TableType::Merged(MergedTable {
                     table_names: vec!["base_a".to_string(), "base_b".to_string()],
@@ -841,17 +433,20 @@ mod tests {
             ),
         );
 
-        let order = DataLake::ordered_table_names_for_refresh(&tables);
+        let order = DataLake::order_tables(&tables).await;
 
         let merged_positions = order
             .iter()
             .enumerate()
-            .filter_map(|(idx, name)| (name == "merged_x").then_some(idx))
+            .filter_map(|(idx, table)| (table.table_name() == "merged_x").then_some(idx))
             .collect::<Vec<_>>();
         let base_positions = order
             .iter()
             .enumerate()
-            .filter_map(|(idx, name)| ((name == "base_a") || (name == "base_b")).then_some(idx))
+            .filter_map(|(idx, table)| {
+                ((table.table_name() == "base_a") || (table.table_name() == "base_b"))
+                    .then_some(idx)
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(merged_positions.len(), 1);
@@ -864,6 +459,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordered_definition_views_follow_table_scan_dependencies() {
+        let mut tables = HashMap::new();
+
+        let base = ExternalTableDefinition {
+            name: "base_table".to_string(),
+            location: "dataset/base_table/*.parquet".to_string(),
+            file_type: "parquet".to_string(),
+            schema: Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+            definition: None,
+            partition_cols: vec![],
+            options: HashMap::new(),
+            if_not_exists: false,
+        };
+
+        let view_a = ViewTableDefinition {
+            name: "view_a".to_string(),
+            definition: "SELECT * FROM base_table".to_string(),
+            dependencies: vec!["base_table".to_string()],
+        };
+
+        let view_b = ViewTableDefinition {
+            name: "view_b".to_string(),
+            definition: "SELECT * FROM view_a".to_string(),
+            dependencies: vec!["view_a".to_string()],
+        };
+
+        tables.insert(
+            base.name.clone(),
+            TableFormat::DefinitionBased(Arc::new(base)),
+        );
+        tables.insert(
+            view_a.name.clone(),
+            TableFormat::DefinitionBased(Arc::new(view_a)),
+        );
+        tables.insert(
+            view_b.name.clone(),
+            TableFormat::DefinitionBased(Arc::new(view_b)),
+        );
+
+        let order = DataLake::order_tables(&tables).await;
+        let ordered_names = order
+            .iter()
+            .map(TableFormat::table_name)
+            .collect::<Vec<_>>();
+
+        let base_pos = ordered_names
+            .iter()
+            .position(|name| *name == "base_table")
+            .expect("base table should be present");
+        let view_a_pos = ordered_names
+            .iter()
+            .position(|name| *name == "view_a")
+            .expect("view_a should be present");
+        let view_b_pos = ordered_names
+            .iter()
+            .position(|name| *name == "view_b")
+            .expect("view_b should be present");
+
+        assert!(base_pos < view_a_pos);
+        assert!(view_a_pos < view_b_pos);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn init_tables_registers_base_tables_before_merged_tables() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -915,7 +573,7 @@ mod tests {
             .expect("schema registration should succeed");
 
         reloaded
-            .init_tables(reload_ctx.clone())
+            .init_tables()
             .await
             .expect("table initialization should succeed");
 
@@ -926,14 +584,17 @@ mod tests {
         let merged_table = reloaded
             .list_table(&merged_name)
             .expect("merged table metadata should be present");
-        match merged_table.table_type {
-            TableType::Merged(merged) => {
-                assert_eq!(
-                    merged.table_names,
-                    vec![base_a_name.clone(), base_b_name.clone()]
-                );
-            }
-            other => panic!("expected merged table, got {other:?}"),
+        match merged_table {
+            TableFormat::Legacy(table) => match table.table_type {
+                TableType::Merged(merged) => {
+                    assert_eq!(
+                        merged.table_names,
+                        vec![base_a_name.clone(), base_b_name.clone()]
+                    );
+                }
+                other => panic!("expected merged legacy table, got {other:?}"),
+            },
+            other => panic!("expected legacy table format, got {other:?}"),
         }
 
         let merged_provider = reload_ctx
@@ -946,16 +607,13 @@ mod tests {
         );
 
         reloaded
-            .remove_table(&merged_name)
-            .await
+            .deregister_table(&merged_name)
             .expect("merged table cleanup should succeed");
         reloaded
-            .remove_table(&base_a_name)
-            .await
+            .deregister_table(&base_a_name)
             .expect("base table A cleanup should succeed");
         reloaded
-            .remove_table(&base_b_name)
-            .await
+            .deregister_table(&base_b_name)
             .expect("base table B cleanup should succeed");
     }
 }

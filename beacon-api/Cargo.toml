@@ -8,7 +8,7 @@ tikv-jemallocator = "0.6.0"
 pprof = { version = "0.15", features = ["flamegraph"] }
 
 [dependencies]
-axum = { version = "0.8.1", features = ["tracing", "multipart"] }
+axum = { version = "0.8.1", features = ["tracing", "multipart", "ws"] }
 axum-streams = { version = "0.23.1", features = ["arrow"]}
 tower-http = { version = "0.6.1", features = ["trace", "cors"] }
 base64 = "0.22.1"

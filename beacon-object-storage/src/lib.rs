@@ -192,7 +192,8 @@ impl DatasetsStore {
         let root = directory_path.clone();
         let inner = if enable_fs_events {
             let local_store = LocalFileSystem::new_with_prefix(directory_path.clone())
-                .map_err(|e| error::StorageError::InitializationError(format!("{}", e)))?;
+                .map_err(|e| error::StorageError::InitializationError(format!("{}", e)))?
+                .with_automatic_cleanup(true);
             let notified_store =
                 NotifiedStore::new(Arc::new(local_store) as Arc<dyn ObjectStore>).await;
             let arc_notified_store = Arc::new(notified_store);
