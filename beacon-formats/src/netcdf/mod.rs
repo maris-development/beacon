@@ -45,6 +45,8 @@ pub struct NetcdfOptions {
     pub unique_value_columns: Vec<String>,
     #[serde(default = "default_replay_batch_size")]
     pub replay_batch_size: usize,
+    #[serde(default)]
+    pub dimensions_projection: Option<Vec<String>>,
 }
 
 fn default_replay_batch_size() -> usize {
@@ -163,7 +165,11 @@ impl FileFormat for NetcdfFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         let mut tasks = vec![];
         for object in objects {
-            let schema_task = fetch_schema(self.datasets_object_store.clone(), object.clone());
+            let schema_task = fetch_schema(
+                self.datasets_object_store.clone(),
+                object.clone(),
+                self.options.dimensions_projection.clone(),
+            );
             tasks.push(schema_task);
         }
         let schemas = futures::future::try_join_all(tasks).await?;
@@ -199,6 +205,7 @@ impl FileFormat for NetcdfFormat {
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let source = NetCDFFileSource::new(
             self.datasets_object_store.clone(),
+            self.options.dimensions_projection.clone(),
             beacon_config::CONFIG.enable_multiplexer_netcdf,
         );
         let conf = FileScanConfigBuilder::from(conf)
@@ -260,6 +267,7 @@ impl FileFormat for NetcdfFormat {
     fn file_source(&self) -> Arc<dyn FileSource> {
         Arc::new(NetCDFFileSource::new(
             self.datasets_object_store.clone(),
+            self.options.dimensions_projection.clone(),
             beacon_config::CONFIG.enable_multiplexer_netcdf,
         ))
     }
