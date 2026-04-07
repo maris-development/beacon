@@ -21,11 +21,13 @@ use datafusion::{
 };
 use futures::StreamExt;
 use parking_lot::Mutex;
+use sysinfo::{ProcessesToUpdate, System};
 
 use crate::{
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
     query_result::{ArrowOutputStream, QueryOutput, QueryResult},
     statement_handlers::SqlStatementExecutor,
+    telemetry,
 };
 
 pub struct VirtualMachine {
@@ -229,6 +231,12 @@ impl VirtualMachine {
         beacon_plan: BeaconQueryPlan,
         query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
     ) -> anyhow::Result<QueryResult> {
+        if let Some(start_memory_bytes) = current_process_memory_bytes() {
+            beacon_plan
+                .metrics_tracker
+                .set_process_memory_start_bytes(start_memory_bytes);
+        }
+
         let task_ctx = self.session_ctx().task_ctx();
 
         match beacon_plan.output_file {
@@ -237,11 +245,18 @@ impl VirtualMachine {
                 let mut stream = datafusion::physical_plan::execute_stream(
                     beacon_plan.physical_plan.clone(),
                     task_ctx,
-                )?;
+                )
+                .map_err(|error| {
+                    telemetry::record_query_failure("file", "execute_stream");
+                    error
+                })?;
 
                 let mut total_rows: u64 = 0;
                 while let Some(maybe_batch) = stream.next().await {
-                    let batch = maybe_batch?;
+                    let batch = maybe_batch.map_err(|error| {
+                        telemetry::record_query_failure("file", "read_batch");
+                        error
+                    })?;
                     let num_rows_array = batch.column(0).as_primitive::<UInt64Type>();
                     if num_rows_array.len() > 0 {
                         let num_rows = num_rows_array.value(0);
@@ -257,7 +272,27 @@ impl VirtualMachine {
                     .metrics_tracker
                     .add_output_bytes(output_file.size()?);
 
+                if let Some(end_memory_bytes) = current_process_memory_bytes() {
+                    beacon_plan
+                        .metrics_tracker
+                        .set_process_memory_end_bytes(end_memory_bytes);
+                }
+
                 let consolidated_metrics = beacon_plan.metrics_tracker.get_consolidated_metrics();
+                telemetry::record_query_completion("file", &consolidated_metrics);
+
+                tracing::info!(
+                    telemetry_event = "query.end",
+                    query_id = %beacon_plan.query_id,
+                    result_size_in_bytes = consolidated_metrics.result_size_in_bytes,
+                    result_rows = consolidated_metrics.result_num_rows,
+                    peak_output_batch_bytes = consolidated_metrics.peak_output_batch_bytes,
+                    process_memory_start_bytes = consolidated_metrics.process_memory_start_bytes,
+                    process_memory_end_bytes = consolidated_metrics.process_memory_end_bytes,
+                    process_memory_delta_bytes = consolidated_metrics.process_memory_delta_bytes,
+                    execution_time_ms = consolidated_metrics.execution_time_ms,
+                    "Query file output completed"
+                );
                 query_metrics
                     .lock()
                     .insert(beacon_plan.query_id, consolidated_metrics);
@@ -272,7 +307,11 @@ impl VirtualMachine {
                 let stream = datafusion::physical_plan::execute_stream(
                     beacon_plan.physical_plan.clone(),
                     task_ctx,
-                )?;
+                )
+                .map_err(|error| {
+                    telemetry::record_query_failure("stream", "execute_stream");
+                    error
+                })?;
 
                 let output_stream = ArrowOutputStream {
                     stream,
@@ -373,4 +412,11 @@ impl VirtualMachine {
         let mut parser = BeaconParser::new(sql)?;
         parser.parse_statement().map_err(Into::into)
     }
+}
+
+fn current_process_memory_bytes() -> Option<u64> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    let mut system = System::new();
+    let _ = system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).map(|process| process.memory())
 }

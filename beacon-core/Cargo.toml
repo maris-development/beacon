@@ -29,6 +29,7 @@ inventory = "0.3.18"
 pathdiff = "0.2.3"
 
 tracing = { workspace=true}
+opentelemetry = { version = "0.27.1" }
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }

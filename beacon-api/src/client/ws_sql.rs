@@ -136,8 +136,34 @@ async fn handle_ws_connection(
                 match parsed {
                     WsClientMessage::RunSql { sql, request_id } => {
                         let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+                        let query_started_at = Instant::now();
+                        crate::otel::record_ws_sql_query_start();
+
+                        tracing::info!(
+                            telemetry_event = "query.start",
+                            protocol = "ws_sql",
+                            request_id = %request_id,
+                            sql = %sql,
+                            "WebSocket SQL query received"
+                        );
 
                         if sql.len() > beacon_config::CONFIG.ws_sql_max_sql_bytes {
+                            crate::otel::record_ws_sql_query_error();
+                            crate::otel::record_ws_sql_query_duration(
+                                "error",
+                                query_started_at.elapsed(),
+                            );
+
+                            tracing::error!(
+                                telemetry_event = "query.error",
+                                protocol = "ws_sql",
+                                request_id = %request_id,
+                                error = "sql_payload_too_large",
+                                sql_bytes = sql.len(),
+                                elapsed_ms = query_started_at.elapsed().as_millis() as u64,
+                                "WebSocket SQL query rejected"
+                            );
+
                             send_event(
                                 &mut socket,
                                 WsServerEvent::Error {
@@ -160,6 +186,21 @@ async fn handle_ws_connection(
                         let mut stream = match runtime.run_sql(sql, true).await {
                             Ok(stream) => stream,
                             Err(err) => {
+                                crate::otel::record_ws_sql_query_error();
+                                crate::otel::record_ws_sql_query_duration(
+                                    "error",
+                                    query_started_at.elapsed(),
+                                );
+
+                                tracing::error!(
+                                    telemetry_event = "query.error",
+                                    protocol = "ws_sql",
+                                    request_id = %request_id,
+                                    error = %err,
+                                    elapsed_ms = query_started_at.elapsed().as_millis() as u64,
+                                    "WebSocket SQL query execution failed"
+                                );
+
                                 send_event(
                                     &mut socket,
                                     WsServerEvent::Error {
@@ -207,6 +248,25 @@ async fn handle_ws_connection(
                                     }
                                 }
                                 Ok(None) => {
+                                    crate::otel::record_ws_sql_query_duration(
+                                        "ok",
+                                        query_started_at.elapsed(),
+                                    );
+                                    crate::otel::record_ws_sql_query_result(
+                                        total_rows,
+                                        batch_index,
+                                    );
+
+                                    tracing::info!(
+                                        telemetry_event = "query.end",
+                                        protocol = "ws_sql",
+                                        request_id = %request_id,
+                                        total_rows,
+                                        chunks_sent = batch_index,
+                                        elapsed_ms = query_started_at.elapsed().as_millis() as u64,
+                                        "WebSocket SQL query completed"
+                                    );
+
                                     send_event(
                                         &mut socket,
                                         WsServerEvent::Done {
@@ -218,6 +278,23 @@ async fn handle_ws_connection(
                                     break;
                                 }
                                 Err(err) => {
+                                    crate::otel::record_ws_sql_query_error();
+                                    crate::otel::record_ws_sql_query_duration(
+                                        "error",
+                                        query_started_at.elapsed(),
+                                    );
+
+                                    tracing::error!(
+                                        telemetry_event = "query.error",
+                                        protocol = "ws_sql",
+                                        request_id = %request_id,
+                                        error = %err,
+                                        chunks_sent = batch_index,
+                                        rows_streamed = total_rows,
+                                        elapsed_ms = query_started_at.elapsed().as_millis() as u64,
+                                        "WebSocket SQL stream failed"
+                                    );
+
                                     send_event(
                                         &mut socket,
                                         WsServerEvent::Error {

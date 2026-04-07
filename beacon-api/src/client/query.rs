@@ -1,5 +1,4 @@
-use core::panic;
-use std::{sync::Arc, thread::sleep};
+use std::{sync::Arc, time::Instant};
 
 use arrow::ipc::{writer::IpcWriteOptions, CompressionType};
 use axum::{
@@ -41,16 +40,58 @@ pub(crate) async fn query(
     State(state): State<Arc<Runtime>>,
     Json(query_obj): Json<Query>,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
+    let query_started_at = Instant::now();
+    crate::otel::record_http_query_start();
+
+    let query_payload = serde_json::to_string(&query_obj)
+        .unwrap_or_else(|_| "{\"error\":\"failed_to_serialize_query\"}".to_string());
+
+    tracing::info!(
+        telemetry_event = "query.start",
+        query_payload = %query_payload,
+        "HTTP query received"
+    );
+
     let query_result = state.run_client_query(query_obj).await.map_err(|err| {
-        tracing::error!("Error running beacon query: {}", err);
+        crate::otel::record_http_query_error();
+        crate::otel::record_http_query_duration("unknown", "error", query_started_at.elapsed());
+
+        tracing::error!(
+            telemetry_event = "query.error",
+            query_payload = %query_payload,
+            error = %err,
+            elapsed_ms = query_started_at.elapsed().as_millis() as u64,
+            "Error running beacon query"
+        );
         (StatusCode::BAD_REQUEST, Json(err.to_string()))
     })?;
 
     match query_result.query_output {
         beacon_core::query_result::QueryOutput::File(query_output_file) => {
+            crate::otel::record_http_query_duration("file", "ok", query_started_at.elapsed());
+
+            tracing::info!(
+                telemetry_event = "query.output_ready",
+                protocol = "http",
+                output_type = "file",
+                query_id = %query_result.query_id,
+                elapsed_ms = query_started_at.elapsed().as_millis() as u64,
+                "HTTP query prepared file output"
+            );
             Ok(handle_query_output_file(query_output_file, query_result.query_id).await)
         }
         beacon_core::query_result::QueryOutput::Stream(arrow_output_stream) => {
+            crate::otel::record_http_query_duration("stream", "ok", query_started_at.elapsed());
+
+            tracing::info!(
+                telemetry_event = "query.output_ready",
+                protocol = "http",
+                output_type = "stream",
+                query_id = %query_result.query_id,
+                elapsed_ms = query_started_at.elapsed().as_millis() as u64,
+                "HTTP query prepared stream output"
+            );
+
             let ipc_options = IpcWriteOptions::default()
                 .try_with_compression(Some(CompressionType::ZSTD))
                 .unwrap();

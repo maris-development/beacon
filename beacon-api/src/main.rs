@@ -22,6 +22,7 @@ use utoipa_swagger_ui::SwaggerUi;
 mod admin;
 mod auth;
 mod client;
+mod otel;
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -31,6 +32,11 @@ use tikv_jemallocator::Jemalloc;
 static GLOBAL: Jemalloc = Jemalloc;
 
 const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+struct TracingGuards {
+    _file_guard: tracing_appender::non_blocking::WorkerGuard,
+    _otel_guard: Option<otel::OtelGuard>,
+}
 
 fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::OpenApi {
     openapi.info.title = "Beacon API".to_string();
@@ -52,7 +58,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    setup_tracing();
+    let _tracing_guards = setup_tracing()?;
 
     tracing::info!("Beacon API v{}", BEACON_VERSION);
     let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new().await?);
@@ -97,29 +103,55 @@ async fn async_main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn setup_tracing() {
+fn setup_tracing() -> anyhow::Result<TracingGuards> {
     // ---- file appender ----
     let file_appender = tracing_appender::rolling::daily("logs", "beacon.log");
-    let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        // axum logs rejections from built-in extractors with the `axum::rejection`
+        // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
+        format!(
+            "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug,beacon_common=debug",
+            env!("CARGO_CRATE_NAME")
+        )
+        .into()
+    });
+
+    if beacon_config::CONFIG.otel_enable {
+        let (otel_tracer, otel_guard) = otel::build_tracer(BEACON_VERSION)?;
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(otel_tracer);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(otel_layer)
+            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(file_writer).with_ansi(false))
+            .init();
+
+        tracing::info!(
+            otel_endpoint = %beacon_config::CONFIG.otel_otlp_endpoint,
+            sample_ratio = beacon_config::CONFIG.otel_trace_sample_ratio,
+            metric_export_interval_secs = beacon_config::CONFIG.otel_metric_export_interval_secs,
+            "OpenTelemetry tracing and metrics enabled"
+        );
+
+        return Ok(TracingGuards {
+            _file_guard: file_guard,
+            _otel_guard: Some(otel_guard),
+        });
+    }
 
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                // axum logs rejections from built-in extractors with the `axum::rejection`
-                // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
-                format!(
-                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug,beacon_common=debug",
-                    env!("CARGO_CRATE_NAME")
-                )
-                .into()
-            }),
-        )
+        .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::fmt::layer().with_writer(file_writer).with_ansi(false))
         .init();
 
-    // Prevent the file writer from being dropped
-    std::mem::forget(_guard);
+    Ok(TracingGuards {
+        _file_guard: file_guard,
+        _otel_guard: None,
+    })
 }
 
 fn setup_tracing_router<T>(mut router: Router<T>) -> Router<T>

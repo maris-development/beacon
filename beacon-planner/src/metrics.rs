@@ -40,6 +40,14 @@ pub struct ConsolidatedMetrics {
     pub optimized_logical_plan: serde_json::Value,
     /// Metrics for each node in the physical plan.
     pub node_metrics: NodeMetrics,
+    /// Peak output batch size observed while streaming results.
+    pub peak_output_batch_bytes: u64,
+    /// Process RSS bytes sampled at query start.
+    pub process_memory_start_bytes: Option<u64>,
+    /// Process RSS bytes sampled at query end.
+    pub process_memory_end_bytes: Option<u64>,
+    /// Difference between end and start process RSS bytes.
+    pub process_memory_delta_bytes: Option<i64>,
 }
 
 /// Tracks metrics during query execution.
@@ -51,6 +59,7 @@ pub struct MetricsTracker {
     pub input_bytes: AtomicU64,
     pub result_rows: AtomicU64,
     pub result_size_in_bytes: AtomicU64,
+    pub peak_output_batch_bytes: AtomicU64,
     pub start_time: std::time::Instant,
     pub query: serde_json::Value,
     pub query_id: uuid::Uuid,
@@ -58,6 +67,8 @@ pub struct MetricsTracker {
     pub optimized_logical_plan: Arc<Mutex<Option<LogicalPlan>>>,
     pub file_paths: Arc<Mutex<Vec<String>>>,
     pub physical_plan: Arc<RwLock<Option<Arc<dyn ExecutionPlan>>>>,
+    pub process_memory_start_bytes: Arc<Mutex<Option<u64>>>,
+    pub process_memory_end_bytes: Arc<Mutex<Option<u64>>>,
 }
 
 impl MetricsTracker {
@@ -71,10 +82,13 @@ impl MetricsTracker {
             input_bytes: AtomicU64::new(0),
             result_rows: AtomicU64::new(0),
             result_size_in_bytes: AtomicU64::new(0),
+            peak_output_batch_bytes: AtomicU64::new(0),
             file_paths: Arc::new(Mutex::new(vec![])),
             parsed_logical_plan: Arc::new(Mutex::new(None)),
             optimized_logical_plan: Arc::new(Mutex::new(None)),
             physical_plan: Arc::new(RwLock::new(None)),
+            process_memory_start_bytes: Arc::new(Mutex::new(None)),
+            process_memory_end_bytes: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -117,6 +131,35 @@ impl MetricsTracker {
             .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Observe a single output batch size and track the peak value.
+    pub fn observe_output_batch_bytes(&self, bytes: u64) {
+        let mut current = self
+            .peak_output_batch_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        while bytes > current {
+            match self.peak_output_batch_bytes.compare_exchange_weak(
+                current,
+                bytes,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    /// Set process memory at query start.
+    pub fn set_process_memory_start_bytes(&self, memory_bytes: u64) {
+        *self.process_memory_start_bytes.lock() = Some(memory_bytes);
+    }
+
+    /// Set process memory at query end.
+    pub fn set_process_memory_end_bytes(&self, memory_bytes: u64) {
+        *self.process_memory_end_bytes.lock() = Some(memory_bytes);
+    }
+
     /// Add file paths accessed during execution.
     pub fn add_file_paths(&self, paths: Vec<String>) {
         self.file_paths.lock().extend(paths);
@@ -140,6 +183,14 @@ impl MetricsTracker {
             .map(|plan| serde_json::from_str(&format!("{}", plan.display_pg_json())).unwrap())
             .unwrap_or_default();
 
+        let process_memory_start_bytes = *self.process_memory_start_bytes.lock();
+        let process_memory_end_bytes = *self.process_memory_end_bytes.lock();
+        let process_memory_delta_bytes =
+            match (process_memory_start_bytes, process_memory_end_bytes) {
+                (Some(start), Some(end)) => Some(end as i64 - start as i64),
+                _ => None,
+            };
+
         ConsolidatedMetrics {
             query_id: self.query_id,
             query: self.query.clone(),
@@ -154,6 +205,12 @@ impl MetricsTracker {
             optimized_logical_plan: optimized_logical_plan_json,
             node_metrics: collect_metrics_json(physical_plan.as_ref()),
             execution_time_ms: self.start_time.elapsed().as_millis() as u64,
+            peak_output_batch_bytes: self
+                .peak_output_batch_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            process_memory_start_bytes,
+            process_memory_end_bytes,
+            process_memory_delta_bytes,
         }
     }
 }

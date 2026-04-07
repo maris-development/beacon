@@ -16,6 +16,18 @@ pub struct Config {
     pub host: String,
     #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
     pub log_level: String,
+    #[envconfig(from = "BEACON_OTEL_ENABLE", default = "false")]
+    pub otel_enable: bool,
+    #[envconfig(from = "BEACON_OTEL_SERVICE_NAME", default = "beacon-api")]
+    pub otel_service_name: String,
+    #[envconfig(from = "BEACON_OTEL_SERVICE_NAMESPACE", default = "beacon")]
+    pub otel_service_namespace: String,
+    #[envconfig(from = "BEACON_OTEL_OTLP_ENDPOINT", default = "http://127.0.0.1:4317")]
+    pub otel_otlp_endpoint: String,
+    #[envconfig(from = "BEACON_OTEL_TRACE_SAMPLE_RATIO", default = "1.0")]
+    pub otel_trace_sample_ratio: f64,
+    #[envconfig(from = "BEACON_OTEL_METRIC_EXPORT_INTERVAL_SECS", default = "30")]
+    pub otel_metric_export_interval_secs: u64,
 
     //VM Settings
     #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "4096")]

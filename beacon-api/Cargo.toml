@@ -32,6 +32,11 @@ uuid = { version = "1.16.0" }
 tracing = { workspace = true}
 tracing-subscriber = { workspace = true}
 tracing-appender = { workspace = true}
+opentelemetry = { version = "0.27.1" }
+opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.27.0", features = ["trace", "metrics", "grpc-tonic"] }
+tracing-opentelemetry = "0.28.0"
+sysinfo = { version = "0.35.2", features = ["serde"] }
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
