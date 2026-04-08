@@ -555,7 +555,7 @@ mod tests {
         let collection_path = Path::from("collections/pipeline");
 
         let mut collection = AtlasCollection::create(
-            store,
+            store.clone(),
             collection_path.clone(),
             "pipeline",
             None,
@@ -596,19 +596,17 @@ mod tests {
         writer.finish().await?;
 
         let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(8));
+        let store_url = ObjectStoreUrl::parse("file://")?;
+        ctx.register_object_store(store_url.as_ref(), store.clone());
         let state = ctx.state();
 
         let file_format: Arc<dyn FileFormat> = Arc::new(AtlasFormat);
         let listing_options = ListingOptions::new(file_format)
-            .with_file_extension(ATLAS_FILE_EXTENSION)
+            .with_file_extension("")
             .with_target_partitions(state.config_options().execution.target_partitions)
             .with_collect_stat(true);
 
-        let absolute_collection_path = temp_dir.path().join("collections/pipeline");
-        let table_url = ListingTableUrl::parse(format!(
-            "file://{}",
-            absolute_collection_path.to_string_lossy()
-        ))?;
+        let table_url = ListingTableUrl::parse("file:///collections/pipeline/atlas.json")?;
         let schema = listing_options.infer_schema(&state, &table_url).await?;
 
         let config = ListingTableConfig::new(table_url)

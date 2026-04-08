@@ -32,10 +32,14 @@ pub struct AtlasOpener {
     pub object_store: Arc<dyn ObjectStore>,
     /// DataFusion schema adapter for projected output mapping.
     pub schema_adapter: Arc<dyn SchemaAdapter>,
+    /// DataFusion physical expression adapter for pruning.
+    pub expr_adapter: Arc<dyn PhysicalExprAdapter>,
     /// Shared dataset work queues keyed by partition path.
     pub shared_dataset_queues: SharedDatasetQueueRegistry,
     /// Shared opened collections keyed by collection path.
     pub shared_collections: SharedCollectionRegistry,
+    /// Filter predicates to apply during pruning.
+    pub predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Aggregated execution counters for Atlas file reads.
     pub metrics: AtlasGlobalMetrics,
 }
@@ -327,12 +331,25 @@ async fn build_partition_read_context(
         None
     };
 
-    let dataset_indexes_mask = partition.deletion_flags();
+    let mut dataset_indexes_mask = partition.deletion_flags().to_vec();
+    if let Some(pruned_mask) = pruned {
+        for (i, keep) in pruned_mask.iter().enumerate() {
+            if !keep {
+                dataset_indexes_mask[i] = true;
+            }
+        }
+    }
+
+    // Mask the undeleted dataset indexes with the pruning result so that pruned and deleted datasets are not included in the queue.
+    let dataset_indexes: Vec<u32> = undeleted_dataset_indexes
+        .into_iter()
+        .filter(|&idx| !dataset_indexes_mask[idx as usize])
+        .collect();
 
     let dataset_queue = get_or_init_dataset_queue(
         &shared_dataset_queues,
         partition_path.as_ref(),
-        partition.undeleted_dataset_indexes(),
+        dataset_indexes,
         &metrics,
     )
     .await;
@@ -456,18 +473,22 @@ impl FileOpener for AtlasOpener {
     ) -> datafusion::error::Result<FileOpenFuture> {
         let object_store = self.object_store.clone();
         let schema_adapter = self.schema_adapter.clone();
+        let expr_adapter = self.expr_adapter.clone();
         let shared_dataset_queues = self.shared_dataset_queues.clone();
         let shared_collections = self.shared_collections.clone();
         let metrics = self.metrics.clone();
+        let predicate = self.predicate.clone();
 
         let fut = async move {
             let context = build_partition_read_context(
                 object_store,
-                schema_adapter.clone(),
+                schema_adapter,
+                expr_adapter,
                 shared_dataset_queues,
                 shared_collections,
                 metrics.clone(),
                 file,
+                predicate,
             )
             .await?;
 
@@ -492,6 +513,7 @@ mod tests {
         physical_plan::{FileMeta, FileOpener},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     };
+    use datafusion::physical_expr_adapter::DefaultPhysicalExprAdapter;
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use futures::{StreamExt, stream};
     use object_store::{ObjectStore, memory::InMemory, path::Path};
@@ -614,13 +636,17 @@ mod tests {
         let table_schema = Arc::new(partition.arrow_schema());
         let schema_adapter =
             DefaultSchemaAdapterFactory.create(table_schema.clone(), table_schema.clone());
+        let expr_adapter =
+            DefaultPhysicalExprAdapter::new(table_schema.clone(), table_schema.clone());
 
         let opener = AtlasOpener {
             object_store: store,
             schema_adapter: Arc::from(schema_adapter),
+            expr_adapter: Arc::from(expr_adapter),
             shared_dataset_queues: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             shared_collections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             metrics: AtlasGlobalMetrics::new(ExecutionPlanMetricsSet::new()),
+            predicate: None,
         };
 
         let partition_meta_path = collection_path
@@ -698,6 +724,8 @@ mod tests {
         let table_schema = Arc::new(partition.arrow_schema());
         let schema_adapter =
             DefaultSchemaAdapterFactory.create(table_schema.clone(), table_schema.clone());
+        let expr_adapter =
+            DefaultPhysicalExprAdapter::new(table_schema.clone(), table_schema.clone());
 
         let opener = AtlasOpener {
             object_store: store,
@@ -705,6 +733,8 @@ mod tests {
             shared_dataset_queues: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             shared_collections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             metrics: AtlasGlobalMetrics::new(ExecutionPlanMetricsSet::new()),
+            expr_adapter: Arc::from(expr_adapter),
+            predicate: None,
         };
 
         let partition_meta_path = collection_path

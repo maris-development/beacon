@@ -9,6 +9,9 @@ use datafusion::{
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
     physical_expr::conjunction,
+    physical_expr_adapter::{
+        DefaultPhysicalExprAdapter, DefaultPhysicalExprAdapterFactory, PhysicalExprAdapterFactory,
+    },
     physical_plan::{
         PhysicalExpr,
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
@@ -29,6 +32,8 @@ use crate::datafusion::opener::{
 pub struct AtlasSource {
     /// Optional schema adapter factory.
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
+    /// Expr adapter factory.
+    expr_adapter_factory: Option<Arc<dyn PhysicalExprAdapterFactory>>,
     /// Optional schema override.
     override_schema: Option<SchemaRef>,
     /// Optional column projection.
@@ -43,7 +48,7 @@ pub struct AtlasSource {
     shared_collections: SharedCollectionRegistry,
     /// Global execution counters published via DataFusion metrics.
     global_metrics: AtlasGlobalMetrics,
-    /// Filter predicates
+    /// Filter predicates to apply during pruning.
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
 
@@ -61,6 +66,7 @@ impl AtlasSource {
             shared_collections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             global_metrics: AtlasGlobalMetrics::new(base_metrics),
             predicate: None,
+            expr_adapter_factory: None,
         }
     }
 }
@@ -87,8 +93,13 @@ impl FileSource for AtlasSource {
             .schema_adapter_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
+        let expr_adapter_factory = self
+            .expr_adapter_factory
+            .clone()
+            .unwrap_or_else(|| Arc::new(DefaultPhysicalExprAdapterFactory));
         let schema_adapter =
             schema_adapter_factory.create(projected_schema.clone(), table_schema.clone());
+        let expr_adapter = expr_adapter_factory.create(projected_schema, table_schema);
 
         // Openers are lightweight and share cross-file state through the source.
         Arc::new(AtlasOpener {
@@ -97,6 +108,8 @@ impl FileSource for AtlasSource {
             shared_dataset_queues: self.shared_dataset_queues.clone(),
             shared_collections: self.shared_collections.clone(),
             metrics: self.global_metrics.clone(),
+            predicate: self.predicate.clone(),
+            expr_adapter,
         })
     }
 
