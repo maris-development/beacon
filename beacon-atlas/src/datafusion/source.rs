@@ -3,11 +3,17 @@ use std::{collections::HashMap, sync::Arc};
 use arrow::datatypes::SchemaRef;
 use datafusion::{
     common::Statistics,
+    config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
     },
-    physical_plan::metrics::ExecutionPlanMetricsSet,
+    physical_expr::conjunction,
+    physical_plan::{
+        PhysicalExpr,
+        filter_pushdown::{FilterPushdownPropagation, PushedDown},
+        metrics::ExecutionPlanMetricsSet,
+    },
 };
 use object_store::ObjectStore;
 
@@ -37,6 +43,8 @@ pub struct AtlasSource {
     shared_collections: SharedCollectionRegistry,
     /// Global execution counters published via DataFusion metrics.
     global_metrics: AtlasGlobalMetrics,
+    /// Filter predicates
+    predicate: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl AtlasSource {
@@ -52,6 +60,7 @@ impl AtlasSource {
             shared_dataset_queues: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             shared_collections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             global_metrics: AtlasGlobalMetrics::new(base_metrics),
+            predicate: None,
         }
     }
 }
@@ -148,6 +157,34 @@ impl FileSource for AtlasSource {
             schema_adapter_factory: Some(factory),
             ..self.clone()
         }))
+    }
+
+    fn try_pushdown_filters(
+        &self,
+        filters: Vec<Arc<dyn PhysicalExpr>>,
+        _config: &ConfigOptions,
+    ) -> datafusion::error::Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
+        let Some(_) = self.override_schema.clone() else {
+            return Ok(FilterPushdownPropagation::with_parent_pushdown_result(
+                vec![PushedDown::No; filters.len()],
+            ));
+        };
+
+        let predicate = match self.predicate.clone() {
+            Some(predicate) => conjunction(std::iter::once(predicate).chain(filters.clone())),
+            None => conjunction(filters.clone()),
+        };
+
+        let source = Self {
+            predicate: Some(predicate),
+            ..self.clone()
+        };
+
+        Ok(FilterPushdownPropagation::with_parent_pushdown_result(vec![
+            PushedDown::No;
+            filters.len()
+        ])
+        .with_updated_node(Arc::new(source)))
     }
 
     fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {

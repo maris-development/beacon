@@ -20,7 +20,8 @@ pub async fn partition_statistics<S: ObjectStore + Clone>(
 }
 
 pub struct PartitionStatistics {
-    fetched_statistics: HashMap<String, RecordBatch>,
+    pub(crate) fetched_statistics: HashMap<String, RecordBatch>,
+    pub(crate) num_containers: usize,
 }
 
 impl PartitionStatistics {
@@ -49,7 +50,10 @@ impl PartitionStatistics {
             }
         }
 
-        Self { fetched_statistics }
+        Self {
+            fetched_statistics,
+            num_containers: expected_dataset_indexes.len(),
+        }
     }
 
     pub fn statistics_for_column(&self, column_name: &str) -> Option<RecordBatch> {

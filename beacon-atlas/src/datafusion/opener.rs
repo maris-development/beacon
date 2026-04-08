@@ -2,18 +2,23 @@ use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_nd_arrow::array::NdArrowArray;
-use datafusion::datasource::{
-    listing::PartitionedFile,
-    physical_plan::{FileMeta, FileOpenFuture, FileOpener},
-    schema_adapter::{SchemaAdapter, SchemaMapper},
-};
+use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder};
+use datafusion::{
+    datasource::{
+        listing::PartitionedFile,
+        physical_plan::{FileMeta, FileOpenFuture, FileOpener},
+        schema_adapter::{SchemaAdapter, SchemaMapper},
+    },
+    physical_expr_adapter::PhysicalExprAdapter,
+};
 use futures::{FutureExt, StreamExt, stream::BoxStream};
 use object_store::ObjectStore;
 
 use crate::{
     collection::AtlasCollection,
     consts::{PARTITION_METADATA_FILE, STREAM_CHUNK_SIZE},
+    datafusion::pruning,
     partition::ops::read::{Dataset, read_dataset_columns_by_index},
 };
 
@@ -57,6 +62,10 @@ pub struct AtlasGlobalMetrics {
     batch_count: Count,
     dataset_count: Count,
     error_count: Count,
+    pruning_attempt_count: Count,
+    pruning_effective_count: Count,
+    pruning_total_container_count: Count,
+    pruning_pruned_container_count: Count,
     collection_cache_hit_count: Count,
     collection_cache_miss_count: Count,
     dataset_queue_cache_hit_count: Count,
@@ -71,6 +80,14 @@ impl AtlasGlobalMetrics {
             dataset_count: MetricBuilder::new(&metrics_set)
                 .global_counter("atlas_total_dataset_count"),
             error_count: MetricBuilder::new(&metrics_set).global_counter("atlas_total_error_count"),
+            pruning_attempt_count: MetricBuilder::new(&metrics_set)
+                .global_counter("atlas_pruning_attempt_count"),
+            pruning_effective_count: MetricBuilder::new(&metrics_set)
+                .global_counter("atlas_pruning_effective_count"),
+            pruning_total_container_count: MetricBuilder::new(&metrics_set)
+                .global_counter("atlas_pruning_total_container_count"),
+            pruning_pruned_container_count: MetricBuilder::new(&metrics_set)
+                .global_counter("atlas_pruning_pruned_container_count"),
             collection_cache_hit_count: MetricBuilder::new(&metrics_set)
                 .global_counter("atlas_collection_cache_hit_count"),
             collection_cache_miss_count: MetricBuilder::new(&metrics_set)
@@ -96,6 +113,22 @@ impl AtlasGlobalMetrics {
 
     fn add_error(&self) {
         self.error_count.add(1);
+    }
+
+    pub(crate) fn add_pruning_attempt(&self) {
+        self.pruning_attempt_count.add(1);
+    }
+
+    pub(crate) fn add_pruning_effective(&self) {
+        self.pruning_effective_count.add(1);
+    }
+
+    pub(crate) fn add_pruning_total_containers(&self, count: usize) {
+        self.pruning_total_container_count.add(count);
+    }
+
+    pub(crate) fn add_pruning_pruned_containers(&self, count: usize) {
+        self.pruning_pruned_container_count.add(count);
     }
 
     fn add_collection_cache_hit(&self) {
@@ -223,10 +256,12 @@ async fn get_or_init_collection(
 async fn build_partition_read_context(
     object_store: Arc<dyn ObjectStore>,
     schema_adapter: Arc<dyn SchemaAdapter>,
+    expr_adapter: Arc<dyn PhysicalExprAdapter>,
     shared_dataset_queues: SharedDatasetQueueRegistry,
     shared_collections: SharedCollectionRegistry,
     metrics: AtlasGlobalMetrics,
     file: PartitionedFile,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
 ) -> datafusion::error::Result<PartitionReadContext> {
     let file_path = file.object_meta.location.as_ref().to_string();
     let (collection_path, partition_name, partition_path) =
@@ -277,6 +312,22 @@ async fn build_partition_read_context(
         })?;
         column_readers.push(reader);
     }
+
+    let undeleted_dataset_indexes = partition.undeleted_dataset_indexes();
+    let pruned = if let Some(predicate) = predicate {
+        pruning::prune_partition_with_metrics(
+            &partition,
+            &projection,
+            predicate,
+            expr_adapter,
+            Some(&metrics),
+        )
+        .await
+    } else {
+        None
+    };
+
+    let dataset_indexes_mask = partition.deletion_flags();
 
     let dataset_queue = get_or_init_dataset_queue(
         &shared_dataset_queues,

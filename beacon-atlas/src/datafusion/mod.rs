@@ -80,6 +80,7 @@ use crate::{
 };
 
 pub mod opener;
+pub mod pruning;
 pub mod source;
 pub mod table;
 
