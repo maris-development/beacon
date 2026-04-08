@@ -55,7 +55,6 @@ impl StatementHandler for IngestStatementHandler {
             .await?;
         let atlas_table = context.as_atlas_table(table.as_ref())?;
         let data_store_url = context.data_object_store_url();
-
         let loader = context.ingest_loader(&statement.format).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unsupported format '{}' in INGEST statement",
@@ -65,7 +64,6 @@ impl StatementHandler for IngestStatementHandler {
 
         let definition = atlas_table.definition();
         let ingestion = loader.load(context, &statement.glob_pattern).await?;
-
         let ingestion_stream = definition
             .ingest_into_partition(
                 context.session_ctx(),
@@ -81,7 +79,6 @@ impl StatementHandler for IngestStatementHandler {
         let refresh_partition_name = statement.partition_name.clone();
         let refresh_data_store_url = data_store_url.clone();
         let refresh_session_ctx = context.session_ctx();
-
         let stream = futures::stream::unfold(
             (
                 ingestion_stream,

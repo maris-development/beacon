@@ -12,6 +12,7 @@ use datafusion::{
 use crate::statement_handlers::{
     context::HandlerContext,
     payload::{StatementKind, StatementPayload},
+    stream_coalescer::coalesce_sql_stream,
     traits::StatementHandler,
 };
 
@@ -107,6 +108,7 @@ impl StatementHandler for DFStatementHandler {
             }
             _ => {
                 let df = DataFrame::new(state, plan);
+                // Ok(coalesce_sql_stream(df.execute_stream().await?))
                 Ok(df.execute_stream().await?)
             }
         }

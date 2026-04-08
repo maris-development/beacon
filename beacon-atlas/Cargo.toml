@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tracing = { workspace = true }
 object_store = { workspace = true }
 tokio = { workspace = true }
 arrow = { workspace = true }

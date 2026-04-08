@@ -32,6 +32,12 @@ impl IngestFormatLoader for NetcdfIngestFormatLoader {
             .try_collect()
             .await?;
 
+        tracing::debug!(
+            "found {} files matching glob pattern '{}' for ingestion",
+            objects.len(),
+            glob_pattern
+        );
+
         let datasets = objects.into_iter().map(move |obj| {
             let file_path = datasets_store.translate_netcdf_url_path(&obj.location)?;
             let reader = NetCDFArrowReader::new(&file_path)?;

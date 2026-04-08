@@ -290,7 +290,6 @@ impl AtlasTableDefinition {
                         }
                         return None;
                     };
-
                     let dataset = match dataset {
                         Ok(dataset) => dataset,
                         Err(error) => {
@@ -306,6 +305,11 @@ impl AtlasTableDefinition {
                         }
                     };
                     let dataset_name = dataset.0.batch_name.clone();
+                    tracing::debug!(
+                        "Ingesting dataset '{}' into partition '{}'",
+                        dataset_name,
+                        partition_name
+                    );
                     let write_result = match writer.as_mut() {
                         Some(writer) => writer.write_dataset(dataset).await,
                         None => Err(anyhow::anyhow!("partition writer is not available")),

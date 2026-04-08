@@ -14,7 +14,6 @@ use crate::{
         loaders::register_default_ingest_loaders,
         payload::StatementPayload,
         registry::{IngestFormatLoaderRegistry, StatementRegistry},
-        stream_coalescer::coalesce_sql_stream,
     },
 };
 
@@ -24,10 +23,7 @@ pub(crate) struct SqlStatementExecutor {
 }
 
 impl SqlStatementExecutor {
-    pub(crate) fn new(
-        session_ctx: Arc<SessionContext>,
-        file_manager: Arc<FileManager>,
-    ) -> Self {
+    pub(crate) fn new(session_ctx: Arc<SessionContext>, file_manager: Arc<FileManager>) -> Self {
         let mut loader_registry = IngestFormatLoaderRegistry::new();
         register_default_ingest_loaders(&mut loader_registry);
 
@@ -49,6 +45,6 @@ impl SqlStatementExecutor {
         let handler = self.statement_registry.get_handler(payload.kind())?;
         let stream = handler.execute(payload, &self.context, sql_options).await?;
 
-        Ok(coalesce_sql_stream(stream))
+        Ok(stream)
     }
 }

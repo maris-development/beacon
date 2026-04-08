@@ -60,7 +60,7 @@ fn coalesce_sql_stream_with_options(
         let mut flush_deadline: Option<tokio::time::Instant> = None;
 
         loop {
-            if buffered_rows >= target_rows || buffered_rows >= max_rows {
+            if buffered_rows > target_rows || buffered_rows >= max_rows {
                 let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
                 buffered_rows = 0;
                 flush_deadline = None;
@@ -188,7 +188,7 @@ mod tests {
 
         let options = SqlStreamCoalesceOptions {
             enabled: true,
-            target_rows: 30_000,
+            target_rows: 25_000,
             flush_timeout_ms: 10_000,
             max_rows: 200_000,
         };
@@ -202,12 +202,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn does_not_flush_when_exactly_target_rows() {
+        let input_stream = make_stream(vec![
+            make_batch(0, 20_000),
+            make_batch(20_000, 20_000),
+            make_batch(40_000, 24_000),
+            make_batch(64_000, 1_000),
+        ]);
+
+        let options = SqlStreamCoalesceOptions {
+            enabled: true,
+            target_rows: 64_000,
+            flush_timeout_ms: 10_000,
+            max_rows: 200_000,
+        };
+
+        let output_stream = coalesce_sql_stream_with_options(input_stream, options);
+        let output_batches = output_stream.try_collect::<Vec<_>>().await.unwrap();
+
+        assert_eq!(output_batches.len(), 1);
+        assert_eq!(output_batches[0].num_rows(), 65_000);
+    }
+
+    #[tokio::test]
     async fn flushes_buffer_when_timeout_expires() {
         let schema = test_schema();
         let source_stream = async_stream::stream! {
             yield Ok(make_batch(0, 5_000));
             tokio::time::sleep(Duration::from_millis(40)).await;
             yield Ok(make_batch(5_000, 5_000));
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            yield Ok(make_batch(10_000, 5_000));
         };
 
         let input_stream = Box::pin(RecordBatchStreamAdapter::new(schema, source_stream));
@@ -221,9 +246,10 @@ mod tests {
         let output_stream = coalesce_sql_stream_with_options(input_stream, options);
         let output_batches = output_stream.try_collect::<Vec<_>>().await.unwrap();
 
-        assert_eq!(output_batches.len(), 2);
+        assert_eq!(output_batches.len(), 3);
         assert_eq!(output_batches[0].num_rows(), 5_000);
         assert_eq!(output_batches[1].num_rows(), 5_000);
+        assert_eq!(output_batches[2].num_rows(), 5_000);
     }
 
     #[tokio::test]

@@ -317,6 +317,7 @@ async fn build_partition_read_context(
         column_readers.push(reader);
     }
 
+    let time = std::time::Instant::now();
     let undeleted_dataset_indexes = partition.undeleted_dataset_indexes();
     let pruned = if let Some(predicate) = predicate {
         pruning::prune_partition_with_metrics(
@@ -332,19 +333,26 @@ async fn build_partition_read_context(
     };
 
     let mut dataset_indexes_mask = partition.deletion_flags().to_vec();
-    if let Some(pruned_mask) = pruned {
-        for (i, keep) in pruned_mask.iter().enumerate() {
-            if !keep {
-                dataset_indexes_mask[i] = true;
-            }
-        }
-    }
+    // if let Some(pruned_mask) = pruned {
+    //     for (i, keep) in pruned_mask.iter().enumerate() {
+    //         if !keep {
+    //             dataset_indexes_mask[i] = true;
+    //         }
+    //     }
+    // }
 
     // Mask the undeleted dataset indexes with the pruning result so that pruned and deleted datasets are not included in the queue.
     let dataset_indexes: Vec<u32> = undeleted_dataset_indexes
         .into_iter()
         .filter(|&idx| !dataset_indexes_mask[idx as usize])
         .collect();
+
+    tracing::debug!(
+        "built partition read context for '{}': {} datasets after pruning and deletion ({}ms)",
+        file_path,
+        dataset_indexes.len(),
+        time.elapsed().as_millis()
+    );
 
     let dataset_queue = get_or_init_dataset_queue(
         &shared_dataset_queues,

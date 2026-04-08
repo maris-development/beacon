@@ -377,7 +377,6 @@ impl FileFormat for AtlasFormat {
 
         let source = AtlasSource::new();
         let conf = FileScanConfigBuilder::from(conf)
-            .with_file_groups(file_groups)
             .with_source(Arc::new(source))
             .build();
         Ok(DataSourceExec::from_data_source(conf))
