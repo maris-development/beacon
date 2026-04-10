@@ -25,10 +25,6 @@ pub async fn prune_partition_with_metrics<S: ObjectStore + Clone>(
     expr_adapter: Arc<dyn PhysicalExprAdapter>,
     metrics: Option<&AtlasGlobalMetrics>,
 ) -> Option<Vec<bool>> {
-    if let Some(metrics) = metrics {
-        metrics.add_pruning_attempt();
-    }
-
     let partition_schema = Arc::new(partition.arrow_schema());
     let projected_partition_schema = Arc::new(partition_schema.project(projection).ok()?);
     let columns = projected_partition_schema
@@ -49,10 +45,6 @@ pub async fn prune_partition_with_metrics<S: ObjectStore + Clone>(
 
         metrics.add_pruning_total_containers(total_containers);
         metrics.add_pruning_pruned_containers(pruned_containers);
-
-        if pruned_containers > 0 {
-            metrics.add_pruning_effective();
-        }
     }
 
     Some(prune_result)

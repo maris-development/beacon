@@ -920,12 +920,14 @@ dependencies = [
  "object_store 0.12.4",
  "once_cell",
  "parking_lot",
+ "rkyv",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "typetag",
+ "zstd",
 ]
 
 [[package]]

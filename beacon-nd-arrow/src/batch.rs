@@ -65,7 +65,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::array::ArrayRef;
-use futures::{StreamExt, stream::BoxStream};
+use futures::{StreamExt, future::try_join_all, stream::BoxStream};
 
 use crate::array::{NdArrowArray, subset::ArraySubset};
 
@@ -184,12 +184,12 @@ impl NdRecordBatch {
 
                 if chunk_shape == max_shape {
                     // No chunking needed, just create a single RecordBatch.
-                    let mut broadcasted_arrays: Vec<ArrayRef> = vec![];
-                    for array in &self.arrays {
-                        let view = array.broadcast(&max_shape, &max_dims).await?;
-                        let arrow_array = view.as_arrow_array_ref().await?;
-                        broadcasted_arrays.push(arrow_array);
-                    }
+                    let broadcasted_arrays: Vec<ArrayRef> =
+                        try_join_all(self.arrays.iter().map(|array| async {
+                            let view = array.broadcast(&max_shape, &max_dims).await?;
+                            view.as_arrow_array_ref().await
+                        }))
+                        .await?;
 
                     let record_batch = arrow::record_batch::RecordBatch::try_new(
                         self.schema.clone(),
@@ -211,38 +211,42 @@ impl NdRecordBatch {
                     let schema = schema.clone();
                     let batch_name = batch_name.clone();
                     async move {
-                        let mut broadcasted_arrays: Vec<ArrayRef> = vec![];
-                        for array in &arrays {
-                            let array_subset = NdRecordBatch::generate_array_subset_from_chunk(
-                                &subset, &max_dims, array,
-                            );
-                            let array = array.subset(array_subset).await.map_err(|e| {
-                                anyhow::anyhow!(
-                                    "Failed to subset array for batch '{}': {}",
-                                    batch_name,
-                                    e
-                                )
-                            })?;
-                            let broadcasted = array
-                                .broadcast(&subset.shape, &max_dims)
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "Failed to broadcast array for batch '{}': {}",
-                                        batch_name,
-                                        e
-                                    )
-                                })?;
-                            let arrow_array =
-                                broadcasted.as_arrow_array_ref().await.map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "Failed to convert array to Arrow array for batch '{}': {}",
-                                        batch_name,
-                                        e
-                                    )
-                                })?;
-                            broadcasted_arrays.push(arrow_array);
-                        }
+                        let broadcasted_arrays: Vec<ArrayRef> =
+                            try_join_all(arrays.iter().map(|array| {
+                                let max_dims = max_dims.clone();
+                                let subset_shape = subset.shape.clone();
+                                let array_subset = NdRecordBatch::generate_array_subset_from_chunk(
+                                    &subset, &max_dims, array,
+                                );
+                                let batch_name = batch_name.clone();
+                                async move {
+                                    let array = array.subset(array_subset).await.map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "Failed to subset array for batch '{}': {}",
+                                            batch_name,
+                                            e
+                                        )
+                                    })?;
+                                    let broadcasted = array
+                                        .broadcast(&subset_shape, &max_dims)
+                                        .await
+                                        .map_err(|e| {
+                                            anyhow::anyhow!(
+                                                "Failed to broadcast array for batch '{}': {}",
+                                                batch_name,
+                                                e
+                                            )
+                                        })?;
+                                    broadcasted.as_arrow_array_ref().await.map_err(|e| {
+                                        anyhow::anyhow!(
+                                            "Failed to convert array to Arrow array for batch '{}': {}",
+                                            batch_name,
+                                            e
+                                        )
+                                    })
+                                }
+                            }))
+                            .await?;
 
                         let record_batch = arrow::record_batch::RecordBatch::try_new(
                             schema.clone(),

@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
+use arrow::array::RecordBatch;
 use async_trait::async_trait;
 use datafusion::{
     datasource::ViewTable,
     execution::SendableRecordBatchStream,
     logical_expr::{DdlStatement, LogicalPlan},
-    physical_plan::EmptyRecordBatchStream,
+    physical_plan::{stream::RecordBatchStreamAdapter, EmptyRecordBatchStream},
     prelude::{DataFrame, SQLOptions, SessionContext},
 };
+use futures::{StreamExt, TryStreamExt};
 
 use crate::statement_handlers::{
     context::HandlerContext,
@@ -109,7 +111,26 @@ impl StatementHandler for DFStatementHandler {
             _ => {
                 let df = DataFrame::new(state, plan);
                 // Ok(coalesce_sql_stream(df.execute_stream().await?))
-                Ok(df.execute_stream().await?)
+                let stream = df.execute_stream().await?;
+                let schema = stream.schema();
+                let stream = stream.map(|b| {
+                    println!(
+                        "emitting batch with {} rows",
+                        b.as_ref().map(|b| b.num_rows()).unwrap_or(0)
+                    );
+                    b
+                });
+                let time = std::time::Instant::now();
+                let collected: Vec<_> = stream.try_collect().await?;
+                println!("collected {} batches", collected.len());
+                println!(
+                    "total rows collected: {} ({}ms)",
+                    collected.iter().map(|b| b.num_rows()).sum::<usize>(),
+                    time.elapsed().as_millis()
+                );
+
+                let stream = EmptyRecordBatchStream::new(schema);
+                Ok(Box::pin(stream) as SendableRecordBatchStream)
             }
         }
     }

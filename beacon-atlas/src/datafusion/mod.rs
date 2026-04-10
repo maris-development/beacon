@@ -369,7 +369,7 @@ impl FileFormat for AtlasFormat {
         let object_store = state
             .runtime_env()
             .object_store(conf.object_store_url.clone())?;
-        let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
+        let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES * 4));
         let target_partitions = state.config_options().execution.target_partitions;
         let file_groups =
             build_partition_file_groups(object_store, &atlas_metas, io_cache, target_partitions)
@@ -377,6 +377,7 @@ impl FileFormat for AtlasFormat {
 
         let source = AtlasSource::new();
         let conf = FileScanConfigBuilder::from(conf)
+            .with_file_groups(file_groups)
             .with_source(Arc::new(source))
             .build();
         Ok(DataSourceExec::from_data_source(conf))

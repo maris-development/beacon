@@ -167,18 +167,26 @@ impl<S: ObjectStore + Send + Sync> ArrowObjectStoreReader<S> {
             (batch_block.bodyLength() as usize) + (batch_block.metaDataLength() as usize);
         let offset = batch_block.offset() as u64;
         let block_len_u64 = u64::try_from(block_len).map_err(|err| anyhow::anyhow!(err))?;
+        let time = std::time::Instant::now();
         let data = self
             .store
             .get_range(&self.path, offset..(offset + block_len_u64))
             .await
             .map_err(|err: object_store::Error| anyhow::anyhow!(err))
             .context("failed to read record batch block")?;
+        // println!(
+        //     "Read batch {index} of {} bytes  in {} ms",
+        //     block_len,
+        //     time.elapsed().as_millis()
+        // );
         let buffer = Buffer::from(data);
+        let time = std::time::Instant::now();
         let batch = self
             .decoder
             .read_record_batch(batch_block, &buffer)
             .map_err(|err| anyhow::anyhow!(err))
             .context("failed to decode record batch")?;
+        // println!("Decode batch {index} in {} ms", time.elapsed().as_millis());
         Ok(batch)
     }
 }

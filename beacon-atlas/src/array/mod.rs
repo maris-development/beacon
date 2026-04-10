@@ -11,12 +11,18 @@ use crate::{
     arrow_object_store::ArrowObjectStoreReader,
 };
 
+pub mod _type;
 pub mod compat;
+pub mod file;
 pub mod io_cache;
 pub mod layout;
 pub mod reader;
 pub mod statistics;
 pub mod writer;
+
+pub struct Atlas {}
+
+pub enum AtlasArray {}
 
 /// Translate an n-dimensional subset into flat half-open ranges `(start, end)`.
 ///

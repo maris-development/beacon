@@ -17,7 +17,7 @@ use object_store::ObjectStore;
 
 use crate::{
     collection::AtlasCollection,
-    consts::{PARTITION_METADATA_FILE, STREAM_CHUNK_SIZE},
+    consts::{DATASET_PREFETCH_CONCURRENCY, PARTITION_METADATA_FILE, STREAM_CHUNK_SIZE},
     datafusion::pruning,
     partition::ops::read::{Dataset, read_dataset_columns_by_index},
 };
@@ -66,14 +66,10 @@ pub struct AtlasGlobalMetrics {
     batch_count: Count,
     dataset_count: Count,
     error_count: Count,
-    pruning_attempt_count: Count,
-    pruning_effective_count: Count,
     pruning_total_container_count: Count,
     pruning_pruned_container_count: Count,
-    collection_cache_hit_count: Count,
-    collection_cache_miss_count: Count,
-    dataset_queue_cache_hit_count: Count,
-    dataset_queue_cache_miss_count: Count,
+    time_spent_mapping_batches_ms: Count,
+    time_spent_io_ms: Count,
 }
 
 impl AtlasGlobalMetrics {
@@ -84,22 +80,14 @@ impl AtlasGlobalMetrics {
             dataset_count: MetricBuilder::new(&metrics_set)
                 .global_counter("atlas_total_dataset_count"),
             error_count: MetricBuilder::new(&metrics_set).global_counter("atlas_total_error_count"),
-            pruning_attempt_count: MetricBuilder::new(&metrics_set)
-                .global_counter("atlas_pruning_attempt_count"),
-            pruning_effective_count: MetricBuilder::new(&metrics_set)
-                .global_counter("atlas_pruning_effective_count"),
             pruning_total_container_count: MetricBuilder::new(&metrics_set)
                 .global_counter("atlas_pruning_total_container_count"),
             pruning_pruned_container_count: MetricBuilder::new(&metrics_set)
                 .global_counter("atlas_pruning_pruned_container_count"),
-            collection_cache_hit_count: MetricBuilder::new(&metrics_set)
-                .global_counter("atlas_collection_cache_hit_count"),
-            collection_cache_miss_count: MetricBuilder::new(&metrics_set)
-                .global_counter("atlas_collection_cache_miss_count"),
-            dataset_queue_cache_hit_count: MetricBuilder::new(&metrics_set)
-                .global_counter("atlas_dataset_queue_cache_hit_count"),
-            dataset_queue_cache_miss_count: MetricBuilder::new(&metrics_set)
-                .global_counter("atlas_dataset_queue_cache_miss_count"),
+            time_spent_mapping_batches_ms: MetricBuilder::new(&metrics_set)
+                .global_counter("atlas_time_spent_mapping_batches_ms"),
+            time_spent_io_ms: MetricBuilder::new(&metrics_set)
+                .global_counter("atlas_time_spent_io_ms"),
         }
     }
 
@@ -119,14 +107,6 @@ impl AtlasGlobalMetrics {
         self.error_count.add(1);
     }
 
-    pub(crate) fn add_pruning_attempt(&self) {
-        self.pruning_attempt_count.add(1);
-    }
-
-    pub(crate) fn add_pruning_effective(&self) {
-        self.pruning_effective_count.add(1);
-    }
-
     pub(crate) fn add_pruning_total_containers(&self, count: usize) {
         self.pruning_total_container_count.add(count);
     }
@@ -135,20 +115,12 @@ impl AtlasGlobalMetrics {
         self.pruning_pruned_container_count.add(count);
     }
 
-    fn add_collection_cache_hit(&self) {
-        self.collection_cache_hit_count.add(1);
+    fn add_time_spent_mapping_batches_ms(&self, ms: usize) {
+        self.time_spent_mapping_batches_ms.add(ms);
     }
 
-    fn add_collection_cache_miss(&self) {
-        self.collection_cache_miss_count.add(1);
-    }
-
-    fn add_dataset_queue_cache_hit(&self) {
-        self.dataset_queue_cache_hit_count.add(1);
-    }
-
-    fn add_dataset_queue_cache_miss(&self) {
-        self.dataset_queue_cache_miss_count.add(1);
+    fn add_time_spent_io_ms(&self, ms: usize) {
+        self.time_spent_io_ms.add(ms);
     }
 }
 
@@ -208,10 +180,8 @@ async fn get_or_init_dataset_queue(
 ) -> DatasetQueue {
     let mut queue_registry = shared_dataset_queues.lock().await;
     if let Some(queue) = queue_registry.get(partition_key) {
-        metrics.add_dataset_queue_cache_hit();
         return queue.clone();
     }
-    metrics.add_dataset_queue_cache_miss();
 
     let queue = Arc::new(crossbeam::queue::SegQueue::new());
     for dataset_index in dataset_indexes {
@@ -231,11 +201,10 @@ async fn get_or_init_collection(
     let key = collection_path.to_string();
 
     // Fast path: collection is already opened and shared.
-    if let Some(collection) = shared_collections.lock().await.get(&key).cloned() {
-        metrics.add_collection_cache_hit();
+    let mut shared_collections_guard = shared_collections.lock().await;
+    if let Some(collection) = shared_collections_guard.get(&key).cloned() {
         return Ok(collection);
     }
-    metrics.add_collection_cache_miss();
 
     let collection = AtlasCollection::open(object_store, collection_path)
         .await
@@ -248,13 +217,8 @@ async fn get_or_init_collection(
     let shared = Arc::new(tokio::sync::Mutex::new(collection));
 
     // Insert with double-check so concurrent tasks reuse the same handle.
-    let mut collections = shared_collections.lock().await;
-    if let Some(collection) = collections.get(&key).cloned() {
-        Ok(collection)
-    } else {
-        collections.insert(key, shared.clone());
-        Ok(shared)
-    }
+    shared_collections_guard.insert(key, shared.clone());
+    Ok(shared)
 }
 
 async fn build_partition_read_context(
@@ -281,6 +245,7 @@ async fn build_partition_read_context(
     .await?;
     // Lock is held only while resolving partition metadata/reader handles.
     let mut collection = collection.lock().await;
+    let time = std::time::Instant::now();
     let partition = collection
         .get_partition(&partition_name)
         .await
@@ -290,6 +255,13 @@ async fn build_partition_read_context(
                 partition_name, file_path, e
             ))
         })?;
+    println!(
+        "Opened partition '{}' for '{}': {}ms",
+        partition_name,
+        file_path,
+        time.elapsed().as_millis()
+    );
+    drop(collection);
 
     let partition_schema = Arc::new(partition.arrow_schema());
     let (schema_mapper, projection) = schema_adapter.map_schema(&partition_schema)?;
@@ -317,7 +289,6 @@ async fn build_partition_read_context(
         column_readers.push(reader);
     }
 
-    let time = std::time::Instant::now();
     let undeleted_dataset_indexes = partition.undeleted_dataset_indexes();
     let pruned = if let Some(predicate) = predicate {
         pruning::prune_partition_with_metrics(
@@ -346,13 +317,6 @@ async fn build_partition_read_context(
         .into_iter()
         .filter(|&idx| !dataset_indexes_mask[idx as usize])
         .collect();
-
-    tracing::debug!(
-        "built partition read context for '{}': {} datasets after pruning and deletion ({}ms)",
-        file_path,
-        dataset_indexes.len(),
-        time.elapsed().as_millis()
-    );
 
     let dataset_queue = get_or_init_dataset_queue(
         &shared_dataset_queues,
@@ -414,15 +378,15 @@ fn dataset_to_record_batch_stream(
     }
 
     let dataset_indexes = dataset_indexes_stream(context.dataset_queue);
-    let metrics_for_then = metrics.clone();
+    let metrics_for_prepare = metrics.clone();
     let metrics_for_flat_map = metrics.clone();
 
     dataset_indexes
-        .then(move |dataset_index| {
+        .map(move |dataset_index| {
             let column_readers = context.column_readers.clone();
             let projected_schema = context.projected_schema.clone();
             let schema_mapper = context.schema_mapper.clone();
-            let metrics = metrics_for_then.clone();
+            let metrics = metrics_for_prepare.clone();
 
             async move {
                 let columns = read_dataset_columns(&column_readers, dataset_index)?;
@@ -444,32 +408,38 @@ fn dataset_to_record_batch_stream(
                 Ok::<_, datafusion::error::DataFusionError>((arrow_stream, schema_mapper))
             }
         })
-        .flat_map(move |result| match result {
-            Ok((arrow_stream, schema_mapper)) => {
-                let metrics = metrics_for_flat_map.clone();
-                arrow_stream
-                    .map(move |batch_result| {
-                        let batch = batch_result.map_err(|e| {
-                            metrics.add_error();
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Error reading Arrow batch from Atlas: {}",
-                                e
-                            ))
-                        })?;
-                        let mapped = schema_mapper.map_batch(batch).inspect_err(|_e| {
-                            metrics.add_error();
-                        })?;
-                        metrics.add_batch();
-                        metrics.add_rows(mapped.num_rows());
-                        Ok(mapped)
-                    })
-                    .boxed()
-            }
-            Err(e) => {
-                metrics.add_error();
-                futures::stream::once(async move { Err(e) }).boxed()
-            }
-        })
+        // Keep a bounded number of datasets in-flight so downstream always has work.
+        .buffer_unordered(DATASET_PREFETCH_CONCURRENCY.max(1))
+        .flat_map_unordered(
+            DATASET_PREFETCH_CONCURRENCY.max(1),
+            move |result| match result {
+                Ok((arrow_stream, schema_mapper)) => {
+                    let metrics = metrics_for_flat_map.clone();
+                    arrow_stream
+                        .map(move |batch_result| {
+                            let batch = batch_result.map_err(|e| {
+                                metrics.add_error();
+                                datafusion::error::DataFusionError::Execution(format!(
+                                    "Error reading Arrow batch from Atlas: {}",
+                                    e
+                                ))
+                            })?;
+                            let mapped = schema_mapper.map_batch(batch).inspect_err(|_e| {
+                                metrics.add_error();
+                            })?;
+
+                            metrics.add_batch();
+                            metrics.add_rows(mapped.num_rows());
+                            Ok(mapped)
+                        })
+                        .boxed()
+                }
+                Err(e) => {
+                    metrics.add_error();
+                    futures::stream::once(async move { Err(e) }).boxed()
+                }
+            },
+        )
         .boxed()
 }
 

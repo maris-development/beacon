@@ -21,7 +21,7 @@ impl IoCache {
     pub fn new(max_bytes_size: usize) -> Self {
         Self {
             inner_cache: moka::future::Cache::builder()
-                .weigher(|_, v: &RecordBatch| v.get_array_memory_size() as u32)
+                // .weigher(|_, v: &RecordBatch| v.get_array_memory_size() as u32)
                 .max_capacity(max_bytes_size as u64)
                 .build(),
         }

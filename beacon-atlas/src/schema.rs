@@ -158,6 +158,23 @@ fn is_string_or_timestamp(data_type: &DataType) -> bool {
     is_string_type(data_type) || is_timestamp_type(data_type)
 }
 
+pub enum AtlasDataType {
+    Bool,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
+    Timestamp,
+    Binary,
+    String,
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{DataType, TimeUnit};

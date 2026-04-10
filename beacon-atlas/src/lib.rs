@@ -1,7 +1,9 @@
 use arrow::ipc::CompressionType;
 use once_cell::sync::Lazy;
 
+pub mod _type;
 pub mod array;
+pub mod array_file;
 pub mod arrow_object_store;
 pub mod collection;
 pub mod column;
@@ -10,7 +12,9 @@ pub mod consts;
 pub mod datafusion;
 pub mod partition;
 pub mod prelude;
+pub mod scalar;
 pub mod schema;
+pub mod typed_vec;
 pub mod util;
 
 pub static IPC_WRITE_OPTS: Lazy<arrow::ipc::writer::IpcWriteOptions> = Lazy::new(|| {
