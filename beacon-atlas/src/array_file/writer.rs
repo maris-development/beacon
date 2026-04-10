@@ -41,7 +41,7 @@ impl<S: ObjectStore + Clone> ArrayFileWriter<S> {
         })
     }
 
-    pub async fn append<I>(&mut self, entry_index: u32, values_stream: I) -> anyhow::Result<()>
+    pub async fn append<I>(&mut self, entry_index: u32, array: ) -> anyhow::Result<()>
     where
         I: futures::stream::Stream<Item = anyhow::Result<TypedVec>>,
     {
