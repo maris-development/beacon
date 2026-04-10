@@ -1,4 +1,4 @@
-use crate::{_type::Timestamp, schema::AtlasDataType};
+use crate::schema::_type::{AtlasDataType, Timestamp};
 
 #[derive(
     Debug,

@@ -1,7 +1,6 @@
 use arrow::ipc::CompressionType;
 use once_cell::sync::Lazy;
 
-pub mod _type;
 pub mod array;
 pub mod array_file;
 pub mod arrow_object_store;
@@ -10,6 +9,7 @@ pub mod column;
 pub mod config;
 pub mod consts;
 pub mod datafusion;
+pub mod nd_array;
 pub mod partition;
 pub mod prelude;
 pub mod scalar;
