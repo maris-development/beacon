@@ -1,7 +1,6 @@
-use crate::{
-    scalar::Scalar,
-    schema::_type::{AtlasDataType, Timestamp},
-};
+use beacon_nd_arrow::datatypes::TimestampNanosecond;
+
+use crate::{scalar::Scalar, schema::_type::AtlasDataType};
 
 /// A strongly-typed columnar vector that stores values for a single Atlas data type.
 #[derive(
@@ -14,6 +13,7 @@ use crate::{
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(attr(derive(Debug)))]
 pub enum TypedVec {
     Bool(Vec<bool>),
     I8(Vec<i8>),
@@ -26,7 +26,7 @@ pub enum TypedVec {
     U64(Vec<u64>),
     F32(Vec<f32>),
     F64(Vec<f64>),
-    Timestamp(Vec<Timestamp>),
+    Timestamp(Vec<TimestampNanosecond>),
     Binary(Vec<Vec<u8>>),
     String(Vec<String>),
 }
@@ -261,8 +261,8 @@ impl TypedVec {
         }
     }
 
-    /// Returns a reference to the underlying `Vec<Timestamp>` if this is a timestamp vector.
-    pub fn as_timestamp_vec(&self) -> Option<&Vec<Timestamp>> {
+    /// Returns a reference to the underlying `Vec<TimestampNanosecond>` if this is a timestamp vector.
+    pub fn as_timestamp_vec(&self) -> Option<&Vec<TimestampNanosecond>> {
         if let TypedVec::Timestamp(vec) = self {
             Some(vec)
         } else {
@@ -355,8 +355,8 @@ impl From<Vec<f64>> for TypedVec {
     }
 }
 
-impl From<Vec<Timestamp>> for TypedVec {
-    fn from(vec: Vec<Timestamp>) -> Self {
+impl From<Vec<TimestampNanosecond>> for TypedVec {
+    fn from(vec: Vec<TimestampNanosecond>) -> Self {
         TypedVec::Timestamp(vec)
     }
 }
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(TypedVec::F32(vec![1.0]).data_type(), AtlasDataType::F32);
         assert_eq!(TypedVec::F64(vec![1.0]).data_type(), AtlasDataType::F64);
         assert_eq!(
-            TypedVec::Timestamp(vec![Timestamp::from(1)]).data_type(),
+            TypedVec::Timestamp(vec![TimestampNanosecond(1)]).data_type(),
             AtlasDataType::Timestamp
         );
         assert_eq!(

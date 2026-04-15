@@ -1,516 +1,390 @@
 use std::{
-    fs::File,
-    io::{Seek, SeekFrom},
-    sync::Arc,
+    collections::BTreeMap,
+    io::{Seek, SeekFrom, Write},
 };
 
-use arrow::{array::ArrayRef, ipc::writer::FileWriter, record_batch::RecordBatch};
-use beacon_nd_arrow::array::NdArrowArray;
-use object_store::ObjectStore;
+use beacon_nd_arrow::{NdArray, array::subset::ArraySubset};
+use object_store::{ObjectStore, buffered::DEFAULT_BUFFER_SIZE};
+use tempfile::NamedTempFile;
 
 use crate::{
-    IPC_WRITE_OPTS,
-    array::{
-        layout::{ArrayLayout, ArrayLayouts},
-        statistics::StatisticsWriter,
+    array::layout::{
+        ArrayEntry, ArrayLookup, ChunkMapIndex, FileArrayChunk, FileArrayFooter, SingleArrayLookup,
     },
-    consts, util,
+    schema::_type::{AtlasDataType, AtlasType},
+    util::stream_file_to_store,
 };
 
-/// Writes chunked ND Arrow arrays to object storage using buffered IPC batches.
-///
-/// The writer stores array values in `array.arrow` and emits the corresponding
-/// dataset layouts in `layout.arrow` within the provided object store path.
-pub struct ArrayWriter<S: ObjectStore + Clone> {
-    store: S,
-    array_datatype: arrow::datatypes::DataType,
-    array_path: object_store::path::Path,
-    layout_path: object_store::path::Path,
-    statistics_path: object_store::path::Path,
-    temp_writer: FileWriter<File>,
-    statistics_writer: StatisticsWriter,
-    row_count: usize,  // Total number of rows flushed to the IPC file
-    chunk_size: usize, // Target number of rows per buffered batch
-
-    current_buffer_size: usize,   // Current number of rows buffered
-    buffer_arrays: Vec<ArrayRef>, // Buffered arrays to write in the next batch
-
-    // Layouts of the arrays written so far.
-    layouts: Vec<ArrayLayout>,
+pub struct ArrayFileWriter<T: AtlasType, S: ObjectStore + Clone> {
+    pub store: S,
+    pub path: object_store::path::Path,
+    pub footer: FileArrayFooter,
+    pub current_chunk: Vec<T>,
+    pub chunk_size: usize,
+    temp_file: NamedTempFile,
 }
 
-impl<S: ObjectStore + Clone> ArrayWriter<S> {
-    pub const FIELD_NAME: &'static str = "array";
-    /// Create a new chunked array writer.
-    ///
-    /// `chunk_size` controls when buffered arrays are flushed to the temp IPC file.
+impl<T: AtlasType, S: ObjectStore + Clone> ArrayFileWriter<T, S> {
     pub fn new(
         store: S,
-        array_path: object_store::path::Path,
-        layout_path: object_store::path::Path,
-        statistics_path: object_store::path::Path,
-        array_datatype: arrow::datatypes::DataType,
+        path: object_store::path::Path,
         chunk_size: usize,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(chunk_size > 0, "chunk_size must be greater than zero");
 
-        let field = arrow::datatypes::Field::new(Self::FIELD_NAME, array_datatype.clone(), true);
-        let schema = arrow::datatypes::Schema::new(vec![field]);
-        let temp_writer = FileWriter::try_new_with_options(
-            tempfile::tempfile().unwrap(),
-            &schema,
-            IPC_WRITE_OPTS.clone(),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to create IPC writer: {e}"))?;
-
         Ok(Self {
-            array_datatype: array_datatype.clone(),
-            statistics_writer: StatisticsWriter::new(array_datatype.clone()),
             store,
-            array_path,
-            layout_path,
-            statistics_path,
-            temp_writer,
+            path,
+            footer: FileArrayFooter {
+                datatype: T::atlas_datatype(),
+                num_chunks: 0,
+                chunk_offsets: Vec::new(),
+                lookup_table: BTreeMap::new(),
+                statistics: None, // For now we don't compute statistics, but we can add this later if needed
+            },
+            current_chunk: Vec::new(),
             chunk_size,
-            row_count: 0,
-            current_buffer_size: 0,
-            buffer_arrays: Vec::new(),
-            layouts: Vec::new(),
+            temp_file: NamedTempFile::new()
+                .map_err(|e| anyhow::anyhow!("Failed to create temporary file: {}", e))?,
         })
     }
 
-    pub fn data_type(&self) -> &arrow::datatypes::DataType {
-        &self.array_datatype
+    pub async fn append(&mut self, entry_index: u32, array: NdArray<T>) -> anyhow::Result<()> {
+        let shape = array.shape();
+        let chunk_shape = array.chunk_shape();
+        anyhow::ensure!(
+            shape.len() == chunk_shape.len(),
+            "Chunk shape rank {} does not match array shape rank {}",
+            chunk_shape.len(),
+            shape.len()
+        );
+
+        let dimensions = array.dimensions();
+
+        if chunk_shape == shape {
+            let values = array.into_raw_vec().await;
+            let lookup = self.append_values_with_lookup(values, shape.clone())?;
+            self.footer.lookup_table.insert(
+                entry_index,
+                ArrayEntry {
+                    chunk_shape: shape.clone(),
+                    shape,
+                    dimensions,
+                    fill_value: None,
+                    lookup: ArrayLookup::Flat(lookup),
+                },
+            );
+
+            if self.current_chunk.len() >= self.chunk_size {
+                self.flush_chunk()?;
+            }
+        } else {
+            let chunk_counts = Self::chunk_counts(&shape, &chunk_shape)?;
+            let mut chunk_map = BTreeMap::new();
+
+            if !chunk_counts.contains(&0) {
+                let mut chunk_index = vec![0usize; shape.len()];
+
+                loop {
+                    let chunk_start: Vec<usize> = chunk_index
+                        .iter()
+                        .zip(chunk_shape.iter())
+                        .map(|(index, size)| index * size)
+                        .collect();
+
+                    let chunk_extent: Vec<usize> = chunk_start
+                        .iter()
+                        .zip(shape.iter())
+                        .zip(chunk_shape.iter())
+                        .map(|((start, full_size), chunk_size)| {
+                            (*full_size - *start).min(*chunk_size)
+                        })
+                        .collect();
+
+                    let subset = array
+                        .subset(ArraySubset::new(chunk_start, chunk_extent.clone()))
+                        .await?;
+                    let values = subset.into_raw_vec().await;
+                    let lookup = self.append_values_with_lookup(values, chunk_extent)?;
+
+                    let key = ChunkMapIndex::new(
+                        chunk_index
+                            .iter()
+                            .map(|index| {
+                                u32::try_from(*index).map_err(|_| {
+                                    anyhow::anyhow!("Chunk index {} cannot fit into u32", index)
+                                })
+                            })
+                            .collect::<anyhow::Result<Vec<u32>>>()?,
+                    );
+                    chunk_map.insert(key, lookup);
+
+                    if self.current_chunk.len() >= self.chunk_size {
+                        self.flush_chunk()?;
+                    }
+
+                    if !Self::advance_chunk_index(&mut chunk_index, &chunk_counts) {
+                        break;
+                    }
+                }
+            }
+
+            self.footer.lookup_table.insert(
+                entry_index,
+                ArrayEntry {
+                    shape,
+                    dimensions,
+                    chunk_shape,
+                    fill_value: None,
+                    lookup: ArrayLookup::Chunked {
+                        map: Box::new(chunk_map),
+                    },
+                },
+            );
+        }
+
+        Ok(())
     }
 
-    /// Flush remaining batches and upload the IPC file to object storage.
-    ///
-    /// Writes `array.arrow` (values) and `layout.arrow` (layout metadata)
-    /// under the configured path.
-    pub async fn finalize(mut self) -> anyhow::Result<()> {
-        // Flush any remaining data, including a final partial batch.
-        self.flush_all().await?;
+    pub fn flush_chunk(&mut self) -> anyhow::Result<()> {
+        if self.current_chunk.is_empty() {
+            return Ok(());
+        }
 
-        self.temp_writer.finish()?;
+        let chunk_data = std::mem::replace(&mut self.current_chunk, Vec::new());
+        let typed_vec = T::into_vec(chunk_data);
+        let serialized_array = rkyv::to_bytes::<rkyv::rancor::Error>(&typed_vec)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize array: {}", e))?;
+        let compressed = zstd::bulk::compress(&serialized_array, 3)?;
 
-        // Upload the temp file to object store
-        let mut temp_file = self.temp_writer.into_inner()?;
-        temp_file.seek(SeekFrom::Start(0))?;
+        let chunk = FileArrayChunk::CompressedZSTD {
+            uncompressed_size: serialized_array.len(),
+            bytes: compressed,
+        };
+        let serialized_chunk = rkyv::to_bytes::<rkyv::rancor::Error>(&chunk)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize chunk: {}", e))?;
 
-        util::stream_file_to_store::<S>(
+        let offset = self.temp_file.as_file_mut().seek(SeekFrom::End(0))?;
+        self.temp_file.as_file_mut().write_all(&serialized_chunk)?;
+
+        self.footer.chunk_offsets.push(offset);
+        self.footer.num_chunks += 1;
+
+        Ok(())
+    }
+
+    fn append_values_with_lookup(
+        &mut self,
+        values: Vec<T>,
+        lookup_shape: Vec<usize>,
+    ) -> anyhow::Result<SingleArrayLookup> {
+        let start = self.current_chunk.len();
+        self.current_chunk.extend(values);
+        let end = self.current_chunk.len();
+
+        let file_chunk_index = u32::try_from(self.footer.num_chunks).map_err(|_| {
+            anyhow::anyhow!("Chunk index {} cannot fit into u32", self.footer.num_chunks)
+        })?;
+        let start_u32 = u32::try_from(start)
+            .map_err(|_| anyhow::anyhow!("Chunk range start {} cannot fit into u32", start))?;
+        let end_u32 = u32::try_from(end)
+            .map_err(|_| anyhow::anyhow!("Chunk range end {} cannot fit into u32", end))?;
+
+        Ok(SingleArrayLookup {
+            file_chunk_index,
+            range: start_u32..end_u32,
+            shape: lookup_shape,
+        })
+    }
+
+    fn chunk_counts(shape: &[usize], chunk_shape: &[usize]) -> anyhow::Result<Vec<usize>> {
+        shape
+            .iter()
+            .zip(chunk_shape.iter())
+            .map(|(full_size, chunk_size)| {
+                anyhow::ensure!(
+                    *chunk_size > 0,
+                    "Chunk shape dimensions must be greater than zero"
+                );
+                Ok(full_size.div_ceil(*chunk_size))
+            })
+            .collect()
+    }
+
+    fn advance_chunk_index(chunk_index: &mut [usize], chunk_counts: &[usize]) -> bool {
+        for axis in (0..chunk_index.len()).rev() {
+            chunk_index[axis] += 1;
+            if chunk_index[axis] < chunk_counts[axis] {
+                return true;
+            }
+            chunk_index[axis] = 0;
+        }
+
+        false
+    }
+
+    pub async fn finish(mut self) -> anyhow::Result<()> {
+        // Flush any remaining data as a final chunk
+        self.flush_chunk()?;
+
+        // Serialize the footer
+        let serialized_footer = rkyv::to_bytes::<rkyv::rancor::Error>(&self.footer)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize footer: {}", e))?;
+
+        // Write the footer at the end of the file
+        self.temp_file.as_file_mut().write_all(&serialized_footer)?;
+        // Write the footer size at the very end of the file (8 bytes for u64)
+        let footer_size = serialized_footer.len() as u64;
+        self.temp_file
+            .as_file_mut()
+            .write_all(&footer_size.to_le_bytes())?;
+
+        // Upload the file to object storage
+        stream_file_to_store(
             &self.store,
-            &self.array_path,
-            &mut temp_file,
-            consts::STREAM_CHUNK_SIZE,
+            &self.path,
+            self.temp_file.as_file_mut(),
+            DEFAULT_BUFFER_SIZE,
         )
         .await?;
 
-        // Create a layout file
-        let layout = ArrayLayouts::new(self.layouts);
-        layout
-            .save::<S>(self.store.clone(), self.layout_path)
-            .await?;
-
-        let store = self.store.clone();
-        let statistics_path = self.statistics_path.clone();
-        let statistics_batch = self.statistics_writer.finish()?;
-        Self::write_statistics_to_store(&store, &statistics_path, statistics_batch).await?;
-
         Ok(())
     }
 
-    async fn write_statistics_to_store(
-        store: &S,
-        statistics_path: &object_store::path::Path,
-        statistics_batch: RecordBatch,
-    ) -> anyhow::Result<()> {
-        let schema = statistics_batch.schema();
-        let mut writer = FileWriter::try_new_with_options(
-            tempfile::tempfile()?,
-            &schema,
-            IPC_WRITE_OPTS.clone(),
-        )?;
-        writer.write(&statistics_batch)?;
-        writer.finish()?;
-
-        let mut file = writer.into_inner()?;
-        file.seek(SeekFrom::Start(0))?;
-        util::stream_file_to_store::<S>(
-            store,
-            statistics_path,
-            &mut file,
-            consts::STREAM_CHUNK_SIZE,
-        )
-        .await
-    }
-
-    /// Append a stream of chunked arrays for a dataset index.
-    ///
-    /// The layout entry is recorded immediately using the current write offset,
-    /// which includes buffered (not-yet-flushed) rows.
-    pub async fn append_array(
-        &mut self,
-        dataset_index: u32,
-        array: Arc<dyn NdArrowArray>,
-    ) -> anyhow::Result<()> {
-        // Check if datatype aligns with writer
-        if array.data_type() != self.array_datatype {
-            return Err(anyhow::anyhow!(
-                "Array datatype does not match writer datatype"
-            ));
-        }
-
-        let array_start =
-            self.row_count
-                .checked_add(self.current_buffer_size)
-                .ok_or_else(|| anyhow::anyhow!("array offset overflow"))? as u64;
-
-        let array_shape = array.shape();
-        let array_dimensions = array.dimensions();
-        let array = array.as_arrow_array_ref().await?;
-
-        self.statistics_writer.append(&array)?;
-
-        self.layouts.push(ArrayLayout {
-            dataset_index,
-            dimensions: array_dimensions,
-            array_len: array.len() as u64,
-            array_shape: array_shape.iter().map(|d| *d as u32).collect(),
-            chunk_shape: array_shape.iter().map(|d| *d as u32).collect(),
-            array_start,
-        });
-
-        self.current_buffer_size += array.len();
-        self.buffer_arrays.push(array);
-
-        if self.current_buffer_size >= self.chunk_size {
-            self.flush().await?;
-        }
-
-        Ok(())
-    }
-
-    /// Flush any remaining buffered data to the temp file.
-    pub async fn flush(&mut self) -> anyhow::Result<()> {
-        self.flush_buffer(false).await
-    }
-
-    async fn flush_all(&mut self) -> anyhow::Result<()> {
-        self.flush_buffer(true).await
-    }
-
-    async fn flush_buffer(&mut self, include_partial_batch: bool) -> anyhow::Result<()> {
-        while !self.buffer_arrays.is_empty()
-            && (self.current_buffer_size >= self.chunk_size
-                || (include_partial_batch && self.current_buffer_size > 0))
-        {
-            let rows_to_write = if self.current_buffer_size >= self.chunk_size {
-                self.chunk_size
-            } else {
-                self.current_buffer_size
-            };
-
-            let column_arrays = Self::take_rows(&mut self.buffer_arrays, rows_to_write);
-
-            // concatenate the buffered arrays into a single column array
-            let column_array = arrow::compute::concat(
-                &column_arrays.iter().map(|a| a.as_ref()).collect::<Vec<_>>(),
-            )?;
-
-            // Create the schema for the batch
-            let field =
-                arrow::datatypes::Field::new(Self::FIELD_NAME, self.array_datatype.clone(), true);
-            let schema = arrow::datatypes::Schema::new(vec![field]);
-            let batch = RecordBatch::try_new(Arc::new(schema), vec![column_array])?;
-
-            // Write the batch to the temp file
-            self.temp_writer.write(&batch)?;
-            self.row_count = self
-                .row_count
-                .checked_add(batch.num_rows())
-                .ok_or_else(|| anyhow::anyhow!("row count overflow"))?;
-            self.current_buffer_size = self
-                .current_buffer_size
-                .checked_sub(batch.num_rows())
-                .ok_or_else(|| anyhow::anyhow!("buffer size underflow"))?;
-        }
-
-        Ok(())
-    }
-
-    fn take_rows(buffer_arrays: &mut Vec<ArrayRef>, rows_to_take: usize) -> Vec<ArrayRef> {
-        let mut remaining_rows = rows_to_take;
-        let mut taken = Vec::new();
-        let mut remainder = Vec::new();
-
-        for array in std::mem::take(buffer_arrays) {
-            if remaining_rows == 0 {
-                remainder.push(array);
-                continue;
-            }
-
-            let array_len = array.len();
-            if array_len <= remaining_rows {
-                taken.push(array);
-                remaining_rows -= array_len;
-            } else {
-                taken.push(array.slice(0, remaining_rows));
-                remainder.push(array.slice(remaining_rows, array_len - remaining_rows));
-                remaining_rows = 0;
-            }
-        }
-
-        *buffer_arrays = remainder;
-        debug_assert_eq!(
-            remaining_rows, 0,
-            "attempted to take more rows than buffered"
-        );
-
-        taken
+    pub fn datatype(&self) -> AtlasDataType {
+        T::atlas_datatype()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ArrayWriter;
-    use crate::array::{io_cache::IoCache, reader::ArrayReader};
-    use std::{io::Cursor, sync::Arc};
+    use std::sync::Arc;
 
-    use arrow::{
-        array::{Array as ArrowArray, Int32Array},
-        datatypes::DataType,
-        ipc::reader::FileReader,
+    use beacon_nd_arrow::{
+        NdArray,
+        array::{
+            backend::{ArrayBackend, mem::InMemoryArrayBackend},
+            subset::ArraySubset,
+        },
     };
-    use beacon_nd_arrow::array::{NdArrowArray, NdArrowArrayDispatch, subset::ArraySubset};
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
-    fn make_i32_array(values: Vec<i32>) -> Arc<dyn NdArrowArray> {
-        Arc::new(
-            NdArrowArrayDispatch::new_in_mem(
-                values.clone(),
-                vec![values.len()],
-                vec!["x".to_string()],
-                None,
-            )
-            .expect("valid test array"),
-        )
+    use super::ArrayFileWriter;
+    use crate::{
+        array::{layout::ArrayLookup, reader::ArrayFileReader},
+        schema::_type::AtlasDataType,
+    };
+
+    #[derive(Debug, Clone)]
+    struct ChunkedTestBackend {
+        inner: InMemoryArrayBackend<i32>,
+        chunk_shape: Vec<usize>,
+    }
+
+    impl ChunkedTestBackend {
+        fn new(
+            values: ndarray::ArrayD<i32>,
+            shape: Vec<usize>,
+            dimensions: Vec<String>,
+            chunk_shape: Vec<usize>,
+        ) -> Self {
+            Self {
+                inner: InMemoryArrayBackend::new(values, shape, dimensions, None),
+                chunk_shape,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ArrayBackend<i32> for ChunkedTestBackend {
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+
+        fn shape(&self) -> Vec<usize> {
+            self.inner.shape()
+        }
+
+        fn chunk_shape(&self) -> Vec<usize> {
+            self.chunk_shape.clone()
+        }
+
+        fn dimensions(&self) -> Vec<String> {
+            self.inner.dimensions()
+        }
+
+        fn fill_value(&self) -> Option<i32> {
+            self.inner.fill_value()
+        }
+
+        async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<i32>> {
+            self.inner.read_subset(subset).await
+        }
     }
 
     #[tokio::test]
-    async fn flush_writes_full_chunks_and_keeps_remainder_buffered() -> anyhow::Result<()> {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let mut writer = ArrayWriter::new(
-            store,
-            Path::from("array.arrow"),
-            Path::from("layout.arrow"),
-            Path::from("statistics.arrow"),
-            DataType::Int32,
-            5,
+    async fn writer_roundtrip_flat_and_chunked_entries() -> anyhow::Result<()> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("writer-roundtrip.bin");
+
+        let mut writer = ArrayFileWriter::<i32, _>::new(store.clone(), path.clone(), 4)?;
+
+        let flat = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![10, 11, 12, 13],
+            vec![4],
+            vec!["x".to_string()],
+            None,
         )?;
+        writer.append(1, flat).await?;
 
-        writer
-            .append_array(0, make_i32_array(vec![1, 2, 3, 4]))
-            .await?;
-        writer
-            .append_array(1, make_i32_array(vec![5, 6, 7]))
-            .await?;
-
-        assert_eq!(writer.row_count, 5);
-        assert_eq!(writer.current_buffer_size, 2);
-        assert_eq!(writer.buffer_arrays.len(), 1);
-
-        let remainder = writer.buffer_arrays[0]
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .expect("int32 remainder array");
-        assert_eq!(remainder.len(), 2);
-        assert_eq!(remainder.value(0), 6);
-        assert_eq!(remainder.value(1), 7);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn finalize_flushes_remaining_partial_batch() -> anyhow::Result<()> {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let array_path = Path::from("finalize-array.arrow");
-        let layout_path = Path::from("finalize-layout.arrow");
-
-        let mut writer = ArrayWriter::new(
-            store.clone(),
-            array_path.clone(),
-            layout_path,
-            Path::from("finalize-statistics.arrow"),
-            DataType::Int32,
-            5,
+        let chunked_values = ndarray::ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[3, 3]),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
         )?;
+        let chunked_backend = ChunkedTestBackend::new(
+            chunked_values,
+            vec![3, 3],
+            vec!["y".to_string(), "x".to_string()],
+            vec![2, 2],
+        );
+        let chunked = NdArray::new_with_backend(chunked_backend)?;
+        writer.append(2, chunked).await?;
 
-        writer
-            .append_array(0, make_i32_array(vec![10, 11, 12, 13]))
-            .await?;
-        writer.finalize().await?;
+        writer.finish().await?;
 
-        let bytes = store.get(&array_path).await?.bytes().await?;
-        let reader = FileReader::try_new(Cursor::new(bytes.to_vec()), None)?;
-        let rows: usize = reader.map(|batch| batch.expect("batch").num_rows()).sum();
+        let reader = Arc::new(ArrayFileReader::open(store, path, None).await?);
+        assert_eq!(reader.footer().lookup_table.len(), 2);
 
-        assert_eq!(rows, 4);
+        let flat_entry = reader.entry(1).expect("flat entry should exist");
+        assert!(matches!(flat_entry.lookup, ArrayLookup::Flat(_)));
 
-        Ok(())
-    }
+        let chunked_entry = reader.entry(2).expect("chunked entry should exist");
+        let chunk_map = match &chunked_entry.lookup {
+            ArrayLookup::Chunked { map } => map,
+            _ => panic!("expected chunked lookup for entry 2"),
+        };
+        assert_eq!(chunk_map.len(), 4);
 
-    #[tokio::test]
-    async fn finalize_writes_layouts_and_subset_reads_across_chunked_batches() -> anyhow::Result<()>
-    {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let array_path = Path::from("pipeline-array.arrow");
-        let layout_path = Path::from("pipeline-layout.arrow");
-
-        let mut writer = ArrayWriter::new(
-            store.clone(),
-            array_path.clone(),
-            layout_path.clone(),
-            Path::from("pipeline-statistics.arrow"),
-            DataType::Int32,
-            4,
-        )?;
-
-        writer
-            .append_array(10, make_i32_array(vec![1, 2, 3]))
-            .await?;
-        writer
-            .append_array(
-                11,
-                Arc::new(NdArrowArrayDispatch::new_in_mem(
-                    vec![100, 101, 102, 103, 104, 105],
-                    vec![2, 3],
-                    vec!["lat".to_string(), "lon".to_string()],
-                    None,
-                )?),
-            )
-            .await?;
-        writer.finalize().await?;
-
-        let reader = ArrayReader::new_with_cache(
-            store,
-            layout_path,
-            array_path,
-            Arc::new(IoCache::new(1024 * 1024)),
-        )
-        .await?;
-
-        let first_layout = reader
-            .layouts()
-            .find_dataset_array_layout(10)
-            .expect("first layout exists");
-        assert_eq!(first_layout.array_start, 0);
-        assert_eq!(first_layout.array_len, 3);
-
-        let second_layout = reader
-            .layouts()
-            .find_dataset_array_layout(11)
-            .expect("second layout exists");
-        assert_eq!(second_layout.array_start, 3);
-        assert_eq!(second_layout.array_shape, vec![2, 3]);
-        assert_eq!(second_layout.chunk_shape, vec![2, 3]);
+        let chunk_shapes: Vec<Vec<usize>> = chunk_map
+            .values()
+            .map(|lookup| lookup.shape.clone())
+            .collect();
         assert_eq!(
-            second_layout.dimensions,
-            vec!["lat".to_string(), "lon".to_string()]
+            chunk_shapes,
+            vec![vec![2, 2], vec![2, 1], vec![1, 2], vec![1, 1]]
         );
 
-        let array = reader
-            .read_dataset_array(11)
-            .transpose()?
-            .expect("dataset array exists");
-        let subset = array
-            .subset(ArraySubset {
-                start: vec![0, 1],
-                shape: vec![2, 2],
-            })
+        let flat_roundtrip = reader.read_entry_array::<i32>(1)?.into_raw_vec().await;
+        assert_eq!(flat_roundtrip, vec![10, 11, 12, 13]);
+
+        let chunked_roundtrip = reader.read_entry_array::<i32>(2)?.into_raw_vec().await;
+        assert_eq!(chunked_roundtrip, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        let chunked_subset = reader
+            .read_entry_array::<i32>(2)?
+            .subset(ArraySubset::new(vec![1, 1], vec![2, 2]))
             .await?;
-        let materialized = subset.as_arrow_array_ref().await?;
-        let values = materialized
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .expect("int32 subset");
-
-        assert_eq!(subset.shape(), vec![2, 2]);
-        assert_eq!(
-            subset.dimensions(),
-            vec!["lat".to_string(), "lon".to_string()]
-        );
-        assert_eq!(values.values(), &[101, 102, 104, 105]);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn finalize_writes_statistics_with_one_row_per_appended_nd_array() -> anyhow::Result<()> {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let array_path = Path::from("stats-array.arrow");
-        let layout_path = Path::from("stats-layout.arrow");
-        let statistics_path = Path::from("stats-statistics.arrow");
-
-        let mut writer = ArrayWriter::new(
-            store.clone(),
-            array_path,
-            layout_path,
-            statistics_path.clone(),
-            DataType::Int32,
-            8,
-        )?;
-
-        writer
-            .append_array(0, make_i32_array(vec![1, 2, 3]))
-            .await?;
-        writer
-            .append_array(1, make_i32_array(vec![7, 8, 9]))
-            .await?;
-
-        writer.finalize().await?;
-
-        let bytes = store.get(&statistics_path).await?.bytes().await?;
-        let reader = FileReader::try_new(Cursor::new(bytes.to_vec()), None)?;
-        let schema = reader.schema();
-        let batches = reader.collect::<Result<Vec<_>, arrow::error::ArrowError>>()?;
-        let batch = arrow::compute::concat_batches(&schema, &batches)?;
-
-        assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.schema().field(0).name(), "min");
-        assert_eq!(batch.schema().field(1).name(), "max");
-        assert_eq!(batch.schema().field(2).name(), "null_count");
-        assert_eq!(batch.schema().field(3).name(), "row_count");
-
-        let min = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let max = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let null_count = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<arrow::array::UInt64Array>()
-            .unwrap();
-        let row_count = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<arrow::array::UInt64Array>()
-            .unwrap();
-
-        assert_eq!(min.value(0), 1);
-        assert_eq!(max.value(0), 3);
-        assert_eq!(null_count.value(0), 0);
-        assert_eq!(row_count.value(0), 3);
-
-        assert_eq!(min.value(1), 7);
-        assert_eq!(max.value(1), 9);
-        assert_eq!(null_count.value(1), 0);
-        assert_eq!(row_count.value(1), 3);
+        assert_eq!(chunked_subset.into_raw_vec().await, vec![5, 6, 8, 9]);
 
         Ok(())
     }

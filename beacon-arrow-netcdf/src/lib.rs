@@ -43,7 +43,7 @@ pub mod decoders;
 /// This type is a logical conversion target and is not meant to map directly
 /// to a physical NetCDF variable type.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, PartialOrd, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct NcTimestampNanosecond(pub TimestampNanosecond);
 unsafe impl NcTypeDescriptor for NcTimestampNanosecond {
     fn type_descriptor() -> NcVariableType {
@@ -52,7 +52,7 @@ unsafe impl NcTypeDescriptor for NcTimestampNanosecond {
 }
 
 impl ArrowTypeConversion for NcTimestampNanosecond {
-    fn data_type() -> arrow::datatypes::DataType
+    fn arrow_data_type() -> arrow::datatypes::DataType
     where
         Self: Sized,
     {
@@ -79,7 +79,7 @@ pub struct NcFixedSizedString(Vec<u8>);
 
 /// Wrapper for a single NetCDF `char` value.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, PartialOrd, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct NcChar(u8);
 unsafe impl NcTypeDescriptor for NcChar {
     fn type_descriptor() -> NcVariableType {
@@ -88,7 +88,7 @@ unsafe impl NcTypeDescriptor for NcChar {
 }
 
 impl ArrowTypeConversion for NcChar {
-    fn data_type() -> arrow::datatypes::DataType
+    fn arrow_data_type() -> arrow::datatypes::DataType
     where
         Self: Sized,
     {
@@ -141,7 +141,7 @@ impl NcString {
 
 /// Owned string representation used by decoders and Arrow conversion.
 #[repr(transparent)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
 pub struct OwnedNcString(String);
 
 unsafe impl NcTypeDescriptor for OwnedNcString {
@@ -151,7 +151,7 @@ unsafe impl NcTypeDescriptor for OwnedNcString {
 }
 
 impl ArrowTypeConversion for OwnedNcString {
-    fn data_type() -> arrow::datatypes::DataType
+    fn arrow_data_type() -> arrow::datatypes::DataType
     where
         Self: Sized,
     {

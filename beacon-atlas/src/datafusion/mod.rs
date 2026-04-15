@@ -72,7 +72,6 @@ use datafusion::{
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::{
-    array::io_cache::IoCache,
     collection::load_collection_state,
     consts::{COLLECTION_METADATA_FILE, DEFAULT_IO_CACHE_BYTES},
     datafusion::source::AtlasSource,

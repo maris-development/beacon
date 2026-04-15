@@ -19,8 +19,10 @@ ndarray = { version = "0.17.1", optional = true }
 anyhow = { workspace=true }
 async-trait = { workspace=true }
 futures = { workspace=true }
+indexmap = { workspace=true }
 pin-project = "1.1.10"
 bytemuck = {version = "1.25.0", features = ["derive"]}
+rkyv = { version = "0.8.10", features = ["pointer_width_64"] }
 
 [dev-dependencies]
 arrow-ipc = { workspace = true }

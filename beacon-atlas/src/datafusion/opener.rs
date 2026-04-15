@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_nd_arrow::array::NdArrowArray;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder};
 use datafusion::{

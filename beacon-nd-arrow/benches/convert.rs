@@ -83,19 +83,27 @@ fn bench_convert_no_fill(c: &mut Criterion) {
         let i64_data: Vec<i64> = (0..n).map(|i| i as i64).collect();
 
         group.bench_with_input(BenchmarkId::new("f64", n), &n, |b, _| {
-            b.iter(|| black_box(<f64 as ArrowTypeConversion>::arrow_from_array_view(&f64_data).unwrap()));
+            b.iter(|| {
+                black_box(<f64 as ArrowTypeConversion>::arrow_from_array_view(&f64_data).unwrap())
+            });
         });
 
         group.bench_with_input(BenchmarkId::new("f32", n), &n, |b, _| {
-            b.iter(|| black_box(<f32 as ArrowTypeConversion>::arrow_from_array_view(&f32_data).unwrap()));
+            b.iter(|| {
+                black_box(<f32 as ArrowTypeConversion>::arrow_from_array_view(&f32_data).unwrap())
+            });
         });
 
         group.bench_with_input(BenchmarkId::new("i32", n), &n, |b, _| {
-            b.iter(|| black_box(<i32 as ArrowTypeConversion>::arrow_from_array_view(&i32_data).unwrap()));
+            b.iter(|| {
+                black_box(<i32 as ArrowTypeConversion>::arrow_from_array_view(&i32_data).unwrap())
+            });
         });
 
         group.bench_with_input(BenchmarkId::new("i64", n), &n, |b, _| {
-            b.iter(|| black_box(<i64 as ArrowTypeConversion>::arrow_from_array_view(&i64_data).unwrap()));
+            b.iter(|| {
+                black_box(<i64 as ArrowTypeConversion>::arrow_from_array_view(&i64_data).unwrap())
+            });
         });
     }
 

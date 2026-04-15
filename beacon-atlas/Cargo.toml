@@ -23,11 +23,11 @@ once_cell = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 flume = { workspace = true }
-chrono = { workspace = true }
+rkyv = { version = "0.8.10", features = ["pointer_width_64"]}
+chrono = { version = "0.4.41", features = [] }
 crossbeam = { workspace = true }
 typetag = { workspace = true }
 ndarray = "0.17.1"
-rkyv = "0.8.10"
 zstd = "0.13.2"
 
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }

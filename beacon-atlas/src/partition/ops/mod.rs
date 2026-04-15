@@ -4,13 +4,11 @@ use arrow::{array::RecordBatch, datatypes::Field};
 use chrono::{DateTime, Utc};
 use object_store::ObjectStore;
 
-use crate::{IPC_WRITE_OPTS, consts::ENTRIES_FILE};
+use crate::consts::ENTRIES_FILE;
 
 pub mod cast;
 pub mod delete;
 pub mod read;
-pub mod statistics;
-pub mod stream_read;
 pub mod write;
 
 /// Writes the partition `entries.arrow` file.

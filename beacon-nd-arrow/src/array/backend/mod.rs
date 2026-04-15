@@ -2,32 +2,10 @@ pub mod mem;
 
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{
-    NdArrowArrayDispatch,
-    array::{NdArrowArray, compat_typings::ArrowTypeConversion, subset::ArraySubset},
-};
-
-#[derive(Debug, Clone)]
-pub struct BackendSubsetResult<T: ArrowTypeConversion> {
-    pub values: ndarray::ArrayD<T>,
-    pub validity: Option<ndarray::ArrayD<bool>>,
-}
-
-impl<T: ArrowTypeConversion> BackendSubsetResult<T> {
-    pub fn new(values: ndarray::ArrayD<T>, validity: Option<ndarray::ArrayD<bool>>) -> Self {
-        Self { values, validity }
-    }
-}
+use crate::{array::subset::ArraySubset, datatypes::NdArrayType};
 
 #[async_trait::async_trait]
-pub trait ArrayBackend<T: ArrowTypeConversion>: Send + Sync + 'static + Debug {
-    fn into_dyn_array(self) -> anyhow::Result<Arc<dyn NdArrowArray>>
-    where
-        Self: Sized + 'static,
-    {
-        Ok(Arc::new(NdArrowArrayDispatch::new(self)?))
-    }
-
+pub trait ArrayBackend<T: NdArrayType>: Send + Sync + 'static + Debug {
     fn len(&self) -> usize;
 
     /// Returns `true` when the array contains no elements.
@@ -91,19 +69,11 @@ pub trait ArrayBackend<T: ArrowTypeConversion>: Send + Sync + 'static + Debug {
         None
     }
 
-    async fn read_subset_with_validity(
-        &self,
-        subset: ArraySubset,
-    ) -> anyhow::Result<BackendSubsetResult<T>> {
-        let values = self.read_subset(subset).await?;
-        Ok(BackendSubsetResult::new(values, None))
-    }
-
     async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<T>>;
 }
 
 #[async_trait::async_trait]
-impl<T: ArrowTypeConversion, A: ArrayBackend<T> + ?Sized> ArrayBackend<T> for Arc<A> {
+impl<T: NdArrayType, A: ArrayBackend<T> + ?Sized> ArrayBackend<T> for Arc<A> {
     fn len(&self) -> usize {
         (**self).len()
     }
@@ -118,13 +88,6 @@ impl<T: ArrowTypeConversion, A: ArrayBackend<T> + ?Sized> ArrayBackend<T> for Ar
 
     fn fill_value(&self) -> Option<T> {
         (**self).fill_value()
-    }
-
-    async fn read_subset_with_validity(
-        &self,
-        subset: ArraySubset,
-    ) -> anyhow::Result<BackendSubsetResult<T>> {
-        (**self).read_subset_with_validity(subset).await
     }
 
     async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<T>> {

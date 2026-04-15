@@ -1,4 +1,6 @@
-use crate::schema::_type::{AtlasDataType, Timestamp};
+use beacon_nd_arrow::datatypes::TimestampNanosecond;
+
+use crate::schema::_type::AtlasDataType;
 
 #[derive(
     Debug,
@@ -10,6 +12,7 @@ use crate::schema::_type::{AtlasDataType, Timestamp};
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(attr(derive(Debug, PartialEq)))]
 pub enum Scalar {
     Bool(bool),
     I8(i8),
@@ -22,7 +25,7 @@ pub enum Scalar {
     U64(u64),
     F32(f32),
     F64(f64),
-    Timestamp(Timestamp),
+    Timestamp(TimestampNanosecond),
     Binary(Vec<u8>),
     String(String),
 }
@@ -151,7 +154,7 @@ impl Scalar {
         }
     }
 
-    pub fn as_timestamp(&self) -> Option<&Timestamp> {
+    pub fn as_timestamp(&self) -> Option<&TimestampNanosecond> {
         if let Scalar::Timestamp(ts) = self {
             Some(ts)
         } else {
@@ -226,8 +229,8 @@ impl From<f64> for Scalar {
     }
 }
 
-impl From<Timestamp> for Scalar {
-    fn from(value: Timestamp) -> Self {
+impl From<TimestampNanosecond> for Scalar {
+    fn from(value: TimestampNanosecond) -> Self {
         Scalar::Timestamp(value)
     }
 }

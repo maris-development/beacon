@@ -33,7 +33,7 @@ where
     let default_decoder: Arc<dyn VariableDecoder<T>> = Arc::new(DefaultVariableDecoder::<T>::new(
         Arc::new(arrow_schema::Field::new(
             variable_name,
-            T::data_type(),
+            T::arrow_data_type(),
             false,
         )),
         fill_value,
@@ -74,70 +74,110 @@ pub fn attribute_to_nd_arrow_array(
     match attr_value {
         AttributeValue::Uchar(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, u8::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    u8::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Schar(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, i8::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    i8::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Ushort(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, u16::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    u16::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Short(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, i16::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    i16::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Uint(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, u32::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    u32::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Int(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, i32::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    i32::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Ulonglong(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, u64::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    u64::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Longlong(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, i64::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    i64::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Float(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, f32::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    f32::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)
         }
         AttributeValue::Double(value) => {
             let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(attr_name, f64::data_type(), false)),
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    f64::arrow_data_type(),
+                    false,
+                )),
                 value,
             );
             Ok(array.into_dyn_array()?)

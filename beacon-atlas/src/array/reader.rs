@@ -1,444 +1,315 @@
-use std::sync::Arc;
-
-use arrow::{
-    array::{ArrayRef, UInt32Array},
-    datatypes::{DataType, Field, Schema, TimeUnit},
-    record_batch::RecordBatch,
-};
-use beacon_nd_arrow::array::backend::ArrayBackend;
-use beacon_nd_arrow::array::compat_typings::TimestampNanosecond;
+use beacon_nd_arrow::NdArray;
 use object_store::ObjectStore;
+use rkyv::util::AlignedVec;
+use std::sync::Arc;
 
 use crate::{
     array::{
-        AtlasArrayBackend,
-        compat::AtlasArrowCompat,
-        io_cache::IoCache,
-        layout::{ArrayLayout, ArrayLayouts},
-        statistics::StatisticsReader,
+        backend::AtlasArrayFileBackend,
+        layout::{ArrayEntry, FileArrayChunk, FileArrayFooter},
     },
-    arrow_object_store::ArrowObjectStoreReader,
+    cache::VecCache,
+    schema::_type::AtlasType,
+    typed_vec::TypedVec,
 };
 
-/// Reads chunked ND Arrow arrays and their layout metadata from object storage.
-pub struct ArrayReader<S: ObjectStore + Clone> {
+#[derive(Debug)]
+pub struct ArrayFileReader<S: ObjectStore + Clone> {
     store: S,
-    array_reader: Arc<ArrowObjectStoreReader<S>>,
-    layouts: ArrayLayouts,
-    array_datatype: arrow::datatypes::DataType,
-    io_cache: Arc<IoCache>,
-    statistics_reader: tokio::sync::OnceCell<Option<StatisticsReader>>,
-    statistics_path: Option<object_store::path::Path>,
+    path: object_store::path::Path,
+    footer: FileArrayFooter,
+    footer_start: u64,
+    cache: Option<Arc<VecCache>>,
 }
 
-impl<S: ObjectStore + Clone> std::fmt::Debug for ArrayReader<S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ArrayReader")
-            .field("array_datatype", &self.array_datatype)
-            .finish()
-    }
-}
-
-impl<S: ObjectStore + Clone> ArrayReader<S> {
-    pub async fn new_with_cache(
+impl<S: ObjectStore + Clone + Send + Sync + 'static> ArrayFileReader<S> {
+    pub async fn open(
         store: S,
-        layout_path: object_store::path::Path,
-        array_path: object_store::path::Path,
-        io_cache: Arc<IoCache>,
+        path: object_store::path::Path,
+        cache: Option<Arc<VecCache>>,
     ) -> anyhow::Result<Self> {
-        let array_reader = Arc::new(ArrowObjectStoreReader::new(store.clone(), array_path).await?);
+        let file_size = store
+            .head(&path)
+            .await
+            .map_err(|err| anyhow::anyhow!(err))?
+            .size;
 
-        let array_field = array_reader.schema();
-        let array_datatype = array_field.field(0).data_type().clone();
+        anyhow::ensure!(
+            file_size >= 8,
+            "Array file is too small to contain footer size trailer"
+        );
+
+        let footer_size_offset = file_size - 8;
+        let footer_size_bytes = store
+            .get_range(&path, footer_size_offset..file_size)
+            .await
+            .map_err(|err| anyhow::anyhow!(err))?;
+        anyhow::ensure!(
+            footer_size_bytes.len() == 8,
+            "Invalid footer size trailer length: expected 8, got {}",
+            footer_size_bytes.len()
+        );
+
+        let mut footer_size_array = [0_u8; 8];
+        footer_size_array.copy_from_slice(footer_size_bytes.as_ref());
+        let footer_size = u64::from_le_bytes(footer_size_array);
+        anyhow::ensure!(
+            footer_size <= footer_size_offset,
+            "Footer size {} exceeds file content before trailer {}",
+            footer_size,
+            footer_size_offset
+        );
+
+        let footer_start = footer_size_offset - footer_size;
+        let footer_bytes = store
+            .get_range(&path, footer_start..footer_size_offset)
+            .await
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let mut aligned_footer: AlignedVec<16> = AlignedVec::with_capacity(footer_bytes.len());
+        aligned_footer.extend_from_slice(footer_bytes.as_ref());
+        let footer = rkyv::from_bytes::<FileArrayFooter, rkyv::rancor::Error>(&aligned_footer)
+            .map_err(|err| anyhow::anyhow!("Failed to deserialize array file footer: {err}"))?;
+
+        anyhow::ensure!(
+            footer.num_chunks == footer.chunk_offsets.len(),
+            "Footer num_chunks {} does not match chunk_offsets length {}",
+            footer.num_chunks,
+            footer.chunk_offsets.len()
+        );
+
+        for window in footer.chunk_offsets.windows(2) {
+            anyhow::ensure!(
+                window[0] < window[1],
+                "Footer chunk offsets must be strictly increasing"
+            );
+        }
+
+        if let Some(last_offset) = footer.chunk_offsets.last() {
+            anyhow::ensure!(
+                *last_offset < footer_start,
+                "Last chunk offset {} must be before footer start {}",
+                last_offset,
+                footer_start
+            );
+        }
 
         Ok(Self {
-            store: store.clone(),
-            array_reader,
-            layouts: ArrayLayouts::from_object(store.clone(), layout_path).await?,
-            array_datatype,
-            io_cache,
-            statistics_reader: tokio::sync::OnceCell::new(),
-            statistics_path: None,
+            store,
+            path,
+            footer,
+            footer_start,
+            cache,
         })
     }
 
-    pub async fn new_with_cache_and_statistics(
-        store: S,
-        layout_path: object_store::path::Path,
-        array_path: object_store::path::Path,
-        statistics_path: object_store::path::Path,
-        io_cache: Arc<IoCache>,
-    ) -> anyhow::Result<Self> {
-        let mut reader =
-            Self::new_with_cache(store.clone(), layout_path, array_path, io_cache).await?;
-        reader.statistics_path = Some(statistics_path.clone());
-
-        Ok(reader)
+    pub fn footer(&self) -> &FileArrayFooter {
+        &self.footer
     }
 
-    /// Returns the loaded array layouts.
-    pub fn layouts(&self) -> &ArrayLayouts {
-        &self.layouts
+    pub fn entry(&self, entry_index: u32) -> Option<&ArrayEntry> {
+        self.footer.lookup_table.get(&entry_index)
     }
 
-    /// Returns the array datatype stored in this reader.
-    pub fn array_datatype(&self) -> &arrow::datatypes::DataType {
-        &self.array_datatype
+    pub fn footer_start(&self) -> u64 {
+        self.footer_start
     }
 
-    /// Returns the shared IO cache.
-    pub fn io_cache(&self) -> &Arc<IoCache> {
-        &self.io_cache
+    pub async fn read_file_chunk_typed<T: AtlasType>(
+        &self,
+        file_chunk_index: u32,
+    ) -> anyhow::Result<Vec<T>> {
+        let chunk = self.read_file_chunk(file_chunk_index).await?;
+        T::try_from_vec(chunk)
     }
 
-    /// Returns statistics for all datasets in this column, if available.
-    ///
-    /// The resulting batch includes a `dataset_index` column appended from layout metadata.
-    pub async fn read_statistics_batch(&self) -> anyhow::Result<Option<RecordBatch>> {
-        let Some(statistics_path) = &self.statistics_path else {
-            return Ok(None);
-        };
-        let store = self.store.clone();
-
-        let Some(statistics_reader) = self
-            .statistics_reader
-            .get_or_try_init(|| async move {
-                match store.head(statistics_path).await {
-                    Ok(_) => {
-                        Some(StatisticsReader::new(store.clone(), statistics_path.clone()).await)
-                            .transpose()
-                    }
-                    Err(object_store::Error::NotFound { .. }) => Ok(None),
-                    Err(err) => Err(anyhow::anyhow!(err)),
-                }
-            })
-            .await?
-        else {
-            return Ok(None);
-        };
-
-        let statistics_batch = statistics_reader.batch().clone();
-        if statistics_batch
-            .schema()
-            .field_with_name("dataset_index")
-            .is_ok()
-        {
-            return Ok(Some(statistics_batch));
-        }
-
-        let dataset_indices = self.layouts.dataset_indices();
+    pub async fn read_file_chunk(&self, file_chunk_index: u32) -> anyhow::Result<TypedVec> {
+        let chunk_index = file_chunk_index as usize;
         anyhow::ensure!(
-            statistics_batch.num_rows() == dataset_indices.len(),
-            "statistics row count ({}) does not match layout row count ({})",
-            statistics_batch.num_rows(),
-            dataset_indices.len()
+            chunk_index < self.footer.chunk_offsets.len(),
+            "Chunk index {} out of bounds for {} chunks",
+            file_chunk_index,
+            self.footer.chunk_offsets.len()
         );
 
-        let dataset_index_array = Arc::new(UInt32Array::from(dataset_indices)) as ArrayRef;
-        let mut columns = statistics_batch.columns().to_vec();
-        columns.push(dataset_index_array);
-
-        let mut fields: Vec<Field> = statistics_batch
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.as_ref().clone())
-            .collect();
-        fields.push(Field::new("dataset_index", DataType::UInt32, false));
-
-        let schema = Arc::new(Schema::new(fields));
-        Ok(Some(RecordBatch::try_new(schema, columns)?))
-    }
-
-    fn lazy_dataset_array<A: AtlasArrowCompat>(
-        &self,
-        layout: Arc<ArrayLayout>,
-    ) -> anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>> {
-        let array = AtlasArrayBackend::<S, A>::new(
-            self.array_reader.clone(),
-            self.io_cache.clone(),
-            layout,
-        );
-
-        array.into_dyn_array()
-    }
-
-    /// Returns a chunked array for a dataset index, if present.
-    pub fn read_dataset_array(
-        &self,
-        dataset_index: u32,
-    ) -> Option<anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>>> {
-        let layout = if let Some(layout) = self.layouts.find_dataset_array_layout(dataset_index) {
-            layout.clone()
+        let chunk_start = self.footer.chunk_offsets[chunk_index];
+        let chunk_end = if chunk_index + 1 < self.footer.chunk_offsets.len() {
+            self.footer.chunk_offsets[chunk_index + 1]
         } else {
-            return None;
+            self.footer_start
         };
-        let layout = Arc::new(layout);
 
-        match &self.array_datatype {
-            DataType::Boolean => Some(self.lazy_dataset_array::<bool>(layout)),
-            DataType::Int8 => Some(self.lazy_dataset_array::<i8>(layout)),
-            DataType::Int16 => Some(self.lazy_dataset_array::<i16>(layout)),
-            DataType::Int32 => Some(self.lazy_dataset_array::<i32>(layout)),
-            DataType::Int64 => Some(self.lazy_dataset_array::<i64>(layout)),
-            DataType::UInt8 => Some(self.lazy_dataset_array::<u8>(layout)),
-            DataType::UInt16 => Some(self.lazy_dataset_array::<u16>(layout)),
-            DataType::UInt32 => Some(self.lazy_dataset_array::<u32>(layout)),
-            DataType::UInt64 => Some(self.lazy_dataset_array::<u64>(layout)),
-            DataType::Float32 => Some(self.lazy_dataset_array::<f32>(layout)),
-            DataType::Float64 => Some(self.lazy_dataset_array::<f64>(layout)),
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-                Some(self.lazy_dataset_array::<TimestampNanosecond>(layout))
+        anyhow::ensure!(
+            chunk_start < chunk_end,
+            "Invalid chunk bounds for chunk {}: {}..{}",
+            file_chunk_index,
+            chunk_start,
+            chunk_end
+        );
+        anyhow::ensure!(
+            chunk_end <= self.footer_start,
+            "Chunk {} end {} exceeds footer start {}",
+            file_chunk_index,
+            chunk_end,
+            self.footer_start
+        );
+
+        let cloned_store = self.store.clone();
+        let fut = |(path, _chunk_index)| async move {
+            let chunk_bytes = cloned_store
+                .get_range(&path, chunk_start..chunk_end)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to resolve chunk bytes: {}", e))?;
+
+            let mut aligned_chunk: AlignedVec<64> = AlignedVec::with_capacity(chunk_bytes.len());
+            aligned_chunk.extend_from_slice(chunk_bytes.as_ref());
+            let chunk = rkyv::from_bytes::<FileArrayChunk, rkyv::rancor::Error>(&aligned_chunk)
+                .map_err(|err| anyhow::anyhow!("Failed to deserialize file chunk: {err}"))?;
+
+            match chunk {
+                FileArrayChunk::CompressedZSTD {
+                    uncompressed_size,
+                    bytes,
+                } => {
+                    let decompressed = zstd::bulk::decompress(&bytes, uncompressed_size)?;
+                    let mut aligned_values: AlignedVec<64> =
+                        AlignedVec::with_capacity(decompressed.len());
+                    aligned_values.extend_from_slice(decompressed.as_slice());
+                    rkyv::from_bytes::<TypedVec, rkyv::rancor::Error>(&aligned_values).map_err(
+                        |err| anyhow::anyhow!("Failed to deserialize typed chunk payload: {err}"),
+                    )
+                }
             }
-            DataType::Utf8 => Some(self.lazy_dataset_array::<String>(layout)),
-            _ => Some(Err(anyhow::anyhow!(
-                "unsupported array datatype: {:?}",
-                self.array_datatype
-            ))),
+        };
+
+        match &self.cache {
+            Some(cache) => {
+                // Access cache with try get resolvable future
+                cache
+                    .try_get_or_insert((self.path.clone(), chunk_index as u32), fut)
+                    .await
+            }
+            None => {
+                // Resolve future
+                fut((self.path.clone(), chunk_index as u32)).await
+            }
         }
+    }
+
+    pub fn read_entry_array<T: AtlasType>(
+        self: &Arc<Self>,
+        entry_index: u32,
+    ) -> anyhow::Result<NdArray<T>> {
+        let backend = AtlasArrayFileBackend::<S, T>::new(Arc::clone(self), entry_index)?;
+        NdArray::new_with_backend(backend)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ArrayReader;
-    use crate::array::{io_cache::IoCache, writer::ArrayWriter};
-    use crate::consts;
-    use arrow::array::{
-        Array as ArrowArray, BooleanArray, Int32Array, TimestampNanosecondArray, UInt32Array,
-    };
-    use beacon_nd_arrow::array::compat_typings::TimestampNanosecond;
-    use beacon_nd_arrow::array::{NdArrowArray, NdArrowArrayDispatch, subset::ArraySubset};
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use bytes::Bytes;
     use object_store::{ObjectStore, memory::InMemory, path::Path};
-    use std::sync::Arc;
 
-    async fn build_reader(
-        array: Arc<dyn NdArrowArray>,
-        chunk_size: usize,
-    ) -> anyhow::Result<ArrayReader<Arc<dyn ObjectStore>>> {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let array_path = Path::from("test-array.arrow");
-        let layout_path = Path::from("test-layout.arrow");
-        let statistics_path = Path::from("test-statistics.arrow");
+    use super::ArrayFileReader;
+    use crate::{
+        array::layout::{
+            ArrayEntry, ArrayLookup, FileArrayChunk, FileArrayFooter, SingleArrayLookup,
+        },
+        schema::_type::AtlasDataType,
+        typed_vec::TypedVec,
+    };
 
-        let mut writer = ArrayWriter::new(
-            store.clone(),
-            array_path.clone(),
-            layout_path.clone(),
-            statistics_path,
-            array.data_type(),
-            chunk_size,
-        )?;
-        writer.append_array(7, array).await?;
-        writer.finalize().await?;
+    fn encode_file(
+        chunks: Vec<TypedVec>,
+        lookup_table: BTreeMap<u32, ArrayEntry>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut file_bytes = Vec::new();
+        let mut chunk_offsets = Vec::with_capacity(chunks.len());
 
-        ArrayReader::new_with_cache(
-            store,
-            layout_path,
-            array_path,
-            Arc::new(IoCache::new(1024 * 1024)),
-        )
-        .await
-    }
+        for chunk_values in chunks {
+            let chunk_offset = u64::try_from(file_bytes.len())?;
+            chunk_offsets.push(chunk_offset);
 
-    async fn build_reader_with_statistics(
-        datasets: Vec<(u32, Arc<dyn NdArrowArray>)>,
-        chunk_size: usize,
-    ) -> anyhow::Result<ArrayReader<Arc<dyn ObjectStore>>> {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let array_path = Path::from("test-array.arrow");
-        let layout_path = Path::from("test-layout.arrow");
-        let statistics_path = Path::from(consts::STATISTICS_FILE_NAME);
-
-        let data_type = datasets
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("at least one dataset is required"))?
-            .1
-            .data_type();
-
-        let mut writer = ArrayWriter::new(
-            store.clone(),
-            array_path.clone(),
-            layout_path.clone(),
-            statistics_path.clone(),
-            data_type,
-            chunk_size,
-        )?;
-
-        for (dataset_index, dataset) in datasets {
-            writer.append_array(dataset_index, dataset).await?;
+            let serialized_array = rkyv::to_bytes::<rkyv::rancor::Error>(&chunk_values)?;
+            let compressed = zstd::bulk::compress(&serialized_array, 3)?;
+            let chunk = FileArrayChunk::CompressedZSTD {
+                uncompressed_size: serialized_array.len(),
+                bytes: compressed,
+            };
+            let serialized_chunk = rkyv::to_bytes::<rkyv::rancor::Error>(&chunk)?;
+            file_bytes.extend_from_slice(&serialized_chunk);
         }
-        writer.finalize().await?;
 
-        ArrayReader::new_with_cache_and_statistics(
-            store,
-            layout_path,
-            array_path,
-            statistics_path,
-            Arc::new(IoCache::new(1024 * 1024)),
-        )
-        .await
+        let footer = FileArrayFooter {
+            datatype: AtlasDataType::I32,
+            num_chunks: chunk_offsets.len(),
+            chunk_offsets,
+            lookup_table,
+            statistics: None,
+        };
+        let serialized_footer = rkyv::to_bytes::<rkyv::rancor::Error>(&footer)?;
+        file_bytes.extend_from_slice(&serialized_footer);
+        file_bytes.extend_from_slice(&(serialized_footer.len() as u64).to_le_bytes());
+
+        Ok(file_bytes)
     }
 
     #[tokio::test]
-    async fn read_dataset_array_returns_lazy_boolean_array() -> anyhow::Result<()> {
-        let source = Arc::new(NdArrowArrayDispatch::new_in_mem(
-            vec![true, false, true],
-            vec![3],
-            vec!["x".to_string()],
-            None,
-        )?) as Arc<dyn NdArrowArray>;
-        let reader = build_reader(source, 2).await?;
+    async fn open_reads_footer_and_chunk_payloads() -> anyhow::Result<()> {
+        let mut lookup_table = BTreeMap::new();
+        lookup_table.insert(
+            1,
+            ArrayEntry {
+                shape: vec![3],
+                chunk_shape: vec![3],
+                dimensions: vec!["x".to_string()],
+                fill_value: None,
+                lookup: ArrayLookup::Flat(SingleArrayLookup {
+                    file_chunk_index: 0,
+                    range: 0..3,
+                    shape: vec![3],
+                }),
+            },
+        );
 
-        let array = reader
-            .read_dataset_array(7)
-            .transpose()?
-            .expect("dataset array exists");
-        let materialized = array.as_arrow_array_ref().await?;
-        let values = materialized
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .expect("boolean array");
-
-        assert_eq!(values.len(), 3);
-        assert!(values.value(0));
-        assert!(!values.value(1));
-        assert!(values.value(2));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn read_dataset_array_returns_lazy_timestamp_array() -> anyhow::Result<()> {
-        let source = Arc::new(NdArrowArrayDispatch::new_in_mem(
-            vec![TimestampNanosecond(100), TimestampNanosecond(200)],
-            vec![2],
-            vec!["time".to_string()],
-            None,
-        )?) as Arc<dyn NdArrowArray>;
-        let reader = build_reader(source, 2).await?;
-
-        let array = reader
-            .read_dataset_array(7)
-            .transpose()?
-            .expect("dataset array exists");
-        let materialized = array.as_arrow_array_ref().await?;
-        let values = materialized
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .expect("timestamp nanosecond array");
-
-        assert_eq!(values.len(), 2);
-        assert_eq!(values.value(0), 100);
-        assert_eq!(values.value(1), 200);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn read_dataset_array_subset_spans_chunk_boundaries() -> anyhow::Result<()> {
-        let source = Arc::new(NdArrowArrayDispatch::new_in_mem(
-            (0..12).collect::<Vec<i32>>(),
-            vec![3, 4],
-            vec!["x".to_string(), "y".to_string()],
-            None,
-        )?) as Arc<dyn NdArrowArray>;
-        let reader = build_reader(source, 5).await?;
-
-        let array = reader
-            .read_dataset_array(7)
-            .transpose()?
-            .expect("dataset array exists");
-        let subset = array
-            .subset(ArraySubset {
-                start: vec![1, 1],
-                shape: vec![2, 2],
-            })
-            .await?;
-        let materialized = subset.as_arrow_array_ref().await?;
-        let values = materialized
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .expect("int32 array");
-
-        assert_eq!(subset.shape(), vec![2, 2]);
-        assert_eq!(subset.dimensions(), vec!["x".to_string(), "y".to_string()]);
-        assert_eq!(values.len(), 4);
-        assert_eq!(values.values(), &[5, 6, 9, 10]);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn read_statistics_batch_appends_dataset_index_column() -> anyhow::Result<()> {
-        let first = Arc::new(NdArrowArrayDispatch::new_in_mem(
-            vec![1_i32, 9, 3],
-            vec![3],
-            vec!["x".to_string()],
-            None,
-        )?) as Arc<dyn NdArrowArray>;
-        let second = Arc::new(NdArrowArrayDispatch::new_in_mem(
-            vec![10_i32, 11],
-            vec![2],
-            vec!["x".to_string()],
-            None,
-        )?) as Arc<dyn NdArrowArray>;
-
-        let reader = build_reader_with_statistics(vec![(7, first), (15, second)], 8).await?;
-        let statistics = reader
-            .read_statistics_batch()
-            .await?
-            .expect("statistics batch should be present");
-
-        assert_eq!(statistics.num_rows(), 2);
-        assert!(statistics.schema().field_with_name("dataset_index").is_ok());
-
-        let dataset_index = statistics
-            .column(statistics.schema().index_of("dataset_index")?)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .expect("dataset_index must be u32");
-        assert_eq!(dataset_index.values(), &[7, 15]);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn read_statistics_batch_returns_none_when_statistics_file_missing() -> anyhow::Result<()>
-    {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let array_path = Path::from("test-array.arrow");
-        let layout_path = Path::from("test-layout.arrow");
-        let written_statistics_path = Path::from(consts::STATISTICS_FILE_NAME);
-
-        let source = Arc::new(NdArrowArrayDispatch::new_in_mem(
-            vec![1_i32, 2, 3],
-            vec![3],
-            vec!["x".to_string()],
-            None,
-        )?) as Arc<dyn NdArrowArray>;
-
-        let mut writer = ArrayWriter::new(
-            store.clone(),
-            array_path.clone(),
-            layout_path.clone(),
-            written_statistics_path,
-            source.data_type(),
-            8,
+        let file_bytes = encode_file(
+            vec![TypedVec::I32(vec![1, 2]), TypedVec::I32(vec![3, 4, 5])],
+            lookup_table,
         )?;
-        writer.append_array(3, source).await?;
-        writer.finalize().await?;
 
-        let reader = ArrayReader::new_with_cache_and_statistics(
-            store,
-            layout_path,
-            array_path,
-            Path::from("missing-statistics.arrow"),
-            Arc::new(IoCache::new(1024 * 1024)),
-        )
-        .await?;
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("array-file.bin");
+        store.put(&path, Bytes::from(file_bytes).into()).await?;
 
-        assert!(reader.read_statistics_batch().await?.is_none());
+        let reader = ArrayFileReader::open(store.clone(), path, None).await?;
+        assert_eq!(reader.footer().num_chunks, 2);
+
+        let first = reader.read_file_chunk(0).await?;
+        assert_eq!(first, TypedVec::I32(vec![1, 2]));
+
+        let second = reader.read_file_chunk(1).await?;
+        assert_eq!(second, TypedVec::I32(vec![3, 4, 5]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_rejects_too_small_file() -> anyhow::Result<()> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("too-small.bin");
+        store
+            .put(&path, Bytes::from(vec![1_u8, 2, 3]).into())
+            .await?;
+
+        let err = ArrayFileReader::open(store, path, None)
+            .await
+            .expect_err("reader should fail for too-small file");
+        assert!(
+            err.to_string()
+                .contains("Array file is too small to contain footer size trailer")
+        );
 
         Ok(())
     }

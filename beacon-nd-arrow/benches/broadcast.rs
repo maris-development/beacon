@@ -104,9 +104,7 @@ fn bench_broadcast_scalar_to_nd(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("scalar_broadcast", case_name), |b| {
             b.iter(|| {
                 rt.block_on(async {
-                    black_box(
-                        broadcast_and_build_batch(&arrays, schema.clone()).await,
-                    )
+                    black_box(broadcast_and_build_batch(&arrays, schema.clone()).await)
                 })
             });
         });
@@ -152,15 +150,21 @@ fn bench_broadcast_1d_to_nd(c: &mut Criterion) {
     for (case_name, target_shape, target_dims, n_out) in cases {
         group.throughput(Throughput::Elements(*n_out as u64));
 
-        let schema = Arc::new(Schema::new(vec![Field::new("time", DataType::Int64, false)]));
-        let arrays = vec![(time_array.clone(), target_shape.clone(), target_dims.clone())];
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "time",
+            DataType::Int64,
+            false,
+        )]));
+        let arrays = vec![(
+            time_array.clone(),
+            target_shape.clone(),
+            target_dims.clone(),
+        )];
 
         group.bench_function(BenchmarkId::new("1d_broadcast", case_name), |b| {
             b.iter(|| {
                 rt.block_on(async {
-                    black_box(
-                        broadcast_and_build_batch(&arrays, schema.clone()).await,
-                    )
+                    black_box(broadcast_and_build_batch(&arrays, schema.clone()).await)
                 })
             });
         });
@@ -223,9 +227,7 @@ fn bench_broadcast_2d_to_3d(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("2d_to_3d", case_name), |b| {
             b.iter(|| {
                 rt.block_on(async {
-                    black_box(
-                        broadcast_and_build_batch(&arrays, schema.clone()).await,
-                    )
+                    black_box(broadcast_and_build_batch(&arrays, schema.clone()).await)
                 })
             });
         });
@@ -260,9 +262,7 @@ fn bench_broadcast_mixed(c: &mut Criterion) {
             vec![dstr("time")],
         );
         // 2-D lat/lon grid
-        let lat_data: Vec<f64> = (0..n_2d)
-            .map(|i| -90.0 + (i / n_lon) as f64)
-            .collect();
+        let lat_data: Vec<f64> = (0..n_2d).map(|i| -90.0 + (i / n_lon) as f64).collect();
         let lat_array = make_f64(
             lat_data,
             vec![*n_lat, *n_lon],
@@ -299,9 +299,7 @@ fn bench_broadcast_mixed(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("mixed_1d_2d_3d_scalar", case_name), |b| {
             b.iter(|| {
                 rt.block_on(async {
-                    black_box(
-                        broadcast_and_build_batch(&arrays, schema.clone()).await,
-                    )
+                    black_box(broadcast_and_build_batch(&arrays, schema.clone()).await)
                 })
             });
         });

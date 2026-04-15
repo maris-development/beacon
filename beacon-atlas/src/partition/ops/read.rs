@@ -1,189 +1,40 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
-use beacon_nd_arrow::{NdRecordBatch, array::NdArrowArray};
+use beacon_nd_arrow::{NdArrayD, dataset::Dataset};
 use object_store::ObjectStore;
-use tokio::sync::OnceCell;
 
 use crate::{
-    array::io_cache::IoCache,
+    cache::Cache,
     column::ColumnReader,
-    consts::DEFAULT_IO_CACHE_BYTES,
     partition::{Partition, column_name_to_path},
 };
 
-pub struct ReaderBuilder<S: ObjectStore + Clone> {
+pub struct PartitionReader<S: ObjectStore + Clone> {
     object_store: S,
     partition: Partition<S>,
+    cached_column_readers: Option<Arc<HashMap<String, Arc<ColumnReader<S>>>>>,
 }
 
-impl<S: ObjectStore + Clone> ReaderBuilder<S> {
+impl<S: ObjectStore + Clone> PartitionReader<S> {
     pub fn new(object_store: S, partition: Partition<S>) -> Self {
         Self {
             object_store,
             partition,
+            cached_column_readers: None,
         }
-    }
-
-    pub fn arrow_schema(&self) -> SchemaRef {
-        Arc::new(self.partition.arrow_schema())
     }
 
     pub async fn dataset(&self, dataset_index: usize) -> anyhow::Result<Dataset> {
-        let mut columns = Vec::with_capacity(self.partition.schema().columns.len());
-
-        for (_, column) in self.partition.schema().columns.iter().enumerate() {
-            let reader = self.partition.column_reader(&column.name).await?;
-            let array = reader.read_column_array(dataset_index as u32).transpose()?;
-            columns.push(array);
-        }
-
-        let dataset = Dataset::new_unaligned("dataset", self.arrow_schema(), columns)?;
-
-        Ok(dataset)
+        unimplemented!()
     }
-}
-
-pub(crate) async fn init_column_reader<S: ObjectStore + Clone>(
-    object_store: S,
-    partition_path: &object_store::path::Path,
-    column_name: &str,
-    io_cache: Arc<IoCache>,
-) -> anyhow::Result<Arc<ColumnReader<S>>> {
-    let column_reader = ColumnReader::new(
-        object_store,
-        column_name_to_path(partition_path.clone(), column_name),
-        io_cache,
-    )
-    .await?;
-    Ok(Arc::new(column_reader))
 }
 
 pub(crate) fn read_dataset_columns_by_index<S: ObjectStore + Clone>(
     readers: &[Arc<ColumnReader<S>>],
     dataset_index: u32,
-) -> anyhow::Result<Vec<Option<Arc<dyn NdArrowArray>>>> {
+) -> anyhow::Result<Vec<Option<Arc<dyn NdArrayD>>>> {
     readers
         .iter()
         .map(|reader| reader.read_column_array(dataset_index).transpose())
         .collect::<Result<Vec<_>, _>>()
-}
-
-pub struct Dataset(pub NdRecordBatch);
-
-impl Dataset {
-    pub fn new(
-        name: &str,
-        schema: SchemaRef,
-        columns: Vec<Arc<dyn NdArrowArray>>,
-    ) -> anyhow::Result<Self> {
-        if columns.len() != schema.fields().len() {
-            anyhow::bail!(
-                "number of columns ({}) does not match number of schema fields ({})",
-                columns.len(),
-                schema.fields().len()
-            );
-        }
-
-        Ok(Self(NdRecordBatch::new(name.to_string(), schema, columns)?))
-    }
-
-    pub fn new_unaligned(
-        name: &str,
-        schema: SchemaRef,
-        columns: Vec<Option<Arc<dyn NdArrowArray>>>,
-    ) -> anyhow::Result<Self> {
-        if columns.len() != schema.fields().len() {
-            anyhow::bail!(
-                "number of columns ({}) does not match number of schema fields ({})",
-                columns.len(),
-                schema.fields().len()
-            );
-        }
-
-        let mut arrays = Vec::with_capacity(columns.len());
-        let mut schema_fields = Vec::with_capacity(columns.len());
-
-        for (i, field) in schema.fields().iter().enumerate() {
-            if let Some(array) = columns.get(i).and_then(|opt| opt.as_ref()) {
-                schema_fields.push(arrow::datatypes::Field::new(
-                    field.name(),
-                    array.data_type().clone(),
-                    true,
-                ));
-                arrays.push(array.clone());
-            }
-        }
-
-        Ok(Self(NdRecordBatch::new(
-            name.to_string(),
-            Arc::new(arrow::datatypes::Schema::new(schema_fields)),
-            arrays,
-        )?))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use arrow::array::{Int32Array, StringArray};
-    use futures::stream;
-    use object_store::{ObjectStore, memory::InMemory, path::Path};
-
-    use super::ReaderBuilder;
-    use crate::{
-        array::io_cache::IoCache, column::Column, consts::DEFAULT_IO_CACHE_BYTES,
-        partition::ops::write::PartitionWriter,
-    };
-
-    #[tokio::test]
-    async fn reader_builder_reads_dataset_by_index() -> anyhow::Result<()> {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let io_cache = Arc::new(IoCache::new(DEFAULT_IO_CACHE_BYTES));
-        let partition_path = Path::from("collections/example/partitions/part-00000");
-        let mut writer = PartitionWriter::new(store.clone(), partition_path, "part-00000", None)?;
-
-        writer
-            .write_dataset_columns(
-                "dataset-0",
-                stream::iter(vec![Column::new_from_vec(
-                    "temperature".to_string(),
-                    vec![10i32],
-                    vec![1],
-                    vec!["x".to_string()],
-                    None,
-                )?]),
-            )
-            .await?;
-        writer
-            .write_dataset_columns(
-                "dataset-1",
-                stream::iter(vec![Column::new_from_vec(
-                    "temperature".to_string(),
-                    vec![20i32],
-                    vec![1],
-                    vec!["x".to_string()],
-                    None,
-                )?]),
-            )
-            .await?;
-
-        let partition = writer.finish(io_cache).await?;
-        let schema = ReaderBuilder::new(store.clone(), partition.clone()).arrow_schema();
-        assert_eq!(schema.fields().len(), 2);
-
-        let arrays = ReaderBuilder::new(store, partition).dataset(1).await?;
-        assert_eq!(arrays.0.arrays.len(), 2);
-
-        let entry_values = arrays.0.arrays[0].as_arrow_array_ref().await?;
-        let entry_values = entry_values.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(entry_values.value(0), "dataset-1");
-
-        let temp_values = arrays.0.arrays[1].as_arrow_array_ref().await?;
-        let temp_values = temp_values.as_any().downcast_ref::<Int32Array>().unwrap();
-        assert_eq!(temp_values.value(0), 20);
-
-        Ok(())
-    }
 }

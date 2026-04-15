@@ -3,35 +3,35 @@ pub mod writer;
 
 use std::sync::Arc;
 
-use beacon_nd_arrow::{
-    NdArrowArrayDispatch,
-    array::{NdArrowArray, compat_typings::ArrowTypeConversion},
-};
+use beacon_nd_arrow::{NdArray, NdArrayD, datatypes::NdArrayDataType};
 pub use reader::ColumnReader;
 pub use writer::ColumnWriter;
+
+use crate::schema::_type::AtlasType;
 
 #[derive(Clone)]
 pub struct Column {
     name: String,
-    array: Arc<dyn NdArrowArray>,
+    array: Arc<dyn NdArrayD>,
 }
 
 impl Column {
-    pub fn new(name: String, array: Arc<dyn NdArrowArray>) -> Self {
+    pub fn new(name: String, array: Arc<dyn NdArrayD>) -> Self {
         Self { name, array }
     }
 
-    pub fn new_from_vec<T: ArrowTypeConversion>(
+    pub fn new_from_vec<T: AtlasType>(
         name: String,
         data: Vec<T>,
         shape: Vec<usize>,
         dimensions: Vec<String>,
         fill_value: Option<T>,
     ) -> anyhow::Result<Self> {
-        let array = NdArrowArrayDispatch::new_in_mem(data, shape, dimensions, fill_value)?;
+        let nd_array = NdArray::try_new_from_vec_in_mem(data, shape, dimensions, fill_value)?;
+
         Ok(Self {
             name,
-            array: Arc::new(array),
+            array: Arc::new(nd_array),
         })
     }
 
@@ -39,11 +39,11 @@ impl Column {
         &self.name
     }
 
-    pub fn data_type(&self) -> arrow::datatypes::DataType {
-        self.array.data_type()
+    pub fn datatype(&self) -> NdArrayDataType {
+        self.array.datatype()
     }
 
-    pub fn array(&self) -> Arc<dyn NdArrowArray> {
+    pub fn array(&self) -> Arc<dyn NdArrayD> {
         self.array.clone()
     }
 }

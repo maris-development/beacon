@@ -8,8 +8,9 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use beacon_nd_arrow::{
-    NdRecordBatch, NdToArrowPipeOptions, pipe_nd_record_batch_stream,
+    NdRecordBatch, NdToArrowPipeOptions,
     array::{NdArrowArray, NdArrowArrayDispatch},
+    pipe_nd_record_batch_stream,
 };
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::StreamExt;
@@ -74,8 +75,7 @@ fn bench_flatten_1d(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let stream = batch.try_as_arrow_stream(cs).await.unwrap();
-                        let results: Vec<anyhow::Result<RecordBatch>> =
-                            stream.collect().await;
+                        let results: Vec<anyhow::Result<RecordBatch>> = stream.collect().await;
                         black_box(results)
                     })
                 });
@@ -150,8 +150,7 @@ fn bench_flatten_3d(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let stream = batch.try_as_arrow_stream(cs).await.unwrap();
-                        let results: Vec<anyhow::Result<RecordBatch>> =
-                            stream.collect().await;
+                        let results: Vec<anyhow::Result<RecordBatch>> = stream.collect().await;
                         black_box(results)
                     })
                 });
@@ -194,12 +193,7 @@ fn bench_flatten_pipe_stream(c: &mut Criterion) {
                 vec![dstr("time"), dstr("latitude"), dstr("longitude")],
                 None,
             ),
-            arc_nd(
-                vec!["ship-A".to_string()],
-                vec![],
-                vec![],
-                None,
-            ),
+            arc_nd(vec!["ship-A".to_string()], vec![], vec![], None),
         ]
     };
 
@@ -234,8 +228,7 @@ fn bench_flatten_pipe_stream(c: &mut Criterion) {
                             .collect();
                         let input_stream = futures::stream::iter(input_batches);
                         let output = pipe_nd_record_batch_stream(input_stream, options);
-                        let results: Vec<anyhow::Result<RecordBatch>> =
-                            output.collect().await;
+                        let results: Vec<anyhow::Result<RecordBatch>> = output.collect().await;
                         black_box(results)
                     })
                 });

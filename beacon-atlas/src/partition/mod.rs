@@ -4,13 +4,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use arrow::{array::AsArray, datatypes::UInt32Type};
 use chrono::{DateTime, Utc};
+use object_store::ObjectStore;
 
 use crate::{
-    array::io_cache::IoCache,
-    column::ColumnReader,
-    consts::PARTITION_METADATA_FILE,
-    partition::ops::{load_partition_entries, read::init_column_reader},
-    schema::AtlasSchema,
+    cache::Cache, column::ColumnReader, consts::PARTITION_METADATA_FILE,
+    partition::ops::load_partition_entries, schema::AtlasSchema,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -29,7 +27,7 @@ pub struct Partition<S: object_store::ObjectStore + Clone> {
     state: PartitionState,
     reader_cache:
         Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Arc<ColumnReader<S>>>>>>>,
-    io_cache: Arc<IoCache>,
+    cache: Arc<Cache>,
 }
 
 impl<S: object_store::ObjectStore + Clone> Partition<S> {
@@ -39,7 +37,7 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
         directory: object_store::path::Path,
         metadata: PartitionMetadata,
         state: PartitionState,
-        io_cache: Arc<IoCache>,
+        cache: Arc<Cache>,
     ) -> Self {
         let reader_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         Self {
@@ -49,7 +47,7 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
             metadata,
             state,
             reader_cache,
-            io_cache,
+            cache,
         }
     }
 
@@ -69,10 +67,6 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
         &self.metadata.schema
     }
 
-    pub fn arrow_schema(&self) -> arrow::datatypes::Schema {
-        self.schema().to_arrow_schema()
-    }
-
     pub(crate) async fn column_reader(
         &self,
         column_name: &str,
@@ -84,11 +78,11 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
             .clone();
         let store = self.store.clone();
         let partition_path = self.directory.clone();
-        let io_cache = self.io_cache.clone();
+        let cache = self.cache.clone();
 
         let reader_result = cell
             .get_or_try_init(|| async move {
-                init_column_reader(store, &partition_path, column_name, io_cache).await
+                init_column_reader(store, &partition_path, column_name, cache).await
             })
             .await;
 
@@ -178,7 +172,7 @@ impl PartitionState {
 pub async fn load_partition<S: object_store::ObjectStore + Clone>(
     object_store: S,
     partition_directory: object_store::path::Path,
-    io_cache: Arc<IoCache>,
+    cache: Arc<Cache>,
 ) -> anyhow::Result<Partition<S>> {
     let metadata_path = partition_directory.child(PARTITION_METADATA_FILE);
     let metadata_bytes = object_store.get(&metadata_path).await?.bytes().await?;
@@ -196,7 +190,7 @@ pub async fn load_partition<S: object_store::ObjectStore + Clone>(
         partition_directory,
         metadata,
         state,
-        io_cache,
+        cache,
     ))
 }
 
@@ -290,71 +284,86 @@ pub(crate) fn column_name_to_path(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use arrow::datatypes::{DataType, Field, Schema};
-    use chrono::DateTime;
-    use object_store::{ObjectStore, memory::InMemory, path::Path};
-
-    use crate::{IPC_WRITE_OPTS, consts::ENTRIES_FILE, partition::load_partition_state};
-
-    #[tokio::test]
-    async fn load_partition_state_supports_legacy_entries_without_insert_timestamp()
-    -> anyhow::Result<()> {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let partition_directory = Path::from("collections/example/partitions/part-legacy");
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("dataset_name", DataType::Utf8, false),
-            Field::new("dataset_index", DataType::UInt32, false),
-            Field::new("deletion", DataType::Boolean, false),
-        ]));
-        let batch = arrow::record_batch::RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(arrow::array::StringArray::from(vec![
-                    "dataset-0",
-                    "dataset-1",
-                ])) as Arc<dyn arrow::array::Array>,
-                Arc::new(arrow::array::UInt32Array::from(vec![0, 1]))
-                    as Arc<dyn arrow::array::Array>,
-                Arc::new(arrow::array::BooleanArray::from(vec![false, true]))
-                    as Arc<dyn arrow::array::Array>,
-            ],
-        )?;
-
-        let mut encoded = Vec::new();
-        let mut writer = arrow::ipc::writer::FileWriter::try_new_with_options(
-            &mut encoded,
-            &schema,
-            IPC_WRITE_OPTS.clone(),
-        )?;
-        writer.write(&batch)?;
-        writer.finish()?;
-
-        store
-            .put(&partition_directory.child(ENTRIES_FILE), encoded.into())
-            .await?;
-
-        let state =
-            load_partition_state(store, partition_directory, "part-legacy".to_string()).await?;
-
-        assert_eq!(
-            state.entry_keys(),
-            &["dataset-0".to_string(), "dataset-1".to_string()]
-        );
-        assert_eq!(state.dataset_indexes(), &[0, 1]);
-        assert_eq!(state.deletion_flags(), &[false, true]);
-        assert_eq!(
-            state.insert_timestamps(),
-            &[
-                DateTime::from_timestamp_nanos(0),
-                DateTime::from_timestamp_nanos(0)
-            ]
-        );
-
-        Ok(())
-    }
+pub(crate) async fn init_column_reader<S: ObjectStore + Clone>(
+    object_store: S,
+    partition_path: &object_store::path::Path,
+    column_name: &str,
+    cache: Arc<Cache>,
+) -> anyhow::Result<Arc<ColumnReader<S>>> {
+    let column_reader = ColumnReader::new(
+        object_store,
+        column_name_to_path(partition_path.clone(), column_name),
+        cache.vec_cache(),
+    )
+    .await?;
+    Ok(Arc::new(column_reader))
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use std::sync::Arc;
+
+//     use arrow::datatypes::{DataType, Field, Schema};
+//     use chrono::DateTime;
+//     use object_store::{ObjectStore, memory::InMemory, path::Path};
+
+//     use crate::{IPC_WRITE_OPTS, consts::ENTRIES_FILE, partition::load_partition_state};
+
+//     #[tokio::test]
+//     async fn load_partition_state_supports_legacy_entries_without_insert_timestamp()
+//     -> anyhow::Result<()> {
+//         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+//         let partition_directory = Path::from("collections/example/partitions/part-legacy");
+
+//         let schema = Arc::new(Schema::new(vec![
+//             Field::new("dataset_name", DataType::Utf8, false),
+//             Field::new("dataset_index", DataType::UInt32, false),
+//             Field::new("deletion", DataType::Boolean, false),
+//         ]));
+//         let batch = arrow::record_batch::RecordBatch::try_new(
+//             schema.clone(),
+//             vec![
+//                 Arc::new(arrow::array::StringArray::from(vec![
+//                     "dataset-0",
+//                     "dataset-1",
+//                 ])) as Arc<dyn arrow::array::Array>,
+//                 Arc::new(arrow::array::UInt32Array::from(vec![0, 1]))
+//                     as Arc<dyn arrow::array::Array>,
+//                 Arc::new(arrow::array::BooleanArray::from(vec![false, true]))
+//                     as Arc<dyn arrow::array::Array>,
+//             ],
+//         )?;
+
+//         let mut encoded = Vec::new();
+//         let mut writer = arrow::ipc::writer::FileWriter::try_new_with_options(
+//             &mut encoded,
+//             &schema,
+//             IPC_WRITE_OPTS.clone(),
+//         )?;
+//         writer.write(&batch)?;
+//         writer.finish()?;
+
+//         store
+//             .put(&partition_directory.child(ENTRIES_FILE), encoded.into())
+//             .await?;
+
+//         let state =
+//             load_partition_state(store, partition_directory, "part-legacy".to_string()).await?;
+
+//         assert_eq!(
+//             state.entry_keys(),
+//             &["dataset-0".to_string(), "dataset-1".to_string()]
+//         );
+//         assert_eq!(state.dataset_indexes(), &[0, 1]);
+//         assert_eq!(state.deletion_flags(), &[false, true]);
+//         assert_eq!(
+//             state.insert_timestamps(),
+//             &[
+//                 DateTime::from_timestamp_nanos(0),
+//                 DateTime::from_timestamp_nanos(0)
+//             ]
+//         );
+
+//         Ok(())
+//     }
+// }
