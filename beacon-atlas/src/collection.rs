@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::cache::Cache;
-use crate::consts::COLLECTION_METADATA_FILE;
-use crate::partition::load_partition;
+use crate::consts::{COLLECTION_METADATA_FILE, PARTITION_METADATA_FILE};
+use crate::partition::Partition;
 use crate::partition::ops::write::PartitionWriter;
+use crate::partition::state::try_load_partition_state;
 use crate::schema::{AtlasSchema, AtlasSuperTypingMode};
 use futures::StreamExt;
 
@@ -24,7 +26,7 @@ pub struct CollectionMetadata {
 #[derive(Debug, Clone)]
 pub struct AtlasCollectionState {
     metadata: CollectionMetadata,
-    partition_schemas: Vec<AtlasSchema>,
+    partition_schemas: HashMap<String, AtlasSchema>,
 }
 
 impl AtlasCollectionState {
@@ -32,7 +34,11 @@ impl AtlasCollectionState {
         &self.metadata
     }
 
-    pub fn partition_schemas(&self) -> &[AtlasSchema] {
+    pub fn partition_schemas(&self) -> impl Iterator<Item = &AtlasSchema> {
+        self.partition_schemas.values()
+    }
+
+    pub fn partition_schema_map(&self) -> &HashMap<String, AtlasSchema> {
         &self.partition_schemas
     }
 }
@@ -44,7 +50,6 @@ pub struct AtlasCollection<
     object_store: S,
     collection_directory: object_store::path::Path,
     state: Option<AtlasCollectionState>,
-    super_typing_mode: AtlasSuperTypingMode,
     cache: Arc<Cache>,
 }
 
@@ -55,14 +60,20 @@ pub struct AtlasCollection<
 /// reloaded before accessing snapshot-derived data.
 pub struct CollectionPartitionWriter<'a, S: object_store::ObjectStore + Clone> {
     collection: &'a mut AtlasCollection<S>,
+    partition_name: String,
     writer: Option<PartitionWriter<S>>,
     finished: bool,
 }
 
 impl<'a, S: object_store::ObjectStore + Clone> CollectionPartitionWriter<'a, S> {
-    fn new(collection: &'a mut AtlasCollection<S>, writer: PartitionWriter<S>) -> Self {
+    fn new(
+        collection: &'a mut AtlasCollection<S>,
+        partition_name: String,
+        writer: PartitionWriter<S>,
+    ) -> Self {
         Self {
             collection,
+            partition_name,
             writer: Some(writer),
             finished: false,
         }
@@ -79,7 +90,28 @@ impl<'a, S: object_store::ObjectStore + Clone> CollectionPartitionWriter<'a, S> 
             .writer
             .take()
             .ok_or_else(|| anyhow::anyhow!("partition writer is no longer available"))?;
-        let partition = writer.finish(self.collection.io_cache.clone()).await?;
+        let partition = writer.finish(self.collection.cache.clone()).await?;
+
+        let state = self
+            .collection
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("collection state is not loaded"))?;
+        if !state
+            .metadata
+            .partitions
+            .iter()
+            .any(|name| name == &self.partition_name)
+        {
+            state.metadata.partitions.push(self.partition_name.clone());
+            save_collection_metadata(
+                self.collection.object_store.clone(),
+                self.collection.collection_directory.clone(),
+                &state.metadata,
+            )
+            .await?;
+        }
+
         self.collection.load().await?;
         self.finished = true;
         Ok(partition)
@@ -120,10 +152,10 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
         .await?;
 
         let mut collection = Self::new(object_store, collection_directory);
-        collection.super_typing_mode = super_typing_mode;
+
         collection.state = Some(AtlasCollectionState {
             metadata,
-            partition_schemas: vec![],
+            partition_schemas: HashMap::new(),
         });
 
         Ok(collection)
@@ -134,7 +166,6 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
             object_store,
             collection_directory,
             state: None,
-            super_typing_mode: AtlasSuperTypingMode::General,
             cache: Arc::new(Cache::new(256, 256)),
         }
     }
@@ -153,7 +184,10 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
     }
 
     pub fn super_typing_mode(&self) -> AtlasSuperTypingMode {
-        self.super_typing_mode
+        self.state
+            .as_ref()
+            .map(|state| state.metadata.super_typing_mode)
+            .unwrap_or_default()
     }
 
     pub fn collection_path(&self) -> &object_store::path::Path {
@@ -168,19 +202,26 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
         let state = load_collection_state(
             self.object_store.clone(),
             self.collection_directory.clone(),
-            self.io_cache.clone(),
+            self.cache.clone(),
         )
         .await?;
-        self.super_typing_mode = state.metadata().super_typing_mode;
+
         self.state = Some(state);
         Ok(())
     }
 
-    pub fn arrow_schema(&self) -> anyhow::Result<Arc<arrow::datatypes::Schema>> {
-        let snapshot = self.snapshot()?;
-        let merged_schema =
-            AtlasSchema::merge_all_with_mode(snapshot.partition_schemas(), self.super_typing_mode)?;
-        Ok(Arc::new(merged_schema.to_arrow_schema()))
+    pub fn collection_schema(&self) -> anyhow::Result<AtlasSchema> {
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("collection state is not loaded"))?;
+
+        if state.partition_schemas.is_empty() {
+            return Ok(AtlasSchema::empty());
+        }
+
+        let schemas: Vec<_> = state.partition_schemas.values().cloned().collect();
+        AtlasSchema::merge_all_with_mode(&schemas, state.metadata.super_typing_mode)
     }
 
     pub async fn update_state(&mut self) -> anyhow::Result<()> {
@@ -225,14 +266,6 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
             description,
         )?;
 
-        state.metadata.partitions.push(name.clone());
-        save_collection_metadata(
-            self.object_store.clone(),
-            self.collection_directory.clone(),
-            &state.metadata,
-        )
-        .await?;
-
         Ok(writer)
     }
 
@@ -241,8 +274,11 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
         name: impl Into<String>,
         description: Option<&str>,
     ) -> anyhow::Result<CollectionPartitionWriter<'_, S>> {
-        let writer = self.create_partition_writer(name, description).await?;
-        Ok(CollectionPartitionWriter::new(self, writer))
+        let name = name.into();
+        let writer = self
+            .create_partition_writer(name.clone(), description)
+            .await?;
+        Ok(CollectionPartitionWriter::new(self, name, writer))
     }
 
     pub fn snapshot(&self) -> anyhow::Result<&AtlasCollectionState> {
@@ -282,12 +318,12 @@ impl<S: object_store::ObjectStore + Clone> AtlasCollection<S> {
             .child("partitions")
             .child(partition_name);
 
-        load_partition(
+        Partition::try_open(
             self.object_store.clone(),
+            partition_name.to_string(),
             partition_directory,
-            self.io_cache.clone(),
+            self.cache.clone(),
         )
-        .await
     }
 
     /// Remove a partition from collection metadata and delete its persisted files.
@@ -373,18 +409,22 @@ pub(crate) async fn load_collection_state<S: object_store::ObjectStore + Clone>(
 async fn load_collection_state_with_metadata<S: object_store::ObjectStore + Clone>(
     object_store: S,
     collection_directory: object_store::path::Path,
-    cache: Arc<Cache>,
+    _cache: Arc<Cache>,
     metadata: CollectionMetadata,
 ) -> anyhow::Result<AtlasCollectionState> {
-    let mut partition_schemas = Vec::with_capacity(metadata.partitions.len());
+    let mut partition_schemas = HashMap::with_capacity(metadata.partitions.len());
 
     for partition_name in &metadata.partitions {
-        let partition_directory = collection_directory
+        let partition_metadata_path = collection_directory
             .clone()
             .child("partitions")
-            .child(partition_name.clone());
-        match load_partition(object_store.clone(), partition_directory, cache.clone()).await {
-            Ok(partition) => partition_schemas.push(partition.schema().clone()),
+            .child(partition_name.clone())
+            .child(PARTITION_METADATA_FILE);
+
+        match try_load_partition_state(&object_store, &partition_metadata_path).await {
+            Ok(partition_state) => {
+                partition_schemas.insert(partition_name.clone(), partition_state.schema());
+            }
             Err(error) if is_object_not_found_error(&error) => {
                 // Partition metadata can be temporarily absent when a writer was dropped before finish.
                 continue;
@@ -423,7 +463,6 @@ async fn save_collection_metadata<S: object_store::ObjectStore + Clone>(
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType;
     use futures::stream;
     use object_store::{ObjectStore, memory::InMemory, path::Path};
     use std::sync::Arc;
@@ -496,7 +535,7 @@ mod tests {
 
         assert_eq!(partition.name(), "part-00000");
         assert_eq!(
-            partition.metadata().description.as_deref(),
+            partition.state().partition_description().as_deref(),
             Some("first partition")
         );
         assert_eq!(
@@ -579,18 +618,15 @@ mod tests {
         assert!(collection.snapshot().is_err());
 
         collection.load().await?;
-        assert_eq!(
-            collection.snapshot()?.metadata().partitions,
-            vec!["part-00002".to_string()]
-        );
+        assert!(collection.snapshot()?.metadata().partitions.is_empty());
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn arrow_schema_general_mode_merges_numeric_types() -> anyhow::Result<()> {
+    async fn remove_partition_updates_collection_metadata() -> anyhow::Result<()> {
         let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let collection_path = Path::from("collections/schema-general");
+        let collection_path = Path::from("collections/remove-partition");
 
         let mut collection = AtlasCollection::create(
             store.clone(),
@@ -601,118 +637,16 @@ mod tests {
         )
         .await?;
 
-        let mut writer = collection.create_partition("part-00000", None).await?;
-        writer
-            .writer_mut()?
-            .write_dataset_columns(
-                "dataset-a",
-                stream::iter(vec![Column::new_from_vec(
-                    "temperature".to_string(),
-                    vec![10_i32],
-                    vec![1],
-                    vec!["x".to_string()],
-                    None,
-                )?]),
-            )
+        let writer = collection
+            .create_partition("part-00003", Some("to delete"))
             .await?;
         writer.finish().await?;
 
-        let mut writer = collection.create_partition("part-00001", None).await?;
-        writer
-            .writer_mut()?
-            .write_dataset_columns(
-                "dataset-b",
-                stream::iter(vec![Column::new_from_vec(
-                    "temperature".to_string(),
-                    vec![10.5_f64],
-                    vec![1],
-                    vec!["x".to_string()],
-                    None,
-                )?]),
-            )
-            .await?;
-        writer.finish().await?;
+        collection.remove_partition("part-00003").await?;
+        assert!(collection.snapshot()?.metadata().partitions.is_empty());
 
-        let schema = collection.arrow_schema()?;
-        assert_eq!(schema.field(0).name(), "__entry_key");
-        assert_eq!(schema.field(1).name(), "temperature");
-        assert_eq!(schema.field(1).data_type(), &DataType::Float64);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn arrow_schema_group_mode_rejects_numeric_and_utf8() -> anyhow::Result<()> {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let collection_path = Path::from("collections/schema-group");
-
-        let mut collection = AtlasCollection::create(
-            store.clone(),
-            collection_path.clone(),
-            "example",
-            None,
-            AtlasSuperTypingMode::GroupBased,
-        )
-        .await?;
-
-        let mut writer = collection.create_partition("part-00000", None).await?;
-        writer
-            .writer_mut()?
-            .write_dataset_columns(
-                "dataset-a",
-                stream::iter(vec![Column::new_from_vec(
-                    "value".to_string(),
-                    vec![10_i32],
-                    vec![1],
-                    vec!["x".to_string()],
-                    None,
-                )?]),
-            )
-            .await?;
-        writer.finish().await?;
-
-        let mut writer = collection.create_partition("part-00001", None).await?;
-        writer
-            .writer_mut()?
-            .write_dataset_columns(
-                "dataset-b",
-                stream::iter(vec![Column::new_from_vec(
-                    "value".to_string(),
-                    vec!["10".to_string()],
-                    vec![1],
-                    vec!["x".to_string()],
-                    None,
-                )?]),
-            )
-            .await?;
-        writer.finish().await?;
-
-        let error = collection.arrow_schema().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("conflicting data types for column 'value'"),
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn arrow_schema_for_empty_collection_is_empty() -> anyhow::Result<()> {
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let collection_path = Path::from("collections/schema-empty");
-
-        let collection = AtlasCollection::create(
-            store,
-            collection_path,
-            "example",
-            None,
-            AtlasSuperTypingMode::General,
-        )
-        .await?;
-
-        let schema = collection.arrow_schema()?;
-        assert!(schema.fields().is_empty());
+        let reopened = AtlasCollection::open(store, collection_path).await?;
+        assert!(reopened.snapshot()?.metadata().partitions.is_empty());
 
         Ok(())
     }

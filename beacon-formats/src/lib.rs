@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use beacon_atlas::datafusion::AtlasFormatFactory;
+// use beacon_atlas::datafusion::AtlasFormatFactory;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::DatasetsStore;
 use datafusion::prelude::SessionContext;
@@ -40,7 +40,7 @@ pub fn file_formats(
         )),
         Arc::new(ZarrFormatFactory),
         Arc::new(bbf::BBFFormatFactory),
-        Arc::new(AtlasFormatFactory::new()),
+        // Arc::new(AtlasFormatFactory::new()),
     ];
 
     for format in formats.iter() {

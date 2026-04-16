@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
 };
 
-use beacon_nd_arrow::array::compat_typings::{ArrowTypeConversion, TimestampNanosecond};
+use beacon_nd_arrow::datatypes::{NdArrayType, TimestampNanosecond};
 use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
 /// Encoder implementations for writing Arrow values to NetCDF variables.
@@ -51,22 +51,9 @@ unsafe impl NcTypeDescriptor for NcTimestampNanosecond {
     }
 }
 
-impl ArrowTypeConversion for NcTimestampNanosecond {
-    fn arrow_data_type() -> arrow::datatypes::DataType
-    where
-        Self: Sized,
-    {
-        arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
-    }
-
-    fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>
-    where
-        Self: Sized,
-    {
-        let primitive_array = arrow::array::PrimitiveArray::<
-            arrow::datatypes::TimestampNanosecondType,
-        >::from_iter(array.iter().map(|x| Some(x.0 .0)));
-        Ok(Arc::new(primitive_array))
+impl NdArrayType for NcTimestampNanosecond {
+    fn data_type() -> beacon_nd_arrow::datatypes::NdArrayDataType {
+        beacon_nd_arrow::datatypes::NdArrayDataType::Timestamp
     }
 }
 
@@ -87,24 +74,9 @@ unsafe impl NcTypeDescriptor for NcChar {
     }
 }
 
-impl ArrowTypeConversion for NcChar {
-    fn arrow_data_type() -> arrow::datatypes::DataType
-    where
-        Self: Sized,
-    {
-        arrow::datatypes::DataType::Utf8
-    }
-
-    fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>
-    where
-        Self: Sized,
-    {
-        let string_array = arrow::array::StringArray::from_iter(array.iter().map(|x| {
-            let c_char = x.0;
-            let s = (c_char as char).to_string();
-            Some(s)
-        }));
-        Ok(Arc::new(string_array))
+impl NdArrayType for NcChar {
+    fn data_type() -> beacon_nd_arrow::datatypes::NdArrayDataType {
+        beacon_nd_arrow::datatypes::NdArrayDataType::String
     }
 }
 
@@ -150,21 +122,9 @@ unsafe impl NcTypeDescriptor for OwnedNcString {
     }
 }
 
-impl ArrowTypeConversion for OwnedNcString {
-    fn arrow_data_type() -> arrow::datatypes::DataType
-    where
-        Self: Sized,
-    {
-        arrow::datatypes::DataType::Utf8
-    }
-
-    fn arrow_from_array_view(array: &[Self]) -> anyhow::Result<arrow::array::ArrayRef>
-    where
-        Self: Sized,
-    {
-        let string_array =
-            arrow::array::StringArray::from_iter(array.iter().map(|x| Some(x.0.as_str())));
-        Ok(Arc::new(string_array))
+impl NdArrayType for OwnedNcString {
+    fn data_type() -> beacon_nd_arrow::datatypes::NdArrayDataType {
+        beacon_nd_arrow::datatypes::NdArrayDataType::String
     }
 }
 

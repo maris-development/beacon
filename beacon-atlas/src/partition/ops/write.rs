@@ -4,7 +4,6 @@ use beacon_nd_arrow::{
     dataset::Dataset,
     datatypes::{NdArrayDataType, TimestampNanosecond},
 };
-use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt};
 use object_store::ObjectStore;
 
@@ -13,19 +12,16 @@ use crate::{
     column::{Column, ColumnWriter, writer::ColumnWriterD},
     consts::{ENTRIES_COLUMN_NAME, PARTITION_METADATA_FILE, chunk_size_by_type},
     partition::{
-        Partition, PartitionMetadata, PartitionState, column_name_to_path,
-        ops::write_partition_entries,
+        Partition, PartitionState, column_name_to_path, entries::PartitionEntry,
+        state::try_write_partition_state,
     },
-    schema::{AtlasColumn, AtlasSchema},
 };
 
 pub struct PartitionWriter<S: ObjectStore + Clone> {
     object_store: S,
     partition_directory: object_store::path::Path,
     column_writers: indexmap::IndexMap<String, Box<dyn ColumnWriterD>>,
-    metadata: PartitionMetadata,
-    dataset_names: Vec<String>,
-    dataset_insert_timestamps: Vec<DateTime<Utc>>,
+    state: PartitionState,
 }
 
 impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
@@ -49,31 +45,21 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
             object_store,
             partition_directory,
             column_writers,
-            metadata: PartitionMetadata {
-                schema: AtlasSchema::empty(),
-                description: description.map(|value| value.to_string()),
-                name: name.to_string(),
-            },
-            dataset_names: vec![],
-            dataset_insert_timestamps: vec![],
+            state: PartitionState::new(name, description),
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn column_writer(&self, name: &str) -> Option<&Box<dyn ColumnWriterD>> {
-        self.column_writers.get(name)
-    }
-
     pub async fn write_dataset(&mut self, dataset: Dataset) -> anyhow::Result<()> {
-        // self.write_dataset_columns(
-        //     &dataset.name,
-        //     futures::stream::iter(dataset.0.arrays.into_iter().enumerate().map(|(i, array)| {
-        //         let column_name = dataset.0.schema.field(i).name().to_string();
-        //         Column::new(column_name, array)
-        //     })),
-        // )
-        // .await
-        todo!()
+        self.write_dataset_columns(
+            &dataset.name,
+            futures::stream::iter(
+                dataset
+                    .arrays
+                    .into_iter()
+                    .map(|(column_name, array)| Column::new(column_name, array)),
+            ),
+        )
+        .await
     }
 
     pub async fn write_dataset_columns<C: Stream<Item = Column>>(
@@ -81,9 +67,7 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
         name: &str,
         columns: C,
     ) -> anyhow::Result<()> {
-        let dataset_index = self.dataset_names.len() as u32;
-        self.dataset_names.push(name.to_string());
-        self.dataset_insert_timestamps.push(Utc::now());
+        let dataset_index = self.state.physical_entries().len() as u32;
 
         let entry_name_column = Column::new_from_vec(
             ENTRIES_COLUMN_NAME.to_string(),
@@ -98,6 +82,13 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
         while let Some(column) = pinned.next().await {
             self.write_column(dataset_index, column).await?;
         }
+
+        self.state.entries.push(PartitionEntry {
+            name: name.to_string(),
+            dataset_index,
+            deleted: false,
+            insert_timestamp: chrono::Utc::now(),
+        });
 
         Ok(())
     }
@@ -201,50 +192,23 @@ impl<S: object_store::ObjectStore + Clone> PartitionWriter<S> {
         }
     }
 
-    pub async fn finish(mut self, cache: Arc<Cache>) -> anyhow::Result<Partition<S>> {
-        self.metadata.schema.columns = self
-            .column_writers
-            .iter()
-            .map(|(name, writer)| AtlasColumn {
-                name: name.clone(),
-                data_type: writer.data_type().clone(),
-            })
-            .collect::<Vec<_>>();
-
-        let metadata_path = self.partition_directory.child(PARTITION_METADATA_FILE);
-        self.object_store
-            .put(&metadata_path, serde_json::to_vec(&self.metadata)?.into())
-            .await?;
-
+    pub async fn finish(self, cache: Arc<Cache>) -> anyhow::Result<Partition<S>> {
         for (_, writer) in self.column_writers {
             writer.finish().await?;
         }
 
-        let deletion_flags = vec![false; self.dataset_names.len()];
-        let local_indexes = (0..self.dataset_names.len() as u32).collect::<Vec<_>>();
-        write_partition_entries(
+        try_write_partition_state(
             &self.object_store,
-            &self.partition_directory,
-            &self.dataset_names,
-            &local_indexes,
-            &deletion_flags,
-            &self.dataset_insert_timestamps,
+            &self.partition_directory.child(PARTITION_METADATA_FILE),
+            &self.state,
         )
         .await?;
 
-        let partiton_state = PartitionState {
-            dataset_indexes: local_indexes,
-            deletion_flags,
-            entry_keys: self.dataset_names.clone(),
-            insert_timestamps: self.dataset_insert_timestamps.clone(),
-        };
-
         Ok(Partition::new(
             self.object_store.clone(),
-            self.metadata.name.clone(),
+            self.state.partition_name(),
             self.partition_directory.clone(),
-            self.metadata.clone(),
-            partiton_state,
+            self.state,
             cache,
         ))
     }

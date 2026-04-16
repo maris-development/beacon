@@ -9,7 +9,7 @@ use arrow::{
     array::{make_array, ArrayRef, Datum, Scalar},
     buffer::NullBuffer,
 };
-use beacon_nd_arrow::array::compat_typings::ArrowTypeConversion;
+use beacon_nd_arrow::datatypes::{NdArrayDataType, NdArrayType};
 use netcdf::{
     types::{FloatType, IntType, NcVariableType},
     Extents, NcTypeDescriptor,
@@ -25,10 +25,8 @@ pub mod strings;
 /// Implementations define how to read and convert variable values into `T`.
 pub trait VariableDecoder<T>: Debug + Send + Sync
 where
-    T: ArrowTypeConversion + NcTypeDescriptor,
+    T: NdArrayType + NcTypeDescriptor,
 {
-    /// Arrow field metadata for the decoded values.
-    fn arrow_field(&self) -> &arrow::datatypes::Field;
     /// Read values from `variable` for the requested NetCDF `extents`.
     fn read(
         &self,
@@ -41,42 +39,40 @@ where
     }
     /// Name of the source variable.
     fn variable_name(&self) -> &str;
+    /// Nd Array Data Type
+    fn data_type(&self) -> NdArrayDataType {
+        T::data_type()
+    }
 }
 
 /// Default decoder that reads a variable directly as `T` without transforms.
 #[derive(Debug)]
 pub struct DefaultVariableDecoder<T>
 where
-    T: ArrowTypeConversion + NcTypeDescriptor,
+    T: NdArrayType + NcTypeDescriptor,
 {
-    pub arrow_field: arrow::datatypes::FieldRef,
+    pub variable_name: String,
     pub fill_value: Option<T>,
     marker: std::marker::PhantomData<T>,
 }
 
 impl<T> DefaultVariableDecoder<T>
 where
-    T: ArrowTypeConversion + NcTypeDescriptor,
+    T: NdArrayType + NcTypeDescriptor,
 {
     /// Construct a default decoder with an Arrow field and optional fill value.
-    pub fn new(arrow_field: arrow::datatypes::FieldRef, fill_value: Option<T>) -> Self {
+    pub fn new(variable_name: impl Into<String>, fill_value: Option<T>) -> Self {
         Self {
-            arrow_field,
+            variable_name: variable_name.into(),
             fill_value,
             marker: std::marker::PhantomData,
         }
     }
 }
 
-impl<T: ArrowTypeConversion + NcTypeDescriptor + Copy> VariableDecoder<T>
-    for DefaultVariableDecoder<T>
-{
+impl<T: NdArrayType + NcTypeDescriptor + Copy> VariableDecoder<T> for DefaultVariableDecoder<T> {
     fn variable_name(&self) -> &str {
-        self.arrow_field.name()
-    }
-
-    fn arrow_field(&self) -> &arrow::datatypes::Field {
-        &self.arrow_field
+        &self.variable_name
     }
 
     fn read(

@@ -29,6 +29,7 @@ crossbeam = { workspace = true }
 typetag = { workspace = true }
 ndarray = "0.17.1"
 zstd = "0.13.2"
+semver = { version = "1.0.28", features = ["serde"] }
 
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-nd-arrow = { path = "../beacon-nd-arrow" }

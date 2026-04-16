@@ -1,32 +1,25 @@
+pub mod entries;
 pub mod ops;
+pub mod state;
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use arrow::{array::AsArray, datatypes::UInt32Type};
-use chrono::{DateTime, Utc};
 use object_store::ObjectStore;
 
 use crate::{
-    cache::Cache, column::ColumnReader, consts::PARTITION_METADATA_FILE,
-    partition::ops::load_partition_entries, schema::AtlasSchema,
+    cache::Cache,
+    column::ColumnReader,
+    partition::{entries::PartitionEntry, state::PartitionState},
+    schema::AtlasSchema,
 };
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PartitionMetadata {
-    pub name: String,
-    pub description: Option<String>,
-    pub schema: AtlasSchema,
-}
 
 #[derive(Debug, Clone)]
 pub struct Partition<S: object_store::ObjectStore + Clone> {
     store: S,
     name: String,
     directory: object_store::path::Path,
-    metadata: PartitionMetadata,
     state: PartitionState,
-    reader_cache:
-        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Arc<ColumnReader<S>>>>>>>,
+    reader_cache: Arc<moka::future::Cache<String, Arc<ColumnReader<S>>>>,
     cache: Arc<Cache>,
 }
 
@@ -35,20 +28,27 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
         store: S,
         name: String,
         directory: object_store::path::Path,
-        metadata: PartitionMetadata,
         state: PartitionState,
         cache: Arc<Cache>,
     ) -> Self {
-        let reader_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let reader_cache = Arc::new(moka::future::Cache::new(state.schema().columns.len() as u64));
         Self {
             store,
             name,
             directory,
-            metadata,
             state,
             reader_cache,
             cache,
         }
+    }
+
+    pub(crate) fn try_open(
+        store: S,
+        name: String,
+        directory: object_store::path::Path,
+        cache: Arc<Cache>,
+    ) -> anyhow::Result<Self> {
+        todo!()
     }
 
     pub fn name(&self) -> &str {
@@ -59,208 +59,41 @@ impl<S: object_store::ObjectStore + Clone> Partition<S> {
         &self.directory
     }
 
-    pub fn metadata(&self) -> &PartitionMetadata {
-        &self.metadata
-    }
-
     pub fn schema(&self) -> &AtlasSchema {
-        &self.metadata.schema
+        &self.state.schema
     }
 
     pub(crate) async fn column_reader(
         &self,
         column_name: &str,
     ) -> anyhow::Result<Arc<ColumnReader<S>>> {
-        let mut cache = self.reader_cache.lock().await;
-        let cell = cache
-            .entry(column_name.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
-            .clone();
         let store = self.store.clone();
         let partition_path = self.directory.clone();
         let cache = self.cache.clone();
 
-        let reader_result = cell
-            .get_or_try_init(|| async move {
-                init_column_reader(store, &partition_path, column_name, cache).await
+        let reader_result = self
+            .reader_cache
+            .try_get_with(column_name.to_string(), async move {
+                let reader = init_column_reader(store, &partition_path, column_name, cache).await?;
+                Ok::<_, anyhow::Error>(reader)
             })
-            .await;
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
 
-        reader_result.cloned()
+        Ok(reader_result)
     }
 
     pub(crate) fn state(&self) -> &PartitionState {
         &self.state
     }
 
-    pub fn entry_keys(&self) -> &[String] {
-        self.state().entry_keys()
+    pub fn entries(&self) -> Vec<PartitionEntry> {
+        self.state.entries()
     }
 
-    pub fn dataset_indexes(&self) -> &[u32] {
-        self.state().dataset_indexes()
+    pub fn physical_entries(&self) -> &[PartitionEntry] {
+        self.state.physical_entries()
     }
-
-    pub fn deletion_flags(&self) -> &[bool] {
-        self.state().deletion_flags()
-    }
-
-    pub fn insert_timestamps(&self) -> &[DateTime<Utc>] {
-        self.state().insert_timestamps()
-    }
-
-    pub fn undeleted_dataset_indexes(&self) -> Vec<u32> {
-        self.state().undeleted_dataset_indexes()
-    }
-
-    pub fn logical_entries(&self) -> Vec<&str> {
-        self.state().logical_entries()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PartitionState {
-    entry_keys: Vec<String>,
-    dataset_indexes: Vec<u32>,
-    deletion_flags: Vec<bool>,
-    insert_timestamps: Vec<DateTime<Utc>>,
-}
-
-impl PartitionState {
-    pub(crate) fn empty() -> Self {
-        Self {
-            entry_keys: vec![],
-            dataset_indexes: vec![],
-            deletion_flags: vec![],
-            insert_timestamps: vec![],
-        }
-    }
-
-    pub(crate) fn entry_keys(&self) -> &[String] {
-        &self.entry_keys
-    }
-
-    pub(crate) fn dataset_indexes(&self) -> &[u32] {
-        &self.dataset_indexes
-    }
-
-    pub(crate) fn deletion_flags(&self) -> &[bool] {
-        &self.deletion_flags
-    }
-
-    pub(crate) fn insert_timestamps(&self) -> &[DateTime<Utc>] {
-        &self.insert_timestamps
-    }
-
-    pub(crate) fn logical_entries(&self) -> Vec<&str> {
-        self.entry_keys
-            .iter()
-            .zip(self.deletion_flags.iter())
-            .filter_map(|(entry, deleted)| (!deleted).then_some(entry.as_str()))
-            .collect()
-    }
-
-    pub(crate) fn undeleted_dataset_indexes(&self) -> Vec<u32> {
-        self.dataset_indexes
-            .iter()
-            .zip(self.deletion_flags.iter())
-            .filter_map(|(dataset_index, deleted)| (!deleted).then_some(*dataset_index))
-            .collect()
-    }
-}
-
-pub async fn load_partition<S: object_store::ObjectStore + Clone>(
-    object_store: S,
-    partition_directory: object_store::path::Path,
-    cache: Arc<Cache>,
-) -> anyhow::Result<Partition<S>> {
-    let metadata_path = partition_directory.child(PARTITION_METADATA_FILE);
-    let metadata_bytes = object_store.get(&metadata_path).await?.bytes().await?;
-    let metadata: PartitionMetadata = serde_json::from_slice(&metadata_bytes)?;
-    let state = load_partition_state(
-        object_store.clone(),
-        partition_directory.clone(),
-        metadata.name.clone(),
-    )
-    .await?;
-
-    Ok(Partition::new(
-        object_store,
-        metadata.name.clone(),
-        partition_directory,
-        metadata,
-        state,
-        cache,
-    ))
-}
-
-pub(crate) async fn load_partition_state<S: object_store::ObjectStore + Clone>(
-    object_store: S,
-    partition_directory: object_store::path::Path,
-    partition_name: impl Into<String>,
-) -> anyhow::Result<PartitionState> {
-    let partition_name = partition_name.into();
-    let entries_batch = load_partition_entries(&object_store, &partition_directory).await?;
-
-    let entry_keys = entries_batch.column(0).as_string::<i32>();
-    let dataset_indexes = entries_batch.column(1).as_primitive::<UInt32Type>();
-    let deletion_flags = entries_batch.column(2).as_boolean();
-
-    let entry_keys = entry_keys
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            entry.map(ToString::to_string).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "null entry key at dataset index {index} in partition {}",
-                    partition_name
-                )
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let dataset_indexes = dataset_indexes.values().to_vec();
-    let deletion_flags = deletion_flags
-        .iter()
-        .map(|flag| flag.unwrap_or(false))
-        .collect::<Vec<_>>();
-    let insert_timestamps = if entries_batch.num_columns() > 3 {
-        let insert_timestamps = entries_batch
-            .column(3)
-            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
-
-        insert_timestamps
-            .iter()
-            .enumerate()
-            .map(|(index, timestamp)| {
-                timestamp
-                    .map(DateTime::from_timestamp_nanos)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "null insert timestamp at dataset index {index} in partition {}",
-                            partition_name
-                        )
-                    })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
-    } else {
-        let legacy_fallback = DateTime::from_timestamp_nanos(0);
-        vec![legacy_fallback; entry_keys.len()]
-    };
-
-    anyhow::ensure!(
-        entry_keys.len() == dataset_indexes.len()
-            && entry_keys.len() == deletion_flags.len()
-            && entry_keys.len() == insert_timestamps.len(),
-        "entries file is inconsistent for partition {}",
-        partition_name
-    );
-
-    Ok(PartitionState {
-        entry_keys,
-        dataset_indexes,
-        deletion_flags,
-        insert_timestamps,
-    })
 }
 
 pub(crate) fn column_name_to_path(

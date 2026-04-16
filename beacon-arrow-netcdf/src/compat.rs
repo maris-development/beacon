@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use beacon_nd_arrow::array::{backend::ArrayBackend, compat_typings::ArrowTypeConversion};
+use beacon_nd_arrow::{arrow::NdArrowArray, datatypes::NdArrayType, NdArray, NdArrayD};
 use netcdf::AttributeValue;
 
 use crate::{
@@ -22,22 +22,12 @@ fn numeric_variable_to_nd_arrow_array<T>(
     dimensions: Vec<String>,
     fill_value: Option<T>,
     cf_time_epoch_unit: Option<(hifitime::Epoch, hifitime::Unit)>,
-) -> anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>>
+) -> anyhow::Result<NdArrowArray>
 where
-    T: ArrowTypeConversion
-        + netcdf::NcTypeDescriptor
-        + Copy
-        + num_traits::AsPrimitive<f64>
-        + 'static,
+    T: NdArrayType + netcdf::NcTypeDescriptor + Copy + num_traits::AsPrimitive<f64> + 'static,
 {
-    let default_decoder: Arc<dyn VariableDecoder<T>> = Arc::new(DefaultVariableDecoder::<T>::new(
-        Arc::new(arrow_schema::Field::new(
-            variable_name,
-            T::arrow_data_type(),
-            false,
-        )),
-        fill_value,
-    ));
+    let default_decoder: Arc<dyn VariableDecoder<T>> =
+        Arc::new(DefaultVariableDecoder::<T>::new(variable_name, fill_value));
 
     if let Some((epoch, unit)) = cf_time_epoch_unit {
         let field = Arc::new(arrow_schema::Field::new(
@@ -46,22 +36,21 @@ where
             false,
         ));
         let time_backend = VariableBackend::new(
-            Arc::new(CFTimeVariableDecoder::new(
-                field,
-                default_decoder,
-                epoch,
-                unit,
-            )),
+            Arc::new(CFTimeVariableDecoder::new(default_decoder, epoch, unit)),
             nc_file,
             shape,
             dimensions,
         );
 
-        return Ok(time_backend.into_dyn_array()?);
+        return Ok(NdArrowArray::new(
+            Arc::new(NdArray::new_with_backend(time_backend)?) as Arc<dyn NdArrayD>,
+        ));
     }
 
     let variable_backend = VariableBackend::new(default_decoder, nc_file, shape, dimensions);
-    Ok(variable_backend.into_dyn_array()?)
+    Ok(NdArrowArray::new(
+        Arc::new(NdArray::new_with_backend(variable_backend)?) as Arc<dyn NdArrayD>,
+    ))
 }
 
 /// Convert a NetCDF attribute value into an ND Arrow scalar array.
@@ -70,128 +59,73 @@ where
 pub fn attribute_to_nd_arrow_array(
     attr_name: &str,
     attr_value: AttributeValue,
-) -> anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>> {
+) -> anyhow::Result<NdArrowArray> {
     match attr_value {
         AttributeValue::Uchar(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    u8::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Schar(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    i8::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Ushort(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    u16::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Short(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    i16::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Uint(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    u32::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Int(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    i32::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Ulonglong(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    u64::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Longlong(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    i64::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Float(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    f32::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Double(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    f64::arrow_data_type(),
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         AttributeValue::Str(value) => {
-            let array = AttributeBackend::new(
-                Arc::new(arrow_schema::Field::new(
-                    attr_name,
-                    arrow_schema::DataType::Utf8,
-                    false,
-                )),
-                value,
-            );
-            Ok(array.into_dyn_array()?)
+            let array = AttributeBackend::new(attr_name, value);
+            Ok(NdArrowArray::new(
+                Arc::new(NdArray::new_with_backend(array)?) as Arc<dyn NdArrayD>,
+            ))
         }
         _ => Err(anyhow::anyhow!(
             "Unsupported attribute type for attribute '{}'",
@@ -211,7 +145,7 @@ pub fn variable_to_nd_arrow_array(
     nc_file: Arc<netcdf::File>,
     variable_name: &str,
     attributes: HashMap<String, AttributeValue>,
-) -> anyhow::Result<Arc<dyn beacon_nd_arrow::array::NdArrowArray>> {
+) -> anyhow::Result<NdArrowArray> {
     let var = nc_file
         .variable(variable_name)
         .ok_or_else(|| anyhow::anyhow!("Variable '{}' not found in NetCDF file", variable_name))?;
@@ -240,19 +174,19 @@ pub fn variable_to_nd_arrow_array(
                 } else {
                     None
                 };
-            let field = Arc::new(arrow_schema::Field::new(
-                variable_name,
-                arrow_schema::DataType::Utf8,
-                string_fill_attr.is_some(),
-            ));
             let array_backend = VariableBackend::new(
-                Arc::new(StringVariableDecoder::new(field, string_fill_attr, None)),
+                Arc::new(StringVariableDecoder::new(
+                    variable_name.to_string(),
+                    string_fill_attr,
+                    None,
+                )),
                 nc_file.clone(),
                 shape,
                 dimensions,
             );
-
-            Ok(array_backend.into_dyn_array()?)
+            use beacon_nd_arrow::arrow::NdArrowArray;
+            let nd_array = Arc::new(NdArray::new_with_backend(array_backend)?) as Arc<dyn NdArrayD>;
+            Ok(NdArrowArray::new(nd_array))
         }
         netcdf::types::NcVariableType::Int(int_type) => match int_type {
             netcdf::types::IntType::U8 => numeric_variable_to_nd_arrow_array::<u8>(
@@ -391,11 +325,6 @@ pub fn variable_to_nd_arrow_array(
                     };
 
                 let fixed_string_size = last_dim.unwrap().len();
-                let field = Arc::new(arrow_schema::Field::new(
-                    variable_name,
-                    arrow_schema::DataType::Utf8,
-                    string_fill_attr.is_some(),
-                ));
 
                 // The trailing dimension stores fixed string length and is consumed
                 // by StringVariableDecoder; exclude it from the ND logical shape.
@@ -404,7 +333,7 @@ pub fn variable_to_nd_arrow_array(
 
                 let array_backend = VariableBackend::new(
                     Arc::new(StringVariableDecoder::new(
-                        field,
+                        variable_name.to_string(),
                         string_fill_attr,
                         Some(fixed_string_size),
                     )),
@@ -413,7 +342,9 @@ pub fn variable_to_nd_arrow_array(
                     logical_dimensions,
                 );
 
-                Ok(array_backend.into_dyn_array()?)
+                Ok(NdArrowArray(Arc::new(NdArray::new_with_backend(
+                    array_backend,
+                )?)))
             } else {
                 // Handle as array of single characters
                 let character_fill_value =
@@ -427,20 +358,19 @@ pub fn variable_to_nd_arrow_array(
                         None
                     };
 
-                let field = Arc::new(arrow_schema::Field::new(
-                    variable_name,
-                    arrow_schema::DataType::Utf8,
-                    character_fill_value.is_some(),
-                ));
-
                 let array_backend = VariableBackend::new(
-                    Arc::new(DefaultVariableDecoder::new(field, character_fill_value)),
+                    Arc::new(DefaultVariableDecoder::new(
+                        variable_name.to_string(),
+                        character_fill_value,
+                    )),
                     nc_file.clone(),
                     shape,
                     dimensions,
                 );
 
-                Ok(array_backend.into_dyn_array()?)
+                Ok(NdArrowArray(Arc::new(NdArray::new_with_backend(
+                    array_backend,
+                )?)))
             }
         }
         _ => Err(anyhow::anyhow!(
