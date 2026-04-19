@@ -116,31 +116,22 @@ GET /api/table-functions
 
 Table functions are especially useful for SQL queries (e.g. `read_netcdf([...])`, `read_parquet([...])`).
 
-## Admin endpoints (tables/files)
+## Admin endpoints (files)
 
-Admin endpoints are under `/api/admin/*` (create table, delete table, upload/download/delete files) and are protected by HTTP Basic Auth.
+Admin endpoints are under `/api/admin/*` for file upload, download, and deletion, and are protected by HTTP Basic Auth.
 
-See the Data Lake docs for deeper table concepts, or browse `/swagger` for the exact request/response shapes.
+Table lifecycle is SQL-only. Create, replace, or remove tables by executing SQL DDL through Beacon's SQL surfaces, such as the HTTP query endpoint or Flight SQL.
 
-### Create a table (collection)
+Examples:
 
-Raw HTTP (as a template):
-
-```http
-POST /api/admin/create-table
-Authorization: Basic <base64(username:password)>
-Content-Type: application/json
-
-{
-
-  "table_name": "argo",
-  "table_type": {
-    "logical": {
-      "paths": [
-        "argo/*.parquet"
-      ],
-      "file_format": "parquet"
-    }
-  }
-}
+```sql
+CREATE EXTERNAL TABLE argo
+STORED AS PARQUET
+LOCATION 'argo/'
 ```
+
+```sql
+DROP TABLE argo
+```
+
+See the Data Lake docs for deeper table concepts, or browse `/swagger` for the exact HTTP request and response shapes that remain on the admin surface.

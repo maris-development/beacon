@@ -1,15 +1,17 @@
+//! Dataset discovery endpoints backed by the runtime's data lake listing.
+
 use std::sync::Arc;
 
-use arrow_schema::SchemaRef;
-use axum::{
+use ::axum::{
     extract::{Query, State},
     http::StatusCode,
     Json,
 };
+use beacon_core::api::{DatasetInfo, SchemaView};
 use beacon_core::runtime::Runtime;
-use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use utoipa::{IntoParams, ToSchema};
 
+/// Pagination and filter parameters shared by the dataset listing endpoints.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct ListDatasetsQuery {
     pub pattern: Option<String>,
@@ -17,6 +19,10 @@ pub struct ListDatasetsQuery {
     pub offset: Option<usize>,
 }
 
+/// Lists dataset file paths matching the optional glob pattern.
+///
+/// Deprecated in favour of [`list_datasets`], which returns full
+/// [`DatasetInfo`] entries.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "datasets",
@@ -51,11 +57,12 @@ pub(crate) async fn datasets(
     }
 }
 
+/// Lists dataset metadata (path plus detected file format) matching the optional glob pattern.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "datasets",
-    get, 
-    path = "/api/list-datasets", 
+    get,
+    path = "/api/list-datasets",
     params(ListDatasetsQuery),
     responses((status = 200, description = "List of datasets including interpreted file format")),
     security(
@@ -67,7 +74,7 @@ pub(crate) async fn datasets(
 pub(crate) async fn list_datasets(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListDatasetsQuery>,
-) -> Result<Json<Vec<DatasetMetadata>>, (StatusCode, String)> {
+) -> Result<Json<Vec<DatasetInfo>>, (StatusCode, String)> {
     let result = state
         .list_datasets(query.pattern, query.offset, query.limit)
         .await;
@@ -84,11 +91,13 @@ pub(crate) async fn list_datasets(
     }
 }
 
+/// Query parameters for [`list_dataset_schema`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct ListDatasetSchemaQuery {
     pub file: String,
 }
 
+/// Returns the Arrow schema that would be produced when reading the given dataset file.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "datasets",
@@ -105,8 +114,8 @@ pub struct ListDatasetSchemaQuery {
 pub(crate) async fn list_dataset_schema(
     State(state): State<Arc<Runtime>>,
     Query(query): Query<ListDatasetSchemaQuery>,
-) -> Result<Json<SchemaRef>, (StatusCode, String)> {
-    let result = state.list_dataset_schema(query.file.clone()).await;
+) -> Result<Json<SchemaView>, (StatusCode, String)> {
+    let result = state.list_dataset_schema_view(query.file.clone()).await;
 
     match result {
         Ok(schema) => Ok(Json(schema)),
@@ -120,11 +129,12 @@ pub(crate) async fn list_dataset_schema(
     }
 }
 
+/// Returns the total number of datasets known to the runtime.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "datasets",
-    get, 
-    path = "/api/total-datasets", 
+    get,
+    path = "/api/total-datasets",
     responses((status = 200, description = "List the total amount of datasets available")),
     security(
         (),

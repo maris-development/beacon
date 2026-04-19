@@ -28,12 +28,23 @@ pub struct Config {
     pub sanitize_schema: bool,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
     pub enable_sql: bool,
-    #[envconfig(from = "BEACON_WS_SQL_ENABLE", default = "false")]
-    pub ws_sql_enable: bool,
-    #[envconfig(from = "BEACON_WS_SQL_TICKET_TTL_SECS", default = "60")]
-    pub ws_sql_ticket_ttl_secs: u64,
-    #[envconfig(from = "BEACON_WS_SQL_MAX_SQL_BYTES", default = "1048576")]
-    pub ws_sql_max_sql_bytes: usize,
+    #[envconfig(from = "BEACON_FLIGHT_SQL_ENABLE", default = "true")]
+    pub flight_sql_enable: bool,
+    #[envconfig(from = "BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS", default = "false")]
+    pub flight_sql_allow_anonymous: bool,
+    #[envconfig(from = "BEACON_FLIGHT_SQL_HOST", default = "0.0.0.0")]
+    pub flight_sql_host: String,
+    #[envconfig(from = "BEACON_FLIGHT_SQL_PORT", default = "32011")]
+    pub flight_sql_port: u16,
+    #[envconfig(from = "BEACON_FLIGHT_SQL_TOKEN_TTL_SECS", default = "3600")]
+    pub flight_sql_token_ttl_secs: u64,
+    #[envconfig(from = "BEACON_FLIGHT_SQL_STATEMENT_TTL_SECS", default = "300")]
+    pub flight_sql_statement_ttl_secs: u64,
+    #[envconfig(
+        from = "BEACON_FLIGHT_SQL_PREPARED_STATEMENT_TTL_SECS",
+        default = "900"
+    )]
+    pub flight_sql_prepared_statement_ttl_secs: u64,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_ENABLED", default = "true")]
     pub sql_stream_coalesce_enabled: bool,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_TARGET_ROWS", default = "65536")]

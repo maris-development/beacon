@@ -16,6 +16,8 @@ base64 = "0.22.1"
 futures = { workspace = true }
 futures-util = { workspace = true }
 bytes = { workspace = true }
+arrow-flight = { workspace = true, features = ["flight-sql"] }
+arrow-ipc = { workspace = true }
 
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
@@ -27,18 +29,13 @@ serde = { workspace = true}
 serde_json = { workspace = true}
 anyhow = { workspace = true}
 arrow = { workspace = true}
-arrow-schema = { workspace = true}
 uuid = { version = "1.16.0" }
 tracing = { workspace = true}
 tracing-subscriber = { workspace = true}
 tracing-appender = { workspace = true}
+tonic = "0.13.1"
+prost = "0.13.1"
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-core = { path = "../beacon-core" }
-beacon-query = { path = "../beacon-query" }
-beacon-planner = { path = "../beacon-planner" }
-beacon-functions = { path = "../beacon-functions" }
-beacon-formats = { path = "../beacon-formats" }
-beacon-data-lake = { path = "../beacon-data-lake" }
-beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }

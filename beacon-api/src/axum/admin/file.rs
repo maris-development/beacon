@@ -1,6 +1,8 @@
+//! Administrative file endpoints: upload, download, and delete data lake files.
+
 use std::sync::Arc;
 
-use axum::{
+use ::axum::{
     extract::{Multipart, Query, State},
     http::StatusCode,
     response::IntoResponse,
@@ -11,7 +13,10 @@ use futures::StreamExt;
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 
-/// Just a schema for axum native multipart
+/// OpenAPI schema describing the multipart form accepted by [`upload_file`].
+///
+/// Fields are read dynamically from the request in [`upload_file`]; this struct
+/// exists solely to teach utoipa about the shape of the multipart body.
 #[derive(Deserialize, ToSchema)]
 #[allow(unused)]
 struct UploadDatasetMultipart {
@@ -21,6 +26,12 @@ struct UploadDatasetMultipart {
     file: String,
 }
 
+/// Uploads a file into the Beacon data lake under the supplied prefix.
+///
+/// Expects a `multipart/form-data` body with a `prefix` text field (the
+/// destination directory) and a `file` binary field. Body size is unbounded
+/// because the router disables [`axum::extract::DefaultBodyLimit`] for the
+/// admin surface.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "file",
@@ -44,15 +55,21 @@ pub async fn upload_file(
         .await
         .map_err(|e| Json(format!("Multipart error: {e}")))?
     {
-        let name = field.name().unwrap_or("");
+        // Reject fields without a name: OpenAPI requires named parts, and accepting them
+        // silently would cause upload payloads to be dropped without explanation.
+        let Some(name) = field.name().map(str::to_string) else {
+            tracing::warn!("Rejected multipart field without a name");
+            return Err(Json("multipart field missing name".to_string()));
+        };
 
-        match name {
+        match name.as_str() {
             "prefix" => {
-                // read small text field
-                let value = field.text().await.unwrap_or_default();
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|e| Json(format!("failed to read `prefix` field: {e}")))?;
                 prefix = Some(value);
             }
-
             "file" => {
                 let file_name = field
                     .file_name()
@@ -64,7 +81,6 @@ pub async fn upload_file(
 
                 tracing::info!("📤 Uploading `{}`...", full_path);
 
-                // Convert Axum field into a stream of Bytes
                 let stream = futures::stream::unfold(field, |mut f| async {
                     match f.chunk().await {
                         Ok(Some(chunk)) => Some((Ok(chunk), f)),
@@ -74,7 +90,6 @@ pub async fn upload_file(
                 });
 
                 let boxed_stream = Box::pin(stream);
-                // Stream into storage
                 state
                     .upload_file(&full_path, boxed_stream)
                     .await
@@ -82,9 +97,7 @@ pub async fn upload_file(
 
                 tracing::info!("✅ Uploaded `{}`", full_path);
             }
-
             _ => {
-                // Ignore unknown fields
                 tracing::warn!("Ignoring unknown field: {}", name);
             }
         }
@@ -93,17 +106,19 @@ pub async fn upload_file(
     Ok(Json("Upload successful!".to_string()))
 }
 
+/// Query parameters for the file download endpoint.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct DownloadQuery {
     pub file_path: String,
 }
 
+/// Streams a data lake file to the caller as `application/octet-stream`.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "file",
-    get, 
+    get,
     params(DownloadQuery),
-    path = "/api/admin/download-file", 
+    path = "/api/admin/download-file",
     responses((status = 200, description = "File downloaded successfully")),
     security(
         ("basic-auth" = []),
@@ -119,7 +134,6 @@ pub async fn download_handler(
 
     match state.download_file(&file_path).await {
         Ok(stream) => {
-            // Convert object_store stream into Axum-compatible stream
             let body_stream = stream.map(|result| {
                 result.map_err(|e| {
                     tracing::error!("❌ Stream error: {}", e);
@@ -127,9 +141,8 @@ pub async fn download_handler(
                 })
             });
 
-            let body = axum::body::Body::from_stream(body_stream);
+            let body = ::axum::body::Body::from_stream(body_stream);
 
-            // Parse filename from file_path for Content-Disposition
             let filename = std::path::Path::new(&file_path)
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -160,17 +173,19 @@ pub async fn download_handler(
     }
 }
 
+/// Query parameters for the file delete endpoint.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct DeleteQuery {
     pub file_path: String,
 }
 
+/// Deletes a data lake file at the given path.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "file",
-    delete, 
+    delete,
     params(DeleteQuery),
-    path = "/api/admin/delete-file", 
+    path = "/api/admin/delete-file",
     responses((status = 200, description = "File deleted successfully")),
     security(
         ("basic-auth" = []),

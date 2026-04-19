@@ -1,8 +1,6 @@
-use core::panic;
-use std::{sync::Arc, thread::sleep};
+//! Query execution endpoints for the client HTTP API.
 
-use arrow::ipc::{writer::IpcWriteOptions, CompressionType};
-use axum::{
+use ::axum::{
     body::Body,
     extract::{Path, State},
     http::{header, HeaderName, HeaderValue, StatusCode},
@@ -10,19 +8,18 @@ use axum::{
     Json,
 };
 use beacon_core::runtime::Runtime;
-use beacon_functions::function_doc::FunctionDoc;
-use beacon_planner::metrics::ConsolidatedMetrics;
-use beacon_query::{output::QueryOutputFile, Query};
+use beacon_core::{
+    api::{QueryMetricsView, QueryRequest},
+    query_result::QueryOutputFile,
+};
 use futures::TryStreamExt;
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct Args {
-    inner: String,
-    output: String,
-}
-
+/// Executes a query against the runtime and streams the result to the client.
+///
+/// The response is either an Arrow IPC stream (zstd-compressed) for in-memory
+/// results or a file download when the query produced a materialized output
+/// file (CSV, Parquet, Arrow, JSON, ODV, NetCDF, GeoParquet).
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "query",
@@ -39,7 +36,7 @@ pub struct Args {
 )]
 pub(crate) async fn query(
     State(state): State<Arc<Runtime>>,
-    Json(query_obj): Json<Query>,
+    Json(query_obj): Json<QueryRequest>,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
     let query_result = state.run_client_query(query_obj).await.map_err(|err| {
         tracing::error!("Error running beacon query: {}", err);
@@ -48,38 +45,52 @@ pub(crate) async fn query(
 
     match query_result.query_output {
         beacon_core::query_result::QueryOutput::File(query_output_file) => {
-            Ok(handle_query_output_file(query_output_file, query_result.query_id).await)
+            handle_query_output_file(query_output_file, query_result.query_id).await
         }
         beacon_core::query_result::QueryOutput::Stream(arrow_output_stream) => {
-            let ipc_options = IpcWriteOptions::default()
-                .try_with_compression(Some(CompressionType::ZSTD))
-                .unwrap();
+            let ipc_options = arrow::ipc::writer::IpcWriteOptions::default()
+                .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))
+                .map_err(|err| {
+                    tracing::error!("failed to configure Arrow IPC zstd compression: {err}");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json("failed to configure Arrow IPC compression".to_string()),
+                    )
+                })?;
+
+            let query_id_header = HeaderValue::from_str(&query_result.query_id.to_string())
+                .map_err(|err| {
+                    tracing::error!("failed to encode query id header: {err}");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json("failed to encode response headers".to_string()),
+                    )
+                })?;
+            // Static content-disposition value is ASCII and cannot fail at runtime; wrapped for parity.
+            let content_disposition =
+                HeaderValue::from_static("application/vnd.apache.arrow.stream");
 
             let schema = arrow_output_stream.schema();
 
+            // Stream Arrow IPC directly so large result sets do not need to be buffered in memory.
             let axum_stream = axum_streams::StreamBodyAs::arrow_ipc_with_options_errors(
                 schema,
-                arrow_output_stream.map_err(|e| axum::Error::new(Box::new(e))),
+                arrow_output_stream.map_err(|e| ::axum::Error::new(Box::new(e))),
                 ipc_options,
             )
-            .header(
-                "x-beacon-query-id",
-                HeaderValue::from_str(&query_result.query_id.to_string()).unwrap(),
-            )
-            .header(
-                header::CONTENT_DISPOSITION,
-                HeaderValue::from_str("application/vnd.apache.arrow.stream").unwrap(),
-            );
+            .header("x-beacon-query-id", query_id_header)
+            .header(header::CONTENT_DISPOSITION, content_disposition);
 
-            return Ok(axum_stream.into_response());
+            Ok(axum_stream.into_response())
         }
     }
 }
 
+/// Converts a completed file-backed query result into a streamed HTTP response.
 async fn handle_query_output_file(
     output_file: QueryOutputFile,
     query_id: uuid::Uuid,
-) -> Response<Body> {
+) -> Result<Response<Body>, (StatusCode, Json<String>)> {
     match output_file {
         QueryOutputFile::Csv(named_temp_file) => {
             file_stream_response(named_temp_file.path(), "text/csv", "csv", query_id).await
@@ -123,18 +134,25 @@ async fn handle_query_output_file(
     }
 }
 
+/// Streams a temporary result file to the client with the appropriate content headers.
 async fn file_stream_response(
     file_path: &std::path::Path,
     content_type: &str,
     file_ext: &str,
     query_id: uuid::Uuid,
-) -> Response<Body> {
-    let file = tokio::fs::File::open(file_path).await.unwrap();
+) -> Result<Response<Body>, (StatusCode, Json<String>)> {
+    let file = tokio::fs::File::open(file_path).await.map_err(|err| {
+        tracing::error!("failed to open query result file {file_path:?}: {err}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json("failed to open query result".to_string()),
+        )
+    })?;
     let stream = tokio_util::io::ReaderStream::new(file);
     let inner_stream = Body::from_stream(stream);
-    (
+    Ok((
         [
-            (header::CONTENT_TYPE, format!("{}", content_type).as_str()),
+            (header::CONTENT_TYPE, content_type),
             (
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"output.{}\"", file_ext).as_str(),
@@ -146,9 +164,11 @@ async fn file_stream_response(
         ],
         inner_stream,
     )
-        .into_response()
+        .into_response())
 }
 
+/// Validates a query body by parsing it. Returns 200 if the payload deserializes
+/// into a [`QueryRequest`] — the query is not executed.
 #[tracing::instrument(level = "info")]
 #[utoipa::path(
     tag = "query",
@@ -163,10 +183,11 @@ async fn file_stream_response(
         ("bearer" = [])
     )
 )]
-pub(crate) async fn parse_query(Json(query_obj): Json<Query>) -> StatusCode {
+pub(crate) async fn parse_query(Json(_query_obj): Json<QueryRequest>) -> StatusCode {
     StatusCode::OK
 }
 
+/// Returns recorded planner metrics for a previously executed query.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "query",
@@ -184,7 +205,7 @@ pub(crate) async fn parse_query(Json(query_obj): Json<Query>) -> StatusCode {
 pub(crate) async fn query_metrics(
     State(state): State<Arc<Runtime>>,
     Path(query_id): Path<String>,
-) -> Result<Json<ConsolidatedMetrics>, (StatusCode, Json<String>)> {
+) -> Result<Json<QueryMetricsView>, (StatusCode, Json<String>)> {
     let query_id = uuid::Uuid::parse_str(&query_id).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -202,6 +223,8 @@ pub(crate) async fn query_metrics(
     Ok(Json(metrics))
 }
 
+/// Returns a JSON-encoded explanation of the plan the runtime would produce for
+/// the supplied query without executing it.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "query",
@@ -218,7 +241,7 @@ pub(crate) async fn query_metrics(
 )]
 pub(crate) async fn explain_query(
     State(state): State<Arc<Runtime>>,
-    Json(query_obj): Json<Query>,
+    Json(query_obj): Json<QueryRequest>,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
     let result = state.explain_client_query(query_obj).await;
     match result {
@@ -237,6 +260,7 @@ pub(crate) async fn explain_query(
     }
 }
 
+/// Backward-compatible endpoint for clients that still request the default schema as column names.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "query",
@@ -255,11 +279,11 @@ pub(crate) async fn explain_query(
 pub(crate) async fn available_columns(State(state): State<Arc<Runtime>>) -> Json<Vec<String>> {
     Json(
         state
-            .list_default_table_schema()
+            .list_default_table_schema_view()
             .await
-            .fields()
+            .fields
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.name.clone())
             .collect(),
     )
 }

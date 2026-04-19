@@ -32,3 +32,4 @@ test.ipynb
 __pycache__/
 .DS_Store
 mpio.log
+CLAUDE.md

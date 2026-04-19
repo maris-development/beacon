@@ -1,9 +1,9 @@
+//! Public client-facing HTTP endpoints.
+
 use std::sync::Arc;
 
-use axum::{routing::get, routing::post, Router};
+use ::axum::Router;
 use beacon_core::runtime::Runtime;
-use datasets::total_datasets;
-use query::{available_columns, query_metrics};
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -12,14 +12,16 @@ mod functions;
 mod info;
 mod query;
 mod tables;
-mod ws_sql;
 
+/// OpenAPI document marker for the client surface.
 #[derive(utoipa::OpenApi)]
 #[openapi()]
 pub struct ClientApiDoc;
 
+/// Builds the client router and returns the generated OpenAPI document alongside it.
+#[allow(deprecated)]
 pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
-    let (client_router, client_api) = OpenApiRouter::with_openapi(ClientApiDoc::openapi())
+    OpenApiRouter::with_openapi(ClientApiDoc::openapi())
         .routes(routes!(query::query))
         .routes(routes!(query::parse_query))
         .routes(routes!(query::query_metrics))
@@ -38,11 +40,5 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(functions::list_functions))
         .routes(routes!(functions::list_table_functions))
         .routes(routes!(info::system_info))
-        .split_for_parts();
-
-    let client_router = client_router
-        .route("/api/ws/sql", get(ws_sql::ws_sql_handler))
-        .route("/api/ws/sql-ticket", post(ws_sql::create_ws_sql_ticket));
-
-    (client_router, client_api)
+        .split_for_parts()
 }

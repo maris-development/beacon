@@ -186,27 +186,9 @@ Beacon’s Zarr reader can use lightweight statistics for predicate-aware IO red
 
 ### Enable statistics for a Zarr collection
 
-When you create a logical Zarr table/collection, include `statistics.columns` under the Zarr table definition.
+When you create a logical Zarr table or collection through SQL DDL, include the corresponding Zarr statistics options on the table definition so Beacon can compute and use those min/max summaries for predicate pruning.
 
-```http
-POST /api/admin/create-table/
-
-Content-Type: application/json
-{
-	"table_name": "my_zarr_table",
-	"table_type": {
-		"logical": {
-			"paths": [
-				"datasets/**/*.zarr/zarr.json"
-			],
-			"file_format": "zarr",
-			"statistics": {
-				"columns": ["valid_time", "latitude", "longitude"]
-			}
-		}
-	}
-}
-```
+The important part is the configuration itself, not a separate admin endpoint: keep the collection definition in SQL so the lifecycle remains consistent with the rest of the catalog.
 
 ### Enable statistics for ad-hoc reads (SQL)
 
