@@ -152,12 +152,13 @@ where
 /// Configuration values are validated at startup so invalid origins, methods, or
 /// header names surface as a contextual error rather than a runtime panic.
 fn build_cors_layer() -> anyhow::Result<CorsLayer> {
+    let cors = &beacon_config::CONFIG.cors;
     let mut layer = CorsLayer::new();
 
-    if beacon_config::CONFIG.allowed_origins.trim() == "*" {
+    if cors.allowed_origins.trim() == "*" {
         layer = layer.allow_origin(Any);
     } else {
-        let origins = beacon_config::CONFIG
+        let origins = cors
             .allowed_origins
             .split(',')
             .map(str::trim)
@@ -170,7 +171,7 @@ fn build_cors_layer() -> anyhow::Result<CorsLayer> {
         layer = layer.allow_origin(AllowOrigin::list(origins));
     }
 
-    let methods = beacon_config::CONFIG
+    let methods = cors
         .allowed_methods
         .split(',')
         .map(str::trim)
@@ -181,7 +182,7 @@ fn build_cors_layer() -> anyhow::Result<CorsLayer> {
         .collect::<anyhow::Result<Vec<_>>>()?;
     layer = layer.allow_methods(methods);
 
-    let headers = beacon_config::CONFIG
+    let headers = cors
         .allowed_headers
         .split(',')
         .map(str::trim)
@@ -192,9 +193,9 @@ fn build_cors_layer() -> anyhow::Result<CorsLayer> {
         .collect::<anyhow::Result<Vec<_>>>()?;
     layer = layer.allow_headers(headers);
 
-    if beacon_config::CONFIG.allowed_credentials {
+    if cors.allowed_credentials {
         layer = layer.allow_credentials(true);
     }
 
-    Ok(layer.max_age(Duration::from_secs(beacon_config::CONFIG.max_age)))
+    Ok(layer.max_age(Duration::from_secs(cors.max_age)))
 }

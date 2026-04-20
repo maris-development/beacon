@@ -150,7 +150,7 @@ fn st_within_point_fast(
     lat: &mut dyn Iterator<Item = Option<f64>>,
 ) -> anyhow::Result<Vec<bool>> {
     let mut cache: lru::LruCache<Point<OrderedFloat<f64>>, bool> = lru::LruCache::new(
-        NonZero::new(beacon_config::CONFIG.st_within_point_cache_size)
+        NonZero::new(beacon_config::CONFIG.runtime.st_within_point_cache_size)
             .expect("Cache size must be non-zero"),
     );
     let bounding_rect = geom.bounding_rect();

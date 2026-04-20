@@ -7,8 +7,11 @@ use arrow::{
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
-use arrow_flight::sql::metadata::{
-    GetCatalogsBuilder, GetDbSchemasBuilder, GetTablesBuilder, SqlInfoData, SqlInfoDataBuilder,
+use arrow_flight::sql::{
+    metadata::{
+        GetCatalogsBuilder, GetDbSchemasBuilder, GetTablesBuilder, SqlInfoData, SqlInfoDataBuilder,
+    },
+    SqlSupportedCaseSensitivity,
 };
 use arrow_flight::sql::{CommandGetDbSchemas, CommandGetSqlInfo, CommandGetTables, SqlInfo};
 
@@ -122,6 +125,10 @@ fn build_sql_info_data() -> anyhow::Result<SqlInfoData> {
     builder.append(SqlInfo::SqlCatalogTerm, "catalog");
     builder.append(SqlInfo::SqlSchemaTerm, "schema");
     builder.append(SqlInfo::SqlIdentifierQuoteChar, "\"");
+    builder.append(
+        SqlInfo::SqlQuotedIdentifierCase,
+        SqlSupportedCaseSensitivity::SqlCaseSensitivityUnknown.as_str_name(),
+    );
     builder.append(SqlInfo::SqlAllTablesAreSelectable, true);
     builder.append(SqlInfo::SqlNullOrdering, 1i32);
     builder.build().map_err(Into::into)

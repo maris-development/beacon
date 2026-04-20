@@ -56,8 +56,8 @@ async fn handshake_execute_and_metadata_work() {
 
     client
         .handshake(
-            &beacon_config::CONFIG.admin_username,
-            &beacon_config::CONFIG.admin_password,
+            &beacon_config::CONFIG.admin.username,
+            &beacon_config::CONFIG.admin.password,
         )
         .await
         .unwrap();
@@ -133,8 +133,8 @@ async fn prepared_statement_flow_works() {
 
     client
         .handshake(
-            &beacon_config::CONFIG.admin_username,
-            &beacon_config::CONFIG.admin_password,
+            &beacon_config::CONFIG.admin.username,
+            &beacon_config::CONFIG.admin.password,
         )
         .await
         .unwrap();

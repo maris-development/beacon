@@ -166,11 +166,11 @@ impl Deref for DatasetsStore {
 impl DatasetsStore {
     /// Build the datasets store using the process-wide Beacon configuration.
     ///
-    /// - If `beacon_config::CONFIG.s3_data_lake` is true, initializes an S3 store.
+    /// - If `beacon_config::CONFIG.storage.s3.data_lake` is true, initializes an S3 store.
     /// - Otherwise initializes a local filesystem store rooted at
     ///   `beacon_config::DATASETS_DIR_PATH`.
     pub(crate) async fn new() -> StorageResult<Self> {
-        if beacon_config::CONFIG.s3_data_lake {
+        if beacon_config::CONFIG.storage.s3.data_lake {
             tracing::info!("Using S3 object store for datasets");
             Ok(Self::new_s3().await?)
         } else {
@@ -183,7 +183,7 @@ impl DatasetsStore {
     async fn new_local() -> StorageResult<Self> {
         Self::new_local_at(
             beacon_config::DATASETS_DIR_PATH.clone(),
-            beacon_config::CONFIG.enable_fs_events,
+            beacon_config::CONFIG.storage.enable_fs_events,
         )
         .await
     }
@@ -418,12 +418,13 @@ impl DatasetsStore {
     }
 
     async fn new_s3() -> StorageResult<Self> {
-        let is_virtual_hosted_style = beacon_config::CONFIG.s3_enable_virtual_hosting;
+        let s3 = &beacon_config::CONFIG.storage.s3;
+        let is_virtual_hosted_style = s3.enable_virtual_hosting;
         let mut builder = AmazonS3Builder::from_env()
             .with_allow_http(true)
             .with_virtual_hosted_style_request(is_virtual_hosted_style);
 
-        let bucket_name = beacon_config::CONFIG.s3_bucket.as_ref();
+        let bucket_name = s3.bucket.as_ref();
         if !is_virtual_hosted_style {
             // Requires a bucket name to be specified in the environment.
             let bucket_name = bucket_name.ok_or(error::StorageError::InitializationError(
@@ -451,7 +452,7 @@ impl DatasetsStore {
             });
         }
 
-        if beacon_config::CONFIG.enable_s3_events {
+        if beacon_config::CONFIG.storage.enable_s3_events {
             let notified_store = NotifiedStore::new(Arc::new(store) as Arc<dyn ObjectStore>).await;
 
             return Ok(DatasetsStore {

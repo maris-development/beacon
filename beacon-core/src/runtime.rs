@@ -8,7 +8,7 @@ use arrow::{
 };
 use beacon_data_lake::{DataLake, FileManager, TableManager};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
-use beacon_functions::{file_formats::BeaconTableFunctionImpl, function_doc::FunctionDoc};
+use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::{metrics::ConsolidatedMetrics, plan::BeaconQueryPlan};
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -31,7 +31,6 @@ use crate::{
 
 /// Beacon's single execution layer: startup, catalog access, queries, SQL, and files.
 pub struct Runtime {
-    table_functions: Vec<Arc<dyn BeaconTableFunctionImpl>>,
     session_ctx: Arc<SessionContext>,
     table_manager: Arc<TableManager>,
     file_manager: Arc<FileManager>,
@@ -42,7 +41,7 @@ impl Runtime {
     /// Boots the Beacon execution environment and initializes runtime-local state.
     pub async fn new() -> anyhow::Result<Self> {
         let memory_pool = Arc::new(FairSpillPool::new(
-            beacon_config::CONFIG.vm_memory_size * 1024 * 1024,
+            beacon_config::CONFIG.runtime.vm_memory_size * 1024 * 1024,
         ));
 
         let session_ctx = Self::init_ctx(memory_pool)?;
@@ -88,7 +87,7 @@ impl Runtime {
         let refresh_table_manager = table_manager.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                beacon_config::CONFIG.table_sync_interval_secs,
+                beacon_config::CONFIG.runtime.table_sync_interval_secs,
             ));
 
             interval.tick().await;
@@ -102,7 +101,6 @@ impl Runtime {
         });
 
         Ok(Self {
-            table_functions,
             session_ctx,
             table_manager,
             file_manager,
@@ -112,7 +110,7 @@ impl Runtime {
 
     fn init_ctx(memory_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
         let mut config = SessionConfig::new()
-            .with_batch_size(beacon_config::CONFIG.beacon_batch_size)
+            .with_batch_size(beacon_config::CONFIG.runtime.batch_size)
             .with_coalesce_batches(true)
             .with_information_schema(true)
             .with_collect_statistics(true);
@@ -227,16 +225,9 @@ impl Runtime {
         functions
     }
 
+    /// ToDo: implement listing of table functions with proper metadata instead of returning an empty list
     fn list_runtime_table_functions(&self) -> Vec<FunctionDoc> {
-        let mut table_functions: Vec<FunctionDoc> = self
-            .table_functions
-            .iter()
-            .map(|table_function| FunctionDoc::from_beacon_table_function(table_function.as_ref()))
-            .collect();
-
-        table_functions.sort_by(|left, right| left.function_name.cmp(&right.function_name));
-        table_functions.dedup_by(|left, right| left.function_name == right.function_name);
-        table_functions
+        vec![]
     }
 
     pub fn list_tables(&self) -> Vec<String> {
@@ -305,7 +296,7 @@ impl Runtime {
     }
 
     pub fn default_table(&self) -> String {
-        beacon_config::CONFIG.default_table.clone()
+        beacon_config::CONFIG.sql.default_table.clone()
     }
 
     pub async fn list_table_config(&self, table_name: String) -> Option<TableConfigView> {
@@ -337,7 +328,7 @@ impl Runtime {
     pub async fn list_default_table_schema(&self) -> SchemaRef {
         let table = self
             .session_ctx
-            .table(beacon_config::CONFIG.default_table.as_str())
+            .table(beacon_config::CONFIG.sql.default_table.as_str())
             .await
             .expect("Default table not found");
         Arc::new(table.schema().as_arrow().to_owned())

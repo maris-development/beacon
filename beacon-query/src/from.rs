@@ -41,7 +41,7 @@ pub enum From {
 impl Default for From {
     /// Returns the default table as specified in the configuration.
     fn default() -> Self {
-        From::Table(beacon_config::CONFIG.default_table.clone())
+        From::Table(beacon_config::CONFIG.sql.default_table.clone())
     }
 }
 

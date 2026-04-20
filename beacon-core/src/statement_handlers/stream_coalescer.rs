@@ -17,11 +17,13 @@ struct SqlStreamCoalesceOptions {
 
 impl SqlStreamCoalesceOptions {
     fn from_config() -> Self {
+        let coalesce = &beacon_config::CONFIG.sql.stream_coalesce;
+
         Self {
-            enabled: beacon_config::CONFIG.sql_stream_coalesce_enabled,
-            target_rows: beacon_config::CONFIG.sql_stream_coalesce_target_rows,
-            flush_timeout_ms: beacon_config::CONFIG.sql_stream_coalesce_flush_timeout_ms,
-            max_rows: beacon_config::CONFIG.sql_stream_coalesce_max_rows,
+            enabled: coalesce.enabled,
+            target_rows: coalesce.target_rows,
+            flush_timeout_ms: coalesce.flush_timeout_ms,
+            max_rows: coalesce.max_rows,
         }
     }
 

@@ -28,7 +28,7 @@ const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Builds the Tokio runtime and hands control to the async entrypoint.
 fn main() -> anyhow::Result<()> {
     let rt = Builder::new_multi_thread()
-        .worker_threads(beacon_config::CONFIG.worker_threads)
+        .worker_threads(beacon_config::CONFIG.server.worker_threads)
         .enable_all()
         .build()
         .context("failed to build Tokio runtime")?;
@@ -45,15 +45,16 @@ async fn async_main() -> anyhow::Result<()> {
     // Keep both transports on the same runtime so metadata and access rules stay aligned.
     let router = setup_router(beacon_runtime.clone())?;
 
+    let server = &beacon_config::CONFIG.server;
     let addr = std::net::SocketAddr::new(
-        IpAddr::from_str(&beacon_config::CONFIG.host)
-            .with_context(|| format!("invalid `host` in config: {}", beacon_config::CONFIG.host))?,
-        beacon_config::CONFIG.port,
+        IpAddr::from_str(&server.host)
+            .with_context(|| format!("invalid `host` in config: {}", server.host))?,
+        server.port,
     );
 
     let http_server = serve_http(router, addr);
 
-    if beacon_config::CONFIG.flight_sql_enable {
+    if beacon_config::CONFIG.flight_sql.enable {
         tokio::try_join!(http_server, flight_sql::serve(beacon_runtime.clone()))?;
     } else {
         http_server.await?;

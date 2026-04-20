@@ -50,7 +50,7 @@ pub(crate) struct BeaconFlightSqlService {
 impl BeaconFlightSqlService {
     /// Creates a service using the configured anonymous-access policy.
     pub(crate) fn new(runtime: Arc<beacon_core::runtime::Runtime>) -> anyhow::Result<Self> {
-        Self::new_with_options(runtime, beacon_config::CONFIG.flight_sql_allow_anonymous)
+        Self::new_with_options(runtime, beacon_config::CONFIG.flight_sql.allow_anonymous)
     }
 
     /// Creates a service with an explicit anonymous-access setting, used primarily by tests.
@@ -58,18 +58,18 @@ impl BeaconFlightSqlService {
         runtime: Arc<beacon_core::runtime::Runtime>,
         allow_anonymous: bool,
     ) -> anyhow::Result<Self> {
+        let flight_sql = &beacon_config::CONFIG.flight_sql;
+
         Ok(Self {
             metadata: FlightSqlMetadata::new(runtime.clone())?,
             runtime,
             authenticator: Authenticator::new(
                 allow_anonymous,
-                Duration::from_secs(beacon_config::CONFIG.flight_sql_token_ttl_secs),
+                Duration::from_secs(flight_sql.token_ttl_secs),
             ),
-            statements: SqlHandleStore::new(Duration::from_secs(
-                beacon_config::CONFIG.flight_sql_statement_ttl_secs,
-            )),
+            statements: SqlHandleStore::new(Duration::from_secs(flight_sql.statement_ttl_secs)),
             prepared_statements: SqlHandleStore::new(Duration::from_secs(
-                beacon_config::CONFIG.flight_sql_prepared_statement_ttl_secs,
+                flight_sql.prepared_statement_ttl_secs,
             )),
         })
     }
@@ -387,15 +387,16 @@ impl FlightSqlService for BeaconFlightSqlService {
 /// Starts the Flight SQL gRPC server on the configured host and port.
 pub(crate) async fn serve(runtime: Arc<beacon_core::runtime::Runtime>) -> anyhow::Result<()> {
     let service = BeaconFlightSqlService::new(runtime)?;
+    let flight_sql = &beacon_config::CONFIG.flight_sql;
     let addr = SocketAddr::new(
-        IpAddr::from_str(&beacon_config::CONFIG.flight_sql_host)
+        IpAddr::from_str(&flight_sql.host)
             .map_err(|error| anyhow::anyhow!("failed to parse Flight SQL host: {error}"))?,
-        beacon_config::CONFIG.flight_sql_port,
+        flight_sql.port,
     );
 
     info!(
         "Flight SQL listening on {addr} (anonymous access: {})",
-        beacon_config::CONFIG.flight_sql_allow_anonymous
+        flight_sql.allow_anonymous
     );
 
     Server::builder()

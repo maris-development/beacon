@@ -3,130 +3,287 @@ use std::path::PathBuf;
 use envconfig::Envconfig;
 use lazy_static::lazy_static;
 
-#[derive(Debug, Envconfig)]
+#[derive(Debug)]
 pub struct Config {
-    // Server settings
-    #[envconfig(from = "BEACON_ADMIN_USERNAME", default = "beacon-admin")]
-    pub admin_username: String,
-    #[envconfig(from = "BEACON_ADMIN_PASSWORD", default = "beacon-password")]
-    pub admin_password: String,
-    #[envconfig(from = "BEACON_PORT", default = "5001")]
+    pub admin: AdminConfig,
+    pub server: ServerConfig,
+    pub runtime: RuntimeConfig,
+    pub sql: SqlConfig,
+    pub flight_sql: FlightSqlConfig,
+    pub storage: StorageConfig,
+    pub cors: CorsConfig,
+    pub netcdf: NetcdfConfig,
+}
+
+#[derive(Debug)]
+pub struct AdminConfig {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug)]
+pub struct ServerConfig {
     pub port: u16,
-    #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
     pub host: String,
-    #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
     pub log_level: String,
+    pub worker_threads: usize,
+}
+
+#[derive(Debug)]
+pub struct RuntimeConfig {
+    pub vm_memory_size: usize,
+    pub table_sync_interval_secs: u64,
+    pub sanitize_schema: bool,
+    pub st_within_point_cache_size: usize,
+    pub enable_sys_info: bool,
+    pub batch_size: usize,
+    pub bbf_split_streams_slice: bool,
+}
+
+#[derive(Debug)]
+pub struct SqlConfig {
+    pub enable: bool,
+    pub default_table: String,
+    pub enable_pushdown_projection: bool,
+    pub stream_coalesce: SqlStreamCoalesceConfig,
+}
+
+#[derive(Debug)]
+pub struct SqlStreamCoalesceConfig {
+    pub enabled: bool,
+    pub target_rows: usize,
+    pub flush_timeout_ms: u64,
+    pub max_rows: usize,
+}
+
+#[derive(Debug)]
+pub struct FlightSqlConfig {
+    pub enable: bool,
+    pub allow_anonymous: bool,
+    pub host: String,
+    pub port: u16,
+    pub token_ttl_secs: u64,
+    pub statement_ttl_secs: u64,
+    pub prepared_statement_ttl_secs: u64,
+}
+
+#[derive(Debug)]
+pub struct StorageConfig {
+    pub enable_fs_events: bool,
+    pub enable_s3_events: bool,
+    pub s3: S3Config,
+}
+
+#[derive(Debug)]
+pub struct S3Config {
+    pub bucket: Option<String>,
+    pub enable_virtual_hosting: bool,
+    pub data_lake: bool,
+}
+
+#[derive(Debug)]
+pub struct CorsConfig {
+    pub allowed_methods: String,
+    pub allowed_origins: String,
+    pub allowed_headers: String,
+    pub allowed_credentials: bool,
+    pub max_age: u64,
+}
+
+#[derive(Debug)]
+pub struct NetcdfConfig {
+    pub use_schema_cache: bool,
+    pub schema_cache_size: u64,
+    pub use_reader_cache: bool,
+    pub reader_cache_size: usize,
+}
+
+#[derive(Debug)]
+pub struct NetcdfMultiplexerConfig {
+    pub enabled: bool,
+    pub processes: Option<usize>,
+}
+
+#[derive(Debug, Envconfig)]
+struct RawConfig {
+    #[envconfig(from = "BEACON_ADMIN_USERNAME", default = "beacon-admin")]
+    admin_username: String,
+    #[envconfig(from = "BEACON_ADMIN_PASSWORD", default = "beacon-password")]
+    admin_password: String,
+    #[envconfig(from = "BEACON_PORT", default = "5001")]
+    port: u16,
+    #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
+    host: String,
+    #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
+    log_level: String,
 
     //VM Settings
     #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "4096")]
-    pub vm_memory_size: usize,
+    vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
-    pub default_table: String,
+    default_table: String,
     #[envconfig(from = "BEACON_TABLE_SYNC_INTERVAL_SECS", default = "300")] // 5 minutes
-    pub table_sync_interval_secs: u64,
+    table_sync_interval_secs: u64,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
-    pub sanitize_schema: bool,
+    sanitize_schema: bool,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
-    pub enable_sql: bool,
+    enable_sql: bool,
     #[envconfig(from = "BEACON_FLIGHT_SQL_ENABLE", default = "true")]
-    pub flight_sql_enable: bool,
+    flight_sql_enable: bool,
     #[envconfig(from = "BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS", default = "false")]
-    pub flight_sql_allow_anonymous: bool,
+    flight_sql_allow_anonymous: bool,
     #[envconfig(from = "BEACON_FLIGHT_SQL_HOST", default = "0.0.0.0")]
-    pub flight_sql_host: String,
+    flight_sql_host: String,
     #[envconfig(from = "BEACON_FLIGHT_SQL_PORT", default = "32011")]
-    pub flight_sql_port: u16,
+    flight_sql_port: u16,
     #[envconfig(from = "BEACON_FLIGHT_SQL_TOKEN_TTL_SECS", default = "3600")]
-    pub flight_sql_token_ttl_secs: u64,
+    flight_sql_token_ttl_secs: u64,
     #[envconfig(from = "BEACON_FLIGHT_SQL_STATEMENT_TTL_SECS", default = "300")]
-    pub flight_sql_statement_ttl_secs: u64,
+    flight_sql_statement_ttl_secs: u64,
     #[envconfig(
         from = "BEACON_FLIGHT_SQL_PREPARED_STATEMENT_TTL_SECS",
         default = "900"
     )]
-    pub flight_sql_prepared_statement_ttl_secs: u64,
+    flight_sql_prepared_statement_ttl_secs: u64,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_ENABLED", default = "true")]
-    pub sql_stream_coalesce_enabled: bool,
+    sql_stream_coalesce_enabled: bool,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_TARGET_ROWS", default = "65536")]
-    pub sql_stream_coalesce_target_rows: usize,
+    sql_stream_coalesce_target_rows: usize,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_FLUSH_TIMEOUT_MS", default = "25")]
-    pub sql_stream_coalesce_flush_timeout_ms: u64,
+    sql_stream_coalesce_flush_timeout_ms: u64,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_MAX_ROWS", default = "262144")]
-    pub sql_stream_coalesce_max_rows: usize,
+    sql_stream_coalesce_max_rows: usize,
     #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
-    pub st_within_point_cache_size: usize,
+    st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
-    pub worker_threads: usize,
+    worker_threads: usize,
 
     #[envconfig(from = "BEACON_S3_BUCKET")]
-    pub s3_bucket: Option<String>,
+    s3_bucket: Option<String>,
     #[envconfig(from = "BEACON_S3_ENABLE_VIRTUAL_HOSTING", default = "false")]
-    pub s3_enable_virtual_hosting: bool,
+    s3_enable_virtual_hosting: bool,
     #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
-    pub s3_data_lake: bool,
+    s3_data_lake: bool,
     #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "false")]
-    pub enable_fs_events: bool,
+    enable_fs_events: bool,
     #[envconfig(from = "BEACON_ENABLE_S3_EVENTS", default = "false")]
-    pub enable_s3_events: bool,
+    enable_s3_events: bool,
 
     // Others
     #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
-    pub enable_sys_info: bool,
+    enable_sys_info: bool,
     /// CORS CONFIG
     #[envconfig(
         from = "BEACON_CORS_ALLOWED_METHODS",
         default = "GET,POST,PUT,DELETE,OPTIONS"
     )]
-    pub allowed_methods: String,
+    allowed_methods: String,
     #[envconfig(from = "BEACON_CORS_ALLOWED_ORIGINS", default = "*")]
-    pub allowed_origins: String,
+    allowed_origins: String,
     #[envconfig(
         from = "BEACON_CORS_ALLOWED_HEADERS",
         default = "Content-Type,Authorization"
     )]
-    pub allowed_headers: String,
+    allowed_headers: String,
     #[envconfig(from = "BEACON_CORS_ALLOWED_CREDENTIALS", default = "false")]
-    pub allowed_credentials: bool,
+    allowed_credentials: bool,
     #[envconfig(from = "BEACON_CORS_MAX_AGE", default = "3600")]
-    pub max_age: u64,
+    max_age: u64,
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "false")]
-    pub enable_pushdown_projection: bool,
+    enable_pushdown_projection: bool,
 
     #[envconfig(from = "BEACON_NETCDF_USE_SCHEMA_CACHE", default = "true")]
-    pub netcdf_use_schema_cache: bool,
+    netcdf_use_schema_cache: bool,
     #[envconfig(from = "BEACON_NETCDF_SCHEMA_CACHE_SIZE", default = "1024")]
-    pub netcdf_schema_cache_size: u64,
+    netcdf_schema_cache_size: u64,
 
     #[envconfig(from = "BEACON_NETCDF_USE_READER_CACHE", default = "true")]
-    pub netcdf_use_reader_cache: bool,
+    netcdf_use_reader_cache: bool,
     #[envconfig(from = "BEACON_NETCDF_READER_CACHE_SIZE", default = "128")]
-    pub netcdf_reader_cache_size: usize,
-
-    #[envconfig(from = "BEACON_ENABLE_MULTIPLEXER_NETCDF", default = "false")]
-    pub enable_multiplexer_netcdf: bool,
-    #[envconfig(from = "BEACON_NETCDF_MULTIPLEXER_PROCESSES")]
-    pub netcdf_multiplexer_processes: Option<usize>,
-
-    /// gRPC address of a running `beacon-arrow-netcdf-mpio` Arrow Flight server.
-    ///
-    /// Used by `beacon_formats::netcdf::source::mpio` for `read_schema`,
-    /// `read_file_as_stream`, and `read_file_as_batch`.
-    /// Example: `http://127.0.0.1:50051`.
-    #[envconfig(from = "BEACON_NETCDF_FLIGHT_ADDR")]
-    pub netcdf_flight_addr: Option<String>,
+    netcdf_reader_cache_size: usize,
 
     /// The batch size for NetCDF reads, in number of rows. This is used for both local and MPIO reads.
     #[envconfig(from = "BEACON_BATCH_SIZE", default = "64000")]
-    pub beacon_batch_size: usize,
+    beacon_batch_size: usize,
 
     /// Whether to split streams into 16k row slices for better memory management and parallelism.
     #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
-    pub bbf_split_streams_slice: bool,
+    bbf_split_streams_slice: bool,
+}
+
+impl From<RawConfig> for Config {
+    fn from(raw: RawConfig) -> Self {
+        Self {
+            admin: AdminConfig {
+                username: raw.admin_username,
+                password: raw.admin_password,
+            },
+            server: ServerConfig {
+                port: raw.port,
+                host: raw.host,
+                log_level: raw.log_level,
+                worker_threads: raw.worker_threads,
+            },
+            runtime: RuntimeConfig {
+                vm_memory_size: raw.vm_memory_size,
+                table_sync_interval_secs: raw.table_sync_interval_secs,
+                sanitize_schema: raw.sanitize_schema,
+                st_within_point_cache_size: raw.st_within_point_cache_size,
+                enable_sys_info: raw.enable_sys_info,
+                batch_size: raw.beacon_batch_size,
+                bbf_split_streams_slice: raw.bbf_split_streams_slice,
+            },
+            sql: SqlConfig {
+                enable: raw.enable_sql,
+                default_table: raw.default_table,
+                enable_pushdown_projection: raw.enable_pushdown_projection,
+                stream_coalesce: SqlStreamCoalesceConfig {
+                    enabled: raw.sql_stream_coalesce_enabled,
+                    target_rows: raw.sql_stream_coalesce_target_rows,
+                    flush_timeout_ms: raw.sql_stream_coalesce_flush_timeout_ms,
+                    max_rows: raw.sql_stream_coalesce_max_rows,
+                },
+            },
+            flight_sql: FlightSqlConfig {
+                enable: raw.flight_sql_enable,
+                allow_anonymous: raw.flight_sql_allow_anonymous,
+                host: raw.flight_sql_host,
+                port: raw.flight_sql_port,
+                token_ttl_secs: raw.flight_sql_token_ttl_secs,
+                statement_ttl_secs: raw.flight_sql_statement_ttl_secs,
+                prepared_statement_ttl_secs: raw.flight_sql_prepared_statement_ttl_secs,
+            },
+            storage: StorageConfig {
+                enable_fs_events: raw.enable_fs_events,
+                enable_s3_events: raw.enable_s3_events,
+                s3: S3Config {
+                    bucket: raw.s3_bucket,
+                    enable_virtual_hosting: raw.s3_enable_virtual_hosting,
+                    data_lake: raw.s3_data_lake,
+                },
+            },
+            cors: CorsConfig {
+                allowed_methods: raw.allowed_methods,
+                allowed_origins: raw.allowed_origins,
+                allowed_headers: raw.allowed_headers,
+                allowed_credentials: raw.allowed_credentials,
+                max_age: raw.max_age,
+            },
+            netcdf: NetcdfConfig {
+                use_schema_cache: raw.netcdf_use_schema_cache,
+                schema_cache_size: raw.netcdf_schema_cache_size,
+                use_reader_cache: raw.netcdf_use_reader_cache,
+                reader_cache_size: raw.netcdf_reader_cache_size,
+            },
+        }
+    }
 }
 
 impl Config {
     pub fn init() -> Config {
-        Config::init_from_env().expect("Failed to load config")
+        RawConfig::init_from_env()
+            .map(Into::into)
+            .expect("Failed to load config")
     }
 }
 

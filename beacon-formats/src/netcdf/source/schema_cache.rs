@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 
 lazy_static::lazy_static!(
     static ref SCHEMA_CACHE : moka::future::Cache<CacheKey, SchemaRef> = moka::future::Cache::builder()
-        .max_capacity(beacon_config::CONFIG.netcdf_schema_cache_size)
+    .max_capacity(beacon_config::CONFIG.netcdf.schema_cache_size)
         .build();
 );
 
