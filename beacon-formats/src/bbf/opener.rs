@@ -144,12 +144,12 @@ impl FileOpener for BBFOpener {
                 .boxed();
 
             // If env variable BBF_SPLIT_STREAMS_SLICE is set, we will split the record batch into 16K rows batches to avoid OOM. This is especially helpful for large tables with wide rows.
-            let stream_proxy = if beacon_config::CONFIG.bbf_split_streams_slice {
+            let stream_proxy = if beacon_config::CONFIG.runtime.bbf_split_streams_slice {
                 stream_proxy
                     .flat_map(|batch| {
                         if let Ok(batch) = batch {
                             let split_batches =
-                                split_record_batch(batch, beacon_config::CONFIG.beacon_batch_size);
+                                split_record_batch(batch, beacon_config::CONFIG.runtime.batch_size);
                             let split_batches_res =
                                 split_batches.into_iter().map(Ok).collect::<Vec<_>>();
                             futures::stream::iter(split_batches_res)

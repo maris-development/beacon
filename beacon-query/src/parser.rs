@@ -39,7 +39,7 @@ impl Parser {
     ) -> anyhow::Result<LogicalPlan> {
         let datafusion_logical_plan = match inner_query {
             InnerQuery::Sql(sql) => {
-                if beacon_config::CONFIG.enable_sql {
+                if beacon_config::CONFIG.sql.enable {
                     let sql_options = SQLOptions::new()
                         .with_allow_ddl(false)
                         .with_allow_dml(false)
@@ -72,7 +72,7 @@ impl Parser {
         table_manager: &TableManager,
         file_manager: &FileManager,
     ) -> anyhow::Result<LogicalPlan> {
-        let mut builder = if beacon_config::CONFIG.enable_pushdown_projection {
+        let mut builder = if beacon_config::CONFIG.sql.enable_pushdown_projection {
             let mut all_columns = vec![];
             for select in &query_body.select {
                 let mut select_cols = vec![];
