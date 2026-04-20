@@ -373,4 +373,13 @@ mod tests {
 
         assert_eq!(decoder.variable_name(), "time");
     }
+
+    #[test]
+    fn test_epoch_extract() {
+        let input = "seconds since 2023-12-04 00:00:00 UTC";
+        let units = super::extract_units(input).expect("Failed to extract units");
+        let epoch = super::extract_epoch(input).expect("Failed to extract epoch");
+        println!("Extracted epoch: {}", epoch);
+        println!("Extracted units: {:?}", units);
+    }
 }

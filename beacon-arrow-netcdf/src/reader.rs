@@ -70,7 +70,7 @@ impl NetCDFArrowReader {
             for (attr_name, attr_value) in variable_attributes {
                 if let Ok(array) = compat::attribute_to_nd_arrow_array(
                     &format!("{}.{}", variable.name(), attr_name),
-                    attr_value,
+                    attr_value.clone(),
                 ) {
                     let field = Field::new(
                         format!("{}.{}", variable.name(), attr_name),

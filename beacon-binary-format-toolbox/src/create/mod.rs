@@ -5,7 +5,7 @@ pub mod csv;
 pub mod netcdf;
 pub mod parquet;
 
-pub fn create(
+pub async fn create(
     glob: String,
     group_size: u64,
     compression: Option<Compression>,
@@ -88,7 +88,9 @@ pub fn create(
                         match netcdf::read_entry(
                             path.as_os_str().to_str().unwrap(),
                             skip_column_on_error,
-                        ) {
+                        )
+                        .await
+                        {
                             Ok(entry) => writer.append(
                                 entry,
                                 path.file_name().unwrap().to_string_lossy().to_string(),

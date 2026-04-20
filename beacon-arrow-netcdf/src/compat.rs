@@ -153,9 +153,22 @@ pub fn attribute_to_nd_arrow_array(
             );
             Ok(array.into_dyn_array()?)
         }
+        AttributeValue::Strs(value) => {
+            let seperated_values = value.join(",");
+            let array = AttributeBackend::new(
+                Arc::new(arrow_schema::Field::new(
+                    attr_name,
+                    arrow_schema::DataType::Utf8,
+                    false,
+                )),
+                seperated_values,
+            );
+            Ok(array.into_dyn_array()?)
+        }
         _ => Err(anyhow::anyhow!(
-            "Unsupported attribute type for attribute '{}'",
-            attr_name
+            "Unsupported attribute type for attribute '{}' with value '{:?}'",
+            attr_name,
+            attr_value
         )),
     }
 }
@@ -189,6 +202,13 @@ pub fn variable_to_nd_arrow_array(
 
     let cf_time_epoch_unit = match attributes.get("units") {
         Some(AttributeValue::Str(units_str)) => parse_time_units(units_str),
+        Some(AttributeValue::Strs(units_strs)) => {
+            if let Some(units_str) = units_strs.first() {
+                parse_time_units(units_str)
+            } else {
+                None
+            }
+        }
         _ => None,
     };
 
