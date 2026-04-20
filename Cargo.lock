@@ -1209,6 +1209,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-table"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-schema 56.2.0",
+ "async-trait",
+ "bytes",
+ "datafusion",
+ "futures",
+ "object_store 0.12.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "bigdecimal"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
