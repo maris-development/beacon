@@ -505,11 +505,8 @@ impl Runtime {
     fn ensure_anonymous_statement_allowed(statement: &BeaconStatement) -> anyhow::Result<()> {
         match statement {
             BeaconStatement::DFStatement(_) => Ok(()),
-            BeaconStatement::Ingest(_)
-            | BeaconStatement::DeleteAtlasDatasets(_)
-            | BeaconStatement::CreateAtlasTable(_)
-            | BeaconStatement::AlterAtlas(_) => Err(anyhow::anyhow!(
-                "anonymous Flight SQL access only supports metadata and read-only SELECT queries"
+            _ => Err(anyhow::anyhow!(
+                "anonymous SQL access only supports metadata and read-only SELECT queries"
             )),
         }
     }

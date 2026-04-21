@@ -2,16 +2,19 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 
+pub type ManifestRef = Arc<TableManifest>;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TableManifest {
-    schema: arrow::datatypes::Schema,
-    data_files: Vec<DataFile>,
+    pub(crate) schema: arrow::datatypes::SchemaRef,
+    pub(crate) schema_version: u64,
+    pub(crate) data_files: Vec<DataFile>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DataFile {
-    parquet_file: String,
-    deletion_vector_files: Vec<String>, // Optional paths to deletion vector files for handling deletions.
+    pub(crate) parquet_file: String,
+    pub(crate) deletion_vector_files: Vec<String>, // Optional paths to deletion vector files for handling deletions.
 }
 
 pub async fn flush_table_manifest(

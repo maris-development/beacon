@@ -16,6 +16,14 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
+parking_lot = { workspace = true }
+typetag =  { workspace=true}
+tracing = { workspace = true }
+
+uuid = "1.23.1"
+
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+parquet = { workspace = true }

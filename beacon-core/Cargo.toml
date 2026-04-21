@@ -42,3 +42,4 @@ beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-atlas = { path = "../beacon-atlas" }
 beacon-common = { path = "../beacon-common" }
+beacon-table = { path = "../beacon-table" }

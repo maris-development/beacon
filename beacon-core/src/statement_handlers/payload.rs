@@ -10,6 +10,7 @@ pub(crate) enum StatementKind {
     DeleteAtlasDatasets,
     CreateAtlasTable,
     AlterAtlas,
+    CreateTable,
 }
 
 pub(crate) enum StatementPayload {
