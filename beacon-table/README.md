@@ -136,6 +136,6 @@ This provides serializable isolation for writers while allowing concurrent reade
 | Scan with projection| ✅ Implemented |
 | Scan with limit     | ✅ Implemented |
 | Vacuum / compaction | ✅ Implemented |
-| Deletion vectors    | 🚧 Planned    |
-| Z-order indexing    | 🚧 Planned    |
-| Schema evolution    | 🚧 Planned    |
+| Deletion vectors    | 🚧 Planned     |
+| Z-order indexing    | 🚧 Planned     |
+| Schema evolution    | 🚧 Planned     |

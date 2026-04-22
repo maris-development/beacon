@@ -41,6 +41,7 @@
 use arrow::datatypes::DataType;
 use arrow_schema::SchemaRef;
 use beacon_datafusion_ext::table_ext::TableDefinition;
+use datafusion::physical_expr::LexOrdering;
 use datafusion::{
     catalog::{Session, TableProvider, memory::DataSourceExec},
     common::not_impl_err,
@@ -57,9 +58,10 @@ use datafusion::{
     },
     execution::{SessionState, object_store::ObjectStoreUrl},
     logical_expr::{TableProviderFilterPushDown, dml::InsertOp},
+    physical_expr::PhysicalSortExpr,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties, coalesce_partitions::CoalescePartitionsExec,
-        empty::EmptyExec, limit::GlobalLimitExec, union::UnionExec,
+        empty::EmptyExec, limit::GlobalLimitExec, sorts::sort::SortExec, union::UnionExec,
     },
     prelude::{Expr, SessionContext},
 };
@@ -68,7 +70,15 @@ use std::{any::Any, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{
-    append_exec::AppendExec, insert_exec::InsertSink, manifest::DataFile, vacuum_exec::VacuumExec,
+    append_exec::AppendExec,
+    index_exec::{CreateIndexExec, TableIndex, ZOrderSortExec},
+    insert_exec::InsertSink,
+    manifest::DataFile,
+    vacuum_exec::VacuumExec,
+};
+
+pub use crate::index_exec::{
+    ClusteredIndex, ClusteredIndexColumn, TableIndex as BeaconTableIndex, ZOrderIndex,
 };
 
 mod append_exec;
@@ -185,7 +195,7 @@ impl BeaconTable {
                 schema: schema.unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty())),
                 schema_version: 1,
                 data_files: vec![],
-                z_order_index: None,
+                index: None,
             };
 
             // Flush the initial manifest to ensure it exists for future readers and writers.
@@ -356,6 +366,150 @@ impl BeaconTable {
             .child(format!("{uuid}.parquet"))
     }
 
+    /// Wraps an execution plan with index-appropriate sorting if an index is configured.
+    ///
+    /// - `None` → returns `plan` unchanged.
+    /// - `Clustered` → wraps with `CoalescePartitionsExec` + `SortExec`.
+    /// - `ZOrder` → wraps with `CoalescePartitionsExec` + `ZOrderSortExec`.
+    fn apply_index_sort(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        index: &Option<TableIndex>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let index = match index {
+            Some(idx) => idx,
+            None => return Ok(plan),
+        };
+
+        // Coalesce to single partition first so sorting is global
+        let coalesced: Arc<dyn ExecutionPlan> =
+            if plan.properties().output_partitioning().partition_count() > 1 {
+                Arc::new(CoalescePartitionsExec::new(plan))
+            } else {
+                plan
+            };
+
+        match index {
+            TableIndex::Clustered(clustered) => {
+                let schema = coalesced.schema();
+                let mut sort_exprs = Vec::with_capacity(clustered.columns.len());
+                for col in &clustered.columns {
+                    sort_exprs.push(PhysicalSortExpr::new(
+                        datafusion::physical_expr::expressions::col(&col.name, &schema)?,
+                        arrow::compute::SortOptions {
+                            descending: !col.ascending,
+                            nulls_first: true,
+                        },
+                    ));
+                }
+                let lex_order = LexOrdering::new(sort_exprs).ok_or_else(|| {
+                    execution_error("failed to create LexOrdering for clustered index")
+                })?;
+                Ok(Arc::new(SortExec::new(lex_order, coalesced)))
+            }
+            TableIndex::ZOrder(z) => {
+                Ok(Arc::new(ZOrderSortExec::new(z.columns.clone(), coalesced)))
+            }
+        }
+    }
+
+    /// Creates an execution plan that builds or replaces a table index.
+    ///
+    /// Reads all existing data, sorts it according to `index`, writes a single
+    /// sorted Parquet file, stores the index configuration in the manifest, and
+    /// deletes the old data files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any referenced column does not exist in the table schema.
+    pub async fn create_index(
+        &self,
+        state: &dyn Session,
+        index: TableIndex,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // Validate all referenced columns exist in schema
+        let schema = self.schema();
+        for col_name in index.column_names() {
+            if schema.column_with_name(col_name).is_none() {
+                return Err(execution_error(format!(
+                    "index column '{col_name}' does not exist in table schema"
+                )));
+            }
+        }
+
+        let manifest = self.manifest.lock().await.clone();
+        let data_files_to_delete = manifest.data_files.clone();
+
+        // Scan all existing data
+        let scan = self.scan(state, None, &[], None).await?;
+
+        // Apply index sorting
+        let sorted = self.apply_index_sort(scan, &Some(index.clone()))?;
+
+        // Coalesce sorted output to single partition
+        let coalesced: Arc<dyn ExecutionPlan> =
+            if sorted.properties().output_partitioning().partition_count() > 1 {
+                Arc::new(CoalescePartitionsExec::new(sorted))
+            } else {
+                sorted
+            };
+
+        // Create output path and parquet sink
+        let new_path = self.insert_path();
+        let original_url = format!("{}{}", self.store_url, new_path);
+        let parsed_url = ListingTableUrl::parse(&original_url)?;
+
+        let sink_config = FileSinkConfig {
+            original_url: original_url.clone(),
+            object_store_url: self.store_url.clone(),
+            file_group: FileGroup::default(),
+            table_paths: vec![parsed_url],
+            output_schema: manifest.schema.clone(),
+            table_partition_cols: vec![],
+            insert_op: InsertOp::Append,
+            keep_partition_by_columns: false,
+            file_extension: "parquet".to_string(),
+        };
+
+        let sink = Arc::new(ParquetSink::new(
+            sink_config,
+            TableParquetOptions::default(),
+        ));
+
+        let output_file = DataFile {
+            parquet_file: new_path.to_string(),
+            deletion_vector_files: vec![],
+        };
+
+        let exec = CreateIndexExec::new(
+            self.store.clone(),
+            self.manifest_path.clone(),
+            self.mutation_handle.clone(),
+            self.manifest.clone(),
+            data_files_to_delete,
+            output_file,
+            sink,
+            coalesced,
+            index,
+        );
+
+        Ok(Arc::new(exec))
+    }
+
+    /// Removes the current index configuration from the manifest.
+    ///
+    /// Does **not** rewrite the data files — data remains physically sorted but
+    /// future inserts and vacuums will no longer enforce the sort order.
+    pub async fn remove_index(&self) -> datafusion::error::Result<()> {
+        let _mutation_guard = self.mutation_handle.lock().await;
+        let mut manifest = self.manifest.lock().await;
+        manifest.index = None;
+        manifest::flush_table_manifest(self.store.clone(), &self.manifest_path, &manifest)
+            .await
+            .map_err(|e| execution_error(format!("failed to flush manifest: {e}")))?;
+        Ok(())
+    }
+
     /// Creates an execution plan that merges all existing data files into a single
     /// parquet file, updates the manifest, and deletes the old files.
     pub async fn vacuum(
@@ -371,6 +525,9 @@ impl BeaconTable {
 
         // Coalesce to single partition for writing
         let coalesced: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(scan));
+
+        // Apply index sorting if configured
+        let sorted = self.apply_index_sort(coalesced, &manifest.index)?;
 
         // Create output path and parquet sink
         let new_path = self.insert_path();
@@ -407,7 +564,7 @@ impl BeaconTable {
             data_files_to_delete,
             output_file,
             sink,
-            coalesced,
+            sorted,
         );
 
         Ok(Arc::new(vacuum_exec))
@@ -502,6 +659,9 @@ impl TableProvider for BeaconTable {
                 input.schema()
             )));
         }
+        // Apply index sorting if configured (ensures each parquet file is sorted)
+        let sorted_input = self.apply_index_sort(input, &manifest.index)?;
+
         let new_path = self.insert_path();
         let original_url = format!("{}{}", self.store_url, new_path);
         let parsed_url = ListingTableUrl::parse(&original_url)?;
@@ -537,7 +697,7 @@ impl TableProvider for BeaconTable {
             sink,
         );
 
-        let sink_exec = DataSinkExec::new(input, Arc::new(insert_sink), None);
+        let sink_exec = DataSinkExec::new(sorted_input, Arc::new(insert_sink), None);
 
         Ok(Arc::new(sink_exec))
     }
@@ -923,6 +1083,341 @@ mod tests {
         assert_eq!(table2.schema(), test_schema());
 
         let batches = collect_scan(&ctx, &table2).await;
+        assert_eq!(total_rows(&batches), 2);
+    }
+
+    // -- Index integration tests --
+
+    use crate::index_exec::{ClusteredIndex, ClusteredIndexColumn, TableIndex, ZOrderIndex};
+
+    async fn setup_with_index(index: TableIndex) -> (Arc<InMemory>, SessionContext, BeaconTable) {
+        let (store, ctx, table) = setup().await;
+        // Set the index in the manifest directly
+        {
+            let mut manifest = table.manifest.lock().await;
+            manifest.index = Some(index);
+            manifest::flush_table_manifest(store.clone(), &table.manifest_path, &manifest)
+                .await
+                .unwrap();
+        }
+        (store, ctx, table)
+    }
+
+    fn clustered_id_asc() -> TableIndex {
+        TableIndex::Clustered(ClusteredIndex {
+            columns: vec![ClusteredIndexColumn {
+                name: "id".to_string(),
+                ascending: true,
+            }],
+        })
+    }
+
+    fn zorder_id_value() -> TableIndex {
+        TableIndex::ZOrder(ZOrderIndex {
+            columns: vec!["id".to_string(), "value".to_string()],
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_insert_with_clustered_index() {
+        let (_store, ctx, table) = setup_with_index(clustered_id_asc()).await;
+
+        // Insert unsorted data: ids [3, 1, 2]
+        let batch = test_batch(&[3, 1, 2], &["c", "a", "b"], &[3.0, 1.0, 2.0]);
+        insert_batch(&ctx, &table, batch).await;
+
+        // Scan back — should be sorted by id ascending
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 3);
+
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3], "rows should be sorted by id");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_insert_with_zorder_index() {
+        let (_store, ctx, table) = setup_with_index(zorder_id_value()).await;
+
+        // Insert data — order should change due to z-order sorting
+        let batch = test_batch(&[3, 1, 2], &["c", "a", "b"], &[30.0, 10.0, 20.0]);
+        insert_batch(&ctx, &table, batch).await;
+
+        // Scan back — all rows present, just possibly reordered
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_vacuum_with_clustered_index() {
+        let (_store, ctx, table) = setup_with_index(clustered_id_asc()).await;
+
+        // Insert 3 unsorted batches
+        insert_batch(&ctx, &table, test_batch(&[5, 3], &["e", "c"], &[5.0, 3.0])).await;
+        insert_batch(&ctx, &table, test_batch(&[1, 4], &["a", "d"], &[1.0, 4.0])).await;
+        insert_batch(&ctx, &table, test_batch(&[2], &["b"], &[2.0])).await;
+
+        // Vacuum — merges all files into one sorted file
+        let state = ctx.state();
+        let vacuum_plan = table.vacuum(&state).await.unwrap();
+        collect(vacuum_plan, ctx.task_ctx()).await.unwrap();
+
+        // Single file, all data present and globally sorted
+        {
+            let manifest = table.manifest.lock().await;
+            assert_eq!(manifest.data_files.len(), 1);
+        }
+
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 5);
+
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4, 5],
+            "vacuum should globally sort by id"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_vacuum_with_zorder_index() {
+        let (_store, ctx, table) = setup_with_index(zorder_id_value()).await;
+
+        insert_batch(
+            &ctx,
+            &table,
+            test_batch(&[3, 1], &["c", "a"], &[30.0, 10.0]),
+        )
+        .await;
+        insert_batch(&ctx, &table, test_batch(&[2], &["b"], &[20.0])).await;
+
+        let state = ctx.state();
+        let vacuum_plan = table.vacuum(&state).await.unwrap();
+        let result_batches = collect(vacuum_plan, ctx.task_ctx()).await.unwrap();
+
+        let count = result_batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 3);
+
+        let manifest = table.manifest.lock().await;
+        assert_eq!(manifest.data_files.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_create_index_rewrites_files() {
+        let (_store, ctx, table) = setup().await;
+
+        // Insert 2 unsorted batches (no index yet)
+        insert_batch(&ctx, &table, test_batch(&[5, 3], &["e", "c"], &[5.0, 3.0])).await;
+        insert_batch(
+            &ctx,
+            &table,
+            test_batch(&[1, 4, 2], &["a", "d", "b"], &[1.0, 4.0, 2.0]),
+        )
+        .await;
+
+        {
+            let manifest = table.manifest.lock().await;
+            assert_eq!(manifest.data_files.len(), 2);
+            assert!(manifest.index.is_none());
+        }
+
+        // Create clustered index
+        let state = ctx.state();
+        let plan = table
+            .create_index(&state, clustered_id_asc())
+            .await
+            .unwrap();
+        collect(plan, ctx.task_ctx()).await.unwrap();
+
+        // Manifest: 1 file, index is set
+        {
+            let manifest = table.manifest.lock().await;
+            assert_eq!(manifest.data_files.len(), 1);
+            assert!(manifest.index.is_some());
+            assert!(matches!(manifest.index, Some(TableIndex::Clustered(_))));
+        }
+
+        // Data is globally sorted
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 5);
+
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_create_zorder_index() {
+        let (_store, ctx, table) = setup().await;
+
+        insert_batch(
+            &ctx,
+            &table,
+            test_batch(&[1, 2], &["a", "b"], &[10.0, 20.0]),
+        )
+        .await;
+
+        let state = ctx.state();
+        let plan = table.create_index(&state, zorder_id_value()).await.unwrap();
+        collect(plan, ctx.task_ctx()).await.unwrap();
+
+        let manifest = table.manifest.lock().await;
+        assert_eq!(manifest.data_files.len(), 1);
+        assert!(matches!(manifest.index, Some(TableIndex::ZOrder(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_create_index_validates_columns() {
+        let (_store, ctx, table) = setup().await;
+
+        let state = ctx.state();
+        let result = table
+            .create_index(
+                &state,
+                TableIndex::Clustered(ClusteredIndex {
+                    columns: vec![ClusteredIndexColumn {
+                        name: "nonexistent".to_string(),
+                        ascending: true,
+                    }],
+                }),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_remove_index() {
+        let (_store, ctx, table) = setup().await;
+
+        insert_batch(&ctx, &table, test_batch(&[1, 2], &["a", "b"], &[1.0, 2.0])).await;
+
+        // Create index
+        let state = ctx.state();
+        let plan = table
+            .create_index(&state, clustered_id_asc())
+            .await
+            .unwrap();
+        collect(plan, ctx.task_ctx()).await.unwrap();
+
+        {
+            let manifest = table.manifest.lock().await;
+            assert!(manifest.index.is_some());
+        }
+
+        // Remove index
+        table.remove_index().await.unwrap();
+
+        {
+            let manifest = table.manifest.lock().await;
+            assert!(manifest.index.is_none());
+        }
+
+        // Data still readable
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_insert_after_create_index() {
+        let (_store, ctx, table) = setup().await;
+
+        insert_batch(&ctx, &table, test_batch(&[3, 1], &["c", "a"], &[3.0, 1.0])).await;
+
+        // Create clustered index
+        let state = ctx.state();
+        let plan = table
+            .create_index(&state, clustered_id_asc())
+            .await
+            .unwrap();
+        collect(plan, ctx.task_ctx()).await.unwrap();
+
+        // Insert more unsorted data — should be written sorted because index is active
+        insert_batch(
+            &ctx,
+            &table,
+            test_batch(&[5, 2, 4], &["e", "b", "d"], &[5.0, 2.0, 4.0]),
+        )
+        .await;
+
+        {
+            let manifest = table.manifest.lock().await;
+            assert_eq!(manifest.data_files.len(), 2); // 1 from index + 1 new
+        }
+
+        // Each file is independently sorted; reading across files gives 2 sorted runs
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_create_index_replaces_existing() {
+        let (_store, ctx, table) = setup().await;
+
+        insert_batch(&ctx, &table, test_batch(&[1, 2], &["a", "b"], &[1.0, 2.0])).await;
+
+        // Create clustered index first
+        let state = ctx.state();
+        let plan = table
+            .create_index(&state, clustered_id_asc())
+            .await
+            .unwrap();
+        collect(plan, ctx.task_ctx()).await.unwrap();
+
+        {
+            let manifest = table.manifest.lock().await;
+            assert!(matches!(manifest.index, Some(TableIndex::Clustered(_))));
+        }
+
+        // Replace with z-order index
+        let plan = table.create_index(&state, zorder_id_value()).await.unwrap();
+        collect(plan, ctx.task_ctx()).await.unwrap();
+
+        {
+            let manifest = table.manifest.lock().await;
+            assert!(matches!(manifest.index, Some(TableIndex::ZOrder(_))));
+            assert_eq!(manifest.data_files.len(), 1);
+        }
+
+        // Data still readable
+        let batches = collect_scan(&ctx, &table).await;
         assert_eq!(total_rows(&batches), 2);
     }
 }

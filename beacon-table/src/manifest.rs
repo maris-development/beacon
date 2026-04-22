@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 
-use crate::index_exec::IndexType;
+use crate::index_exec::TableIndex;
 
 /// A reference-counted pointer to a [`TableManifest`].
 pub type ManifestRef = Arc<TableManifest>;
@@ -33,9 +33,9 @@ pub(crate) struct TableManifest {
     /// Each entry references a Parquet file and optional deletion vectors.
     pub(crate) data_files: Vec<DataFile>,
 
-    /// Optional Z-order index configuration for the table.
+    /// Optional index configuration for the table (clustered or Z-order).
     #[serde(default)]
-    pub(crate) z_order_index: Option<IndexType>,
+    pub(crate) index: Option<TableIndex>,
 }
 
 /// A single data file entry within the table manifest.
