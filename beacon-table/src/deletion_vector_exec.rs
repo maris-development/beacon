@@ -1,3 +1,13 @@
+//! Deletion vector execution for Beacon tables.
+//!
+//! Provides [`DeletionVectorExec`], a DataFusion [`ExecutionPlan`] that filters
+//! out logically deleted rows by applying one or more boolean deletion vector
+//! streams to the data stream. A row is kept only if **none** of the deletion
+//! vectors mark it as deleted.
+//!
+//! **Note:** This module is not yet wired into the scan path; it exists as
+//! infrastructure for future delete support.
+
 use std::{any::Any, sync::Arc};
 
 use arrow::{
@@ -16,17 +26,31 @@ use datafusion::{
 };
 use futures::{StreamExt, stream};
 
+/// Creates a [`DataFusionError::Execution`](DataFusionError::Execution) from a string.
 fn execution_error(message: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(message.into())
 }
 
+/// An execution plan that applies deletion vectors to filter out deleted rows.
+///
+/// Each deletion vector is a stream of boolean batches aligned 1:1 with the
+/// data stream's rows. A `true` value means the row is deleted and should be
+/// excluded from the output.
 #[derive(Debug)]
 pub struct DeletionVectorExec {
+    /// The data scan plan whose rows will be filtered.
     data: Arc<dyn ExecutionPlan>,
+    /// One or more deletion vector scan plans, each aligned with `data`.
     deletion_vectors: Vec<Arc<dyn ExecutionPlan>>,
 }
 
 impl DeletionVectorExec {
+    /// Creates a new `DeletionVectorExec`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any deletion vector plan has a different partition
+    /// count than the data plan.
     pub fn try_new(
         data: Arc<dyn ExecutionPlan>,
         deletion_vectors: Vec<Arc<dyn ExecutionPlan>>,
@@ -149,18 +173,27 @@ impl ExecutionPlan for DeletionVectorExec {
     }
 }
 
+/// Internal state for the deletion-vector filtering stream.
 struct DeletionVectorState {
+    /// The underlying data stream being filtered.
     data_stream: SendableRecordBatchStream,
+    /// Cursors into each deletion vector stream.
     deletion_vector_cursors: Vec<DeletionVectorCursor>,
 }
 
+/// A cursor that reads boolean deletion masks from a stream, one batch at a
+/// time, and provides `next_mask(len)` to consume exactly `len` boolean values.
 struct DeletionVectorCursor {
+    /// The underlying deletion vector stream.
     stream: SendableRecordBatchStream,
+    /// The current batch of boolean values being consumed.
     current_batch: Option<BooleanArray>,
+    /// The read position within `current_batch`.
     current_index: usize,
 }
 
 impl DeletionVectorCursor {
+    /// Creates a new cursor over the given deletion vector stream.
     fn new(stream: SendableRecordBatchStream) -> Self {
         Self {
             stream,
@@ -169,6 +202,8 @@ impl DeletionVectorCursor {
         }
     }
 
+    /// Consumes exactly `len` boolean values from the stream, returning them
+    /// as a `Vec<bool>`. Advances to the next batch as needed.
     async fn next_mask(&mut self, len: usize) -> DataFusionResult<Vec<bool>> {
         let mut values = Vec::with_capacity(len);
 
@@ -209,6 +244,10 @@ impl DeletionVectorCursor {
         Ok(values)
     }
 
+    /// Verifies that the deletion vector stream has no remaining rows.
+    ///
+    /// Returns an error if there are unconsumed values, indicating a
+    /// row-count mismatch between data and deletion vector.
     async fn ensure_exhausted(&mut self) -> DataFusionResult<()> {
         if self.has_remaining_values() {
             return Err(execution_error(
@@ -227,6 +266,7 @@ impl DeletionVectorCursor {
         Ok(())
     }
 
+    /// Returns `true` if the current batch has unconsumed values.
     fn has_remaining_values(&self) -> bool {
         self.current_batch
             .as_ref()
@@ -234,6 +274,8 @@ impl DeletionVectorCursor {
             .unwrap_or(false)
     }
 
+    /// Sets the next batch to consume, validating it contains exactly one
+    /// boolean column.
     fn set_current_batch(&mut self, batch: RecordBatch) -> DataFusionResult<()> {
         if batch.num_columns() != 1 {
             return Err(execution_error(format!(
@@ -257,6 +299,8 @@ impl DeletionVectorCursor {
     }
 }
 
+/// Applies all deletion vectors to a single data batch, keeping only rows
+/// where no deletion vector marks the row as deleted.
 async fn filter_batch(
     batch: RecordBatch,
     deletion_vector_cursors: &mut [DeletionVectorCursor],

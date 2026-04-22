@@ -1,3 +1,43 @@
+//! Beacon Table — a manifest-managed, append-only table format backed by Parquet.
+//!
+//! `beacon-table` provides [`BeaconTable`], a DataFusion [`TableProvider`] that
+//! stores data as a collection of Parquet files managed by a JSON manifest. It
+//! supports:
+//!
+//! - **Append-only inserts** via the standard DataFusion `INSERT INTO` path.
+//! - **Full-table scans** with optional projection and limit push-down.
+//! - **Vacuum / compaction** to merge all data files into a single Parquet file.
+//! - **Optimistic concurrency control** using a schema-version check and a
+//!   table-level mutation lock.
+//!
+//! # Storage Layout
+//!
+//! ```text
+//! <table_directory>/
+//!     manifest.json          # Table metadata (schema, file list)
+//!     data/
+//!         <uuid>.parquet     # Data files (one per insert)
+//! ```
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use beacon_table::BeaconTable;
+//! use datafusion::execution::object_store::ObjectStoreUrl;
+//! use object_store::memory::InMemory;
+//! use std::sync::Arc;
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let store = Arc::new(InMemory::new());
+//! let url = ObjectStoreUrl::parse("memory://")?;
+//! let table = BeaconTable::new(
+//!     store, url, "my_table".into(),
+//!     "my_table".into(), None,
+//! ).await?;
+//! # Ok(())
+//! # }
+//! ```
+
 use arrow::datatypes::DataType;
 use arrow_schema::SchemaRef;
 use beacon_datafusion_ext::table_ext::TableDefinition;
@@ -27,33 +67,58 @@ use object_store::{ObjectMeta, ObjectStore};
 use std::{any::Any, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::{append_exec::AppendExec, insert_exec::InsertSink, manifest::DataFile};
+use crate::{
+    append_exec::AppendExec, insert_exec::InsertSink, manifest::DataFile, vacuum_exec::VacuumExec,
+};
 
 mod append_exec;
 mod deletion_vector_exec;
-mod index;
+mod index_exec;
 mod insert_exec;
 mod manifest;
-mod vacuum;
+mod vacuum_exec;
 
+/// Creates a [`DataFusionError::Execution`](datafusion::error::DataFusionError::Execution)
+/// from any string-like type.
 fn execution_error(message: impl Into<String>) -> datafusion::error::DataFusionError {
     datafusion::error::DataFusionError::Execution(message.into())
 }
 
+/// A manifest-managed, append-only table backed by Parquet files.
+///
+/// `BeaconTable` implements DataFusion's [`TableProvider`] trait, enabling it to
+/// be registered with a [`SessionContext`] and queried with SQL. Data is stored
+/// as one or more Parquet files in an object store, tracked by a JSON manifest.
+///
+/// Mutations (inserts, vacuums) are serialized by `mutation_handle` and guarded
+/// by optimistic concurrency checks on the manifest's `schema_version`.
 #[derive(Debug, Clone)]
 pub struct BeaconTable {
+    /// The object store where data files and the manifest are persisted.
     store: Arc<dyn ObjectStore>,
+    /// The base URL of the object store (e.g. `memory://`, `s3://bucket`).
     store_url: ObjectStoreUrl,
+    /// Human-readable name for this table.
     table_name: String,
+    /// Root directory path for this table in the object store.
     table_directory: object_store::path::Path,
+    /// Path to the `manifest.json` file.
     manifest_path: object_store::path::Path,
+    /// Shared, mutex-protected in-memory copy of the table manifest.
     manifest: Arc<Mutex<manifest::TableManifest>>,
-    mutation_handle: Arc<Mutex<()>>, // Mutex to ensure only one mutating operation can happen at a time
+    /// Mutex that serializes all mutating operations (insert, vacuum).
+    mutation_handle: Arc<Mutex<()>>,
 }
 
+/// Serializable definition of a Beacon table, used for catalog persistence.
+///
+/// Contains the minimal information needed to reconstruct a [`BeaconTable`]
+/// via [`TableDefinition::build_provider`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BeaconTableDefinition {
+    /// Root directory of the table in the object store.
     pub table_directory: String,
+    /// Human-readable table name.
     pub table_name: String,
 }
 
@@ -91,6 +156,20 @@ impl TableDefinition for BeaconTableDefinition {
 }
 
 impl BeaconTable {
+    /// Creates a new `BeaconTable`.
+    ///
+    /// If a manifest already exists at `<table_directory>/manifest.json`, it is
+    /// loaded from the object store. Otherwise a fresh manifest is created with
+    /// the provided `schema` (or an empty schema if `None`) and flushed to the
+    /// store.
+    ///
+    /// # Parameters
+    ///
+    /// * `store` - Object store for all I/O.
+    /// * `store_url` - Base URL of the object store.
+    /// * `table_name` - Human-readable name.
+    /// * `table_directory` - Root directory path for this table.
+    /// * `schema` - Optional Arrow schema; used only when creating a new table.
     pub async fn new(
         store: Arc<dyn ObjectStore>,
         store_url: ObjectStoreUrl,
@@ -126,6 +205,7 @@ impl BeaconTable {
         })
     }
 
+    /// Returns a serializable [`BeaconTableDefinition`] for catalog persistence.
     pub fn definition(&self) -> BeaconTableDefinition {
         BeaconTableDefinition {
             table_directory: self.table_directory.to_string(),
@@ -133,6 +213,7 @@ impl BeaconTable {
         }
     }
 
+    /// Returns the table schema, optionally projected to the given column indices.
     fn projected_schema(
         &self,
         projection: Option<&Vec<usize>>,
@@ -144,6 +225,10 @@ impl BeaconTable {
         }
     }
 
+    /// Resolves a relative file path against the table directory.
+    ///
+    /// If `relative_path` already starts with the table directory prefix, it is
+    /// used as-is. Otherwise the table directory is prepended.
     fn resolve_table_path(&self, relative_path: &str) -> object_store::path::Path {
         let relative_path = relative_path.trim_start_matches('/');
         let table_directory = self.table_directory.as_ref();
@@ -155,6 +240,7 @@ impl BeaconTable {
         }
     }
 
+    /// Fetches object metadata (size, last-modified, etc.) for a path.
     async fn object_meta(
         &self,
         path: &object_store::path::Path,
@@ -166,6 +252,7 @@ impl BeaconTable {
         })
     }
 
+    /// Creates a [`DataSourceExec`] plan that reads a single Parquet file.
     async fn create_parquet_scan(
         &self,
         _state: &dyn Session,
@@ -187,6 +274,7 @@ impl BeaconTable {
         Ok(DataSourceExec::from_data_source(scan_config))
     }
 
+    /// Creates a scan plan for a data Parquet file with optional projection.
     async fn create_data_scan(
         &self,
         state: &dyn Session,
@@ -199,6 +287,9 @@ impl BeaconTable {
             .await
     }
 
+    /// Creates a scan plan for a deletion vector Parquet file.
+    ///
+    /// Validates that the file contains exactly one boolean column.
     async fn create_deletion_vector_scan(
         &self,
         state: &dyn Session,
@@ -229,6 +320,10 @@ impl BeaconTable {
             .await
     }
 
+    /// Builds the full execution plan for a single [`DataFile`](manifest::DataFile).
+    ///
+    /// If the data file has no deletion vectors, returns a plain Parquet scan.
+    /// Deletion vector support is not yet implemented.
     async fn create_file_plan(
         &self,
         state: &dyn Session,
@@ -248,15 +343,74 @@ impl BeaconTable {
         not_impl_err!("deletion vector support is not yet implemented")
     }
 
+    /// Returns `true` if the table's mutation lock is currently held.
     pub fn is_locked(&self) -> bool {
         self.mutation_handle.try_lock().is_err()
     }
 
+    /// Generates a new unique path for a data file under `<table_dir>/data/<uuid>.parquet`.
     fn insert_path(&self) -> object_store::path::Path {
         let uuid = uuid::Uuid::new_v4();
         self.table_directory
             .child("data")
             .child(format!("{uuid}.parquet"))
+    }
+
+    /// Creates an execution plan that merges all existing data files into a single
+    /// parquet file, updates the manifest, and deletes the old files.
+    pub async fn vacuum(
+        &self,
+        state: &dyn Session,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let manifest = self.manifest.lock().await.clone();
+        let schema = manifest.schema.clone();
+        let data_files_to_delete = manifest.data_files.clone();
+
+        // Scan all existing data
+        let scan = self.scan(state, None, &[], None).await?;
+
+        // Coalesce to single partition for writing
+        let coalesced: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(scan));
+
+        // Create output path and parquet sink
+        let new_path = self.insert_path();
+        let original_url = format!("{}{}", self.store_url, new_path);
+        let parsed_url = ListingTableUrl::parse(&original_url)?;
+
+        let sink_config = FileSinkConfig {
+            original_url: original_url.clone(),
+            object_store_url: self.store_url.clone(),
+            file_group: FileGroup::default(),
+            table_paths: vec![parsed_url],
+            output_schema: schema,
+            table_partition_cols: vec![],
+            insert_op: InsertOp::Append,
+            keep_partition_by_columns: false,
+            file_extension: "parquet".to_string(),
+        };
+
+        let sink = Arc::new(ParquetSink::new(
+            sink_config,
+            TableParquetOptions::default(),
+        ));
+
+        let output_file = DataFile {
+            parquet_file: new_path.to_string(),
+            deletion_vector_files: vec![],
+        };
+
+        let vacuum_exec = VacuumExec::new(
+            self.store.clone(),
+            self.manifest_path.clone(),
+            self.mutation_handle.clone(),
+            self.manifest.clone(),
+            data_files_to_delete,
+            output_file,
+            sink,
+            coalesced,
+        );
+
+        Ok(Arc::new(vacuum_exec))
     }
 }
 
@@ -386,5 +540,389 @@ impl TableProvider for BeaconTable {
         let sink_exec = DataSinkExec::new(input, Arc::new(insert_sink), None);
 
         Ok(Arc::new(sink_exec))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Float64Array, Int64Array, StringArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::catalog::memory::MemorySourceConfig;
+    use datafusion::physical_plan::collect;
+    use datafusion::prelude::SessionContext;
+    use object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    fn test_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]))
+    }
+
+    fn test_batch(ids: &[i64], names: &[&str], values: &[f64]) -> RecordBatch {
+        RecordBatch::try_new(
+            test_schema(),
+            vec![
+                Arc::new(Int64Array::from(ids.to_vec())),
+                Arc::new(StringArray::from(
+                    names.iter().map(|s| *s).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(values.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    async fn setup() -> (Arc<InMemory>, SessionContext, BeaconTable) {
+        let store = Arc::new(InMemory::new());
+        let ctx = SessionContext::new();
+        let store_url = ObjectStoreUrl::parse("memory://").unwrap();
+        ctx.runtime_env()
+            .register_object_store(store_url.as_ref(), store.clone());
+
+        let table = BeaconTable::new(
+            store.clone(),
+            store_url,
+            "test_table".to_string(),
+            object_store::path::Path::from("test_table"),
+            Some(test_schema()),
+        )
+        .await
+        .unwrap();
+
+        (store, ctx, table)
+    }
+
+    async fn insert_batch(ctx: &SessionContext, table: &BeaconTable, batch: RecordBatch) -> u64 {
+        let state = ctx.state();
+        let mem_exec =
+            MemorySourceConfig::try_new_exec(&[vec![batch]], test_schema(), None).unwrap();
+
+        let plan = table
+            .insert_into(&state, mem_exec, InsertOp::Append)
+            .await
+            .unwrap();
+
+        let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+        // DataSinkExec returns a single batch with count column
+        let count_array = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        count_array.value(0)
+    }
+
+    async fn collect_scan(ctx: &SessionContext, table: &BeaconTable) -> Vec<RecordBatch> {
+        let state = ctx.state();
+        let plan = table.scan(&state, None, &[], None).await.unwrap();
+        collect(plan, ctx.task_ctx()).await.unwrap()
+    }
+
+    fn total_rows(batches: &[RecordBatch]) -> usize {
+        batches.iter().map(|b| b.num_rows()).sum()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_create_empty_table() {
+        let (_store, ctx, table) = setup().await;
+        assert_eq!(table.schema(), test_schema());
+        assert_eq!(table.table_type(), TableType::Base);
+
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_insert_and_scan() {
+        let (_store, ctx, table) = setup().await;
+        let batch = test_batch(&[1, 2, 3], &["a", "b", "c"], &[1.0, 2.0, 3.0]);
+
+        let rows = insert_batch(&ctx, &table, batch).await;
+        assert_eq!(rows, 3);
+
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multiple_inserts() {
+        let (_store, ctx, table) = setup().await;
+
+        let batch1 = test_batch(&[1, 2], &["a", "b"], &[1.0, 2.0]);
+        let batch2 = test_batch(&[3, 4, 5], &["c", "d", "e"], &[3.0, 4.0, 5.0]);
+
+        insert_batch(&ctx, &table, batch1).await;
+        insert_batch(&ctx, &table, batch2).await;
+
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 5);
+
+        // Manifest should have 2 data files
+        let manifest = table.manifest.lock().await;
+        assert_eq!(manifest.data_files.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_scan_with_projection() {
+        let (_store, ctx, table) = setup().await;
+        let batch = test_batch(&[1, 2], &["a", "b"], &[10.0, 20.0]);
+        insert_batch(&ctx, &table, batch).await;
+
+        let state = ctx.state();
+        let projection = vec![0_usize, 2]; // id + value only
+        let plan = table
+            .scan(&state, Some(&projection), &[], None)
+            .await
+            .unwrap();
+        let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+
+        assert_eq!(batches[0].num_columns(), 2);
+        assert_eq!(batches[0].schema().field(0).name(), "id");
+        assert_eq!(batches[0].schema().field(1).name(), "value");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_scan_with_limit() {
+        let (_store, ctx, table) = setup().await;
+        let batch = test_batch(
+            &[1, 2, 3, 4, 5],
+            &["a", "b", "c", "d", "e"],
+            &[1.0, 2.0, 3.0, 4.0, 5.0],
+        );
+        insert_batch(&ctx, &table, batch).await;
+
+        let state = ctx.state();
+        let plan = table.scan(&state, None, &[], Some(2)).await.unwrap();
+        let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+
+        assert_eq!(total_rows(&batches), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_insert_schema_mismatch() {
+        let (_store, ctx, table) = setup().await;
+        let wrong_schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            wrong_schema.clone(),
+            vec![Arc::new(arrow::array::Int32Array::from(vec![1]))],
+        )
+        .unwrap();
+
+        let state = ctx.state();
+        let mem_exec =
+            MemorySourceConfig::try_new_exec(&[vec![batch]], wrong_schema, None).unwrap();
+
+        let result = table.insert_into(&state, mem_exec, InsertOp::Append).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("does not match table schema")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_insert_overwrite_rejected() {
+        let (_store, ctx, table) = setup().await;
+        let batch = test_batch(&[1], &["a"], &[1.0]);
+
+        let state = ctx.state();
+        let mem_exec =
+            MemorySourceConfig::try_new_exec(&[vec![batch]], test_schema(), None).unwrap();
+
+        let result = table
+            .insert_into(&state, mem_exec, InsertOp::Overwrite)
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("only append insert operations are supported")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_vacuum_merges_files() {
+        let (_store, ctx, table) = setup().await;
+
+        // Insert 3 separate batches → 3 data files
+        insert_batch(&ctx, &table, test_batch(&[1, 2], &["a", "b"], &[1.0, 2.0])).await;
+        insert_batch(&ctx, &table, test_batch(&[3, 4], &["c", "d"], &[3.0, 4.0])).await;
+        insert_batch(&ctx, &table, test_batch(&[5], &["e"], &[5.0])).await;
+
+        {
+            let manifest = table.manifest.lock().await;
+            assert_eq!(manifest.data_files.len(), 3);
+        }
+
+        // Vacuum
+        let state = ctx.state();
+        let vacuum_plan = table.vacuum(&state).await.unwrap();
+        let result_batches = collect(vacuum_plan, ctx.task_ctx()).await.unwrap();
+
+        // VacuumExec returns count of rows
+        let count = result_batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 5);
+
+        // Manifest should now have exactly 1 data file
+        {
+            let manifest = table.manifest.lock().await;
+            assert_eq!(manifest.data_files.len(), 1);
+        }
+
+        // All data still readable
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_vacuum_empty_table() {
+        let (_store, ctx, table) = setup().await;
+
+        let state = ctx.state();
+        let vacuum_plan = table.vacuum(&state).await.unwrap();
+        let result_batches = collect(vacuum_plan, ctx.task_ctx()).await.unwrap();
+
+        let count = result_batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 0);
+
+        let manifest = table.manifest.lock().await;
+        assert_eq!(manifest.data_files.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_insert_after_vacuum() {
+        let (_store, ctx, table) = setup().await;
+
+        insert_batch(&ctx, &table, test_batch(&[1, 2], &["a", "b"], &[1.0, 2.0])).await;
+        insert_batch(&ctx, &table, test_batch(&[3], &["c"], &[3.0])).await;
+
+        // Vacuum
+        let state = ctx.state();
+        let vacuum_plan = table.vacuum(&state).await.unwrap();
+        collect(vacuum_plan, ctx.task_ctx()).await.unwrap();
+
+        // Insert more after vacuum
+        insert_batch(&ctx, &table, test_batch(&[4, 5], &["d", "e"], &[4.0, 5.0])).await;
+
+        let manifest = table.manifest.lock().await;
+        assert_eq!(manifest.data_files.len(), 2); // 1 vacuumed + 1 new
+
+        drop(manifest);
+        let batches = collect_scan(&ctx, &table).await;
+        assert_eq!(total_rows(&batches), 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_is_locked() {
+        let (_store, _ctx, table) = setup().await;
+        // Not locked initially
+        assert!(!table.is_locked());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_manifest_persisted() {
+        let (store, ctx, table) = setup().await;
+        let batch = test_batch(&[1, 2, 3], &["a", "b", "c"], &[1.0, 2.0, 3.0]);
+        insert_batch(&ctx, &table, batch).await;
+
+        // Load manifest from store directly
+        let loaded = manifest::load_table_manifest(
+            store.clone(),
+            &object_store::path::Path::from("test_table/manifest.json"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(loaded.data_files.len(), 1);
+        assert_eq!(loaded.schema, test_schema());
+        assert_eq!(loaded.schema_version, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_vacuum_deletes_old_files() {
+        let (store, ctx, table) = setup().await;
+
+        insert_batch(&ctx, &table, test_batch(&[1], &["a"], &[1.0])).await;
+        insert_batch(&ctx, &table, test_batch(&[2], &["b"], &[2.0])).await;
+
+        // Record old file paths
+        let old_paths: Vec<String> = {
+            let manifest = table.manifest.lock().await;
+            manifest
+                .data_files
+                .iter()
+                .map(|f| f.parquet_file.clone())
+                .collect()
+        };
+        assert_eq!(old_paths.len(), 2);
+
+        // Verify old files exist
+        for path in &old_paths {
+            let p = object_store::path::Path::from(path.as_str());
+            assert!(store.head(&p).await.is_ok());
+        }
+
+        // Vacuum
+        let state = ctx.state();
+        let vacuum_plan = table.vacuum(&state).await.unwrap();
+        collect(vacuum_plan, ctx.task_ctx()).await.unwrap();
+
+        // Old files should be deleted
+        for path in &old_paths {
+            let p = object_store::path::Path::from(path.as_str());
+            assert!(store.head(&p).await.is_err());
+        }
+
+        // New file should exist
+        let manifest = table.manifest.lock().await;
+        assert_eq!(manifest.data_files.len(), 1);
+        let new_path = object_store::path::Path::from(manifest.data_files[0].parquet_file.as_str());
+        assert!(store.head(&new_path).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_table_reload_from_existing_manifest() {
+        let (store, ctx, _table) = setup().await;
+
+        // Insert via first table handle
+        let batch = test_batch(&[10, 20], &["x", "y"], &[100.0, 200.0]);
+        insert_batch(&ctx, &_table, batch).await;
+
+        // Create new table handle pointing to same directory
+        let store_url = ObjectStoreUrl::parse("memory://").unwrap();
+        let table2 = BeaconTable::new(
+            store.clone(),
+            store_url,
+            "test_table".to_string(),
+            object_store::path::Path::from("test_table"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(table2.schema(), test_schema());
+
+        let batches = collect_scan(&ctx, &table2).await;
+        assert_eq!(total_rows(&batches), 2);
     }
 }

@@ -1,3 +1,11 @@
+//! Append execution plan for combining multiple single-partition inputs.
+//!
+//! Provides [`AppendExec`], a DataFusion [`ExecutionPlan`] that sequentially
+//! concatenates the output of multiple child plans into a single output
+//! partition. Unlike DataFusion's built-in `UnionExec`, `AppendExec` requires
+//! each child to already have exactly one partition, producing a single
+//! sequential stream that preserves per-child row ordering.
+
 use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,14 +23,34 @@ use datafusion::physical_plan::{
 };
 use futures::{Stream, StreamExt};
 
+/// A physical execution plan that sequentially appends multiple single-partition
+/// inputs into one output stream.
+///
+/// Each child plan must produce exactly one partition. The output is a single
+/// partition that yields all batches from the first child, then all batches
+/// from the second child, and so on.
+///
+/// This is used when scanning a Beacon table with multiple data files: each
+/// file produces a single-partition scan, and `AppendExec` concatenates them.
 #[derive(Debug)]
 pub struct AppendExec {
+    /// The child execution plans to concatenate.
     inputs: Vec<Arc<dyn ExecutionPlan>>,
+    /// Cached plan properties (single partition, incremental, bounded).
     props: PlanProperties,
+    /// The shared output schema (must be identical across all children).
     schema: SchemaRef,
 }
 
 impl AppendExec {
+    /// Creates a new `AppendExec` from a list of child execution plans.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `inputs` is empty.
+    /// - Any child has a different schema than the first.
+    /// - Any child has more than one output partition.
     pub fn try_new(inputs: Vec<Arc<dyn ExecutionPlan>>) -> Result<Self> {
         if inputs.is_empty() {
             return internal_err!("AppendExec requires at least one input");
@@ -133,9 +161,16 @@ impl ExecutionPlan for AppendExec {
     }
 }
 
+/// Internal stream that sequentially drains multiple [`SendableRecordBatchStream`]s.
+///
+/// Polls the current stream until it is exhausted, then advances to the next.
+/// Once all streams have been consumed, the stream terminates.
 struct AppendNStream {
+    /// Schema of the output batches (retained for trait compliance).
     schema: SchemaRef,
+    /// The child streams to drain in order.
     streams: Vec<SendableRecordBatchStream>,
+    /// Index of the stream currently being polled.
     current: usize,
 }
 

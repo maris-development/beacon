@@ -1,3 +1,10 @@
+//! Insert execution for Beacon tables.
+//!
+//! Provides [`InsertSink`], a DataFusion [`DataSink`] implementation that writes
+//! incoming record batches to a new Parquet file and atomically updates the table
+//! manifest. Concurrency is controlled via a mutation lock and optimistic
+//! schema-version checking.
+
 use std::{any::Any, fmt::Formatter, sync::Arc};
 
 use arrow_schema::SchemaRef;
@@ -11,18 +18,51 @@ use tokio::sync::Mutex;
 
 use crate::manifest::{self, DataFile};
 
+/// A [`DataSink`] that appends data to a Beacon table.
+///
+/// `InsertSink` wraps an inner Parquet sink and adds manifest management on top.
+/// When [`write_all`](DataSink::write_all) is called it:
+///
+/// 1. Acquires the table-level mutation lock to serialize concurrent writes.
+/// 2. Validates that the manifest `schema_version` has not changed since the
+///    sink was created (optimistic concurrency check).
+/// 3. Delegates the actual Parquet write to the inner `parquet_sink`.
+/// 4. On success, appends the new [`DataFile`] to the manifest and flushes it
+///    to the object store.
 #[derive(Debug)]
 pub struct InsertSink {
+    /// Object store used for manifest persistence.
     store: Arc<dyn ObjectStore>,
+    /// Path to the `manifest.json` file in the object store.
     manifest_path: object_store::path::Path,
+    /// Table-level mutex that serializes all mutating operations.
     mutation_handle: Arc<Mutex<()>>,
+    /// Shared handle to the in-memory manifest, protected by a mutex.
     manifest_handle: Arc<Mutex<manifest::TableManifest>>,
+    /// Snapshot of the manifest captured at sink creation time, used for
+    /// optimistic concurrency detection.
     initial_manifest: manifest::TableManifest,
-    data_file: DataFile, // The new data file being written to by this insert operation. This should be added to the manifest once the insert is complete.
+    /// Metadata for the new Parquet file being written by this insert.
+    data_file: DataFile,
+    /// The underlying Parquet sink that performs the actual file write.
     parquet_sink: Arc<dyn DataSink>,
 }
 
 impl InsertSink {
+    /// Creates a new `InsertSink`.
+    ///
+    /// Captures a snapshot of the current manifest state for later concurrency
+    /// validation. This uses [`tokio::task::block_in_place`] to synchronously
+    /// lock the manifest, so it must be called from a multi-threaded Tokio runtime.
+    ///
+    /// # Parameters
+    ///
+    /// * `store` - Object store for manifest persistence.
+    /// * `manifest_path` - Path to the `manifest.json` file.
+    /// * `mutation_handle` - Shared mutex for serializing mutations.
+    /// * `manifest_handle` - Shared handle to the in-memory manifest.
+    /// * `data_file` - Metadata for the new Parquet file to be written.
+    /// * `parquet_sink` - The underlying Parquet sink for the actual write.
     pub fn new(
         store: Arc<dyn ObjectStore>,
         manifest_path: object_store::path::Path,
@@ -44,7 +84,10 @@ impl InsertSink {
         }
     }
 
-    /// Get the initial manifest state at the time of sink creation. This is used to determine which files were added during the insert operation.
+    /// Returns the manifest state captured when this sink was created.
+    ///
+    /// Useful for determining which files were added during the insert operation
+    /// by comparing against the current manifest.
     pub fn initial_manifest(&self) -> manifest::TableManifest {
         self.initial_manifest.clone()
     }
