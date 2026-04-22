@@ -14,10 +14,11 @@ pub fn parse_listing_table_url(
     let (path, glob_pattern) = split_path_and_glob(glob_path);
     let mut full_path = data_directory_store_url.to_string();
     if path.components().next().is_some() {
+        let normalized_path = path.as_os_str().to_string_lossy().replace('\\', "/");
         if full_path.ends_with('/') {
-            full_path.push_str(format!("{}", path.as_os_str().to_string_lossy()).as_str());
+            full_path.push_str(normalized_path.as_str());
         } else {
-            full_path.push_str(format!("/{}", path.as_os_str().to_string_lossy()).as_str());
+            full_path.push_str(format!("/{}", normalized_path).as_str());
         }
     }
 
@@ -64,9 +65,9 @@ pub fn split_path_and_glob(input: &str) -> (PathBuf, Option<String>) {
         let base = if i == 0 {
             PathBuf::from(".")
         } else {
-            PathBuf::from(parts[..i].join(std::path::MAIN_SEPARATOR_STR))
+            PathBuf::from(parts[..i].join("/"))
         };
-        let glob = parts[i..].join(std::path::MAIN_SEPARATOR_STR);
+        let glob = parts[i..].join("/");
         (base, Some(glob))
     } else {
         // No glob pattern at all
@@ -98,7 +99,7 @@ mod tests {
     fn test_recursive_glob() {
         let (base, glob) = split_path_and_glob("src/**/*.rs");
         assert_eq!(base, PathBuf::from("src"));
-        assert_eq!(glob, Some(format!("**{}*.rs", std::path::MAIN_SEPARATOR)));
+        assert_eq!(glob, Some("**/*.rs".to_string()));
     }
 
     #[test]
@@ -129,7 +130,7 @@ mod tests {
         let input = format!("dir{}**{}*.txt", MAIN_SEPARATOR, MAIN_SEPARATOR);
         let (base, glob) = split_path_and_glob(&input);
         assert_eq!(base, PathBuf::from("dir"));
-        assert_eq!(glob, Some(format!("**{}*.txt", MAIN_SEPARATOR)));
+        assert_eq!(glob, Some("**/*.txt".to_string()));
     }
 
     #[test]
@@ -154,6 +155,20 @@ mod tests {
         assert!(dbg.contains("/subdir/"), "dbg={}", dbg);
         // pattern should be present in debug output
         assert!(dbg.contains("*.json"), "dbg={}", dbg);
+    }
+
+    #[test]
+    fn test_parse_listing_table_url_with_parent_dir_and_glob() {
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let store_url: ObjectStoreUrl = ObjectStoreUrl::parse("datasets://").unwrap();
+        let url = parse_listing_table_url(&store_url, "argo-floats/pub/**/*.nc").unwrap();
+
+        assert_eq!(url.prefix().to_string(), "argo-floats/pub");
+        assert_eq!(
+            url.get_glob().as_ref().map(glob::Pattern::as_str),
+            Some("**/*.nc")
+        );
     }
 
     #[test]

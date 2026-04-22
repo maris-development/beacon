@@ -92,6 +92,12 @@ impl NetCDFArrowReader {
             }
         }
 
+        // Order the schema fields and arrays according to their name.
+        let mut combined: Vec<(Field, Arc<dyn NdArrowArray>)> =
+            file_schema_fields.into_iter().zip(file_arrays).collect();
+        combined.sort_by(|(f1, _), (f2, _)| f1.name().cmp(f2.name()));
+        let (file_schema_fields, file_arrays): (Vec<_>, Vec<_>) = combined.into_iter().unzip();
+
         let file_schema = Arc::new(Schema::new(file_schema_fields));
 
         Ok(Self {
@@ -142,13 +148,13 @@ impl NetCDFArrowReader {
             dimensions.iter().map(String::as_str).collect();
 
         // Collect the names of variables that have at least one requested dimension.
-        let kept_variables: std::collections::HashSet<String> = self
+        let kept_variables: Vec<String> = self
             .file
             .variables()
             .filter(|var| {
                 var.dimensions()
                     .iter()
-                    .any(|d| dimension_set.contains(d.name().as_str()))
+                    .all(|d| dimension_set.contains(d.name().as_str()))
             })
             .map(|var| var.name().to_string())
             .collect();
@@ -169,6 +175,20 @@ impl NetCDFArrowReader {
                 field_name == var_name || field_name.starts_with(&format!("{var_name}."))
             });
             if belongs {
+                new_fields.push(field.clone());
+                new_arrays.push(array.clone());
+            }
+        }
+        // It should also keep global attributes that are not associated with any variable
+        for (field, array) in self
+            .file_schema
+            .fields()
+            .iter()
+            .zip(self.file_arrays.iter())
+        {
+            let field_name = field.name().as_str();
+            let is_global_attr = !field_name.contains('.');
+            if is_global_attr {
                 new_fields.push(field.clone());
                 new_arrays.push(array.clone());
             }
@@ -1221,5 +1241,19 @@ mod tests {
         let reader = NetCDFArrowReader::new(Path::new(path)).unwrap();
         let columns = reader.read_columns::<Vec<_>>(None).unwrap();
         assert!(!columns.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires network access"]
+    fn test_remote_argo_read_all_columns_should_have_same_schema() {
+        let path = "https://s3.eu-west-3.amazonaws.com/argo-gdac-sandbox/pub/dac/aoml/13857/13857_prof.nc#mode=bytes";
+        let reader = NetCDFArrowReader::new(Path::new(path)).unwrap();
+        let schema = reader.schema();
+        let reader_2 = NetCDFArrowReader::new(Path::new(path)).unwrap();
+        let schema_2 = reader_2.schema();
+        assert_eq!(
+            schema, schema_2,
+            "schemas from two readers on the same file should match"
+        );
     }
 }

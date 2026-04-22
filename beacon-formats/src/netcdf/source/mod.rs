@@ -39,6 +39,8 @@ pub struct NetCDFFileSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     /// Projected statistics.
     projected_statistics: Option<Statistics>,
+    /// Optional dimensions to read (used for schema inference when we only want dimension variables).
+    read_dimensions: Option<Vec<String>>,
 }
 
 impl NetCDFFileSource {
@@ -47,13 +49,17 @@ impl NetCDFFileSource {
     /// The `object_resolver` determines how an `ObjectMeta` location is turned
     /// into a concrete path that `netcdf::open` can handle (local path or
     /// remote URL).
-    pub fn new(datasets_object_store: Arc<DatasetsStore>) -> Self {
+    pub fn new(
+        datasets_object_store: Arc<DatasetsStore>,
+        read_dimensions: Option<Vec<String>>,
+    ) -> Self {
         Self {
             datasets_object_store,
             override_schema: None,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projected_statistics: None,
             schema_adapter_factory: None,
+            read_dimensions,
         }
     }
 }
@@ -81,6 +87,7 @@ impl FileSource for NetCDFFileSource {
         Arc::new(DefaultFileOpener::new(
             self.datasets_object_store.clone(),
             arc_schema_adapter,
+            self.read_dimensions.clone(),
         ))
     }
 
@@ -208,16 +215,18 @@ struct ReaderCacheKey {
 pub async fn fetch_schema(
     datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
+    dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
-    fetch_schema_with_read_mode(datasets_object_store, object).await
+    fetch_schema_with_read_mode(datasets_object_store, object, dimensions).await
 }
 
 pub async fn fetch_schema_with_read_mode(
     datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
+    dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
     // First try to get the schema from the cache.
-    let cached_schema = if beacon_config::CONFIG.netcdf.use_schema_cache {
+    let cached_schema = if beacon_config::CONFIG.netcdf.use_schema_cache && dimensions.is_none() {
         schema_cache::get_schema_from_cache(&object).await
     } else {
         None
@@ -226,10 +235,14 @@ pub async fn fetch_schema_with_read_mode(
     if let Some(schema) = cached_schema {
         Ok(schema)
     } else {
-        let reader = open_reader(datasets_object_store.clone(), object.clone())?;
+        let reader = open_reader(
+            datasets_object_store.clone(),
+            object.clone(),
+            dimensions.clone(),
+        )?;
         let schema = reader.schema();
         // Insert the schema into the cache for future use
-        if beacon_config::CONFIG.netcdf.use_schema_cache {
+        if beacon_config::CONFIG.netcdf.use_schema_cache && dimensions.is_none() {
             schema_cache::insert_schema_into_cache(&object, schema.clone()).await;
         }
 
@@ -246,6 +259,7 @@ pub async fn fetch_schema_with_read_mode(
 pub fn open_reader(
     datasets_object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
+    dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<Arc<NetCDFArrowReader>> {
     if beacon_config::CONFIG.netcdf.use_reader_cache {
         let key = ReaderCacheKey {
@@ -272,6 +286,19 @@ pub fn open_reader(
             e
         ))
     })?;
+
+    // If dimensions are provided, apply them to the reader to limit which variables are read. This is used for schema inference when we only want to read dimension variables.
+    let reader = if let Some(dims) = dimensions {
+        reader.project_with_dimensions(&dims).map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to project NetCDF reader with dimensions {:?}: {}",
+                dims, e
+            ))
+        })?
+    } else {
+        reader
+    };
+
     let reader = Arc::new(reader);
     if beacon_config::CONFIG.netcdf.use_reader_cache {
         let key = ReaderCacheKey {
@@ -291,16 +318,20 @@ pub struct DefaultFileOpener {
     datasets_object_store: Arc<DatasetsStore>,
     /// Schema adapter for mapping NetCDF schema to Arrow schema.
     schema_adapter: Arc<dyn SchemaAdapter>,
+    /// Optional dimensions to read (used for schema inference when we only want dimension variables).
+    dimensions: Option<Vec<String>>,
 }
 
 impl DefaultFileOpener {
     pub fn new(
         datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
+        dimensions: Option<Vec<String>>,
     ) -> Self {
         Self {
             datasets_object_store,
             schema_adapter,
+            dimensions,
         }
     }
 }
@@ -310,9 +341,10 @@ impl DefaultFileOpener {
         object: ObjectMeta,
         datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
+        dimensions: Option<Vec<String>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         // Use the local (cached) NetCDF reader.
-        let mut reader = open_reader(datasets_object_store, object.clone())?;
+        let mut reader = open_reader(datasets_object_store, object.clone(), dimensions.clone())?;
         let file_schema = reader.schema();
         let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
         if !projection.is_empty() {
@@ -377,6 +409,7 @@ impl FileOpener for DefaultFileOpener {
             file_meta.object_meta,
             self.datasets_object_store.clone(),
             self.schema_adapter.clone(),
+            self.dimensions.clone(),
         )
         .boxed();
         Ok(stream)
@@ -435,12 +468,12 @@ mod tests {
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let s1 = fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone())
+        let s1 = fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone(), None)
             .await
             .expect("schema");
         assert!(!s1.fields().is_empty());
 
-        let s2 = fetch_schema_with_read_mode(datasets_object_store.clone(), obj)
+        let s2 = fetch_schema_with_read_mode(datasets_object_store.clone(), obj, None)
             .await
             .expect("schema 2");
         assert_eq!(s1.fields().len(), s2.fields().len());
@@ -452,7 +485,7 @@ mod tests {
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let reader = open_reader(datasets_object_store, obj).expect("reader");
+        let reader = open_reader(datasets_object_store, obj, None).expect("reader");
         let schema = reader.schema();
         assert!(!schema.fields().is_empty());
     }
@@ -463,9 +496,10 @@ mod tests {
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let table_schema = fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone())
-            .await
-            .expect("schema");
+        let table_schema =
+            fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone(), None)
+                .await
+                .expect("schema");
         let analysed_sst_index = table_schema
             .fields()
             .iter()
@@ -477,7 +511,7 @@ mod tests {
             table_schema,
         );
 
-        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter));
+        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter), None);
 
         let file_meta = FileMeta {
             object_meta: obj,
@@ -506,9 +540,10 @@ mod tests {
         let datasets_object_store = test_datasets_object_store().await;
         let obj = test_object_meta();
 
-        let table_schema = fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone())
-            .await
-            .expect("schema");
+        let table_schema =
+            fetch_schema_with_read_mode(datasets_object_store.clone(), obj.clone(), None)
+                .await
+                .expect("schema");
         assert!(!table_schema.fields().is_empty());
 
         // Table schema should only contain projected columns.
@@ -518,7 +553,7 @@ mod tests {
         let schema_adapter_factory = DefaultSchemaAdapterFactory;
         let schema_adapter =
             schema_adapter_factory.create(table_schema.clone(), table_schema.clone());
-        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter));
+        let opener = DefaultFileOpener::new(datasets_object_store, Arc::from(schema_adapter), None);
 
         let file_meta = FileMeta {
             object_meta: obj,

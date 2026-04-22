@@ -31,8 +31,10 @@ use crate::{append_exec::AppendExec, insert_exec::InsertSink, manifest::DataFile
 
 mod append_exec;
 mod deletion_vector_exec;
+mod index;
 mod insert_exec;
 mod manifest;
+mod vacuum;
 
 fn execution_error(message: impl Into<String>) -> datafusion::error::DataFusionError {
     datafusion::error::DataFusionError::Execution(message.into())
@@ -104,6 +106,7 @@ impl BeaconTable {
                 schema: schema.unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty())),
                 schema_version: 1,
                 data_files: vec![],
+                z_order_index: None,
             };
 
             // Flush the initial manifest to ensure it exists for future readers and writers.
@@ -243,19 +246,6 @@ impl BeaconTable {
         }
 
         not_impl_err!("deletion vector support is not yet implemented")
-        // let mut deletion_vector_scans = Vec::with_capacity(data_file.deletion_vector_files.len());
-        // for deletion_vector_file in &data_file.deletion_vector_files {
-        //     let deletion_vector_path = self.resolve_table_path(deletion_vector_file);
-        //     deletion_vector_scans.push(
-        //         self.create_deletion_vector_scan(state, &deletion_vector_path)
-        //             .await?,
-        //     );
-        // }
-
-        // Ok(Arc::new(DeletionVectorExec::try_new(
-        //     data_scan,
-        //     deletion_vector_scans,
-        // )?))
     }
 
     pub fn is_locked(&self) -> bool {

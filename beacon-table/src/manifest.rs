@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 
+use crate::index::IndexType;
+
 pub type ManifestRef = Arc<TableManifest>;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -9,6 +11,8 @@ pub(crate) struct TableManifest {
     pub(crate) schema: arrow::datatypes::SchemaRef,
     pub(crate) schema_version: u64,
     pub(crate) data_files: Vec<DataFile>,
+    #[serde(default)]
+    pub(crate) z_order_index: Option<IndexType>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -122,6 +122,7 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 pub struct NetcdfFormat {
     pub datasets_object_store: Arc<DatasetsStore>,
     pub options: NetcdfOptions,
+    pub read_dimensions: Option<Vec<String>>,
 }
 
 impl NetcdfFormat {
@@ -129,6 +130,19 @@ impl NetcdfFormat {
         Self {
             datasets_object_store,
             options,
+            read_dimensions: None,
+        }
+    }
+
+    pub fn new_with_dimensions(
+        datasets_object_store: Arc<DatasetsStore>,
+        options: NetcdfOptions,
+        dimensions: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            datasets_object_store,
+            options,
+            read_dimensions: dimensions,
         }
     }
 }
@@ -162,7 +176,11 @@ impl FileFormat for NetcdfFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         let mut tasks = vec![];
         for object in objects {
-            let schema_task = fetch_schema(self.datasets_object_store.clone(), object.clone());
+            let schema_task = fetch_schema(
+                self.datasets_object_store.clone(),
+                object.clone(),
+                self.read_dimensions.clone(),
+            );
             tasks.push(schema_task);
         }
         let schemas = futures::future::try_join_all(tasks).await?;
@@ -196,7 +214,10 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let source = NetCDFFileSource::new(self.datasets_object_store.clone());
+        let source = NetCDFFileSource::new(
+            self.datasets_object_store.clone(),
+            self.read_dimensions.clone(),
+        );
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -254,6 +275,9 @@ impl FileFormat for NetcdfFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(NetCDFFileSource::new(self.datasets_object_store.clone()))
+        Arc::new(NetCDFFileSource::new(
+            self.datasets_object_store.clone(),
+            self.read_dimensions.clone(),
+        ))
     }
 }

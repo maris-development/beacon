@@ -92,7 +92,7 @@ fn setup_tracing() {
             // built-in extractors with the `axum::rejection` target at `TRACE` level.
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 format!(
-                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug,beacon_common=debug,beacon_table=debug",
+                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug,beacon_common=debug,beacon_table=debug,beacon_functions=debug",
                     env!("CARGO_CRATE_NAME")
                 )
                 .into()
