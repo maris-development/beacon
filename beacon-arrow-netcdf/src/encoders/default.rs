@@ -16,7 +16,7 @@ use super::{Encoder, EncoderError};
 /// Default encoder mapping common Arrow scalar arrays into NetCDF variables.
 pub struct DefaultEncoder {
     nc_file: FileMut,
-    schema: SchemaRef,
+    _schema: SchemaRef,
     offsets: HashMap<String, usize>,
 }
 
@@ -159,22 +159,10 @@ impl DefaultEncoder {
                 extents.push(0..*size as usize);
 
                 let byte_slice = array.value_data();
-                //We can transmute the byte slice to FixedSizeString as they have the same memory layout (1 ubyte) & repr(transparent)
-                let fixed_size_string = unsafe {
-                    std::slice::from_raw_parts(
-                        byte_slice.as_ptr() as *const NcChar,
-                        byte_slice.len(),
-                    )
-                };
-                // println!("Byte slice: {:?}", byte_slice.len());
 
                 let view = ArrayView::from_shape((1_000_000, 5), byte_slice).unwrap();
-                // println!("View: {:?}", view.len());
-                // println!("Extents: {:?}", extents);
 
                 variable.put(view, extents).unwrap();
-                // variable.put_values::<NcChar, _>(fixed_size_string, extents)?;
-                // std::mem::drop(fixed_size_string);
             }
             DataType::Utf8 => {
                 let string_array = array
@@ -289,7 +277,7 @@ impl Encoder for DefaultEncoder {
 
         Ok(Self {
             nc_file,
-            schema,
+            _schema: schema,
             offsets,
         })
     }

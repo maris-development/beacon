@@ -21,8 +21,6 @@ use netcdf::{types::NcVariableType, NcTypeDescriptor};
 
 /// Encoder implementations for writing Arrow values to NetCDF variables.
 pub mod encoders;
-/// Message types for MPIO command/response interoperability.
-pub mod mpio_utils;
 /// High-level NetCDF reader.
 pub mod reader;
 /// High-level NetCDF writer.

@@ -3,17 +3,8 @@
 //! A decoder receives a NetCDF variable plus read extents and returns an
 //! `ndarray::ArrayD<T>` in the target logical type.
 
-use std::{fmt::Debug, sync::Arc};
-
-use arrow::{
-    array::{make_array, ArrayRef, Datum, Scalar},
-    buffer::NullBuffer,
-};
 use beacon_nd_arrow::array::compat_typings::ArrowTypeConversion;
-use netcdf::{
-    types::{FloatType, IntType, NcVariableType},
-    Extents, NcTypeDescriptor,
-};
+use netcdf::{Extents, NcTypeDescriptor};
 
 /// Decoders for CF-style time units.
 pub mod cf_time;
@@ -23,7 +14,7 @@ pub mod strings;
 /// Generic NetCDF variable decoder.
 ///
 /// Implementations define how to read and convert variable values into `T`.
-pub trait VariableDecoder<T>: Debug + Send + Sync
+pub trait VariableDecoder<T>: std::fmt::Debug + Send + Sync
 where
     T: ArrowTypeConversion + NcTypeDescriptor,
 {
