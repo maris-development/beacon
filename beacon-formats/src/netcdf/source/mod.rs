@@ -241,6 +241,11 @@ pub async fn fetch_schema_with_read_mode(
             dimensions.clone(),
         )?;
         let schema = reader.schema();
+        println!(
+            "Inferred schema for object {}: {:?}",
+            object.location,
+            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+        );
         // Insert the schema into the cache for future use
         if beacon_config::CONFIG.netcdf.use_schema_cache && dimensions.is_none() {
             schema_cache::insert_schema_into_cache(&object, schema.clone()).await;
@@ -261,7 +266,12 @@ pub fn open_reader(
     object: ObjectMeta,
     dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<Arc<NetCDFArrowReader>> {
-    if beacon_config::CONFIG.netcdf.use_reader_cache {
+    tracing::debug!(
+        "Opening netcdf reader with dimensions: {:?} for object: {}",
+        dimensions,
+        object.location
+    );
+    if beacon_config::CONFIG.netcdf.use_reader_cache && dimensions.is_none() {
         let key = ReaderCacheKey {
             last_modified: object.last_modified,
             path: object.location.clone(),
@@ -288,25 +298,38 @@ pub fn open_reader(
     })?;
 
     // If dimensions are provided, apply them to the reader to limit which variables are read. This is used for schema inference when we only want to read dimension variables.
-    let reader = if let Some(dims) = dimensions {
-        reader.project_with_dimensions(&dims).map_err(|e| {
+    let reader = if let Some(dims) = &dimensions {
+        reader.project_with_dimensions(dims).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(
                 "Failed to project NetCDF reader with dimensions {:?}: {}",
                 dims, e
             ))
         })?
     } else {
+        println!(
+            "Opening reader without dimension projection for object: {}",
+            object.location
+        );
         reader
     };
 
     let reader = Arc::new(reader);
-    if beacon_config::CONFIG.netcdf.use_reader_cache {
+    if beacon_config::CONFIG.netcdf.use_reader_cache && dimensions.is_none() {
         let key = ReaderCacheKey {
             last_modified: object.last_modified,
             path: object.location.clone(),
         };
         READER_CACHE.lock().put(key, reader.clone());
     }
+    println!(
+        "Returned Schema: {:?}",
+        reader
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect::<Vec<_>>()
+    );
     Ok(reader)
 }
 

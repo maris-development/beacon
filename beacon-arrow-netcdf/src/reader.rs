@@ -100,6 +100,8 @@ impl NetCDFArrowReader {
 
         let file_schema = Arc::new(Schema::new(file_schema_fields));
 
+        println!("Opened NetCDF file '{}'", path.as_ref().display(),);
+
         Ok(Self {
             file_name: path.as_ref().to_string_lossy().to_string(),
             file_schema,
@@ -159,6 +161,8 @@ impl NetCDFArrowReader {
             .map(|var| var.name().to_string())
             .collect();
 
+        tracing::debug!("Kept variables: {:?}", kept_variables);
+
         // Keep each field (and its parallel array) that either IS a kept variable
         // or is an attribute of one (named "variable_name.attribute_name").
         let mut new_fields = Vec::new();
@@ -187,8 +191,7 @@ impl NetCDFArrowReader {
             .zip(self.file_arrays.iter())
         {
             let field_name = field.name().as_str();
-            let is_global_attr = !field_name.contains('.');
-            if is_global_attr {
+            if field_name.starts_with('.') {
                 new_fields.push(field.clone());
                 new_arrays.push(array.clone());
             }
@@ -258,10 +261,14 @@ impl NetCDFArrowReader {
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<arrow::record_batch::RecordBatch>>> {
         // Apply projection to get the right columns and schema for the stream.
         let schema = self.schema();
+        println!(
+            "Variables: {:?}",
+            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+        );
         let columns = self.file_arrays.clone();
 
         let nd_batch = NdRecordBatch::new(self.file_name.clone(), schema, columns)?;
-
+        tracing::debug!("Created NdRecordBatch for streaming with chunk size {chunk_size}");
         nd_batch.try_as_arrow_stream(chunk_size).await
     }
 
