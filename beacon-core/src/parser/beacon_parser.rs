@@ -1,4 +1,6 @@
 use datafusion::error::{DataFusionError, Result};
+use datafusion::sql::parser::Statement;
+use datafusion::sql::sqlparser;
 use datafusion::sql::{
     parser::{DFParser, DFParserBuilder},
     sqlparser::{keywords::Keyword, tokenizer::Token},
@@ -39,9 +41,9 @@ impl<'a> BeaconParser<'a> {
             return self.parse_alter_atlas_table();
         }
 
-        Ok(BeaconStatement::DFStatement(Box::new(
-            self.df_parser.parse_statement()?,
-        )))
+        let df_statement = Box::new(self.df_parser.parse_statement()?);
+
+        Ok(BeaconStatement::DFStatement(df_statement))
     }
 
     /// Check if the next tokens form an INGEST statement.

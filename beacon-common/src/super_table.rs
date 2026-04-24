@@ -15,6 +15,7 @@ use datafusion::{
     physical_plan::ExecutionPlan,
     prelude::Expr,
 };
+use futures::{StreamExt, TryStreamExt};
 
 use crate::super_typing::super_type_schema;
 

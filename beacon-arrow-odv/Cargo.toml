@@ -1,6 +1,6 @@
 [package]
 name = "beacon-arrow-odv"
-version = "1.5.4"
+version = "1.6.0"
 edition = "2021"
 
 [dependencies]

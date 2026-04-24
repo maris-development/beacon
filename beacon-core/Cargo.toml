@@ -1,6 +1,6 @@
 [package]
 name = "beacon-core"
-version = "1.5.4"
+version = "1.6.0"
 edition = "2021"
 
 [dependencies]
@@ -42,3 +42,4 @@ beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-atlas = { path = "../beacon-atlas" }
 beacon-common = { path = "../beacon-common" }
+beacon-table = { path = "../beacon-table" }

@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_formats::netcdf::{
-    object_resolver::{NetCDFObjectResolver, NetCDFSinkResolver},
-    NetcdfFormat,
-};
+use beacon_formats::netcdf::NetcdfFormat;
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -106,6 +103,29 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         } else {
             return plan_err!("read_netcdf requires at least 1 argument: glob_paths : List<Utf8>");
         }
+        let mut dimensions: Option<Vec<String>> = None;
+        if let Some(dimensions_arg) = args.get(1) {
+            if let Expr::Literal(ScalarValue::List(values), _) = dimensions_arg {
+                let string_array = values.as_ref().values();
+                match string_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                {
+                    Some(str_arr) => {
+                        let dims: Vec<String> = str_arr
+                            .iter()
+                            .filter_map(|opt_str| opt_str.map(|s| s.to_string()))
+                            .collect();
+                        dimensions = Some(dims);
+                    }
+                    None => {
+                        return plan_err!(
+                            "read_netcdf second argument must be a List<Utf8> of dimension names"
+                        );
+                    }
+                }
+            }
+        }
 
         tracing::debug!("read_netcdf glob paths: {:?}", glob_paths);
 
@@ -115,7 +135,13 @@ impl TableFunctionImpl for ReadNetCDFFunc {
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
-        let file_format = NetcdfFormat::new(self.datasets_object_store.clone(), Default::default());
+        tracing::debug!("read_netcdf listing urls: {:?}", listing_urls);
+
+        let file_format = NetcdfFormat::new_with_dimensions(
+            self.datasets_object_store.clone(),
+            Default::default(),
+            dimensions,
+        );
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

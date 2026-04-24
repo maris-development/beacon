@@ -35,12 +35,8 @@ impl StatementHandler for CreateAtlasTableStatementHandler {
         )
         .await?;
 
-        let table = AtlasTable::from_definition(
-            definition,
-            context.session_ctx(),
-            &data_store_url,
-        )
-        .await?;
+        let table =
+            AtlasTable::from_definition(definition, context.session_ctx(), &data_store_url).await?;
 
         context.session_ctx().register_table(
             TableReference::parse_str(&statement.table_name.to_string()),

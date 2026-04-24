@@ -1,6 +1,6 @@
 [package]
 name = "beacon-arrow-zarr"
-version = "1.5.4"
+version = "1.6.0"
 edition = "2024"
 
 [dependencies]
