@@ -175,7 +175,6 @@ impl FileFormat for NetcdfFormat {
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
         let mut tasks = vec![];
-        println!("Dimensions: {:?}", self.read_dimensions);
         for object in objects {
             let schema_task = fetch_schema(
                 self.datasets_object_store.clone(),
@@ -196,11 +195,6 @@ impl FileFormat for NetcdfFormat {
                 e
             )
         })?;
-
-        tracing::debug!(
-            "Schema fields: {:?}",
-            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
-        );
 
         Ok(schema.into())
     }

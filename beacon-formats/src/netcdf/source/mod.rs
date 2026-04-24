@@ -241,11 +241,6 @@ pub async fn fetch_schema_with_read_mode(
             dimensions.clone(),
         )?;
         let schema = reader.schema();
-        println!(
-            "Inferred schema for object {}: {:?}",
-            object.location,
-            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
-        );
         // Insert the schema into the cache for future use
         if beacon_config::CONFIG.netcdf.use_schema_cache && dimensions.is_none() {
             schema_cache::insert_schema_into_cache(&object, schema.clone()).await;
@@ -266,11 +261,6 @@ pub fn open_reader(
     object: ObjectMeta,
     dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<Arc<NetCDFArrowReader>> {
-    tracing::debug!(
-        "Opening netcdf reader with dimensions: {:?} for object: {}",
-        dimensions,
-        object.location
-    );
     if beacon_config::CONFIG.netcdf.use_reader_cache && dimensions.is_none() {
         let key = ReaderCacheKey {
             last_modified: object.last_modified,
@@ -289,7 +279,6 @@ pub fn open_reader(
                 e
             ))
         })?;
-    tracing::debug!("Opening NetCDFArrowReader for path: {}", netcdf_path);
     let reader = NetCDFArrowReader::new(netcdf_path).map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
             "Failed to create NetCDFArrowReader: {}",
@@ -306,10 +295,6 @@ pub fn open_reader(
             ))
         })?
     } else {
-        println!(
-            "Opening reader without dimension projection for object: {}",
-            object.location
-        );
         reader
     };
 
@@ -321,15 +306,6 @@ pub fn open_reader(
         };
         READER_CACHE.lock().put(key, reader.clone());
     }
-    println!(
-        "Returned Schema: {:?}",
-        reader
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .collect::<Vec<_>>()
-    );
     Ok(reader)
 }
 
