@@ -1,0 +1,28 @@
+[package]
+name = "beacon-nd-array"
+version = "0.1.0"
+edition = "2024"
+readme = "README.md"
+
+[dependencies]
+arrow = { workspace = true }
+arrow-schema = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+ndarray = { version = "0.17.1" }
+anyhow = { workspace=true }
+async-trait = { workspace=true }
+futures = { workspace=true }
+indexmap = { workspace=true }
+pin-project = "1.1.10"
+bytemuck = {version = "1.25.0", features = ["derive"]}
+rkyv = { version = "0.8.10", features = ["pointer_width_64"] }
+
+[dev-dependencies]
+arrow-ipc = { workspace = true }
+criterion = { version = "0.5", default-features = false, features = ["rayon", "html_reports"] }
+rand = "0.8"
+tempfile = { workspace = true }
+tokio = { workspace = true }
