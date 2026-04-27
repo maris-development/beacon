@@ -23,7 +23,16 @@ bytemuck = {version = "1.25.0", features = ["derive"]}
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-beacon-nd-arrow = {path = "../beacon-nd-arrow"}
+object_store = { workspace = true }
+datafusion = { workspace = true }
+moka = { workspace = true }
+chrono = { workspace = true }
+
+
+beacon-object-storage = { path = "../beacon-object-storage" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-config = { path = "../beacon-config" }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -1,15 +1,150 @@
 use std::sync::Arc;
 
 use arrow::{
-    array::ArrayRef,
+    array::{ArrayRef, new_null_array},
+    compute::concat,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
 use futures::{StreamExt, stream::BoxStream};
 
-use crate::{NdArrayD, array::subset::ArraySubset, dataset::Dataset};
+use crate::{
+    NdArrayD,
+    array::subset::ArraySubset,
+    dataset::{AnyDataset, Dataset, RaggedDataset},
+};
 
 use super::array::ndarray_to_arrow_array;
+
+pub fn any_dataset_as_record_batch_stream(
+    dataset: AnyDataset,
+) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
+    match dataset {
+        AnyDataset::Regular(ds) => dataset_as_record_batch_stream(ds),
+        AnyDataset::Ragged(ragged) => {
+            let schema = ragged_record_batch_schema(&ragged);
+            let obs_dims: std::collections::HashSet<String> =
+                ragged.obs_variables.keys().cloned().collect();
+            let n = ragged.len();
+            futures::stream::iter(0..n)
+                .then(move |index| {
+                    let ragged = ragged.clone();
+                    let schema = schema.clone();
+                    let obs_dims = obs_dims.clone();
+                    async move {
+                        let cast = ragged.get_cast(index).await?;
+                        ragged_cast_to_record_batch(&cast, &schema, &obs_dims).await
+                    }
+                })
+                .boxed()
+        }
+    }
+}
+
+/// Build a unified Arrow [`Schema`] for all variables that appear in
+/// any cast of a ragged dataset. This includes instance variables,
+/// observation variables (all obs-dim groups), variable attributes,
+/// and global attributes. Row-size variables are excluded. Fields are
+/// sorted alphabetically.
+fn ragged_record_batch_schema(ragged: &RaggedDataset) -> Arc<Schema> {
+    let ds = ragged.dataset();
+    let mut fields: Vec<Field> = Vec::new();
+
+    // Instance variables.
+    for name in &ragged.instance_variables {
+        if let Some(array) = ds.get_array(name) {
+            let dt: DataType = array.datatype().into();
+            fields.push(Field::new(name.clone(), dt, true));
+        }
+    }
+
+    // Observation variables (all obs-dim groups).
+    for var_names in ragged.obs_variables.values() {
+        for name in var_names {
+            if let Some(array) = ds.get_array(name) {
+                let dt: DataType = array.datatype().into();
+                fields.push(Field::new(name.clone(), dt, true));
+            }
+        }
+    }
+
+    // Variable attributes.
+    for (name, array) in &ragged.variable_attributes {
+        let dt: DataType = array.datatype().into();
+        fields.push(Field::new(name.clone(), dt, true));
+    }
+
+    // Global attributes.
+    for (name, array) in &ragged.global_attributes {
+        let dt: DataType = array.datatype().into();
+        fields.push(Field::new(name.clone(), dt, true));
+    }
+
+    fields.sort_by(|a, b| a.name().cmp(b.name()));
+    Arc::new(Schema::new(fields))
+}
+
+/// Convert a single cast [`Dataset`] (as returned by
+/// [`RaggedDataset::get_cast`]) into a [`RecordBatch`] aligned to
+/// `schema`.
+///
+/// - Arrays whose first-axis length equals the target row count are
+///   converted directly.
+/// - Shorter arrays (including dimensionless scalars and instance vars
+///   with shape \[1\]) are repeated to the target row count.
+/// - Arrays missing from the cast are filled with nulls.
+async fn ragged_cast_to_record_batch(
+    cast: &Dataset,
+    schema: &Arc<Schema>,
+    obs_dims: &std::collections::HashSet<String>,
+) -> anyhow::Result<RecordBatch> {
+    // Target row count = max first-axis size across observation-dimension
+    // arrays. Instance variables (shape [1]) and dimensionless attributes
+    // are excluded from this calculation.
+    let target_rows = cast
+        .arrays
+        .values()
+        .filter(|a| a.dimensions().first().is_some_and(|d| obs_dims.contains(d)))
+        .map(|a| a.shape()[0])
+        .max()
+        .unwrap_or(0);
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+
+    for field in schema.fields() {
+        let col = match cast.get_array(field.name()) {
+            Some(array) => {
+                let arrow_arr = ndarray_to_arrow_array(array.as_ref()).await?;
+                let arr_len = arrow_arr.len();
+                let is_obs = array
+                    .dimensions()
+                    .first()
+                    .is_some_and(|d| obs_dims.contains(d));
+
+                if arr_len == target_rows {
+                    arrow_arr
+                } else if target_rows == 0 {
+                    // Empty cast — no observation rows.
+                    new_null_array(field.data_type(), 0)
+                } else if is_obs {
+                    // Observation variable on a shorter obs dimension → null-pad.
+                    let pad_len = target_rows - arr_len;
+                    let null_tail = new_null_array(field.data_type(), pad_len);
+                    concat(&[arrow_arr.as_ref(), null_tail.as_ref()])?
+                } else {
+                    // Instance variable or attribute → repeat to target row count.
+                    let refs: Vec<&dyn arrow::array::Array> =
+                        std::iter::repeat_n(arrow_arr.as_ref(), target_rows).collect();
+                    concat(&refs)?
+                }
+            }
+            None => new_null_array(field.data_type(), target_rows),
+        };
+        columns.push(col);
+    }
+
+    Ok(RecordBatch::try_new(schema.clone(), columns)?)
+}
 
 pub fn dataset_as_record_batch_stream(
     dataset: Dataset,
@@ -366,5 +501,381 @@ mod tests {
         let result = generate_array_subset_from_chunk(&chunk_subset, &chunk_dims, &nd);
         assert_eq!(result.start, vec![0, 10]);
         assert_eq!(result.shape, vec![4, 5]);
+    }
+
+    // ── any_dataset_as_record_batch_stream ───────────────────────────
+
+    use crate::dataset::AnyDataset;
+    use arrow::array::StringArray;
+
+    /// Build a minimal CF contiguous-ragged-array dataset with 3 casts.
+    ///
+    /// Layout (same as dataset::tests::make_ragged_dataset):
+    ///   - instance dim `"casts"` (size 3)
+    ///   - obs dim `"z_obs"` (size 6, row sizes = [2, 1, 3])
+    ///   - `station_id`  : instance var, f64  [100, 200, 300]
+    ///   - `z_row_size`  : row-size var, i32  [2, 1, 3]
+    ///   - `z_row_size.sample_dimension` : attr "z_obs"
+    ///   - `depth`       : obs var, f64       [10, 20, 30, 40, 50, 60]
+    ///   - `temperature` : obs var, f64       [1, 2, 3, 4, 5, 6]
+    ///   - `depth.units` : var attr, String   ["m"]
+    ///   - `temperature.units` : var attr     ["°C"]
+    ///   - `Conventions` : global attr        ["CF-1.6"]
+    async fn make_ragged() -> Dataset {
+        let station_id = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![100.0, 200.0, 300.0],
+            vec![3],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let z_row_size = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![2, 1, 3],
+            vec![3],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let sample_dim = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["z_obs".into()],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let depth = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            vec![6],
+            vec!["z_obs".into()],
+            None,
+        )
+        .unwrap();
+        let temperature = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![6],
+            vec!["z_obs".into()],
+            None,
+        )
+        .unwrap();
+        let depth_units = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["m".into()],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let temp_units = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["°C".into()],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let conventions = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["CF-1.6".into()],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+
+        make_dataset(vec![
+            ("Conventions", Arc::new(conventions)),
+            ("station_id", Arc::new(station_id)),
+            ("z_row_size", Arc::new(z_row_size)),
+            ("z_row_size.sample_dimension", Arc::new(sample_dim)),
+            ("depth", Arc::new(depth)),
+            ("depth.units", Arc::new(depth_units)),
+            ("temperature", Arc::new(temperature)),
+            ("temperature.units", Arc::new(temp_units)),
+        ])
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_any_dataset_regular_delegates() {
+        let nd =
+            NdArray::<i32>::try_new_from_vec_in_mem(vec![1, 2, 3], vec![3], vec!["x".into()], None)
+                .unwrap();
+        let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
+        let col = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(col.values().as_ref(), &[1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_any_dataset_ragged_single_obs_dim() {
+        let ds = make_ragged().await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+            .try_collect()
+            .await
+            .unwrap();
+
+        // One batch per cast.
+        assert_eq!(batches.len(), 3);
+        // Row counts match row sizes [2, 1, 3].
+        assert_eq!(batches[0].num_rows(), 2);
+        assert_eq!(batches[1].num_rows(), 1);
+        assert_eq!(batches[2].num_rows(), 3);
+
+        // Obs variable `depth` present in first cast.
+        let depth_col = batches[0]
+            .column_by_name("depth")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(depth_col.values().as_ref(), &[10.0, 20.0]);
+    }
+
+    #[tokio::test]
+    async fn test_any_dataset_ragged_schema_excludes_row_size() {
+        let ds = make_ragged().await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+            .try_collect()
+            .await
+            .unwrap();
+
+        let schema = batches[0].schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(!field_names.contains(&"z_row_size"));
+        assert!(!field_names.contains(&"z_row_size.sample_dimension"));
+    }
+
+    #[tokio::test]
+    async fn test_any_dataset_ragged_instance_vars_repeated() {
+        let ds = make_ragged().await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+            .try_collect()
+            .await
+            .unwrap();
+
+        // Cast 0: station_id=100, obs_len=2 → [100, 100]
+        let sid = batches[0]
+            .column_by_name("station_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(sid.values().as_ref(), &[100.0, 100.0]);
+
+        // Cast 2: station_id=300, obs_len=3 → [300, 300, 300]
+        let sid2 = batches[2]
+            .column_by_name("station_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(sid2.values().as_ref(), &[300.0, 300.0, 300.0]);
+    }
+
+    #[tokio::test]
+    async fn test_any_dataset_ragged_attrs_repeated() {
+        let ds = make_ragged().await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+            .try_collect()
+            .await
+            .unwrap();
+
+        // Cast 0 has obs_len=2. Global attr `Conventions` should be repeated.
+        let conv = batches[0]
+            .column_by_name("Conventions")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(conv.len(), 2);
+        assert_eq!(conv.value(0), "CF-1.6");
+        assert_eq!(conv.value(1), "CF-1.6");
+
+        // Variable attr `depth.units` should be repeated.
+        let du = batches[0]
+            .column_by_name("depth.units")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(du.len(), 2);
+        assert_eq!(du.value(0), "m");
+        assert_eq!(du.value(1), "m");
+    }
+
+    #[tokio::test]
+    async fn test_any_dataset_ragged_multi_obs_dim_null_pad() {
+        // Two obs dims: z_obs (row sizes [2,1]) and t_obs (row sizes [3,2]).
+        // Cast 0: z_obs=2, t_obs=3 → target=3, z_obs vars null-padded.
+        // Cast 1: z_obs=1, t_obs=2 → target=2, z_obs vars null-padded.
+        let station_id = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![100.0, 200.0],
+            vec![2],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let z_row_size = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![2, 1],
+            vec![2],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let z_sample_dim = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["z_obs".into()],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let t_row_size = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![3, 2],
+            vec![2],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let t_sample_dim = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["t_obs".into()],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let depth = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![10.0, 20.0, 30.0],
+            vec![3],
+            vec!["z_obs".into()],
+            None,
+        )
+        .unwrap();
+        let time = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            vec![5],
+            vec!["t_obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let ds = make_dataset(vec![
+            ("station_id", Arc::new(station_id)),
+            ("z_row_size", Arc::new(z_row_size)),
+            ("z_row_size.sample_dimension", Arc::new(z_sample_dim)),
+            ("t_row_size", Arc::new(t_row_size)),
+            ("t_row_size.sample_dimension", Arc::new(t_sample_dim)),
+            ("depth", Arc::new(depth)),
+            ("time", Arc::new(time)),
+        ])
+        .await;
+
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_eq!(batches.len(), 2);
+
+        // Cast 0: z_obs=2, t_obs=3 → target=3.
+        assert_eq!(batches[0].num_rows(), 3);
+        let depth_col = batches[0]
+            .column_by_name("depth")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        // depth has 2 real values, then 1 null.
+        assert_eq!(depth_col.value(0), 10.0);
+        assert_eq!(depth_col.value(1), 20.0);
+        assert!(depth_col.is_null(2));
+
+        let time_col = batches[0]
+            .column_by_name("time")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(time_col.values().as_ref(), &[1.0, 2.0, 3.0]);
+
+        // Cast 1: z_obs=1, t_obs=2 → target=2.
+        assert_eq!(batches[1].num_rows(), 2);
+        let depth_col1 = batches[1]
+            .column_by_name("depth")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(depth_col1.value(0), 30.0);
+        assert!(depth_col1.is_null(1));
+    }
+
+    #[tokio::test]
+    async fn test_any_dataset_ragged_empty_cast() {
+        // 2 casts, first has 0 observations, second has 2.
+        let station_id = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![100.0, 200.0],
+            vec![2],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let z_row_size = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![0, 2],
+            vec![2],
+            vec!["casts".into()],
+            None,
+        )
+        .unwrap();
+        let sample_dim = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["z_obs".into()],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let depth = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![10.0, 20.0],
+            vec![2],
+            vec!["z_obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let ds = make_dataset(vec![
+            ("station_id", Arc::new(station_id)),
+            ("z_row_size", Arc::new(z_row_size)),
+            ("z_row_size.sample_dimension", Arc::new(sample_dim)),
+            ("depth", Arc::new(depth)),
+        ])
+        .await;
+
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_eq!(batches.len(), 2);
+        // First cast: 0 observations → 0-row batch.
+        assert_eq!(batches[0].num_rows(), 0);
+        // Second cast: 2 observations.
+        assert_eq!(batches[1].num_rows(), 2);
     }
 }

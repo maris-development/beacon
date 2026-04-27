@@ -1,6 +1,6 @@
 //! String decoding for NetCDF `String` and fixed-size char arrays.
 
-use crate::{decoders::VariableDecoder, NcChar, OwnedNcString};
+use crate::{decoders::VariableDecoder, NcChar};
 use ndarray::Axis;
 use netcdf::Extent;
 
@@ -10,10 +10,10 @@ use netcdf::Extent;
 /// variable to store bytes in a trailing string-length dimension.
 #[derive(Debug)]
 pub struct StringVariableDecoder {
-    /// Arrow field metadata used by downstream array wrappers.
-    pub arrow_field: arrow::datatypes::FieldRef,
+    /// Name of the source variable.
+    pub variable_name: String,
     /// Optional fill value for missing strings.
-    pub fill_value: Option<OwnedNcString>,
+    pub fill_value: Option<String>,
     /// Fixed string length for char-array decoding.
     pub fixed_sized_string: Option<usize>,
 }
@@ -21,28 +21,24 @@ pub struct StringVariableDecoder {
 impl StringVariableDecoder {
     /// Construct a string decoder.
     pub fn new(
-        arrow_field: arrow::datatypes::FieldRef,
-        fill_value: Option<OwnedNcString>,
+        variable_name: String,
+        fill_value: Option<String>,
         fixed_sized_string: Option<usize>,
     ) -> Self {
         Self {
-            arrow_field,
+            variable_name,
             fill_value,
             fixed_sized_string,
         }
     }
 }
 
-impl VariableDecoder<OwnedNcString> for StringVariableDecoder {
-    fn arrow_field(&self) -> &arrow::datatypes::Field {
-        &self.arrow_field
-    }
-
+impl VariableDecoder<String> for StringVariableDecoder {
     fn read(
         &self,
         variable: &netcdf::Variable,
         extents: netcdf::Extents,
-    ) -> anyhow::Result<ndarray::ArrayD<OwnedNcString>> {
+    ) -> anyhow::Result<ndarray::ArrayD<String>> {
         match self.fixed_sized_string {
             Some(length) => match extents {
                 netcdf::Extents::All => {
@@ -60,7 +56,9 @@ impl VariableDecoder<OwnedNcString> for StringVariableDecoder {
                     let string_array = array.map_axis(Axis(ndim - 1), |slice| {
                         let nc_char_bytes: &[NcChar] = slice.as_slice().unwrap_or(&[]);
                         let char_bytes: &[u8] = bytemuck::cast_slice(nc_char_bytes);
-                        OwnedNcString(String::from_utf8_lossy(char_bytes).trim().to_string())
+                        String::from_utf8_lossy(char_bytes)
+                            .trim_end_matches(|c: char| c == '\0' || c.is_whitespace())
+                            .to_string()
                     });
 
                     return Ok(string_array);
@@ -90,9 +88,7 @@ impl VariableDecoder<OwnedNcString> for StringVariableDecoder {
                     }
                 };
                 let array = variable.get_strings(extents)?;
-                let owned_array: Vec<OwnedNcString> =
-                    array.into_iter().map(OwnedNcString).collect();
-                let nd_array = ndarray::Array::from_shape_vec(shape, owned_array)?;
+                let nd_array = ndarray::Array::from_shape_vec(shape, array)?;
 
                 return Ok(nd_array);
             }
@@ -100,7 +96,11 @@ impl VariableDecoder<OwnedNcString> for StringVariableDecoder {
     }
 
     fn variable_name(&self) -> &str {
-        self.arrow_field.name()
+        &self.variable_name
+    }
+
+    fn fill_value(&self) -> Option<String> {
+        self.fill_value.clone()
     }
 }
 
@@ -142,11 +142,8 @@ fn selected_axis_len(extent: &Extent, dim_len: usize) -> anyhow::Result<Option<u
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::{decoders::VariableDecoder, OwnedNcString};
-    use arrow::datatypes::{DataType, Field};
+    use crate::decoders::VariableDecoder;
     use netcdf::Extents;
     use tempfile::Builder;
 
@@ -196,7 +193,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
+            variable_name: var_name.to_string(),
             fill_value: None,
             fixed_sized_string: Some(string_len),
         };
@@ -209,10 +206,10 @@ mod tests {
             .expect("StringVariableDecoder::read (char) failed");
 
         assert_eq!(array.len(), strings.len());
-        let values: Vec<OwnedNcString> = array.iter().cloned().collect();
-        assert_eq!(values[0].0, "hello");
-        assert_eq!(values[1].0, "world");
-        assert_eq!(values[2].0, "foo");
+        let values: Vec<String> = array.iter().cloned().collect();
+        assert_eq!(values[0], "hello");
+        assert_eq!(values[1], "world");
+        assert_eq!(values[2], "foo");
     }
 
     #[test]
@@ -238,7 +235,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
+            variable_name: var_name.to_string(),
             fill_value: None,
             fixed_sized_string: Some(string_len),
         };
@@ -247,8 +244,8 @@ mod tests {
             .read(&variable, netcdf::Extents::Extent(vec![Extent::from(..1)]))
             .expect("StringVariableDecoder::read (char trimming) failed");
 
-        let values: Vec<OwnedNcString> = array.iter().cloned().collect();
-        assert_eq!(values[0].0, "hi", "Trailing whitespace should be trimmed");
+        let values: Vec<String> = array.iter().cloned().collect();
+        assert_eq!(values[0], "hi", "Trailing whitespace should be trimmed");
     }
 
     #[test]
@@ -274,7 +271,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
+            variable_name: var_name.to_string(),
             fill_value: None,
             fixed_sized_string: Some(string_len),
         };
@@ -283,9 +280,9 @@ mod tests {
             .read(&variable, netcdf::Extents::Extent(vec![Extent::from(..2)]))
             .expect("StringVariableDecoder::read (empty string) failed");
 
-        let values: Vec<OwnedNcString> = array.iter().cloned().collect();
-        assert_eq!(values[0].0, "", "All-null row should produce empty string");
-        assert_eq!(values[1].0, "ab");
+        let values: Vec<String> = array.iter().cloned().collect();
+        assert_eq!(values[0], "", "All-null row should produce empty string");
+        assert_eq!(values[1], "ab");
     }
 
     #[test]
@@ -297,7 +294,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
+            variable_name: var_name.to_string(),
             fill_value: None,
             fixed_sized_string: None, // deliberately omitted
         };
@@ -329,7 +326,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
+            variable_name: var_name.to_string(),
             fill_value: None,
             fixed_sized_string: None,
         };
@@ -339,10 +336,10 @@ mod tests {
             .expect("StringVariableDecoder::read (NcString) failed");
 
         assert_eq!(array.len(), input.len());
-        let values: Vec<OwnedNcString> = array.iter().cloned().collect();
-        assert_eq!(values[0].0, "alpha");
-        assert_eq!(values[1].0, "beta");
-        assert_eq!(values[2].0, "gamma");
+        let values: Vec<String> = array.iter().cloned().collect();
+        assert_eq!(values[0], "alpha");
+        assert_eq!(values[1], "beta");
+        assert_eq!(values[2], "gamma");
     }
 
     #[test]
@@ -408,7 +405,7 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let decoder = StringVariableDecoder {
-            arrow_field: Arc::new(Field::new(var_name, DataType::Utf8, true)),
+            variable_name: var_name.to_string(),
             fill_value: None,
             fixed_sized_string: None,
         };
@@ -428,9 +425,9 @@ mod tests {
             .expect("StringVariableDecoder::read with index + slice_count failed");
 
         assert_eq!(array.shape(), &[2]);
-        let values: Vec<OwnedNcString> = array.iter().cloned().collect();
-        assert_eq!(values[0].0, "x1y0");
-        assert_eq!(values[1].0, "x1y1");
+        let values: Vec<String> = array.iter().cloned().collect();
+        assert_eq!(values[0], "x1y0");
+        assert_eq!(values[1], "x1y1");
     }
 
     // ── variable_name ──────────────────────────────────────────────────────
@@ -438,7 +435,7 @@ mod tests {
     #[test]
     fn test_string_decoder_variable_name() {
         let decoder = StringVariableDecoder {
-            arrow_field: Arc::new(Field::new("station_name", DataType::Utf8, true)),
+            variable_name: "station_name".to_string(),
             fill_value: None,
             fixed_sized_string: Some(10),
         };
