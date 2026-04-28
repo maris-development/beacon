@@ -1,8 +1,8 @@
-﻿//! High-level NetCDF reader that produces [`Dataset`] values.
+﻿//! High-level NetCDF reader that produces [`AnyDataset`] values.
 //!
 //! The entry point is [`open_dataset`], which opens a NetCDF file, converts
 //! every variable and attribute into a lazy [`NdArrayD`] wrapper, and returns
-//! the result as a [`Dataset`].
+//! the result as an [`AnyDataset`].
 //!
 //! # CF conventions
 //!
@@ -24,8 +24,8 @@
 //!
 //! ```no_run
 //! # async fn example() -> anyhow::Result<()> {
-//! let dataset = beacon_arrow_netcdf::reader::open_dataset("data.nc").await?;
-//! for name in dataset.get_array_names() {
+//! let any = beacon_arrow_netcdf::reader::open_dataset("data.nc").await?;
+//! for name in any.dataset().get_array_names() {
 //!     println!("{name}");
 //! }
 //! # Ok(())
@@ -34,7 +34,10 @@
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-use beacon_nd_array::{dataset::Dataset, NdArrayD};
+use beacon_nd_array::{
+    dataset::{AnyDataset, Dataset},
+    NdArrayD,
+};
 use indexmap::IndexMap;
 use netcdf::AttributeValue;
 
@@ -42,11 +45,13 @@ use crate::compat;
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
-/// Open a NetCDF file and return its contents as a [`Dataset`].
+/// Open a NetCDF file and return its contents as an [`AnyDataset`].
 ///
 /// This is the primary entry point for reading NetCDF files.  It discovers
 /// every variable and attribute in the file, wraps each one in a lazy
-/// [`NdArrayD`] backend, and assembles them into a [`Dataset`].
+/// [`NdArrayD`] backend, and assembles them into a [`Dataset`] that is
+/// then classified as either regular or ragged (CF contiguous ragged-array
+/// convention) via [`AnyDataset::try_from_dataset`].
 ///
 /// Variable data is **not** read eagerly — the underlying backends fetch
 /// data on demand when individual arrays are accessed.
@@ -55,10 +60,11 @@ use crate::compat;
 ///
 /// Returns an error if the file cannot be opened or if any variable uses an
 /// unsupported NetCDF type.
-pub async fn open_dataset<P: AsRef<Path>>(path: P) -> anyhow::Result<Dataset> {
+pub async fn open_dataset<P: AsRef<Path>>(path: P) -> anyhow::Result<AnyDataset> {
     let name = path.as_ref().to_string_lossy().to_string();
     let arrays = read_arrays(&path)?;
-    Ok(Dataset::new(name, arrays).await)
+    let dataset = Dataset::new(name, arrays).await;
+    AnyDataset::try_from_dataset(dataset).await
 }
 
 /// Read all variables and attributes from a NetCDF file into an ordered map
@@ -281,9 +287,9 @@ mod tests {
     #[tokio::test]
     async fn open_dataset_creates_dataset_with_all_arrays() {
         let tmp = make_multi_var_nc("temp", &[1.0, 2.0], "salt", &[3, 4]);
-        let dataset = open_dataset(tmp.path()).await.unwrap();
-        assert!(dataset.get_array("temp").is_some());
-        assert!(dataset.get_array("salt").is_some());
+        let any = open_dataset(tmp.path()).await.unwrap();
+        assert!(any.get_array("temp").is_some());
+        assert!(any.get_array("salt").is_some());
     }
 
     #[tokio::test]
@@ -294,8 +300,8 @@ mod tests {
     #[tokio::test]
     async fn open_dataset_name_matches_path() {
         let tmp = make_f64_nc("v", &[1.0], None);
-        let dataset = open_dataset(tmp.path()).await.unwrap();
-        assert_eq!(dataset.name, tmp.path().to_string_lossy().to_string());
+        let any = open_dataset(tmp.path()).await.unwrap();
+        assert_eq!(any.name(), tmp.path().to_string_lossy().as_ref());
     }
 
     // ── Data type mapping ──────────────────────────────────────────────
@@ -457,17 +463,17 @@ mod tests {
     #[tokio::test]
     async fn dataset_captures_dimensions() {
         let tmp = make_f64_nc("lat", &[1.0, 2.0, 3.0], None);
-        let dataset = open_dataset(tmp.path()).await.unwrap();
-        assert_eq!(dataset.dimensions.get("obs"), Some(&3));
+        let any = open_dataset(tmp.path()).await.unwrap();
+        assert_eq!(any.dataset().dimensions.get("obs"), Some(&3));
     }
 
     #[tokio::test]
     async fn dataset_empty_for_dimless_file() {
         let tmp = Builder::new().suffix(".nc").tempfile().unwrap();
         netcdf::create(tmp.path()).unwrap();
-        let dataset = open_dataset(tmp.path()).await.unwrap();
-        assert!(dataset.dimensions.is_empty());
-        assert!(dataset.arrays.is_empty());
+        let any = open_dataset(tmp.path()).await.unwrap();
+        assert!(any.dataset().dimensions.is_empty());
+        assert!(any.dataset().arrays.is_empty());
     }
 
     // ── Edge cases ─────────────────────────────────────────────────────
@@ -496,9 +502,10 @@ mod tests {
     #[ignore = "requires network access"]
     async fn remote_argo_file_opens_as_dataset() {
         let path = "https://s3.eu-west-3.amazonaws.com/argo-gdac-sandbox/pub/dac/aoml/13857/13857_prof.nc#mode=bytes";
-        let dataset = open_dataset(path).await.unwrap();
-        assert!(!dataset.arrays.is_empty());
-        assert!(!dataset.dimensions.is_empty());
+        let any = open_dataset(path).await.unwrap();
+        let ds = any.dataset();
+        assert!(!ds.arrays.is_empty());
+        assert!(!ds.dimensions.is_empty());
     }
 
     // ── Ragged dataset → record batch stream ───────────────────────────
@@ -506,31 +513,20 @@ mod tests {
     mod ragged_record_batch {
         use super::*;
         use arrow::array::{Array, Float32Array, Float64Array, StringArray};
-        use beacon_nd_array::{
-            arrow::batch::any_dataset_as_record_batch_stream,
-            dataset::{AnyDataset, CfDatasetType},
-        };
+        use beacon_nd_array::arrow::batch::any_dataset_as_record_batch_stream;
         use futures::TryStreamExt;
 
         const WOD_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test_files/wod_ctd_1964.nc");
 
         #[tokio::test]
         async fn wod_file_detected_as_ragged() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            assert!(matches!(ds.cf_dataset_type(), CfDatasetType::Ragged));
-        }
-
-        #[tokio::test]
-        async fn any_dataset_wraps_as_ragged() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
             assert!(any.is_ragged());
         }
 
         #[tokio::test]
         async fn stream_produces_one_batch_per_cast() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -543,8 +539,7 @@ mod tests {
 
         #[tokio::test]
         async fn all_batches_share_the_same_schema() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -559,8 +554,7 @@ mod tests {
 
         #[tokio::test]
         async fn schema_excludes_row_size_variables() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -581,8 +575,7 @@ mod tests {
 
         #[tokio::test]
         async fn schema_includes_observation_variables() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -600,8 +593,7 @@ mod tests {
 
         #[tokio::test]
         async fn schema_includes_instance_variables() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -619,8 +611,7 @@ mod tests {
 
         #[tokio::test]
         async fn total_obs_row_count_across_batches() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -639,8 +630,7 @@ mod tests {
 
         #[tokio::test]
         async fn instance_vars_repeated_to_obs_length() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -672,8 +662,7 @@ mod tests {
 
         #[tokio::test]
         async fn shorter_obs_dim_null_padded() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -699,8 +688,7 @@ mod tests {
 
         #[tokio::test]
         async fn global_attrs_present_and_repeated() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()
@@ -731,8 +719,7 @@ mod tests {
 
         #[tokio::test]
         async fn observation_data_is_not_all_null() {
-            let ds = open_dataset(WOD_PATH).await.unwrap();
-            let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+            let any = open_dataset(WOD_PATH).await.unwrap();
 
             let batches: Vec<_> = any_dataset_as_record_batch_stream(any)
                 .try_collect()

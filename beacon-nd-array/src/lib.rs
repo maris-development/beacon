@@ -61,6 +61,7 @@ pub mod array;
 pub mod arrow;
 pub mod dataset;
 pub mod datatypes;
+pub mod projection;
 
 use std::sync::Arc;
 

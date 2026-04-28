@@ -769,6 +769,7 @@ dependencies = [
  "arrow",
  "arrow-schema 56.2.0",
  "async-trait",
+ "beacon-common",
  "beacon-config",
  "beacon-datafusion-ext",
  "beacon-nd-array",

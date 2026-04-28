@@ -11,7 +11,7 @@ use futures::{StreamExt, stream::BoxStream};
 use crate::{
     NdArrayD,
     array::subset::ArraySubset,
-    dataset::{AnyDataset, Dataset, RaggedDataset},
+    dataset::{Dataset, any::AnyDataset, ragged::RaggedDataset},
 };
 
 use super::array::ndarray_to_arrow_array;
@@ -21,10 +21,10 @@ pub fn any_dataset_as_record_batch_stream(
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     match dataset {
         AnyDataset::Regular(ds) => dataset_as_record_batch_stream(ds),
-        AnyDataset::Ragged(ragged) => {
+        AnyDataset::Ragged { ragged, .. } => {
             let schema = ragged_record_batch_schema(&ragged);
             let obs_dims: std::collections::HashSet<String> =
-                ragged.obs_variables.keys().cloned().collect();
+                ragged.observation_dimensions().map(String::from).collect();
             let n = ragged.len();
             futures::stream::iter(0..n)
                 .then(move |index| {
@@ -47,36 +47,10 @@ pub fn any_dataset_as_record_batch_stream(
 /// and global attributes. Row-size variables are excluded. Fields are
 /// sorted alphabetically.
 fn ragged_record_batch_schema(ragged: &RaggedDataset) -> Arc<Schema> {
-    let ds = ragged.dataset();
     let mut fields: Vec<Field> = Vec::new();
 
-    // Instance variables.
-    for name in &ragged.instance_variables {
-        if let Some(array) = ds.get_array(name) {
-            let dt: DataType = array.datatype().into();
-            fields.push(Field::new(name.clone(), dt, true));
-        }
-    }
-
-    // Observation variables (all obs-dim groups).
-    for var_names in ragged.obs_variables.values() {
-        for name in var_names {
-            if let Some(array) = ds.get_array(name) {
-                let dt: DataType = array.datatype().into();
-                fields.push(Field::new(name.clone(), dt, true));
-            }
-        }
-    }
-
-    // Variable attributes.
-    for (name, array) in &ragged.variable_attributes {
-        let dt: DataType = array.datatype().into();
-        fields.push(Field::new(name.clone(), dt, true));
-    }
-
-    // Global attributes.
-    for (name, array) in &ragged.global_attributes {
-        let dt: DataType = array.datatype().into();
+    for (name, var) in &ragged.variables {
+        let dt: DataType = var.array().datatype().into();
         fields.push(Field::new(name.clone(), dt, true));
     }
 
