@@ -4,6 +4,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::unique_values::UniqueValuesExec;
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
@@ -11,13 +12,21 @@ use datafusion::{
     datasource::{
         file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
         physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
+        sink::DataSinkExec,
     },
-    physical_expr::LexRequirement,
-    physical_plan::ExecutionPlan,
+    physical_expr::{LexOrdering, LexRequirement, PhysicalSortExpr},
+    physical_plan::{
+        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+        ExecutionPlan,
+    },
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::datafusion::{options::NetcdfOptions, source::NetCDFSource};
+use crate::datafusion::{
+    options::NetcdfOptions,
+    sink::{NetCDFNdSink, NetCDFSink},
+    source::NetCDFSource,
+};
 
 const NETCDF_EXTENSION: &str = "nc";
 
@@ -186,12 +195,55 @@ impl FileFormat for NetcdfFormat {
 
     async fn create_writer_physical_plan(
         &self,
-        _input: Arc<dyn ExecutionPlan>,
+        input: Arc<dyn ExecutionPlan>,
         _state: &dyn Session,
-        _conf: FileSinkConfig,
-        _order_requirements: Option<LexRequirement>,
+        conf: FileSinkConfig,
+        order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        todo!()
+        match &self.options.write_dimensions {
+            Some(dim_columns) if !dim_columns.is_empty() => {
+                let unique_columns = dim_columns.clone();
+
+                let (unique_exec, collection_handle) =
+                    UniqueValuesExec::new(input, unique_columns.clone())?;
+
+                // Create lex order requirements based on the unique columns
+                let schema = unique_exec.schema();
+                let mut sort_exprs = vec![];
+                for col in &unique_columns {
+                    sort_exprs.push(PhysicalSortExpr::new_default(
+                        datafusion::physical_expr::expressions::col(col, &schema)?,
+                    ));
+                }
+                let lex_order = LexOrdering::new(sort_exprs).ok_or(exec_datafusion_err!(
+                    "Failed to create LexOrdering for NetCDF dimension columns"
+                ))?;
+
+                let sort_exec = SortExec::new(lex_order.clone(), Arc::new(unique_exec));
+                let sort_preserving_merge_exec =
+                    SortPreservingMergeExec::new(lex_order, Arc::new(sort_exec));
+
+                let netcdf_sink = Arc::new(NetCDFNdSink::new(
+                    conf,
+                    unique_columns.len(),
+                    collection_handle,
+                )?);
+
+                Ok(Arc::new(DataSinkExec::new(
+                    Arc::new(sort_preserving_merge_exec),
+                    netcdf_sink,
+                    order_requirements,
+                )))
+            }
+            _ => {
+                let netcdf_sink = Arc::new(NetCDFSink::new(conf));
+                Ok(Arc::new(DataSinkExec::new(
+                    input,
+                    netcdf_sink,
+                    order_requirements,
+                )))
+            }
+        }
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {

@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 
+use beacon_arrow_netcdf::datafusion::options::NetcdfOptions;
+use beacon_arrow_netcdf::datafusion::NetcdfFormat;
 use beacon_data_lake::{
-    FileManager, TableManager, files::collection::FileCollection,
-    table::table_formats::NetCDFFileFormat,
+    files::collection::FileCollection, table::table_formats::NetCDFFileFormat, FileManager,
+    TableManager,
 };
-use beacon_formats::netcdf::NetcdfOptions;
 use beacon_formats::zarr::statistics::ZarrStatisticsSelection;
 use beacon_formats::{
     arrow::ArrowFormat, csv::CsvFormat, odv_ascii::OdvFormat, parquet::ParquetFormat,
@@ -83,7 +84,9 @@ impl From {
             }
             From::Format { format } => {
                 // Use a file format as a table source.
-                let table_source = format.as_table_source(session_context, file_manager).await?;
+                let table_source = format
+                    .as_table_source(session_context, file_manager)
+                    .await?;
                 Ok(LogicalPlanBuilder::scan("tmp", table_source, None)?)
             }
         }
@@ -156,14 +159,14 @@ impl FromFormat {
             FromFormat::Csv { delimiter, .. } => Ok(Arc::new(CsvFormat::new(
                 delimiter.unwrap_or(',') as u8,
                 10_000,
-            ))),
-            FromFormat::Parquet { .. } => Ok(Arc::new(ParquetFormat::new())),
-            FromFormat::Arrow { .. } => Ok(Arc::new(ArrowFormat::new())),
-            FromFormat::NetCDF { .. } => Ok(Arc::new(beacon_formats::netcdf::NetcdfFormat::new(
+            )) as Arc<dyn FileFormat>),
+            FromFormat::Parquet { .. } => Ok(Arc::new(ParquetFormat::new()) as Arc<dyn FileFormat>),
+            FromFormat::Arrow { .. } => Ok(Arc::new(ArrowFormat::new()) as Arc<dyn FileFormat>),
+            FromFormat::NetCDF { .. } => Ok(Arc::new(NetcdfFormat::new(
                 beacon_object_storage::get_datasets_object_store().await,
                 NetcdfOptions::default(),
-            ))),
-            FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new())),
+            )) as Arc<dyn FileFormat>),
+            FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>),
             FromFormat::Zarr {
                 statistics_columns, ..
             } => {
@@ -173,9 +176,11 @@ impl FromFormat {
                 let zarr_format = beacon_formats::zarr::ZarrFormat::default()
                     .with_zarr_statistics(zarr_selections);
 
-                Ok(Arc::new(zarr_format))
+                Ok(Arc::new(zarr_format) as Arc<dyn FileFormat>)
             }
-            FromFormat::Bbf { .. } => Ok(Arc::new(beacon_formats::bbf::BBFFormat::default())),
+            FromFormat::Bbf { .. } => {
+                Ok(Arc::new(beacon_formats::bbf::BBFFormat::default()) as Arc<dyn FileFormat>)
+            }
         }
     }
 

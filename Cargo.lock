@@ -786,6 +786,7 @@ dependencies = [
  "netcdf-sys",
  "num-traits",
  "object_store 0.12.4",
+ "ordered-float 5.1.0",
  "regex",
  "serde",
  "serde_json",
@@ -1034,6 +1035,10 @@ dependencies = [
  "async-trait",
  "beacon-common",
  "datafusion",
+ "futures",
+ "indexmap 2.13.0",
+ "ordered-float 5.1.0",
+ "parking_lot",
  "serde",
  "serde_json",
  "tokio",
@@ -1101,8 +1106,10 @@ version = "1.6.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "beacon-arrow-netcdf",
  "beacon-common",
  "beacon-config",
+ "beacon-datafusion-ext",
  "beacon-formats",
  "beacon-object-storage",
  "chrono",
@@ -1226,6 +1233,7 @@ name = "beacon-query"
 version = "1.6.0"
 dependencies = [
  "anyhow",
+ "beacon-arrow-netcdf",
  "beacon-arrow-odv",
  "beacon-config",
  "beacon-data-lake",

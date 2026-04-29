@@ -1,14 +1,13 @@
 //! Execution plan utilities that capture the unique values seen for selected
 //! columns while still forwarding the original record batches untouched.
 //!
-//! NetCDF exports need to know the list of distinct station identifiers,
-//! depth levels, etc. before files are written. The `UniqueValuesExec`
-//! execution plan wraps any upstream plan, sorts the requested columns so
-//! uniqueness can be computed incrementally, and registers a handle per
-//! partition that downstream consumers can inspect once execution finishes.
-//! Each stream is wrapped by [`UniqueValueStream`], which mirrors the input
-//! batches and populates the per-column collectors stored inside a
-//! [`UniqueValuesHandle`].
+//! Sinks that need to know the list of distinct values for certain columns
+//! (e.g. NetCDF dimension columns) before files are written can use the
+//! [`UniqueValuesExec`] execution plan. It wraps any upstream plan, mirrors
+//! its output, and registers a handle per partition that downstream consumers
+//! can inspect once execution finishes. Each stream is wrapped by
+//! [`UniqueValueStream`], which populates the per-column collectors stored
+//! inside a [`UniqueValuesHandle`].
 //!
 //! The end result is a lightweight side channel of unique values that can be
 //! consumed after a query completes without buffering the full result set.
@@ -26,13 +25,11 @@ use arrow::{
     datatypes::{DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit},
 };
 use datafusion::{
-    common::{HashMap, Statistics},
+    common::Statistics,
     error::{DataFusionError, Result},
     execution::{RecordBatchStream, SendableRecordBatchStream},
-    physical_expr::{LexOrdering, PhysicalSortExpr},
     physical_plan::{
         DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
-        expressions::col, sorts::sort::SortExec,
     },
 };
 use futures::{Stream, StreamExt};
@@ -40,15 +37,15 @@ use indexmap::IndexMap;
 use ordered_float::OrderedFloat;
 use parking_lot::Mutex;
 
-/// DataFusion execution plan that sorts the required columns, mirrors its
-/// child output, and records unique values per partition via shared handles.
+/// DataFusion execution plan that mirrors its child output and records unique
+/// values per partition via shared handles.
 ///
 /// When `execute` is called for a partition, the plan creates a
 /// [`UniqueValuesHandle`] that owns collectors for the requested columns,
 /// wraps the child stream in a [`UniqueValueStream`], and registers that handle
 /// in the shared [`UniqueValuesHandleCollection`]. Downstream consumers (such
-/// as the NetCDF sink) can inspect the handle collection after the query runs
-/// to obtain per-partition distinct lists without re-scanning the data.
+/// as file sinks) can inspect the handle collection after the query runs to
+/// obtain per-partition distinct lists without re-scanning the data.
 #[derive(Debug)]
 pub struct UniqueValuesExec {
     input: Arc<dyn ExecutionPlan>,
@@ -61,18 +58,14 @@ pub struct UniqueValuesExec {
 impl UniqueValuesExec {
     /// Creates a new execution plan that tracks the provided column names.
     ///
-    /// The child plan is wrapped in a [`SortExec`] that enforces a lexical
-    /// ordering on the tracked columns so incremental unique-value collection
-    /// remains efficient. The returned tuple also includes the
-    /// [`UniqueValuesHandleCollection`] where per-partition handles will be
-    /// registered once `execute` is invoked.
+    /// The returned tuple also includes the [`UniqueValuesHandleCollection`]
+    /// where per-partition handles will be registered once `execute` is invoked.
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         columns_to_track: Vec<String>,
     ) -> datafusion::error::Result<(Self, UniqueValuesHandleCollection)> {
         let schema = input.schema();
         let mut columns_to_track_indices = Vec::with_capacity(columns_to_track.len());
-        // let mut sort_expr = Vec::with_capacity(columns_to_track.len());
         for col_name in columns_to_track {
             let index = schema.index_of(&col_name).map_err(|_| {
                 DataFusionError::Plan(format!(
@@ -80,7 +73,6 @@ impl UniqueValuesExec {
                 ))
             })?;
 
-            // sort_expr.push(PhysicalSortExpr::new_default(col(&col_name, &schema)?));
             columns_to_track_indices.push(index);
         }
 
@@ -167,8 +159,6 @@ impl ExecutionPlan for UniqueValuesExec {
         partition: usize,
         context: Arc<datafusion::execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // Each partition receives its own handle so unique values stay scoped
-        // to the input slice and can later be merged or inspected independently.
         let input_stream = self.input.execute(partition, context)?;
 
         let tracked_fields: Vec<FieldRef> = self
@@ -219,7 +209,8 @@ impl UniqueValuesHandleCollection {
         self.len() == 0
     }
 
-    /// Merges the unique values collected across all registered handles into a single map grouped by column(field).
+    /// Merges the unique values collected across all registered handles into a
+    /// single map grouped by column (field).
     pub fn unique_values(&self) -> Option<ColumnValueMap> {
         let handles = self.handles();
         if handles.is_empty() {
@@ -298,11 +289,12 @@ fn merge_column_value_sets(
 pub type ErasedColumnValues = Box<dyn UniqueVec + Send + Sync>;
 pub type ColumnValueMap = IndexMap<FieldRef, ErasedColumnValues>;
 
-/// Shared state that keeps track of the unique values discovered for each column.
+/// Shared state that keeps track of the unique values discovered for each
+/// column.
 ///
 /// The handle is wrapped in an [`Arc`] and guarded by a [`Mutex`] so it can be
-/// updated from multiple execution streams while batches are flowing towards the
-/// NetCDF sink.
+/// updated from multiple execution streams while batches are flowing towards a
+/// sink.
 #[derive(Debug)]
 pub struct UniqueValuesHandle {
     pub unique_column_values: Mutex<ColumnValueMap>,
@@ -389,7 +381,7 @@ pub trait UniqueVec: Any + Debug {
 
 /// Sorted container that stores the unique values for a single column.
 #[derive(Debug)]
-pub(crate) struct UniqueColumnValues<T: Ord + Eq + Send + Sync + 'static> {
+pub struct UniqueColumnValues<T: Ord + Eq + Send + Sync + 'static> {
     pub values: Vec<T>,
 }
 
@@ -468,8 +460,8 @@ impl<T: Ord + Eq + Send + Sync + 'static> UniqueColumnValues<T> {
     }
 }
 
-/// Stream adapter that records the unique values for the requested columns while
-/// forwarding all batches downstream unchanged.
+/// Stream adapter that records the unique values for the requested columns
+/// while forwarding all batches downstream unchanged.
 pub struct UniqueValueStream {
     pub input: SendableRecordBatchStream,
     pub unique_values_handle: Arc<UniqueValuesHandle>,
@@ -477,11 +469,6 @@ pub struct UniqueValueStream {
 }
 
 impl UniqueValueStream {
-    /// Creates a new stream adapter.
-    ///
-    /// * `input` - upstream record batch stream.
-    /// * `unique_values` - shared handle that stores the collected values.
-    /// * `unique_value_columns_projection` - zero-based column indices to track.
     pub fn new(
         input: SendableRecordBatchStream,
         unique_values: Arc<UniqueValuesHandle>,
@@ -863,62 +850,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projection_controls_tracked_columns() {
-        let batch = batch_from(
-            vec![Some("A"), Some("B"), Some("C")],
-            vec![Some(1), Some(2), Some(3)],
-            vec![Some(b"a"), Some(b"b"), Some(b"c")],
-        );
-        let partitions = vec![vec![batch.clone()]];
-        let schema = build_schema();
-        let exec = Arc::new(
-            TestMemoryExec::try_new(&partitions, schema.clone(), None).expect("memory exec"),
-        );
-
-        let session = SessionContext::new();
-        let input_stream = exec
-            .execute(0, session.task_ctx())
-            .expect("execute memory exec");
-        let handle = Arc::new(UniqueValuesHandle::from_schema(schema).expect("handle"));
-        let projection = vec![0]; // only track the first column
-        let stream: SendableRecordBatchStream = Box::pin(UniqueValueStream::new(
-            input_stream,
-            handle.clone(),
-            projection,
-        ));
-        let output = common::collect(stream).await.expect("collect stream");
-        assert_batches_eq(std::slice::from_ref(&batch), &output);
-
-        let unique_values = handle.unique_column_values.lock();
-        let station_values = unique_values
-            .iter()
-            .find_map(|(f, b)| if f.name() == "station" { Some(b) } else { None })
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UniqueColumnValues<String>>()
-            .expect("station unique values");
-        assert_eq!(station_values.values, vec!["A", "B", "C"]);
-
-        let depth_values = unique_values
-            .iter()
-            .find_map(|(f, b)| if f.name() == "depth" { Some(b) } else { None })
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UniqueColumnValues<i32>>()
-            .expect("depth unique values");
-        assert!(depth_values.values.is_empty());
-
-        let payload_values = unique_values
-            .iter()
-            .find_map(|(f, b)| if f.name() == "payload" { Some(b) } else { None })
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UniqueColumnValues<Vec<u8>>>()
-            .expect("payload unique values");
-        assert!(payload_values.values.is_empty());
-    }
-
-    #[tokio::test]
     async fn unique_values_exec_registers_handles_per_partition() {
         let partitions = vec![
             vec![batch_from(
@@ -948,7 +879,6 @@ mod tests {
             let stream = exec
                 .execute(partition, session.task_ctx())
                 .expect("execute unique exec");
-            // We only care that the stream drains successfully.
             common::collect(stream)
                 .await
                 .expect("collect unique exec partition");

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
+use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetcdfFormat};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_formats::netcdf::NetcdfFormat;
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -137,11 +137,10 @@ impl TableFunctionImpl for ReadNetCDFFunc {
 
         tracing::debug!("read_netcdf listing urls: {:?}", listing_urls);
 
-        let file_format = NetcdfFormat::new_with_dimensions(
-            self.datasets_object_store.clone(),
-            Default::default(),
-            dimensions,
-        );
+        let mut netcdf_options = NetcdfOptions::default();
+        netcdf_options.read_dimensions = dimensions;
+
+        let file_format = NetcdfFormat::new(self.datasets_object_store.clone(), netcdf_options);
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

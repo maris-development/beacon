@@ -1,15 +1,13 @@
 use std::sync::Arc;
 
+use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, options::NetcdfOptions};
 use beacon_atlas::datafusion::AtlasFormatFactory;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::DatasetsStore;
 use datafusion::prelude::SessionContext;
 
 use crate::{
-    arrow::ArrowFormatFactory,
-    csv::CsvFormatFactory,
-    netcdf::{NetCDFFormatFactory, NetcdfOptions},
-    parquet::ParquetFormatFactory,
+    arrow::ArrowFormatFactory, csv::CsvFormatFactory, parquet::ParquetFormatFactory,
     zarr::ZarrFormatFactory,
 };
 
@@ -17,7 +15,6 @@ pub mod arrow;
 pub mod bbf;
 pub mod csv;
 pub mod geo_parquet;
-pub mod netcdf;
 pub mod odv_ascii;
 pub mod parquet;
 pub mod zarr;

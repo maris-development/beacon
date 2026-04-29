@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use beacon_arrow_netcdf::reader::NetCDFArrowReader;
 use beacon_atlas::prelude::Dataset;
 use beacon_common::listing_url::parse_listing_table_url;
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
@@ -32,15 +31,16 @@ impl IngestFormatLoader for NetcdfIngestFormatLoader {
             .try_collect()
             .await?;
 
-        let datasets = objects.into_iter().map(move |obj| {
-            let file_path = datasets_store.translate_netcdf_url_path(&obj.location)?;
-            let reader = NetCDFArrowReader::new(&file_path)?;
-            let arrays = reader.read_columns::<Vec<_>>(None)?;
-            let schema = reader.schema();
-            let dataset = Dataset::new(&file_path, schema, arrays)?;
-            Ok::<_, anyhow::Error>(dataset)
-        });
+        // let datasets = objects.into_iter().map(move |obj| {
+        //     let file_path = datasets_store.translate_netcdf_url_path(&obj.location)?;
+        //     let reader = NetCDFArrowReader::new(&file_path)?;
+        //     let arrays = reader.read_columns::<Vec<_>>(None)?;
+        //     let schema = reader.schema();
+        //     let dataset = Dataset::new(&file_path, schema, arrays)?;
+        //     Ok::<_, anyhow::Error>(dataset)
+        // });
 
-        Ok(futures::stream::iter(datasets).boxed())
+        // Ok(futures::stream::iter(datasets).boxed())
+        todo!()
     }
 }
