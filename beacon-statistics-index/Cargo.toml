@@ -1,0 +1,20 @@
+[package]
+name = "beacon-statistics-index"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+datafusion = { workspace = true }
+moka = { workspace = true }
+chrono = { workspace = true }
+indexmap = { workspace = true }
+object_store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace=true }
+
+beacon-config = { path = "../beacon-config" }
+beacon-common = { path = "../beacon-common" }
+beacon-object-storage = { path = "../beacon-object-storage" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
