@@ -963,4 +963,199 @@ mod tests {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2);
     }
+
+    // ─── SQL Integration Tests ─────────────────────────────────────────────────
+
+    /// Helper: register an atlas collection as a table in a SessionContext.
+    async fn register_atlas_table(
+        ctx: &SessionContext,
+        store: Arc<InMemory>,
+        table_name: &str,
+        collection_path: &str,
+    ) {
+        use datafusion::datasource::listing::{
+            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+        };
+
+        let url = ObjectStoreUrl::parse("memory://").unwrap();
+        ctx.runtime_env()
+            .object_store_registry
+            .register_store(url.as_ref(), store.clone());
+
+        let format = Arc::new(AtlasFormat::new(store.clone(), 64 * 1024 * 1024));
+        let options = ListingOptions::new(format).with_file_extension("atlas");
+
+        let table_url =
+            ListingTableUrl::parse(format!("memory:///{}/collection.atlas", collection_path))
+                .unwrap();
+
+        let schema = options
+            .infer_schema(&ctx.state(), &table_url)
+            .await
+            .unwrap();
+
+        let config = ListingTableConfig::new(table_url)
+            .with_listing_options(options)
+            .with_schema(schema);
+
+        let table = ListingTable::try_new(config).unwrap();
+        ctx.register_table(table_name, Arc::new(table)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sql_select_all() {
+        let store = Arc::new(InMemory::new());
+        write_test_collection(store.clone()).await;
+
+        let ctx = SessionContext::new();
+        register_atlas_table(&ctx, store, "ocean", "test-collection").await;
+
+        let df = ctx.sql("SELECT * FROM ocean").await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 5); // dataset-1(3) + dataset-2(2)
+
+        // All batches should have the global schema columns
+        for batch in &batches {
+            assert_eq!(batch.num_columns(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_select_single_column() {
+        let store = Arc::new(InMemory::new());
+        write_test_collection(store.clone()).await;
+
+        let ctx = SessionContext::new();
+        register_atlas_table(&ctx, store, "ocean", "test-collection").await;
+
+        let df = ctx.sql("SELECT temperature FROM ocean").await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 5);
+
+        for batch in &batches {
+            assert_eq!(batch.num_columns(), 1);
+            assert_eq!(batch.schema().field(0).name(), "temperature");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_select_with_filter() {
+        let store = Arc::new(InMemory::new());
+        write_test_collection(store.clone()).await;
+
+        let ctx = SessionContext::new();
+        register_atlas_table(&ctx, store, "ocean", "test-collection").await;
+
+        // temperature values: dataset-1 [15, 16, 17], dataset-2 [20, 21]
+        let df = ctx
+            .sql("SELECT temperature FROM ocean WHERE temperature > 18.0")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2); // only 20.0 and 21.0 from dataset-2
+    }
+
+    #[tokio::test]
+    async fn test_sql_count() {
+        let store = Arc::new(InMemory::new());
+        write_test_collection(store.clone()).await;
+
+        let ctx = SessionContext::new();
+        register_atlas_table(&ctx, store, "ocean", "test-collection").await;
+
+        let df = ctx.sql("SELECT COUNT(*) AS cnt FROM ocean").await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        assert_eq!(batches.len(), 1);
+        let cnt = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(cnt, 5);
+    }
+
+    #[tokio::test]
+    async fn test_sql_aggregation() {
+        let store = Arc::new(InMemory::new());
+        write_test_collection(store.clone()).await;
+
+        let ctx = SessionContext::new();
+        register_atlas_table(&ctx, store, "ocean", "test-collection").await;
+
+        // depth values: dataset-1 [10, 20, 30], dataset-2 has no depth (null)
+        let df = ctx
+            .sql("SELECT MIN(depth) AS min_d, MAX(depth) AS max_d FROM ocean")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+
+        let min_d = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .value(0);
+        let max_d = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .value(0);
+
+        assert_eq!(min_d, 10.0);
+        assert_eq!(max_d, 30.0);
+    }
+
+    #[tokio::test]
+    async fn test_sql_null_handling() {
+        let store = Arc::new(InMemory::new());
+        write_test_collection(store.clone()).await;
+
+        let ctx = SessionContext::new();
+        register_atlas_table(&ctx, store, "ocean", "test-collection").await;
+
+        // Count non-null depth values (only dataset-1 has depth = 3 rows)
+        let df = ctx
+            .sql("SELECT COUNT(depth) AS non_null_depth FROM ocean")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let cnt = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(cnt, 3);
+    }
+
+    #[tokio::test]
+    async fn test_sql_limit() {
+        let store = Arc::new(InMemory::new());
+        write_test_collection(store.clone()).await;
+
+        let ctx = SessionContext::new();
+        register_atlas_table(&ctx, store, "ocean", "test-collection").await;
+
+        let df = ctx
+            .sql("SELECT temperature FROM ocean LIMIT 2")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
 }
