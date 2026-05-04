@@ -13,8 +13,10 @@ use parking_lot::RwLock;
 use tokio::sync::OnceCell;
 
 use crate::array::lazy_ndarray_dyn;
-use crate::schema::{ResolvedSchema, SchemaStore};
-use crate::writer::{ObjStoreStorage, array_name_to_path};
+use crate::format::footer::{CollectionFooter, DeletionMask};
+use crate::format::schema::{ResolvedSchema, SchemaStore};
+use crate::format::statistics::{ColumnStatistics, StatisticsValue};
+use crate::storage::{AtlasStorage, array_name_to_path, stats_path};
 
 // ─── AtlasReader ──────────────────────────────────────────────────────────────
 
@@ -28,8 +30,11 @@ use crate::writer::{ObjStoreStorage, array_name_to_path};
 /// `".convention"`) are read directly from their `.arrf` files.
 pub struct AtlasReader {
     schema_store: SchemaStore,
+    deletion_mask: DeletionMask,
     /// Lazy cache of opened `array_format::Reader` instances, keyed by array name.
     column_readers: RwLock<HashMap<String, Arc<OnceCell<Arc<Reader>>>>>,
+    /// Cache for loaded column statistics.
+    column_stats_cache: RwLock<HashMap<String, Arc<ColumnStatistics>>>,
     storage: Arc<dyn ObjectStore>,
     base_path: Path,
     cache_capacity_bytes: u64,
@@ -38,114 +43,72 @@ pub struct AtlasReader {
 impl AtlasReader {
     /// Open an existing atlas collection for reading.
     ///
-    /// Loads the schema store from `{base_path}/schema.bin`. Column `.arrf`
-    /// files are opened lazily on first read.
+    /// Loads the footer from `{base_path}/collection.atlas` and the deletion
+    /// mask from `{base_path}/deleted.atlas`. Column `.arrf` files are opened
+    /// lazily on first read.
     pub async fn open(
         storage: Arc<dyn ObjectStore>,
         base_path: Path,
         cache_capacity_bytes: u64,
     ) -> anyhow::Result<Self> {
-        let schema_path = Path::from(format!("{}/schema.bin", base_path));
-        let schema_store =
-            SchemaStore::load_from_object_store(storage.as_ref(), &schema_path).await?;
+        let footer_path = Path::from(format!("{}/collection.atlas", base_path));
+        let footer =
+            CollectionFooter::load_from_object_store(storage.as_ref(), &footer_path).await?;
+
+        let mask_path = Path::from(format!("{}/deleted.atlas", base_path));
+        let deletion_mask =
+            DeletionMask::load_from_object_store(storage.as_ref(), &mask_path).await?;
 
         Ok(Self {
-            schema_store,
+            schema_store: footer.schema_store,
+            deletion_mask,
             column_readers: RwLock::new(HashMap::new()),
+            column_stats_cache: RwLock::new(HashMap::new()),
             storage,
             base_path,
             cache_capacity_bytes,
         })
     }
 
-    /// Read a full dataset by name, returning all arrays.
-    pub async fn read_dataset(&self, dataset_name: &str) -> anyhow::Result<Dataset> {
-        let schema = self
-            .schema_store
-            .get_schema(dataset_name)
-            .ok_or_else(|| anyhow!("Dataset not found: {}", dataset_name))?;
-
-        let array_names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
-        self.read_dataset_impl(dataset_name, &schema, &array_names)
-            .await
+    pub async fn read_dataset_schema(&self, dataset_name: &str) -> Option<ResolvedSchema> {
+        self.schema_store.get_schema(dataset_name)
     }
 
-    /// Read a dataset with only the specified arrays.
+    /// Read a dataset by name, returning all or projected arrays.
     ///
-    /// Only the `.arrf` files for the requested arrays are opened.
-    pub async fn read_dataset_projected(
+    /// If `projection` is provided, only arrays with names in the projection are returned (if they exist in the schema). Otherwise all arrays in the schema are returned.
+    /// The schema is used to determine which arrays exist for the dataset and their types, but all arrays are read directly from their `.arrf` files on demand.
+    /// Returns an error if any requested column is not in the schema, or if the dataset is deleted.
+    pub async fn read_dataset<S: AsRef<str>, P: AsRef<[S]>>(
         &self,
         dataset_name: &str,
-        columns: &[&str],
+        projection: Option<P>,
     ) -> anyhow::Result<Dataset> {
+        self.check_not_deleted(dataset_name)?;
+
         let schema = self
             .schema_store
             .get_schema(dataset_name)
-            .ok_or_else(|| anyhow!("Dataset not found: {}", dataset_name))?;
+            .ok_or_else(|| anyhow!("Dataset '{}' not found in schema store", dataset_name))?;
 
-        // Validate requested columns exist in schema
-        for &col in columns {
-            if !schema.columns.iter().any(|c| c.name == col) {
-                anyhow::bail!("Column '{}' not found in dataset '{}'", col, dataset_name);
-            }
-        }
-
-        self.read_dataset_impl(dataset_name, &schema, columns).await
-    }
-
-    /// Read specific arrays from a dataset by name, returning them as a map.
-    ///
-    /// Only the `.arrf` files for the requested arrays are opened.
-    pub async fn read_dataset_arrays(
-        &self,
-        dataset_name: &str,
-        array_names: &[&str],
-    ) -> anyhow::Result<IndexMap<String, Arc<dyn NdArrayD>>> {
-        let schema = self
-            .schema_store
-            .get_schema(dataset_name)
-            .ok_or_else(|| anyhow!("Dataset not found: {}", dataset_name))?;
+        let requested_columns: Vec<String> = if let Some(cols) = projection {
+            cols.as_ref()
+                .iter()
+                .map(|s| s.as_ref().to_string())
+                .collect()
+        } else {
+            schema.columns.iter().map(|c| c.name.clone()).collect()
+        };
 
         let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
 
-        for &name in array_names {
-            let col = schema
-                .columns
-                .iter()
-                .find(|c| c.name == name)
-                .ok_or_else(|| {
-                    anyhow!("Array '{}' not found in dataset '{}'", name, dataset_name)
-                })?;
-
-            let reader = self.get_or_open_column_reader(name).await?;
-            let nd = lazy_ndarray_dyn(reader, dataset_name, col.data_type.clone())?;
-            arrays.insert(name.to_string(), nd);
-        }
-
-        Ok(arrays)
-    }
-
-    /// Get a reference to the schema store.
-    pub fn schema_store(&self) -> &SchemaStore {
-        &self.schema_store
-    }
-
-    // ── Internal helpers ──────────────────────────────────────────────────
-
-    async fn read_dataset_impl(
-        &self,
-        dataset_name: &str,
-        schema: &ResolvedSchema,
-        columns: &[&str],
-    ) -> anyhow::Result<Dataset> {
-        let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
-
-        for &col_name in columns {
-            let col = schema
-                .columns
-                .iter()
-                .find(|c| c.name == col_name)
-                .ok_or_else(|| anyhow!("Column '{}' not in schema", col_name))?;
+        for col_name in &requested_columns {
+            let col = match schema.columns.iter().find(|c| &c.name == col_name) {
+                Some(col) => col,
+                None => {
+                    anyhow::bail!("Column '{}' not in schema", col_name);
+                }
+            };
 
             let reader = self.get_or_open_column_reader(col_name).await?;
             let nd = lazy_ndarray_dyn(reader, dataset_name, col.data_type.clone())?;
@@ -153,6 +116,74 @@ impl AtlasReader {
         }
 
         Ok(Dataset::new(dataset_name.to_string(), arrays).await)
+    }
+
+    /// Get a reference to the schema store.
+    pub fn schema_store(&self) -> &SchemaStore {
+        &self.schema_store
+    }
+
+    /// Get the global schema (merged union of all non-deleted dataset schemas).
+    pub fn global_schema(&self) -> &ResolvedSchema {
+        self.schema_store.global_schema()
+    }
+
+    /// Get a reference to the deletion mask.
+    pub fn deletion_mask(&self) -> &DeletionMask {
+        &self.deletion_mask
+    }
+
+    /// Returns dataset names that are not deleted.
+    pub fn dataset_names(&self) -> impl Iterator<Item = &str> {
+        self.schema_store.datasets().filter_map(|(name, entry)| {
+            if self.deletion_mask.is_deleted(entry.dataset_id) {
+                None
+            } else {
+                Some(name)
+            }
+        })
+    }
+
+    /// Load column statistics for a given column on demand.
+    ///
+    /// Returns cached statistics if already loaded, otherwise reads from
+    /// `{base_path}/columns/{name}.stats.atlas`.
+    pub async fn load_column_statistics(
+        &self,
+        column_name: &str,
+    ) -> anyhow::Result<Arc<ColumnStatistics>> {
+        // Check cache first
+        {
+            let cache = self.column_stats_cache.read();
+            if let Some(stats) = cache.get(column_name) {
+                return Ok(Arc::clone(stats));
+            }
+        }
+
+        // Load from object store
+        let path = stats_path(&self.base_path, column_name);
+        let stats = ColumnStatistics::load_from_object_store(self.storage.as_ref(), &path).await?;
+        let stats = Arc::new(stats);
+
+        // Cache it
+        {
+            let mut cache = self.column_stats_cache.write();
+            cache.insert(column_name.to_string(), Arc::clone(&stats));
+        }
+
+        Ok(stats)
+    }
+
+    // ── Internal helpers ──────────────────────────────────────────────────
+
+    /// Returns an error if the dataset is deleted.
+    fn check_not_deleted(&self, dataset_name: &str) -> anyhow::Result<()> {
+        if let Some(entry) = self.schema_store.get_dataset_entry(dataset_name)
+            && self.deletion_mask.is_deleted(entry.dataset_id)
+        {
+            anyhow::bail!("Dataset '{}' has been deleted", dataset_name);
+        }
+        Ok(())
     }
 
     /// Lazily open an `array_format::Reader` for the given array name.
@@ -182,7 +213,7 @@ impl AtlasReader {
         let reader = cell
             .get_or_try_init(|| async {
                 let col_path = array_name_to_path(&base_path, &col_name);
-                let backend = ObjStoreStorage {
+                let backend = AtlasStorage {
                     store: storage,
                     path: col_path,
                 };
@@ -195,188 +226,7 @@ impl AtlasReader {
 
         Ok(Arc::clone(reader))
     }
-
-    /// Stream all datasets with a column projection.
-    ///
-    /// Returns a `Send` receiver stream of [`ProjectedDataset`] items that can
-    /// be polled from multiple threads. Internally spawns `concurrency` tasks
-    /// that read datasets in parallel and push results into a bounded channel.
-    ///
-    /// For each dataset in the store, the requested `projection` columns are
-    /// read. If a column does not exist for a given dataset, that slot is
-    /// `None`. If **all** projected columns are `None`, the dataset is skipped
-    /// entirely (it has no relevant data).
-    ///
-    /// # Arguments
-    ///
-    /// * `projection` — column names to read from each dataset.
-    /// * `concurrency` — how many datasets to read in parallel.
-    pub fn stream_projected(
-        self: &Arc<Self>,
-        projection: &[&str],
-        concurrency: usize,
-    ) -> flume::r#async::RecvStream<'static, anyhow::Result<ProjectedDataset>> {
-        let projection: Arc<Vec<String>> =
-            Arc::new(projection.iter().map(|&s| s.to_string()).collect());
-        let dataset_names: Vec<String> = self
-            .schema_store
-            .dataset_names()
-            .map(|s| s.to_owned())
-            .collect();
-        let reader = Arc::clone(self);
-
-        let (tx, rx) = flume::bounded(concurrency);
-
-        tokio::spawn(async move {
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
-            let mut handles = Vec::with_capacity(dataset_names.len());
-
-            for dataset_name in dataset_names {
-                let reader = Arc::clone(&reader);
-                let projection = Arc::clone(&projection);
-                let tx = tx.clone();
-                let permit = semaphore.clone().acquire_owned().await;
-
-                let handle = tokio::spawn(async move {
-                    let _permit = permit;
-                    let result = reader
-                        .read_projected_dataset(&dataset_name, &projection)
-                        .await;
-                    match result {
-                        Ok(Some(ds)) => {
-                            let _ = tx.send_async(Ok(ds)).await;
-                        }
-                        Ok(None) => {} // skip — all columns missing
-                        Err(e) => {
-                            let _ = tx.send_async(Err(e)).await;
-                        }
-                    }
-                });
-                handles.push(handle);
-            }
-
-            // Wait for all tasks to complete (channel drops when tx + all clones drop)
-            for handle in handles {
-                let _ = handle.await;
-            }
-        });
-
-        rx.into_stream()
-    }
-
-    /// Read a single dataset with projected columns, returning `None` values
-    /// for missing columns. Returns `Ok(None)` if all columns are missing.
-    async fn read_projected_dataset(
-        &self,
-        dataset_name: &str,
-        projection: &[String],
-    ) -> anyhow::Result<Option<ProjectedDataset>> {
-        let schema = match self.schema_store.get_schema(dataset_name) {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        let mut arrays: IndexMap<String, Option<Arc<dyn NdArrayD>>> =
-            IndexMap::with_capacity(projection.len());
-        let mut any_present = false;
-
-        for col_name in projection {
-            let col = schema.columns.iter().find(|c| c.name == col_name.as_str());
-
-            let value = match col {
-                Some(col_def) => {
-                    // Column exists in schema — try to read from .arrf file
-                    match self
-                        .try_read_array(dataset_name, col_name, col_def.data_type.clone())
-                        .await
-                    {
-                        Ok(Some(arr)) => {
-                            any_present = true;
-                            Some(arr)
-                        }
-                        Ok(None) => None,
-                        Err(e) => return Err(e),
-                    }
-                }
-                None => None, // column not in schema for this dataset
-            };
-
-            arrays.insert(col_name.clone(), value);
-        }
-
-        if !any_present {
-            return Ok(None);
-        }
-
-        Ok(Some(ProjectedDataset {
-            name: dataset_name.to_string(),
-            arrays,
-        }))
-    }
-
-    /// Try to read a single array. Returns `Ok(None)` if the array doesn't
-    /// exist in the .arrf file (dataset was never written to this column file).
-    async fn try_read_array(
-        &self,
-        dataset_name: &str,
-        column_name: &str,
-        data_type: NdArrayDataType,
-    ) -> anyhow::Result<Option<Arc<dyn NdArrayD>>> {
-        let reader = match self.get_or_open_column_reader(column_name).await {
-            Ok(r) => r,
-            Err(_) => return Ok(None), // .arrf file doesn't exist
-        };
-
-        match reader.get_array(dataset_name) {
-            Ok(_) => {
-                let nd = lazy_ndarray_dyn(reader, dataset_name, data_type)?;
-                Ok(Some(nd))
-            }
-            Err(array_format::Error::ArrayNotFound { .. }) => Ok(None),
-            Err(e) => Err(anyhow!(
-                "Error reading '{}' for '{}': {}",
-                column_name,
-                dataset_name,
-                e
-            )),
-        }
-    }
 }
-
-// ─── Projected Dataset ────────────────────────────────────────────────────────
-
-/// A dataset read with a column projection.
-///
-/// Each entry in `arrays` corresponds to a projected column name. The value
-/// is `Some(array)` if the column existed for this dataset, or `None` if it
-/// was missing. Datasets where all columns are `None` are never emitted by
-/// the streaming reader.
-#[derive(Debug)]
-pub struct ProjectedDataset {
-    pub name: String,
-    pub arrays: IndexMap<String, Option<Arc<dyn NdArrayD>>>,
-}
-
-impl ProjectedDataset {
-    /// Returns only the columns that are present (non-None).
-    pub fn present_arrays(&self) -> impl Iterator<Item = (&str, &Arc<dyn NdArrayD>)> {
-        self.arrays
-            .iter()
-            .filter_map(|(k, v)| v.as_ref().map(|a| (k.as_str(), a)))
-    }
-
-    /// Convert to a full `Dataset`, keeping only the present arrays.
-    pub async fn into_dataset(self) -> Dataset {
-        let arrays: IndexMap<String, Arc<dyn NdArrayD>> = self
-            .arrays
-            .into_iter()
-            .filter_map(|(k, v)| v.map(|a| (k, a)))
-            .collect();
-        Dataset::new(self.name, arrays).await
-    }
-}
-
-// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -385,7 +235,6 @@ mod tests {
     use array_format::NoCompression;
     use beacon_nd_array::NdArray;
     use beacon_nd_array::datatypes::TimestampNanosecond;
-    use futures::StreamExt;
     use object_store::memory::InMemory;
 
     async fn make_dataset(name: &str, arrays: Vec<(&str, Arc<dyn NdArrayD>)>) -> Dataset {
@@ -427,7 +276,9 @@ mod tests {
         write_and_flush(store.clone(), vec![ds]).await;
 
         let reader = open_reader(store).await;
-        let result = reader.read_dataset("ds-1").await.unwrap();
+        let schema = reader.read_dataset_schema("ds-1").await.unwrap();
+        assert!(!schema.columns.is_empty());
+        let result = reader.read_dataset("ds-1", None::<&[&str]>).await.unwrap();
 
         assert_eq!(result.name, "ds-1");
         let arr = result.arrays.get("temperature").unwrap();
@@ -470,7 +321,12 @@ mod tests {
         write_and_flush(store.clone(), vec![ds]).await;
 
         let reader = open_reader(store.clone()).await;
-        let result = reader.read_dataset("ds-attrs").await.unwrap();
+        let schema = reader.read_dataset_schema("ds-attrs").await.unwrap();
+        assert_eq!(schema.columns.len(), 2);
+        let result = reader
+            .read_dataset("ds-attrs", None::<&[&str]>)
+            .await
+            .unwrap();
 
         // Both arrays are read from .arrf files stored hierarchically
         assert!(result.arrays.contains_key("temperature"));
@@ -534,7 +390,12 @@ mod tests {
         write_and_flush(store.clone(), vec![ds]).await;
 
         let reader = open_reader(store).await;
-        let result = reader.read_dataset("ds-global").await.unwrap();
+        let schema = reader.read_dataset_schema("ds-global").await.unwrap();
+        assert_eq!(schema.columns.len(), 2);
+        let result = reader
+            .read_dataset("ds-global", None::<&[&str]>)
+            .await
+            .unwrap();
 
         assert!(result.arrays.contains_key("temperature"));
         assert!(result.arrays.contains_key(".convention"));
@@ -585,8 +446,10 @@ mod tests {
         write_and_flush(store.clone(), vec![ds]).await;
 
         let reader = open_reader(store).await;
+        let schema = reader.read_dataset_schema("ds-proj").await.unwrap();
+        assert!(schema.columns.iter().any(|c| c.name == "temperature"));
         let result = reader
-            .read_dataset_projected("ds-proj", &["temperature"])
+            .read_dataset("ds-proj", Some(&["temperature"]))
             .await
             .unwrap();
 
@@ -607,9 +470,9 @@ mod tests {
         write_and_flush(store.clone(), vec![ds]).await;
 
         let reader = open_reader(store).await;
-        let err = reader
-            .read_dataset_projected("ds-err", &["nonexistent"])
-            .await;
+        let schema = reader.read_dataset_schema("ds-err").await.unwrap();
+        assert!(!schema.columns.iter().any(|c| c.name == "nonexistent"));
+        let err = reader.read_dataset("ds-err", Some(&["nonexistent"])).await;
         assert!(err.is_err());
     }
 
@@ -653,12 +516,15 @@ mod tests {
         write_and_flush(store.clone(), vec![ds]).await;
 
         let reader = open_reader(store).await;
+        let schema = reader.read_dataset_schema("ds-sel").await.unwrap();
+        assert_eq!(schema.columns.len(), 3);
 
         // Read only specific arrays
-        let arrays = reader
-            .read_dataset_arrays("ds-sel", &["temperature.units", ".convention"])
+        let result = reader
+            .read_dataset("ds-sel", Some(&["temperature.units", ".convention"]))
             .await
             .unwrap();
+        let arrays = &result.arrays;
 
         assert_eq!(arrays.len(), 2);
         assert!(arrays.contains_key("temperature.units"));
@@ -677,7 +543,13 @@ mod tests {
         write_and_flush(store.clone(), vec![ds]).await;
 
         let reader = open_reader(store).await;
-        assert!(reader.read_dataset("nonexistent").await.is_err());
+        assert!(reader.read_dataset_schema("nonexistent").await.is_none());
+        assert!(
+            reader
+                .read_dataset("nonexistent", None::<&[&str]>)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -704,7 +576,10 @@ mod tests {
         for i in 0..10 {
             let r = Arc::clone(&reader);
             handles.push(tokio::spawn(async move {
-                let ds = r.read_dataset(&format!("ds-{}", i)).await.unwrap();
+                let name = format!("ds-{}", i);
+                let schema = r.read_dataset_schema(&name).await.unwrap();
+                assert!(!schema.columns.is_empty());
+                let ds = r.read_dataset(&name, None::<&[&str]>).await.unwrap();
                 let arr = ds.arrays.get("values").unwrap();
                 let typed = arr.as_any().downcast_ref::<NdArray<f64>>().unwrap();
                 let vals = typed.clone_into_raw_vec().await;
@@ -758,7 +633,12 @@ mod tests {
         write_and_flush(store.clone(), vec![ds]).await;
 
         let reader = open_reader(store).await;
-        let result = reader.read_dataset("ds-types").await.unwrap();
+        let schema = reader.read_dataset_schema("ds-types").await.unwrap();
+        assert_eq!(schema.columns.len(), 3);
+        let result = reader
+            .read_dataset("ds-types", None::<&[&str]>)
+            .await
+            .unwrap();
 
         let f = result.arrays.get("float_col").unwrap();
         assert_eq!(f.datatype(), NdArrayDataType::F64);
@@ -779,10 +659,10 @@ mod tests {
         );
     }
 
-    // ─── Streaming tests ──────────────────────────────────────────────────
+    // ─── Schema-driven projected read tests ─────────────────────────────
 
     #[tokio::test]
-    async fn test_stream_projected_basic() {
+    async fn test_read_dataset_schema_then_projected_read() {
         let store = Arc::new(InMemory::new());
 
         // Write 3 datasets, all with "temperature" column
@@ -801,22 +681,24 @@ mod tests {
         }
         write_and_flush(store.clone(), datasets).await;
 
-        let reader = Arc::new(open_reader(store).await);
-        let mut stream = reader.stream_projected(&["temperature"], 4);
+        let reader = open_reader(store).await;
 
-        let mut results = Vec::new();
-        while let Some(item) = stream.next().await {
-            results.push(item.unwrap());
-        }
+        for i in 0..3 {
+            let name = format!("ds-{}", i);
+            let schema = reader.read_dataset_schema(&name).await.unwrap();
+            let cols: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+            assert!(cols.contains(&"temperature"));
 
-        assert_eq!(results.len(), 3);
-        for r in &results {
-            assert!(r.arrays.get("temperature").unwrap().is_some());
+            let result = reader
+                .read_dataset(&name, Some(cols.as_slice()))
+                .await
+                .unwrap();
+            assert!(result.arrays.contains_key("temperature"));
         }
     }
 
     #[tokio::test]
-    async fn test_stream_projected_missing_columns() {
+    async fn test_read_dataset_schema_filters_missing_columns() {
         let store = Arc::new(InMemory::new());
 
         // ds-a has temperature + depth
@@ -843,61 +725,74 @@ mod tests {
 
         write_and_flush(store.clone(), vec![ds_a, ds_b]).await;
 
-        let reader = Arc::new(open_reader(store).await);
-        let mut stream = reader.stream_projected(&["temperature", "depth"], 4);
+        let reader = open_reader(store).await;
+        let desired = &["temperature", "depth"];
 
-        let mut results = Vec::new();
-        while let Some(item) = stream.next().await {
-            results.push(item.unwrap());
-        }
+        // ds-a has both columns — schema confirms both exist
+        let schema_a = reader.read_dataset_schema("ds-a").await.unwrap();
+        let cols_a: Vec<&str> = desired
+            .iter()
+            .filter(|c| schema_a.columns.iter().any(|sc| sc.name == **c))
+            .copied()
+            .collect();
+        assert_eq!(cols_a, vec!["temperature", "depth"]);
+        let a = reader
+            .read_dataset("ds-a", Some(cols_a.as_slice()))
+            .await
+            .unwrap();
+        assert!(a.arrays.contains_key("temperature"));
+        assert!(a.arrays.contains_key("depth"));
 
-        // Both datasets should be emitted (both have at least "temperature")
-        assert_eq!(results.len(), 2);
-
-        let a = results.iter().find(|r| r.name == "ds-a").unwrap();
-        assert!(a.arrays.get("temperature").unwrap().is_some());
-        assert!(a.arrays.get("depth").unwrap().is_some());
-
-        let b = results.iter().find(|r| r.name == "ds-b").unwrap();
-        assert!(b.arrays.get("temperature").unwrap().is_some());
-        assert!(b.arrays.get("depth").unwrap().is_none()); // missing column
+        // ds-b is missing "depth" — schema-based filter removes it
+        let schema_b = reader.read_dataset_schema("ds-b").await.unwrap();
+        let cols_b: Vec<&str> = desired
+            .iter()
+            .filter(|c| schema_b.columns.iter().any(|sc| sc.name == **c))
+            .copied()
+            .collect();
+        assert_eq!(cols_b, vec!["temperature"]);
+        let b = reader
+            .read_dataset("ds-b", Some(cols_b.as_slice()))
+            .await
+            .unwrap();
+        assert!(b.arrays.contains_key("temperature"));
+        assert!(!b.arrays.contains_key("depth"));
     }
 
     #[tokio::test]
-    async fn test_stream_projected_skips_empty_datasets() {
+    async fn test_read_dataset_schema_no_matching_columns() {
         let store = Arc::new(InMemory::new());
 
-        // ds-has has "temperature"
-        let temp =
-            NdArray::<f64>::try_new_from_vec_in_mem(vec![5.0], vec![1], vec!["obs".into()], None)
-                .unwrap();
-        let ds_has = make_dataset("ds-has", vec![("temperature", Arc::new(temp))]).await;
-
-        // ds-missing has only "salinity" (not in the projection)
+        // ds-missing has only "salinity" (not in the desired projection)
         let sal =
             NdArray::<f32>::try_new_from_vec_in_mem(vec![35.0], vec![1], vec!["obs".into()], None)
                 .unwrap();
         let ds_missing = make_dataset("ds-missing", vec![("salinity", Arc::new(sal))]).await;
 
-        write_and_flush(store.clone(), vec![ds_has, ds_missing]).await;
+        write_and_flush(store.clone(), vec![ds_missing]).await;
 
-        let reader = Arc::new(open_reader(store).await);
-        let mut stream = reader.stream_projected(&["temperature", "depth"], 4);
+        let reader = open_reader(store).await;
+        let desired = &["temperature", "depth"];
 
-        let mut results = Vec::new();
-        while let Some(item) = stream.next().await {
-            results.push(item.unwrap());
-        }
+        // Schema shows no overlap with desired columns
+        let schema = reader.read_dataset_schema("ds-missing").await.unwrap();
+        let cols: Vec<&str> = desired
+            .iter()
+            .filter(|c| schema.columns.iter().any(|sc| sc.name == **c))
+            .copied()
+            .collect();
+        assert!(cols.is_empty());
 
-        // Only ds-has should appear — ds-missing has no projected columns
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].name, "ds-has");
-        assert!(results[0].arrays.get("temperature").unwrap().is_some());
-        assert!(results[0].arrays.get("depth").unwrap().is_none());
+        // Reading with empty projection gives empty dataset
+        let result = reader
+            .read_dataset("ds-missing", Some(cols.as_slice()))
+            .await
+            .unwrap();
+        assert!(result.arrays.is_empty());
     }
 
     #[tokio::test]
-    async fn test_stream_projected_concurrent() {
+    async fn test_read_dataset_schema_many_datasets() {
         let store = Arc::new(InMemory::new());
 
         // Write 50 datasets
@@ -915,21 +810,22 @@ mod tests {
         }
         write_and_flush(store.clone(), datasets).await;
 
-        let reader = Arc::new(open_reader(store).await);
-        // Use high concurrency
-        let mut stream = reader.stream_projected(&["values"], 16);
+        let reader = open_reader(store).await;
 
-        let mut count = 0;
-        while let Some(item) = stream.next().await {
-            let pd = item.unwrap();
-            assert!(pd.arrays.get("values").unwrap().is_some());
-            count += 1;
+        for i in 0..50 {
+            let name = format!("ds-{}", i);
+            let schema = reader.read_dataset_schema(&name).await.unwrap();
+            let cols: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+            let result = reader
+                .read_dataset(&name, Some(cols.as_slice()))
+                .await
+                .unwrap();
+            assert!(result.arrays.contains_key("values"));
         }
-        assert_eq!(count, 50);
     }
 
     #[tokio::test]
-    async fn test_projected_dataset_into_dataset() {
+    async fn test_read_dataset_schema_only_present_columns_included() {
         let store = Arc::new(InMemory::new());
 
         let temp = NdArray::<f64>::try_new_from_vec_in_mem(
@@ -942,16 +838,374 @@ mod tests {
         let ds = make_dataset("ds-conv", vec![("temperature", Arc::new(temp))]).await;
         write_and_flush(store.clone(), vec![ds]).await;
 
-        let reader = Arc::new(open_reader(store).await);
-        let mut stream = reader.stream_projected(&["temperature", "nonexistent"], 4);
+        let reader = open_reader(store).await;
+        let desired = &["temperature", "nonexistent"];
 
-        let projected = stream.next().await.unwrap().unwrap();
-        assert!(projected.arrays.get("temperature").unwrap().is_some());
-        assert!(projected.arrays.get("nonexistent").unwrap().is_none());
+        // Use schema to filter — only "temperature" is in the schema
+        let schema = reader.read_dataset_schema("ds-conv").await.unwrap();
+        let cols: Vec<&str> = desired
+            .iter()
+            .filter(|c| schema.columns.iter().any(|sc| sc.name == **c))
+            .copied()
+            .collect();
 
-        // Convert to Dataset — only present arrays included
-        let dataset = projected.into_dataset().await;
-        assert!(dataset.arrays.contains_key("temperature"));
-        assert!(!dataset.arrays.contains_key("nonexistent"));
+        let result = reader
+            .read_dataset("ds-conv", Some(cols.as_slice()))
+            .await
+            .unwrap();
+
+        // Only present columns are included
+        assert!(result.arrays.contains_key("temperature"));
+        assert!(!result.arrays.contains_key("nonexistent"));
+    }
+
+    // ─── Lazy AtlasArray integration tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_lazy_read_subset_through_reader() {
+        let store = Arc::new(InMemory::new());
+
+        // Write a 2D array: 3×4 matrix
+        let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let arr = NdArray::<f64>::try_new_from_vec_in_mem(
+            values,
+            vec![3, 4],
+            vec!["row".into(), "col".into()],
+            None,
+        )
+        .unwrap();
+
+        let ds = make_dataset("ds-2d", vec![("matrix", Arc::new(arr))]).await;
+        write_and_flush(store.clone(), vec![ds]).await;
+
+        let reader = open_reader(store).await;
+        let schema = reader.read_dataset_schema("ds-2d").await.unwrap();
+        assert_eq!(schema.columns.len(), 1);
+        let result = reader.read_dataset("ds-2d", None::<&[&str]>).await.unwrap();
+
+        let matrix = result.arrays.get("matrix").unwrap();
+        assert_eq!(matrix.shape(), vec![3, 4]);
+        assert_eq!(matrix.dimensions(), vec!["row", "col"]);
+
+        // Read a subset via the NdArrayD trait — exercises AtlasArray::read_subset
+        use beacon_nd_array::array::subset::ArraySubset;
+        let subset = matrix
+            .subset(ArraySubset {
+                start: vec![1, 1],
+                shape: vec![2, 2],
+            })
+            .await
+            .unwrap();
+        assert_eq!(subset.shape(), vec![2, 2]);
+
+        let typed = subset.as_any().downcast_ref::<NdArray<f64>>().unwrap();
+        assert_eq!(typed.clone_into_raw_vec().await, vec![5.0, 6.0, 9.0, 10.0]);
+    }
+
+    #[tokio::test]
+    async fn test_lazy_read_multiple_datasets_same_column() {
+        let store = Arc::new(InMemory::new());
+
+        // Write two datasets sharing the same column name but different data
+        let arr1 = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![1.0, 2.0, 3.0],
+            vec![3],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+        let arr2 = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![10.0, 20.0],
+            vec![2],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let ds1 = make_dataset("ds-a", vec![("temperature", Arc::new(arr1))]).await;
+        let ds2 = make_dataset("ds-b", vec![("temperature", Arc::new(arr2))]).await;
+        write_and_flush(store.clone(), vec![ds1, ds2]).await;
+
+        let reader = open_reader(store).await;
+
+        // Both datasets share the same .arrf file but read different arrays
+        let schema_a = reader.read_dataset_schema("ds-a").await.unwrap();
+        assert_eq!(schema_a.columns.len(), 1);
+        let r1 = reader.read_dataset("ds-a", None::<&[&str]>).await.unwrap();
+        let schema_b = reader.read_dataset_schema("ds-b").await.unwrap();
+        assert_eq!(schema_b.columns.len(), 1);
+        let r2 = reader.read_dataset("ds-b", None::<&[&str]>).await.unwrap();
+
+        let t1 = r1.arrays.get("temperature").unwrap();
+        let t2 = r2.arrays.get("temperature").unwrap();
+
+        assert_eq!(t1.shape(), vec![3]);
+        assert_eq!(t2.shape(), vec![2]);
+
+        let v1 = t1.as_any().downcast_ref::<NdArray<f64>>().unwrap();
+        let v2 = t2.as_any().downcast_ref::<NdArray<f64>>().unwrap();
+        assert_eq!(v1.clone_into_raw_vec().await, vec![1.0, 2.0, 3.0]);
+        assert_eq!(v2.clone_into_raw_vec().await, vec![10.0, 20.0]);
+    }
+
+    #[tokio::test]
+    async fn test_lazy_read_all_types_roundtrip() {
+        let store = Arc::new(InMemory::new());
+
+        let bool_arr = NdArray::<bool>::try_new_from_vec_in_mem(
+            vec![true, false],
+            vec![2],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let u8_arr =
+            NdArray::<u8>::try_new_from_vec_in_mem(vec![255, 0], vec![2], vec!["obs".into()], None)
+                .unwrap();
+
+        let u64_arr = NdArray::<u64>::try_new_from_vec_in_mem(
+            vec![u64::MAX, 0],
+            vec![2],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let ts_arr = NdArray::<TimestampNanosecond>::try_new_from_vec_in_mem(
+            vec![
+                TimestampNanosecond(1_000_000_000),
+                TimestampNanosecond(2_000_000_000),
+            ],
+            vec![2],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let bin_arr = NdArray::<Vec<u8>>::try_new_from_vec_in_mem(
+            vec![vec![0xDE, 0xAD], vec![0xBE, 0xEF]],
+            vec![2],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let ds = make_dataset(
+            "ds-alltypes",
+            vec![
+                ("bools", Arc::new(bool_arr)),
+                ("bytes", Arc::new(u8_arr)),
+                ("big_ints", Arc::new(u64_arr)),
+                ("timestamps", Arc::new(ts_arr)),
+                ("binary", Arc::new(bin_arr)),
+            ],
+        )
+        .await;
+        write_and_flush(store.clone(), vec![ds]).await;
+
+        let reader = open_reader(store).await;
+        let schema = reader.read_dataset_schema("ds-alltypes").await.unwrap();
+        assert_eq!(schema.columns.len(), 5);
+        let result = reader
+            .read_dataset("ds-alltypes", None::<&[&str]>)
+            .await
+            .unwrap();
+
+        // Verify bool
+        let b = result.arrays.get("bools").unwrap();
+        let typed = b.as_any().downcast_ref::<NdArray<bool>>().unwrap();
+        assert_eq!(typed.clone_into_raw_vec().await, vec![true, false]);
+
+        // Verify u8
+        let u = result.arrays.get("bytes").unwrap();
+        let typed = u.as_any().downcast_ref::<NdArray<u8>>().unwrap();
+        assert_eq!(typed.clone_into_raw_vec().await, vec![255, 0]);
+
+        // Verify u64
+        let big = result.arrays.get("big_ints").unwrap();
+        let typed = big.as_any().downcast_ref::<NdArray<u64>>().unwrap();
+        assert_eq!(typed.clone_into_raw_vec().await, vec![u64::MAX, 0]);
+
+        // Verify timestamps
+        let ts = result.arrays.get("timestamps").unwrap();
+        assert_eq!(ts.datatype(), NdArrayDataType::Timestamp);
+        let typed = ts
+            .as_any()
+            .downcast_ref::<NdArray<TimestampNanosecond>>()
+            .unwrap();
+        assert_eq!(
+            typed.clone_into_raw_vec().await,
+            vec![
+                TimestampNanosecond(1_000_000_000),
+                TimestampNanosecond(2_000_000_000)
+            ]
+        );
+
+        // Verify binary
+        let bin = result.arrays.get("binary").unwrap();
+        assert_eq!(bin.datatype(), NdArrayDataType::Binary);
+        let typed = bin.as_any().downcast_ref::<NdArray<Vec<u8>>>().unwrap();
+        assert_eq!(
+            typed.clone_into_raw_vec().await,
+            vec![vec![0xDE, 0xAD], vec![0xBE, 0xEF]]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lazy_read_with_subset_reads() {
+        let store = Arc::new(InMemory::new());
+
+        // Write datasets with 1D arrays of increasing length
+        let mut datasets = Vec::new();
+        for i in 1..=5 {
+            let values: Vec<f64> = (0..i * 10).map(|v| v as f64).collect();
+            let arr = NdArray::<f64>::try_new_from_vec_in_mem(
+                values,
+                vec![i * 10],
+                vec!["obs".into()],
+                None,
+            )
+            .unwrap();
+            datasets
+                .push(make_dataset(&format!("ds-{}", i), vec![("values", Arc::new(arr))]).await);
+        }
+        write_and_flush(store.clone(), datasets).await;
+
+        let reader = open_reader(store).await;
+
+        use beacon_nd_array::array::subset::ArraySubset;
+        for i in 1..=5 {
+            let name = format!("ds-{}", i);
+            let schema = reader.read_dataset_schema(&name).await.unwrap();
+            assert!(schema.columns.iter().any(|c| c.name == "values"));
+            let result = reader.read_dataset(&name, Some(&["values"])).await.unwrap();
+            let arr = result.arrays.get("values").unwrap();
+            let len = arr.shape()[0];
+
+            // Read a subset: first 5 elements (or all if fewer)
+            let subset_len = len.min(5);
+            let sub = arr
+                .subset(ArraySubset {
+                    start: vec![0],
+                    shape: vec![subset_len],
+                })
+                .await
+                .unwrap();
+            assert_eq!(sub.shape(), vec![subset_len]);
+
+            // Verify values are 0..subset_len
+            let typed = sub.as_any().downcast_ref::<NdArray<f64>>().unwrap();
+            let vals = typed.clone_into_raw_vec().await;
+            let expected: Vec<f64> = (0..subset_len).map(|v| v as f64).collect();
+            assert_eq!(vals, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deleted_dataset_invisible_to_reader() {
+        let store = Arc::new(InMemory::new());
+
+        // Write two datasets
+        let arr1 = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![1.0, 2.0],
+            vec![2],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+        let arr2 = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![3.0, 4.0],
+            vec![2],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let ds1 = make_dataset("keep-me", vec![("val", Arc::new(arr1))]).await;
+        let ds2 = make_dataset("delete-me", vec![("val", Arc::new(arr2))]).await;
+
+        let mut writer =
+            AtlasWriter::new(store.clone(), Path::from("atlas"), NoCompression, 64 * 1024);
+        writer.write_dataset(&ds1).await.unwrap();
+        writer.write_dataset(&ds2).await.unwrap();
+
+        // Delete one dataset
+        writer.remove_dataset("delete-me").unwrap();
+        writer.flush().await.unwrap();
+
+        // Open reader — deleted dataset should be invisible
+        let reader = open_reader(store).await;
+        let names: Vec<&str> = reader.dataset_names().collect();
+        assert_eq!(names, vec!["keep-me"]);
+
+        // Reading deleted dataset — schema is not available, read errors
+        assert!(reader.read_dataset_schema("delete-me").await.is_none());
+        let err = reader.read_dataset("delete-me", None::<&[&str]>).await;
+        assert!(err.is_err());
+
+        // Reading the kept dataset should work fine
+        let schema = reader.read_dataset_schema("keep-me").await.unwrap();
+        assert_eq!(schema.columns.len(), 1);
+        let ds = reader
+            .read_dataset("keep-me", None::<&[&str]>)
+            .await
+            .unwrap();
+        assert_eq!(ds.name, "keep-me");
+    }
+
+    #[tokio::test]
+    async fn test_load_column_statistics() {
+        let store = Arc::new(InMemory::new());
+
+        // Write datasets with different ranges
+        let arr1 = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![1.0, 2.0, 3.0],
+            vec![3],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+        let arr2 = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![10.0, 20.0, 30.0],
+            vec![3],
+            vec!["obs".into()],
+            None,
+        )
+        .unwrap();
+
+        let ds1 = make_dataset("low", vec![("temp", Arc::new(arr1))]).await;
+        let ds2 = make_dataset("high", vec![("temp", Arc::new(arr2))]).await;
+
+        let mut writer =
+            AtlasWriter::new(store.clone(), Path::from("atlas"), NoCompression, 64 * 1024);
+        writer.write_dataset(&ds1).await.unwrap();
+        writer.write_dataset(&ds2).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = open_reader(store).await;
+        let stats = reader.load_column_statistics("temp").await.unwrap();
+
+        let s0 = stats.get(crate::schema::DatasetId::from_raw(0)).unwrap();
+        assert_eq!(s0.row_count, 3);
+        assert_eq!(
+            s0.min_value,
+            Some(crate::statistics::StatisticsValue::F64(1.0))
+        );
+        assert_eq!(
+            s0.max_value,
+            Some(crate::statistics::StatisticsValue::F64(3.0))
+        );
+
+        let s1 = stats.get(crate::schema::DatasetId::from_raw(1)).unwrap();
+        assert_eq!(s1.row_count, 3);
+        assert_eq!(
+            s1.min_value,
+            Some(crate::statistics::StatisticsValue::F64(10.0))
+        );
+        assert_eq!(
+            s1.max_value,
+            Some(crate::statistics::StatisticsValue::F64(30.0))
+        );
     }
 }

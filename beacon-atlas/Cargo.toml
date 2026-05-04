@@ -35,3 +35,6 @@ beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-nd-arrow = { path = "../beacon-nd-arrow" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-common = { path = "../beacon-common" }
+
+[dev-dependencies]
+tokio-test = "0.4"

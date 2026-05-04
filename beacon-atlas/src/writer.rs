@@ -1,65 +1,21 @@
 use std::collections::HashMap;
-use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use array_format::{
-    ArrayData, BinaryArray, CompressionCodec, DType, PrimitiveArray, Storage, StringArray, Writer,
+    ArrayData, BinaryArray, CompressionCodec, DType, PrimitiveArray, StringArray, Writer,
     WriterConfig,
 };
-use beacon_nd_array::array::subset::ArraySubset;
 use beacon_nd_array::dataset::Dataset;
 use beacon_nd_array::datatypes::{NdArrayDataType, TimestampNanosecond};
 use beacon_nd_array::{NdArray, NdArrayD};
-use bytes::Bytes;
-use futures::future::BoxFuture;
 use object_store::ObjectStore;
 use object_store::path::Path;
 
-use crate::schema::{ColumnInput, DatasetEntry, SchemaStore};
-
-// ─── Storage Adapter ──────────────────────────────────────────────────────────
-
-/// Adapter implementing `array_format::Storage` over the workspace `object_store` crate.
-#[derive(Clone)]
-pub(crate) struct ObjStoreStorage {
-    pub(crate) store: Arc<dyn ObjectStore>,
-    pub(crate) path: Path,
-}
-
-impl Storage for ObjStoreStorage {
-    fn read_range(&self, range: Range<u64>) -> BoxFuture<'_, array_format::Result<Bytes>> {
-        Box::pin(async move {
-            let bytes = self
-                .store
-                .get_range(&self.path, range)
-                .await
-                .map_err(|e| array_format::Error::Storage(e.to_string()))?;
-            Ok(bytes)
-        })
-    }
-
-    fn write(&self, data: Bytes) -> BoxFuture<'_, array_format::Result<()>> {
-        Box::pin(async move {
-            self.store
-                .put(&self.path, data.into())
-                .await
-                .map_err(|e| array_format::Error::Storage(e.to_string()))?;
-            Ok(())
-        })
-    }
-
-    fn size(&self) -> BoxFuture<'_, array_format::Result<u64>> {
-        Box::pin(async move {
-            let meta = self
-                .store
-                .head(&self.path)
-                .await
-                .map_err(|e| array_format::Error::Storage(e.to_string()))?;
-            Ok(meta.size as u64)
-        })
-    }
-}
+use crate::format::footer::{CollectionFooter, DeletionMask};
+use crate::format::schema::{ColumnInput, DatasetEntry, SchemaStore};
+use crate::format::statistics::{ColumnStatistics, compute_statistics, extract_fill_value};
+use crate::storage::{AtlasStorage, array_name_to_path, generate_chunk_subsets, stats_path};
 
 /// An atlas writer that stores datasets as per-array array-format files
 /// with an interned schema store for column definitions.
@@ -69,8 +25,10 @@ impl Storage for ObjStoreStorage {
 /// dotted names like `"temperature.units"` or `".convention"`) are stored
 /// as data arrays — there is no special attribute extraction.
 pub struct AtlasWriter<C: CompressionCodec> {
-    schema_store: SchemaStore,
+    footer: CollectionFooter,
+    deletion_mask: DeletionMask,
     column_writers: HashMap<String, Writer<C>>,
+    column_statistics: HashMap<String, ColumnStatistics>,
     storage: Arc<dyn ObjectStore>,
     base_path: Path,
     block_target_size: usize,
@@ -86,8 +44,10 @@ impl<C: CompressionCodec + Clone> AtlasWriter<C> {
         block_target_size: usize,
     ) -> Self {
         Self {
-            schema_store: SchemaStore::new(),
+            footer: CollectionFooter::new(),
+            deletion_mask: DeletionMask::new(),
             column_writers: HashMap::new(),
+            column_statistics: HashMap::new(),
             storage,
             base_path,
             block_target_size,
@@ -95,21 +55,28 @@ impl<C: CompressionCodec + Clone> AtlasWriter<C> {
         }
     }
 
-    /// Open an existing atlas collection, loading the schema store from
-    /// `{base_path}/schema.bin`. Column writers are opened lazily on first write.
+    /// Open an existing atlas collection, loading the footer from
+    /// `{base_path}/collection.atlas` and deletion mask from
+    /// `{base_path}/deleted.atlas`. Column writers are opened lazily on first write.
     pub async fn open(
         storage: Arc<dyn ObjectStore>,
         base_path: Path,
         codec: C,
         block_target_size: usize,
     ) -> anyhow::Result<Self> {
-        let schema_path = Path::from(format!("{}/schema.bin", base_path));
-        let schema_store =
-            SchemaStore::load_from_object_store(storage.as_ref(), &schema_path).await?;
+        let footer_path = Path::from(format!("{}/collection.atlas", base_path));
+        let footer =
+            CollectionFooter::load_from_object_store(storage.as_ref(), &footer_path).await?;
+
+        let mask_path = Path::from(format!("{}/deleted.atlas", base_path));
+        let deletion_mask =
+            DeletionMask::load_from_object_store(storage.as_ref(), &mask_path).await?;
 
         Ok(Self {
-            schema_store,
+            footer,
+            deletion_mask,
             column_writers: HashMap::new(),
+            column_statistics: HashMap::new(),
             storage,
             base_path,
             block_target_size,
@@ -136,6 +103,7 @@ impl<C: CompressionCodec + Clone> AtlasWriter<C> {
 
         // Register schema
         let entry = self
+            .footer
             .schema_store
             .register_schema(&dataset.name, column_inputs);
 
@@ -188,12 +156,29 @@ impl<C: CompressionCodec + Clone> AtlasWriter<C> {
             }
         }
 
+        // Compute per-column statistics for this dataset
+        for (array_name, array) in &dataset.arrays {
+            let fill_value = extract_fill_value(array.as_ref()).await;
+            let stat_entry = compute_statistics(array.as_ref(), fill_value.as_ref()).await;
+
+            let col_stats = self
+                .column_statistics
+                .entry(array_name.clone())
+                .or_insert_with(ColumnStatistics::new);
+            col_stats.set(entry.dataset_id, stat_entry);
+        }
+
         Ok(entry)
     }
 
-    /// Remove a dataset from the schema store and delete its arrays from column files.
+    /// Remove a dataset by marking it as deleted in the deletion mask
+    /// and removing it from the schema index (allowing re-registration).
     pub fn remove_dataset(&mut self, dataset_name: &str) -> anyhow::Result<Option<DatasetEntry>> {
-        let entry = self.schema_store.remove_dataset(dataset_name);
+        let entry = self.footer.schema_store.remove_dataset(dataset_name);
+
+        if let Some(ref e) = entry {
+            self.deletion_mask.mark_deleted(e.dataset_id);
+        }
 
         // Mark arrays as deleted in column writers that are currently open
         for writer in self.column_writers.values_mut() {
@@ -203,28 +188,50 @@ impl<C: CompressionCodec + Clone> AtlasWriter<C> {
         Ok(entry)
     }
 
-    /// Flush all open column writers and persist the schema store.
+    /// Flush all open column writers and persist the footer, deletion mask, and statistics.
     pub async fn flush(&mut self) -> anyhow::Result<()> {
         for writer in self.column_writers.values_mut() {
             writer.flush().await?;
         }
 
-        let schema_path = Path::from(format!("{}/schema.bin", self.base_path));
-        self.schema_store
-            .save_to_object_store(self.storage.as_ref(), &schema_path)
+        self.footer
+            .schema_store
+            .recompute_global_schema(&self.deletion_mask);
+
+        let footer_path = Path::from(format!("{}/collection.atlas", self.base_path));
+        self.footer
+            .save_to_object_store(self.storage.as_ref(), &footer_path)
             .await?;
+
+        let mask_path = Path::from(format!("{}/deleted.atlas", self.base_path));
+        self.deletion_mask
+            .save_to_object_store(self.storage.as_ref(), &mask_path)
+            .await?;
+
+        // Persist per-column statistics
+        for (col_name, col_stats) in &self.column_statistics {
+            let path = stats_path(&self.base_path, col_name);
+            col_stats
+                .save_to_object_store(self.storage.as_ref(), &path)
+                .await?;
+        }
 
         Ok(())
     }
 
     /// Get a reference to the schema store.
     pub fn schema_store(&self) -> &SchemaStore {
-        &self.schema_store
+        &self.footer.schema_store
     }
 
     /// Get a mutable reference to the schema store.
     pub fn schema_store_mut(&mut self) -> &mut SchemaStore {
-        &mut self.schema_store
+        &mut self.footer.schema_store
+    }
+
+    /// Get a reference to the deletion mask.
+    pub fn deletion_mask(&self) -> &DeletionMask {
+        &self.deletion_mask
     }
 
     async fn get_or_create_column_writer(
@@ -233,7 +240,7 @@ impl<C: CompressionCodec + Clone> AtlasWriter<C> {
     ) -> anyhow::Result<&mut Writer<C>> {
         if !self.column_writers.contains_key(column_name) {
             let col_path = array_name_to_path(&self.base_path, column_name);
-            let backend = ObjStoreStorage {
+            let backend = AtlasStorage {
                 store: self.storage.clone(),
                 path: col_path.clone(),
             };
@@ -260,32 +267,6 @@ impl<C: CompressionCodec + Clone> AtlasWriter<C> {
 
         Ok(self.column_writers.get_mut(column_name).unwrap())
     }
-}
-
-// ─── Path Helpers ─────────────────────────────────────────────────────────────
-
-/// Convert an array name to its storage path.
-///
-/// Dots in array names become directory separators so that related arrays
-/// are stored hierarchically, avoiding huge fan-out in a single directory:
-///
-/// - `"temperature"` → `{base}/columns/temperature.arrf`
-/// - `"temperature.units"` → `{base}/columns/temperature/units.arrf`
-/// - `".convention"` → `{base}/columns/.convention.arrf`
-pub(crate) fn array_name_to_path(base_path: &Path, array_name: &str) -> Path {
-    // Global attributes start with '.' — don't split the leading dot
-    let relative = if let Some(rest) = array_name.strip_prefix('.') {
-        // Global attribute: ".convention" → ".convention.arrf"
-        format!("columns/.{}.arrf", rest)
-    } else if array_name.contains('.') {
-        // Nested: "temperature.units" → "columns/temperature/units.arrf"
-        let parts: Vec<&str> = array_name.splitn(2, '.').collect();
-        format!("columns/{}/{}.arrf", parts[0], parts[1].replace('.', "/"))
-    } else {
-        // Plain column: "temperature" → "columns/temperature.arrf"
-        format!("columns/{}.arrf", array_name)
-    };
-    Path::from(format!("{}/{}", base_path, relative))
 }
 
 // ─── Conversion Helpers ───────────────────────────────────────────────────────
@@ -385,60 +366,6 @@ pub(crate) fn ndarray_dtype_to_arrf_dtype(dt: NdArrayDataType) -> DType {
         NdArrayDataType::String => DType::String,
         NdArrayDataType::Binary => DType::Binary,
     }
-}
-
-/// Generate all chunk subsets that tile a given shape with the given chunk shape.
-fn generate_chunk_subsets(shape: &[usize], chunk_shape: &[usize]) -> Vec<ArraySubset> {
-    if shape.is_empty() {
-        return vec![ArraySubset::new(vec![], vec![])];
-    }
-
-    let chunk_counts: Vec<usize> = shape
-        .iter()
-        .zip(chunk_shape.iter())
-        .map(|(&axis_len, &axis_chunk)| {
-            if axis_len == 0 {
-                0
-            } else {
-                axis_len.div_ceil(axis_chunk.max(1))
-            }
-        })
-        .collect();
-
-    if chunk_counts.contains(&0) {
-        return vec![];
-    }
-
-    let total_chunks: usize = chunk_counts.iter().product();
-    let mut subsets = Vec::with_capacity(total_chunks);
-
-    for linear_idx in 0..total_chunks {
-        let mut rem = linear_idx;
-        let mut chunk_index = vec![0usize; shape.len()];
-        for axis in (0..shape.len()).rev() {
-            chunk_index[axis] = rem % chunk_counts[axis];
-            rem /= chunk_counts[axis];
-        }
-
-        let start: Vec<usize> = chunk_index
-            .iter()
-            .zip(chunk_shape.iter())
-            .map(|(&ci, &cs)| ci * cs.max(1))
-            .collect();
-
-        let sub_shape: Vec<usize> = shape
-            .iter()
-            .zip(start.iter())
-            .zip(chunk_shape.iter())
-            .map(|((&axis_len, &axis_start), &axis_chunk)| {
-                axis_chunk.max(1).min(axis_len - axis_start)
-            })
-            .collect();
-
-        subsets.push(ArraySubset::new(start, sub_shape));
-    }
-
-    subsets
 }
 
 #[cfg(test)]
@@ -753,5 +680,80 @@ mod tests {
 
         let entry_c = writer.schema_store().get_dataset_entry("ds-c").unwrap();
         assert_ne!(entry_a.schema_id, entry_c.schema_id);
+    }
+
+    #[tokio::test]
+    async fn test_statistics_computed_on_write() {
+        let store = Arc::new(InMemory::new());
+        let mut writer = new_writer(store);
+
+        let arr = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![-999.0, 1.0, 5.0, -999.0, 3.0],
+            vec![5],
+            vec!["obs".into()],
+            Some(-999.0),
+        )
+        .unwrap();
+
+        let ds = make_dataset("ds-1", vec![("temperature", Arc::new(arr))]).await;
+        let entry = writer.write_dataset(&ds).await.unwrap();
+
+        // Check statistics were computed
+        let col_stats = writer.column_statistics.get("temperature").unwrap();
+        let stat_entry = col_stats.get(entry.dataset_id).unwrap();
+        assert_eq!(stat_entry.row_count, 5);
+        assert_eq!(stat_entry.null_count, 2); // two fill values
+        assert_eq!(
+            stat_entry.min_value,
+            Some(crate::statistics::StatisticsValue::F64(1.0))
+        );
+        assert_eq!(
+            stat_entry.max_value,
+            Some(crate::statistics::StatisticsValue::F64(5.0))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_statistics_persisted_on_flush() {
+        let store = Arc::new(InMemory::new());
+
+        {
+            let mut writer = AtlasWriter::new(
+                store.clone(),
+                Path::from("test-atlas"),
+                NoCompression,
+                64 * 1024,
+            );
+
+            let arr = NdArray::<f64>::try_new_from_vec_in_mem(
+                vec![10.0, 20.0, 30.0],
+                vec![3],
+                vec!["obs".into()],
+                None,
+            )
+            .unwrap();
+
+            let ds = make_dataset("ds-1", vec![("value", Arc::new(arr))]).await;
+            writer.write_dataset(&ds).await.unwrap();
+            writer.flush().await.unwrap();
+        }
+
+        // Verify the stats file exists and is loadable
+        let stats_file = object_store::path::Path::from("test-atlas/columns/value.stats.atlas");
+        let result = store.get(&stats_file).await.unwrap();
+        let bytes = result.bytes().await.unwrap();
+        let loaded = crate::statistics::ColumnStatistics::load(&bytes[..]).unwrap();
+
+        let stat = loaded.get(crate::schema::DatasetId::from_raw(0)).unwrap();
+        assert_eq!(stat.row_count, 3);
+        assert_eq!(stat.null_count, 0);
+        assert_eq!(
+            stat.min_value,
+            Some(crate::statistics::StatisticsValue::F64(10.0))
+        );
+        assert_eq!(
+            stat.max_value,
+            Some(crate::statistics::StatisticsValue::F64(30.0))
+        );
     }
 }

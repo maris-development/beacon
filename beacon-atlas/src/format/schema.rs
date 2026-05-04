@@ -104,6 +104,11 @@ impl DatasetId {
     pub fn as_u32(self) -> u32 {
         self.0
     }
+
+    /// Create a `DatasetId` from a raw `u32`. Primarily for testing.
+    pub fn from_raw(val: u32) -> Self {
+        Self(val)
+    }
 }
 
 // ─── CompactDataType ──────────────────────────────────────────────────────────
@@ -285,13 +290,13 @@ pub struct ColumnInput {
 ///
 /// Returned by [`SchemaStore::get_schema`] and [`SchemaStore::resolve_schema`].
 /// This is a standalone value that does not borrow from the store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResolvedSchema {
     pub columns: Vec<ResolvedColumn>,
 }
 
 /// A fully resolved column definition with materialized strings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedColumn {
     pub name: String,
     pub data_type: DataType,
@@ -352,6 +357,12 @@ pub struct SchemaStore {
     dataset_index: IndexMap<StringId, DatasetEntry>,
     /// Monotonically increasing counter for the next dataset id.
     next_dataset_id: u32,
+    /// Merged schema of all non-deleted datasets (union of columns with super-typed data types).
+    #[serde(default)]
+    global_schema: ResolvedSchema,
+    /// User-specified type overrides applied on top of the computed global schema.
+    #[serde(default)]
+    global_schema_overrides: IndexMap<String, NdArrayDataType>,
 }
 
 impl SchemaStore {
@@ -363,6 +374,8 @@ impl SchemaStore {
             schemas: SchemaPool::new(),
             dataset_index: IndexMap::new(),
             next_dataset_id: 0,
+            global_schema: ResolvedSchema::default(),
+            global_schema_overrides: IndexMap::new(),
         }
     }
 
@@ -532,6 +545,93 @@ impl SchemaStore {
         self.column_defs.len()
     }
 
+    /// The next dataset id that would be assigned (also the total number of
+    /// dataset ids ever issued, including removed datasets). Useful as
+    /// `num_containers` for statistics arrays.
+    pub fn next_dataset_id(&self) -> u32 {
+        self.next_dataset_id
+    }
+
+    // ─── Global Schema ─────────────────────────────────────────────────────
+
+    /// Returns the global schema (merged union of all non-deleted dataset schemas).
+    pub fn global_schema(&self) -> &ResolvedSchema {
+        &self.global_schema
+    }
+
+    /// Set a type override for a column in the global schema.
+    ///
+    /// On the next call to [`Self::recompute_global_schema`], this column will
+    /// use the overridden type instead of the computed super type.
+    pub fn set_global_schema_override(
+        &mut self,
+        column: impl Into<String>,
+        data_type: NdArrayDataType,
+    ) {
+        self.global_schema_overrides
+            .insert(column.into(), data_type);
+    }
+
+    /// Remove a type override for a column in the global schema.
+    pub fn remove_global_schema_override(&mut self, column: &str) -> Option<NdArrayDataType> {
+        self.global_schema_overrides.shift_remove(column)
+    }
+
+    /// Returns the current global schema type overrides.
+    pub fn global_schema_overrides(&self) -> &IndexMap<String, NdArrayDataType> {
+        &self.global_schema_overrides
+    }
+
+    /// Recompute the global schema by merging all non-deleted dataset schemas.
+    ///
+    /// Each column present in any non-deleted dataset appears in the global schema.
+    /// When the same column name appears with different types across datasets,
+    /// the super type is computed. If no valid super type exists, the column is
+    /// typed as `NdArrayDataType::String` (the universal fallback).
+    ///
+    /// Type overrides set via [`Self::set_global_schema_override`] are applied last.
+    pub fn recompute_global_schema(&mut self, deletion_mask: &super::footer::DeletionMask) {
+        let mut columns: IndexMap<String, NdArrayDataType> = IndexMap::new();
+
+        for (_, entry) in &self.dataset_index {
+            if deletion_mask.is_deleted(entry.dataset_id) {
+                continue;
+            }
+
+            let schema = self.schemas.resolve(entry.schema_id);
+            for &col_def_id in &schema.columns {
+                let def = self.column_defs.resolve(col_def_id);
+                let col_name = self.strings.resolve(def.name).to_owned();
+                let col_type = def.data_type.clone();
+
+                columns
+                    .entry(col_name)
+                    .and_modify(|existing| {
+                        if *existing != col_type {
+                            *existing = existing
+                                .super_type(&col_type)
+                                .unwrap_or(NdArrayDataType::String);
+                        }
+                    })
+                    .or_insert(col_type);
+            }
+        }
+
+        // Apply overrides
+        for (name, override_type) in &self.global_schema_overrides {
+            if columns.contains_key(name) {
+                columns.insert(name.clone(), override_type.clone());
+            }
+        }
+
+        self.global_schema = ResolvedSchema {
+            columns: columns
+                .into_iter()
+                .map(|(name, data_type)| ResolvedColumn { name, data_type })
+                .collect(),
+        };
+    }
+
     // ─── Persistence ──────────────────────────────────────────────────────
 
     /// Serialize the entire store to a writer using bincode + zstd compression.
@@ -600,7 +700,7 @@ impl SchemaStore {
         Self::load(&bytes[..])
     }
 
-    fn rebuild_lookups(&mut self) {
+    pub(crate) fn rebuild_lookups(&mut self) {
         self.strings.rebuild_lookup();
         self.column_defs.rebuild_lookup();
         self.schemas.rebuild_lookup();
@@ -808,6 +908,195 @@ mod tests {
             "Serialized: {:.2} MB ({:.0} bytes/dataset)",
             serialized_mb,
             buf.len() as f64 / num_datasets as f64
+        );
+    }
+
+    // ─── Global Schema Tests ─────────────────────────────────────────────
+
+    fn empty_mask() -> super::super::footer::DeletionMask {
+        super::super::footer::DeletionMask::new()
+    }
+
+    #[test]
+    fn test_global_schema_empty_store() {
+        let mut store = SchemaStore::new();
+        store.recompute_global_schema(&empty_mask());
+        assert!(store.global_schema().columns.is_empty());
+    }
+
+    #[test]
+    fn test_global_schema_single_dataset() {
+        let mut store = SchemaStore::new();
+        store.register_schema(
+            "ds-1",
+            vec![make_column("temp", DT::F32), make_column("depth", DT::F64)],
+        );
+
+        store.recompute_global_schema(&empty_mask());
+        let gs = store.global_schema();
+        assert_eq!(gs.columns.len(), 2);
+
+        let names: Vec<&str> = gs.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"temp"));
+        assert!(names.contains(&"depth"));
+    }
+
+    #[test]
+    fn test_global_schema_union_of_columns() {
+        let mut store = SchemaStore::new();
+        store.register_schema(
+            "ds-1",
+            vec![make_column("temp", DT::F32), make_column("depth", DT::F64)],
+        );
+        store.register_schema(
+            "ds-2",
+            vec![
+                make_column("temp", DT::F32),
+                make_column("salinity", DT::F32),
+            ],
+        );
+
+        store.recompute_global_schema(&empty_mask());
+        let gs = store.global_schema();
+        assert_eq!(gs.columns.len(), 3);
+
+        let names: Vec<&str> = gs.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"temp"));
+        assert!(names.contains(&"depth"));
+        assert!(names.contains(&"salinity"));
+    }
+
+    #[test]
+    fn test_global_schema_super_typing() {
+        let mut store = SchemaStore::new();
+        store.register_schema("ds-1", vec![make_column("value", DT::F32)]);
+        store.register_schema("ds-2", vec![make_column("value", DT::F64)]);
+
+        store.recompute_global_schema(&empty_mask());
+        let gs = store.global_schema();
+        assert_eq!(gs.columns.len(), 1);
+        assert_eq!(gs.columns[0].name, "value");
+        assert_eq!(gs.columns[0].data_type, DT::F64);
+    }
+
+    #[test]
+    fn test_global_schema_super_typing_int_widening() {
+        let mut store = SchemaStore::new();
+        store.register_schema("ds-1", vec![make_column("x", DT::I8)]);
+        store.register_schema("ds-2", vec![make_column("x", DT::I32)]);
+        store.register_schema("ds-3", vec![make_column("x", DT::U32)]);
+
+        store.recompute_global_schema(&empty_mask());
+        let gs = store.global_schema();
+        // I8 + I32 → I32, then I32 + U32 → I64
+        assert_eq!(gs.columns[0].data_type, DT::I64);
+    }
+
+    #[test]
+    fn test_global_schema_incompatible_falls_back_to_string() {
+        let mut store = SchemaStore::new();
+        store.register_schema("ds-1", vec![make_column("data", DT::Binary)]);
+        store.register_schema("ds-2", vec![make_column("data", DT::F64)]);
+
+        store.recompute_global_schema(&empty_mask());
+        let gs = store.global_schema();
+        assert_eq!(gs.columns[0].data_type, DT::String);
+    }
+
+    #[test]
+    fn test_global_schema_respects_deletion_mask() {
+        let mut store = SchemaStore::new();
+        let e1 = store.register_schema("ds-1", vec![make_column("temp", DT::F32)]);
+        store.register_schema("ds-2", vec![make_column("salinity", DT::F64)]);
+
+        let mut mask = empty_mask();
+        mask.mark_deleted(e1.dataset_id);
+
+        store.recompute_global_schema(&mask);
+        let gs = store.global_schema();
+        assert_eq!(gs.columns.len(), 1);
+        assert_eq!(gs.columns[0].name, "salinity");
+    }
+
+    #[test]
+    fn test_global_schema_override() {
+        let mut store = SchemaStore::new();
+        store.register_schema("ds-1", vec![make_column("value", DT::F32)]);
+        store.register_schema("ds-2", vec![make_column("value", DT::F64)]);
+
+        // Without override: super type is F64
+        store.recompute_global_schema(&empty_mask());
+        assert_eq!(store.global_schema().columns[0].data_type, DT::F64);
+
+        // With override: forced to I32
+        store.set_global_schema_override("value", DT::I32);
+        store.recompute_global_schema(&empty_mask());
+        assert_eq!(store.global_schema().columns[0].data_type, DT::I32);
+    }
+
+    #[test]
+    fn test_global_schema_override_only_affects_existing_columns() {
+        let mut store = SchemaStore::new();
+        store.register_schema("ds-1", vec![make_column("x", DT::F32)]);
+
+        // Override a column that doesn't exist in any dataset
+        store.set_global_schema_override("nonexistent", DT::I64);
+        store.recompute_global_schema(&empty_mask());
+
+        let gs = store.global_schema();
+        assert_eq!(gs.columns.len(), 1);
+        assert_eq!(gs.columns[0].name, "x");
+    }
+
+    #[test]
+    fn test_global_schema_remove_override() {
+        let mut store = SchemaStore::new();
+        store.register_schema("ds-1", vec![make_column("v", DT::F32)]);
+        store.register_schema("ds-2", vec![make_column("v", DT::I32)]);
+
+        store.set_global_schema_override("v", DT::String);
+        store.recompute_global_schema(&empty_mask());
+        assert_eq!(store.global_schema().columns[0].data_type, DT::String);
+
+        store.remove_global_schema_override("v");
+        store.recompute_global_schema(&empty_mask());
+        // Without override: F32 + I32 → F64
+        assert_eq!(store.global_schema().columns[0].data_type, DT::F64);
+    }
+
+    #[test]
+    fn test_global_schema_persisted_on_roundtrip() {
+        let mut store = SchemaStore::new();
+        store.register_schema(
+            "ds-1",
+            vec![make_column("temp", DT::F32), make_column("depth", DT::I16)],
+        );
+        store.register_schema(
+            "ds-2",
+            vec![make_column("temp", DT::F64), make_column("depth", DT::I32)],
+        );
+
+        store.set_global_schema_override("temp", DT::String);
+        store.recompute_global_schema(&empty_mask());
+
+        // Save and reload
+        let mut buf = Vec::new();
+        store.save(&mut buf).unwrap();
+        let loaded = SchemaStore::load(&buf[..]).unwrap();
+
+        let gs = loaded.global_schema();
+        assert_eq!(gs.columns.len(), 2);
+
+        let temp_col = gs.columns.iter().find(|c| c.name == "temp").unwrap();
+        assert_eq!(temp_col.data_type, DT::String); // override preserved
+
+        let depth_col = gs.columns.iter().find(|c| c.name == "depth").unwrap();
+        assert_eq!(depth_col.data_type, DT::I32); // super type preserved
+
+        // Overrides also persist
+        assert_eq!(
+            loaded.global_schema_overrides().get("temp"),
+            Some(&DT::String)
         );
     }
 }
