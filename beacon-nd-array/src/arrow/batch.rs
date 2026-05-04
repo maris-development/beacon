@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use arrow::{
     array::{ArrayRef, new_null_array},
@@ -18,27 +18,54 @@ use super::array::ndarray_to_arrow_array;
 
 pub fn any_dataset_as_record_batch_stream(
     dataset: AnyDataset,
+    batch_size: usize,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     match dataset {
         AnyDataset::Regular(ds) => dataset_as_record_batch_stream(ds),
         AnyDataset::Ragged { ragged, .. } => {
-            let schema = ragged_record_batch_schema(&ragged);
-            let obs_dims: std::collections::HashSet<String> =
-                ragged.observation_dimensions().map(String::from).collect();
-            let n = ragged.len();
-            futures::stream::iter(0..n)
-                .then(move |index| {
-                    let ragged = ragged.clone();
-                    let schema = schema.clone();
-                    let obs_dims = obs_dims.clone();
-                    async move {
-                        let cast = ragged.get_cast(index).await?;
-                        ragged_cast_to_record_batch(&cast, &schema, &obs_dims).await
-                    }
-                })
-                .boxed()
+            ragged_dataset_as_record_batch_stream(ragged, batch_size)
         }
     }
+}
+
+/// Stream [`RecordBatch`]es from a ragged dataset, grouping multiple
+/// casts into each batch until `batch_size` observation rows are
+/// reached. Casts are never split — a single cast that exceeds
+/// `batch_size` on its own is still emitted as one batch.
+fn ragged_dataset_as_record_batch_stream(
+    ragged: RaggedDataset,
+    batch_size: usize,
+) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
+    let schema = ragged_record_batch_schema(&ragged);
+    let obs_dims: std::collections::HashSet<String> =
+        ragged.observation_dimensions().map(String::from).collect();
+
+    // We need to compute offsets up-front to plan batches, so wrap
+    // the entire stream in an async block that awaits them once.
+    futures::stream::once(async move {
+        let offsets = ragged.cumulative_offsets().await?.clone();
+        let n = ragged.len();
+        let ranges = plan_ragged_batches(&offsets, &obs_dims, n, batch_size);
+        Ok((ragged, schema, obs_dims, offsets, ranges))
+    })
+    .map(|init| match init {
+        Ok((ragged, schema, obs_dims, offsets, ranges)) => futures::stream::iter(ranges)
+            .then(move |range| {
+                let ragged = ragged.clone();
+                let schema = schema.clone();
+                let obs_dims = obs_dims.clone();
+                let offsets = offsets.clone();
+                async move {
+                    let cast_data = ragged.get_casts_range(range.start, range.end).await?;
+                    ragged_batch_to_record_batch(&cast_data, &schema, &obs_dims, &offsets, &range)
+                        .await
+                }
+            })
+            .boxed(),
+        Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
+    })
+    .flatten()
+    .boxed()
 }
 
 /// Build a unified Arrow [`Schema`] for all variables that appear in
@@ -58,35 +85,93 @@ fn ragged_record_batch_schema(ragged: &RaggedDataset) -> Arc<Schema> {
     Arc::new(Schema::new(fields))
 }
 
-/// Convert a single cast [`Dataset`] (as returned by
-/// [`RaggedDataset::get_cast`]) into a [`RecordBatch`] aligned to
-/// `schema`.
+/// Greedily group consecutive casts into batch ranges such that no
+/// batch exceeds `batch_size` observation rows. A single cast that
+/// exceeds `batch_size` on its own is still emitted as one batch.
 ///
-/// - Arrays whose first-axis length equals the target row count are
-///   converted directly.
-/// - Shorter arrays (including dimensionless scalars and instance vars
-///   with shape \[1\]) are repeated to the target row count.
-/// - Arrays missing from the cast are filled with nulls.
-async fn ragged_cast_to_record_batch(
-    cast: &Dataset,
+/// The effective row count for a group is the **max across obs_dims**
+/// of the total observation rows contributed by the casts in the group.
+fn plan_ragged_batches(
+    offsets: &HashMap<String, Vec<usize>>,
+    obs_dims: &std::collections::HashSet<String>,
+    n_instances: usize,
+    batch_size: usize,
+) -> Vec<Range<usize>> {
+    if n_instances == 0 {
+        return vec![];
+    }
+
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    let mut batch_start = 0usize;
+
+    for i in 1..=n_instances {
+        // Compute the max row count across all obs dims for [batch_start..i).
+        let current_rows: usize = offsets
+            .iter()
+            .filter(|(dim, _)| obs_dims.contains(dim.as_str()))
+            .map(|(_, cum)| cum[i] - cum[batch_start])
+            .max()
+            .unwrap_or(0);
+
+        if current_rows > batch_size && i > batch_start + 1 {
+            // Adding cast `i-1` would exceed the limit — close the previous batch.
+            ranges.push(batch_start..i - 1);
+            batch_start = i - 1;
+        }
+    }
+
+    // Emit the final batch.
+    if batch_start < n_instances {
+        ranges.push(batch_start..n_instances);
+    }
+
+    ranges
+}
+
+/// Convert a multi-cast [`Dataset`] (from [`RaggedDataset::get_casts_range`])
+/// into a [`RecordBatch`] aligned to `schema`.
+///
+/// Instance variables (shape `[N, ...]` where N = number of casts in the
+/// range) are run-length expanded: element `i` is repeated for each
+/// observation row belonging to cast `i`. Observation variables are
+/// already contiguous across all casts. Attributes are repeated to
+/// fill all rows.
+async fn ragged_batch_to_record_batch(
+    cast_data: &Dataset,
     schema: &Arc<Schema>,
     obs_dims: &std::collections::HashSet<String>,
+    offsets: &HashMap<String, Vec<usize>>,
+    range: &Range<usize>,
 ) -> anyhow::Result<RecordBatch> {
-    // Target row count = max first-axis size across observation-dimension
-    // arrays. Instance variables (shape [1]) and dimensionless attributes
-    // are excluded from this calculation.
-    let target_rows = cast
-        .arrays
-        .values()
-        .filter(|a| a.dimensions().first().is_some_and(|d| obs_dims.contains(d)))
-        .map(|a| a.shape()[0])
+    // Target row count = max total obs rows across all obs dims for this range.
+    let target_rows: usize = offsets
+        .iter()
+        .filter(|(dim, _)| obs_dims.contains(dim.as_str()))
+        .map(|(_, cum)| cum[range.end] - cum[range.start])
         .max()
         .unwrap_or(0);
+
+    // Per-cast row sizes for the "primary" obs dim (the one with the most rows).
+    // Used for run-length expansion of instance variables.
+    let primary_obs_dim = offsets
+        .iter()
+        .filter(|(dim, _)| obs_dims.contains(dim.as_str()))
+        .max_by_key(|(_, cum)| cum[range.end] - cum[range.start])
+        .map(|(dim, _)| dim.as_str());
+
+    let cast_row_sizes: Vec<usize> = if let Some(dim) = primary_obs_dim {
+        let cum = &offsets[dim];
+        (range.start..range.end)
+            .map(|i| cum[i + 1] - cum[i])
+            .collect()
+    } else {
+        vec![0; range.end - range.start]
+    };
 
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for field in schema.fields() {
-        let col = match cast.get_array(field.name()) {
+        let col = match cast_data.get_array(field.name()) {
             Some(array) => {
                 let arrow_arr = ndarray_to_arrow_array(array.as_ref()).await?;
                 let arr_len = arrow_arr.len();
@@ -98,15 +183,17 @@ async fn ragged_cast_to_record_batch(
                 if arr_len == target_rows {
                     arrow_arr
                 } else if target_rows == 0 {
-                    // Empty cast — no observation rows.
                     new_null_array(field.data_type(), 0)
                 } else if is_obs {
                     // Observation variable on a shorter obs dimension → null-pad.
                     let pad_len = target_rows - arr_len;
                     let null_tail = new_null_array(field.data_type(), pad_len);
                     concat(&[arrow_arr.as_ref(), null_tail.as_ref()])?
+                } else if arr_len == range.end - range.start {
+                    // Instance variable — run-length expand per cast row sizes.
+                    run_length_expand(&arrow_arr, &cast_row_sizes, target_rows)?
                 } else {
-                    // Instance variable or attribute → repeat to target row count.
+                    // Attribute (dimensionless / scalar) — repeat to target row count.
                     let refs: Vec<&dyn arrow::array::Array> =
                         std::iter::repeat_n(arrow_arr.as_ref(), target_rows).collect();
                     concat(&refs)?
@@ -118,6 +205,26 @@ async fn ragged_cast_to_record_batch(
     }
 
     Ok(RecordBatch::try_new(schema.clone(), columns)?)
+}
+
+/// Expand an array of N elements by repeating element `i` for
+/// `row_sizes[i]` times, producing an array of `target_rows` length.
+fn run_length_expand(
+    array: &ArrayRef,
+    row_sizes: &[usize],
+    target_rows: usize,
+) -> Result<ArrayRef, arrow::error::ArrowError> {
+    // Build a take-indices array: [0,0,..,0, 1,1,..,1, 2, ...]
+    let indices: Vec<u32> = row_sizes
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &count)| std::iter::repeat_n(i as u32, count))
+        .collect();
+
+    debug_assert_eq!(indices.len(), target_rows);
+
+    let indices_array = arrow::array::UInt32Array::from(indices);
+    arrow::compute::take(array.as_ref(), &indices_array, None)
 }
 
 pub fn dataset_as_record_batch_stream(
@@ -574,7 +681,7 @@ mod tests {
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, usize::MAX)
             .try_collect()
             .await
             .unwrap();
@@ -593,7 +700,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1)
             .try_collect()
             .await
             .unwrap();
@@ -620,7 +727,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1)
             .try_collect()
             .await
             .unwrap();
@@ -636,7 +743,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1)
             .try_collect()
             .await
             .unwrap();
@@ -665,7 +772,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1)
             .try_collect()
             .await
             .unwrap();
@@ -760,7 +867,7 @@ mod tests {
         .await;
 
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1)
             .try_collect()
             .await
             .unwrap();
@@ -841,7 +948,7 @@ mod tests {
         .await;
 
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1)
             .try_collect()
             .await
             .unwrap();

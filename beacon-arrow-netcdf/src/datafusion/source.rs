@@ -30,6 +30,7 @@ pub struct NetCDFSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     projected_statistics: Option<Statistics>,
     read_dimensions: Option<Vec<String>>,
+    batch_size: usize,
 }
 
 impl NetCDFSource {
@@ -44,6 +45,7 @@ impl NetCDFSource {
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projected_statistics: None,
             read_dimensions,
+            batch_size: usize::MAX,
         }
     }
 }
@@ -71,6 +73,7 @@ impl FileSource for NetCDFSource {
             self.datasets_object_store.clone(),
             Arc::from(schema_adapter),
             self.read_dimensions.clone(),
+            self.batch_size,
         ))
     }
 
@@ -78,8 +81,11 @@ impl FileSource for NetCDFSource {
         self
     }
 
-    fn with_batch_size(&self, _batch_size: usize) -> Arc<dyn FileSource> {
-        Arc::new(self.clone())
+    fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
+        Arc::new(Self {
+            batch_size,
+            ..self.clone()
+        })
     }
 
     fn with_schema(&self, schema: SchemaRef) -> Arc<dyn FileSource> {
@@ -147,6 +153,7 @@ struct NetCDFOpener {
     datasets_object_store: Arc<DatasetsStore>,
     schema_adapter: Arc<dyn SchemaAdapter>,
     read_dimensions: Option<Vec<String>>,
+    batch_size: usize,
 }
 
 impl NetCDFOpener {
@@ -154,11 +161,13 @@ impl NetCDFOpener {
         datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
         read_dimensions: Option<Vec<String>>,
+        batch_size: usize,
     ) -> Self {
         Self {
             datasets_object_store,
             schema_adapter,
             read_dimensions,
+            batch_size,
         }
     }
 
@@ -167,6 +176,7 @@ impl NetCDFOpener {
         datasets_object_store: Arc<DatasetsStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
         read_dimensions: Option<Vec<String>>,
+        batch_size: usize,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(datasets_object_store, object.clone())
             .await
@@ -221,7 +231,7 @@ impl NetCDFOpener {
             dataset
         };
 
-        let stream = any_dataset_as_record_batch_stream(dataset)
+        let stream = any_dataset_as_record_batch_stream(dataset, batch_size)
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "Error reading NetCDF as Arrow stream: {e}"
@@ -252,6 +262,7 @@ impl FileOpener for NetCDFOpener {
             self.datasets_object_store.clone(),
             self.schema_adapter.clone(),
             self.read_dimensions.clone(),
+            self.batch_size,
         )
         .boxed();
         Ok(fut)

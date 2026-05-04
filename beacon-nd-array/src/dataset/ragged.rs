@@ -335,6 +335,98 @@ impl RaggedDataset {
         let name = format!("{}[{index}]", self.instance_dim);
         Ok(Dataset::new(name, arrays).await)
     }
+
+    /// Extract the sub-dataset for a contiguous range of casts
+    /// `[start..end)` in a single I/O pass per array.
+    ///
+    /// This is more efficient than calling [`get_cast`](Self::get_cast)
+    /// repeatedly because observation variables are read once for the
+    /// entire range rather than once per cast.
+    ///
+    /// The returned [`Dataset`] contains:
+    /// - Instance variables subsetted to `[start..end, ...]`.
+    /// - Observation variables subsetted to the concatenated rows of all
+    ///   casts in the range.
+    /// - Variable attributes for every included variable.
+    /// - All global attributes.
+    ///
+    /// Row-size variables and their attributes are **not** included.
+    pub async fn get_casts_range(&self, start: usize, end: usize) -> anyhow::Result<Dataset> {
+        if start >= end || end > self.n_instances {
+            anyhow::bail!(
+                "cast range [{start}..{end}) out of bounds for {} instances",
+                self.n_instances
+            );
+        }
+
+        let offsets = self.offsets().await?;
+        let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
+
+        // ── First pass: instance and observation variables ────────────────
+        for (name, var) in &self.variables {
+            match var {
+                RaggedArray::InstanceVariable(array) => {
+                    let mut sub_start = vec![0usize; array.shape().len()];
+                    let mut sub_shape = array.shape();
+                    sub_start[0] = start;
+                    sub_shape[0] = end - start;
+                    let sub = array.subset(ArraySubset::new(sub_start, sub_shape)).await?;
+                    arrays.insert(name.clone(), sub);
+                }
+                RaggedArray::ObservationVariable(array) => {
+                    let obs_dim = array
+                        .dimensions()
+                        .first()
+                        .cloned()
+                        .expect("observation variable must have dimensions");
+                    let cum = &offsets[&obs_dim];
+                    let obs_start = cum[start];
+                    let obs_len = cum[end] - obs_start;
+
+                    let mut sub_start = vec![0usize; array.shape().len()];
+                    let mut sub_shape = array.shape();
+                    sub_start[0] = obs_start;
+                    sub_shape[0] = obs_len;
+                    let sub = array.subset(ArraySubset::new(sub_start, sub_shape)).await?;
+                    arrays.insert(name.clone(), sub);
+                }
+                RaggedArray::Attribute(_) => {
+                    // Handled in second pass.
+                }
+            }
+        }
+
+        // ── Second pass: attributes ──────────────────────────────────────
+        for (name, var) in &self.variables {
+            if let RaggedArray::Attribute(array) = var
+                && let Some(var_part) = name.split('.').next()
+            {
+                if name.contains('.') {
+                    // Variable attribute — include only if parent variable is present.
+                    if arrays.contains_key(var_part) {
+                        arrays.insert(name.clone(), array.clone());
+                    }
+                } else {
+                    // Global attribute (dimensionless, no dot).
+                    arrays.insert(name.clone(), array.clone());
+                }
+            }
+        }
+
+        let name = format!("{}[{start}..{end}]", self.instance_dim);
+        Ok(Dataset::new(name, arrays).await)
+    }
+
+    /// Return the cached cumulative offsets per observation dimension.
+    ///
+    /// Each entry maps an obs dimension name to a vec of length
+    /// `n_instances + 1` where `offsets[i]` is the starting row of
+    /// cast `i` and `offsets[n_instances]` is the total row count.
+    ///
+    /// Lazily initialises offsets on first call.
+    pub async fn cumulative_offsets(&self) -> anyhow::Result<&HashMap<String, Vec<usize>>> {
+        self.offsets().await
+    }
 }
 
 /// Iterator over cast indices, yielding `(index, &RaggedDataset)`.
