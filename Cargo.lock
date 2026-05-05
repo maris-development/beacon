@@ -1165,6 +1165,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "criterion 0.5.1",
+ "datafusion",
  "futures",
  "indexmap 2.13.0",
  "ndarray 0.17.2",

@@ -6,9 +6,9 @@ pub use any::AnyDataset;
 pub use ragged::RaggedDataset;
 pub use variant::DatasetType;
 
-use crate::{NdArray, NdArrayD, datatypes::NdArrayDataType};
+use crate::{NdArray, NdArrayD, array::subset::ArraySubset, datatypes::NdArrayDataType};
 use indexmap::IndexMap;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub struct Dataset {
@@ -30,10 +30,6 @@ impl Dataset {
             dimensions,
             arrays,
         }
-    }
-
-    pub fn get_array_names(&self) -> Vec<String> {
-        self.arrays.keys().cloned().collect()
     }
 
     pub fn get_array(&self, name: &str) -> Option<&Arc<dyn NdArrayD>> {

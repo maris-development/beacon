@@ -2,16 +2,22 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
-    arrow::batch::any_dataset_as_record_batch_stream, projection::DatasetProjection,
+    arrow::batch::any_dataset_as_record_batch_stream, dataset::pushdown_filter::PushdownFilter,
+    projection::DatasetProjection,
 };
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     common::Statistics,
+    config::ConfigOptions,
     datasource::{
         physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
     },
-    physical_plan::metrics::ExecutionPlanMetricsSet,
+    physical_expr::{conjunction, PhysicalExpr},
+    physical_plan::{
+        filter_pushdown::{FilterPushdownPropagation, PushedDown},
+        metrics::ExecutionPlanMetricsSet,
+    },
 };
 use futures::{stream::BoxStream, FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
@@ -31,6 +37,7 @@ pub struct NetCDFSource {
     projected_statistics: Option<Statistics>,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl NetCDFSource {
@@ -46,6 +53,7 @@ impl NetCDFSource {
             projected_statistics: None,
             read_dimensions,
             batch_size: usize::MAX,
+            predicate: None,
         }
     }
 }
@@ -74,6 +82,7 @@ impl FileSource for NetCDFSource {
             Arc::from(schema_adapter),
             self.read_dimensions.clone(),
             self.batch_size,
+            self.predicate.clone(),
         ))
     }
 
@@ -143,6 +152,28 @@ impl FileSource for NetCDFSource {
     fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
         self.schema_adapter_factory.clone()
     }
+
+    fn try_pushdown_filters(
+        &self,
+        filters: Vec<Arc<dyn PhysicalExpr>>,
+        _config: &ConfigOptions,
+    ) -> datafusion::error::Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
+        let predicate = match self.predicate.clone() {
+            Some(existing) => conjunction(std::iter::once(existing).chain(filters.clone())),
+            None => conjunction(filters.clone()),
+        };
+
+        let source = Self {
+            predicate: Some(predicate),
+            ..self.clone()
+        };
+
+        Ok(FilterPushdownPropagation::with_parent_pushdown_result(vec![
+            PushedDown::No;
+            filters.len()
+        ])
+        .with_updated_node(Arc::new(source)))
+    }
 }
 
 // ─── FileOpener ────────────────────────────────────────────────────────────
@@ -154,6 +185,7 @@ struct NetCDFOpener {
     schema_adapter: Arc<dyn SchemaAdapter>,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl NetCDFOpener {
@@ -162,12 +194,14 @@ impl NetCDFOpener {
         schema_adapter: Arc<dyn SchemaAdapter>,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> Self {
         Self {
             datasets_object_store,
             schema_adapter,
             read_dimensions,
             batch_size,
+            predicate,
         }
     }
 
@@ -177,6 +211,7 @@ impl NetCDFOpener {
         schema_adapter: Arc<dyn SchemaAdapter>,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(datasets_object_store, object.clone())
             .await
@@ -200,6 +235,20 @@ impl NetCDFOpener {
             })?
         } else {
             dataset
+        };
+
+        // Resolve predicate pushdown masks (applied during streaming, not upfront).
+        let masks = if let Some(ref pred) = predicate {
+            let filter = PushdownFilter::new(pred.clone());
+            let is_ragged = dataset.is_ragged();
+            let instance_dim = dataset
+                .as_ragged()
+                .map(|r| r.instance_dimension().to_string());
+            filter
+                .resolve(dataset.dataset(), is_ragged, instance_dim.as_deref())
+                .await
+        } else {
+            vec![]
         };
 
         let file_schema: SchemaRef =
@@ -231,7 +280,7 @@ impl NetCDFOpener {
             dataset
         };
 
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size)
+        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, masks)
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "Error reading NetCDF as Arrow stream: {e}"
@@ -263,6 +312,7 @@ impl FileOpener for NetCDFOpener {
             self.schema_adapter.clone(),
             self.read_dimensions.clone(),
             self.batch_size,
+            self.predicate.clone(),
         )
         .boxed();
         Ok(fut)
