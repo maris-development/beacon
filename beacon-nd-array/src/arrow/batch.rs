@@ -10,11 +10,9 @@ use futures::{StreamExt, stream::BoxStream};
 
 use crate::{
     NdArrayD,
-    array::{
-        filter::{compute_chunk_mask, mask_is_all_false, mask_is_all_true},
-        subset::ArraySubset,
-    },
-    dataset::{Dataset, any::AnyDataset, pushdown_filter::PushdownFilter, ragged::RaggedDataset},
+    array::subset::ArraySubset,
+    arrow::pushdown_filter::PushdownFilter,
+    dataset::{Dataset, any::AnyDataset, ragged::RaggedDataset},
 };
 
 use super::array::ndarray_to_arrow_array;
@@ -408,6 +406,11 @@ pub fn dataset_as_record_batch_stream(
         let schema = schema.clone();
         return futures::stream::once(async move {
             let mut arrow_arrays: Vec<ArrayRef> = Vec::with_capacity(arrays.len());
+
+            if let Some(predicate) = predicate {
+                todo!()
+            }
+
             for (_, array) in &arrays {
                 let broadcasted = array.broadcast(max_shape.clone(), max_dims.clone()).await?;
                 arrow_arrays.push(ndarray_to_arrow_array(broadcasted.as_ref()).await?);
