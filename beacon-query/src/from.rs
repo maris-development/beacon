@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use beacon_arrow_netcdf::datafusion::options::NetcdfOptions;
 use beacon_arrow_netcdf::datafusion::NetcdfFormat;
+use beacon_arrow_tiff::datafusion::TiffFormat;
 use beacon_data_lake::{
     files::collection::FileCollection, table::table_formats::NetCDFFileFormat, FileManager,
     TableManager,
@@ -117,6 +118,8 @@ pub enum FromFormat {
     NetCDF { paths: Vec<String> },
     #[serde(rename = "odv")]
     Odv { paths: Vec<String> },
+    #[serde(rename = "tiff")]
+    Tiff { paths: Vec<String> },
     #[serde(rename = "zarr")]
     Zarr {
         paths: Vec<String>,
@@ -166,6 +169,9 @@ impl FromFormat {
                 beacon_object_storage::get_datasets_object_store().await,
                 NetcdfOptions::default(),
             )) as Arc<dyn FileFormat>),
+            FromFormat::Tiff { .. } => {
+                Ok(Arc::new(TiffFormat::new(Default::default())) as Arc<dyn FileFormat>)
+            }
             FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>),
             FromFormat::Zarr {
                 statistics_columns, ..
@@ -194,6 +200,7 @@ impl FromFormat {
             | FromFormat::Parquet { paths }
             | FromFormat::Arrow { paths }
             | FromFormat::NetCDF { paths }
+            | FromFormat::Tiff { paths }
             | FromFormat::Odv { paths }
             | FromFormat::Zarr { paths, .. } => paths,
             FromFormat::Bbf { paths } => paths,

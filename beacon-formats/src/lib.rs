@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, options::NetcdfOptions};
+use beacon_arrow_tiff::datafusion::TiffFormatFactory;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::DatasetsStore;
 use datafusion::prelude::SessionContext;
@@ -34,6 +35,7 @@ pub fn file_formats(
             datasets_object_store.clone(),
             NetcdfOptions::default(),
         )),
+        Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory),
         Arc::new(bbf::BBFFormatFactory),
     ];

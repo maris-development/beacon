@@ -33,3 +33,4 @@ __pycache__/
 .DS_Store
 mpio.log
 CLAUDE.md
+beacon-arrow-tiff/test-files/TEMP_AVG_20201201.tif
