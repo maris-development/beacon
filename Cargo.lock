@@ -981,6 +981,7 @@ dependencies = [
  "beacon-datafusion-ext",
  "beacon-formats",
  "beacon-functions",
+ "beacon-nd-array",
  "beacon-object-storage",
  "beacon-planner",
  "beacon-query",

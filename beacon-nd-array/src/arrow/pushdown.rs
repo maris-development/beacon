@@ -109,11 +109,18 @@ impl ValueRange {
     }
 }
 
-pub async fn mask_pushdown(array: Arc<dyn NdArrayD>, value_range: &ValueRange) -> Vec<bool> {
-    todo!(
-        "Implement pushdown masking for array with range: {:?}",
-        value_range
-    );
+pub async fn mask_pushdown(
+    array: Arc<dyn NdArrayD>,
+    value_range: &ValueRange,
+) -> anyhow::Result<Vec<bool>> {
+    resolve_array_mask(&array, value_range).await.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Failed to resolve pushdown mask for array. Expected a 1D numeric/timestamp array with compatible range bounds. datatype={:?}, dims={:?}, range={:?}",
+            array.datatype(),
+            array.dimensions(),
+            value_range
+        )
+    })
 }
 
 /// Bound specification for `compute_mask`.

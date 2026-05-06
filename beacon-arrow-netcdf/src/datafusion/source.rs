@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
-    arrow::batch::any_dataset_as_record_batch_stream, dataset::pushdown_filter::PushdownFilter,
+    arrow::{batch::any_dataset_as_record_batch_stream, pushdown_filter::PushdownFilter},
     projection::DatasetProjection,
 };
 use beacon_object_storage::DatasetsStore;
@@ -237,20 +237,6 @@ impl NetCDFOpener {
             dataset
         };
 
-        // Resolve predicate pushdown masks (applied during streaming, not upfront).
-        let masks = if let Some(ref pred) = predicate {
-            let filter = PushdownFilter::new(pred.clone());
-            let is_ragged = dataset.is_ragged();
-            let instance_dim = dataset
-                .as_ragged()
-                .map(|r| r.instance_dimension().to_string());
-            filter
-                .resolve(dataset.dataset(), is_ragged, instance_dim.as_deref())
-                .await
-        } else {
-            vec![]
-        };
-
         let file_schema: SchemaRef =
             beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
                 .map_err(|e| {
@@ -280,7 +266,8 @@ impl NetCDFOpener {
             dataset
         };
 
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, masks)
+        let pushdown_filter = predicate.map(PushdownFilter::new);
+        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter)
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "Error reading NetCDF as Arrow stream: {e}"

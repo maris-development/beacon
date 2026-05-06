@@ -1,8 +1,8 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use arrow::{
-    array::{ArrayRef, BooleanArray, new_null_array},
-    compute::{concat, filter_record_batch},
+    array::{ArrayRef, new_null_array},
+    compute::concat,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -11,8 +11,15 @@ use futures::{StreamExt, stream::BoxStream};
 use crate::{
     NdArrayD,
     array::subset::ArraySubset,
-    arrow::pushdown_filter::PushdownFilter,
-    dataset::{Dataset, any::AnyDataset, ragged::RaggedDataset},
+    arrow::{
+        pushdown::{is_pushdown_candidate_ragged, mask_pushdown},
+        pushdown_filter::PushdownFilter,
+    },
+    dataset::{
+        Dataset,
+        any::AnyDataset,
+        ragged::{RaggedArray, RaggedDataset},
+    },
 };
 
 use super::array::ndarray_to_arrow_array;
@@ -37,35 +44,43 @@ pub fn any_dataset_as_record_batch_stream(
 fn ragged_dataset_as_record_batch_stream(
     ragged: RaggedDataset,
     batch_size: usize,
-    predicate: Option<PushdownFilter>,
+    _predicate: Option<PushdownFilter>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     let schema = ragged_record_batch_schema(&ragged);
     let obs_dims: std::collections::HashSet<String> =
         ragged.observation_dimensions().map(String::from).collect();
     let instance_dim = ragged.instance_dimension().to_string();
 
-    // Separate instance-dimension mask from observation-dimension masks.
-    let instance_mask: Option<Vec<bool>> = masks
-        .iter()
-        .find(|(dim, _)| *dim == instance_dim)
-        .map(|(_, m)| m.clone());
-    let obs_masks: Vec<(String, Vec<bool>)> = masks
-        .into_iter()
-        .filter(|(dim, _)| *dim != instance_dim)
-        .collect();
-
     futures::stream::once(async move {
         let offsets = ragged.cumulative_offsets().await?.clone();
         let n = ragged.len();
 
+        let mut mask = vec![true; n];
+        for (name, array) in &ragged.variables {
+            if let RaggedArray::InstanceVariable(array) = array
+                && is_pushdown_candidate_ragged(array, &instance_dim)
+                && let Some(value_range) = _predicate.as_ref().and_then(|f| f.ranges().get(name))
+            {
+                let array_mask = mask_pushdown(array.clone(), value_range).await?;
+                assert_eq!(
+                    array_mask.len(),
+                    n,
+                    "Pushdown mask length must match number of casts in the ragged dataset"
+                );
+                for (i, keep) in array_mask.iter().enumerate() {
+                    if !keep {
+                        mask[i] = false;
+                    }
+                }
+            }
+        }
+
         // Determine which instance indices pass the instance mask.
-        let passing_indices: Vec<usize> = if let Some(ref imask) = instance_mask {
-            (0..n)
-                .filter(|&i| imask.get(i).copied().unwrap_or(false))
-                .collect()
-        } else {
-            (0..n).collect()
-        };
+        let passing_indices: Vec<usize> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &keep)| if keep { Some(i) } else { None })
+            .collect();
 
         // Replan batches using only passing instances.
         // Build filtered offsets for batch planning.
@@ -86,24 +101,15 @@ fn ragged_dataset_as_record_batch_stream(
 
         let n_filtered = passing_indices.len();
         let ranges = plan_ragged_batches(&filtered_offsets, &obs_dims, n_filtered, batch_size);
-        Ok((
-            ragged,
-            schema,
-            obs_dims,
-            obs_masks,
-            offsets,
-            passing_indices,
-            ranges,
-        ))
+        Ok((ragged, schema, obs_dims, offsets, passing_indices, ranges))
     })
     .map(|init| match init {
-        Ok((ragged, schema, obs_dims, obs_masks, offsets, passing_indices, ranges)) => {
+        Ok((ragged, schema, obs_dims, offsets, passing_indices, ranges)) => {
             futures::stream::iter(ranges)
                 .then(move |range| {
                     let ragged = ragged.clone();
                     let schema = schema.clone();
                     let obs_dims = obs_dims.clone();
-                    let obs_masks = obs_masks.clone();
                     let offsets = offsets.clone();
                     let passing_indices = passing_indices.clone();
                     async move {
@@ -139,40 +145,7 @@ fn ragged_dataset_as_record_batch_stream(
                         )
                         .await?;
 
-                        // Apply observation-dimension masks if any.
-                        if obs_masks.is_empty() || batch.num_rows() == 0 {
-                            return Ok(batch);
-                        }
-
-                        // For obs masks, build a 1D boolean filter on the rows.
-                        let n_rows = batch.num_rows();
-                        let primary_obs_dim = offsets
-                            .iter()
-                            .filter(|(dim, _)| obs_dims.contains(dim.as_str()))
-                            .max_by_key(|(_, cum)| cum[last + 1] - cum[first])
-                            .map(|(dim, _)| dim.as_str());
-
-                        if let Some(pdim) = primary_obs_dim {
-                            if let Some((_, obs_mask)) =
-                                obs_masks.iter().find(|(dim, _)| dim == pdim)
-                            {
-                                let obs_start = offsets[pdim][first];
-                                let obs_end = offsets[pdim][last + 1];
-                                let slice = &obs_mask[obs_start..obs_end.min(obs_mask.len())];
-                                if !mask_is_all_true(slice) {
-                                    let bool_arr = BooleanArray::from(
-                                        slice[..n_rows.min(slice.len())].to_vec(),
-                                    );
-                                    let filtered = filter_record_batch(&batch, &bool_arr)?;
-                                    if filtered.num_rows() == 0 {
-                                        return Ok(RecordBatch::new_empty(schema));
-                                    }
-                                    return Ok(filtered);
-                                }
-                            }
-                        }
-
-                        Ok(batch)
+                        return Ok(batch);
                     }
                 })
                 .boxed()
@@ -344,7 +317,7 @@ fn run_length_expand(
 
 pub fn dataset_as_record_batch_stream(
     dataset: Dataset,
-    predicate: Option<PushdownFilter>,
+    _predicate: Option<PushdownFilter>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     let dimensions = dataset.dimensions;
 
@@ -407,17 +380,13 @@ pub fn dataset_as_record_batch_stream(
         return futures::stream::once(async move {
             let mut arrow_arrays: Vec<ArrayRef> = Vec::with_capacity(arrays.len());
 
-            if let Some(predicate) = predicate {
-                todo!()
-            }
-
             for (_, array) in &arrays {
                 let broadcasted = array.broadcast(max_shape.clone(), max_dims.clone()).await?;
                 arrow_arrays.push(ndarray_to_arrow_array(broadcasted.as_ref()).await?);
             }
             let batch = RecordBatch::try_new(schema.clone(), arrow_arrays)?;
-            let start = vec![0usize; max_dims.len()];
-            apply_mask_to_batch(batch, &masks, &max_dims, &start, &max_shape, schema)
+
+            Ok(batch)
         })
         .boxed();
     }
@@ -432,15 +401,8 @@ pub fn dataset_as_record_batch_stream(
             let max_dims = max_dims.clone();
             let arrays = arrays.clone();
             let schema = schema.clone();
-            let masks = masks.clone();
             async move {
                 // Early-skip: if this chunk is entirely filtered out, don't read data.
-                let chunk_mask =
-                    compute_chunk_mask(&masks, &max_dims, &subset.start, &subset.shape);
-                if mask_is_all_false(&chunk_mask) {
-                    return Ok(None);
-                }
-
                 let mut arrow_arrays: Vec<ArrayRef> = Vec::with_capacity(arrays.len());
                 for (name, array) in &arrays {
                     let array_subset =
@@ -461,16 +423,7 @@ pub fn dataset_as_record_batch_stream(
                 }
                 let batch = RecordBatch::try_new(schema.clone(), arrow_arrays)?;
 
-                // Apply mask filtering.
-                if mask_is_all_true(&chunk_mask) {
-                    return Ok(Some(batch));
-                }
-                let bool_arr = BooleanArray::from(chunk_mask);
-                let filtered = filter_record_batch(&batch, &bool_arr)?;
-                if filtered.num_rows() == 0 {
-                    return Ok(None);
-                }
-                Ok(Some(filtered))
+                Ok(Some(batch))
             }
         })
         .filter_map(|result| async move {
@@ -481,29 +434,6 @@ pub fn dataset_as_record_batch_stream(
             }
         })
         .boxed()
-}
-
-/// Apply dimension masks to a single RecordBatch (non-chunked path).
-fn apply_mask_to_batch(
-    batch: RecordBatch,
-    masks: &[(String, Vec<bool>)],
-    dims: &[String],
-    start: &[usize],
-    shape: &[usize],
-    schema: Arc<Schema>,
-) -> anyhow::Result<RecordBatch> {
-    if masks.is_empty() {
-        return Ok(batch);
-    }
-    let chunk_mask = compute_chunk_mask(masks, dims, start, shape);
-    if mask_is_all_true(&chunk_mask) {
-        return Ok(batch);
-    }
-    if mask_is_all_false(&chunk_mask) {
-        return Ok(RecordBatch::new_empty(schema));
-    }
-    let bool_arr = BooleanArray::from(chunk_mask);
-    Ok(filter_record_batch(&batch, &bool_arr)?)
 }
 
 /// For a given chunk subset (expressed in max_dims space), compute the corresponding
@@ -608,7 +538,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("values", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, vec![])
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, None)
             .try_collect()
             .await
             .unwrap();
@@ -643,7 +573,7 @@ mod tests {
 
         let ds = make_dataset(vec![("data", Arc::new(nd_2d)), ("scale", Arc::new(nd_1d))]).await;
 
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, vec![])
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, None)
             .try_collect()
             .await
             .unwrap();
@@ -679,7 +609,7 @@ mod tests {
         ds.dimensions.clear();
 
         let results: Vec<anyhow::Result<RecordBatch>> =
-            dataset_as_record_batch_stream(ds, vec![]).collect().await;
+            dataset_as_record_batch_stream(ds, None).collect().await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
     }
@@ -688,7 +618,7 @@ mod tests {
     async fn test_empty_dataset_error() {
         let ds = make_dataset(vec![]).await;
         let results: Vec<anyhow::Result<RecordBatch>> =
-            dataset_as_record_batch_stream(ds, vec![]).collect().await;
+            dataset_as_record_batch_stream(ds, None).collect().await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
     }
@@ -703,7 +633,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, vec![])
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, None)
             .try_collect()
             .await
             .unwrap();
@@ -852,7 +782,7 @@ mod tests {
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, usize::MAX, vec![])
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
             .try_collect()
             .await
             .unwrap();
@@ -871,7 +801,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, vec![])
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None)
             .try_collect()
             .await
             .unwrap();
@@ -898,7 +828,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, vec![])
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None)
             .try_collect()
             .await
             .unwrap();
@@ -914,7 +844,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, vec![])
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None)
             .try_collect()
             .await
             .unwrap();
@@ -943,7 +873,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, vec![])
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None)
             .try_collect()
             .await
             .unwrap();
@@ -1038,7 +968,7 @@ mod tests {
         .await;
 
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, vec![])
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None)
             .try_collect()
             .await
             .unwrap();
@@ -1119,7 +1049,7 @@ mod tests {
         .await;
 
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, vec![])
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None)
             .try_collect()
             .await
             .unwrap();

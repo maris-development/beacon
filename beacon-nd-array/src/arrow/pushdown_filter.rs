@@ -15,7 +15,7 @@ use crate::arrow::pushdown::ValueRange;
 /// all backends (NetCDF, Zarr, Atlas).
 #[derive(Debug, Clone)]
 pub struct PushdownFilter {
-    predicate: Arc<dyn PhysicalExpr>,
+    _predicate: Arc<dyn PhysicalExpr>,
     ranges: HashMap<String, ValueRange>,
 }
 
@@ -23,7 +23,10 @@ impl PushdownFilter {
     pub fn new(predicate: Arc<dyn PhysicalExpr>) -> Self {
         let mut ranges = HashMap::new();
         walk_expr(&predicate, &mut ranges);
-        Self { predicate, ranges }
+        Self {
+            _predicate: predicate,
+            ranges,
+        }
     }
 
     pub fn ranges(&self) -> &HashMap<String, ValueRange> {

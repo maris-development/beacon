@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use beacon_atlas::prelude::Dataset;
 use beacon_common::listing_url::parse_listing_table_url;
+use beacon_nd_array::dataset::Dataset;
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 
 use crate::statement_handlers::{context::HandlerContext, traits::IngestFormatLoader};
