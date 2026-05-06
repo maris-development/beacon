@@ -71,44 +71,88 @@ pub fn attribute_to_nd_array(
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
             Ok(Arc::new(nd))
         }
+        AttributeValue::Uchars(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
+            Ok(Arc::new(nd))
+        }
         AttributeValue::Schar(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
+            Ok(Arc::new(nd))
+        }
+        AttributeValue::Schars(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
             Ok(Arc::new(nd))
         }
         AttributeValue::Ushort(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
             Ok(Arc::new(nd))
         }
+        AttributeValue::Ushorts(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
+            Ok(Arc::new(nd))
+        }
         AttributeValue::Short(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
+            Ok(Arc::new(nd))
+        }
+        AttributeValue::Shorts(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
             Ok(Arc::new(nd))
         }
         AttributeValue::Uint(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
             Ok(Arc::new(nd))
         }
+        AttributeValue::Uints(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
+            Ok(Arc::new(nd))
+        }
         AttributeValue::Int(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
+            Ok(Arc::new(nd))
+        }
+        AttributeValue::Ints(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
             Ok(Arc::new(nd))
         }
         AttributeValue::Ulonglong(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
             Ok(Arc::new(nd))
         }
+        AttributeValue::Ulonglongs(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
+            Ok(Arc::new(nd))
+        }
         AttributeValue::Longlong(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
+            Ok(Arc::new(nd))
+        }
+        AttributeValue::Longlongs(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
             Ok(Arc::new(nd))
         }
         AttributeValue::Float(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
             Ok(Arc::new(nd))
         }
+        AttributeValue::Floats(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
+            Ok(Arc::new(nd))
+        }
         AttributeValue::Double(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
             Ok(Arc::new(nd))
         }
+        AttributeValue::Doubles(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0]))?;
+            Ok(Arc::new(nd))
+        }
         AttributeValue::Str(value) => {
             let nd = NdArray::new_with_backend(AttributeBackend::new(value))?;
+            Ok(Arc::new(nd))
+        }
+        AttributeValue::Strs(values) if values.len() == 1 => {
+            let nd = NdArray::new_with_backend(AttributeBackend::new(values[0].clone()))?;
             Ok(Arc::new(nd))
         }
         _ => Err(anyhow::anyhow!(
@@ -147,6 +191,9 @@ pub fn variable_to_nd_array(
 
     let cf_time_epoch_unit = match attributes.get("units") {
         Some(AttributeValue::Str(units_str)) => parse_time_units(units_str),
+        Some(AttributeValue::Strs(units_strs)) if units_strs.len() == 1 => {
+            parse_time_units(&units_strs[0])
+        }
         _ => None,
     };
 
