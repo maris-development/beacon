@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use beacon_atlas::datafusion::table::AtlasTable;
 use beacon_datafusion_ext::table_ext::{ExternalTable, TableDefinition, ViewTableDefinition};
 use beacon_table::BeaconTable;
 use datafusion::{
@@ -80,10 +79,7 @@ impl SchemaPersistenceService {
         table: &dyn TableProvider,
     ) -> datafusion::error::Result<String> {
         let definition: Arc<dyn TableDefinition> =
-            if let Some(table) = table.as_any().downcast_ref::<AtlasTable>() {
-                let definition = table.definition();
-                Arc::new(definition)
-            } else if let Some(table) = table.as_any().downcast_ref::<BeaconTable>() {
+            if let Some(table) = table.as_any().downcast_ref::<BeaconTable>() {
                 let definition = table.definition();
                 Arc::new(definition)
             } else if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {

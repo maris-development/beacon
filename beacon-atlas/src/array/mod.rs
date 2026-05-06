@@ -1,497 +1,1050 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-use beacon_nd_arrow::array::{
-    backend::{ArrayBackend, BackendSubsetResult},
-    subset::ArraySubset,
+use anyhow::anyhow;
+use array_format::{BinaryArray, FillValue, Reader, StorageLayout, StringArray};
+use beacon_nd_array::datatypes::{NdArrayDataType, NdArrayType, TimestampNanosecond};
+use beacon_nd_array::{
+    NdArray, NdArrayD, array::backend::ArrayBackend, array::subset::ArraySubset,
 };
-use object_store::ObjectStore;
+use ndarray::{ArrayD, Axis, IxDyn, Slice};
 
-use crate::{
-    array::{compat::AtlasArrowCompat, layout::ArrayLayout},
-    arrow_object_store::ArrowObjectStoreReader,
-};
+// ─── AtlasArray ───────────────────────────────────────────────────────────────
 
-pub mod compat;
-pub mod io_cache;
-pub mod layout;
-pub mod reader;
-pub mod statistics;
-pub mod writer;
-
-/// Translate an n-dimensional subset into flat half-open ranges `(start, end)`.
+/// A lazy array backend backed by an `array_format::Reader`.
 ///
-/// Atlas stores array values as one logical 1D stream in row-major order.
-/// This helper turns a multi-dimensional slice request into the smallest set of
-/// contiguous flat ranges that cover the requested values.
+/// Metadata (shape, dimensions, chunk_shape, fill_value) is resolved at
+/// construction time from the footer — **no data I/O**. The actual array
+/// bytes are only read when [`read_subset`](ArrayBackend::read_subset) is
+/// called.
 ///
-/// The main optimization is that fully selected trailing axes are merged into a
-/// single contiguous block. For example, selecting full rows from a 2D array
-/// becomes one range per row instead of one range per element.
-fn subset_to_flat_ranges(subset: &ArraySubset, array_shape: &[usize]) -> Vec<(usize, usize)> {
-    assert_eq!(subset.start.len(), array_shape.len());
-    assert_eq!(subset.shape.len(), array_shape.len());
-
-    if array_shape.is_empty() {
-        return vec![(0, 1)];
-    }
-
-    if subset.shape.contains(&0) {
-        return Vec::new();
-    }
-
-    for ((&start, &len), &axis_len) in subset
-        .start
-        .iter()
-        .zip(subset.shape.iter())
-        .zip(array_shape.iter())
-    {
-        assert!(start <= axis_len);
-        assert!(len <= axis_len - start);
-    }
-
-    if array_shape.len() == 1 {
-        let start = subset.start[0];
-        return vec![(start, start + subset.shape[0])];
-    }
-
-    let mut strides = vec![1; array_shape.len()];
-    for axis in (0..array_shape.len().saturating_sub(1)).rev() {
-        strides[axis] = strides[axis + 1] * array_shape[axis + 1];
-    }
-
-    let mut block_axis = array_shape.len() - 1;
-    while block_axis > 0
-        && subset.start[block_axis] == 0
-        && subset.shape[block_axis] == array_shape[block_axis]
-    {
-        block_axis -= 1;
-    }
-
-    // `base_offset` is the flat position of the first requested element.
-    // `block_len` is the largest contiguous run we can read at once after
-    // collapsing fully selected trailing axes.
-    let base_offset: usize = (0..array_shape.len())
-        .map(|axis| subset.start[axis] * strides[axis])
-        .sum();
-    let block_len: usize = subset.shape[block_axis..].iter().product();
-
-    if block_axis == 0 {
-        return vec![(base_offset, base_offset + block_len)];
-    }
-
-    let range_count: usize = subset.shape[..block_axis].iter().product();
-    let mut ranges = Vec::with_capacity(range_count);
-    let mut prefix = subset.start[..block_axis].to_vec();
-    let mut current_start = base_offset;
-
-    // Walk the non-collapsed prefix axes like an odometer. Each step advances
-    // to the next contiguous block in row-major order.
-    for range_index in 0..range_count {
-        ranges.push((current_start, current_start + block_len));
-
-        if range_index + 1 == range_count {
-            break;
-        }
-
-        for axis in (0..block_axis).rev() {
-            prefix[axis] += 1;
-            current_start += strides[axis];
-
-            let axis_end = subset.start[axis] + subset.shape[axis];
-            if prefix[axis] < axis_end {
-                break;
-            }
-
-            prefix[axis] = subset.start[axis];
-            current_start -= subset.shape[axis] * strides[axis];
-        }
-    }
-
-    ranges
+/// For **flat** arrays the full payload is read and then sliced locally.
+/// For **chunked** arrays only the chunks that overlap the requested subset
+/// are fetched, giving true partial-I/O benefits.
+#[derive(Clone)]
+pub struct AtlasArray<T: NdArrayType> {
+    reader: Arc<Reader>,
+    array_name: String,
+    shape: Vec<usize>,
+    chunk_shape: Vec<usize>,
+    dimensions: Vec<String>,
+    fill_value: Option<T>,
+    _phantom: PhantomData<T>,
 }
 
-/// Array backend backed by Arrow IPC batches stored in an object store.
-///
-/// Each logical dataset array is described by an [`ArrayLayout`], which tells
-/// Atlas where the array begins inside the flat stored value stream and what
-/// its n-dimensional shape is. Subset reads are implemented by:
-///
-/// 1. translating the n-dimensional subset into flat contiguous ranges,
-/// 2. mapping those ranges onto stored Arrow record batches,
-/// 3. concatenating the resulting Arrow slices,
-/// 4. converting them into `Vec<A>` using [`AtlasArrowCompat`], and
-/// 5. reshaping the values into an `ndarray::ArrayD<A>`.
-#[derive(Debug, Clone)]
-pub struct AtlasArrayBackend<S: ObjectStore + Clone, A: AtlasArrowCompat> {
-    marker: std::marker::PhantomData<A>,
-    arrow_array_reader: Arc<ArrowObjectStoreReader<S>>,
-    io_cache: Arc<io_cache::IoCache>,
-    layout: Arc<ArrayLayout>,
+impl<T: NdArrayType> std::fmt::Debug for AtlasArray<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AtlasArray")
+            .field("array_name", &self.array_name)
+            .field("shape", &self.shape)
+            .field("chunk_shape", &self.chunk_shape)
+            .field("dimensions", &self.dimensions)
+            .finish()
+    }
+}
+
+impl<T: NdArrayType> AtlasArray<T> {
+    /// Create a new lazy array from a shared reader and an array name.
+    ///
+    /// Looks up the array in the reader's footer to extract shape,
+    /// dimensions, chunk shape, and fill value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the array is not found in the reader's footer.
+    pub fn new(reader: Arc<Reader>, array_name: &str) -> anyhow::Result<Self>
+    where
+        T: FromFillValue,
+    {
+        let meta = reader
+            .get_array(array_name)
+            .map_err(|e| anyhow!("Array '{}' not found: {}", array_name, e))?;
+
+        let shape: Vec<usize> = meta.layout.shape.iter().map(|&s| s as usize).collect();
+        let mut dimensions = meta.layout.dimension_names.clone();
+
+        // Attribute arrays may have a shape (e.g. [1]) but no named dimensions.
+        // Pad with empty strings to satisfy the shape.len() == dimensions.len()
+        // invariant required by NdArray.
+        while dimensions.len() < shape.len() {
+            dimensions.push(String::new());
+        }
+
+        let chunk_shape = match &meta.layout.storage {
+            StorageLayout::Chunked { chunk_shape, .. } => {
+                chunk_shape.iter().map(|&s| s as usize).collect()
+            }
+            StorageLayout::Flat { .. } => shape.clone(),
+        };
+
+        let fill_value = meta
+            .fill_value
+            .as_ref()
+            .and_then(|fv| T::from_fill_value(fv));
+
+        Ok(Self {
+            reader,
+            array_name: array_name.to_string(),
+            shape,
+            chunk_shape,
+            dimensions,
+            fill_value,
+            _phantom: PhantomData,
+        })
+    }
 }
 
 #[async_trait::async_trait]
-impl<S: ObjectStore + Clone, A: AtlasArrowCompat> ArrayBackend<A> for AtlasArrayBackend<S, A> {
+impl<T: NdArrayType + DecodeFromBytes + FromFillValue> ArrayBackend<T> for AtlasArray<T> {
     fn len(&self) -> usize {
-        self.layout
-            .array_shape
-            .iter()
-            .map(|&dim| dim as usize)
-            .product()
-    }
-
-    /// Returns `true` when the array contains no elements.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.shape.iter().product()
     }
 
     fn shape(&self) -> Vec<usize> {
-        self.layout
-            .array_shape
-            .iter()
-            .map(|&dim| dim as usize)
-            .collect()
-    }
-    fn dimensions(&self) -> Vec<String> {
-        self.layout.dimensions.clone()
-    }
-    fn fill_value(&self) -> Option<A> {
-        None
+        self.shape.clone()
     }
 
-    /// Read an n-dimensional subset from the stored flat Arrow value stream.
-    ///
-    /// The implementation first converts the logical subset into flat ranges,
-    /// then slices the necessary IPC record batches, concatenates those slices,
-    /// converts the Arrow array into `Vec<A>` plus an optional validity mask,
-    /// and finally reshapes both into the requested subset shape.
-    async fn read_subset_with_validity(
-        &self,
-        subset: ArraySubset,
-    ) -> anyhow::Result<BackendSubsetResult<A>> {
+    fn chunk_shape(&self) -> Vec<usize> {
+        self.chunk_shape.clone()
+    }
+
+    fn dimensions(&self) -> Vec<String> {
+        self.dimensions.clone()
+    }
+
+    fn fill_value(&self) -> Option<T> {
+        self.fill_value.clone()
+    }
+
+    async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayD<T>> {
         self.validate_subset(&subset)?;
 
-        let subset_shape = subset.shape.clone();
-        let ranges = Self::translate_subset_to_ranges(&subset, &self.shape());
+        let meta = self
+            .reader
+            .get_array(&self.array_name)
+            .map_err(|e| anyhow!("Array '{}' not found: {}", self.array_name, e))?;
 
-        if ranges.is_empty() {
-            let values = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&subset_shape), Vec::new())
-                .map_err(|err| anyhow::anyhow!("failed to build empty subset array: {err}"))?;
-            return Ok(BackendSubsetResult::new(values, None));
-        }
-
-        let batch_size = self.batch_size().await?;
-        let dataset_start = usize::try_from(self.layout.array_start)
-            .map_err(|err| anyhow::anyhow!("array_start does not fit in usize: {err}"))?;
-        let mut chunks = Vec::new();
-
-        for (range_start, range_end) in ranges {
-            let mut absolute_start = dataset_start
-                .checked_add(range_start)
-                .ok_or_else(|| anyhow::anyhow!("subset start overflow"))?;
-            let absolute_end = dataset_start
-                .checked_add(range_end)
-                .ok_or_else(|| anyhow::anyhow!("subset end overflow"))?;
-
-            while absolute_start < absolute_end {
-                let batch_index = absolute_start / batch_size;
-                let offset_in_batch = absolute_start % batch_size;
-                let len = (absolute_end - absolute_start).min(batch_size - offset_in_batch);
-
-                // A flat subset range may cross batch boundaries, so split it
-                // into per-batch slices and fetch each slice independently.
-                let batch = self.read_batch(batch_index, offset_in_batch, len).await?;
-
-                anyhow::ensure!(
-                    batch.num_columns() == 1,
-                    "expected a single array column, got {}",
-                    batch.num_columns()
-                );
-
-                chunks.push(batch.column(0).clone());
-                absolute_start += len;
+        match &meta.layout.storage {
+            StorageLayout::Flat { .. } => self.read_flat_subset(&subset).await,
+            StorageLayout::Chunked { chunk_shape, .. } => {
+                let chunk_shape: Vec<usize> = chunk_shape.iter().map(|&s| s as usize).collect();
+                self.read_chunked_subset(&subset, &chunk_shape).await
             }
         }
-
-        let concatenated = if chunks.len() == 1 {
-            chunks.pop().expect("one chunk exists")
-        } else {
-            let chunk_refs: Vec<&dyn arrow::array::Array> =
-                chunks.iter().map(|chunk| chunk.as_ref()).collect();
-            arrow::compute::concat(&chunk_refs)
-                .map_err(|err| anyhow::anyhow!("failed to concatenate subset chunks: {err}"))?
-        };
-
-        let converted = A::from_arrow_array_with_validity(concatenated.as_ref())?;
-        let values =
-            ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&subset_shape), converted.values)
-                .map_err(|err| anyhow::anyhow!("failed to build subset ndarray: {err}"))?;
-        let validity = converted
-            .validity
-            .map(|mask| ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&subset_shape), mask))
-            .transpose()
-            .map_err(|err| anyhow::anyhow!("failed to build subset validity ndarray: {err}"))?;
-
-        Ok(BackendSubsetResult::new(values, validity))
-    }
-
-    async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ndarray::ArrayD<A>> {
-        Ok(self.read_subset_with_validity(subset).await?.values)
     }
 }
 
-impl<S: ObjectStore + Clone, A: AtlasArrowCompat> AtlasArrayBackend<S, A> {
-    /// Create a new Atlas array backend for one dataset array.
-    pub fn new(
-        arrow_array_reader: Arc<ArrowObjectStoreReader<S>>,
-        io_cache: Arc<io_cache::IoCache>,
-        layout: Arc<ArrayLayout>,
-    ) -> Self {
-        Self {
-            marker: std::marker::PhantomData,
-            arrow_array_reader,
-            io_cache,
-            layout,
+impl<T: NdArrayType + DecodeFromBytes> AtlasArray<T> {
+    /// Read a flat array, decode, and slice to the requested subset.
+    async fn read_flat_subset(&self, subset: &ArraySubset) -> anyhow::Result<ArrayD<T>> {
+        let bytes = self
+            .reader
+            .read_raw_bytes(&self.array_name)
+            .await
+            .map_err(|e| anyhow!("Failed to read '{}': {}", self.array_name, e))?;
+        let values = T::decode_from_bytes(&bytes)?;
+        let full = ArrayD::from_shape_vec(IxDyn(&self.shape), values)
+            .map_err(|e| anyhow!("Shape mismatch for '{}': {}", self.array_name, e))?;
+        Ok(slice_array(&full, subset))
+    }
+
+    /// Read only the chunks that overlap the requested subset, then assemble.
+    async fn read_chunked_subset(
+        &self,
+        subset: &ArraySubset,
+        chunk_shape: &[usize],
+    ) -> anyhow::Result<ArrayD<T>> {
+        let ndim = self.shape.len();
+
+        // Determine which chunk coords overlap the subset
+        let mut axis_ranges: Vec<std::ops::RangeInclusive<u32>> = Vec::with_capacity(ndim);
+        for i in 0..ndim {
+            let first = (subset.start[i] / chunk_shape[i]) as u32;
+            let last = if subset.shape[i] == 0 {
+                first
+            } else {
+                ((subset.start[i] + subset.shape[i] - 1) / chunk_shape[i]) as u32
+            };
+            axis_ranges.push(first..=last);
+        }
+
+        // Build the output array filled with fill_value (or T::default-ish zeros)
+        let fill = self.fill_value.clone().unwrap_or_else(T::default_value);
+        let mut output = ArrayD::from_elem(IxDyn(&subset.shape), fill);
+
+        // Iterate over all overlapping chunk coordinates (cartesian product)
+        let mut coord = vec![0u32; ndim];
+        for i in 0..ndim {
+            coord[i] = *axis_ranges[i].start();
+        }
+
+        loop {
+            // Read this chunk
+            let chunk_bytes = self
+                .reader
+                .read_chunk_raw(&self.array_name, &coord)
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to read chunk {:?} of '{}': {}",
+                        coord,
+                        self.array_name,
+                        e
+                    )
+                })?;
+            let chunk_values = T::decode_from_bytes(&chunk_bytes)?;
+
+            // Compute this chunk's global extent
+            let mut chunk_global_start = vec![0usize; ndim];
+            let mut chunk_actual_shape = vec![0usize; ndim];
+            for i in 0..ndim {
+                chunk_global_start[i] = coord[i] as usize * chunk_shape[i];
+                chunk_actual_shape[i] = (chunk_shape[i]).min(self.shape[i] - chunk_global_start[i]);
+            }
+
+            let chunk_array = ArrayD::from_shape_vec(IxDyn(&chunk_actual_shape), chunk_values)
+                .map_err(|e| anyhow!("Chunk shape mismatch for '{}': {}", self.array_name, e))?;
+
+            // Compute intersection of chunk extent with the requested subset
+            let mut src_start = vec![0usize; ndim];
+            let mut dst_start = vec![0usize; ndim];
+            let mut copy_shape = vec![0usize; ndim];
+            for i in 0..ndim {
+                let chunk_end = chunk_global_start[i] + chunk_actual_shape[i];
+                let subset_end = subset.start[i] + subset.shape[i];
+                let inter_start = chunk_global_start[i].max(subset.start[i]);
+                let inter_end = chunk_end.min(subset_end);
+                if inter_start >= inter_end {
+                    // No overlap on this axis — skip entire chunk
+                    copy_shape[i] = 0;
+                } else {
+                    src_start[i] = inter_start - chunk_global_start[i];
+                    dst_start[i] = inter_start - subset.start[i];
+                    copy_shape[i] = inter_end - inter_start;
+                }
+            }
+
+            // Skip if any axis has zero overlap
+            if copy_shape.iter().all(|&s| s > 0) {
+                // Slice the chunk to the intersection region
+                let src_slice = slice_array_region(&chunk_array, &src_start, &copy_shape);
+                // Write into the output
+                let mut dst_view = output.view_mut();
+                for i in 0..ndim {
+                    dst_view.slice_axis_inplace(
+                        Axis(i),
+                        Slice::from(dst_start[i]..dst_start[i] + copy_shape[i]),
+                    );
+                }
+                dst_view.assign(&src_slice);
+            }
+
+            // Advance to next coord (odometer-style)
+            let mut axis = ndim;
+            loop {
+                if axis == 0 {
+                    return Ok(output);
+                }
+                axis -= 1;
+                coord[axis] += 1;
+                if coord[axis] <= *axis_ranges[axis].end() {
+                    break;
+                }
+                coord[axis] = *axis_ranges[axis].start();
+            }
         }
     }
+}
 
-    /// Translate an n-dimensional subset into flat half-open ranges `(start, end)`.
-    ///
-    /// The backing store is row-major and physically contiguous, so we coalesce
-    /// as far left as possible when trailing axes are fully selected.
-    fn translate_subset_to_ranges(
-        subset: &ArraySubset,
-        array_shape: &[usize],
-    ) -> Vec<(usize, usize)> {
-        subset_to_flat_ranges(subset, array_shape)
+// ─── Subset Slicing Helpers ───────────────────────────────────────────────────
+
+/// Slice an ArrayD to an ArraySubset region.
+fn slice_array<T: Clone>(array: &ArrayD<T>, subset: &ArraySubset) -> ArrayD<T> {
+    let mut view = array.view();
+    for i in 0..subset.start.len() {
+        view.slice_axis_inplace(
+            Axis(i),
+            Slice::from(subset.start[i]..subset.start[i] + subset.shape[i]),
+        );
     }
+    view.to_owned()
+}
 
-    /// Determine the stored IPC batch size from the first batch.
-    ///
-    /// Atlas currently assumes a stable batch size for all non-terminal batches,
-    /// which matches how the writer emits the flat value stream.
-    async fn batch_size(&self) -> anyhow::Result<usize> {
-        let first_batch = self.read_batch(0, 0, usize::MAX).await?;
-        anyhow::ensure!(first_batch.num_rows() > 0, "first record batch is empty");
-        Ok(first_batch.num_rows())
+/// Slice an ArrayD to a region given by start offsets and shape.
+fn slice_array_region<T: Clone>(array: &ArrayD<T>, start: &[usize], shape: &[usize]) -> ArrayD<T> {
+    let mut view = array.view();
+    for i in 0..start.len() {
+        view.slice_axis_inplace(Axis(i), Slice::from(start[i]..start[i] + shape[i]));
     }
+    view.to_owned()
+}
 
-    /// Read and slice a single stored Arrow record batch.
-    ///
-    /// Batches are cached by `(path, batch_index)` so repeated subset reads can
-    /// reuse previously decoded Arrow data.
-    async fn read_batch(
-        &self,
-        index: usize,
-        start: usize,
-        len: usize,
-    ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
-        let path = self.arrow_array_reader.path().clone();
-        let batch = self
-            .io_cache
-            .get_or_insert_with((path, index), |_| async move {
-                self.arrow_array_reader
-                    .read_batch(index)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("batch index out of range"))
-            })
-            .await?;
-        let slice_len = len.min(batch.num_rows().saturating_sub(start));
-        Ok(batch.slice(start, slice_len))
+// ─── Decode Trait ─────────────────────────────────────────────────────────────
+
+/// Decode raw bytes from an array-format file into a `Vec<T>`.
+///
+/// This is a sealed trait — only types that correspond to array-format's
+/// supported data types implement it.
+pub trait DecodeFromBytes: Sized {
+    fn decode_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Self>>;
+    /// A zero-like default used to pre-fill output buffers for chunked reads.
+    fn default_value() -> Self;
+}
+
+macro_rules! impl_decode_primitive {
+    ($ty:ty, $default:expr) => {
+        impl DecodeFromBytes for $ty {
+            fn decode_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Self>> {
+                let elem = std::mem::size_of::<$ty>();
+                if elem > 0 && bytes.len() % elem != 0 {
+                    anyhow::bail!(
+                        "byte length {} is not a multiple of element size {}",
+                        bytes.len(),
+                        elem
+                    );
+                }
+                let len = if elem > 0 { bytes.len() / elem } else { 0 };
+                let values: Vec<$ty> =
+                    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const $ty, len) }
+                        .to_vec();
+                Ok(values)
+            }
+
+            fn default_value() -> Self {
+                $default
+            }
+        }
+    };
+}
+
+impl_decode_primitive!(i8, 0);
+impl_decode_primitive!(i16, 0);
+impl_decode_primitive!(i32, 0);
+impl_decode_primitive!(i64, 0);
+impl_decode_primitive!(u8, 0);
+impl_decode_primitive!(u16, 0);
+impl_decode_primitive!(u32, 0);
+impl_decode_primitive!(u64, 0);
+impl_decode_primitive!(f32, 0.0);
+impl_decode_primitive!(f64, 0.0);
+
+impl DecodeFromBytes for bool {
+    fn decode_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Self>> {
+        Ok(bytes.iter().map(|&b| b != 0).collect())
+    }
+    fn default_value() -> Self {
+        false
     }
 }
+
+impl DecodeFromBytes for TimestampNanosecond {
+    fn decode_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Self>> {
+        let i64s = i64::decode_from_bytes(bytes)?;
+        Ok(i64s.into_iter().map(TimestampNanosecond).collect())
+    }
+    fn default_value() -> Self {
+        TimestampNanosecond(0)
+    }
+}
+
+impl DecodeFromBytes for String {
+    fn decode_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Self>> {
+        let arr = StringArray::from_bytes(bytes.to_vec());
+        let len = arr.len();
+        Ok((0..len)
+            .map(|i| arr.value(i).unwrap_or("").to_string())
+            .collect())
+    }
+    fn default_value() -> Self {
+        String::new()
+    }
+}
+
+impl DecodeFromBytes for Vec<u8> {
+    fn decode_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Self>> {
+        let arr = BinaryArray::from_bytes(bytes.to_vec());
+        let len = arr.len();
+        Ok((0..len)
+            .map(|i| arr.value(i).unwrap_or(&[]).to_vec())
+            .collect())
+    }
+    fn default_value() -> Self {
+        Vec::new()
+    }
+}
+
+// ─── FillValue Conversion ─────────────────────────────────────────────────────
+
+/// Convert an `array_format::FillValue` to the concrete Rust type `T`.
+pub trait FromFillValue: Sized {
+    fn from_fill_value(fv: &FillValue) -> Option<Self>;
+}
+
+macro_rules! impl_fill_int {
+    ($ty:ty) => {
+        impl FromFillValue for $ty {
+            fn from_fill_value(fv: &FillValue) -> Option<Self> {
+                match fv {
+                    FillValue::Int(v) => Some(*v as $ty),
+                    FillValue::UInt(v) => Some(*v as $ty),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+macro_rules! impl_fill_uint {
+    ($ty:ty) => {
+        impl FromFillValue for $ty {
+            fn from_fill_value(fv: &FillValue) -> Option<Self> {
+                match fv {
+                    FillValue::UInt(v) => Some(*v as $ty),
+                    FillValue::Int(v) => Some(*v as $ty),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+macro_rules! impl_fill_float {
+    ($ty:ty) => {
+        impl FromFillValue for $ty {
+            fn from_fill_value(fv: &FillValue) -> Option<Self> {
+                match fv {
+                    FillValue::Float(v) => Some(*v as $ty),
+                    FillValue::Int(v) => Some(*v as $ty),
+                    FillValue::UInt(v) => Some(*v as $ty),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+impl_fill_int!(i8);
+impl_fill_int!(i16);
+impl_fill_int!(i32);
+impl_fill_int!(i64);
+impl_fill_uint!(u8);
+impl_fill_uint!(u16);
+impl_fill_uint!(u32);
+impl_fill_uint!(u64);
+impl_fill_float!(f32);
+impl_fill_float!(f64);
+
+impl FromFillValue for bool {
+    fn from_fill_value(fv: &FillValue) -> Option<Self> {
+        match fv {
+            FillValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
+impl FromFillValue for TimestampNanosecond {
+    fn from_fill_value(fv: &FillValue) -> Option<Self> {
+        match fv {
+            FillValue::Int(v) => Some(TimestampNanosecond(*v)),
+            _ => None,
+        }
+    }
+}
+
+impl FromFillValue for String {
+    fn from_fill_value(fv: &FillValue) -> Option<Self> {
+        match fv {
+            FillValue::String(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl FromFillValue for Vec<u8> {
+    fn from_fill_value(_fv: &FillValue) -> Option<Self> {
+        None // FillValue has no Binary variant
+    }
+}
+
+// ─── Dynamic Constructor ──────────────────────────────────────────────────────
+
+/// Create a lazy `Arc<dyn NdArrayD>` from a reader and array name.
+///
+/// The returned array does not read any data until [`NdArrayD`] methods that
+/// access values (e.g. subset, broadcast, into_raw_vec) are called.
+pub fn lazy_ndarray_dyn(
+    reader: Arc<Reader>,
+    array_name: &str,
+    data_type: NdArrayDataType,
+) -> anyhow::Result<Arc<dyn NdArrayD>> {
+    macro_rules! make_lazy {
+        ($ty:ty) => {{
+            let backend = AtlasArray::<$ty>::new(Arc::clone(&reader), array_name)?;
+            let nd = NdArray::new_with_backend(backend)?;
+            Ok(Arc::new(nd) as Arc<dyn NdArrayD>)
+        }};
+    }
+
+    match data_type {
+        NdArrayDataType::Bool => make_lazy!(bool),
+        NdArrayDataType::I8 => make_lazy!(i8),
+        NdArrayDataType::I16 => make_lazy!(i16),
+        NdArrayDataType::I32 => make_lazy!(i32),
+        NdArrayDataType::I64 => make_lazy!(i64),
+        NdArrayDataType::U8 => make_lazy!(u8),
+        NdArrayDataType::U16 => make_lazy!(u16),
+        NdArrayDataType::U32 => make_lazy!(u32),
+        NdArrayDataType::U64 => make_lazy!(u64),
+        NdArrayDataType::F32 => make_lazy!(f32),
+        NdArrayDataType::F64 => make_lazy!(f64),
+        NdArrayDataType::Timestamp => make_lazy!(TimestampNanosecond),
+        NdArrayDataType::String => make_lazy!(String),
+        NdArrayDataType::Binary => make_lazy!(Vec<u8>),
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::AtlasArrayBackend;
-    use crate::{
-        array::{io_cache::IoCache, layout::ArrayLayout},
-        arrow_object_store::ArrowObjectStoreReader,
-    };
-    use arrow::{
-        array::Int32Array,
-        datatypes::{DataType, Field, Schema},
-        ipc::writer::FileWriter,
-        record_batch::RecordBatch,
-    };
-    use beacon_nd_arrow::array::{backend::ArrayBackend, subset::ArraySubset};
+    use super::*;
+    use array_format::{NoCompression, PrimitiveArray, Writer, WriterConfig};
+    use beacon_nd_array::array::backend::ArrayBackend;
     use bytes::Bytes;
-    use object_store::{ObjectStore, memory::InMemory, path::Path};
-    use std::{io::Cursor, sync::Arc};
+    use futures::future::BoxFuture;
+    use std::ops::Range;
+    use std::sync::Mutex;
 
-    type TestBackend = AtlasArrayBackend<Arc<dyn ObjectStore>, i32>;
+    // ── In-memory storage for direct arrf Writer/Reader tests ──────────
 
-    async fn make_test_backend(
-        values: Vec<i32>,
-        batch_sizes: &[usize],
-        layout: ArrayLayout,
-    ) -> anyhow::Result<TestBackend> {
-        anyhow::ensure!(values.len() == batch_sizes.iter().sum::<usize>());
+    #[derive(Clone, Default)]
+    struct MemStorage(Arc<Mutex<Vec<u8>>>);
 
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "array",
-            DataType::Int32,
-            false,
-        )]));
-        let mut cursor = Cursor::new(Vec::new());
-        let mut writer = FileWriter::try_new(&mut cursor, &schema)?;
-
-        let mut offset = 0;
-        for &batch_size in batch_sizes {
-            let batch_values = values[offset..offset + batch_size].to_vec();
-            offset += batch_size;
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(Int32Array::from(batch_values))],
-            )?;
-            writer.write(&batch)?;
+    impl array_format::Storage for MemStorage {
+        fn read_range(&self, range: Range<u64>) -> BoxFuture<'_, array_format::Result<Bytes>> {
+            let data = self.0.lock().unwrap();
+            let bytes = Bytes::copy_from_slice(&data[range.start as usize..range.end as usize]);
+            Box::pin(async move { Ok(bytes) })
         }
-        writer.finish()?;
 
-        let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
-        let path = Path::from("array.arrow");
-        store
-            .put(&path, Bytes::from(cursor.into_inner()).into())
-            .await?;
+        fn write(&self, data: Bytes) -> BoxFuture<'_, array_format::Result<()>> {
+            let mut buf = self.0.lock().unwrap();
+            *buf = data.to_vec();
+            Box::pin(async { Ok(()) })
+        }
 
-        let reader = Arc::new(ArrowObjectStoreReader::new(store.clone(), path).await?);
-        Ok(TestBackend::new(
-            reader,
-            Arc::new(IoCache::new(1024 * 1024)),
-            Arc::new(layout),
-        ))
+        fn size(&self) -> BoxFuture<'_, array_format::Result<u64>> {
+            let len = self.0.lock().unwrap().len() as u64;
+            Box::pin(async move { Ok(len) })
+        }
     }
 
-    #[test]
-    fn translate_subset_to_ranges_returns_full_array_as_one_range() {
-        let ranges = TestBackend::translate_subset_to_ranges(
-            &ArraySubset {
-                start: vec![0, 0, 0],
-                shape: vec![3, 4, 5],
-            },
-            &[3, 4, 5],
-        );
-
-        assert_eq!(ranges, vec![(0, 60)]);
+    fn config() -> WriterConfig<NoCompression> {
+        WriterConfig {
+            block_target_size: 64 * 1024,
+            codec: NoCompression,
+        }
     }
 
-    #[test]
-    fn translate_subset_to_ranges_splits_non_contiguous_rows() {
-        let ranges = TestBackend::translate_subset_to_ranges(
-            &ArraySubset {
-                start: vec![1, 1],
+    // ── Flat array: f64 ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_flat_f64_full_read() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        let values = vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let data = PrimitiveArray::from_slice(&values);
+        writer
+            .write_array("arr", vec!["x".into(), "y".into()], vec![2, 3], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<f64>::new(Arc::clone(&reader), "arr").unwrap();
+
+        assert_eq!(backend.len(), 6);
+        assert_eq!(backend.shape(), vec![2, 3]);
+        assert_eq!(backend.chunk_shape(), vec![2, 3]);
+        assert_eq!(backend.dimensions(), vec!["x", "y"]);
+        assert_eq!(backend.fill_value(), None);
+
+        let full = backend
+            .read_subset(ArraySubset {
+                start: vec![0, 0],
                 shape: vec![2, 3],
-            },
-            &[4, 5],
-        );
-
-        assert_eq!(ranges, vec![(6, 9), (11, 14)]);
-    }
-
-    #[test]
-    fn translate_subset_to_ranges_merges_when_trailing_axes_are_full() {
-        let ranges = TestBackend::translate_subset_to_ranges(
-            &ArraySubset {
-                start: vec![1, 2, 0],
-                shape: vec![2, 2, 6],
-            },
-            &[4, 5, 6],
-        );
-
-        assert_eq!(ranges, vec![(42, 54), (72, 84)]);
-    }
-
-    #[test]
-    fn translate_subset_to_ranges_returns_one_range_for_scalar() {
-        let ranges = TestBackend::translate_subset_to_ranges(
-            &ArraySubset {
-                start: vec![],
-                shape: vec![],
-            },
-            &[],
-        );
-
-        assert_eq!(ranges, vec![(0, 1)]);
-    }
-
-    #[test]
-    fn translate_subset_to_ranges_returns_one_range_for_1d_subset() {
-        let ranges = TestBackend::translate_subset_to_ranges(
-            &ArraySubset {
-                start: vec![3],
-                shape: vec![4],
-            },
-            &[10],
-        );
-
-        assert_eq!(ranges, vec![(3, 7)]);
-    }
-
-    #[test]
-    fn translate_subset_to_ranges_returns_single_element_ranges_when_needed() {
-        let ranges = TestBackend::translate_subset_to_ranges(
-            &ArraySubset {
-                start: vec![1, 1, 1],
-                shape: vec![2, 2, 1],
-            },
-            &[3, 4, 5],
-        );
-
-        assert_eq!(ranges, vec![(26, 27), (31, 32), (46, 47), (51, 52)]);
-    }
-
-    #[tokio::test]
-    async fn read_subset_reads_across_batch_boundaries() -> anyhow::Result<()> {
-        let backend = make_test_backend(
-            (0..8).collect(),
-            &[5, 3],
-            ArrayLayout {
-                dataset_index: 0,
-                array_start: 0,
-                array_len: 8,
-                array_shape: vec![8],
-                chunk_shape: vec![8],
-                dimensions: vec!["x".to_string()],
-            },
-        )
-        .await?;
-
-        let subset = backend
-            .read_subset(ArraySubset {
-                start: vec![3],
-                shape: vec![4],
             })
-            .await?;
-
-        assert_eq!(subset.shape(), &[4]);
-        assert_eq!(subset.iter().copied().collect::<Vec<_>>(), vec![3, 4, 5, 6]);
-        Ok(())
+            .await
+            .unwrap();
+        assert_eq!(full.into_raw_vec_and_offset().0, values);
     }
 
     #[tokio::test]
-    async fn read_subset_reads_non_contiguous_ranges_with_array_offset() -> anyhow::Result<()> {
-        let backend = make_test_backend(
-            (0..12).collect(),
-            &[5, 5, 2],
-            ArrayLayout {
-                dataset_index: 0,
-                array_start: 2,
-                array_len: 8,
-                array_shape: vec![2, 4],
-                chunk_shape: vec![2, 4],
-                dimensions: vec!["x".to_string(), "y".to_string()],
-            },
-        )
-        .await?;
+    async fn test_flat_f64_subset() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        // 3×4 matrix: [[0,1,2,3],[4,5,6,7],[8,9,10,11]]
+        let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let data = PrimitiveArray::from_slice(&values);
+        writer
+            .write_array(
+                "m",
+                vec!["row".into(), "col".into()],
+                vec![3, 4],
+                None,
+                &data,
+            )
+            .unwrap();
+        writer.flush().await.unwrap();
 
-        let subset = backend
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<f64>::new(Arc::clone(&reader), "m").unwrap();
+
+        // Subset: rows 1..3, cols 1..3 → [[5,6],[9,10]]
+        let sub = backend
             .read_subset(ArraySubset {
-                start: vec![0, 1],
+                start: vec![1, 1],
                 shape: vec![2, 2],
             })
-            .await?;
+            .await
+            .unwrap();
+        assert_eq!(sub.shape(), &[2, 2]);
+        assert_eq!(sub.into_raw_vec_and_offset().0, vec![5.0, 6.0, 9.0, 10.0]);
+    }
 
-        assert_eq!(subset.shape(), &[2, 2]);
-        assert_eq!(subset.iter().copied().collect::<Vec<_>>(), vec![3, 4, 7, 8]);
-        Ok(())
+    // ── Flat array: i32 ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_flat_i32() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        let values = vec![10_i32, 20, 30];
+        let data = PrimitiveArray::from_slice(&values);
+        writer
+            .write_array("ints", vec!["obs".into()], vec![3], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<i32>::new(Arc::clone(&reader), "ints").unwrap();
+        assert_eq!(backend.shape(), vec![3]);
+
+        let full = backend
+            .read_subset(ArraySubset {
+                start: vec![0],
+                shape: vec![3],
+            })
+            .await
+            .unwrap();
+        assert_eq!(full.into_raw_vec_and_offset().0, values);
+    }
+
+    // ── Flat array: String ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_flat_string() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        let values = ["hello", "world", "foo"];
+        let data = StringArray::from_slices(&values);
+        writer
+            .write_array("names", vec!["obs".into()], vec![3], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<String>::new(Arc::clone(&reader), "names").unwrap();
+        assert_eq!(backend.shape(), vec![3]);
+
+        let full = backend
+            .read_subset(ArraySubset {
+                start: vec![0],
+                shape: vec![3],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            full.into_raw_vec_and_offset().0,
+            vec!["hello".to_string(), "world".to_string(), "foo".to_string()]
+        );
+    }
+
+    // ── Flat array: bool ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_flat_bool() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        // bool is stored as u8
+        let bools: Vec<u8> = vec![1, 0, 1, 1];
+        let data = PrimitiveArray::from_slice(&bools);
+        writer
+            .write_array("flags", vec!["obs".into()], vec![4], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<bool>::new(Arc::clone(&reader), "flags").unwrap();
+
+        let full = backend
+            .read_subset(ArraySubset {
+                start: vec![0],
+                shape: vec![4],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            full.into_raw_vec_and_offset().0,
+            vec![true, false, true, true]
+        );
+    }
+
+    // ── Attribute array (no dimension names) ───────────────────────────
+
+    #[tokio::test]
+    async fn test_attribute_no_dimensions() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        let values = ["celsius"];
+        let data = StringArray::from_slices(&values);
+        // Empty dimensions, shape [1] — like an attribute
+        writer
+            .write_array("units", vec![], vec![1], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<String>::new(Arc::clone(&reader), "units").unwrap();
+
+        // Dimensions should be padded with empty strings
+        assert_eq!(backend.shape(), vec![1]);
+        assert_eq!(backend.dimensions(), vec![""]);
+
+        let full = backend
+            .read_subset(ArraySubset {
+                start: vec![0],
+                shape: vec![1],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            full.into_raw_vec_and_offset().0,
+            vec!["celsius".to_string()]
+        );
+    }
+
+    // ── Chunked array: 1D ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_chunked_1d_full_read() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+
+        // 6-element array, chunk size 2 → 3 chunks
+        let dtype = array_format::DType::Float64;
+        let mut cw = writer
+            .begin_chunked_array("arr", dtype, vec!["x".into()], vec![6], vec![2], None)
+            .unwrap();
+
+        cw.write_array(vec![0], &PrimitiveArray::from_slice(&[1.0_f64, 2.0]))
+            .unwrap();
+        cw.write_array(vec![1], &PrimitiveArray::from_slice(&[3.0_f64, 4.0]))
+            .unwrap();
+        cw.write_array(vec![2], &PrimitiveArray::from_slice(&[5.0_f64, 6.0]))
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<f64>::new(Arc::clone(&reader), "arr").unwrap();
+
+        assert_eq!(backend.shape(), vec![6]);
+        assert_eq!(backend.chunk_shape(), vec![2]);
+
+        let full = backend
+            .read_subset(ArraySubset {
+                start: vec![0],
+                shape: vec![6],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            full.into_raw_vec_and_offset().0,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunked_1d_subset_spanning_chunks() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+
+        let dtype = array_format::DType::Float64;
+        let mut cw = writer
+            .begin_chunked_array("arr", dtype, vec!["x".into()], vec![6], vec![2], None)
+            .unwrap();
+
+        cw.write_array(vec![0], &PrimitiveArray::from_slice(&[10.0_f64, 20.0]))
+            .unwrap();
+        cw.write_array(vec![1], &PrimitiveArray::from_slice(&[30.0_f64, 40.0]))
+            .unwrap();
+        cw.write_array(vec![2], &PrimitiveArray::from_slice(&[50.0_f64, 60.0]))
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<f64>::new(Arc::clone(&reader), "arr").unwrap();
+
+        // Subset [1..5] spans chunks 0, 1, 2
+        let sub = backend
+            .read_subset(ArraySubset {
+                start: vec![1],
+                shape: vec![4],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            sub.into_raw_vec_and_offset().0,
+            vec![20.0, 30.0, 40.0, 50.0]
+        );
+    }
+
+    // ── Chunked array: 2D ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_chunked_2d_full_read() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+
+        // 4×4 array, chunk shape 2×2 → 4 chunks
+        let dtype = array_format::DType::Int32;
+        let mut cw = writer
+            .begin_chunked_array(
+                "grid",
+                dtype,
+                vec!["row".into(), "col".into()],
+                vec![4, 4],
+                vec![2, 2],
+                None,
+            )
+            .unwrap();
+
+        // chunk (0,0): rows 0-1, cols 0-1
+        cw.write_array(vec![0, 0], &PrimitiveArray::from_slice(&[0_i32, 1, 4, 5]))
+            .unwrap();
+        // chunk (0,1): rows 0-1, cols 2-3
+        cw.write_array(vec![0, 1], &PrimitiveArray::from_slice(&[2_i32, 3, 6, 7]))
+            .unwrap();
+        // chunk (1,0): rows 2-3, cols 0-1
+        cw.write_array(vec![1, 0], &PrimitiveArray::from_slice(&[8_i32, 9, 12, 13]))
+            .unwrap();
+        // chunk (1,1): rows 2-3, cols 2-3
+        cw.write_array(
+            vec![1, 1],
+            &PrimitiveArray::from_slice(&[10_i32, 11, 14, 15]),
+        )
+        .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<i32>::new(Arc::clone(&reader), "grid").unwrap();
+
+        assert_eq!(backend.shape(), vec![4, 4]);
+        assert_eq!(backend.chunk_shape(), vec![2, 2]);
+
+        let full = backend
+            .read_subset(ArraySubset {
+                start: vec![0, 0],
+                shape: vec![4, 4],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            full.into_raw_vec_and_offset().0,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunked_2d_subset() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+
+        let dtype = array_format::DType::Int32;
+        let mut cw = writer
+            .begin_chunked_array(
+                "grid",
+                dtype,
+                vec!["row".into(), "col".into()],
+                vec![4, 4],
+                vec![2, 2],
+                None,
+            )
+            .unwrap();
+
+        cw.write_array(vec![0, 0], &PrimitiveArray::from_slice(&[0_i32, 1, 4, 5]))
+            .unwrap();
+        cw.write_array(vec![0, 1], &PrimitiveArray::from_slice(&[2_i32, 3, 6, 7]))
+            .unwrap();
+        cw.write_array(vec![1, 0], &PrimitiveArray::from_slice(&[8_i32, 9, 12, 13]))
+            .unwrap();
+        cw.write_array(
+            vec![1, 1],
+            &PrimitiveArray::from_slice(&[10_i32, 11, 14, 15]),
+        )
+        .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<i32>::new(Arc::clone(&reader), "grid").unwrap();
+
+        // Subset: rows 1..3, cols 1..3 → [[5,6],[9,10]]
+        let sub = backend
+            .read_subset(ArraySubset {
+                start: vec![1, 1],
+                shape: vec![2, 2],
+            })
+            .await
+            .unwrap();
+        assert_eq!(sub.shape(), &[2, 2]);
+        assert_eq!(sub.into_raw_vec_and_offset().0, vec![5, 6, 9, 10]);
+    }
+
+    // ── lazy_ndarray_dyn ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_lazy_ndarray_dyn_f64() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        let values = vec![1.0_f64, 2.0, 3.0];
+        let data = PrimitiveArray::from_slice(&values);
+        writer
+            .write_array("temps", vec!["obs".into()], vec![3], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let nd = lazy_ndarray_dyn(Arc::clone(&reader), "temps", NdArrayDataType::F64).unwrap();
+
+        assert_eq!(nd.datatype(), NdArrayDataType::F64);
+        assert_eq!(nd.shape(), vec![3]);
+        assert_eq!(nd.dimensions(), vec!["obs"]);
+
+        // Actually read data via downcast
+        let typed = nd.as_any().downcast_ref::<NdArray<f64>>().unwrap();
+        let vals = typed.clone_into_raw_vec().await;
+        assert_eq!(vals, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[tokio::test]
+    async fn test_lazy_ndarray_dyn_string() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        let values = ["alpha", "beta"];
+        let data = StringArray::from_slices(&values);
+        writer
+            .write_array("labels", vec!["obs".into()], vec![2], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let nd = lazy_ndarray_dyn(Arc::clone(&reader), "labels", NdArrayDataType::String).unwrap();
+
+        assert_eq!(nd.datatype(), NdArrayDataType::String);
+        let typed = nd.as_any().downcast_ref::<NdArray<String>>().unwrap();
+        assert_eq!(
+            typed.clone_into_raw_vec().await,
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    // ── Error: non-existent array ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_atlas_array_not_found() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        let data = PrimitiveArray::from_slice(&[1.0_f64]);
+        writer
+            .write_array("exists", vec!["x".into()], vec![1], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let result = AtlasArray::<f64>::new(Arc::clone(&reader), "nonexistent");
+        assert!(result.is_err());
+    }
+
+    // ── Multiple arrays in one file ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_multiple_arrays_in_single_file() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+
+        let d1 = PrimitiveArray::from_slice(&[1.0_f64, 2.0]);
+        writer
+            .write_array("ds1", vec!["obs".into()], vec![2], None, &d1)
+            .unwrap();
+
+        let d2 = PrimitiveArray::from_slice(&[10.0_f64, 20.0, 30.0]);
+        writer
+            .write_array("ds2", vec!["obs".into()], vec![3], None, &d2)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+
+        let b1 = AtlasArray::<f64>::new(Arc::clone(&reader), "ds1").unwrap();
+        assert_eq!(b1.shape(), vec![2]);
+        let v1 = b1
+            .read_subset(ArraySubset {
+                start: vec![0],
+                shape: vec![2],
+            })
+            .await
+            .unwrap();
+        assert_eq!(v1.into_raw_vec_and_offset().0, vec![1.0, 2.0]);
+
+        let b2 = AtlasArray::<f64>::new(Arc::clone(&reader), "ds2").unwrap();
+        assert_eq!(b2.shape(), vec![3]);
+        let v2 = b2
+            .read_subset(ArraySubset {
+                start: vec![0],
+                shape: vec![3],
+            })
+            .await
+            .unwrap();
+        assert_eq!(v2.into_raw_vec_and_offset().0, vec![10.0, 20.0, 30.0]);
+    }
+
+    // ── NdArray integration via new_with_backend ───────────────────────
+
+    #[tokio::test]
+    async fn test_ndarray_with_atlas_backend() {
+        let storage = MemStorage::default();
+        let mut writer = Writer::new(storage.clone(), config());
+        let values = vec![100_i64, 200, 300, 400];
+        let data = PrimitiveArray::from_slice(&values);
+        writer
+            .write_array("arr", vec!["x".into(), "y".into()], vec![2, 2], None, &data)
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        let reader = Arc::new(Reader::open(storage, 1024 * 1024).await.unwrap());
+        let backend = AtlasArray::<i64>::new(Arc::clone(&reader), "arr").unwrap();
+        let nd = NdArray::new_with_backend(backend).unwrap();
+
+        assert_eq!(nd.shape(), vec![2, 2]);
+        assert_eq!(nd.dimensions(), vec!["x", "y"]);
+
+        // subset via NdArray
+        let sub = nd
+            .subset(ArraySubset {
+                start: vec![0, 1],
+                shape: vec![2, 1],
+            })
+            .await
+            .unwrap();
+        assert_eq!(sub.clone_into_raw_vec().await, vec![200, 400]);
     }
 }

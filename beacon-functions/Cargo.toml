@@ -30,3 +30,5 @@ beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
 beacon-formats = { path = "../beacon-formats" }
 beacon-object-storage = { path = "../beacon-object-storage" }
+beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }

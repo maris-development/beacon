@@ -5,21 +5,21 @@
 
 use std::{str::FromStr, sync::Arc};
 
-use beacon_nd_arrow::array::compat_typings::{ArrowTypeConversion, TimestampNanosecond};
+use beacon_nd_array::datatypes::TimestampNanosecond;
 use hifitime::Epoch;
 use netcdf::NcTypeDescriptor;
 use num_traits::AsPrimitive;
 use regex::Regex;
 
-use crate::{decoders::VariableDecoder, NcTimestampNanosecond};
+use crate::decoders::VariableDecoder;
 
 /// Decoder that wraps a numeric decoder and converts values to timestamps.
 #[derive(Debug)]
 pub struct CFTimeVariableDecoder<T>
 where
-    T: ArrowTypeConversion + NcTypeDescriptor + AsPrimitive<f64>,
+    T: NcTypeDescriptor + AsPrimitive<f64>,
 {
-    pub arrow_field: arrow::datatypes::FieldRef,
+    pub variable_name: String,
     pub inner_decoder: Arc<dyn VariableDecoder<T>>,
     pub epoch: hifitime::Epoch,
     pub unit: hifitime::Unit,
@@ -27,20 +27,20 @@ where
 
 impl<T> CFTimeVariableDecoder<T>
 where
-    T: ArrowTypeConversion + NcTypeDescriptor + AsPrimitive<f64>,
+    T: NcTypeDescriptor + AsPrimitive<f64>,
 {
     /// Create a CF-time decoder.
     ///
     /// `inner_decoder` provides the raw numeric values; `epoch` and `unit`
     /// define the CF conversion rule.
     pub fn new(
-        arrow_field: arrow::datatypes::FieldRef,
+        variable_name: String,
         inner_decoder: Arc<dyn VariableDecoder<T>>,
         epoch: hifitime::Epoch,
         unit: hifitime::Unit,
     ) -> Self {
         Self {
-            arrow_field,
+            variable_name,
             inner_decoder,
             epoch,
             unit,
@@ -48,26 +48,22 @@ where
     }
 }
 
-impl<T> VariableDecoder<NcTimestampNanosecond> for CFTimeVariableDecoder<T>
+impl<T> VariableDecoder<TimestampNanosecond> for CFTimeVariableDecoder<T>
 where
-    T: ArrowTypeConversion + NcTypeDescriptor + AsPrimitive<f64>,
+    T: NcTypeDescriptor + AsPrimitive<f64> + Copy + std::fmt::Debug + Send + Sync + 'static,
 {
-    fn arrow_field(&self) -> &arrow::datatypes::Field {
-        &self.arrow_field
-    }
-
     fn read(
         &self,
         variable: &netcdf::Variable,
         extents: netcdf::Extents,
-    ) -> anyhow::Result<ndarray::ArrayD<NcTimestampNanosecond>> {
+    ) -> anyhow::Result<ndarray::ArrayD<TimestampNanosecond>> {
         let array = self.inner_decoder.read(variable, extents)?;
         let ts_array = convert_to_timestamp_nanoseconds(array.view(), self.epoch, self.unit);
         Ok(ts_array)
     }
 
     fn variable_name(&self) -> &str {
-        self.arrow_field.name()
+        &self.variable_name
     }
 }
 
@@ -75,15 +71,13 @@ fn convert_to_timestamp_nanoseconds<T>(
     array: ndarray::ArrayViewD<T>,
     epoch: hifitime::Epoch,
     unit: hifitime::Unit,
-) -> ndarray::ArrayD<NcTimestampNanosecond>
+) -> ndarray::ArrayD<TimestampNanosecond>
 where
     T: num_traits::cast::AsPrimitive<f64>,
 {
-    let array: ndarray::ArrayD<NcTimestampNanosecond> = array.mapv(|v| {
+    let array: ndarray::ArrayD<TimestampNanosecond> = array.mapv(|v| {
         let time = epoch + (v.as_() * unit);
-        NcTimestampNanosecond(TimestampNanosecond(
-            time.to_unix(hifitime::Unit::Nanosecond).as_(),
-        ))
+        TimestampNanosecond(time.to_unix(hifitime::Unit::Nanosecond).as_())
     });
 
     array
@@ -133,7 +127,6 @@ pub(crate) fn extract_epoch(input: &str) -> Option<Epoch> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::datatypes::{DataType, Field};
     use tempfile::Builder;
 
     use super::CFTimeVariableDecoder;
@@ -187,16 +180,12 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let inner = Arc::new(DefaultVariableDecoder::<f64>::new(
-            Arc::new(Field::new(var_name, DataType::Float64, true)),
+            var_name.to_string(),
             None,
         ));
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Arc::new(Field::new(
-                var_name,
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
-                true,
-            )),
+            variable_name: var_name.to_string(),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Day,
@@ -207,7 +196,7 @@ mod tests {
             .expect("CF time decoder failed");
 
         assert_eq!(array.len(), 3);
-        let ts: Vec<i64> = array.iter().map(|x| x.0 .0).collect();
+        let ts: Vec<i64> = array.iter().map(|x| x.0).collect();
         assert_eq!(ts[0], 0, "0 days should be Unix epoch (0 ns)");
         assert!(
             (ts[1] - NANOS_PER_DAY).abs() <= MAX_NS_ERROR,
@@ -232,16 +221,12 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let inner = Arc::new(DefaultVariableDecoder::<f64>::new(
-            Arc::new(Field::new(var_name, DataType::Float64, true)),
+            var_name.to_string(),
             None,
         ));
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Arc::new(Field::new(
-                var_name,
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
-                true,
-            )),
+            variable_name: var_name.to_string(),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Second,
@@ -251,7 +236,7 @@ mod tests {
             .read(&variable, netcdf::Extents::All)
             .expect("CF time decoder (seconds) failed");
 
-        let ts: Vec<i64> = array.iter().map(|x| x.0 .0).collect();
+        let ts: Vec<i64> = array.iter().map(|x| x.0).collect();
         assert_eq!(ts[0], 0, "0 seconds should be 0 ns");
         assert!(
             (ts[1] - NANOS_PER_SECOND).abs() <= MAX_NS_ERROR,
@@ -277,16 +262,12 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let inner = Arc::new(DefaultVariableDecoder::<f64>::new(
-            Arc::new(Field::new(var_name, DataType::Float64, true)),
+            var_name.to_string(),
             None,
         ));
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Arc::new(Field::new(
-                var_name,
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
-                true,
-            )),
+            variable_name: var_name.to_string(),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Day,
@@ -296,7 +277,7 @@ mod tests {
             .read(&variable, netcdf::Extents::All)
             .expect("CF time decoder (negative) failed");
 
-        let ts: Vec<i64> = array.iter().map(|x| x.0 .0).collect();
+        let ts: Vec<i64> = array.iter().map(|x| x.0).collect();
         assert!(
             (ts[0] - (-NANOS_PER_DAY)).abs() <= MAX_NS_ERROR,
             "-1 day mismatch: got {}, expected ~{}",
@@ -317,16 +298,12 @@ mod tests {
         let variable = file.variable(var_name).unwrap();
 
         let inner = Arc::new(DefaultVariableDecoder::<i32>::new(
-            Arc::new(Field::new(var_name, DataType::Int32, true)),
+            var_name.to_string(),
             None,
         ));
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Arc::new(Field::new(
-                var_name,
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
-                true,
-            )),
+            variable_name: var_name.to_string(),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Day,
@@ -336,7 +313,7 @@ mod tests {
             .read(&variable, netcdf::Extents::All)
             .expect("CF time decoder (i32 days) failed");
 
-        let ts: Vec<i64> = array.iter().map(|x| x.0 .0).collect();
+        let ts: Vec<i64> = array.iter().map(|x| x.0).collect();
         assert_eq!(ts[0], 0);
         assert!(
             (ts[1] - NANOS_PER_DAY).abs() <= MAX_NS_ERROR,
@@ -355,17 +332,10 @@ mod tests {
 
     #[test]
     fn test_cf_time_variable_name() {
-        let inner = Arc::new(DefaultVariableDecoder::<f64>::new(
-            Arc::new(Field::new("time", DataType::Float64, true)),
-            None,
-        ));
+        let inner = Arc::new(DefaultVariableDecoder::<f64>::new("time".to_string(), None));
 
         let decoder = CFTimeVariableDecoder {
-            arrow_field: Arc::new(Field::new(
-                "time",
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
-                true,
-            )),
+            variable_name: "time".to_string(),
             inner_decoder: inner,
             epoch: unix_epoch(),
             unit: hifitime::Unit::Day,

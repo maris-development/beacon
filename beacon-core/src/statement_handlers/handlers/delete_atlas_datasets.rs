@@ -21,21 +21,24 @@ impl StatementHandler for DeleteAtlasDatasetsStatementHandler {
         context: &HandlerContext,
         _sql_options: &SQLOptions,
     ) -> anyhow::Result<SendableRecordBatchStream> {
-        let statement = payload.into_delete_atlas_datasets()?;
-        let table = context
-            .resolve_table_provider(&statement.table_name)
-            .await?;
-        let atlas_table = context.as_atlas_table(table.as_ref())?;
-        let data_store_url = context.data_object_store_url();
+        // let statement = payload.into_delete_atlas_datasets()?;
+        // let table = context
+        //     .resolve_table_provider(&statement.table_name)
+        //     .await?;
+        // let atlas_table = context.as_atlas_table(table.as_ref())?;
+        // let data_store_url = context.data_object_store_url();
 
-        let definition = atlas_table.definition();
-        definition
-            .delete_datasets_from_partition(
-                context.session_ctx(),
-                &data_store_url,
-                &statement.partition_name,
-                statement.dataset_names.unwrap_or_default(),
-            )
-            .await
+        // let definition = atlas_table.definition();
+        // definition
+        //     .delete_datasets_from_partition(
+        //         context.session_ctx(),
+        //         &data_store_url,
+        //         &statement.partition_name,
+        //         statement.dataset_names.unwrap_or_default(),
+        //     )
+        //     .await
+        return Err(anyhow::anyhow!(
+            "DeleteAtlasDatasetsStatementHandler is not implemented yet"
+        ));
     }
 }

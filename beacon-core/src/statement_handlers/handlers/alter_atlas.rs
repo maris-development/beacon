@@ -22,8 +22,9 @@ impl StatementHandler for AlterAtlasStatementHandler {
         _sql_options: &SQLOptions,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let statement = payload.into_alter_atlas()?;
-        let table = context.resolve_table_provider(&statement.table_name).await?;
-        let _atlas_table = context.as_atlas_table(table.as_ref())?;
+        let table = context
+            .resolve_table_provider(&statement.table_name)
+            .await?;
 
         todo!()
     }

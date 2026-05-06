@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use beacon_atlas::prelude::Dataset;
+use beacon_nd_array::dataset::Dataset;
 use datafusion::{execution::SendableRecordBatchStream, prelude::SQLOptions};
 use futures::stream::BoxStream;
 

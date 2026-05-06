@@ -5,13 +5,13 @@
 
 use std::sync::Arc;
 
+use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory};
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_data_lake::FileManager;
 use beacon_formats::{
     arrow::ArrowFormatFactory,
     csv::CsvFormatFactory,
     geo_parquet::{GeoParquetFormatFactory, GeoParquetOptions},
-    netcdf::{NetCDFFormatFactory, NetcdfOptions},
     odv_ascii::OdvFileFormatFactory,
     parquet::ParquetFormatFactory,
 };
@@ -131,6 +131,7 @@ impl OutputFormat {
             OutputFormat::NdNetCDF { dimension_columns } => {
                 let mut options = NetcdfOptions::default();
                 options.unique_value_columns = dimension_columns.clone();
+                options.write_dimensions = Some(dimension_columns.clone());
 
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
                     beacon_object_storage::get_datasets_object_store().await,

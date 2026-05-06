@@ -2,24 +2,22 @@
 
 use std::sync::Arc;
 
-use arrow_schema::FieldRef;
-use beacon_nd_arrow::array::{
-    backend::ArrayBackend, compat_typings::ArrowTypeConversion, subset::ArraySubset,
-};
-use netcdf::NcTypeDescriptor;
-
 use crate::decoders::VariableDecoder;
+use beacon_nd_array::{
+    array::{backend::ArrayBackend, subset::ArraySubset},
+    datatypes::NdArrayType,
+};
 
 /// Backend that reads variable data lazily from a NetCDF file.
 #[derive(Debug)]
-pub struct VariableBackend<T: ArrowTypeConversion + NcTypeDescriptor + 'static> {
+pub struct VariableBackend<T: NdArrayType + 'static> {
     decoder: Arc<dyn VariableDecoder<T>>,
     nc_file: Arc<netcdf::File>,
     shape: Vec<usize>,
     dimensions: Vec<String>,
 }
 
-impl<T: ArrowTypeConversion + NcTypeDescriptor + 'static> VariableBackend<T> {
+impl<T: NdArrayType + 'static> VariableBackend<T> {
     /// Create a lazy variable backend.
     pub fn new(
         decoder: Arc<dyn VariableDecoder<T>>,
@@ -37,7 +35,7 @@ impl<T: ArrowTypeConversion + NcTypeDescriptor + 'static> VariableBackend<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: ArrowTypeConversion + NcTypeDescriptor + 'static> ArrayBackend<T> for VariableBackend<T> {
+impl<T: NdArrayType + 'static> ArrayBackend<T> for VariableBackend<T> {
     fn len(&self) -> usize {
         self.shape.iter().product()
     }
@@ -81,23 +79,19 @@ impl<T: ArrowTypeConversion + NcTypeDescriptor + 'static> ArrayBackend<T> for Va
 
 /// Backend for scalar attribute values surfaced as rank-0 arrays.
 #[derive(Debug)]
-pub struct AttributeBackend<T: ArrowTypeConversion> {
-    _field: FieldRef,
+pub struct AttributeBackend<T: NdArrayType> {
     value: T,
 }
 
-impl<T: ArrowTypeConversion> AttributeBackend<T> {
+impl<T: NdArrayType> AttributeBackend<T> {
     /// Create an attribute backend from a single scalar value.
-    pub fn new(field: FieldRef, value: T) -> Self {
-        Self {
-            _field: field,
-            value,
-        }
+    pub fn new(value: T) -> Self {
+        Self { value }
     }
 }
 
 #[async_trait::async_trait]
-impl<T: ArrowTypeConversion + Clone> ArrayBackend<T> for AttributeBackend<T> {
+impl<T: NdArrayType + Clone> ArrayBackend<T> for AttributeBackend<T> {
     fn len(&self) -> usize {
         1
     }

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use arrow::datatypes::Schema;
-use beacon_atlas::datafusion::table::{AtlasTable, AtlasTableDefinition};
 use beacon_data_lake::FileManager;
 use datafusion::{
     datasource::TableProvider,
@@ -59,16 +58,6 @@ impl HandlerContext {
             .table_provider(table_ref)
             .await
             .map_err(Into::into)
-    }
-
-    pub(crate) fn as_atlas_table<'a>(
-        &self,
-        table: &'a dyn TableProvider,
-    ) -> anyhow::Result<&'a AtlasTable> {
-        table
-            .as_any()
-            .downcast_ref::<AtlasTable>()
-            .ok_or_else(|| anyhow::anyhow!("Table is not an AtlasTable"))
     }
 
     pub(crate) fn empty_record_batch_stream(&self) -> SendableRecordBatchStream {

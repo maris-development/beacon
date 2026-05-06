@@ -1,21 +1,11 @@
-use arrow::ipc::CompressionType;
-use once_cell::sync::Lazy;
-
 pub mod array;
-pub mod arrow_object_store;
-pub mod collection;
-pub mod column;
-pub mod config;
-pub mod consts;
 pub mod datafusion;
-pub mod partition;
-pub mod prelude;
-pub mod schema;
-pub mod util;
+pub mod format;
+pub mod reader;
+pub(crate) mod storage;
+pub mod writer;
 
-pub static IPC_WRITE_OPTS: Lazy<arrow::ipc::writer::IpcWriteOptions> = Lazy::new(|| {
-    arrow::ipc::writer::IpcWriteOptions::default()
-        .try_with_compression(Some(CompressionType::ZSTD))
-        .unwrap()
-        .with_dictionary_handling(arrow::ipc::writer::DictionaryHandling::Delta)
-});
+// Re-export format types at crate root for backward compatibility.
+pub use format::footer;
+pub use format::schema;
+pub use format::statistics;

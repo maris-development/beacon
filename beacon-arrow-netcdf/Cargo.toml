@@ -16,14 +16,25 @@ indexmap = { workspace=true }
 thiserror = { workspace=true }
 async-trait = { workspace=true }
 ndarray = "0.17.1"
+ordered-float = { workspace = true }
+num-traits = "0.2.19"
 hifitime = "4.0.2"
 regex = "1.11.1"
-num-traits = "0.2.19"
 bytemuck = {version = "1.25.0", features = ["derive"]}
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-beacon-nd-arrow = {path = "../beacon-nd-arrow"}
+object_store = { workspace = true }
+datafusion = { workspace = true }
+moka = { workspace = true }
+chrono = { workspace = true }
+
+
+beacon-object-storage = { path = "../beacon-object-storage" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-config = { path = "../beacon-config" }
+beacon-common = { path = "../beacon-common" }
 
 [dev-dependencies]
 tokio = { workspace = true }
