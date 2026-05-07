@@ -15,27 +15,12 @@ pub async fn open_dataset(
 pub async fn fetch_schema(
     object_store: Arc<dyn ObjectStore>,
     object: ObjectMeta,
-    read_dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
     let dataset = open_dataset(object_store, object).await.map_err(|e| {
         datafusion::error::DataFusionError::Execution(format!(
             "Failed to open TIFF dataset for schema inference: {e}"
         ))
     })?;
-
-    let dataset = if let Some(dims) = read_dimensions {
-        let proj = DatasetProjection {
-            dimension_projection: Some(dims),
-            index_projection: None,
-        };
-        dataset.project(&proj).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to project TIFF dataset with dimensions: {e}"
-            ))
-        })?
-    } else {
-        dataset
-    };
 
     let schema =
         beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset).map_err(|e| {

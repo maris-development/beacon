@@ -29,19 +29,17 @@ pub struct TiffSource {
     override_schema: Option<SchemaRef>,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     projected_statistics: Option<Statistics>,
-    read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl TiffSource {
-    pub fn new(read_dimensions: Option<Vec<String>>) -> Self {
+    pub fn new() -> Self {
         Self {
             schema_adapter_factory: None,
             override_schema: None,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projected_statistics: None,
-            read_dimensions,
             batch_size: usize::MAX,
             predicate: None,
         }
@@ -70,7 +68,6 @@ impl FileSource for TiffSource {
         Arc::new(TiffOpener::new(
             object_store,
             Arc::from(schema_adapter),
-            self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
         ))
@@ -169,7 +166,6 @@ impl FileSource for TiffSource {
 struct TiffOpener {
     object_store: Arc<dyn object_store::ObjectStore>,
     schema_adapter: Arc<dyn SchemaAdapter>,
-    read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
@@ -178,14 +174,12 @@ impl TiffOpener {
     fn new(
         object_store: Arc<dyn object_store::ObjectStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
-        read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> Self {
         Self {
             object_store,
             schema_adapter,
-            read_dimensions,
             batch_size,
             predicate,
         }
@@ -195,7 +189,6 @@ impl TiffOpener {
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
-        read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
@@ -207,20 +200,6 @@ impl TiffOpener {
                     object.location,
                 ))
             })?;
-
-        let dataset = if let Some(dims) = read_dimensions {
-            let proj = DatasetProjection {
-                dimension_projection: Some(dims),
-                index_projection: None,
-            };
-            dataset.project(&proj).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project TIFF dataset with dimensions: {e}"
-                ))
-            })?
-        } else {
-            dataset
-        };
 
         let file_schema: SchemaRef =
             beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
@@ -282,7 +261,6 @@ impl FileOpener for TiffOpener {
             file_meta.object_meta,
             self.object_store.clone(),
             self.schema_adapter.clone(),
-            self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
         )

@@ -122,11 +122,7 @@ impl FileFormat for TiffFormat {
     ) -> datafusion::error::Result<SchemaRef> {
         let mut tasks = vec![];
         for object in objects {
-            let task = reader::fetch_schema(
-                store.clone(),
-                object.clone(),
-                self.options.read_dimensions.clone(),
-            );
+            let task = reader::fetch_schema(store.clone(), object.clone());
             tasks.push(task);
         }
 
@@ -159,7 +155,7 @@ impl FileFormat for TiffFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let source = TiffSource::new(self.options.read_dimensions.clone());
+        let source = TiffSource::new();
 
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -169,7 +165,7 @@ impl FileFormat for TiffFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(TiffSource::new(self.options.read_dimensions.clone()))
+        Arc::new(TiffSource::new())
     }
 }
 
@@ -202,7 +198,7 @@ mod tests {
         let path = Path::from("tests/datafusion/test.tif");
         let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
 
-        let schema = reader::fetch_schema(object_store, object, None)
+        let schema = reader::fetch_schema(object_store, object)
             .await
             .expect("real stripped GeoTIFF should produce a schema");
 
@@ -233,11 +229,11 @@ mod tests {
         let path = Path::from("tests/datafusion/test2.tif");
         let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
 
-        let table_schema = reader::fetch_schema(object_store.clone(), object.clone(), None)
+        let table_schema = reader::fetch_schema(object_store.clone(), object.clone())
             .await
             .expect("schema");
 
-        let source = source::TiffSource::new(None);
+        let source = source::TiffSource::new();
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
                 ObjectStoreUrl::parse("memory://").expect("url"),
@@ -262,10 +258,154 @@ mod tests {
             .await
             .expect("stream");
 
-        let batches: Vec<_> = stream.collect().await;
+        let batches: Vec<_> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all batches should be ok");
+
         assert!(!batches.is_empty(), "should produce at least one batch");
-        let first = batches[0].as_ref().expect("first batch");
-        assert!(first.num_rows() > 0);
-        assert!(first.num_columns() > 0);
+
+        // Concatenate into a single batch for easy column access.
+        let full = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");
+
+        let schema = full.schema();
+
+        // geo.lat column — values span ~30°N to ~46°N
+        let lat_idx = schema.index_of("geo.lat").expect("geo.lat column");
+        let lat_col = full
+            .column(lat_idx)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("geo.lat should be Float64");
+        assert!(lat_col.len() > 0);
+        // First value: lat[0] = 0.04166667002172143 * 0 + 30.16666666498914
+        assert!(
+            (lat_col.value(0) - 30.166_666_664_989_14).abs() < 1e-6,
+            "lat[0]={}",
+            lat_col.value(0)
+        );
+        // All values should be within the expected geographic range.
+        for i in 0..lat_col.len() {
+            let v = lat_col.value(i);
+            assert!(v >= 30.0 && v <= 47.0, "lat[{i}]={v} out of range");
+        }
+
+        // geo.lon column — values span ~-17°E to ~36°E
+        let lon_idx = schema.index_of("geo.lon").expect("geo.lon column");
+        let lon_col = full
+            .column(lon_idx)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("geo.lon should be Float64");
+        assert!(lon_col.len() > 0);
+        // First value: lon[0] = 0.0416666671610546 * 0 + -17.312499364464315
+        assert!(
+            (lon_col.value(0) - -17.312_499_364_464_315).abs() < 1e-6,
+            "lon[0]={}",
+            lon_col.value(0)
+        );
+        // All values should be within the expected geographic range.
+        for i in 0..lon_col.len() {
+            let v = lon_col.value(i);
+            assert!(v >= -18.0 && v <= 37.0, "lon[{i}]={v} out of range");
+        }
+    }
+
+    #[tokio::test]
+    async fn opener_with_predicate_filters_rows() {
+        use datafusion::config::ConfigOptions;
+        use datafusion::datasource::physical_plan::FileSource;
+        use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+        use datafusion::scalar::ScalarValue;
+
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let path = Path::from("tests/datafusion/test_pred.tif");
+        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
+
+        let table_schema = reader::fetch_schema(object_store.clone(), object.clone())
+            .await
+            .expect("schema");
+
+        // Build predicate: geo.lat > 40.0
+        // The Column index must match geo.lat's position in the file schema.
+        let lat_idx = table_schema.index_of("geo.lat").expect("geo.lat field");
+        let predicate: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("geo.lat", lat_idx)),
+                Operator::Gt,
+                Arc::new(Literal::new(ScalarValue::Float64(Some(40.0)))),
+            ));
+
+        // Push the predicate into a TiffSource via try_pushdown_filters.
+        let source_with_predicate: Arc<dyn FileSource> = {
+            let base_source = source::TiffSource::new();
+            let pushdown = base_source
+                .try_pushdown_filters(vec![predicate], &ConfigOptions::default())
+                .expect("try_pushdown_filters");
+            pushdown.updated_node.expect("updated node with predicate")
+        };
+
+        let file_opener = {
+            let conf = FileScanConfigBuilder::new(
+                ObjectStoreUrl::parse("memory://").expect("url"),
+                table_schema.clone(),
+                source_with_predicate.clone(),
+            )
+            .build();
+            source_with_predicate.create_file_opener(object_store, &conf, 0)
+        };
+
+        let stream = file_opener
+            .open(
+                datafusion::datasource::physical_plan::FileMeta {
+                    object_meta: object,
+                    range: None,
+                    extensions: None,
+                    metadata_size_hint: None,
+                },
+                datafusion::datasource::listing::PartitionedFile::new("ignored", 0),
+            )
+            .expect("open")
+            .await
+            .expect("stream");
+
+        let batches: Vec<_> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all batches should be ok");
+
+        assert!(!batches.is_empty(), "should produce at least one batch");
+
+        let full = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");
+
+        // test.tif has 380 lat rows; geo.lat > 40.0 should exclude the lower-latitude rows.
+        let total_rows = 380 * 1287;
+        assert!(
+            full.num_rows() < total_rows,
+            "predicate should reduce row count from {total_rows} (got {})",
+            full.num_rows()
+        );
+        assert!(full.num_rows() > 0, "predicate should keep some rows");
+
+        // Every surviving row must satisfy geo.lat > 40.0.
+        let lat_col_idx = full.schema().index_of("geo.lat").expect("geo.lat column");
+        let lat_col = full
+            .column(lat_col_idx)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("geo.lat should be Float64");
+        for i in 0..lat_col.len() {
+            let v = lat_col.value(i);
+            assert!(
+                v > 40.0,
+                "lat[{i}]={v} should be > 40.0 after predicate pushdown"
+            );
+        }
     }
 }
