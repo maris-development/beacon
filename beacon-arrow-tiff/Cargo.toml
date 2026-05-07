@@ -1,0 +1,28 @@
+[package]
+name = "beacon-arrow-tiff"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+indexmap = { workspace = true }
+bytes = { workspace = true }
+
+arrow = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+
+async-tiff = { version = "0.3.0", default-features = false }
+
+beacon-common = { path = "../beacon-common" }
+beacon-config = { path = "../beacon-config" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-object-storage = { path = "../beacon-object-storage" }
+
+[dev-dependencies]
+tokio = { workspace = true }

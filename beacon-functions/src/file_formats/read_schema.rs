@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
 use beacon_arrow_netcdf::datafusion::NetcdfFormat;
+use beacon_arrow_tiff::datafusion::TiffFormat;
 use beacon_common::{
     listing_url::parse_listing_table_url, schema_table_provider::SchemaTableProvider,
     super_table::SuperListingTable,
@@ -136,11 +137,12 @@ impl TableFunctionImpl for ReadSchemaFunc {
                             self.datasets_object_store.clone(),
                             Default::default(),
                         )),
+                        "tiff" | "tif" => Arc::new(TiffFormat::new(Default::default())),
                         "zarr" => Arc::new(ZarrFormat::default()),
                         "bbf" => Arc::new(BBFFormat::default()),
                         _ => {
                             return plan_err!(
-                                "read_schema second argument file_format must be one of: parquet, netcdf, zarr, csv, arrow, bbf"
+                                "read_schema second argument file_format must be one of: parquet, netcdf, tiff, zarr, csv, arrow, bbf"
                             );
                         }
                     }
