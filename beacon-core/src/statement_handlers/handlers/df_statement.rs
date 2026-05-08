@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
 use beacon_table::BeaconTable;
 use datafusion::{
-    catalog::TableProvider,
+    catalog::{TableProvider, TableProviderFactory},
     datasource::{physical_plan, ViewTable},
     execution::{object_store::ObjectStoreUrl, SendableRecordBatchStream},
     logical_expr::{dml::InsertOp, CreateMemoryTable, DdlStatement, LogicalPlan},
@@ -46,17 +46,12 @@ impl DFStatementHandler {
     }
 
     async fn execute_create_external_table(
+        handler_context: &HandlerContext,
         session_ctx: &SessionContext,
         state: &datafusion::execution::context::SessionState,
         create_external: &datafusion::logical_expr::CreateExternalTable,
     ) -> anyhow::Result<()> {
-        let table_factory = session_ctx
-            .table_factory(&create_external.file_type)
-            .ok_or(anyhow::anyhow!(
-                "Unsupported file type '{}' for CREATE EXTERNAL TABLE",
-                create_external.file_type
-            ))?;
-
+        let table_factory = handler_context.listing_table_factory();
         let created_table = table_factory.create(state, create_external).await?;
         session_ctx.register_table(create_external.name.clone(), created_table)?;
         Ok(())
@@ -228,7 +223,8 @@ impl StatementHandler for DFStatementHandler {
                 Ok(Self::empty_ddl_stream(&plan))
             }
             LogicalPlan::Ddl(DdlStatement::CreateExternalTable(create_external)) => {
-                Self::execute_create_external_table(&session_ctx, &state, create_external).await?;
+                Self::execute_create_external_table(context, &session_ctx, &state, create_external)
+                    .await?;
                 Ok(Self::empty_ddl_stream(&plan))
             }
             LogicalPlan::Ddl(DdlStatement::CreateView(create_view)) => {
