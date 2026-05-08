@@ -21,4 +21,5 @@ beacon-data-lake = { path = "../beacon-data-lake" }
 beacon-formats = { path = "../beacon-formats" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
+beacon-arrow-tiff = { path = "../beacon-arrow-tiff" }
 beacon-object-storage = { path = "../beacon-object-storage" }

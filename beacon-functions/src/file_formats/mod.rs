@@ -16,6 +16,7 @@ pub mod read_netcdf;
 pub mod read_odv_ascii;
 pub mod read_parquet;
 pub mod read_schema;
+pub mod read_tiff;
 pub mod read_zarr;
 
 pub fn register_table_functions(
@@ -46,6 +47,12 @@ pub fn register_table_functions(
             data_object_store_url.clone(),
         )),
         Arc::new(read_netcdf::ReadNetCDFFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
+            datasets_object_store.clone(),
+        )),
+        Arc::new(read_tiff::ReadTiffFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
