@@ -7,16 +7,18 @@ use beacon_nd_array::{
 };
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
-    common::Statistics,
+    common::{pruning::PrunableStatistics, Statistics},
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
     },
     physical_expr::{conjunction, PhysicalExpr},
+    physical_optimizer::pruning::PruningPredicate,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
+        EmptyRecordBatchStream,
     },
 };
 use futures::{stream::BoxStream, FutureExt, StreamExt, TryStreamExt};
@@ -75,7 +77,7 @@ impl FileSource for NetCDFSource {
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
 
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
+        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema.clone());
 
         Arc::new(NetCDFOpener::new(
             self.datasets_object_store.clone(),
@@ -83,6 +85,7 @@ impl FileSource for NetCDFSource {
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
+            table_schema,
         ))
     }
 
@@ -186,6 +189,8 @@ struct NetCDFOpener {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    pruning_predicate: Option<PruningPredicate>,
+    table_schema: SchemaRef,
 }
 
 impl NetCDFOpener {
@@ -195,13 +200,20 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        table_schema: SchemaRef,
     ) -> Self {
+        let pruning_predicate = predicate
+            .as_ref()
+            .and_then(|pred| PruningPredicate::try_new(pred.clone(), table_schema.clone()).ok());
+
         Self {
             datasets_object_store,
             schema_adapter,
             read_dimensions,
             batch_size,
             predicate,
+            pruning_predicate,
+            table_schema,
         }
     }
 
@@ -291,8 +303,25 @@ impl FileOpener for NetCDFOpener {
     fn open(
         &self,
         file_meta: FileMeta,
-        _file: datafusion::datasource::listing::PartitionedFile,
+        file: datafusion::datasource::listing::PartitionedFile,
     ) -> datafusion::error::Result<FileOpenFuture> {
+        if let (Some(stats), Some(prune)) = (&file.statistics, &self.pruning_predicate) {
+            let result = prune.prune(&PrunableStatistics::new(
+                vec![stats.clone()],
+                self.table_schema.clone(),
+            ))?[0];
+            if !result {
+                tracing::debug!(
+                    "Pruning NetCDF file {} based on statistics.",
+                    file_meta.object_meta.location
+                );
+                // File is pruned, return empty stream.
+                let stream = EmptyRecordBatchStream::new(self.table_schema.clone()).boxed();
+
+                return Ok(futures::future::ready(Ok(stream)).boxed());
+            }
+        };
+
         let fut = Self::read_task(
             file_meta.object_meta,
             self.datasets_object_store.clone(),

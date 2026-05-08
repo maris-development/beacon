@@ -33,3 +33,4 @@ __pycache__/
 .DS_Store
 mpio.log
 CLAUDE.md
+.claude/
