@@ -164,8 +164,6 @@ pub fn compute_mask<T: PartialOrd>(
         .collect()
 }
 
-// ─── resolve_array_mask ────────────────────────────────────────────────────
-
 /// Resolve a `ValueRange` against a coordinate array, producing a boolean mask.
 ///
 /// Returns `None` if the array type is unsupported or the array is not 1D.
@@ -240,8 +238,6 @@ pub async fn resolve_array_mask(
     }
 }
 
-// ─── compute_chunk_mask ────────────────────────────────────────────────────
-
 /// Compute a flat boolean mask for a chunk, given per-dimension masks.
 ///
 /// For each axis of the chunk, the corresponding dimension mask is sliced
@@ -314,10 +310,6 @@ pub fn mask_is_all_true(mask: &[bool]) -> bool {
 pub fn mask_is_all_false(mask: &[bool]) -> bool {
     mask.iter().all(|&v| !v)
 }
-
-// ─── is_pushdown_type ──────────────────────────────────────────────────────
-
-// ─── Scalar conversion helpers ─────────────────────────────────────────────
 
 fn scalar_to_i8(sv: &ScalarValue) -> Option<i8> {
     match sv {

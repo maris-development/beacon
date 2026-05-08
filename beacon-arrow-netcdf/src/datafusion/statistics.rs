@@ -23,8 +23,6 @@ use datafusion::{
 
 use crate::reader::open_dataset;
 
-// ─── Public entry point ─────────────────────────────────────────────────────
-
 /// Open the NetCDF file at `object` and return DataFusion [`Statistics`] for
 /// the columns in `table_schema`.
 pub async fn generate_statistics(
@@ -44,8 +42,6 @@ pub async fn generate_statistics(
         }
     }
 }
-
-// ─── Per-dataset-type helpers ───────────────────────────────────────────────
 
 /// Compute statistics for a regular (non-ragged) dataset.
 ///
@@ -96,8 +92,6 @@ async fn generate_statistics_ragged_dataset(
     Ok(stats)
 }
 
-// ─── Shared primitive ───────────────────────────────────────────────────────
-
 /// Return exact min/max [`ColumnStatistics`] for `array`, or unknown if the
 /// array type has no orderable range (String, Binary, empty, all-fill).
 async fn column_stats_for_array(array: &dyn NdArrayD) -> anyhow::Result<ColumnStatistics> {
@@ -112,8 +106,6 @@ async fn column_stats_for_array(array: &dyn NdArrayD) -> anyhow::Result<ColumnSt
         .with_min_value(Precision::Exact(min))
         .with_max_value(Precision::Exact(max)))
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

@@ -38,8 +38,6 @@ impl PushdownFilter {
     }
 }
 
-// ─── Expression tree walking ───────────────────────────────────────────────
-
 fn walk_expr(node: &Arc<dyn PhysicalExpr>, ranges: &mut HashMap<String, ValueRange>) {
     if let Some(bin) = downcast::<BinaryExpr>(node) {
         let op = bin.op();
