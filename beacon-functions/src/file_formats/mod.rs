@@ -13,6 +13,7 @@ pub mod read_arrow;
 pub mod read_bbf;
 pub mod read_csv;
 pub mod read_netcdf;
+pub mod read_odv_ascii;
 pub mod read_parquet;
 pub mod read_schema;
 pub mod read_tiff;
@@ -63,10 +64,15 @@ pub fn register_table_functions(
             data_object_store_url.clone(),
         )),
         Arc::new(read_schema::ReadSchemaFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
+            datasets_object_store,
+        )),
+        Arc::new(read_odv_ascii::ReadOdvAsciiFunc::new(
             runtime_handle,
             session_ctx,
             data_object_store_url,
-            datasets_object_store,
         )),
     ]
 }
