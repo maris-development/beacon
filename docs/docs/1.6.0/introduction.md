@@ -13,8 +13,11 @@ Beacon works well with common earth-science and oceanographic formats out of the
 - NetCDF files
 - Zarr stores
 - Parquet files
+- Tiff files (geotiff, cloud-optimized geotiff)
+- ODV ASCII files
 - Collections (e.g. a virtual dataset created using Beacon composed from many NetCDF files)
 - Other supported formats in the Beacon ecosystem
+- SQL Tables / Views (for example, if you create a SQL view on top of your datasets, you can expose that view via the API)
 
 ## How it fits together
 

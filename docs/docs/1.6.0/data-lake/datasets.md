@@ -30,6 +30,7 @@ NetCDF S3 support is limited to anonymous access only. Authenticated access is n
 :::
 
 Beacon supports NetCDF but limited to native data types. User defined types are not supported.
+Huge NetCDF files can be read by Beacon, as it supports streaming reads using chunks. This allows for more efficient reading of large NetCDF files, as data can be read in smaller chunks rather than loading the entire file into memory at once. This is especially beneficial for users working with large NetCDF datasets, as it can significantly reduce memory usage and improve performance.
 
 - NetCDF4 (recommended)
 - NetCDF3
@@ -46,6 +47,10 @@ Beacon supports parquet natively through datafusion.
 Limitations:
 
 - Hive partioning is not supported.
+
+### Tiff (geotiff, cloud-optimized geotiff)
+
+Beacon supports Tiff files, xincluding geotiff and cloud-optimized geotiff formats. This allows users to work with raster data in addition to the existing support for tabular data formats.
 
 ### CSV
 
