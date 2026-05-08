@@ -24,6 +24,7 @@ lru = "0.14.0"
 ordered-float = "5.0.0"
 tracing = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 chrono = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
