@@ -16,6 +16,7 @@ ordered-float = { workspace = true }
 indexmap = { workspace = true }
 parking_lot = { workspace = true }
 futures = { workspace = true }
+object_store = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 

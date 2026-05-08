@@ -1102,6 +1102,7 @@ dependencies = [
  "datafusion",
  "futures",
  "indexmap 2.13.0",
+ "object_store 0.12.4",
  "ordered-float 5.1.0",
  "parking_lot",
  "serde",
