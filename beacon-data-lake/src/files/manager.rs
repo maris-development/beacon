@@ -43,6 +43,10 @@ impl FileManager {
         self.data_directory_store_url.clone()
     }
 
+    pub fn file_formats(&self) -> &Vec<Arc<dyn FileFormatFactoryExt>> {
+        &self.file_formats
+    }
+
     pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {
         Self::create_temp_output_file(extension)
     }

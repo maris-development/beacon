@@ -78,6 +78,7 @@ impl Runtime {
             session_ctx.clone(),
             file_manager.data_object_store_url(),
             beacon_object_storage::get_datasets_object_store().await,
+            file_manager.file_formats().to_vec(),
         );
 
         for table_function in table_functions.iter() {

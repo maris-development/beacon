@@ -1182,6 +1182,7 @@ dependencies = [
  "chrono",
  "csv",
  "datafusion",
+ "futures",
  "geo",
  "geojson",
  "gsw",
