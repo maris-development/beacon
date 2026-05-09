@@ -7,7 +7,9 @@ use arrow::{
     datatypes::{SchemaRef, UInt64Type},
 };
 use beacon_data_lake::{DataLake, FileManager, TableManager};
-use beacon_datafusion_ext::format_ext::DatasetMetadata;
+use beacon_datafusion_ext::{
+    format_ext::DatasetMetadata, listing_table_factory_ext::ListingTableFactoryExt,
+};
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::{metrics::ConsolidatedMetrics, plan::BeaconQueryPlan};
 use datafusion::{
@@ -34,6 +36,7 @@ pub struct Runtime {
     session_ctx: Arc<SessionContext>,
     table_manager: Arc<TableManager>,
     file_manager: Arc<FileManager>,
+    listing_table_factory: Arc<ListingTableFactoryExt>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
 }
 
@@ -104,6 +107,9 @@ impl Runtime {
         Ok(Self {
             session_ctx,
             table_manager,
+            listing_table_factory: Arc::new(ListingTableFactoryExt::new(
+                file_manager.data_object_store_url(),
+            )),
             file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
         })

@@ -21,6 +21,8 @@ use datafusion::{
     catalog::{Session, TableProvider, TableProviderFactory},
 };
 
+use crate::table_ext::{ExternalTable, ExternalTableDefinition};
+
 type PartitionCols = Vec<(String, DataType)>;
 
 /// A `TableProviderFactory` capable of creating new `ListingTable`s
@@ -45,7 +47,7 @@ impl TableProviderFactory for ListingTableFactoryExt {
     ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
         let session_state = as_session_state(state)?;
         let file_format_factory = session_state
-            .get_file_format_factory(cmd.file_type.as_str())
+            .get_file_format_factory(cmd.file_type.to_lowercase().as_str())
             .ok_or(config_datafusion_err!(
                 "Unable to create table with format {}! Could not find FileFormat.",
                 cmd.file_type
@@ -60,6 +62,7 @@ impl TableProviderFactory for ListingTableFactoryExt {
         let options = ListingOptions::new(file_format)
             .with_file_extension("") // file extension is not needed for listing table factory since the file format will handle it in `infer_schema` and `infer_partition_schema`
             .with_session_config_options(session_state.config())
+            .with_collect_stat(true)
             .with_table_partition_cols(table_partition_cols);
 
         options
@@ -101,7 +104,21 @@ impl TableProviderFactory for ListingTableFactoryExt {
             .with_definition(cmd.definition.clone())
             .with_constraints(cmd.constraints.clone())
             .with_column_defaults(cmd.column_defaults.clone());
-        Ok(Arc::new(table))
+
+        let definition = ExternalTableDefinition {
+            definition: cmd.definition.clone(),
+            name: cmd.name.to_string(),
+            file_type: cmd.file_type.to_string(),
+            options: cmd.options.clone(),
+            location: cmd.location.clone(),
+            partition_cols: cmd.table_partition_cols.clone(),
+            if_not_exists: cmd.if_not_exists,
+            schema: table.schema(),
+        };
+
+        let external_table = ExternalTable::new(definition, table);
+
+        Ok(Arc::new(external_table))
     }
 }
 
