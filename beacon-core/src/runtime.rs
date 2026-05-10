@@ -8,8 +8,7 @@ use arrow::{
 };
 use beacon_data_lake::{DataLake, FileManager, TableManager};
 use beacon_datafusion_ext::{
-    format_ext::DatasetMetadata,
-    listing_table_factory_ext::ListingTableFactoryExt,
+    format_ext::DatasetMetadata, listing_table_factory_ext::ListingTableFactoryExt,
     stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
@@ -82,7 +81,6 @@ impl Runtime {
             file_manager.data_object_store_url(),
             beacon_object_storage::get_datasets_object_store().await,
             file_manager.file_formats().to_vec(),
-        );
         ));
         table_functions.extend(beacon_functions::metadata::register_metadata_functions(
             session_ctx.clone(),

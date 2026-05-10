@@ -26,7 +26,6 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
-futures = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
