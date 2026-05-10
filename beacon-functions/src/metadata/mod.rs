@@ -5,9 +5,10 @@ use datafusion::prelude::SessionContext;
 
 use crate::file_formats::BeaconTableFunctionImpl;
 
+mod helpers;
 pub mod view_dataset_statistics;
+pub mod view_external_table_statistics;
 pub mod view_statistics_cache;
-pub mod view_table_statistics;
 
 pub fn register_metadata_functions(
     session_ctx: Arc<SessionContext>,
@@ -18,6 +19,13 @@ pub fn register_metadata_functions(
             runtime_handle.clone(),
             session_ctx.clone(),
         )),
+        Arc::new(
+            view_external_table_statistics::ViewExternalTableStatisticsFunc::new(
+                session_ctx.clone(),
+                beacon_file_statistics_cache(),
+                runtime_handle.clone(),
+            ),
+        ),
         Arc::new(view_statistics_cache::ViewStatisticsCacheFunc::new(
             session_ctx,
             beacon_file_statistics_cache(),

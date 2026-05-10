@@ -7,26 +7,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context;
-use arrow::datatypes::Schema;
-use arrow_flight::sql::{
-    server::{FlightSqlService, PeekableFlightDataStream},
-    ActionClosePreparedStatementRequest, ActionCreatePreparedStatementRequest,
-    ActionCreatePreparedStatementResult, CommandGetCatalogs, CommandGetDbSchemas,
-    CommandGetSqlInfo, CommandGetTableTypes, CommandGetTables, CommandPreparedStatementQuery,
-    CommandStatementQuery, DoPutPreparedStatementResult, ProstMessageExt, SqlInfo,
-    TicketStatementQuery,
-};
-use arrow_flight::{
-    encode::FlightDataEncoderBuilder, error::FlightError, flight_service_server::FlightService,
-    flight_service_server::FlightServiceServer, Action, FlightDescriptor, FlightInfo,
-    HandshakeRequest, HandshakeResponse, Ticket,
-};
-use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt};
-use tonic::{metadata::MetadataValue, transport::Server, Request, Response, Status, Streaming};
-use tracing::info;
-
 use crate::flight_sql::{
     auth::{AuthContext, Authenticator},
     metadata::FlightSqlMetadata,
@@ -36,6 +16,25 @@ use crate::flight_sql::{
         HandshakeStream,
     },
 };
+use anyhow::Context;
+use arrow::datatypes::Schema;
+use arrow_flight::sql::{
+    server::{FlightSqlService, PeekableFlightDataStream},
+    ActionClosePreparedStatementRequest, ActionCreatePreparedStatementRequest,
+    ActionCreatePreparedStatementResult, CommandGetCatalogs, CommandGetDbSchemas,
+    CommandGetSqlInfo, CommandGetTableTypes, CommandGetTables, CommandPreparedStatementQuery,
+    CommandPreparedStatementUpdate, CommandStatementQuery, DoPutPreparedStatementResult,
+    ProstMessageExt, SqlInfo, TicketStatementQuery,
+};
+use arrow_flight::{
+    encode::FlightDataEncoderBuilder, error::FlightError, flight_service_server::FlightService,
+    flight_service_server::FlightServiceServer, Action, FlightDescriptor, FlightInfo,
+    HandshakeRequest, HandshakeResponse, Ticket,
+};
+use bytes::Bytes;
+use futures::{StreamExt, TryStream, TryStreamExt};
+use tonic::{metadata::MetadataValue, transport::Server, Request, Response, Status, Streaming};
+use tracing::info;
 
 /// Flight SQL service backed by the shared Beacon runtime.
 #[derive(Clone)]
@@ -350,25 +349,64 @@ impl FlightSqlService for BeaconFlightSqlService {
         })
     }
 
+    async fn do_put_prepared_statement_update(
+        &self,
+        query: CommandPreparedStatementUpdate,
+        request: Request<PeekableFlightDataStream>,
+    ) -> Result<i64, Status> {
+        let auth_value = self.authenticator.authorization_value(&request)?;
+        let auth = self.authenticator.authorize_optional(auth_value).await?;
+
+        // For simplicity, we execute the update immediately rather than waiting for the client to signal completion.
+        let sql = self
+            .get_prepared_statement(&query.prepared_statement_handle)
+            .await?;
+        let stream = self
+            .runtime
+            .run_sql(sql, auth.is_super_user)
+            .await
+            .map_err(to_internal_status)?;
+
+        // We consume the stream to ensure the update is fully executed, but ignore any output batches.
+        let row_count = stream
+            .map_err(to_internal_status)
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .map(|batch| batch.num_rows() as i64)
+            .sum();
+
+        Ok(row_count)
+    }
+
     async fn do_action_create_prepared_statement(
         &self,
         query: ActionCreatePreparedStatementRequest,
         request: Request<Action>,
     ) -> Result<ActionCreatePreparedStatementResult, Status> {
         let auth = self.authenticator.authorize_request(&request).await?;
-        let stream = self
-            .runtime
-            .run_sql(query.query.clone(), auth.is_super_user)
-            .await
-            .map_err(to_internal_status)?;
-        let dataset_schema = encode_schema(stream.schema().as_ref())?;
-        let parameter_schema = encode_schema(&Schema::empty())?;
+        let empty_schema = encode_schema(&Schema::empty())?;
+
+        // DDL statements have no result schema and must not be executed here — executing to
+        // infer the schema would cause a double-execution when do_put_prepared_statement_update
+        // runs the statement for real (e.g. CREATE EXTERNAL TABLE would be created twice).
+        let dataset_schema = if is_ddl(&query.query) {
+            empty_schema.clone()
+        } else {
+            let stream = self
+                .runtime
+                .run_sql(query.query.clone(), auth.is_super_user)
+                .await
+                .map_err(to_internal_status)?;
+            encode_schema(stream.schema().as_ref())?
+        };
+
         let prepared_statement_handle = self.prepared_statements.insert(query.query).await;
 
         Ok(ActionCreatePreparedStatementResult {
             prepared_statement_handle,
             dataset_schema,
-            parameter_schema,
+            parameter_schema: empty_schema,
         })
     }
 
@@ -382,6 +420,14 @@ impl FlightSqlService for BeaconFlightSqlService {
             .close(&query.prepared_statement_handle)
             .await
     }
+}
+
+fn is_ddl(sql: &str) -> bool {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    upper.starts_with("CREATE ")
+        || upper.starts_with("DROP ")
+        || upper.starts_with("ALTER ")
+        || upper.starts_with("TRUNCATE ")
 }
 
 /// Starts the Flight SQL gRPC server on the configured host and port.

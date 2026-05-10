@@ -32,9 +32,10 @@ use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::{get_datasets_object_store, DatasetsStore};
 use datafusion::{
     catalog::TableFunctionImpl,
-    common::{plan_datafusion_err, plan_err, stats::Precision, Statistics},
+    common::{plan_datafusion_err, plan_err, Statistics},
     datasource::{
         file_format::{self, FileFormat},
+        listing::ListingTable,
         MemTable,
     },
     execution::cache::CacheAccessor,
@@ -44,6 +45,7 @@ use datafusion::{
 use object_store::{ObjectMeta, ObjectStore};
 
 use crate::file_formats::BeaconTableFunctionImpl;
+use super::helpers::{ColumnStatRow, column_stat_rows};
 
 fn output_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -160,56 +162,22 @@ impl TableFunctionImpl for ViewDatasetStatisticsFunc {
     }
 }
 
-/// Convert `Statistics` + schema into a single `RecordBatch` in `output_schema()` format.
 fn build_record_batch(
     schema: &arrow::datatypes::Schema,
     stats: &Statistics,
 ) -> datafusion::error::Result<RecordBatch> {
-    let fields = schema.fields();
-    let col_stats = &stats.column_statistics;
-
-    let n = fields.len().min(col_stats.len());
-    let mut column_names: Vec<Option<&str>> = Vec::with_capacity(n);
-    let mut data_types: Vec<Option<String>> = Vec::with_capacity(n);
-    let mut min_values: Vec<Option<String>> = Vec::with_capacity(n);
-    let mut max_values: Vec<Option<String>> = Vec::with_capacity(n);
-    let mut is_exact: Vec<Option<bool>> = Vec::with_capacity(n);
-
-    for (field, col_stat) in fields.iter().zip(col_stats.iter()) {
-        column_names.push(Some(field.name().as_str()));
-        data_types.push(Some(field.data_type().to_string()));
-
-        let (min_str, exact) = precision_to_str_and_exact(&col_stat.min_value);
-        let (max_str, _) = precision_to_str_and_exact(&col_stat.max_value);
-        min_values.push(min_str);
-        max_values.push(max_str);
-        is_exact.push(exact);
-    }
-
+    let rows = column_stat_rows(schema.fields(), &stats.column_statistics);
     RecordBatch::try_new(
         output_schema(),
         vec![
-            Arc::new(StringArray::from(column_names)),
-            Arc::new(StringArray::from(data_types)),
-            Arc::new(StringArray::from(min_values)),
-            Arc::new(StringArray::from(max_values)),
-            Arc::new(BooleanArray::from(is_exact)),
+            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.column_name.as_deref()))),
+            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.data_type.as_deref()))),
+            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.min_value.as_deref()))),
+            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.max_value.as_deref()))),
+            Arc::new(BooleanArray::from(rows.iter().map(|r| r.is_exact).collect::<Vec<_>>())),
         ],
     )
     .map_err(|e| plan_datafusion_err!("Failed to build statistics record batch: {e}"))
-}
-
-/// Stringify a `Precision<ScalarValue>` and return whether it is exact.
-///
-/// - `Exact(v)` → `(Some(v.to_string()), Some(true))`
-/// - `Inexact(v)` → `(Some(v.to_string()), Some(false))`
-/// - `Absent` → `(None, None)`
-fn precision_to_str_and_exact(p: &Precision<ScalarValue>) -> (Option<String>, Option<bool>) {
-    match p {
-        Precision::Exact(v) => (Some(v.to_string()), Some(true)),
-        Precision::Inexact(v) => (Some(v.to_string()), Some(false)),
-        Precision::Absent => (None, None),
-    }
 }
 
 fn infer_file_format(

@@ -30,16 +30,16 @@ use beacon_datafusion_ext::stats_cache::BeaconFileStatisticsCache;
 use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
     catalog::TableFunctionImpl,
-    common::{plan_datafusion_err, stats::Precision},
+    common::plan_datafusion_err,
     datasource::MemTable,
     logical_expr::{Signature, Volatility},
     prelude::{Expr, SessionContext},
-    scalar::ScalarValue,
 };
 use object_store::ObjectStore;
 use tokio::runtime::Handle;
 
 use crate::file_formats::BeaconTableFunctionImpl;
+use super::helpers::column_stat_rows;
 
 // ─── Output schema ──────────────────────────────────────────────────────────
 
@@ -164,7 +164,10 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
             .zip(path_strings.iter())
             .zip(validations.iter())
         {
-            if stats.column_statistics.is_empty() {
+            // Schema is unavailable here; pass &[] so column_name/data_type stay null.
+            let rows = column_stat_rows(&[], &stats.column_statistics);
+
+            if rows.is_empty() {
                 // File is cached but has no per-column data — one null row to surface the file.
                 paths.push(Some(path_str.as_str()));
                 file_sizes.push(Some(meta.size));
@@ -174,23 +177,17 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
                 min_values.push(None);
                 max_values.push(None);
                 is_exact.push(None);
-                continue;
-            }
-
-            for col_stat in &stats.column_statistics {
-                paths.push(Some(path_str.as_str()));
-                file_sizes.push(Some(meta.size));
-                is_valid_col.append_value(*valid);
-                // `Statistics` doesn't carry field names; the caller can join against
-                // `read_schema` by ordinal position if needed.
-                column_names.push(None);
-                data_types.push(None);
-
-                let (min_str, exact) = precision_to_str_and_exact(&col_stat.min_value);
-                let (max_str, _) = precision_to_str_and_exact(&col_stat.max_value);
-                min_values.push(min_str);
-                max_values.push(max_str);
-                is_exact.push(exact);
+            } else {
+                for row in rows {
+                    paths.push(Some(path_str.as_str()));
+                    file_sizes.push(Some(meta.size));
+                    is_valid_col.append_value(*valid);
+                    column_names.push(row.column_name);
+                    data_types.push(row.data_type);
+                    min_values.push(row.min_value);
+                    max_values.push(row.max_value);
+                    is_exact.push(row.is_exact);
+                }
             }
         }
 
@@ -215,12 +212,3 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
     }
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-fn precision_to_str_and_exact(p: &Precision<ScalarValue>) -> (Option<String>, Option<bool>) {
-    match p {
-        Precision::Exact(v) => (Some(v.to_string()), Some(true)),
-        Precision::Inexact(v) => (Some(v.to_string()), Some(false)),
-        Precision::Absent => (None, None),
-    }
-}

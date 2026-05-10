@@ -34,7 +34,7 @@ typetag = "0.2.19"
 indexmap = { version = "2.7.1", features = ["serde"]}
 chrono = { version = "0.4.41", features = ["serde"] }
 crossbeam = "0.8.4"
-moka = { version = "0.12.10", features = ["future"] }
+moka = { version = "0.12.10", features = ["future", "sync"] }
 lru = "0.16.2"
 once_cell = "1.21.3"
 lazy_static = "1.5.0"

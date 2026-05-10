@@ -25,6 +25,7 @@ ordered-float = "5.0.0"
 tracing = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
