@@ -9,6 +9,7 @@ use arrow::{
 use beacon_data_lake::{DataLake, FileManager, TableManager};
 use beacon_datafusion_ext::{
     format_ext::DatasetMetadata, listing_table_factory_ext::ListingTableFactoryExt,
+    stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
 use beacon_planner::{metrics::ConsolidatedMetrics, plan::BeaconQueryPlan};
@@ -73,13 +74,18 @@ impl Runtime {
             session_ctx.register_udf(udf);
         }
 
-        let table_functions = beacon_functions::file_formats::register_table_functions(
+        let mut table_functions = vec![];
+        table_functions.extend(beacon_functions::file_formats::register_table_functions(
             tokio::runtime::Handle::current(),
             session_ctx.clone(),
             file_manager.data_object_store_url(),
             beacon_object_storage::get_datasets_object_store().await,
             file_manager.file_formats().to_vec(),
-        );
+        ));
+        table_functions.extend(beacon_functions::metadata::register_metadata_functions(
+            session_ctx.clone(),
+            tokio::runtime::Handle::current(),
+        ));
 
         for table_function in table_functions.iter() {
             session_ctx.register_udtf(
@@ -136,6 +142,12 @@ impl Runtime {
         let runtime_env = RuntimeEnvBuilder::new()
             .with_disk_manager_builder(DiskManagerBuilder::default())
             .with_memory_pool(memory_pool)
+            .with_cache_manager(
+                datafusion::execution::cache::cache_manager::CacheManagerConfig {
+                    table_files_statistics_cache: Some(beacon_file_statistics_cache()),
+                    ..Default::default()
+                },
+            )
             .build_arc()?;
 
         let session_state = SessionStateBuilder::new()
