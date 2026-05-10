@@ -1,4 +1,10 @@
-use datafusion::{datasource::file_format::FileFormatFactory, object_store::ObjectMeta};
+use std::sync::Arc;
+
+use datafusion::{
+    datasource::file_format::{FileFormat, FileFormatFactory},
+    object_store::ObjectMeta,
+    prelude::SessionContext,
+};
 
 pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     fn discover_datasets(
@@ -9,6 +15,12 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     fn list_with_file_extension(&self) -> bool {
         true
     }
+}
+
+pub fn file_format_by_ext(ext: &str, session_ctx: &SessionContext) -> Option<Arc<dyn FileFormat>> {
+    let state = session_ctx.state();
+    let factory = state.get_file_format_factory(ext)?;
+    Some(factory.default())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

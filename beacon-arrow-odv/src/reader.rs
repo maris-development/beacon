@@ -7,7 +7,7 @@ use arrow::{
 };
 use bytes::{Buf, Bytes};
 use csv::StringRecord;
-use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 use object_store::ObjectStore;
 use regex::Regex;
@@ -334,7 +334,7 @@ impl AsyncOdvDecoder {
         schema_mapper: Arc<OdvSchemaMapper>,
     ) -> impl Stream<Item = Result<RecordBatch, ArrowError>> {
         let decoder = arrow::csv::reader::ReaderBuilder::new(schema_mapper.input_schema.clone())
-            .with_batch_size(64 * 1024)
+            .with_batch_size(16 * 1024)
             .with_comment(b'/')
             .with_delimiter(b'\t')
             .with_header(true)

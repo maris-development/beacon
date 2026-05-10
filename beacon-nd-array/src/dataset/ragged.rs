@@ -245,6 +245,10 @@ impl RaggedDataset {
         self.variables.get(name).map(|v| v.array())
     }
 
+    pub fn get_ragged_array(&self, name: &str) -> Option<&RaggedArray> {
+        self.variables.get(name)
+    }
+
     /// Return the observation dimension names (keys of `row_size_vars`).
     pub fn observation_dimensions(&self) -> impl Iterator<Item = &str> {
         self.row_size_vars.keys().map(String::as_str)

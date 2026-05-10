@@ -34,6 +34,7 @@ pub mod options;
 pub mod reader;
 pub mod sink;
 pub mod source;
+pub mod statistics;
 
 #[derive(Debug, Clone)]
 pub struct NetCDFFormatFactory {
@@ -173,9 +174,26 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         _store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
-        _object: &ObjectMeta,
+        object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
-        Ok(Statistics::new_unknown(&table_schema))
+        if beacon_config::CONFIG.netcdf.enable_statistics {
+            Ok(statistics::generate_statistics(
+                self.datasets_object_store.clone(),
+                object,
+                &table_schema,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to generate statistics for object {}: {}",
+                    object.location,
+                    e
+                );
+                Statistics::new_unknown(&table_schema)
+            }))
+        } else {
+            Ok(Statistics::new_unknown(&table_schema))
+        }
     }
 
     async fn create_physical_plan(

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use beacon_data_lake::FileManager;
+use beacon_datafusion_ext::listing_table_factory_ext::ListingTableFactoryExt;
 use datafusion::{
     execution::SendableRecordBatchStream,
     prelude::{SQLOptions, SessionContext},
@@ -19,23 +20,30 @@ use crate::{
 };
 
 pub(crate) struct SqlStatementExecutor {
-    context: HandlerContext,
+    context: Arc<HandlerContext>,
     statement_registry: StatementRegistry,
 }
 
 impl SqlStatementExecutor {
-    pub(crate) fn new(
-        session_ctx: Arc<SessionContext>,
-        file_manager: Arc<FileManager>,
-    ) -> Self {
+    pub(crate) fn new(session_ctx: Arc<SessionContext>, file_manager: Arc<FileManager>) -> Self {
         let mut loader_registry = IngestFormatLoaderRegistry::new();
         register_default_ingest_loaders(&mut loader_registry);
 
         let mut statement_registry = StatementRegistry::new();
+        let table_factory = Arc::new(ListingTableFactoryExt::new(
+            file_manager.data_object_store_url(),
+        ));
+        let context = Arc::new(HandlerContext::new(
+            session_ctx,
+            file_manager,
+            loader_registry,
+            table_factory,
+        ));
+
         register_default_statement_handlers(&mut statement_registry);
 
         Self {
-            context: HandlerContext::new(session_ctx, file_manager, loader_registry),
+            context,
             statement_registry,
         }
     }

@@ -32,6 +32,10 @@ impl PushdownFilter {
     pub fn ranges(&self) -> &HashMap<String, ValueRange> {
         &self.ranges
     }
+
+    pub fn predicate(&self) -> &Arc<dyn PhysicalExpr> {
+        &self._predicate
+    }
 }
 
 // ─── Expression tree walking ───────────────────────────────────────────────

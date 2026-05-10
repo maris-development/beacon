@@ -96,6 +96,7 @@ pub struct NetcdfConfig {
     pub schema_cache_size: u64,
     pub use_reader_cache: bool,
     pub reader_cache_size: usize,
+    pub enable_statistics: bool,
 }
 
 #[derive(Debug)]
@@ -197,6 +198,9 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_SCHEMA_CACHE_SIZE", default = "1024")]
     netcdf_schema_cache_size: u64,
 
+    #[envconfig(from = "BEACON_NETCDF_ENABLE_STATISTICS", default = "true")]
+    netcdf_enable_statistics: bool,
+
     #[envconfig(from = "BEACON_NETCDF_USE_READER_CACHE", default = "true")]
     netcdf_use_reader_cache: bool,
     #[envconfig(from = "BEACON_NETCDF_READER_CACHE_SIZE", default = "128")]
@@ -274,6 +278,7 @@ impl From<RawConfig> for Config {
                 schema_cache_size: raw.netcdf_schema_cache_size,
                 use_reader_cache: raw.netcdf_use_reader_cache,
                 reader_cache_size: raw.netcdf_reader_cache_size,
+                enable_statistics: raw.netcdf_enable_statistics,
             },
         }
     }

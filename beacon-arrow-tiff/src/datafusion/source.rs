@@ -5,65 +5,51 @@ use beacon_nd_array::{
     arrow::{batch::any_dataset_as_record_batch_stream, pushdown_filter::PushdownFilter},
     projection::DatasetProjection,
 };
-use beacon_object_storage::DatasetsStore;
 use datafusion::{
-    common::{pruning::PrunableStatistics, Statistics},
+    common::Statistics,
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
     },
-    physical_expr::{conjunction, PhysicalExpr},
-    physical_optimizer::pruning::PruningPredicate,
+    physical_expr::{PhysicalExpr, conjunction},
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
-        EmptyRecordBatchStream,
     },
 };
-use futures::{stream::BoxStream, FutureExt, StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
 use object_store::ObjectMeta;
 
 use super::reader;
 
-/// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
-///
-/// Integrates the `beacon_arrow_netcdf` reader with DataFusion's file scan
-/// pipeline via a [`FileOpener`].
 #[derive(Debug, Clone)]
-pub struct NetCDFSource {
-    datasets_object_store: Arc<DatasetsStore>,
+pub struct TiffSource {
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     override_schema: Option<SchemaRef>,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     projected_statistics: Option<Statistics>,
-    read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
 
-impl NetCDFSource {
-    pub fn new(
-        datasets_object_store: Arc<DatasetsStore>,
-        read_dimensions: Option<Vec<String>>,
-    ) -> Self {
+impl TiffSource {
+    pub fn new() -> Self {
         Self {
-            datasets_object_store,
             schema_adapter_factory: None,
             override_schema: None,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projected_statistics: None,
-            read_dimensions,
             batch_size: usize::MAX,
             predicate: None,
         }
     }
 }
 
-impl FileSource for NetCDFSource {
+impl FileSource for TiffSource {
     fn create_file_opener(
         &self,
-        _object_store: Arc<dyn object_store::ObjectStore>,
+        object_store: Arc<dyn object_store::ObjectStore>,
         base_config: &datafusion::datasource::physical_plan::FileScanConfig,
         _partition: usize,
     ) -> Arc<dyn FileOpener> {
@@ -77,15 +63,13 @@ impl FileSource for NetCDFSource {
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
 
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema.clone());
+        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
 
-        Arc::new(NetCDFOpener::new(
-            self.datasets_object_store.clone(),
+        Arc::new(TiffOpener::new(
+            object_store,
             Arc::from(schema_adapter),
-            self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
-            table_schema,
         ))
     }
 
@@ -149,7 +133,7 @@ impl FileSource for NetCDFSource {
     }
 
     fn file_type(&self) -> &str {
-        "netcdf"
+        "tiff"
     }
 
     fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
@@ -179,81 +163,49 @@ impl FileSource for NetCDFSource {
     }
 }
 
-// ─── FileOpener ────────────────────────────────────────────────────────────
-
-/// Opens a single NetCDF file and streams its contents as Arrow
-/// [`RecordBatch`]es via [`any_dataset_as_record_batch_stream`].
-struct NetCDFOpener {
-    datasets_object_store: Arc<DatasetsStore>,
+struct TiffOpener {
+    object_store: Arc<dyn object_store::ObjectStore>,
     schema_adapter: Arc<dyn SchemaAdapter>,
-    read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    pruning_predicate: Option<PruningPredicate>,
-    table_schema: SchemaRef,
 }
 
-impl NetCDFOpener {
+impl TiffOpener {
     fn new(
-        datasets_object_store: Arc<DatasetsStore>,
+        object_store: Arc<dyn object_store::ObjectStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
-        read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        table_schema: SchemaRef,
     ) -> Self {
-        let pruning_predicate = predicate
-            .as_ref()
-            .and_then(|pred| PruningPredicate::try_new(pred.clone(), table_schema.clone()).ok());
-
         Self {
-            datasets_object_store,
+            object_store,
             schema_adapter,
-            read_dimensions,
             batch_size,
             predicate,
-            pruning_predicate,
-            table_schema,
         }
     }
 
     async fn read_task(
         object: ObjectMeta,
-        datasets_object_store: Arc<DatasetsStore>,
+        object_store: Arc<dyn object_store::ObjectStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
-        read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let dataset = reader::open_dataset(datasets_object_store, object.clone())
+        let dataset = reader::open_dataset(object_store, object.clone())
             .await
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to open NetCDF dataset {}: {e}",
+                    "Failed to open TIFF dataset {}: {e}",
                     object.location,
                 ))
             })?;
-
-        // Apply dimension projection before deriving the file schema.
-        let dataset = if let Some(dims) = read_dimensions {
-            let proj = DatasetProjection {
-                dimension_projection: Some(dims),
-                index_projection: None,
-            };
-            dataset.project(&proj).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project NetCDF dataset with dimensions: {e}"
-                ))
-            })?
-        } else {
-            dataset
-        };
 
         let file_schema: SchemaRef =
             beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
                 .map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to derive Arrow schema from NetCDF dataset: {e}"
+                        "Failed to derive Arrow schema from TIFF dataset: {e}"
                     ))
                 })?
                 .into();
@@ -271,7 +223,7 @@ impl NetCDFOpener {
             };
             dataset.project(&proj).map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project NetCDF dataset: {e}"
+                    "Failed to project TIFF dataset: {e}"
                 ))
             })?
         } else {
@@ -282,13 +234,13 @@ impl NetCDFOpener {
         let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter)
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading NetCDF as Arrow stream: {e}"
+                    "Error reading TIFF as Arrow stream: {e}"
                 ))
             })
             .and_then(move |batch| {
                 let mapped = schema_mapper.map_batch(batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to map NetCDF batch schema: {e}"
+                        "Failed to map TIFF batch schema: {e}"
                     ))
                 });
                 futures::future::ready(mapped)
@@ -299,34 +251,16 @@ impl NetCDFOpener {
     }
 }
 
-impl FileOpener for NetCDFOpener {
+impl FileOpener for TiffOpener {
     fn open(
         &self,
         file_meta: FileMeta,
-        file: datafusion::datasource::listing::PartitionedFile,
+        _file: datafusion::datasource::listing::PartitionedFile,
     ) -> datafusion::error::Result<FileOpenFuture> {
-        if let (Some(stats), Some(prune)) = (&file.statistics, &self.pruning_predicate) {
-            let result = prune.prune(&PrunableStatistics::new(
-                vec![stats.clone()],
-                self.table_schema.clone(),
-            ))?[0];
-            if !result {
-                tracing::debug!(
-                    "Pruning NetCDF file {} based on statistics.",
-                    file_meta.object_meta.location
-                );
-                // File is pruned, return empty stream.
-                let stream = EmptyRecordBatchStream::new(self.table_schema.clone()).boxed();
-
-                return Ok(futures::future::ready(Ok(stream)).boxed());
-            }
-        };
-
         let fut = Self::read_task(
             file_meta.object_meta,
-            self.datasets_object_store.clone(),
+            self.object_store.clone(),
             self.schema_adapter.clone(),
-            self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
         )
