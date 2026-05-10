@@ -81,6 +81,8 @@ impl Runtime {
             session_ctx.clone(),
             file_manager.data_object_store_url(),
             beacon_object_storage::get_datasets_object_store().await,
+            file_manager.file_formats().to_vec(),
+        );
         ));
         table_functions.extend(beacon_functions::metadata::register_metadata_functions(
             session_ctx.clone(),
