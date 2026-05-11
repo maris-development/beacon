@@ -11,15 +11,14 @@ To simplify the setup process, you can clone our ready-to-use Beacon examples fr
 To run Beacon on top of files/datasets stored locally, you can use Docker Compose. Below is an example `docker-compose.yml` file that sets up Beacon with local datasets. Simply modify the volume mappings to point to your dataset locations or copy your datasets into the `./datasets` folder.
 
 ```yaml
-version: "3.8"
-
 services:
     beacon:
         image: ghcr.io/maris-development/beacon:latest
         container_name: beacon
         restart: unless-stopped
         ports:
-            - "8080:8080" # Adjust the port mapping as needed
+            - "8080:8080" # Rest API port 
+            - "32011:32011" # Arrow Flight SQL port
         environment:
             - BEACON_ADMIN_USERNAME=admin # Replace with your admin username
             - BEACON_ADMIN_PASSWORD=securepassword # Replace with your admin password
@@ -63,8 +62,6 @@ Create a docker compose file with the following content (pick one of the two opt
 ::: code-group
 
 ```yaml  [s3.docker-compose.yml]{19-23}
-version: "3.8"
-
 services:
     beacon:
         image: ghcr.io/maris-development/beacon:latest
@@ -72,6 +69,7 @@ services:
         restart: unless-stopped
         ports:
             - "8080:8080" # Adjust the port mapping as needed
+            - "32011:32011" # Arrow Flight SQL port
         environment:
             - BEACON_ADMIN_USERNAME=admin # Replace with your admin username
             - BEACON_ADMIN_PASSWORD=securepassword # Replace with your admin password

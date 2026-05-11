@@ -65,56 +65,93 @@ export default defineConfig({
           ]
         },
         {
-          text: 'Data Lake Setup',
+          text: 'Connect',
+          collapsed: false,
+          items: [
+            {
+              text: 'JetBrains DataGrip',
+              link: '/docs/1.6.0/connect/jetbrains-datagrip',
+            },
+            {
+              text: 'Beacon CLI',
+              link: '/docs/1.6.0/connect/beacon-cli',
+            },
+            {
+              text: 'Beacon Python SDK',
+              link: '/docs/1.6.0/connect/beacon-python-sdk',
+            },
+            {
+              text: 'Python ADBC Driver',
+              link: '/docs/1.6.0/connect/python-adbc',
+            }
+          ]
+        },
+        {
+          text: 'Data Lakehouse Setup',
           link: '/docs/1.6.0/data-lake',
           collapsed: false,
           items: [
             {
-              text: 'Datasets',
+              text: 'Supported Formats',
               link: '/docs/1.6.0/data-lake/datasets',
+              collapsed: true,
               items: [
                 {
-                  text: 'Zarr',
-                  link: '/docs/1.6.0/data-lake/datasets#zarr'
+                  text: 'Parquet',
+                  link: '/docs/1.6.0/data-lake/datasets#parquet'
                 },
                 {
                   text: 'NetCDF',
                   link: '/docs/1.6.0/data-lake/datasets#netcdf'
                 },
                 {
-                  text: 'ODV ASCII',
-                  link: '/docs/1.6.0/data-lake/datasets#odv-ascii'
-                },
-                {
-                  text: 'Parquet',
-                  link: '/docs/1.6.0/data-lake/datasets#parquet'
-                },
-                {
-                  text: 'CSV',
-                  link: '/docs/1.6.0/data-lake/datasets#csv'
+                  text: 'Zarr',
+                  link: '/docs/1.6.0/data-lake/datasets#zarr'
                 },
                 {
                   text: 'Arrow IPC',
                   link: '/docs/1.6.0/data-lake/datasets#arrow-ipc'
                 },
                 {
+                  text: 'ODV ASCII',
+                  link: '/docs/1.6.0/data-lake/datasets#odv-ascii'
+                },
+                {
+                  text: 'CSV',
+                  link: '/docs/1.6.0/data-lake/datasets#csv'
+                },
+                {
+                  text: 'GeoTIFF',
+                  link: '/docs/1.6.0/data-lake/datasets#geotiff--cloud-optimized-geotiff'
+                },
+                {
                   text: 'Beacon Binary Format',
-                  link: '/docs/1.6.0/data-lake/datasets#beacon-binary-format'
+                  link: '/docs/1.6.0/data-lake/datasets#beacon-binary-format-bbf'
                 },
               ]
             },
             {
-              text: 'Collections',
-              link: '/docs/1.6.0/data-lake/collections',
-              collapsed: true,
+              text: 'SQL Tables & Views',
+              collapsed: false,
               items: [
                 {
-                  text: 'Logical Collections',
-                  link: '/docs/1.6.0/data-lake/collections#logical-data-tables'
+                  text: 'External Tables',
+                  link: '/docs/1.6.0/data-lake/external-tables',
+                  collapsed: true,
+                  items: [
+                    { text: 'Parquet', link: '/docs/1.6.0/data-lake/external-tables#parquet' },
+                    { text: 'NetCDF', link: '/docs/1.6.0/data-lake/external-tables#netcdf' },
+                    { text: 'Zarr', link: '/docs/1.6.0/data-lake/external-tables#zarr' },
+                    { text: 'CSV', link: '/docs/1.6.0/data-lake/external-tables#csv' },
+                    { text: 'Arrow IPC', link: '/docs/1.6.0/data-lake/external-tables#arrow-ipc' },
+                    { text: 'ODV ASCII', link: '/docs/1.6.0/data-lake/external-tables#odv-ascii' },
+                    { text: 'GeoTIFF / COG', link: '/docs/1.6.0/data-lake/external-tables#geotiff--cog' },
+                    { text: 'Atlas Tables', link: '/docs/1.6.0/data-lake/external-tables#atlas-backed-tables' },
+                  ]
                 },
                 {
-                  text: 'Preset Collections',
-                  link: '/docs/1.6.0/data-lake/collections#preset-data-tables'
+                  text: 'Views',
+                  link: '/docs/1.6.0/data-lake/view',
                 }
               ]
             },
@@ -141,6 +178,115 @@ export default defineConfig({
                 }
               ]
             }
+          ]
+        },
+        {
+          text: 'SQL Guide',
+          link: '/docs/1.6.0/sql/',
+          collapsed: false,
+          items: [
+            {
+              text: 'Introduction',
+              link: '/docs/1.6.0/sql/',
+            },
+            {
+              text: 'Querying',
+              items: [
+                {
+                  text: 'SELECT',
+                  link: '/docs/1.6.0/sql/select',
+                },
+                {
+                  text: 'WHERE',
+                  link: '/docs/1.6.0/sql/where',
+                  collapsed: true,
+                  items: [
+                    { text: 'Comparison', link: '/docs/1.6.0/sql/where#comparison-operators' },
+                    { text: 'BETWEEN', link: '/docs/1.6.0/sql/where#between' },
+                    { text: 'IN', link: '/docs/1.6.0/sql/where#in' },
+                    { text: 'LIKE', link: '/docs/1.6.0/sql/where#like' },
+                    { text: 'IS NULL', link: '/docs/1.6.0/sql/where#is-null--is-not-null' },
+                    { text: 'AND / OR / NOT', link: '/docs/1.6.0/sql/where#and--or--not' },
+                    { text: 'Date & time', link: '/docs/1.6.0/sql/where#date-and-time-filtering' },
+                  ]
+                },
+                {
+                  text: 'GROUP BY',
+                  link: '/docs/1.6.0/sql/group-by',
+                },
+                {
+                  text: 'JOIN',
+                  link: '/docs/1.6.0/sql/join',
+                  collapsed: true,
+                  items: [
+                    { text: 'INNER JOIN', link: '/docs/1.6.0/sql/join#inner-join' },
+                    { text: 'LEFT JOIN', link: '/docs/1.6.0/sql/join#left-join' },
+                  ]
+                },
+                {
+                  text: 'Reading Files',
+                  link: '/docs/1.6.0/sql/table-functions',
+                  collapsed: true,
+                  items: [
+                    { text: 'read_netcdf', link: '/docs/1.6.0/sql/table-functions#read_netcdf' },
+                    { text: 'read_zarr', link: '/docs/1.6.0/sql/table-functions#read_zarr' },
+                    { text: 'read_parquet', link: '/docs/1.6.0/sql/table-functions#read_parquet' },
+                    { text: 'read_arrow', link: '/docs/1.6.0/sql/table-functions#read_arrow' },
+                    { text: 'read_csv', link: '/docs/1.6.0/sql/table-functions#read_csv' },
+                    { text: 'read_odv_ascii', link: '/docs/1.6.0/sql/table-functions#read_odv_ascii' },
+                    { text: 'read_bbf', link: '/docs/1.6.0/sql/table-functions#read_bbf' },
+                    { text: 'read_tiff', link: '/docs/1.6.0/sql/table-functions#read_tiff' },
+                  ]
+                },
+                {
+                  text: 'UNION ALL BY NAME',
+                  link: '/docs/1.6.0/sql/union-by-name',
+                },
+              ]
+            },
+            {
+              text: 'DDL',
+              items: [
+                {
+                  text: 'CREATE EXTERNAL TABLE',
+                  link: '/docs/1.6.0/sql/create-table',
+                  collapsed: true,
+                  items: [
+                    { text: 'IF NOT EXISTS', link: '/docs/1.6.0/sql/create-table#if-not-exists' },
+                    { text: 'OR REPLACE', link: '/docs/1.6.0/sql/create-table#or-replace' },
+                    { text: 'PARTITIONED BY', link: '/docs/1.6.0/sql/create-table#partitioned-by' },
+                    { text: 'DROP TABLE', link: '/docs/1.6.0/sql/create-table#drop-table' },
+                  ]
+                },
+                {
+                  text: 'CREATE VIEW',
+                  link: '/docs/1.6.0/sql/create-view',
+                },
+              ]
+            },
+            {
+              text: 'Introspection',
+              link: '/docs/1.6.0/sql/table-functions-utility',
+              collapsed: true,
+              items: [
+                { text: 'read_schema', link: '/docs/1.6.0/sql/table-functions-utility#read_schema' },
+                { text: 'list_datasets', link: '/docs/1.6.0/sql/table-functions-utility#list_datasets' },
+                { text: 'view_dataset_statistics', link: '/docs/1.6.0/sql/table-functions-utility#view_dataset_statistics' },
+                { text: 'view_external_table_statistics', link: '/docs/1.6.0/sql/table-functions-utility#view_external_table_statistics' },
+                { text: 'view_statistics_cache', link: '/docs/1.6.0/sql/table-functions-utility#view_statistics_cache' },
+              ]
+            },
+            {
+              text: 'Function Reference',
+              link: '/docs/1.6.0/sql/function-reference',
+              collapsed: true,
+              items: [
+                { text: 'Aggregate', link: '/docs/1.6.0/sql/function-reference#aggregate-functions' },
+                { text: 'Date & Time', link: '/docs/1.6.0/sql/function-reference#date-and-time-functions' },
+                { text: 'Math', link: '/docs/1.6.0/sql/function-reference#math-functions' },
+                { text: 'String', link: '/docs/1.6.0/sql/function-reference#string-functions' },
+              ]
+            },
           ]
         },
         {

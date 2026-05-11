@@ -1,102 +1,102 @@
-# Datasets
+# Supported Formats
 
-All datasets intended for querying through Beacon must be placed in the following directory inside the Docker container: `/beacon/data/datasets/`
-No other configuration is required to make the datasets available for querying. Beacon will be able to infer the schema (columns,variables,attributes) of the dataset and make it available for querying.
+Beacon discovers datasets from its configured storage root automatically — no registration step is required. Place files in the datasets folder (or S3 prefix) and they become immediately queryable via table functions or [External Tables](./external-tables.md).
 
-## Supported File Formats
+Default local path inside the Docker container: `/beacon/data/datasets/`
 
-Beacon supports the following file formats for querying datasets:
+## Parquet
 
-### Zarr
+Native support via DataFusion. Recommended for analytical workloads due to columnar storage and built-in predicate pushdown.
 
-Beacon supports Zarr datasets extensively with the following features:
+- Column pruning and predicate pushdown are fully supported.
+- Hive-style directory partitioning is supported via `PARTITIONED BY` on [External Tables](./external-tables.md).
+- Compatible with files produced by DuckDB, Spark, pandas, and similar tools.
 
-- Support for Zarr v3 format.
-- Support for chunked datasets.
-- Support for Array Slice Pushdown using Predicate Pushdown. This allows Beacon to only read the necessary chunks of data based on the query predicates, improving performance significantly (eg, spatial and temporal queries or both together). Beacon can leverage Zarr's chunking scheme to minimize data reads.
-- Support for compressed datasets (e.g., zstd, gzip).
-- Support for nested directories containing multiple Zarr datasets.
-- Support for cloud storage backends (e.g., S3, GCS).
+## NetCDF
+
+Streaming reads with chunk-level access — large files are read incrementally rather than loaded entirely into memory.
+
+Supported dialects:
+
+- **NetCDF4** (recommended)
+- **NetCDF3** — `char*` arrays with a string-like dimension (e.g. `STRLEN`) are inferred as fixed-length strings
 
 Limitations:
 
-- Datasets with user defined data types are not supported.
+- User-defined types are not supported.
+- S3 / object-store backends only support anonymous access. Authenticated S3 reads are not yet supported.
 
-### NetCDF
-
-::: tip
-It is recommended to convert NetCDF files to a Beacon Binary Format dataset using the [beacon-binary-format-toolbox](../beacon-binary-format/how-to-use.md#creating-a-beacon-binary-format-file-collection) for optimal performance and full feature support.
-NetCDF S3 support is limited to anonymous access only. Authenticated access is not supported yet.
+:::tip
+For best performance with NetCDF, convert files to [Beacon Binary Format](#beacon-binary-format) using the beacon-binary-format-toolbox. BBF supports efficient chunk-level pruning and full S3 authentication.
 :::
 
-Beacon supports NetCDF but limited to native data types. User defined types are not supported.
-Huge NetCDF files can be read by Beacon, as it supports streaming reads using chunks. This allows for more efficient reading of large NetCDF files, as data can be read in smaller chunks rather than loading the entire file into memory at once. This is especially beneficial for users working with large NetCDF datasets, as it can significantly reduce memory usage and improve performance.
+## Zarr
 
-- NetCDF4 (recommended)
-- NetCDF3
-  - char* arrays with a string like dimension (eg. STRLEN) will be inferred as a fixed size string
+Zarr datasets are queried using chunk-level predicate pushdown — Beacon reads only the chunks that can satisfy the query predicates, which makes spatial and temporal range queries fast even over large multi-dimensional stores.
 
-Limitations:
-
-- S3 Cloud Storage backends for NetCDF are only supported when allowing anonymous access. Authenticated access is not supported yet.
-
-### Parquet
-
-Beacon supports parquet natively through datafusion.
+- Zarr v2 and v3 are supported.
+- Compressed chunks (zstd, gzip, blosc, …) are decompressed transparently.
+- Multiple Zarr stores can be combined in a single external table using glob patterns (e.g. `sst/*/zarr.json`).
+- S3 and other object-store backends are fully supported.
 
 Limitations:
 
-- Hive partioning is not supported.
+- User-defined data types are not supported.
 
-### Tiff (geotiff, cloud-optimized geotiff)
+:::tip
+Declare `statistics_columns` in the `read_zarr()` table function or configure statistics on an external table to enable 1D slice pushdown for large coordinate dimensions like `time`, `latitude`, and `longitude`.
+:::
 
-Beacon supports Tiff files, xincluding geotiff and cloud-optimized geotiff formats. This allows users to work with raster data in addition to the existing support for tabular data formats.
+## Arrow IPC
 
-### CSV
+Fully supported. Arrow IPC stream files (`.arrow`, `.ipc`) are read natively with zero-copy column access.
 
-Beacon supports CSV files with the following limitations:
-  
-- The first row of the CSV file must contain the column names. (Header Row)
-- The CSV file must be well-formed and properly formatted.
-- The CSV file must be encoded in UTF-8.
-- Beacon will infer the schema based on the entire CSV file, this can be optionally changed in the configuration.
+## ODV ASCII
 
-### ODV ASCII
-
-Fully supported. It is recommended to store the ODV ASCII files using zstd compression. This can be done using the `zstd` command line tool:
+Fully supported. Storing ODV ASCII files with zstd compression is recommended to reduce storage and I/O:
 
 ```bash
 zstd -9 < input.txt > output.txt.zst
 ```
 
-Beacon will automatically detect the compression and decompress the file on the fly. This also works when ODV ASCII is stored in cloud compatible storage.
+Beacon detects compression automatically and decompresses on the fly. zstd-compressed ODV files work with S3-backed storage.
 
-### Arrow IPC
+## CSV
 
-Fully supported.
+- The first row must be a header row containing column names.
+- Files must be UTF-8 encoded.
+- Schema is inferred from the file contents.
 
-### Beacon Binary Format
+## GeoTIFF / Cloud-Optimized GeoTIFF
 
-Fully supported. Learn more more about this format and its usage.
-It fully supports S3 data lake integration and allows for efficient pruning similar to parquet.
+Raster data in GeoTIFF and Cloud-Optimized GeoTIFF (COG) formats is supported. COG files are particularly efficient over S3 because Beacon can issue range requests to read only the required tiles.
 
-## Exploring Datasets
+## Beacon Binary Format (BBF)
 
-Once the datasets are mounted into the container, Beacon will automatically discover them and make them available for querying.
-To list the available datasets, you can use the following API endpoint:
+Beacon's own columnar format, optimized for the kinds of queries common in earth-science and oceanographic workloads.
+
+- Full S3 / object-store support with authenticated access.
+- Chunk-level predicate pruning similar to Parquet row-group filtering.
+- Efficient for repeated range queries over coordinate columns (time, depth, lat/lon).
+
+Convert existing NetCDF files to BBF using the beacon-binary-format-toolbox for significant query speedups on large collections.
+
+## Exploring datasets
+
+List all datasets Beacon has discovered:
 
 ```http
 GET /api/list-datasets
 ```
 
-### Listing available columns/variables/attributes of a dataset
+Inspect the schema (columns, types) of a specific file:
 
 ```http
 GET /api/dataset-schema?file=example.nc
 ```
 
-However, it it also possible to list the merged schema of all datasets found using a glob path:
+Inspect the merged schema across a glob of files:
 
 ```http
-GET /api/dataset-schema?file=*.nc
+GET /api/dataset-schema?file=**/*.nc
 ```
