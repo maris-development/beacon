@@ -59,7 +59,7 @@ export default defineConfig({
               link: '/docs/1.6.0/getting-started#local',
             },
             {
-              text: 'Cloud (S3)',
+              text: 'S3 / Object Storage',
               link: '/docs/1.6.0/getting-started#s3-compatible-object-storage',
             }
           ]
@@ -145,8 +145,7 @@ export default defineConfig({
                     { text: 'CSV', link: '/docs/1.6.0/data-lake/external-tables#csv' },
                     { text: 'Arrow IPC', link: '/docs/1.6.0/data-lake/external-tables#arrow-ipc' },
                     { text: 'ODV ASCII', link: '/docs/1.6.0/data-lake/external-tables#odv-ascii' },
-                    { text: 'GeoTIFF / COG', link: '/docs/1.6.0/data-lake/external-tables#geotiff--cog' },
-                    { text: 'Atlas Tables', link: '/docs/1.6.0/data-lake/external-tables#atlas-backed-tables' },
+                    { text: 'GeoTIFF / COG', link: '/docs/1.6.0/data-lake/external-tables#geotiff-cog' },
                   ]
                 },
                 {

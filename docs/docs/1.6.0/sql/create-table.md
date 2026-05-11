@@ -98,4 +98,4 @@ SHOW TABLES;
 DESCRIBE ocean_profiles;
 ```
 
-See the [External Tables](../data-lake/external-tables.md) page for the full setup guide, including Atlas-backed tables and the HTTP API for listing tables.
+See the [External Tables](../data-lake/external-tables.md) page for the full setup guide, including the HTTP API for listing tables.

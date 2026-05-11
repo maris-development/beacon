@@ -1,56 +1,49 @@
 # Introduction
 
 :::info Open Source (AGPL V3)
-Beacon is an open source project available under the AGPL V3 license. You can find the source code and contribute to its development on GitHub: [beacon](https://github.com/maris-development/beacon)
+Beacon is open source under the AGPL V3 license. Source code and contributions: [github.com/maris-development/beacon](https://github.com/maris-development/beacon)
 :::
 
-Beacon is a high-performance data lake query engine designed for data providers who want to expose large scientific datasets to users via an API with minimal setup effort and excellent query performance.
+Beacon is a data lakehouse query engine built for scientific datasets. Point it at your existing files — on disk or in S3 — and it exposes a SQL query API instantly, with no data migration or preprocessing required.
 
-It allows you to rapidly set up a query API endpoint on top of your existing datasets (local files or S3-compatible object storage). Users can query datasets using **SQL** or **JSON** queries, and Beacon returns the result as a **single file** (e.g. parquet, netcdf) in various data formats or as a continous data stream (using Arrow IPC).
+Clients query Beacon using **SQL** or **JSON** and receive results as a file (Parquet, NetCDF, Arrow IPC, …) or a streaming Arrow IPC response. Beacon handles filtering, aggregation, and joins across files entirely server-side.
 
-Beacon works well with common earth-science and oceanographic formats out of the box. You can expose datasets such as:
+## Supported formats
 
-- NetCDF files
-- Zarr stores
-- Parquet files
-- Tiff files (geotiff, cloud-optimized geotiff)
-- ODV ASCII files
-- Collections (e.g. a virtual dataset created using Beacon composed from many NetCDF files)
-- Other supported formats in the Beacon ecosystem
-- SQL Tables / Views (for example, if you create a SQL view on top of your datasets, you can expose that view via the API)
+| Format | Notes |
+| ------ | ----- |
+| NetCDF | `.nc`, `.nc4`, `.cdf` |
+| Zarr | v2 and v3 |
+| Parquet | Native columnar, Hive partitioning supported |
+| GeoTIFF / COG | Cloud-Optimized GeoTIFF supported |
+| ODV ASCII | Ocean Data View spreadsheet format |
+| CSV | Header row required, delimiter configurable |
+| Arrow IPC | `.arrow`, `.ipc` stream files |
+| Beacon Binary Format | Beacon's native ingest format |
 
 ## How it fits together
 
 ```text
-(SQL / JSON)
-    +-------------------------------+
-    |           Clients             |
-    |  notebooks • apps • scripts   |
-    +---------------+---------------+
-                    |
-                    v
-          +-------------------+
-          |       Beacon      |
-          |  query + execution|
-          +---+-----------+---+
-              |           |
-              |           |
-              v           v
-+----------------+    +---------------------+
-| Local datasets |    |   S3 / Object Store |
-| (files, zarr)  |    | (existing bucket)   |
-+--------+-------+    +----------+----------+
-         \                     /
-          \                   /
-           v                 v
-      +---------------------------+
-      |      Scan + Compute       |
-      |   (filter/agg/join)       |
-      +------------+--------------+
-                   |
-                   v
-      +--------------------------+
-      | Single result file       |
-      | returned to the client   |
-      +--------------------------+
+                    Clients
+           (notebooks · apps · scripts)
+                       |
+                  SQL / JSON
+                       |
+                       v
+               +---------------+
+               |    Beacon     |
+               | query engine  |
+               +-------+-------+
+                       |
+           +-----------+-----------+
+           |                       |
+           v                       v
+    Local files               S3 / Object Store
+    (NetCDF, Zarr, …)         (existing bucket)
+           |                       |
+           +-----------+-----------+
+                       |
+                       v
+              Result returned to client
+              (Parquet · NetCDF · Arrow)
 ```

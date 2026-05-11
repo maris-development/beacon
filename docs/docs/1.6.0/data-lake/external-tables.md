@@ -139,36 +139,6 @@ LOCATION 'argo/'
 
 Views let you define a persistent SQL query over any external table or table function. See the [Views](./view.md) page for the full reference, including `UNION ALL BY NAME` for harmonizing datasets with different schemas.
 
-## Atlas-backed tables
-
-Atlas tables are Beacon's managed, ingestible table type. Use `CREATE ATLAS TABLE` to register one, then `INGEST INTO ATLAS` to load data into a partition.
-
-```sql
-CREATE ATLAS TABLE sensor_data
-LOCATION '/collections/sensor'
-```
-
-Add data to a partition:
-
-```sql
-INGEST INTO ATLAS sensor_data ON PARTITION p0
-FROM 'raw_sensor/**/*.nc'
-WITH netcdf
-```
-
-Remove specific datasets from a partition:
-
-```sql
-DELETE ATLAS DATASETS 'bad_sensor.nc' FROM sensor_data ON PARTITION p0
-```
-
-Adjust a column type within a partition:
-
-```sql
-ALTER ATLAS TABLE sensor_data ON PARTITION p0
-ALTER COLUMN temperature SET DATA TYPE FLOAT
-```
-
 ## Removing tables
 
 Remove a registered table from the catalog. The underlying files are not deleted.
