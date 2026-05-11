@@ -15,6 +15,7 @@ use crate::axum::setup_router;
 mod auth;
 mod axum;
 mod flight_sql;
+mod s3s;
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;

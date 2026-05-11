@@ -35,6 +35,7 @@ tracing-subscriber = { workspace = true}
 tracing-appender = { workspace = true}
 tonic = "0.13.1"
 prost = "0.13.1"
+s3s = "0.13.0"
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
