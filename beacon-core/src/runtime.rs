@@ -54,7 +54,7 @@ impl Runtime {
         let file_manager = data_lake.file_manager();
 
         session_ctx
-            .catalog("datafusion")
+            .catalog("beacon")
             .unwrap()
             .register_schema("public", table_manager.clone())?;
 
@@ -126,6 +126,7 @@ impl Runtime {
             .with_batch_size(beacon_config::CONFIG.runtime.batch_size)
             .with_coalesce_batches(true)
             .with_information_schema(true)
+            .with_default_catalog_and_schema("beacon", "public")
             .with_collect_statistics(true);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
