@@ -1,25 +1,10 @@
-# Query examples
+# Query Examples
 
-This chapter contains end-to-end examples you can copy/paste and adapt.
+Copy-paste examples for both query styles. All examples use `"output": { "format": "csv" }` — omit `output` to receive a streaming Arrow IPC response instead.
 
-- All examples are shown as raw HTTP request templates.
-- Examples use `output.format: "csv"` so the response is a single downloadable file.
-  - If you omit `output`, Beacon streams Arrow IPC instead.
+## JSON DSL
 
-::: tip
-Start by discovering columns:
-
-- Default table schema: `GET /api/default-table-schema`
-- Per-dataset schema: `GET /api/dataset-schema?file=...`
-:::
-
-## JSON examples
-
-### 1) Select + alias + computed column
-
-- Select a few columns
-- Add an aliased computed column using a function
-- Use a literal function argument
+### Select with computed column
 
 ```http
 POST /api/query
@@ -31,20 +16,14 @@ Content-Type: application/json
     "time",
     "latitude",
     "longitude",
-    {
-      "function": "round",
-      "args": ["temp", { "value": 2 }],
-      "alias": "temp_rounded"
-    }
+    { "function": "round", "args": ["temperature", { "value": 2 }], "alias": "temperature_rounded" }
   ],
   "limit": 100,
   "output": { "format": "csv" }
 }
 ```
 
-### 2) Multiple filters (AND by default)
-
-Use `filters` to apply multiple constraints.
+### Range filter on multiple columns
 
 ```http
 POST /api/query
@@ -52,9 +31,9 @@ Content-Type: application/json
 
 {
   "from": "default",
-  "select": ["time", "latitude", "longitude", "temp"],
+  "select": ["time", "latitude", "longitude", "temperature"],
   "filters": [
-    { "column": "temp", "min": 2, "max": 10 },
+    { "column": "temperature", "min": 2, "max": 10 },
     { "column": "latitude", "min": -10, "max": 10 }
   ],
   "limit": 1000,
@@ -62,9 +41,7 @@ Content-Type: application/json
 }
 ```
 
-### 3) OR conditions
-
-Wrap OR logic inside a single `or` filter object.
+### OR filter
 
 ```http
 POST /api/query
@@ -72,7 +49,7 @@ Content-Type: application/json
 
 {
   "from": "default",
-  "select": ["time", "platform", "temp"],
+  "select": ["time", "platform", "temperature"],
   "filters": [
     {
       "or": [
@@ -86,9 +63,7 @@ Content-Type: application/json
 }
 ```
 
-### 4) Sort + offset + limit
-
-`sort_by` is case-sensitive and uses enum keys.
+### Sort, offset, and limit
 
 ```http
 POST /api/query
@@ -96,7 +71,7 @@ Content-Type: application/json
 
 {
   "from": "default",
-  "select": ["time", "temp"],
+  "select": ["time", "temperature"],
   "sort_by": [{ "Desc": "time" }],
   "offset": 100,
   "limit": 50,
@@ -104,9 +79,7 @@ Content-Type: application/json
 }
 ```
 
-### 5) DISTINCT ON
-
-Use `distinct` to keep one row per key.
+### DISTINCT ON
 
 ```http
 POST /api/query
@@ -116,7 +89,7 @@ Content-Type: application/json
   "from": "default",
   "distinct": {
     "on": ["platform"],
-    "select": ["platform", "time", "temp"]
+    "select": ["platform", "time", "temperature"]
   },
   "sort_by": [{ "Desc": "time" }],
   "limit": 100,
@@ -124,23 +97,45 @@ Content-Type: application/json
 }
 ```
 
-### 6) Query a dataset directly (ad-hoc source)
+### GeoJSON spatial filter
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "from": { "netcdf": { "paths": ["test-files/gridded-example.nc"] } },
-  "select": ["time", "latitude", "longitude"],
+  "from": "default",
+  "select": ["time", "longitude", "latitude", "temperature"],
+  "filters": [
+    {
+      "longitude_column": "longitude",
+      "latitude_column": "latitude",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[4.0, 52.0], [6.0, 52.0], [6.0, 54.0], [4.0, 54.0], [4.0, 52.0]]]
+      }
+    }
+  ],
+  "limit": 10000,
+  "output": { "format": "csv" }
+}
+```
+
+### Query a NetCDF file directly
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "from": { "netcdf": { "paths": ["argo/**/*.nc"] } },
+  "select": ["time", "latitude", "longitude", "temperature"],
   "limit": 100,
   "output": { "format": "csv" }
 }
 ```
 
-### 7) Zarr pruning with `statistics_columns`
-
-If you frequently filter on coordinate-like arrays, provide `statistics_columns` so Beacon can prune Zarr groups and push down 1D slicing.
+### Query Zarr with statistics columns
 
 ```http
 POST /api/query
@@ -149,13 +144,13 @@ Content-Type: application/json
 {
   "from": {
     "zarr": {
-      "paths": ["some-zarr-dataset/zarr.json"],
-      "statistics_columns": ["valid_time", "latitude", "longitude"]
+      "paths": ["sst/*/zarr.json"],
+      "statistics_columns": ["time", "latitude", "longitude"]
     }
   },
-  "select": ["valid_time", "latitude", "longitude", "temp"],
+  "select": ["time", "latitude", "longitude", "sst"],
   "filters": [
-    { "column": "valid_time", "min": "2025-01-01" },
+    { "column": "time", "min": "2025-01-01" },
     { "column": "latitude", "min": -10, "max": 10 }
   ],
   "limit": 1000,
@@ -163,78 +158,94 @@ Content-Type: application/json
 }
 ```
 
-## SQL examples
+---
 
-SQL queries are submitted to the same endpoint as JSON queries.
+## SQL
 
-::: warning
-SQL is disabled by default; enable it with `BEACON_ENABLE_SQL=true`.
+:::warning
+SQL requires `BEACON_ENABLE_SQL=true`.
 :::
 
-### 1) Select + computed columns + literals
+### Select with a computed column
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "sql": "SELECT time, latitude, longitude, round(temp, 2) AS temp_rounded FROM default LIMIT 100",
+  "sql": "SELECT time, latitude, longitude, round(temperature, 2) AS temperature_rounded FROM default LIMIT 100",
   "output": { "format": "csv" }
 }
 ```
 
-### 2) WHERE with multiple conditions
+### WHERE with multiple conditions
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "sql": "SELECT time, latitude, longitude, temp FROM default WHERE temp BETWEEN 2 AND 10 AND latitude BETWEEN -10 AND 10 LIMIT 1000",
+  "sql": "SELECT time, latitude, longitude, temperature FROM default WHERE temperature BETWEEN 2 AND 10 AND latitude BETWEEN -10 AND 10 LIMIT 1000",
   "output": { "format": "csv" }
 }
 ```
 
-### 3) Aggregation + GROUP BY
+### GROUP BY aggregation
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "sql": "SELECT platform, avg(temp) AS avg_temp, count(*) AS n FROM default GROUP BY platform ORDER BY n DESC LIMIT 100",
+  "sql": "SELECT platform, avg(temperature) AS avg_temp, count(*) AS n FROM default GROUP BY platform ORDER BY n DESC LIMIT 100",
   "output": { "format": "csv" }
 }
 ```
 
-### 4) Read Zarr directly + enable pruning
+### Read Zarr directly with 1D pushdown
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "sql": "SELECT valid_time, latitude, longitude, temp FROM read_zarr(['some-zarr-dataset/zarr.json'], ['valid_time', 'latitude', 'longitude']) WHERE valid_time >= '2025-01-01' LIMIT 1000",
+  "sql": "SELECT time, latitude, longitude, sst FROM read_zarr(['sst/*/zarr.json'], ['time', 'latitude', 'longitude']) WHERE time >= '2025-01-01' LIMIT 1000",
   "output": { "format": "csv" }
 }
 ```
 
-## Validate and explain (works for JSON and SQL)
+### Export as GeoParquet
 
-Validate a query body:
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "sql": "SELECT longitude, latitude, time, temperature FROM default LIMIT 100000",
+  "output": {
+    "format": {
+      "geoparquet": { "longitude_column": "longitude", "latitude_column": "latitude" }
+    }
+  }
+}
+```
+
+---
+
+## Validate and explain
+
+Both styles support validate and explain. The request body is identical to a normal query body.
 
 ```http
 POST /api/parse-query
 Content-Type: application/json
 
-{ "select": ["time"], "limit": 1 }
+{ "select": ["time", "temperature"], "limit": 1 }
 ```
-
-Explain the planned query:
 
 ```http
 POST /api/explain-query
 Content-Type: application/json
 
-{ "select": ["time"], "limit": 1 }
+{ "sql": "SELECT * FROM default LIMIT 10" }
 ```

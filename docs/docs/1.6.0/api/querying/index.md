@@ -1,78 +1,128 @@
 # Querying
 
-Beacon’s API exposes a single query execution surface that can return streamed Arrow results or downloadable files. This chapter explains the two ways to express a query and the supporting endpoints you’ll typically use when building clients and UIs.
-
-## Why query via the API
-
-Use the query API when you want to:
-
-- Fetch a subset of rows/columns (projection + filtering) instead of downloading whole files.
-- Build interactive UIs (schemas → query builder → validate/explain → run → show metrics).
-- Export results in a client-friendly format (Arrow IPC stream, CSV, Parquet, NetCDF, GeoParquet, ...).
-
-## Two query styles
-
-- **JSON query DSL** ([json.md](json.md))
-  - Best for programmatic query builders.
-  - Request is a typed object: `select`, optional `from`, optional `filters`, optional `output`.
-
-- **SQL** ([sql.md](sql.md))
-  - Best for power users and ad-hoc analysis.
-  - Send `{ "sql": "SELECT ..." }` to the same endpoint.
-
-- **Examples** ([examples.md](examples.md))
-  - Copy/paste query patterns for JSON and SQL.
-
-## Core endpoints
-
-## Default response: Arrow IPC stream
-
-By default, `/api/query` returns an Apache Arrow IPC stream (content type `application/vnd.apache.arrow.stream`).
-
-If you set `output`, Beacon returns a downloadable file instead (for example CSV/Parquet/NetCDF).
-
-Client libraries and docs for reading Arrow IPC streams:
-
-- Rust: [docs.rs/arrow-ipc StreamReader](https://docs.rs/arrow-ipc/latest/arrow_ipc/reader/struct.StreamReader.html)
-- Python: [PyArrow IPC streaming (open_stream / RecordBatchStreamReader)](https://arrow.apache.org/docs/python/ipc.html)
-- C++: [Arrow C++ IPC stream reading (RecordBatchStreamReader)](https://arrow.apache.org/docs/cpp/ipc.html)
-
-Run a query:
+All queries go through a single endpoint:
 
 ```http
 POST /api/query
 Content-Type: application/json
-
-{ "select": ["time"], "limit": 1 }
 ```
 
-Validate a query without running it:
+The request body selects between two query styles:
+
+| Style | When to use | Body key |
+| ----- | ----------- | -------- |
+| [JSON DSL](./json.md) | Programmatic clients, query builders | `select`, `from`, `filters`, … |
+| [SQL](./sql.md) | Power users, ad-hoc analysis | `sql` |
+
+Both styles share the same `output` field and the same supporting endpoints.
+
+## Supporting endpoints
+
+### Validate
+
+Parse and type-check a query without executing it:
 
 ```http
 POST /api/parse-query
 Content-Type: application/json
 
-{ "select": ["time"], "limit": 1 }
+{ "select": ["time", "temperature"], "limit": 1 }
 ```
 
-Explain the planned query (useful for debugging and performance work):
+### Explain
+
+Return the physical query plan — useful for debugging and performance work:
 
 ```http
 POST /api/explain-query
 Content-Type: application/json
 
-{ "select": ["time"], "limit": 1 }
+{ "select": ["time", "temperature"], "limit": 1 }
 ```
 
-Fetch metrics for a completed query (query id is returned via the `x-beacon-query-id` response header):
+### Query metrics
+
+Beacon returns a query ID via the `x-beacon-query-id` response header. Use it to fetch timing and row-count metrics after the query completes:
 
 ```http
 GET /api/query/metrics/{query_id}
 ```
 
-## Choosing sources
+## Default response: Arrow IPC stream
 
-Most deployments query a **registered table** (collection) by name (for example `"from": "default"`).
+When `output` is omitted, `/api/query` returns an [Apache Arrow IPC stream](https://arrow.apache.org/docs/format/Columnar.html#ipc-streaming-format) (`application/vnd.apache.arrow.stream`). This is the most efficient format for downstream processing.
 
-Some formats can also be queried directly by specifying a `from` object with a format and paths (see [json.md](json.md) and [sql.md](sql.md) for examples).
+Client libraries:
 
+- Python: [PyArrow `open_stream` / `RecordBatchStreamReader`](https://arrow.apache.org/docs/python/ipc.html)
+- Rust: [`arrow-ipc` `StreamReader`](https://docs.rs/arrow-ipc/latest/arrow_ipc/reader/struct.StreamReader.html)
+- C++: [`RecordBatchStreamReader`](https://arrow.apache.org/docs/cpp/ipc.html)
+
+## Output formats
+
+Add an `output` field to download a single file instead of streaming Arrow IPC.
+
+### Simple formats
+
+Set `output.format` to one of: `csv`, `parquet`, `netcdf`, `ipc` (alias: `arrow`).
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "select": ["time", "temperature"],
+  "output": { "format": "csv" }
+}
+```
+
+### GeoParquet
+
+Requires longitude and latitude columns:
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "select": ["longitude", "latitude", "time", "temperature"],
+  "output": {
+    "format": {
+      "geoparquet": {
+        "longitude_column": "longitude",
+        "latitude_column": "latitude"
+      }
+    }
+  }
+}
+```
+
+### N-dimensional NetCDF
+
+Reconstructs a multi-dimensional NetCDF file from the result, using the specified columns as dimension axes:
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "select": ["time", "depth", "temperature"],
+  "output": {
+    "format": {
+      "nd_netcdf": {
+        "dimension_columns": ["time", "depth"]
+      }
+    }
+  }
+}
+```
+
+## Data sources
+
+Most queries target a **registered table** by name:
+
+```json
+{ "from": "default", "select": ["time"] }
+```
+
+Both styles also support querying files directly without a registered table — see the [JSON DSL `from` reference](./json.md#choosing-the-data-source-from) and the [SQL table functions](./sql.md#query-files-directly).

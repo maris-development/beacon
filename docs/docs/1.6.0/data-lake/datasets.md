@@ -21,6 +21,20 @@ Supported dialects:
 - **NetCDF4** (recommended)
 - **NetCDF3** — `char*` arrays with a string-like dimension (e.g. `STRLEN`) are inferred as fixed-length strings
 
+### Variable attributes
+
+NetCDF variables carry metadata attributes (e.g. `units`, `long_name`, `valid_min`). Beacon exposes these as extra columns using dot notation: `<variable>.<attribute>`. For example, a variable `temperature` with a `units` attribute is accessible as the column `temperature.units`.
+
+Attribute columns preserve the original type (string, integer, float, …) as stored in the file. They are available alongside the variable columns in every query.
+
+File-level global attributes are exposed with a leading dot and no variable prefix: `.<attribute>`. For example, a global attribute `source` is accessible as the column `.source`.
+
+```sql
+SELECT temperature, "temperature.units", "temperature.long_name", ".source"
+FROM read_netcdf(['argo/**/*.nc'])
+LIMIT 1
+```
+
 Limitations:
 
 - User-defined types are not supported.
@@ -38,6 +52,20 @@ Zarr datasets are queried using chunk-level predicate pushdown — Beacon reads 
 - Compressed chunks (zstd, gzip, blosc, …) are decompressed transparently.
 - Multiple Zarr stores can be combined in a single external table using glob patterns (e.g. `sst/*/zarr.json`).
 - S3 and other object-store backends are fully supported.
+
+### Array attributes
+
+Zarr arrays store per-array attributes in `.zattrs` (v2) or the `attributes` section of `zarr.json` (v3). Beacon exposes these as extra columns using dot notation: `<array>.<attribute>`. For example, an array `sst` with a `units` attribute is accessible as the column `sst.units`.
+
+Attribute columns preserve the original type (string, integer, float, …) as stored in the file.
+
+Root-level store attributes (not tied to a specific array) are exposed with a leading dot and no array prefix: `.<attribute>`. For example, a root attribute `Conventions` is accessible as the column `.Conventions`.
+
+```sql
+SELECT sst, "sst.units", "sst.long_name", ".Conventions"
+FROM read_zarr(['sst/*/zarr.json'])
+LIMIT 1
+```
 
 Limitations:
 
@@ -70,6 +98,20 @@ Beacon detects compression automatically and decompresses on the fly. zstd-compr
 ## GeoTIFF / Cloud-Optimized GeoTIFF
 
 Raster data in GeoTIFF and Cloud-Optimized GeoTIFF (COG) formats is supported. COG files are particularly efficient over S3 because Beacon can issue range requests to read only the required tiles.
+
+### Tag attributes
+
+GeoTIFF files carry TIFF tags and GeoTIFF metadata (e.g. `nodata`, `crs`, `scale`). Beacon exposes these per-band as extra columns using dot notation: `<band>.<attribute>`. For example, a band column `band_1` with a `nodata` tag is accessible as `band_1.nodata`.
+
+Attribute columns preserve the original type (string, integer, float, …) as stored in the file.
+
+File-level tags that are not tied to a specific band are exposed with a leading dot and no band prefix: `.<attribute>`. For example, a file-level `crs` tag is accessible as the column `.crs`.
+
+```sql
+SELECT band_1, "band_1.nodata", "band_1.scale", ".crs"
+FROM read_tiff(['rasters/elevation.tif'])
+LIMIT 1
+```
 
 ## Beacon Binary Format (BBF)
 

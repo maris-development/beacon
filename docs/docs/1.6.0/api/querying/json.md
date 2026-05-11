@@ -1,109 +1,66 @@
+# JSON Query DSL
 
-# Querying with JSON
-
-Beacon supports a structured JSON query format. This is useful when you want to build queries programmatically (without generating SQL), because the query is expressed as a typed object: select columns, apply filters, choose a data source, and pick an output format.
-
-JSON queries are sent to:
+The JSON DSL lets you express queries as a typed object — no SQL string building required. It is the preferred interface for programmatic clients and query builders.
 
 ```http
 POST /api/query
+Content-Type: application/json
 ```
 
-All paths are shown as relative URLs. Send them to your Beacon base URL.
+:::tip
+Discover available columns before querying:
 
-::: tip
-Discover columns first:
+- Default table: `GET /api/table-schema?table_name=default`
+- From a file glob: `GET /api/dataset-schema?file=argo/**/*.nc`
 
-- Default table schema: `GET /api/default-table-schema`
-- Per-dataset schema: `GET /api/dataset-schema?file=...`
 :::
 
 ## Request shape
 
-At the top level, the request body is a `Query`.
-
-- In JSON mode, you send a JSON query body directly.
-- You can optionally include `output` to download a file instead of [streaming Arrow IPC](#output-formats).
-
-### Minimal JSON query
-
-This queries a NetCDF file directly (useful when no table/default table is configured) and returns the first 10 rows as a CSV download.
-
-Raw HTTP:
-
-```http
-POST /api/query
-Content-Type: application/json
-
-{
-  "from": { "netcdf": { "paths": ["test-files/gridded-example.nc"] } },
-  "select": ["time", "latitude", "longitude"],
-  "limit": 10,
-  "output": { "format": "csv" }
-}
-```
-
-Notes:
-
-- `select` is required.
-- If `from` is omitted, Beacon uses the configured default table (if one is configured).
-- If you have not created any tables yet, specify a file source via `from` (for example `{"netcdf":{"paths":["...nc"]}}`).
-- If `output` is omitted, Beacon streams Arrow IPC (`application/vnd.apache.arrow.stream`).
+| Field | Required | Description |
+| ----- | -------- | ----------- |
+| `select` | Yes | Columns (and expressions) to return |
+| `from` | No | Data source — table name or inline file source |
+| `filters` | No | Row filters, combined with AND by default |
+| `sort_by` | No | Sort expressions |
+| `limit` | No | Maximum rows to return |
+| `offset` | No | Rows to skip |
+| `distinct` | No | DISTINCT ON expression |
+| `output` | No | Output format (default: Arrow IPC stream) |
 
 ## Selecting columns
 
-`select` accepts multiple forms:
+### Plain column
 
-- Column name string: `"temp"`
-- Column with alias:
+```json
+{ "select": ["time", "latitude", "longitude"] }
+```
 
-```http
-POST /api/query
-Content-Type: application/json
+### Column with alias
 
+```json
 {
-  "from": { "netcdf": { "paths": ["obs-example.nc"] } },
-  "select": [{ "column": "sea_surface_temperature", "alias": "sst" }],
-  "limit": 10,
-  "output": { "format": "csv" }
+  "select": [
+    { "column": "sea_surface_temperature", "alias": "sst" }
+  ]
 }
 ```
 
-For compatibility with older clients, `column_name` is accepted as an alias of `column`:
+### Function call
 
-```http
-POST /api/query
-Content-Type: application/json
-
+```json
 {
-  "from": { "netcdf": { "paths": ["argo-*.nc"] } },
-  "select": [{ "column_name": "TEMP", "alias": "temperature" }],
-  "limit": 10,
-  "output": { "format": "csv" }
+  "select": [
+    { "function": "round", "args": ["temperature", { "value": 2 }], "alias": "temperature_rounded" }
+  ]
 }
 ```
 
-- Function call:
-
-```http
-POST /api/query
-Content-Type: application/json
-
-{
-  "from": { "netcdf": { "paths": ["argo.nc", "argo-2.nc"] } },
-  "select": [{ "function": "round", "args": ["temp"], "alias": "temp_rounded" }],
-  "limit": 10,
-  "output": { "format": "csv" }
-}
-```
+`args` entries are either a column name string or a literal `{ "value": … }` object.
 
 ## Choosing the data source (`from`)
 
-You can query either a registered table or a set of files as an ad-hoc source.
-
-### Query a table
-
-Use `GET /api/tables` to discover the table names available.
+### Query a registered table
 
 ```http
 POST /api/query
@@ -111,67 +68,47 @@ Content-Type: application/json
 
 {
   "from": "default",
-  "select": ["time", "temp"],
-  "limit": 10,
+  "select": ["time", "temperature"],
+  "limit": 100,
   "output": { "format": "csv" }
 }
 ```
+
+Use `GET /api/tables` to list available table names. When `from` is omitted, Beacon uses the configured default table.
 
 ### Query files directly
 
-`from` also supports a format+paths shape.
+Pass a format key with a `paths` array. Paths are resolved relative to Beacon's dataset root and support glob patterns.
 
-NetCDF example:
-
-```http
-POST /api/query
-Content-Type: application/json
-
-{
-  "from": { "netcdf": { "paths": ["test-files/gridded-example.nc"] } },
-  "select": ["time", "latitude", "longitude"],
-  "limit": 100,
-  "output": { "format": "csv" }
-}
-```
-
-Zarr example:
+**NetCDF:**
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "from": { "zarr": { "paths": ["some-zarr-dataset/zarr.json"] } },
-  "select": ["time", "latitude", "longitude"],
+  "from": { "netcdf": { "paths": ["argo/**/*.nc"] } },
+  "select": ["time", "latitude", "longitude", "temperature"],
   "limit": 100,
   "output": { "format": "csv" }
 }
 ```
 
-Zarr statistics (predicate pruning):
-
-If you frequently filter on a small set of “coordinate-like” columns (for example time/lat/lon), provide `statistics_columns` so Beacon can prune Zarr groups and push down 1D slicing.
+**Zarr:**
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "from": {
-    "zarr": {
-      "paths": ["some-zarr-dataset/zarr.json"],
-      "statistics_columns": ["valid_time", "latitude", "longitude"]
-    }
-  },
-  "select": ["valid_time", "latitude", "longitude"],
-  "filters": [{ "column": "valid_time", "min": "2025-01-01" }],
+  "from": { "zarr": { "paths": ["sst/*/zarr.json"] } },
+  "select": ["time", "sst"],
   "limit": 100,
   "output": { "format": "csv" }
 }
 ```
 
-Zarr with glob paths and multiple datasets:
+To enable 1D slice pushdown for large Zarr stores, supply `statistics_columns`:
 
 ```http
 POST /api/query
@@ -180,85 +117,61 @@ Content-Type: application/json
 {
   "from": {
     "zarr": {
-      "paths": [
-        "datasets/**/*.zarr/zarr.json",
-        "test-files/gridded-example.zarr/zarr.json",
-        "other-zarr-dataset/zarr.json"
-      ]
+      "paths": ["sst/*/zarr.json"],
+      "statistics_columns": ["time", "latitude", "longitude"]
     }
   },
-  "select": ["time", "latitude", "longitude"],
-  "limit": 100,
+  "select": ["time", "latitude", "longitude", "sst"],
+  "filters": [{ "column": "time", "min": "2025-01-01" }],
+  "limit": 1000,
   "output": { "format": "csv" }
 }
 ```
 
-Parquet example:
+**Parquet:**
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "from": { "parquet": { "paths": ["some-folder/*.parquet"] } },
+  "from": { "parquet": { "paths": ["obs/**/*.parquet"] } },
   "select": ["time", "latitude", "longitude"],
   "limit": 100,
   "output": { "format": "csv" }
 }
 ```
 
-Other supported `from` formats include `zarr`, `parquet`, `csv`, `arrow`, and `odv`.
+Other supported format keys: `csv`, `arrow`, `odv`.
 
 ## Filters
 
-Use `filters` (recommended) to constrain results.
+`filters` is an array of filter objects. Multiple entries are combined with AND. A filter can be placed on any column in the schema.
 
-`filters` is an array so you can apply multiple filters (even multiple filters on the same column). Filters are combined with AND by default.
+### Range (min / max)
 
-::: tip
-Beacon also accepts a legacy single-object `filter` property, but the docs use `filters` for clarity.
-:::
-
-### Range filter (between)
-
-```http
-POST /api/query
-Content-Type: application/json
-
-{
-  "select": ["time", "temp"],
-  "filters": [{ "column": "temp", "min": 2, "max": 10 }],
-  "limit": 100,
-  "output": { "format": "csv" }
-}
+```json
+{ "filters": [{ "column": "temperature", "min": 2, "max": 10 }] }
 ```
 
-For compatibility with older clients, `for_query_parameter` is accepted as an alias of `column`.
+Either `min` or `max` can be omitted for an open-ended range.
 
-### Equality filter
+### Equality
 
-```http
-POST /api/query
-Content-Type: application/json
-
-{
-  "select": ["time", "platform"],
-  "filters": [{ "column": "platform", "eq": "SHIP" }],
-  "limit": 100,
-  "output": { "format": "csv" }
-}
+```json
+{ "filters": [{ "column": "platform", "eq": "SHIP" }] }
 ```
 
-### Combine filters (and/or)
+### AND (multiple filters)
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "select": ["time", "latitude", "longitude", "temp"],
+  "select": ["time", "latitude", "longitude", "temperature"],
   "filters": [
-    { "column": "temp", "min": 2, "max": 10 },
+    { "column": "temperature", "min": 2, "max": 10 },
     { "column": "latitude", "min": -10, "max": 10 }
   ],
   "limit": 10000,
@@ -266,14 +179,16 @@ Content-Type: application/json
 }
 ```
 
-To express OR conditions, wrap them in an `or` filter:
+### OR
+
+Wrap OR branches in a single `or` filter object:
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "select": ["time", "platform"],
+  "select": ["time", "platform", "temperature"],
   "filters": [
     {
       "or": [
@@ -282,36 +197,28 @@ Content-Type: application/json
       ]
     }
   ],
-  "limit": 100,
+  "limit": 1000,
   "output": { "format": "csv" }
 }
 ```
 
 ### GeoJSON spatial filter
 
-This filter checks whether a point (lon/lat columns) falls within a provided GeoJSON geometry.
+Tests whether a point (lon/lat columns) falls within a GeoJSON geometry:
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "select": ["time", "longitude", "latitude", "temp"],
+  "select": ["time", "longitude", "latitude", "temperature"],
   "filters": [
     {
       "longitude_column": "longitude",
       "latitude_column": "latitude",
       "geometry": {
         "type": "Polygon",
-        "coordinates": [
-          [
-            [4.0, 52.0],
-            [6.0, 52.0],
-            [6.0, 54.0],
-            [4.0, 54.0],
-            [4.0, 52.0]
-          ]
-        ]
+        "coordinates": [[[4.0, 52.0], [6.0, 52.0], [6.0, 54.0], [4.0, 54.0], [4.0, 52.0]]]
       }
     }
   ],
@@ -320,100 +227,50 @@ Content-Type: application/json
 }
 ```
 
-## Sorting, limits, offsets
+## Sorting and pagination
 
-- `limit`: maximum rows returned
-- `offset`: skip N rows
-- `sort_by`: sort expressions
+| Field | Description |
+| ----- | ----------- |
+| `sort_by` | Array of `{"Asc": "col"}` or `{"Desc": "col"}` objects |
+| `limit` | Maximum number of rows |
+| `offset` | Number of rows to skip |
 
-::: warning
-The current JSON encoding for `sort_by` uses enum keys and is case-sensitive.
-
-Use `[{"Asc":"time"}]` or `[{"Desc":"time"}]`.
+:::warning
+`sort_by` enum keys are case-sensitive: `"Asc"` and `"Desc"`, not `"asc"` / `"desc"`.
 :::
-
-## Output formats
-
-### Streaming Arrow IPC (default)
-
-If `output` is omitted, `/api/query` returns an Apache Arrow IPC stream (content type `application/vnd.apache.arrow.stream`).
-
-To download a single file instead, set `output.format`.
-
-Client libraries and docs for reading Arrow IPC streams:
-
-- Rust: [docs.rs/arrow-ipc StreamReader](https://docs.rs/arrow-ipc/latest/arrow_ipc/reader/struct.StreamReader.html)
-- Python: [PyArrow IPC streaming (open_stream / RecordBatchStreamReader)](https://arrow.apache.org/docs/python/ipc.html)
-- C++: [Arrow C++ IPC stream reading (RecordBatchStreamReader)](https://arrow.apache.org/docs/cpp/ipc.html)
-
-To download a single file, set `output.format`.
-
-Simple formats:
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "select": ["time", "temp"],
+  "select": ["time", "temperature"],
+  "sort_by": [{ "Desc": "time" }],
+  "offset": 100,
+  "limit": 50,
   "output": { "format": "csv" }
 }
 ```
 
-Supported simple values include: `csv`, `ipc` (alias: `arrow`), `parquet`, `netcdf`.
+## DISTINCT ON
 
-Formats with options:
-
-```http
-POST /api/query
-Content-Type: application/json
-
-{
-  "select": ["longitude", "latitude", "time", "temp"],
-  "output": {
-    "format": { "geoparquet": { "longitude_column": "longitude", "latitude_column": "latitude" } }
-  }
-}
-```
+Return one row per unique combination of the `on` columns:
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "select": ["time", "depth", "temp"],
-  "output": { "format": { "nd_netcdf": { "dimension_columns": ["time", "depth"] } } }
+  "distinct": {
+    "on": ["platform"],
+    "select": ["platform", "time", "temperature"]
+  },
+  "sort_by": [{ "Desc": "time" }],
+  "limit": 100,
+  "output": { "format": "csv" }
 }
 ```
 
-## Validating and explaining queries
+## Output formats
 
-Validate a query body:
-
-```http
-POST /api/parse-query
-Content-Type: application/json
-
-{ "select": ["time"], "limit": 1 }
-```
-
-Explain the planned query:
-
-```http
-POST /api/explain-query
-Content-Type: application/json
-
-{ "select": ["time"], "limit": 1 }
-```
-
-## Query metrics
-
-Beacon returns a query id via the `x-beacon-query-id` response header.
-
-```http
-GET /api/query/metrics/{query_id}
-```
-
-::: tip
-If you are building a UI, metrics are useful for showing row counts, bytes output, and timing breakdowns.
-:::
+See [Querying — Output formats](./index.md#output-formats) for the full list. The `output` field is identical for JSON DSL and SQL queries.

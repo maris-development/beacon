@@ -1,15 +1,12 @@
+# Exploring the Data Lake (REST API)
 
-# Exploring the Data Lake (API)
+Use these endpoints to discover what data is available on a running Beacon instance — without running a full query.
 
-This chapter shows how to discover what data is available on a running Beacon instance using raw HTTP request templates.
+**Concepts:**
 
-All paths are shown as relative URLs (for example `GET /api/info`). Send them to your Beacon base URL.
-
-## Concepts
-
-- **Datasets**: individual assets (e.g. a single `.nc` file, a single `.parquet` file, a Zarr group).
-- **Tables (collections)**: named logical tables that Beacon registers (often spanning many datasets).
-- **Schemas/columns**: returned as an Arrow schema (fields + types). Use schemas to discover which columns you can `select` and `filter` on.
+- **Datasets** — individual files (a single `.nc` file, a `.parquet` file, a Zarr group, etc.)
+- **Tables** — named logical tables registered in Beacon, often spanning many datasets
+- **Schemas** — Arrow field lists (name + type) describing the columns available for `select` and `filter`
 
 ## System info
 
@@ -17,11 +14,11 @@ All paths are shown as relative URLs (for example `GET /api/info`). Send them to
 GET /api/info
 ```
 
+Returns Beacon version, configuration summary, and registered table count.
+
 ## Datasets
 
 ### List datasets
-
-Preferred endpoint:
 
 ```http
 GET /api/list-datasets
@@ -29,42 +26,39 @@ GET /api/list-datasets
 
 Optional query parameters:
 
-- `pattern`: glob pattern to filter dataset paths (example: `*.nc`, `**/*.parquet`)
-- `offset`: pagination offset
-- `limit`: pagination limit
-
-Examples:
+| Parameter | Description |
+| --------- | ----------- |
+| `pattern` | Glob to filter paths (e.g. `*.nc`, `**/*.parquet`) |
+| `offset` | Pagination offset |
+| `limit` | Pagination limit |
 
 ```http
-GET /api/list-datasets?pattern=*.nc&limit=50&offset=0
+GET /api/list-datasets?pattern=argo/**/*.nc&limit=50&offset=0
 ```
 
-### Total dataset count
+### Dataset count
 
 ```http
 GET /api/total-datasets
 ```
 
-### Get dataset schema (columns)
+### Dataset schema
 
-To get the Arrow schema for a single dataset path:
-
-```http
-GET /api/dataset-schema?file=test-files/gridded-example.nc
-```
-
-To infer a merged schema across multiple datasets using a glob:
+Returns the Arrow schema (fields + types) for a single path:
 
 ```http
-GET /api/dataset-schema?file=**/*.nc
+GET /api/dataset-schema?file=argo/profile_001.nc
 ```
 
-::: tip
-The response is an Arrow schema JSON. Column names are under `.fields[].name`.
+To infer a merged schema across multiple files using a glob:
 
-:::
+```http
+GET /api/dataset-schema?file=argo/**/*.nc
+```
 
-## Tables (collections)
+The response contains an Arrow schema JSON. Column names are under `.fields[].name`.
+
+## Tables
 
 ### List tables
 
@@ -72,31 +66,31 @@ The response is an Arrow schema JSON. Column names are under `.fields[].name`.
 GET /api/tables
 ```
 
-### Get default table name
+### Default table
 
-If the query request does not specify `from`, Beacon uses this table.
+Beacon uses this table when a query omits `from`:
 
 ```http
 GET /api/default-table
 ```
 
-### Get table schema (columns)
+### Table schema
 
 ```http
 GET /api/table-schema?table_name=default
 ```
 
-### List all tables with schemas
+### All tables with schemas
 
-This is convenient for UI discovery, but can be heavier on large installations.
+Convenient for UI discovery, but can be slow on large installations:
 
 ```http
 GET /api/tables-with-schema
 ```
 
-### Get table configuration
+### Table configuration
 
-Useful to see how a table was constructed (paths, file format, statistics settings, etc.).
+Shows how a table was constructed — paths, file format, statistics settings, etc.:
 
 ```http
 GET /api/table-config?table_name=default
@@ -104,34 +98,38 @@ GET /api/table-config?table_name=default
 
 ## Functions
 
-Beacon exposes DataFusion scalar functions and Beacon table functions.
+List all registered DataFusion scalar functions:
 
 ```http
 GET /api/functions
 ```
 
+List all registered Beacon table functions (e.g. `read_netcdf`, `read_zarr`):
+
 ```http
 GET /api/table-functions
 ```
 
-Table functions are especially useful for SQL queries (e.g. `read_netcdf([...])`, `read_parquet([...])`).
+See the [Function Reference](../sql/function-reference.md) for descriptions and signatures.
 
-## Admin endpoints (files)
+## Admin (file management)
 
-Admin endpoints are under `/api/admin/*` for file upload, download, and deletion, and are protected by HTTP Basic Auth.
+File upload, download, and deletion endpoints are available under `/api/admin/*` and are protected by HTTP Basic Auth.
 
-Table lifecycle is SQL-only. Create, replace, or remove tables by executing SQL DDL through Beacon's SQL surfaces, such as the HTTP query endpoint or Flight SQL.
+**Table lifecycle is SQL-only.** Create, replace, or remove tables by sending SQL DDL to the query endpoint:
 
-Examples:
+```http
+POST /api/query
+Content-Type: application/json
 
-```sql
-CREATE EXTERNAL TABLE argo
-STORED AS PARQUET
-LOCATION 'argo/'
+{ "sql": "CREATE EXTERNAL TABLE argo STORED AS PARQUET LOCATION 'argo/'" }
 ```
 
-```sql
-DROP TABLE argo
+```http
+POST /api/query
+Content-Type: application/json
+
+{ "sql": "DROP TABLE argo" }
 ```
 
-See the Data Lake docs for deeper table concepts, or browse `/swagger` for the exact HTTP request and response shapes that remain on the admin surface.
+Browse `/swagger` for the full admin request and response shapes.

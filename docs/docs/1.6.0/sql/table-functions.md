@@ -24,7 +24,7 @@ read_netcdf(glob_paths, dimensions)
 
 Reads NetCDF files matching one or more glob patterns.
 
-The optional `dimensions` argument pins which variables Beacon treats as dimension coordinates when reading N-dimensional variables. Providing it can improve correctness and performance for datasets with complex dimensionality.
+The optional `dimensions` argument filters which variables are returned: a variable is included only if all of its dimensions are a subset of the provided list. Use it to exclude high-dimensional variables you don't need, or to resolve ambiguity when files contain variables with incompatible dimensionalities.
 
 ```sql
 SELECT time, latitude, longitude, temperature
@@ -33,6 +33,22 @@ FROM read_netcdf(['argo/**/*.nc'])
 -- With explicit dimension columns
 SELECT *
 FROM read_netcdf(['argo/**/*.nc'], ['time', 'pressure'])
+```
+
+### Variable attributes
+
+NetCDF variable attributes (e.g. `units`, `long_name`) are exposed as additional columns using the pattern `<variable>.<attribute>`. Attribute columns preserve the original type (string, integer, float, …). File-level global attributes use a leading dot with no variable prefix: `.<attribute>`. Quote these column names because they contain a dot.
+
+```sql
+-- Variable attribute
+SELECT temperature, "temperature.units", "temperature.long_name"
+FROM read_netcdf(['argo/**/*.nc'])
+LIMIT 1
+
+-- Global attribute
+SELECT ".source", temperature
+FROM read_netcdf(['argo/**/*.nc'])
+LIMIT 1
 ```
 
 ## `read_zarr`
@@ -53,6 +69,22 @@ SELECT * FROM read_zarr(['sst/*/zarr.json'])
 SELECT time, sst
 FROM read_zarr(['sst/*/zarr.json'], ['time', 'latitude', 'longitude'])
 WHERE time >= '2024-01-01'
+```
+
+### Array attributes
+
+Per-array attributes are exposed as additional columns using the pattern `<array>.<attribute>`. Attribute columns preserve the original type (string, integer, float, …). Root-level store attributes use a leading dot with no array prefix: `.<attribute>`. Quote these column names because they contain a dot.
+
+```sql
+-- Array attribute
+SELECT sst, "sst.units", "sst.long_name"
+FROM read_zarr(['sst/*/zarr.json'])
+LIMIT 1
+
+-- Root-level global attribute
+SELECT ".Conventions", sst
+FROM read_zarr(['sst/*/zarr.json'])
+LIMIT 1
 ```
 
 ## `read_parquet`
@@ -129,4 +161,20 @@ Reads GeoTIFF and Cloud-Optimized GeoTIFF files.
 
 ```sql
 SELECT * FROM read_tiff(['rasters/elevation.tif'])
+```
+
+### Tag attributes
+
+Per-band TIFF tags are exposed as additional columns using the pattern `<band>.<attribute>`. Attribute columns preserve the original type (string, integer, float, …). File-level tags not tied to a specific band use a leading dot with no band prefix: `.<attribute>`. Quote these column names because they contain a dot.
+
+```sql
+-- Band attribute
+SELECT band_1, "band_1.nodata", "band_1.scale"
+FROM read_tiff(['rasters/elevation.tif'])
+LIMIT 1
+
+-- File-level global tag
+SELECT ".crs", band_1
+FROM read_tiff(['rasters/elevation.tif'])
+LIMIT 1
 ```

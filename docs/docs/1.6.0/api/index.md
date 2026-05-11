@@ -1,37 +1,35 @@
-# API
+# REST API
 
-Beacon exposes an HTTP API for:
+Beacon exposes an HTTP API for querying datasets, inspecting schemas, and managing the data lake. All surfaces speak JSON over HTTP.
 
-- Discovering datasets and tables (collections)
-- Inspecting available columns (Arrow schemas)
-- Running queries (JSON DSL or SQL)
-- Downloading results in formats like Arrow IPC, CSV, Parquet, NetCDF, GeoParquet, ODV
+## OpenAPI reference
 
-::: tip
-The API is fully documented via OpenAPI. When Beacon is running, open:
+Beacon generates an OpenAPI spec at runtime. When the server is running, open one of these URLs:
 
-- Swagger UI: `/swagger`
-- Scalar UI: `/scalar/`
-- OpenAPI JSON: `/openapi.json`
-:::
+| UI | URL |
+| -- | --- |
+| Swagger UI | `/swagger` |
+| Scalar UI | `/scalar/` |
+| Raw spec (JSON) | `/openapi.json` |
 
 ## Base URL
 
-Examples in these docs are shown as raw HTTP request templates (e.g. `GET /api/health`).
+All endpoints in these docs are shown as relative paths (e.g. `GET /api/health`). Send requests to your Beacon base URL — by default `http://localhost:5001`. If you run behind a reverse proxy, use that URL instead.
 
-Send them to your Beacon base URL (by default `http://localhost:5001`).
-
-If you run behind a reverse proxy, use that URL instead.
-
-## Quick health check
+## Health check
 
 ```http
 GET /api/health
 ```
 
-## Next
+Returns `200 OK` when Beacon is up and ready.
 
-- Explore datasets/tables: [exploring-data-lake.md](exploring-data-lake.md)
-- Query with JSON: [querying/json.md](querying/json.md)
-- Query with SQL: [querying/sql.md](querying/sql.md)
-- Query examples: [querying/examples.md](querying/examples.md)
+## What's in the API
+
+| Section | Description |
+| ------- | ----------- |
+| [Exploring the Data Lake](./exploring-data-lake.md) | Discover datasets, tables, and schemas |
+| [Querying](./querying/index.md) | Run queries (JSON DSL or SQL) and receive results |
+| [JSON Query DSL](./querying/json.md) | Structured query format for programmatic clients |
+| [SQL](./querying/sql.md) | Full SQL via DataFusion |
+| [Examples](./querying/examples.md) | Copy-paste query patterns |

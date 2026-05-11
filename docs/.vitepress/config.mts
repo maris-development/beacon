@@ -281,15 +281,55 @@ export default defineConfig({
               collapsed: true,
               items: [
                 { text: 'Aggregate', link: '/docs/1.6.0/sql/function-reference#aggregate-functions' },
-                { text: 'Date & Time', link: '/docs/1.6.0/sql/function-reference#date-and-time-functions' },
                 { text: 'Math', link: '/docs/1.6.0/sql/function-reference#math-functions' },
                 { text: 'String', link: '/docs/1.6.0/sql/function-reference#string-functions' },
+                { text: 'Regular Expressions', link: '/docs/1.6.0/sql/function-reference#regular-expression-functions' },
+                { text: 'Binary String', link: '/docs/1.6.0/sql/function-reference#binary-string-functions' },
+                { text: 'Date & Time', link: '/docs/1.6.0/sql/function-reference#date-and-time-functions' },
+                { text: 'Conditional', link: '/docs/1.6.0/sql/function-reference#conditional-expressions' },
+                { text: 'Casting', link: '/docs/1.6.0/sql/function-reference#casting' },
+                {
+                  text: 'Beacon-specific',
+                  link: '/docs/1.6.0/sql/function-reference#beacon-specific-functions',
+                  collapsed: true,
+                  items: [
+                    { text: 'beacon_version', link: '/docs/1.6.0/sql/function-reference#beacon_version' },
+                    { text: 'coalesce_label', link: '/docs/1.6.0/sql/function-reference#coalesce_label' },
+                    { text: 'cast_int8_as_char', link: '/docs/1.6.0/sql/function-reference#cast_int8_as_charn' },
+                    { text: 'try_arrow_cast', link: '/docs/1.6.0/sql/function-reference#try_arrow_castexpr-type_str' },
+                  ]
+                },
+                {
+                  text: 'Geospatial',
+                  link: '/docs/1.6.0/sql/function-reference#geospatial-functions',
+                  collapsed: true,
+                  items: [
+                    { text: 'st_within_point', link: '/docs/1.6.0/sql/function-reference#st_within_point' },
+                    { text: 'st_geojson_as_wkt', link: '/docs/1.6.0/sql/function-reference#st_geojson_as_wkt' },
+                  ]
+                },
+                {
+                  text: 'Domain Mapping',
+                  link: '/docs/1.6.0/sql/function-reference#domain-mapping-functions',
+                  collapsed: true,
+                  items: [
+                    { text: 'pressure_to_depth_teos_10', link: '/docs/1.6.0/sql/function-reference#pressure_to_depth_teos_10' },
+                    { text: 'map_units', link: '/docs/1.6.0/sql/function-reference#map_units' },
+                    { text: 'Common', link: '/docs/1.6.0/sql/function-reference#common' },
+                    { text: 'CMEMS', link: '/docs/1.6.0/sql/function-reference#cmems' },
+                    { text: 'CORA', link: '/docs/1.6.0/sql/function-reference#cora' },
+                    { text: 'EMODnet Chemistry', link: '/docs/1.6.0/sql/function-reference#emodnet-chemistry' },
+                    { text: 'SeaDataNet', link: '/docs/1.6.0/sql/function-reference#seadatanet' },
+                    { text: 'Argo', link: '/docs/1.6.0/sql/function-reference#argo' },
+                    { text: 'World Ocean Database', link: '/docs/1.6.0/sql/function-reference#world-ocean-database-wod' },
+                  ]
+                },
               ]
             },
           ]
         },
         {
-          text: 'API',
+          text: 'REST API',
           link: '/docs/1.6.0/api/',
           collapsed: false,
           items: [
@@ -300,6 +340,13 @@ export default defineConfig({
             {
               text: 'Exploring the Data Lake',
               link: '/docs/1.6.0/api/exploring-data-lake',
+              collapsed: true,
+              items: [
+                { text: 'Datasets', link: '/docs/1.6.0/api/exploring-data-lake#datasets' },
+                { text: 'Tables', link: '/docs/1.6.0/api/exploring-data-lake#tables' },
+                { text: 'Functions', link: '/docs/1.6.0/api/exploring-data-lake#functions' },
+                { text: 'Admin', link: '/docs/1.6.0/api/exploring-data-lake#admin-file-management' },
+              ]
             },
             {
               text: 'Querying',
@@ -307,29 +354,25 @@ export default defineConfig({
               collapsed: false,
               items: [
                 {
-                  text: 'SQL',
-                  link: '/docs/1.6.0/api/querying/sql',
+                  text: 'JSON Query DSL',
+                  link: '/docs/1.6.0/api/querying/json',
+                  collapsed: true,
+                  items: [
+                    { text: 'Selecting Columns', link: '/docs/1.6.0/api/querying/json#selecting-columns' },
+                    { text: 'Data Source', link: '/docs/1.6.0/api/querying/json#choosing-the-data-source-from' },
+                    { text: 'Filters', link: '/docs/1.6.0/api/querying/json#filters' },
+                    { text: 'Sorting & Pagination', link: '/docs/1.6.0/api/querying/json#sorting-and-pagination' },
+                    { text: 'Output Formats', link: '/docs/1.6.0/api/querying/json#output-formats' },
+                  ]
                 },
                 {
-                  text: 'JSON',
-                  link: '/docs/1.6.0/api/querying/json',
+                  text: 'SQL',
+                  link: '/docs/1.6.0/api/querying/sql',
+                  collapsed: true,
                   items: [
-                    {
-                      text: 'Selecting Columns',
-                      link: '/docs/1.6.0/api/querying/json#selecting-columns'
-                    },
-                    {
-                      text: 'From',
-                      link: '/docs/1.6.0/api/querying/json#choosing-the-data-source-from'
-                    },
-                    {
-                      text: 'Filtering',
-                      link: '/docs/1.6.0/api/querying/json#filters'
-                    },
-                    {
-                      text: 'Output',
-                      link: '/docs/1.6.0/api/querying/json#output-formats'
-                    }
+                    { text: 'Query a Table', link: '/docs/1.6.0/api/querying/sql#query-a-registered-table' },
+                    { text: 'Table Functions', link: '/docs/1.6.0/api/querying/sql#query-files-directly' },
+                    { text: 'Output Formats', link: '/docs/1.6.0/api/querying/sql#output-formats' },
                   ]
                 },
                 {
@@ -338,21 +381,6 @@ export default defineConfig({
                 },
               ]
             },
-          ]
-
-        },
-        {
-          text: 'API Libraries & Tooling',
-          link: '/docs/1.6.0/libraries-tooling',
-          items: [
-            {
-              text: 'Python',
-              link: '/docs/1.6.0/libraries-tooling/python-sdk',
-            },
-            {
-              text: 'CLI Tool',
-              link: '/docs/1.6.0/libraries-tooling/cli',
-            }
           ]
         }
       ],
