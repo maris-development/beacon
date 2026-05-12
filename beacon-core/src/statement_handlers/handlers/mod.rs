@@ -16,8 +16,9 @@ use crate::statement_handlers::registry::StatementRegistry;
 
 pub(crate) fn register_default_statement_handlers(registry: &mut StatementRegistry) {
     registry.register_handler(Arc::new(DFStatementHandler));
-    registry.register_handler(Arc::new(IngestStatementHandler));
-    registry.register_handler(Arc::new(DeleteAtlasDatasetsStatementHandler));
-    registry.register_handler(Arc::new(CreateAtlasTableStatementHandler));
-    registry.register_handler(Arc::new(AlterAtlasStatementHandler));
+    // ToDo: Re-enable when the handlers are implemented
+    // registry.register_handler(Arc::new(IngestStatementHandler));
+    // registry.register_handler(Arc::new(DeleteAtlasDatasetsStatementHandler));
+    // registry.register_handler(Arc::new(CreateAtlasTableStatementHandler));
+    // registry.register_handler(Arc::new(AlterAtlasStatementHandler));
 }

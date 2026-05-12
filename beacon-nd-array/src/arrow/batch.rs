@@ -1,7 +1,9 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
+use indexmap::IndexMap;
+
 use arrow::{
-    array::{ArrayRef, new_null_array},
+    array::{ArrayRef, RecordBatchOptions, new_null_array},
     compute::concat,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
@@ -12,7 +14,10 @@ use crate::{
     NdArrayD,
     array::subset::ArraySubset,
     arrow::{
-        pushdown::{is_pushdown_candidate_ragged, mask_pushdown},
+        pushdown::{
+            compute_chunk_mask, is_pushdown_candidate, is_pushdown_candidate_ragged,
+            mask_is_all_false, mask_pushdown,
+        },
         pushdown_filter::PushdownFilter,
     },
     dataset::{
@@ -24,13 +29,66 @@ use crate::{
 
 use super::array::ndarray_to_arrow_array;
 
+pub fn any_dataset_as_row_size(
+    dataset: AnyDataset,
+) -> anyhow::Result<BoxStream<'static, anyhow::Result<RecordBatch>>> {
+    match dataset {
+        AnyDataset::Regular(dataset) => {
+            // Find max array and use its shape to determine the number of rows using the product.
+            let max_array = dataset
+                .arrays
+                .values()
+                .max_by_key(|array| array.shape().len())
+                .ok_or_else(|| anyhow::anyhow!("Dataset contains no arrays"))?;
+
+            let shape = max_array.shape();
+            if shape.is_empty() {
+                Ok(futures::stream::once(async {
+                    let schema = Arc::new(Schema::empty());
+                    let record_batch_options = RecordBatchOptions::new().with_row_count(Some(1));
+                    RecordBatch::try_new_with_options(schema, vec![], &record_batch_options)
+                        .map_err(|e| e.into())
+                })
+                .boxed())
+            } else {
+                Ok(futures::stream::once(async move {
+                    let schema = Arc::new(Schema::empty());
+                    let record_batch_options =
+                        RecordBatchOptions::new().with_row_count(Some(shape.iter().product()));
+                    RecordBatch::try_new_with_options(schema, vec![], &record_batch_options)
+                        .map_err(|e| e.into())
+                })
+                .boxed())
+            }
+        }
+        AnyDataset::Ragged { ragged, .. } => {
+            // The ragged dataset row count is the size of the largest obs variable.
+            let max_obs_rows = ragged
+                .observation_dimensions()
+                .filter_map(|dim| ragged.variables.get(dim))
+                .filter_map(|var| var.array().shape().first().cloned())
+                .max()
+                .unwrap_or(0);
+
+            Ok(futures::stream::once(async move {
+                let schema = Arc::new(Schema::empty());
+                let record_batch_options =
+                    RecordBatchOptions::new().with_row_count(Some(max_obs_rows));
+                RecordBatch::try_new_with_options(schema, vec![], &record_batch_options)
+                    .map_err(|e| e.into())
+            })
+            .boxed())
+        }
+    }
+}
+
 pub fn any_dataset_as_record_batch_stream(
     dataset: AnyDataset,
     batch_size: usize,
     predicate: Option<PushdownFilter>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     match dataset {
-        AnyDataset::Regular(ds) => dataset_as_record_batch_stream(ds, predicate),
+        AnyDataset::Regular(ds) => dataset_as_record_batch_stream(ds, batch_size, predicate),
         AnyDataset::Ragged { ragged, .. } => {
             ragged_dataset_as_record_batch_stream(ragged, batch_size, predicate)
         }
@@ -44,7 +102,7 @@ pub fn any_dataset_as_record_batch_stream(
 fn ragged_dataset_as_record_batch_stream(
     ragged: RaggedDataset,
     batch_size: usize,
-    _predicate: Option<PushdownFilter>,
+    predicate: Option<PushdownFilter>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     let schema = ragged_record_batch_schema(&ragged);
     let obs_dims: std::collections::HashSet<String> =
@@ -59,7 +117,7 @@ fn ragged_dataset_as_record_batch_stream(
         for (name, array) in &ragged.variables {
             if let RaggedArray::InstanceVariable(array) = array
                 && is_pushdown_candidate_ragged(array, &instance_dim)
-                && let Some(value_range) = _predicate.as_ref().and_then(|f| f.ranges().get(name))
+                && let Some(value_range) = predicate.as_ref().and_then(|f| f.ranges().get(name))
             {
                 let array_mask = mask_pushdown(array.clone(), value_range).await?;
                 assert_eq!(
@@ -315,125 +373,157 @@ fn run_length_expand(
     arrow::compute::take(array.as_ref(), &indices_array, None)
 }
 
-pub fn dataset_as_record_batch_stream(
-    dataset: Dataset,
-    _predicate: Option<PushdownFilter>,
-) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
-    let dimensions = dataset.dimensions;
-
-    // Verify that all arrays have all their dimensions being part of the dataset dimensions.
+fn extract_dataset_layout(
+    dataset: &Dataset,
+) -> anyhow::Result<(Vec<String>, Vec<usize>, Vec<usize>)> {
     for (array_name, array) in &dataset.arrays {
         if !array
             .dimensions()
             .iter()
-            .all(|d| dimensions.contains_key(d))
+            .all(|d| dataset.dimensions.contains_key(d))
         {
             let array_dimensions = array.dimensions();
-            let dataset_dimensions = dimensions.keys().cloned().collect::<Vec<String>>();
-            let array_name = array_name.clone();
-            return futures::stream::once(async move {
-                Err(anyhow::anyhow!(
-                    "Array '{}' has dimensions: {:?} that are not part of the dataset dimensions: {:?}",
-                    array_name,
-                    array_dimensions,
-                    dataset_dimensions
-                ))
-            })
-            .boxed();
+            let dataset_dimensions = dataset.dimensions.keys().cloned().collect::<Vec<String>>();
+            anyhow::bail!(
+                "Array '{}' has dimensions: {:?} that are not part of the dataset dimensions: {:?}",
+                array_name,
+                array_dimensions,
+                dataset_dimensions
+            );
         }
     }
 
-    // Find the array with the largest number of dimensions to determine the broadcast target.
-    let Some((_, max_array)) = dataset
+    let (_, max_array) = dataset
         .arrays
         .iter()
         .max_by_key(|(_, array)| array.shape().len())
-    else {
-        return futures::stream::once(async move {
-            Err(anyhow::anyhow!(
+        .ok_or_else(|| {
+            anyhow::anyhow!(
                 "Dataset has no arrays, so we can not determine the shape and chunk shape to use for iterating over the dataset."
-            ))
-        })
-        .boxed();
-    };
+            )
+        })?;
 
-    let max_dims = max_array.dimensions();
-    let max_shape = max_array.shape();
-    let chunk_shape = max_array.chunk_shape();
+    Ok((
+        max_array.dimensions(),
+        max_array.shape(),
+        max_array.chunk_shape(),
+    ))
+}
 
-    // Build schema from dataset arrays.
-    let schema = Arc::new(Schema::new(
-        dataset
-            .arrays
+fn build_dataset_schema(arrays: &IndexMap<String, Arc<dyn NdArrayD>>) -> Arc<Schema> {
+    Arc::new(Schema::new(
+        arrays
             .iter()
             .map(|(name, array)| {
                 let arrow_dt: DataType = array.datatype().into();
                 Field::new(name.clone(), arrow_dt, true)
             })
             .collect::<Vec<_>>(),
-    ));
+    ))
+}
 
-    if chunk_shape == max_shape {
-        // No chunking needed: broadcast all arrays and return a single RecordBatch.
-        let arrays = dataset.arrays;
-        let schema = schema.clone();
-        return futures::stream::once(async move {
-            let mut arrow_arrays: Vec<ArrayRef> = Vec::with_capacity(arrays.len());
-
-            for (_, array) in &arrays {
-                let broadcasted = array.broadcast(max_shape.clone(), max_dims.clone()).await?;
-                arrow_arrays.push(ndarray_to_arrow_array(broadcasted.as_ref()).await?);
+async fn compute_predicate_masks(
+    arrays: &IndexMap<String, Arc<dyn NdArrayD>>,
+    predicate: Option<PushdownFilter>,
+) -> anyhow::Result<Vec<(String, Vec<bool>)>> {
+    let mut dim_masks: Vec<(String, Vec<bool>)> = Vec::new();
+    if let Some(pred) = predicate {
+        let ranges = pred.ranges();
+        for (name, array) in arrays {
+            if let Some(range) = ranges.get(name) {
+                if is_pushdown_candidate(array) {
+                    let dim = array.dimensions()[0].clone();
+                    let mask = mask_pushdown(array.clone(), range).await?;
+                    dim_masks.push((dim, mask));
+                }
             }
-            let batch = RecordBatch::try_new(schema.clone(), arrow_arrays)?;
+        }
+    }
+    Ok(dim_masks)
+}
 
-            Ok(batch)
-        })
-        .boxed();
+async fn read_chunk(
+    arrays: &IndexMap<String, Arc<dyn NdArrayD>>,
+    subset: ArraySubset,
+    schema: Arc<Schema>,
+    max_dims: &[String],
+    dim_masks: &[(String, Vec<bool>)],
+) -> anyhow::Result<Option<RecordBatch>> {
+    if !dim_masks.is_empty() {
+        let mask = compute_chunk_mask(dim_masks, max_dims, &subset.start, &subset.shape);
+        if mask_is_all_false(&mask) {
+            return Ok(None);
+        }
     }
 
-    // Chunked path: generate chunk subsets from the max shape and chunk shape,
-    // then for each chunk, subset each array (before broadcasting to avoid materializing full data).
-    let subsets = generate_chunk_subsets(&max_shape, &chunk_shape);
-    let arrays = dataset.arrays;
+    let mut arrow_arrays: Vec<ArrayRef> = Vec::with_capacity(arrays.len());
+    for (name, array) in arrays {
+        let array_subset = generate_array_subset_from_chunk(&subset, max_dims, array.as_ref());
+        let sliced = array
+            .subset(array_subset)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to subset array '{}': {}", name, e))?;
+        let broadcasted = sliced
+            .broadcast(subset.shape.clone(), max_dims.to_vec())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to broadcast array '{}': {}", name, e))?;
+        arrow_arrays.push(
+            ndarray_to_arrow_array(broadcasted.as_ref())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to convert array '{}' to Arrow: {}", name, e)
+                })?,
+        );
+    }
+    Ok(Some(RecordBatch::try_new(schema, arrow_arrays)?))
+}
 
-    futures::stream::iter(subsets)
-        .then(move |subset| {
-            let max_dims = max_dims.clone();
-            let arrays = arrays.clone();
-            let schema = schema.clone();
-            async move {
-                // Early-skip: if this chunk is entirely filtered out, don't read data.
-                let mut arrow_arrays: Vec<ArrayRef> = Vec::with_capacity(arrays.len());
-                for (name, array) in &arrays {
-                    let array_subset =
-                        generate_array_subset_from_chunk(&subset, &max_dims, array.as_ref());
-                    let sliced = array
-                        .subset(array_subset)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to subset array '{}': {}", name, e))?;
-                    let broadcasted = sliced
-                        .broadcast(subset.shape.clone(), max_dims.clone())
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to broadcast array '{}': {}", name, e)
-                        })?;
-                    arrow_arrays.push(ndarray_to_arrow_array(broadcasted.as_ref()).await.map_err(
-                        |e| anyhow::anyhow!("Failed to convert array '{}' to Arrow: {}", name, e),
-                    )?);
+pub fn dataset_as_record_batch_stream(
+    dataset: Dataset,
+    batch_size: usize,
+    predicate: Option<PushdownFilter>,
+) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
+    let (max_dims, max_shape, chunk_shape) = match extract_dataset_layout(&dataset) {
+        Ok(layout) => layout,
+        Err(e) => return futures::stream::once(async move { Err(e) }).boxed(),
+    };
+
+    let schema = build_dataset_schema(&dataset.arrays);
+
+    let effective_chunk_shape = if chunk_shape != max_shape {
+        chunk_shape
+    } else {
+        c_order_chunk_shape(&max_shape, batch_size)
+    };
+
+    let subsets = generate_chunk_subsets(&max_shape, &effective_chunk_shape);
+    let arrays = Arc::new(dataset.arrays);
+
+    futures::stream::once(async move {
+        let dim_masks = Arc::new(compute_predicate_masks(&arrays, predicate).await?);
+        Ok((arrays, subsets, schema, max_dims, dim_masks))
+    })
+    .map(|result| match result {
+        Ok((arrays, subsets, schema, max_dims, dim_masks)) => futures::stream::iter(subsets)
+            .then(move |subset| {
+                let arrays = arrays.clone();
+                let schema = schema.clone();
+                let max_dims = max_dims.clone();
+                let dim_masks = dim_masks.clone();
+                async move { read_chunk(&arrays, subset, schema, &max_dims, &dim_masks).await }
+            })
+            .filter_map(|result| async move {
+                match result {
+                    Ok(Some(batch)) if batch.num_rows() > 0 => Some(Ok(batch)),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
                 }
-                let batch = RecordBatch::try_new(schema.clone(), arrow_arrays)?;
-
-                Ok(Some(batch))
-            }
-        })
-        .filter_map(|result| async move {
-            match result {
-                Ok(Some(batch)) => Some(Ok(batch)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            }
-        })
-        .boxed()
+            })
+            .boxed(),
+        Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
+    })
+    .flatten()
+    .boxed()
 }
 
 /// For a given chunk subset (expressed in max_dims space), compute the corresponding
@@ -455,6 +545,19 @@ fn generate_array_subset_from_chunk(
     }
 
     ArraySubset::new(start, shape)
+}
+
+/// Compute a C-memory-ordered chunk shape targeting approximately `batch_size` elements.
+/// Inner dimensions are kept whole; only the outermost axis is cut.
+fn c_order_chunk_shape(shape: &[usize], batch_size: usize) -> Vec<usize> {
+    if shape.is_empty() {
+        return vec![];
+    }
+    let inner: usize = shape[1..].iter().product::<usize>().max(1);
+    let rows = (batch_size / inner).max(1).min(shape[0].max(1));
+    let mut chunk = shape.to_vec();
+    chunk[0] = rows;
+    chunk
 }
 
 /// Generate all chunk subsets for iterating over `shape` in chunks of `chunk_shape`.
@@ -538,7 +641,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("values", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, None)
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None)
             .try_collect()
             .await
             .unwrap();
@@ -573,7 +676,7 @@ mod tests {
 
         let ds = make_dataset(vec![("data", Arc::new(nd_2d)), ("scale", Arc::new(nd_1d))]).await;
 
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, None)
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None)
             .try_collect()
             .await
             .unwrap();
@@ -609,7 +712,9 @@ mod tests {
         ds.dimensions.clear();
 
         let results: Vec<anyhow::Result<RecordBatch>> =
-            dataset_as_record_batch_stream(ds, None).collect().await;
+            dataset_as_record_batch_stream(ds, usize::MAX, None)
+                .collect()
+                .await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
     }
@@ -618,7 +723,9 @@ mod tests {
     async fn test_empty_dataset_error() {
         let ds = make_dataset(vec![]).await;
         let results: Vec<anyhow::Result<RecordBatch>> =
-            dataset_as_record_batch_stream(ds, None).collect().await;
+            dataset_as_record_batch_stream(ds, usize::MAX, None)
+                .collect()
+                .await;
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
     }
@@ -633,7 +740,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, None)
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None)
             .try_collect()
             .await
             .unwrap();
@@ -683,6 +790,131 @@ mod tests {
         let result = generate_array_subset_from_chunk(&chunk_subset, &chunk_dims, &nd);
         assert_eq!(result.start, vec![0, 10]);
         assert_eq!(result.shape, vec![4, 5]);
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_2d_cuts_outer_axis() {
+        // shape [10, 5], batch_size 15 → inner=5, rows=3 → [3, 5]
+        assert_eq!(c_order_chunk_shape(&[10, 5], 15), vec![3, 5]);
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_batch_larger_than_array() {
+        // batch_size bigger than total → rows capped at shape[0]
+        assert_eq!(c_order_chunk_shape(&[4, 3], 1000), vec![4, 3]);
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_usize_max() {
+        // usize::MAX must not overflow and must cap at shape[0]
+        assert_eq!(c_order_chunk_shape(&[6, 3], usize::MAX), vec![6, 3]);
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_1d() {
+        // 1-D: inner=1, rows=batch_size capped at shape[0]
+        assert_eq!(c_order_chunk_shape(&[20], 7), vec![7]);
+        assert_eq!(c_order_chunk_shape(&[20], 100), vec![20]);
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_batch_smaller_than_row() {
+        // batch_size < one inner row → rows=1 (minimum)
+        assert_eq!(c_order_chunk_shape(&[10, 100], 50), vec![1, 100]);
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_empty() {
+        assert_eq!(c_order_chunk_shape(&[], 100), Vec::<usize>::new());
+    }
+
+    #[tokio::test]
+    async fn test_chunked_stream_splits_into_multiple_batches() {
+        // shape [6, 1]: inner=1, batch_size=2 → chunk=[2,1] → 3 batches
+        let nd = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![1, 2, 3, 4, 5, 6],
+            vec![6, 1],
+            vec!["time".to_string(), "x".to_string()],
+            None,
+        )
+        .unwrap();
+        let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 2, None)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].num_rows(), 2);
+        assert_eq!(batches[1].num_rows(), 2);
+        assert_eq!(batches[2].num_rows(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_chunked_stream_remainder_batch() {
+        // shape [7, 1]: batch_size=3 → chunks [3,1],[3,1],[1,1] → 3 batches, last has 1 row
+        let nd = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![10, 20, 30, 40, 50, 60, 70],
+            vec![7, 1],
+            vec!["t".to_string(), "x".to_string()],
+            None,
+        )
+        .unwrap();
+        let ds = make_dataset(vec![("v", Arc::new(nd))]).await;
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 3, None)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[2].num_rows(), 1);
+        let col = batches[2]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(col.values().as_ref(), &[70]);
+    }
+
+    #[tokio::test]
+    async fn test_chunked_stream_broadcast_per_chunk() {
+        // 2D [4,3] and 1D [3] broadcast; batch_size=6 → chunk=[2,3] → 2 batches of 6 rows
+        let nd_2d = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            vec![4, 3],
+            vec!["time".to_string(), "x".to_string()],
+            None,
+        )
+        .unwrap();
+        let nd_1d = NdArray::<i32>::try_new_from_vec_in_mem(
+            vec![10, 20, 30],
+            vec![3],
+            vec!["x".to_string()],
+            None,
+        )
+        .unwrap();
+        let ds = make_dataset(vec![("data", Arc::new(nd_2d)), ("scale", Arc::new(nd_1d))]).await;
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 6, None)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 6);
+        assert_eq!(batches[1].num_rows(), 6);
+        // First chunk: scale broadcast over time rows 0-1 → [10,20,30,10,20,30]
+        let scale0 = batches[0]
+            .column_by_name("scale")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(scale0.values().as_ref(), &[10, 20, 30, 10, 20, 30]);
+        // Second chunk: same pattern for time rows 2-3
+        let scale1 = batches[1]
+            .column_by_name("scale")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(scale1.values().as_ref(), &[10, 20, 30, 10, 20, 30]);
     }
 
     // ── any_dataset_as_record_batch_stream ───────────────────────────

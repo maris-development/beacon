@@ -231,42 +231,42 @@ impl StatementHandler for DFStatementHandler {
                 Self::execute_create_view(&session_ctx, create_view)?;
                 Ok(Self::empty_ddl_stream(&plan))
             }
-            LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) => {
-                let stream = Self::execute_create_table(&session_ctx, table).await?;
-                Ok(stream)
-            }
-            LogicalPlan::Ddl(DdlStatement::CreateIndex(index)) => {
-                Self::execute_create_index(&session_ctx, index).await?;
-                Ok(Self::empty_ddl_stream(&plan))
-            }
-            LogicalPlan::Dml(dml_statement) => match dml_statement.op {
-                datafusion::logical_expr::WriteOp::Insert(insert_op) => {
-                    tracing::debug!(
-                        "Executing INSERT INTO for table '{}'",
-                        dml_statement.table_name.to_string()
-                    );
-                    let stream = Self::execute_insert_into_table(
-                        &session_ctx,
-                        &dml_statement.table_name.to_string(),
-                        &insert_op,
-                        dml_statement.input.clone(),
-                    )
-                    .await?;
-                    Ok(stream)
-                }
-                datafusion::logical_expr::WriteOp::Ctas => {
-                    tracing::debug!(
-                        "Executing CTAS for table '{}'",
-                        dml_statement.table_name.to_string()
-                    );
-                    let df = DataFrame::new(state, plan);
-                    Ok(df.execute_stream().await?)
-                }
-                _ => {
-                    let df = DataFrame::new(state, plan);
-                    Ok(df.execute_stream().await?)
-                }
-            },
+            // LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) => {
+            //     let stream = Self::execute_create_table(&session_ctx, table).await?;
+            //     Ok(stream)
+            // }
+            // LogicalPlan::Ddl(DdlStatement::CreateIndex(index)) => {
+            //     Self::execute_create_index(&session_ctx, index).await?;
+            //     Ok(Self::empty_ddl_stream(&plan))
+            // }
+            // LogicalPlan::Dml(dml_statement) => match dml_statement.op {
+            //     datafusion::logical_expr::WriteOp::Insert(insert_op) => {
+            //         tracing::debug!(
+            //             "Executing INSERT INTO for table '{}'",
+            //             dml_statement.table_name.to_string()
+            //         );
+            //         let stream = Self::execute_insert_into_table(
+            //             &session_ctx,
+            //             &dml_statement.table_name.to_string(),
+            //             &insert_op,
+            //             dml_statement.input.clone(),
+            //         )
+            //         .await?;
+            //         Ok(stream)
+            //     }
+            //     datafusion::logical_expr::WriteOp::Ctas => {
+            //         tracing::debug!(
+            //             "Executing CTAS for table '{}'",
+            //             dml_statement.table_name.to_string()
+            //         );
+            //         let df = DataFrame::new(state, plan);
+            //         Ok(df.execute_stream().await?)
+            //     }
+            //     _ => {
+            //         let df = DataFrame::new(state, plan);
+            //         Ok(df.execute_stream().await?)
+            //     }
+            // },
             _ => {
                 let df = DataFrame::new(state, plan);
                 Ok(df.execute_stream().await?)

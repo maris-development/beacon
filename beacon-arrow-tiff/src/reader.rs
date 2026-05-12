@@ -1,18 +1,20 @@
 use std::{ops::Range, sync::Arc};
 
+use async_tiff::ImageFileDirectory;
 use async_tiff::metadata::{TiffMetadataReader, cache::ReadaheadMetadataCache};
 use async_tiff::reader::AsyncFileReader;
 use async_tiff::tags::{PlanarConfiguration, SampleFormat};
-use async_tiff::{ImageFileDirectory, TypedArray, decoder::DecoderRegistry};
 use beacon_nd_array::{
     NdArray, NdArrayD,
     dataset::{AnyDataset, Dataset},
 };
+
+use crate::backend::{BandConfig, TiffTileBackend};
 use indexmap::IndexMap;
 use object_store::{ObjectStore, path::Path};
 
 #[derive(Clone)]
-struct ObjectStoreAsyncReader {
+pub(crate) struct ObjectStoreAsyncReader {
     store: Arc<dyn ObjectStore>,
     path: Path,
 }
@@ -66,9 +68,11 @@ pub async fn open_dataset(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to read TIFF metadata IFDs: {e}"))?;
 
-    let first_ifd = ifds
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("TIFF contains no image file directories (IFDs)."))?;
+    let first_ifd = Arc::new(
+        ifds.into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("TIFF contains no image file directories (IFDs)."))?,
+    );
 
     let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
 
@@ -130,6 +134,8 @@ pub async fn open_dataset(
         )?;
     }
 
+    let nodata_value: Option<f64> = first_ifd.gdal_nodata().and_then(|s| s.parse::<f64>().ok());
+
     if let Some(nodata) = first_ifd.gdal_nodata() {
         insert_scalar(&mut arrays, "geo.nodata", nodata.to_string())?;
     }
@@ -139,11 +145,10 @@ pub async fn open_dataset(
     }
 
     let bands = if first_ifd.tile_count().is_some() {
-        read_pixel_bands(first_ifd, &reader)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read TIFF pixel data: {e}"))?
+        read_pixel_bands(Arc::clone(&first_ifd), &reader, nodata_value)
+            .map_err(|e| anyhow::anyhow!("Failed to build TIFF tile backends: {e}"))?
     } else {
-        read_pixel_bands_stripped(first_ifd, &reader)
+        read_pixel_bands_stripped(&first_ifd, &reader, nodata_value)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read TIFF strip data: {e}"))?
     };
@@ -151,7 +156,7 @@ pub async fn open_dataset(
         arrays.insert(format!("band.{band_idx}"), band_array);
     }
 
-    if let Some((lon_array, lat_array)) = build_coordinate_arrays(first_ifd)? {
+    if let Some((lon_array, lat_array)) = build_coordinate_arrays(&first_ifd)? {
         arrays.insert(
             "geo.lat".to_string(),
             Arc::new(lat_array) as Arc<dyn NdArrayD>,
@@ -273,125 +278,71 @@ fn build_coordinate_arrays(
     Ok(None)
 }
 
-/// Fetch and decode every tile for `ifd`, then assemble one `NdArray` per band.
+/// Build one lazy [`TiffTileBackend`] per band for a tiled GeoTIFF.
 ///
-/// Returns a `Vec` where index `i` is the per-band 2-D array (dims: `["y", "x"]`)
-/// with shape `[image_height, image_width]`.
-async fn read_pixel_bands(
-    ifd: &ImageFileDirectory,
+/// No tile data is fetched here. Each backend records the tile geometry and
+/// reports [`chunk_shape`] = `[tile_height, tile_width]` so that callers
+/// stream data one tile row at a time.
+fn read_pixel_bands(
+    ifd: Arc<ImageFileDirectory>,
     reader: &ObjectStoreAsyncReader,
+    nodata_value: Option<f64>,
 ) -> anyhow::Result<Vec<Arc<dyn NdArrayD>>> {
-    let (tiles_x, tiles_y) = ifd
-        .tile_count()
-        .ok_or_else(|| anyhow::anyhow!("IFD has no tiles"))?;
-
     let image_width = ifd.image_width() as usize;
     let image_height = ifd.image_height() as usize;
     let tile_width = ifd.tile_width().unwrap() as usize;
     let tile_height = ifd.tile_height().unwrap() as usize;
+
     let n_bands = ifd.samples_per_pixel() as usize;
     let is_planar = ifd.planar_configuration() == PlanarConfiguration::Planar;
 
-    let coords: Vec<(usize, usize)> = (0..tiles_y)
-        .flat_map(|ty| (0..tiles_x).map(move |tx| (tx, ty)))
-        .collect();
+    let bits_per_sample = ifd.bits_per_sample().first().copied().unwrap_or(8) as usize;
+    let sample_format = ifd
+        .sample_format()
+        .first()
+        .copied()
+        .unwrap_or(SampleFormat::Uint);
 
-    let tiles = ifd
-        .fetch_tiles(&coords, reader)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch TIFF tiles: {e}"))?;
-
-    let decoder_registry = DecoderRegistry::default();
-    let decoded: Vec<async_tiff::Array> = tiles
-        .into_iter()
-        .map(|t| t.decode(&decoder_registry))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Failed to decode TIFF tile: {e}"))?;
-
-    if decoded.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let decoded_with_coords: Vec<(async_tiff::Array, (usize, usize))> =
-        decoded.into_iter().zip(coords.into_iter()).collect();
-
-    // Assembles per-band pixel buffers from decoded tiles, then wraps each in an NdArray.
-    // Supports both chunky (shape: [tile_h, tile_w, bands]) and planar
-    // (shape: [bands, tile_h, tile_w]) TIFF configurations.
-    macro_rules! assemble {
-        ($variant:ident => $T:ty) => {{
-            let mut band_bufs: Vec<Vec<$T>> = (0..n_bands)
-                .map(|_| {
-                    let zero: $T = Default::default();
-                    vec![zero; image_height * image_width]
-                })
-                .collect();
-
-            for (array, (tx, ty)) in &decoded_with_coords {
-                let data = match array.data() {
-                    TypedArray::$variant(d) => d.as_slice(),
-                    _ => anyhow::bail!("inconsistent tile data types in TIFF"),
-                };
-                let valid_rows = tile_height.min(image_height.saturating_sub(ty * tile_height));
-                let valid_cols = tile_width.min(image_width.saturating_sub(tx * tile_width));
-
-                if !is_planar {
-                    // Chunky: flat index = row * tile_w * bands + col * bands + band
-                    for row in 0..valid_rows {
-                        for col in 0..valid_cols {
-                            for band in 0..n_bands {
-                                let src = row * tile_width * n_bands + col * n_bands + band;
-                                let dst = (ty * tile_height + row) * image_width
-                                    + (tx * tile_width + col);
-                                band_bufs[band][dst] = data[src];
-                            }
-                        }
-                    }
-                } else {
-                    // Planar: flat index = band * tile_h * tile_w + row * tile_w + col
-                    for band in 0..n_bands {
-                        for row in 0..valid_rows {
-                            for col in 0..valid_cols {
-                                let src = band * tile_height * tile_width + row * tile_width + col;
-                                let dst = (ty * tile_height + row) * image_width
-                                    + (tx * tile_width + col);
-                                band_bufs[band][dst] = data[src];
-                            }
-                        }
-                    }
-                }
-            }
-
-            band_bufs
-                .into_iter()
-                .map(|buf| -> anyhow::Result<Arc<dyn NdArrayD>> {
-                    let nd = NdArray::try_new_from_vec_in_mem(
-                        buf,
-                        vec![image_height, image_width],
-                        vec!["y".to_string(), "x".to_string()],
-                        None,
-                    )?;
+    macro_rules! make_backends {
+        ($T:ty, $nodata:expr) => {{
+            (0..n_bands)
+                .map(|band_idx| -> anyhow::Result<Arc<dyn NdArrayD>> {
+                    let backend = TiffTileBackend::<$T> {
+                        reader: reader.clone(),
+                        ifd: Arc::clone(&ifd),
+                        image_width,
+                        image_height,
+                        tile_width,
+                        tile_height,
+                        band_config: BandConfig {
+                            band_index: band_idx,
+                            n_bands,
+                            planar: is_planar,
+                        },
+                        fill_value: $nodata,
+                    };
+                    let nd = NdArray::new_with_backend(backend)?;
                     Ok(Arc::new(nd) as Arc<dyn NdArrayD>)
                 })
-                .collect::<anyhow::Result<Vec<_>>>()?
+                .collect::<anyhow::Result<Vec<Arc<dyn NdArrayD>>>>()
         }};
     }
 
-    let bands = match decoded_with_coords[0].0.data() {
-        TypedArray::Bool(_) => assemble!(Bool => bool),
-        TypedArray::UInt8(_) => assemble!(UInt8 => u8),
-        TypedArray::UInt16(_) => assemble!(UInt16 => u16),
-        TypedArray::UInt32(_) => assemble!(UInt32 => u32),
-        TypedArray::UInt64(_) => assemble!(UInt64 => u64),
-        TypedArray::Int8(_) => assemble!(Int8 => i8),
-        TypedArray::Int16(_) => assemble!(Int16 => i16),
-        TypedArray::Int32(_) => assemble!(Int32 => i32),
-        TypedArray::Int64(_) => assemble!(Int64 => i64),
-        TypedArray::Float32(_) => assemble!(Float32 => f32),
-        TypedArray::Float64(_) => assemble!(Float64 => f64),
-    };
-
-    Ok(bands)
+    match (sample_format, bits_per_sample) {
+        (SampleFormat::Float, 32) => make_backends!(f32, nodata_value.map(|v| v as f32)),
+        (SampleFormat::Float, 64) => make_backends!(f64, nodata_value),
+        (SampleFormat::Uint, 8) => make_backends!(u8, nodata_value.map(|v| v as u8)),
+        (SampleFormat::Uint, 16) => make_backends!(u16, nodata_value.map(|v| v as u16)),
+        (SampleFormat::Uint, 32) => make_backends!(u32, nodata_value.map(|v| v as u32)),
+        (SampleFormat::Uint, 64) => make_backends!(u64, nodata_value.map(|v| v as u64)),
+        (SampleFormat::Int, 8) => make_backends!(i8, nodata_value.map(|v| v as i8)),
+        (SampleFormat::Int, 16) => make_backends!(i16, nodata_value.map(|v| v as i16)),
+        (SampleFormat::Int, 32) => make_backends!(i32, nodata_value.map(|v| v as i32)),
+        (SampleFormat::Int, 64) => make_backends!(i64, nodata_value.map(|v| v as i64)),
+        _ => anyhow::bail!(
+            "Unsupported tiled TIFF format: {sample_format:?} / {bits_per_sample} bits per sample"
+        ),
+    }
 }
 
 /// Fetch and decode every strip for `ifd`, then assemble one `NdArray` per band.
@@ -401,6 +352,7 @@ async fn read_pixel_bands(
 async fn read_pixel_bands_stripped(
     ifd: &ImageFileDirectory,
     reader: &ObjectStoreAsyncReader,
+    nodata_value: Option<f64>,
 ) -> anyhow::Result<Vec<Arc<dyn NdArrayD>>> {
     let strip_offsets = ifd
         .strip_offsets()
@@ -483,7 +435,7 @@ async fn read_pixel_bands_stripped(
                         buf,
                         vec![image_height, image_width],
                         vec!["y".to_string(), "x".to_string()],
-                        None,
+                        nodata_value.map(|v| v as $T),
                     )?;
                     Ok(Arc::new(nd) as Arc<dyn NdArrayD>)
                 })
