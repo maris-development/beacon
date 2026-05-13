@@ -38,6 +38,7 @@ CREATE EXTERNAL TABLE argo STORED AS NETCDF LOCATION 'argo/**/*.nc'
 | `ARROW`     | Arrow IPC (`.arrow`, `.ipc`) |
 | `ODV`       | ODV ASCII spreadsheet |
 | `TIFF`      | GeoTIFF / Cloud-Optimized GeoTIFF |
+| `BBF`       | BBF format |
 
 Zarr tables should point at `zarr.json` entry files:
 

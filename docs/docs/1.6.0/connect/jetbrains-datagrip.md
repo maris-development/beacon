@@ -10,35 +10,39 @@ You can connect to a Beacon data lakehouse from [JetBrains DataGrip](https://www
 
 ## Step 1 — Download the Arrow Flight SQL JDBC driver
 
-Download the `flight-sql-jdbc-driver-<version>-jar-with-dependencies.jar` from:
+Download the driver from:
 
 - [JetBrains JDBC Drivers page](https://www.jetbrains.com/datagrip/jdbc-drivers/) — search for "Apache Arrow Flight"
+    Click on the versions (18.3.0 or later) to download a zip file containing the JAR.
+    Unzip the downloaded file and locate the JAR (e.g. `flight-sql-jdbc-driver-18.3.0.jar`).
 
 ## Step 2 — Add the driver to DataGrip
 
-1. Open **Settings** → **Database** → **Driver Manager** (or press `Ctrl+Alt+S` and search for *Driver Manager*).
-2. Click **+** to create a new driver.
-3. Set the **Name** to `Apache Arrow Flight SQL`.
-4. Under **Driver Files**, click **+** → **Custom JARs…** and select the JAR you downloaded (it is contained within the downloaded zip file).
-5. Set **Class** to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`.
-6. Click **OK** to save the driver.
+1. Open **Database Explorer** → **New** → **Driver**.
+![DataGrip Driver Manager](/connect_datagrip/2.png)
+2. Click **+** to create a new driver. Give it a name (e.g. Beacon Driver). Add driver files (the JAR you downloaded in Step 1) and set the driver class to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`. Save the driver.
+3. Under **Driver Files**, click **+** → **Custom JARs…** and select the JAR you downloaded (it is contained within the downloaded zip file).
+![DataGrip Driver Manager](/connect_datagrip/3.png)
+4. Set **Class** to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`.
+![DataGrip Driver Manager](/connect_datagrip/4.png)
+5. Click **OK** to save the driver.
 
 ## Step 3 — Create a data source
 
-1. Open the **Database** panel (**View** → **Tool Windows** → **Database**).
-2. Click **+** → **Data Source** → select the **Arrow Flight SQL** driver you just added.
+1. Open **Database Explorer** → **New** → **Data Source** -> **YOUR_DRIVER_NAME**.
+2. Click **+** → select the **YOUR_DRIVER_NAME** driver.
 3. Fill in the connection details:
 
 | Field        | Value                                                          |
 | ------------ | -------------------------------------------------------------- |
-| **Host**     | Hostname or IP of your Beacon instance (e.g. `localhost`)      |
-| **Port**     | `32011` (default; configurable via `BEACON_FLIGHT_SQL_PORT`)   |
-| **URL**      | `jdbc:arrow-flight-sql://localhost:32011?useEncryption=false`  |
 | **User**     | Your Beacon admin username (`BEACON_ADMIN_USERNAME`)           |
 | **Password** | Your Beacon admin password (`BEACON_ADMIN_PASSWORD`)           |
+| **URL**      | `jdbc:arrow-flight-sql://localhost:32011?useEncryption=false`  |
+
+![DataGrip Data Source Configuration](/connect_datagrip/6.png)
 
 :::info
-If your Beacon instance is served over TLS, change `useEncryption=false` to `useEncryption=true` in the JDBC URL and add `disableCertificateVerification=true` if you are using a self-signed certificate.
+If your Beacon instance is served over TLS, change `useEncryption=false` to `useEncryption=true` in the JDBC URL.
 :::
 
 4. Click **Test Connection** to verify. You should see a *Successful* message.
@@ -69,7 +73,10 @@ Once connected, DataGrip will introspect the available tables. You can then:
 SHOW TABLES;
 
 -- Query a dataset
-SELECT * FROM "my_dataset.nc" LIMIT 100;
+SELECT 1;
+
+-- Query a dataset
+SELECT * FROM read_netcdf(['my_dataset.nc'], ['TIME', 'DEPTH']) LIMIT 100;
 ```
 
 :::tip

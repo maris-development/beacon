@@ -122,23 +122,3 @@ Beacon's own columnar format, optimized for the kinds of queries common in earth
 - Efficient for repeated range queries over coordinate columns (time, depth, lat/lon).
 
 Convert existing NetCDF files to BBF using the beacon-binary-format-toolbox for significant query speedups on large collections.
-
-## Exploring datasets
-
-List all datasets Beacon has discovered:
-
-```http
-GET /api/list-datasets
-```
-
-Inspect the schema (columns, types) of a specific file:
-
-```http
-GET /api/dataset-schema?file=example.nc
-```
-
-Inspect the merged schema across a glob of files:
-
-```http
-GET /api/dataset-schema?file=**/*.nc
-```
