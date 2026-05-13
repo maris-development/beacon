@@ -185,7 +185,15 @@ fn ragged_dataset_as_record_batch_stream(
 
         let n_filtered = passing_indices.len();
         let ranges = plan_ragged_batches(&filtered_offsets, &obs_dims, n_filtered, batch_size);
-        Ok((ragged, schema, obs_dims, offsets, passing_indices, ranges, metrics))
+        Ok((
+            ragged,
+            schema,
+            obs_dims,
+            offsets,
+            passing_indices,
+            ranges,
+            metrics,
+        ))
     })
     .map(|init| match init {
         Ok((ragged, schema, obs_dims, offsets, passing_indices, ranges, metrics)) => {
@@ -541,45 +549,44 @@ pub fn dataset_as_record_batch_stream(
         let metrics_for_then = metrics.clone();
         let metrics_for_filter = metrics.clone();
         match result {
-            Ok((arrays, subsets, schema, max_dims, dim_masks)) => {
-                futures::stream::iter(subsets)
-                    .then(move |subset| {
-                        let arrays = arrays.clone();
-                        let schema = schema.clone();
-                        let max_dims = max_dims.clone();
-                        let dim_masks = dim_masks.clone();
-                        let metrics = metrics_for_then.clone();
-                        let chunk_rows: usize = subset.shape.iter().product();
-                        async move {
-                            let result =
-                                read_chunk(&arrays, subset, schema, &max_dims, &dim_masks).await;
-                            if let Ok(None) = &result {
+            Ok((arrays, subsets, schema, max_dims, dim_masks)) => futures::stream::iter(subsets)
+                .then(move |subset| {
+                    let arrays = arrays.clone();
+                    let schema = schema.clone();
+                    let max_dims = max_dims.clone();
+                    let dim_masks = dim_masks.clone();
+                    let metrics = metrics_for_then.clone();
+                    let chunk_rows: usize = subset.shape.iter().product();
+                    async move {
+                        let result =
+                            read_chunk(&arrays, subset, schema, &max_dims, &dim_masks).await;
+                        if let Ok(None) = &result {
+                            if let Some(m) = &metrics {
+                                m.batches_pruned.add(1);
+                                m.rows_pruned.add(chunk_rows);
+                            }
+                        }
+                        result
+                    }
+                })
+                .filter_map(move |result| {
+                    let metrics = metrics_for_filter.clone();
+                    async move {
+                        match result {
+                            Ok(Some(batch)) if batch.num_rows() > 0 => {
                                 if let Some(m) = &metrics {
-                                    m.batches_pruned.add(1);
-                                    m.rows_pruned.add(chunk_rows);
+                                    m.output_rows.add(batch.num_rows());
+                                    m.output_batches.add(1);
                                 }
+                                tracing::debug!("Emitting batch with {} rows", batch.num_rows());
+                                Some(Ok(batch))
                             }
-                            result
+                            Ok(_) => None,
+                            Err(e) => Some(Err(e)),
                         }
-                    })
-                    .filter_map(move |result| {
-                        let metrics = metrics_for_filter.clone();
-                        async move {
-                            match result {
-                                Ok(Some(batch)) if batch.num_rows() > 0 => {
-                                    if let Some(m) = &metrics {
-                                        m.output_rows.add(batch.num_rows());
-                                        m.output_batches.add(1);
-                                    }
-                                    Some(Ok(batch))
-                                }
-                                Ok(_) => None,
-                                Err(e) => Some(Err(e)),
-                            }
-                        }
-                    })
-                    .boxed()
-            }
+                    }
+                })
+                .boxed(),
             Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
         }
     })
@@ -1075,10 +1082,11 @@ mod tests {
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> =
+            any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
+                .try_collect()
+                .await
+                .unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 3);
         let col = batches[0]

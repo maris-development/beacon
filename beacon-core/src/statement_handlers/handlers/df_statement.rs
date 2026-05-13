@@ -267,6 +267,14 @@ impl StatementHandler for DFStatementHandler {
             //         Ok(df.execute_stream().await?)
             //     }
             // },
+            LogicalPlan::Copy(copy) => {
+                let mut copy_cleaned = copy.clone();
+                copy_cleaned.output_url =
+                    format!("{}{}", *DATASETS_OBJECT_STORE_URL, copy.output_url);
+
+                let df = DataFrame::new(state, LogicalPlan::Copy(copy_cleaned));
+                Ok(df.execute_stream().await?)
+            }
             _ => {
                 let df = DataFrame::new(state, plan);
                 Ok(df.execute_stream().await?)
