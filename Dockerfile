@@ -1,4 +1,4 @@
-FROM ubuntu:latest as builder
+FROM ubuntu:latest AS builder
 
 RUN apt-get update
 RUN apt-get install wget -y
@@ -25,7 +25,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 COPY beacon-api/ /beacon-api/
 COPY beacon-arrow-netcdf/ /beacon-arrow-netcdf/
-COPY beacon-arrow-netcdf-mpio/ /beacon-arrow-netcdf-mpio/
+COPY beacon-arrow-tiff/ /beacon-arrow-tiff/
 COPY beacon-arrow-zarr/ /beacon-arrow-zarr/
 COPY beacon-arrow-odv/ /beacon-arrow-odv/
 COPY beacon-atlas/ /beacon-atlas/
@@ -37,10 +37,13 @@ COPY beacon-data-lake/ /beacon-data-lake/
 COPY beacon-datafusion-ext/ /beacon-datafusion-ext/
 COPY beacon-formats/ /beacon-formats/
 COPY beacon-functions/ /beacon-functions/
+COPY beacon-nd-array/ /beacon-nd-array/
 COPY beacon-nd-arrow/ /beacon-nd-arrow/
 COPY beacon-object-storage/ /beacon-object-storage/
 COPY beacon-planner/ /beacon-planner/
 COPY beacon-query/ /beacon-query/
+COPY beacon-statistics-index/ /beacon-statistics-index/
+COPY beacon-table/ /beacon-table/
 COPY Cargo.toml /
 COPY Cargo.lock /
 COPY rust-toolchain /
@@ -51,7 +54,6 @@ RUN cargo build --release
 FROM ubuntu:latest AS node
 WORKDIR /beacon
 COPY --from=builder /target/release/beacon-api /beacon/
-COPY --from=builder /target/release/beacon-arrow-netcdf-mpio /beacon/
 
 #Install Dependencies
 RUN apt-get update
