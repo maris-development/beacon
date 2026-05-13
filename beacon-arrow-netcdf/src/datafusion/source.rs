@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
-    arrow::{batch::any_dataset_as_record_batch_stream, pushdown_filter::PushdownFilter},
+    arrow::{
+        batch::any_dataset_as_record_batch_stream,
+        metrics::DatasetReadMetrics,
+        pushdown_filter::PushdownFilter,
+    },
     projection::DatasetProjection,
 };
 use beacon_object_storage::DatasetsStore;
@@ -65,7 +69,7 @@ impl FileSource for NetCDFSource {
         &self,
         _object_store: Arc<dyn object_store::ObjectStore>,
         base_config: &datafusion::datasource::physical_plan::FileScanConfig,
-        _partition: usize,
+        partition: usize,
     ) -> Arc<dyn FileOpener> {
         let table_schema = self
             .override_schema
@@ -86,6 +90,8 @@ impl FileSource for NetCDFSource {
             self.batch_size,
             self.predicate.clone(),
             table_schema,
+            self.execution_plan_metrics.clone(),
+            partition,
         ))
     }
 
@@ -191,6 +197,8 @@ struct NetCDFOpener {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     pruning_predicate: Option<PruningPredicate>,
     table_schema: SchemaRef,
+    metrics: ExecutionPlanMetricsSet,
+    partition: usize,
 }
 
 impl NetCDFOpener {
@@ -201,6 +209,8 @@ impl NetCDFOpener {
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         table_schema: SchemaRef,
+        metrics: ExecutionPlanMetricsSet,
+        partition: usize,
     ) -> Self {
         let pruning_predicate = predicate
             .as_ref()
@@ -214,6 +224,8 @@ impl NetCDFOpener {
             predicate,
             pruning_predicate,
             table_schema,
+            metrics,
+            partition,
         }
     }
 
@@ -224,6 +236,7 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        metrics: Option<DatasetReadMetrics>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(datasets_object_store, object.clone())
             .await
@@ -279,7 +292,7 @@ impl NetCDFOpener {
         };
 
         let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter)
+        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "Error reading NetCDF as Arrow stream: {e}"
@@ -322,6 +335,7 @@ impl FileOpener for NetCDFOpener {
             }
         };
 
+        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
             file_meta.object_meta,
             self.datasets_object_store.clone(),
@@ -329,6 +343,7 @@ impl FileOpener for NetCDFOpener {
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
+            metrics,
         )
         .boxed();
         Ok(fut)

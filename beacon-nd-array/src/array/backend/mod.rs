@@ -82,6 +82,10 @@ impl<T: NdArrayType, A: ArrayBackend<T> + ?Sized> ArrayBackend<T> for Arc<A> {
         (**self).shape()
     }
 
+    fn chunk_shape(&self) -> Vec<usize> {
+        (**self).chunk_shape()
+    }
+
     fn dimensions(&self) -> Vec<String> {
         (**self).dimensions()
     }

@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
 async fn async_main() -> anyhow::Result<()> {
     setup_tracing();
 
-    tracing::info!("Beacon API v{}", BEACON_VERSION);
+    tracing::info!("Beacon v{}", BEACON_VERSION);
     let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new().await?);
     // Keep both transports on the same runtime so metadata and access rules stay aligned.
     let router = setup_router(beacon_runtime.clone())?;
@@ -92,7 +92,7 @@ fn setup_tracing() {
             // built-in extractors with the `axum::rejection` target at `TRACE` level.
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 format!(
-                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug,beacon_common=debug,beacon_table=debug,beacon_functions=debug",
+                    "info,{}=debug,tower_http=debug,axum::rejection=trace,beacon_core=debug,beacon_arrow_odv=debug,beacon_arrow_netcdf=debug,beacon_data_lake=debug,beacon_api=debug,beacon_formats=debug,beacon_common=debug,beacon_table=debug,beacon_functions=debug,beacon_nd_array=debug",
                     env!("CARGO_CRATE_NAME")
                 )
                 .into()

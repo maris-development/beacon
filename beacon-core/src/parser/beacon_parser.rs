@@ -25,21 +25,22 @@ impl<'a> BeaconParser<'a> {
 
     /// Parse a single statement, returning a `BeaconStatement`.
     pub fn parse_statement(&mut self) -> Result<BeaconStatement> {
-        if self.is_ingest() {
-            return self.parse_ingest();
-        }
+        // ToDo: Implement custom parsing for non-DF statements before falling back to DF parsing
+        // if self.is_ingest() {
+        //     return self.parse_ingest();
+        // }
 
-        if self.is_delete_atlas_datasets() {
-            return self.parse_delete_atlas_datasets();
-        }
+        // if self.is_delete_atlas_datasets() {
+        //     return self.parse_delete_atlas_datasets();
+        // }
 
-        if self.is_create_atlas_table() {
-            return self.parse_create_atlas_table();
-        }
+        // if self.is_create_atlas_table() {
+        //     return self.parse_create_atlas_table();
+        // }
 
-        if self.is_alter_atlas_table() {
-            return self.parse_alter_atlas_table();
-        }
+        // if self.is_alter_atlas_table() {
+        //     return self.parse_alter_atlas_table();
+        // }
 
         let df_statement = Box::new(self.df_parser.parse_statement()?);
 

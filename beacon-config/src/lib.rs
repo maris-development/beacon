@@ -119,7 +119,7 @@ struct RawConfig {
     log_level: String,
 
     //VM Settings
-    #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "4096")]
+    #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "8192")]
     vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     default_table: String,
