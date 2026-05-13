@@ -86,12 +86,13 @@ impl SchemaPersistenceService {
                 let definition = table.definition();
                 Arc::new(definition.clone())
             } else if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
-                let definition = ViewTableDefinition::try_from_view(table).map_err(|error| {
-                    DataFusionError::Plan(format!(
-                        "Failed to create ViewTableDefinition for table {}: {}",
-                        table_name, error
-                    ))
-                })?;
+                let definition =
+                    ViewTableDefinition::try_from_view(table_name, table).map_err(|error| {
+                        DataFusionError::Plan(format!(
+                            "Failed to create ViewTableDefinition for table {}: {}",
+                            table_name, error
+                        ))
+                    })?;
                 Arc::new(definition)
             } else {
                 return Err(DataFusionError::Plan(format!(

@@ -13,7 +13,7 @@ use datafusion::catalog::Session;
 use datafusion::common::{Constraints, DataFusionError, Statistics, not_impl_err};
 use datafusion::datasource::{TableType, ViewTable};
 use datafusion::logical_expr::dml::InsertOp;
-use datafusion::logical_expr::{LogicalPlan, TableProviderFilterPushDown};
+use datafusion::logical_expr::{DdlStatement, LogicalPlan, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::{Expr, SQLOptions};
 use datafusion::{
@@ -390,7 +390,7 @@ impl TableDefinition for ExternalTableDefinition {
 pub struct ViewTableDefinition {
     /// Logical view name.
     pub name: String,
-    /// SQL query used to materialize the view.
+    /// SQL query used to create the view.
     pub definition: String,
     /// Dependencies on other tables, used to determine rebuild order.
     #[serde(default)]
@@ -401,14 +401,14 @@ impl ViewTableDefinition {
     /// Builds a serializable view definition from an existing [`ViewTable`].
     ///
     /// Returns an error when the input view has no persisted SQL definition.
-    pub fn try_from_view(table: &ViewTable) -> anyhow::Result<Self> {
+    pub fn try_from_view(view_name: &str, table: &ViewTable) -> anyhow::Result<Self> {
         let plan = table.logical_plan();
         let mut dependencies = Vec::new();
         Self::traverse_logical_plan_for_dependencies(plan, &mut dependencies);
 
         match table.definition() {
             Some(def) => Ok(Self {
-                name: "view".to_string(), // Name is not used for view tables, so we can set a default value here
+                name: view_name.to_string(),
                 definition: def.clone(),
                 dependencies,
             }),
@@ -436,10 +436,20 @@ impl ViewTableDefinition {
     pub async fn into_view_table(self, context: Arc<SessionContext>) -> anyhow::Result<ViewTable> {
         let options = SQLOptions::new().with_allow_ddl(true);
         let df = context.sql_with_options(&self.definition, options).await?;
-        Ok(ViewTable::new(
-            df.logical_plan().clone(),
-            Some(self.definition),
-        ))
+        let cloned_plan = df.logical_plan();
+        if let LogicalPlan::Ddl(DdlStatement::CreateView(plan)) = cloned_plan {
+            Ok(ViewTable::new(
+                plan.input.as_ref().clone(),
+                Some(self.definition),
+            ))
+        } else {
+            // This should never happen because the definition must have come from a ViewTable, but we defensively handle it just in case.
+            anyhow::bail!(
+                "Expected logical plan for view '{}' to be a CreateView DDL, but got: {:?}",
+                self.name,
+                cloned_plan
+            );
+        }
     }
 }
 
@@ -456,10 +466,19 @@ impl TableDefinition for ViewTableDefinition {
         let state = context.state();
         let plan = state.create_logical_plan(&self.definition).await?;
 
-        Ok(Arc::new(ViewTable::new(
-            plan,
-            Some(self.definition.clone()),
-        )))
+        if let LogicalPlan::Ddl(DdlStatement::CreateView(plan)) = plan {
+            Ok(Arc::new(ViewTable::new(
+                plan.input.as_ref().clone(),
+                Some(self.definition.clone()),
+            )))
+        } else {
+            // This should never happen because the definition must have come from a ViewTable, but we defensively handle it just in case.
+            anyhow::bail!(
+                "Expected logical plan for view '{}' to be a CreateView DDL, but got: {:?}",
+                self.name,
+                plan
+            );
+        }
     }
 
     fn table_name(&self) -> &str {
@@ -620,7 +639,7 @@ mod tests {
             .unwrap();
         let view = ViewTable::new(plan, Some("SELECT 1 AS x".to_string()));
 
-        let definition = ViewTableDefinition::try_from_view(&view).unwrap();
+        let definition = ViewTableDefinition::try_from_view("view", &view).unwrap();
         assert_eq!(definition.name, "view");
         assert_eq!(definition.definition, "SELECT 1 AS x");
     }
@@ -636,7 +655,8 @@ mod tests {
             .unwrap();
         let view = ViewTable::new(plan, None);
 
-        let err = ViewTableDefinition::try_from_view(&view).expect_err("missing definition");
+        let err =
+            ViewTableDefinition::try_from_view("view", &view).expect_err("missing definition");
         assert!(err.to_string().contains("requires a SQL definition"));
     }
 
