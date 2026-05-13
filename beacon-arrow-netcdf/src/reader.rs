@@ -528,7 +528,7 @@ mod tests {
         async fn stream_produces_one_batch_per_cast() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, 1, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, 1, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -541,7 +541,7 @@ mod tests {
         async fn all_batches_share_the_same_schema() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -556,7 +556,7 @@ mod tests {
         async fn schema_excludes_row_size_variables() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -577,7 +577,7 @@ mod tests {
         async fn schema_includes_observation_variables() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -595,7 +595,7 @@ mod tests {
         async fn schema_includes_instance_variables() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -613,7 +613,7 @@ mod tests {
         async fn total_obs_row_count_across_batches() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -632,7 +632,7 @@ mod tests {
         async fn instance_vars_repeated_to_obs_length() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, 1, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, 1, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -664,7 +664,7 @@ mod tests {
         async fn shorter_obs_dim_null_padded() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -690,7 +690,7 @@ mod tests {
         async fn global_attrs_present_and_repeated() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -721,7 +721,7 @@ mod tests {
         async fn observation_data_is_not_all_null() {
             let any = open_dataset(WOD_PATH).await.unwrap();
 
-            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None)
+            let batches: Vec<_> = any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
                 .try_collect()
                 .await
                 .unwrap();
