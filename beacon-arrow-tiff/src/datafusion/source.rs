@@ -4,6 +4,7 @@ use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
         batch::{any_dataset_as_record_batch_stream, any_dataset_as_row_size},
+        metrics::DatasetReadMetrics,
         pushdown_filter::PushdownFilter,
     },
     projection::DatasetProjection,
@@ -208,6 +209,7 @@ impl TiffOpener {
         schema_adapter: Arc<dyn SchemaAdapter>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        metrics: Option<DatasetReadMetrics>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
@@ -259,7 +261,7 @@ impl TiffOpener {
         };
 
         let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter)
+        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "Error reading TIFF as Arrow stream: {e}"
@@ -285,12 +287,14 @@ impl FileOpener for TiffOpener {
         file_meta: FileMeta,
         _file: datafusion::datasource::listing::PartitionedFile,
     ) -> datafusion::error::Result<FileOpenFuture> {
+        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
             file_meta.object_meta,
             self.object_store.clone(),
             self.schema_adapter.clone(),
             self.batch_size,
             self.predicate.clone(),
+            metrics,
         )
         .boxed();
 
