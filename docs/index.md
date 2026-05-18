@@ -1,34 +1,47 @@
 ---
-# https://vitepress.dev/reference/default-theme-home-page
 layout: home
 
 hero:
   name: "Beacon"
-  text: "A High-Performance ARCO Data Lake Query Engine"
-  tagline: Making climate datasets instantly queryable by users using SQL and JSON.
+  text: "A modern open-source data lakehouse for scientific data"
+  tagline: "Manage, query, and serve climate and scientific datasets from S3 Buckets, or local storage through SQL and JSON APIs."
+  image:
+    src: /hero.png
+    alt: VitePress
   actions:
     - theme: brand
-      text: Getting Started
-      link: /docs/1.5.4/getting-started
+      text: Get Started
+      link: /docs/1.6.0/getting-started
     - theme: alt
-      text: Documentation
-      link: /docs/1.5.4/introduction
+      text: Read the Docs
+      link: /docs/1.6.0/introduction
     - theme: alt
-      text: Existing Data Lake Nodes
+      text: Explore Public Nodes 
       link: /available-nodes/available-nodes
 
 features:
-  - title: Performance 
-    details: Beacon is written in Rust 🦀 and in combination with Apache Arrow and Apache Datafusion provides unmatched performance. Experience lightning-fast ⚡ data retrieval, enabling you to explore and query millions of datasets on the fly with ease.
+  - title: Fast analytical queries
+    details: Built in Rust with Apache Arrow and DataFusion, Beacon is designed for efficient filtering, projection, and retrieval across large scientific datasets.
     icon: 🚀
-  - title: Open Source (AGPL V3)
-    details: Beacon is fully open source available under the AGPL V3 license 👐. This means you have full control over your data and can contribute to its development.
+
+  - title: Works with existing formats
+    details: Query NetCDF, Zarr, Parquet, CSV, ODV, Arrow, TIFF and BBF datasets without converting everything into a proprietary warehouse.
+    icon: 🧩
+
+  - title: Create tables and views
+    details: Define external tables over existing files, create reusable SQL views, and expose curated datasets to downstream users and applications.
+    icon: 🧱
+
+  - title: SQL and JSON APIs
+    details: Serve scientific data through queryable SQL and JSON interfaces for portals, dashboards, notebooks, services, and data products.
+    icon: 🔌
+
+  - title: Query from your favorite tools
+    details: Use Arrow Flight SQL to connect Beacon to JDBC-compatible SQL clients such as DataGrip and DBeaver, or query datasets directly through JSON APIs.
+    icon: 🧭
+
+  - title: Open source and self-hosted
+    details: Beacon is available under the AGPL-3.0 license, giving teams full control over deployment, data access, and infrastructure.
     icon: 🤝
-  - title: Efficiency
-    details: Say goodbye to storage woes! 📊 Store and manage millions of datasets efficiently, in the cloud using S3 or locally. Beacon ensures you will have high-performance access to your datasets.
-    icon: ⚙️
-  - title: It just works
-    details: Beacon has been designed for simplicity! 🌟 Experience seamless integration with existing file formats such as NetCDF, Zarr, Parquet and many others. 🛠️ You'll have a powerful data lake query engine up in minutes.
-    icon: 😄
 
 ---

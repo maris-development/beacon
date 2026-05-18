@@ -120,62 +120,14 @@ Recommendations:
 - Increase `BEACON_NETCDF_READER_CACHE_SIZE` if your “hot set” of NetCDF files is larger than the default (128).
 - Disable reader caching if you have extremely high file churn and want to minimize open file handles.
 
-### NetCDF multiplexer (MPIO): multi-process NetCDF reads
-
-#### `BEACON_ENABLE_MULTIPLEXER_NETCDF`
-
-When enabled, Beacon routes NetCDF schema reads and batch reads through a pool of external worker processes (`beacon-arrow-netcdf-mpio`). This can improve throughput by:
-
-- parallelizing NetCDF reads across processes
-- isolating blocking NetCDF operations from the main async runtime
-
-Enable this when:
-
-- you have many concurrent queries reading NetCDF
-- NetCDF open/read calls are a bottleneck
-- you want better isolation from native library behavior
-
-Keep it disabled when:
-
-- you run a minimal deployment and prefer fewer moving parts
-
-#### `BEACON_NETCDF_MULTIPLEXER_PROCESSES`
-
-Controls the number of worker processes in the MPIO pool.
-
-- Default is half of CPU cores.
-- Increase for high concurrency / IO-bound workloads.
-- Decrease if the workers compete too aggressively with query execution CPU.
-
-#### `BEACON_NETCDF_MPIO_WORKER`
-
-Optional explicit path to the `beacon-arrow-netcdf-mpio` executable.
-
-Use this if:
-
-- the worker is not on `PATH`
-
-#### `BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS`
-
-Per-request timeout for calls to the MPIO worker pool.
-
-- Default is `0` (disabled).
-- Set this in production to bound tail-latency if you’ve observed stuck or pathological reads.
-
 ### Suggested starting points
 
-For a “many users, many NetCDF files” deployment:
+For a “many NetCDF files” deployment:
 
 - `BEACON_NETCDF_USE_SCHEMA_CACHE=true`
-- `BEACON_NETCDF_SCHEMA_CACHE_SIZE=4096`
+- `BEACON_NETCDF_SCHEMA_CACHE_SIZE=16484`
 - `BEACON_NETCDF_USE_READER_CACHE=true`
-- `BEACON_NETCDF_READER_CACHE_SIZE=512`
-- `BEACON_ENABLE_MULTIPLEXER_NETCDF=true`
-- `BEACON_NETCDF_MULTIPLEXER_PROCESSES` ~= `CPU/2` (then tune up/down)
-
-For a small single-user deployment:
-
-- Keep defaults, and only enable the MPIO multiplexer if NetCDF reads dominate runtime.
+- `BEACON_NETCDF_READER_CACHE_SIZE=16484`
 
 ## Zarr statistics (predicate pruning)
 
