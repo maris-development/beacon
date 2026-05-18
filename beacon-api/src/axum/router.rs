@@ -15,8 +15,9 @@ use beacon_core::runtime::Runtime;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{info_span, Span};
+use utoipa::openapi::{OpenApi, Server};
 use utoipa_scalar::{Scalar, Servable};
-use utoipa_swagger_ui::SwaggerUi;
+use utoipa_swagger_ui::{SwaggerUi, Url};
 
 use crate::axum::{admin::setup_admin_router, client::setup_client_router};
 
@@ -30,23 +31,46 @@ const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Router> {
     let (client_router, mut api_docs_client) = setup_client_router();
     let (admin_router, api_docs_admin) = setup_admin_router();
+
     api_docs_client.merge(api_docs_admin);
     api_docs_client = set_api_docs_info(api_docs_client);
 
+    let base_path = &beacon_config::CONFIG.server.base_path;
+    let swagger_url = format!("{base_path}/swagger");
+    let openapi_url = format!("{base_path}/openapi.json");
+
+    let docs = if base_path.is_empty() {
+        api_docs_client
+    } else {
+        OpenApi::default().nest(base_path, api_docs_client)
+    };
+
     let router = client_router
         .merge(admin_router)
-        .merge(Scalar::with_url("/scalar/", api_docs_client.clone()))
-        .route("/scalar", get(|| async { Redirect::to("/scalar/") }))
-        .merge(SwaggerUi::new("/swagger").url("/openapi.json", api_docs_client.clone()))
+        .merge(Scalar::with_url("/scalar/", docs.clone()))
+        .route("/scalar", get(|| async { Redirect::to("./scalar/") }))
         .route(
             "/api/health",
             get(|| async { Response::new("Ok".to_string()) }),
         )
-        .route("/", get(|| async { Redirect::to("/swagger") }))
+        .route("/", get(|| async { Redirect::to("./swagger") }))
         .layer(build_cors_layer()?)
         .with_state::<_>(beacon_runtime);
 
-    Ok(setup_tracing_router(router))
+    // SwaggerUi is merged outside the base_path nest to avoid doubling the prefix
+    // in the openapi.json URL (/{base_path}/{base_path}/openapi.json).
+    let swagger_ui = SwaggerUi::new(swagger_url)
+        .urls(vec![(Url::new("Docs", &openapi_url), docs)]);
+
+    if base_path.is_empty() {
+        Ok(Router::new()
+            .merge(setup_tracing_router(router))
+            .merge(swagger_ui))
+    } else {
+        Ok(Router::new()
+            .nest(base_path, setup_tracing_router(router))
+            .merge(swagger_ui))
+    }
 }
 
 /// Fills in the top-level OpenAPI metadata exposed by the HTTP documentation endpoints.
@@ -176,9 +200,7 @@ fn build_cors_layer() -> anyhow::Result<CorsLayer> {
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| {
-            Method::from_str(s).with_context(|| format!("invalid CORS method in config: {s}"))
-        })
+        .map(|s| Method::from_str(s).with_context(|| format!("invalid CORS method in config: {s}")))
         .collect::<anyhow::Result<Vec<_>>>()?;
     layer = layer.allow_methods(methods);
 
