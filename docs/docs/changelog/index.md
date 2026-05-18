@@ -1,6 +1,27 @@
 # Changelog
 
-## Latest (v1.2.0 - 2025-09-01)
+## (v1.6.0 - 2026-05-08)
+
+- **Added**: Support for Flight SQL. In addition to the existing HTTP query endpoint, users can now query datasets using the Flight SQL protocol. This provides a more efficient and performant interface for querying datasets. It also allows Beacon to be used with a wider range of clients (JetBrains DataGrip, DBeaver) and tools that support Flight SQL, such as Apache Arrow Flight clients and BI tools.
+- **Added**: Support for SQL Tables. Possibility to create a SQL table, backed by Parquet files (local or in the cloud). This allows users to create custom tables that are not directly tied to existing datasets, and populate those tables with data from other files or bare insert statements.
+- **Added**: Support for SQL views. Create SQL views on top of datasets and expose those views via the API. This allows for more flexible data modeling and querying capabilities, as data managers can define custom views that combine and transform their underlying datasets in various ways.
+- **Added**: Support for Tiff files. Beacon can now read and query Tiff files, including geotiff and cloud-optimized geotiff formats. This allows users to work with raster data in addition to the existing support for tabular data formats.
+- **Added**: Support for ODV ASCII files. ODV ASCII files can be read directly as datasets in Beacon and queried via the API. ODV ASCII files can also be streamed via the S3 protocol, allowing for efficient access to large ODV datasets stored in S3-compatible object storage.
+- **Fixed**: Fixed a bug in the NetCDF reader, where attributes stored as a list of values were not being read correctly while containing a single value. This ensures that all attributes that are scalars can be read by Beacon.
+- **Added**: NetCDF reader supports streamed reading using chunks. This allows for more efficient reading of large NetCDF files, as data can be read in smaller chunks rather than loading the entire file into memory at once. This is especially beneficial for users working with large NetCDF datasets, as it can significantly reduce memory usage and improve performance.
+- **Added**: NetCDF reader supports pushing down filters to the reader for coordinate variables. This allows for more efficient querying of NetCDF datasets, as filters can be applied directly to the coordinate variables during reading, reducing the amount of data that needs to be read and processed in memory.
+- **Added**: Support for reading "ragged" NetCDF & Zarr datasets. Ragged datasets are a type of file that can contain variables with different lengths, allowing for more flexible data structures. This allows users to work with a wider range of datasets, including those that do not conform to the traditional rectangular structure.
+
+## (v1.5.4 - 2026-01-05)
+
+- **Added**: Support for SQL querying. Users can now query datasets using SQL syntax, in addition to the existing JSON query format. This provides a more familiar and powerful interface for users who are comfortable with SQL.
+- **Added**: Support for SQL querying for native datasets (eg. NetCDF, Parquet). Users can now use SQL to query native datasets directly, without needing to create a collection first. This allows for more flexible and ad-hoc querying of datasets.
+- **Fixed**: Fixed a bug in NetCDF output where the FillValue was not being set correctly. This ensures that missing values are properly represented in the NetCDF output.
+- **Fixed**: Updated querying documentation to include examples for SQL querying. This provides users with clear guidance on how to use the new SQL querying features.
+- **Fixed**: Update querying documentation to include examples for JSON querying. This ensures that the documentation is comprehensive and up-to-date with the latest features.
+- **Added**: Support for setting the "unit" field in the ODV output schema for columns. This allows users to specify the units of measurement for columns in the ODV output, improving the clarity and usability of the output data.
+
+## (v1.2.0 - 2025-09-01)
 
 - **Added**: Support for S3. This all is abstracted via the Object Store Crate. All file sources are abstracted via the Object Store itself and support various backends. (Eg. MinIO, AWS S3, Cloudflare R2)
 - **Added**: Implemented support for ODV ASCII streaming via S3 protocol.

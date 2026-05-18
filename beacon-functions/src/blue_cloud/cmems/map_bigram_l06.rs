@@ -115,7 +115,7 @@ fn map_bigram_l06(
         (Some("MO"), _) => Some("SDN:L06::48"),
         (Some("SM"), _) => Some("SDN:L06::70"),
         (Some("XX"), _) => Some("SDN:L06::0"),
-        (Some("ML"), _) => Some("SDN:L06::46"),
+        (Some("ML"), _) => Some("SDN:L06::36"),
         (Some("SF"), _) => Some("SDN:L06::23"),
         _ => None,
     }
