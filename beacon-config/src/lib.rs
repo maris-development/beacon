@@ -27,6 +27,8 @@ pub struct ServerConfig {
     pub host: String,
     pub log_level: String,
     pub worker_threads: usize,
+    /// URL prefix for all HTTP routes, e.g. `/base-path`. Empty string means serve at `/`.
+    pub base_path: String,
 }
 
 #[derive(Debug)]
@@ -158,6 +160,8 @@ struct RawConfig {
     st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     worker_threads: usize,
+    #[envconfig(from = "BEACON_BASE_PATH", default = "")]
+    base_path: String,
 
     #[envconfig(from = "BEACON_S3_BUCKET")]
     s3_bucket: Option<String>,
@@ -227,6 +231,7 @@ impl From<RawConfig> for Config {
                 host: raw.host,
                 log_level: raw.log_level,
                 worker_threads: raw.worker_threads,
+                base_path: raw.base_path,
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
