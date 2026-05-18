@@ -19,6 +19,7 @@ pub(crate) fn verify_basic_auth_value(auth_str: &str) -> Result<(), AuthError> {
 
 /// Compares username and password pairs against the configured admin credentials
 pub(crate) fn validate_basic_auth_credentials(username: &str, password: &str) -> bool {
+    tracing::debug!("Validating basic auth credentials for user '{}'", username);
     username == beacon_config::CONFIG.admin.username
         && password == beacon_config::CONFIG.admin.password
 }

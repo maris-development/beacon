@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
-    arrow::{batch::any_dataset_as_record_batch_stream, pushdown_filter::PushdownFilter},
+    arrow::{
+        batch::{any_dataset_as_record_batch_stream, any_dataset_as_row_size},
+        metrics::DatasetReadMetrics,
+        pushdown_filter::PushdownFilter,
+    },
     projection::DatasetProjection,
 };
 use datafusion::{
@@ -12,10 +16,12 @@ use datafusion::{
         physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
     },
+    execution::SendableRecordBatchStream,
     physical_expr::{PhysicalExpr, conjunction},
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
-        metrics::ExecutionPlanMetricsSet,
+        metrics::{ExecutionPlanMetricsSet, SplitMetrics},
+        stream::{BatchSplitStream, RecordBatchStreamAdapter},
     },
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
@@ -40,7 +46,7 @@ impl TiffSource {
             override_schema: None,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             projected_statistics: None,
-            batch_size: usize::MAX,
+            batch_size: 128 * 1024,
             predicate: None,
         }
     }
@@ -51,7 +57,7 @@ impl FileSource for TiffSource {
         &self,
         object_store: Arc<dyn object_store::ObjectStore>,
         base_config: &datafusion::datasource::physical_plan::FileScanConfig,
-        _partition: usize,
+        partition: usize,
     ) -> Arc<dyn FileOpener> {
         let table_schema = self
             .override_schema
@@ -63,13 +69,16 @@ impl FileSource for TiffSource {
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
 
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
+        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema.clone());
 
         Arc::new(TiffOpener::new(
+            table_schema,
             object_store,
             Arc::from(schema_adapter),
             self.batch_size,
             self.predicate.clone(),
+            self.execution_plan_metrics.clone(),
+            partition,
         ))
     }
 
@@ -164,24 +173,33 @@ impl FileSource for TiffSource {
 }
 
 struct TiffOpener {
+    table_schema: SchemaRef,
     object_store: Arc<dyn object_store::ObjectStore>,
     schema_adapter: Arc<dyn SchemaAdapter>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    partition: usize,
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl TiffOpener {
     fn new(
+        table_schema: SchemaRef,
         object_store: Arc<dyn object_store::ObjectStore>,
         schema_adapter: Arc<dyn SchemaAdapter>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        metrics: ExecutionPlanMetricsSet,
+        partition: usize,
     ) -> Self {
         Self {
+            table_schema,
             object_store,
             schema_adapter,
             batch_size,
             predicate,
+            partition,
+            metrics,
         }
     }
 
@@ -191,6 +209,7 @@ impl TiffOpener {
         schema_adapter: Arc<dyn SchemaAdapter>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        metrics: Option<DatasetReadMetrics>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
@@ -213,7 +232,18 @@ impl TiffOpener {
         let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
 
         if projection.is_empty() {
-            return Ok(futures::stream::empty().boxed());
+            return Ok(any_dataset_as_row_size(dataset)
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to compute row size for empty projection on TIFF dataset: {e}"
+                    ))
+                })?
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to read TIFF dataset with empty projection: {e}"
+                    ))
+                })
+                .boxed());
         }
 
         let dataset = if projection.len() < file_schema.fields().len() {
@@ -231,7 +261,7 @@ impl TiffOpener {
         };
 
         let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter)
+        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "Error reading TIFF as Arrow stream: {e}"
@@ -257,14 +287,17 @@ impl FileOpener for TiffOpener {
         file_meta: FileMeta,
         _file: datafusion::datasource::listing::PartitionedFile,
     ) -> datafusion::error::Result<FileOpenFuture> {
+        let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
             file_meta.object_meta,
             self.object_store.clone(),
             self.schema_adapter.clone(),
             self.batch_size,
             self.predicate.clone(),
+            metrics,
         )
         .boxed();
+
         Ok(fut)
     }
 }

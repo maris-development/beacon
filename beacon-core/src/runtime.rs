@@ -50,29 +50,9 @@ impl Runtime {
 
         let session_ctx = Self::init_ctx(memory_pool)?;
         let data_lake = Arc::new(DataLake::new(session_ctx.clone()).await);
+
         let table_manager = data_lake.table_manager();
         let file_manager = data_lake.file_manager();
-
-        session_ctx
-            .catalog("beacon")
-            .unwrap()
-            .register_schema("public", table_manager.clone())?;
-
-        table_manager.init_tables().await?;
-
-        geodatafusion::register(&session_ctx);
-
-        for udf in beacon_functions::geo::geo_udfs() {
-            session_ctx.register_udf(udf);
-        }
-
-        for udf in beacon_functions::util::util_udfs() {
-            session_ctx.register_udf(udf);
-        }
-
-        for udf in beacon_functions::blue_cloud::blue_cloud_udfs() {
-            session_ctx.register_udf(udf);
-        }
 
         let mut table_functions = vec![];
         table_functions.extend(beacon_functions::file_formats::register_table_functions(
@@ -93,6 +73,27 @@ impl Runtime {
                 Arc::clone(table_function) as Arc<dyn TableFunctionImpl>,
             );
         }
+
+        session_ctx
+            .catalog("beacon")
+            .unwrap()
+            .register_schema("public", table_manager.clone())?;
+
+        geodatafusion::register(&session_ctx);
+
+        for udf in beacon_functions::geo::geo_udfs() {
+            session_ctx.register_udf(udf);
+        }
+
+        for udf in beacon_functions::util::util_udfs() {
+            session_ctx.register_udf(udf);
+        }
+
+        for udf in beacon_functions::blue_cloud::blue_cloud_udfs() {
+            session_ctx.register_udf(udf);
+        }
+
+        table_manager.init_tables().await?;
 
         let refresh_table_manager = table_manager.clone();
         tokio::spawn(async move {
@@ -429,6 +430,7 @@ impl Runtime {
         self.file_manager.delete_file(file_path).await
     }
 
+    #[tracing::instrument(skip(self))]
     pub async fn run_sql(
         &self,
         sql: String,

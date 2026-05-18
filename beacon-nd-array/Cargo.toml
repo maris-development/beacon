@@ -21,6 +21,7 @@ pin-project = "1.1.10"
 bytemuck = {version = "1.25.0", features = ["derive"]}
 rkyv = { version = "0.8.10", features = ["pointer_width_64"] }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 arrow-ipc = { workspace = true }

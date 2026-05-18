@@ -296,7 +296,7 @@ async fn read_dataset_as_batches(
         })?;
 
     let mapper = schema_mapper.clone();
-    let batch_stream = dataset_as_record_batch_stream(dataset, None)
+    let batch_stream = dataset_as_record_batch_stream(dataset, usize::MAX, None, None)
         .map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(
                 "Error converting atlas dataset to RecordBatch: {e}"
