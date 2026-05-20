@@ -10,8 +10,10 @@ pprof = { version = "0.15", features = ["flamegraph"] }
 [dependencies]
 axum = { version = "0.8.1", features = ["tracing", "multipart", "ws"] }
 axum-streams = { version = "0.23.1", features = ["arrow"]}
+axum-keycloak-auth = { version = "0.8.3", default-features = false, features = ["rustls-tls"] }
 tower-http = { version = "0.6.1", features = ["trace", "cors"] }
 base64 = "0.22.1"
+url = "2"
 
 futures = { workspace = true }
 futures-util = { workspace = true }

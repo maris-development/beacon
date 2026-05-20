@@ -49,13 +49,19 @@ pub(crate) struct BeaconFlightSqlService {
 impl BeaconFlightSqlService {
     /// Creates a service using the configured anonymous-access policy.
     pub(crate) fn new(runtime: Arc<beacon_core::runtime::Runtime>) -> anyhow::Result<Self> {
-        Self::new_with_options(runtime, beacon_config::CONFIG.flight_sql.allow_anonymous)
+        let layers = crate::auth::keycloak::build_layers()?;
+        Self::new_with_options(
+            runtime,
+            beacon_config::CONFIG.flight_sql.allow_anonymous,
+            layers,
+        )
     }
 
     /// Creates a service with an explicit anonymous-access setting, used primarily by tests.
     pub(super) fn new_with_options(
         runtime: Arc<beacon_core::runtime::Runtime>,
         allow_anonymous: bool,
+        keycloak_layers: crate::auth::keycloak::KeycloakLayers,
     ) -> anyhow::Result<Self> {
         let flight_sql = &beacon_config::CONFIG.flight_sql;
 
@@ -65,6 +71,7 @@ impl BeaconFlightSqlService {
             authenticator: Authenticator::new(
                 allow_anonymous,
                 Duration::from_secs(flight_sql.token_ttl_secs),
+                keycloak_layers,
             ),
             statements: SqlHandleStore::new(Duration::from_secs(flight_sql.statement_ttl_secs)),
             prepared_statements: SqlHandleStore::new(Duration::from_secs(
@@ -160,7 +167,8 @@ impl FlightSqlService for BeaconFlightSqlService {
             .unwrap_or_default();
         let auth = self
             .authenticator
-            .authorize_handshake(auth_value.as_deref(), first_request.as_ref())?;
+            .authorize_handshake(auth_value.as_deref(), first_request.as_ref())
+            .await?;
         // Flight SQL clients reuse the bearer token returned by the handshake for subsequent RPCs.
         let token = self.authenticator.issue_token(auth).await;
 

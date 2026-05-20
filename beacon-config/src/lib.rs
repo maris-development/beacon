@@ -6,6 +6,7 @@ use lazy_static::lazy_static;
 #[derive(Debug)]
 pub struct Config {
     pub admin: AdminConfig,
+    pub keycloak: KeycloakConfig,
     pub server: ServerConfig,
     pub runtime: RuntimeConfig,
     pub sql: SqlConfig,
@@ -19,6 +20,29 @@ pub struct Config {
 pub struct AdminConfig {
     pub username: String,
     pub password: String,
+}
+
+/// Optional Keycloak Bearer-JWT authentication.
+///
+/// When [`KeycloakConfig::enabled`] is `true`, HTTP admin routes and the Flight SQL
+/// handshake validate `Authorization: Bearer <jwt>` tokens against the configured
+/// Keycloak realm and require [`KeycloakConfig::required_role`] in the token claims.
+/// HTTP Basic auth is rejected in this mode.
+///
+/// When additionally [`KeycloakConfig::protect_query`] is `true`, client/read endpoints
+/// (`/api/query*`, `/api/datasets*`, `/api/tables*`, `/api/functions*`, `/api/info`) and
+/// all Flight SQL traffic require a JWT carrying [`KeycloakConfig::query_role`]. The
+/// admin role should be configured as a Keycloak composite of the query role so that
+/// admin tokens also pass the query gate.
+#[derive(Debug)]
+pub struct KeycloakConfig {
+    pub enabled: bool,
+    pub server_url: String,
+    pub realm: String,
+    pub expected_audience: String,
+    pub required_role: String,
+    pub protect_query: bool,
+    pub query_role: String,
 }
 
 #[derive(Debug)]
@@ -113,6 +137,22 @@ struct RawConfig {
     admin_username: String,
     #[envconfig(from = "BEACON_ADMIN_PASSWORD", default = "beacon-password")]
     admin_password: String,
+
+    // Keycloak (optional)
+    #[envconfig(from = "BEACON_KEYCLOAK_ENABLED", default = "false")]
+    keycloak_enabled: bool,
+    #[envconfig(from = "BEACON_KEYCLOAK_SERVER_URL", default = "")]
+    keycloak_server_url: String,
+    #[envconfig(from = "BEACON_KEYCLOAK_REALM", default = "")]
+    keycloak_realm: String,
+    #[envconfig(from = "BEACON_KEYCLOAK_EXPECTED_AUDIENCE", default = "beacon-api")]
+    keycloak_expected_audience: String,
+    #[envconfig(from = "BEACON_KEYCLOAK_REQUIRED_ROLE", default = "beacon-admin")]
+    keycloak_required_role: String,
+    #[envconfig(from = "BEACON_KEYCLOAK_PROTECT_QUERY", default = "false")]
+    keycloak_protect_query: bool,
+    #[envconfig(from = "BEACON_KEYCLOAK_QUERY_ROLE", default = "beacon-user")]
+    keycloak_query_role: String,
     #[envconfig(from = "BEACON_PORT", default = "5001")]
     port: u16,
     #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
@@ -226,6 +266,15 @@ impl From<RawConfig> for Config {
                 username: raw.admin_username,
                 password: raw.admin_password,
             },
+            keycloak: KeycloakConfig {
+                enabled: raw.keycloak_enabled,
+                server_url: raw.keycloak_server_url,
+                realm: raw.keycloak_realm,
+                expected_audience: raw.keycloak_expected_audience,
+                required_role: raw.keycloak_required_role,
+                protect_query: raw.keycloak_protect_query,
+                query_role: raw.keycloak_query_role,
+            },
             server: ServerConfig {
                 port: raw.port,
                 host: raw.host,
@@ -291,9 +340,24 @@ impl From<RawConfig> for Config {
 
 impl Config {
     pub fn init() -> Config {
-        RawConfig::init_from_env()
+        let config: Config = RawConfig::init_from_env()
             .map(Into::into)
-            .expect("Failed to load config")
+            .expect("Failed to load config");
+        if config.keycloak.enabled {
+            assert!(
+                !config.keycloak.server_url.trim().is_empty(),
+                "BEACON_KEYCLOAK_SERVER_URL must be set when BEACON_KEYCLOAK_ENABLED=true"
+            );
+            assert!(
+                !config.keycloak.realm.trim().is_empty(),
+                "BEACON_KEYCLOAK_REALM must be set when BEACON_KEYCLOAK_ENABLED=true"
+            );
+        } else if config.keycloak.protect_query {
+            eprintln!(
+                "warning: BEACON_KEYCLOAK_PROTECT_QUERY=true ignored because BEACON_KEYCLOAK_ENABLED=false"
+            );
+        }
+        config
     }
 }
 
