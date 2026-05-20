@@ -3,7 +3,7 @@ use std::{collections::HashMap, pin::Pin, sync::Arc, task::Poll};
 use futures::{Future, Stream};
 use indexmap::IndexMap;
 use nd_arrow_array::{NdArrowArray, batch::NdRecordBatch};
-use zarrs::{array::ChunkGrid, array_subset::ArraySubset};
+use zarrs::array::{ArraySubset, ChunkGrid};
 
 use crate::{array_slice_pushdown::ArraySlicePushDown, reader::AsyncArrowZarrGroupReader};
 
@@ -73,9 +73,10 @@ impl ArrowZarrStreamComposer {
         }
 
         if let Some(chunk_grid) = &chunk_grid {
-            // Generate all chunk indices
+            // Generate all chunk indices. zarrs 0.23 yields `TinyVec<[u64; 4]>`
+            // from `iter_chunk_indices`; the queue stores `Vec<u64>` (ChunkIndices).
             for chunk_indices in chunk_grid.iter_chunk_indices() {
-                queue.push(chunk_indices);
+                queue.push(chunk_indices.to_vec());
             }
         } else {
             // We should at least have one chunk to read, we can add an empty as it should only contain scalar attributes and arrays

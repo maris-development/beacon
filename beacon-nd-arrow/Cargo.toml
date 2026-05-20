@@ -15,7 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true, optional = true }
-ndarray = { version = "0.17.1", optional = true }
+ndarray = { version = "0.17", optional = true }
 anyhow = { workspace=true }
 async-trait = { workspace=true }
 futures = { workspace=true }

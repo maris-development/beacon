@@ -267,6 +267,23 @@ impl FileFormat for AtlasFormat {
                                 e
                             )
                         })?;
+                // Honor the dimension filter so the inferred schema only contains
+                // arrays whose dimensions match the user's `read_dimensions` selection.
+                let dataset = if let Some(dims) = self.options.read_dimensions.clone() {
+                    let proj = beacon_nd_array::projection::DatasetProjection {
+                        dimension_projection: Some(dims),
+                        index_projection: None,
+                    };
+                    dataset.project(&proj).map_err(|e| {
+                        exec_datafusion_err!(
+                            "Failed to apply dimension projection to atlas dataset '{}': {}",
+                            dataset_name,
+                            e
+                        )
+                    })?
+                } else {
+                    dataset
+                };
                 let schema = beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
                     .map_err(|e| {
                         exec_datafusion_err!(
@@ -336,7 +353,10 @@ impl FileFormat for AtlasFormat {
             }
         }
 
-        let source = AtlasSource::new(self.datasets_object_store.clone());
+        let source = AtlasSource::new(
+            self.datasets_object_store.clone(),
+            self.options.read_dimensions.clone(),
+        );
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(new_groups)
             .with_source(Arc::new(source))
@@ -357,7 +377,10 @@ impl FileFormat for AtlasFormat {
     }
 
     fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(AtlasSource::new(self.datasets_object_store.clone()))
+        Arc::new(AtlasSource::new(
+            self.datasets_object_store.clone(),
+            self.options.read_dimensions.clone(),
+        ))
     }
 }
 

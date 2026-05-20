@@ -16,8 +16,8 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-ndarray = "0.17.1"
-atlas = { git = "https://github.com/robinskil/atlas.git", version = "0.2.0" }
+ndarray = "0.17"
+atlas = { git = "https://github.com/robinskil/atlas.git", version = "0.2.2" }
 
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }

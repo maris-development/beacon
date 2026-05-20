@@ -9,7 +9,10 @@ use nd_arrow_array::{
     NdArrowArray,
     dimensions::{Dimension, Dimensions},
 };
-use zarrs::{array::Array, array_subset::ArraySubset, group::Group};
+use zarrs::{
+    array::{Array, ArraySubset},
+    group::Group,
+};
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::{
@@ -79,7 +82,7 @@ impl AsyncArrowZarrGroupReader {
 
             let zarr_data_type = array.data_type();
             if let Ok(arrow_data_type) =
-                crate::data_types::try_zarrs_dtype_to_arrow(zarr_data_type.clone())
+                crate::data_types::try_zarrs_dtype_to_arrow(zarr_data_type)
             {
                 fields.push(arrow::datatypes::Field::new(
                     array_name,
@@ -184,8 +187,9 @@ impl AsyncArrowZarrGroupReader {
             .collect::<Vec<_>>();
         let dimensions = Dimensions::new(dimensions);
 
-        let mut maybe_nd_array = match array_reader.data_type() {
-            zarrs::array::DataType::Bool => {
+        let zarr_data_type = array_reader.data_type();
+        let mut maybe_nd_array = match crate::data_types::classify(zarr_data_type) {
+            crate::data_types::ZarrDtypeKind::Bool => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<bool>(subset)
                     .await
@@ -197,7 +201,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::Int8 => {
+            crate::data_types::ZarrDtypeKind::Int8 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<i8>(subset)
                     .await
@@ -210,7 +214,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::Int16 => {
+            crate::data_types::ZarrDtypeKind::Int16 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<i16>(subset)
                     .await
@@ -223,7 +227,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::Int32 => {
+            crate::data_types::ZarrDtypeKind::Int32 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<i32>(subset)
                     .await
@@ -236,7 +240,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::Int64 => {
+            crate::data_types::ZarrDtypeKind::Int64 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<i64>(subset)
                     .await
@@ -249,7 +253,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::UInt8 => {
+            crate::data_types::ZarrDtypeKind::UInt8 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<u8>(subset)
                     .await
@@ -262,7 +266,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::UInt16 => {
+            crate::data_types::ZarrDtypeKind::UInt16 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<u16>(subset)
                     .await
@@ -275,7 +279,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::UInt32 => {
+            crate::data_types::ZarrDtypeKind::UInt32 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<u32>(subset)
                     .await
@@ -288,7 +292,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::UInt64 => {
+            crate::data_types::ZarrDtypeKind::UInt64 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<u64>(subset)
                     .await
@@ -301,7 +305,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::Float32 => {
+            crate::data_types::ZarrDtypeKind::Float32 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<f32>(subset)
                     .await
@@ -314,7 +318,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::Float64 => {
+            crate::data_types::ZarrDtypeKind::Float64 => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<f64>(subset)
                     .await
@@ -327,7 +331,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::String => {
+            crate::data_types::ZarrDtypeKind::String => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<String>(subset)
                     .await
@@ -340,7 +344,7 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarrs::array::DataType::Bytes => {
+            crate::data_types::ZarrDtypeKind::Bytes => {
                 let array = array_reader
                     .async_retrieve_array_subset_ndarray::<Vec<u8>>(subset)
                     .await
@@ -353,7 +357,9 @@ impl AsyncArrowZarrGroupReader {
                     .map_err(|e| e.to_string())?;
                 Ok(Some(nd_array))
             }
-            zarr_data_type => Err(format!("Unsupported Zarrs data type: {:?}", zarr_data_type)),
+            crate::data_types::ZarrDtypeKind::Other => {
+                Err(format!("Unsupported Zarrs data type: {:?}", zarr_data_type))
+            }
         };
 
         maybe_nd_array = if let Ok(Some(mut nd_array)) = maybe_nd_array {
@@ -378,7 +384,10 @@ mod tests {
 
     use futures::StreamExt;
     use object_store::local::LocalFileSystem;
-    use zarrs::{array::Array, array_subset::ArraySubset, group::Group};
+    use zarrs::{
+    array::{Array, ArraySubset},
+    group::Group,
+};
     use zarrs_object_store::AsyncObjectStore;
     use zarrs_storage::AsyncReadableListableStorage;
 

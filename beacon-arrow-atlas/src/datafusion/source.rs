@@ -46,10 +46,14 @@ pub struct AtlasSource {
     projected_statistics: Option<Statistics>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    read_dimensions: Option<Vec<String>>,
 }
 
 impl AtlasSource {
-    pub fn new(datasets_object_store: Arc<DatasetsStore>) -> Self {
+    pub fn new(
+        datasets_object_store: Arc<DatasetsStore>,
+        read_dimensions: Option<Vec<String>>,
+    ) -> Self {
         Self {
             datasets_object_store,
             schema_adapter_factory: None,
@@ -58,6 +62,7 @@ impl AtlasSource {
             projected_statistics: None,
             batch_size: usize::MAX,
             predicate: None,
+            read_dimensions,
         }
     }
 }
@@ -87,6 +92,7 @@ impl FileSource for AtlasSource {
             batch_size: self.batch_size,
             metrics: self.execution_plan_metrics.clone(),
             partition,
+            read_dimensions: self.read_dimensions.clone(),
         })
     }
 
@@ -188,6 +194,7 @@ struct AtlasOpener {
     batch_size: usize,
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
+    read_dimensions: Option<Vec<String>>,
 }
 
 impl AtlasOpener {
@@ -198,6 +205,7 @@ impl AtlasOpener {
         schema_adapter: Arc<dyn SchemaAdapter>,
         batch_size: usize,
         metrics: Option<DatasetReadMetrics>,
+        read_dimensions: Option<Vec<String>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let atlas = reader::open_atlas_store(datasets_object_store, &object_path).await?;
 
@@ -208,6 +216,22 @@ impl AtlasOpener {
                     "Failed to open atlas dataset '{dataset_name}' at {object_path}: {e}"
                 ))
             })?;
+
+        // Apply dimension projection before deriving the file schema, so the
+        // schema reflects only arrays whose dimensions match the user's filter.
+        let dataset = if let Some(dims) = read_dimensions {
+            let proj = DatasetProjection {
+                dimension_projection: Some(dims),
+                index_projection: None,
+            };
+            dataset.project(&proj).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to apply dimension projection to atlas dataset '{dataset_name}': {e}"
+                ))
+            })?
+        } else {
+            dataset
+        };
 
         let file_schema: SchemaRef =
             beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
@@ -287,6 +311,7 @@ impl FileOpener for AtlasOpener {
             self.schema_adapter.clone(),
             self.batch_size,
             metrics,
+            self.read_dimensions.clone(),
         );
         Ok(Box::pin(fut))
     }
@@ -325,7 +350,7 @@ mod tests {
             .await
             .expect("infer schema");
 
-        let source = AtlasSource::new(store);
+        let source = AtlasSource::new(store, None);
         let conf = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             table_schema.clone(),
