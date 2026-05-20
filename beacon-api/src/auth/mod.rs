@@ -2,6 +2,8 @@
 
 use base64::{engine::general_purpose, Engine as _};
 
+pub(crate) mod keycloak;
+
 /// Marker error for invalid or malformed authentication credentials
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AuthError;

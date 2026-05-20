@@ -29,8 +29,9 @@ const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// contains invalid origins, methods, or headers — validated once at startup
 /// rather than on every request.
 pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Router> {
-    let (client_router, mut api_docs_client) = setup_client_router();
-    let (admin_router, api_docs_admin) = setup_admin_router();
+    let layers = crate::auth::keycloak::build_layers()?;
+    let (client_router, mut api_docs_client) = setup_client_router(layers.query);
+    let (admin_router, api_docs_admin) = setup_admin_router(layers.admin);
 
     api_docs_client.merge(api_docs_admin);
     api_docs_client = set_api_docs_info(api_docs_client);
@@ -59,8 +60,9 @@ pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Route
 
     // SwaggerUi is merged outside the base_path nest to avoid doubling the prefix
     // in the openapi.json URL (/{base_path}/{base_path}/openapi.json).
-    let swagger_ui = SwaggerUi::new(swagger_url)
-        .urls(vec![(Url::new("Docs", &openapi_url), docs)]);
+    // `Url::new` requires `&'static str`; the URL is built once at startup, so leak it.
+    let openapi_url: &'static str = openapi_url.leak();
+    let swagger_ui = SwaggerUi::new(swagger_url).urls(vec![(Url::new("Docs", openapi_url), docs)]);
 
     if base_path.is_empty() {
         Ok(Router::new()
