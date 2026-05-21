@@ -15,6 +15,7 @@ use datafusion::{
         physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileScanConfig, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
     },
+    physical_expr::LexOrdering,
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
@@ -85,6 +86,16 @@ impl FileSource for OdvSource {
             schema_adapter: Arc::from(schema_adapter),
             object_store,
         })
+    }
+
+    fn repartitioned(
+        &self,
+        _target_partitions: usize,
+        _repartition_file_min_size: usize,
+        _output_ordering: Option<LexOrdering>,
+        _config: &FileScanConfig,
+    ) -> datafusion::error::Result<Option<FileScanConfig>> {
+        Ok(None)
     }
 
     /// Returns a reference to self as [`Any`].
