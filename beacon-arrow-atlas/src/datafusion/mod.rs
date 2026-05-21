@@ -23,7 +23,7 @@ use object_store::{ObjectMeta, ObjectStore};
 use crate::datafusion::{
     options::AtlasOptions,
     reader::open_atlas_store,
-    source::{AtlasFileInfo, AtlasSource},
+    source::{AtlasSource, AtlasStreamDatasets},
 };
 
 pub mod options;

@@ -833,6 +833,7 @@ dependencies = [
  "beacon-nd-array",
  "beacon-object-storage",
  "chrono",
+ "crossbeam",
  "datafusion",
  "futures",
  "indexmap 2.13.0",
