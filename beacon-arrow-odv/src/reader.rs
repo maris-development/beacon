@@ -440,4 +440,25 @@ mod tests {
             writer.write(&batch).unwrap();
         }
     }
+
+    #[tokio::test]
+    #[ignore = "This needs to be fixed"]
+    async fn test_full_file_compressed() {
+        let object_store =
+            object_store::local::LocalFileSystem::new_with_prefix("./test-data/").unwrap();
+        let path = object_store::path::Path::from("test.txt.zst");
+
+        let reader = OdvObjectReader::try_new(Arc::new(object_store), path)
+            .await
+            .unwrap();
+        let mut async_stream = reader.read_async(None).await;
+
+        let output_file = std::fs::File::create("./test-data/test_output_compressed.csv").unwrap();
+        let mut writer = arrow::csv::Writer::new(output_file);
+
+        while let Some(batch) = async_stream.next().await {
+            let batch = batch.unwrap();
+            writer.write(&batch).unwrap();
+        }
+    }
 }
