@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::{collections::HashMap, sync::LazyLock};
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use atlas::Atlas;
 use beacon_nd_array::arrow::{
     batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
     pushdown_filter::PushdownFilter,
@@ -20,8 +22,38 @@ use datafusion::{
     },
 };
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use tokio::sync::Mutex;
 
 use crate::datafusion::reader;
+
+/// Per-opener cache of opened atlas stores keyed by `atlas.json` path.
+///
+/// All `read_task` futures spawned by one `AtlasOpener` share this
+/// map, so the N datasets in a single atlas store pay `Atlas::open_path`
+/// exactly once. The mutex is held across the open so concurrent first
+/// reads of the same marker coalesce instead of double-opening.
+static ATLAS_CACHE: LazyLock<Mutex<HashMap<object_store::path::Path, Arc<Atlas>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub async fn get_or_open_atlas(
+    datasets_object_store: Arc<DatasetsStore>,
+    object_path: &object_store::path::Path,
+) -> datafusion::error::Result<Arc<Atlas>> {
+    let mut guard = ATLAS_CACHE.lock().await;
+    if let Some(atlas) = guard.get(object_path) {
+        return Ok(atlas.clone());
+    }
+    let atlas = reader::open_atlas_store(datasets_object_store, object_path)
+        .await
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to open atlas store at {}: {e}",
+                object_path
+            ))
+        })?;
+    guard.insert(object_path.clone(), atlas.clone());
+    Ok(atlas)
+}
 
 /// Per-file payload attached to each `PartitionedFile.extensions`.
 ///
@@ -125,17 +157,6 @@ impl FileSource for AtlasSource {
         })
     }
 
-    fn repartitioned(
-        &self,
-        _target_partitions: usize,
-        _repartition_file_min_size: usize,
-        _output_ordering: Option<datafusion::physical_expr::LexOrdering>,
-        _config: &datafusion::datasource::physical_plan::FileScanConfig,
-    ) -> datafusion::error::Result<Option<datafusion::datasource::physical_plan::FileScanConfig>>
-    {
-        Ok(None)
-    }
-
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
     }
@@ -204,8 +225,7 @@ impl AtlasOpener {
         metrics: Option<DatasetReadMetrics>,
         read_dimensions: Option<Vec<String>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let atlas = reader::open_atlas_store(datasets_object_store, &object_path).await?;
-
+        let atlas = get_or_open_atlas(datasets_object_store, &object_path).await?;
         let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(
                 "Failed to open atlas dataset '{dataset_name}' at {object_path}: {e}"
@@ -214,16 +234,14 @@ impl AtlasOpener {
 
         // Derive the file schema from atlas metadata alone (no backends),
         // then ask the schema adapter which fields the query needs.
-        let file_schema: SchemaRef = crate::compat::atlas_view_arrow_schema(
-            &view,
-            read_dimensions.as_deref(),
-        )
-        .map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to derive Arrow schema for atlas dataset '{dataset_name}': {e}"
-            ))
-        })?
-        .into();
+        let file_schema: SchemaRef =
+            crate::compat::atlas_view_arrow_schema(&view, read_dimensions.as_deref())
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to derive Arrow schema for atlas dataset '{dataset_name}': {e}"
+                    ))
+                })?
+                .into();
 
         let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
 
@@ -236,17 +254,14 @@ impl AtlasOpener {
             .iter()
             .map(|i| file_schema.field(*i).name().clone())
             .collect();
-        let dataset = crate::reader::dataset_from_atlas(
-            atlas,
-            &dataset_name,
-            Some(&projected_names),
-        )
-        .await
-        .map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to load atlas dataset '{dataset_name}': {e}"
-            ))
-        })?;
+        let dataset =
+            crate::reader::dataset_from_atlas(atlas, &dataset_name, Some(&projected_names))
+                .await
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to load atlas dataset '{dataset_name}': {e}"
+                    ))
+                })?;
 
         // Atlas has no filter pushdown today.
         let pushdown_filter: Option<PushdownFilter> = None;
@@ -294,6 +309,7 @@ impl FileOpener for AtlasOpener {
             file_meta.object_meta.location,
             dataset_name,
             self.datasets_object_store.clone(),
+            self.atlas_cache.clone(),
             self.schema_adapter.clone(),
             self.batch_size,
             metrics,
@@ -312,16 +328,17 @@ mod tests {
     use arrow::array::Array;
     use datafusion::datasource::file_format::FileFormat;
     use datafusion::datasource::listing::PartitionedFile;
-    use datafusion::datasource::physical_plan::{
-        FileMeta, FileScanConfigBuilder, FileSource,
-    };
+    use datafusion::datasource::physical_plan::{FileMeta, FileScanConfigBuilder, FileSource};
     use datafusion::execution::object_store::ObjectStoreUrl;
     use datafusion::prelude::SessionContext;
     use futures::StreamExt;
     use std::sync::Arc;
 
-    async fn build_opener_with_schema()
-    -> (Arc<dyn FileOpener>, arrow::datatypes::SchemaRef, object_store::ObjectMeta) {
+    async fn build_opener_with_schema() -> (
+        Arc<dyn FileOpener>,
+        arrow::datatypes::SchemaRef,
+        object_store::ObjectMeta,
+    ) {
         ensure_fixture().await;
         let store = test_store().await;
         let format = AtlasFormat::new(store.clone(), AtlasOptions::default());
@@ -373,7 +390,11 @@ mod tests {
             metadata_size_hint: None,
         };
 
-        let stream = opener.open(file_meta, pf).expect("open").await.expect("stream");
+        let stream = opener
+            .open(file_meta, pf)
+            .expect("open")
+            .await
+            .expect("stream");
         let batches: Vec<_> = stream.collect().await;
         assert!(!batches.is_empty(), "expected at least one batch");
 
@@ -402,7 +423,10 @@ mod tests {
             metadata_size_hint: None,
         };
         let result = opener.open(file_meta, pf);
-        assert!(result.is_err(), "missing AtlasFileInfo should produce error");
+        assert!(
+            result.is_err(),
+            "missing AtlasFileInfo should produce error"
+        );
     }
 
     #[tokio::test]
@@ -419,12 +443,17 @@ mod tests {
             metadata_size_hint: None,
         };
 
-        let stream = opener.open(file_meta, pf).expect("open").await.expect("stream");
-        let batches: Vec<arrow::record_batch::RecordBatch> = stream
-            .filter_map(|b| async move { b.ok() })
-            .collect()
-            .await;
-        assert!(!batches.is_empty(), "expected at least one batch from summer");
+        let stream = opener
+            .open(file_meta, pf)
+            .expect("open")
+            .await
+            .expect("stream");
+        let batches: Vec<arrow::record_batch::RecordBatch> =
+            stream.filter_map(|b| async move { b.ok() }).collect().await;
+        assert!(
+            !batches.is_empty(),
+            "expected at least one batch from summer"
+        );
 
         for batch in &batches {
             assert_eq!(
@@ -505,11 +534,75 @@ mod tests {
             metadata_size_hint: None,
         };
 
-        let stream = opener.open(file_meta, pf).expect("open").await.expect("stream");
+        let stream = opener
+            .open(file_meta, pf)
+            .expect("open")
+            .await
+            .expect("stream");
         let batches: Vec<_> = stream.collect().await;
         assert!(
             batches.is_empty(),
             "summer has no `cycle`; empty projection must yield no batches"
+        );
+    }
+
+    #[tokio::test]
+    async fn opener_reuses_atlas_across_datasets() {
+        use datafusion::datasource::schema_adapter::{
+            DefaultSchemaAdapterFactory, SchemaAdapterFactory,
+        };
+
+        ensure_fixture().await;
+        let store = test_store().await;
+        let format = AtlasFormat::new(store.clone(), AtlasOptions::default());
+        let ctx = SessionContext::new();
+        let object = fixture_marker_object_meta();
+
+        let dummy_store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new());
+        let table_schema = format
+            .infer_schema(&ctx.state(), &dummy_store, &[object.clone()])
+            .await
+            .expect("infer schema");
+
+        let projected_schema = table_schema.clone();
+        let schema_adapter =
+            Arc::new(DefaultSchemaAdapterFactory).create(projected_schema, table_schema.clone());
+        let atlas_cache: AtlasCache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+        let opener = AtlasOpener {
+            datasets_object_store: store,
+            schema_adapter: Arc::from(schema_adapter),
+            batch_size: usize::MAX,
+            metrics: ExecutionPlanMetricsSet::new(),
+            partition: 0,
+            read_dimensions: None,
+            atlas_cache: atlas_cache.clone(),
+        };
+
+        for name in ["winter", "summer"] {
+            let pf = pf_for(name, object.clone());
+            let file_meta = FileMeta {
+                object_meta: object.clone(),
+                range: None,
+                extensions: pf.extensions.clone(),
+                metadata_size_hint: None,
+            };
+            let stream = opener
+                .open(file_meta, pf)
+                .expect("open")
+                .await
+                .expect("stream");
+            let batches: Vec<_> = stream.collect().await;
+            assert!(!batches.is_empty(), "expected batches for dataset {name}");
+        }
+
+        let guard = atlas_cache.lock().await;
+        assert_eq!(
+            guard.len(),
+            1,
+            "atlas store must be opened exactly once across both datasets, cache: {:?}",
+            guard.keys().collect::<Vec<_>>(),
         );
     }
 
@@ -524,11 +617,13 @@ mod tests {
             metadata_size_hint: None,
         };
 
-        let stream = opener.open(file_meta, pf).expect("open").await.expect("stream");
-        let batches: Vec<arrow::record_batch::RecordBatch> = stream
-            .filter_map(|b| async move { b.ok() })
-            .collect()
-            .await;
+        let stream = opener
+            .open(file_meta, pf)
+            .expect("open")
+            .await
+            .expect("stream");
+        let batches: Vec<arrow::record_batch::RecordBatch> =
+            stream.filter_map(|b| async move { b.ok() }).collect().await;
         assert!(!batches.is_empty());
 
         // Verify the union schema is honored: even though winter has all
@@ -555,4 +650,3 @@ mod tests {
         assert_eq!(all, vec![1.0f32, 2.0, 3.0, 4.0]);
     }
 }
-

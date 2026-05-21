@@ -11,7 +11,9 @@ use datafusion::{
     datasource::{
         file_format::{FileFormat, FileFormatFactory, file_compression_type::FileCompressionType},
         listing::PartitionedFile,
-        physical_plan::{FileGroup, FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
+        physical_plan::{
+            FileGroup, FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource,
+        },
     },
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
@@ -282,7 +284,10 @@ impl FileFormat for AtlasFormat {
         }
 
         let schema = super_type_schema(&schemas).map_err(|e| {
-            exec_datafusion_err!("Failed to compute super type schema for atlas datasets: {}", e)
+            exec_datafusion_err!(
+                "Failed to compute super type schema for atlas datasets: {}",
+                e
+            )
         })?;
         Ok(Arc::new(schema))
     }
@@ -302,44 +307,11 @@ impl FileFormat for AtlasFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        // Rebuild file_groups: explode each atlas.json marker into one
-        // PartitionedFile per atlas dataset, carrying the dataset name in
-        // `extensions`.
-        let mut object_metas: Vec<ObjectMeta> = Vec::new();
-        for group in &conf.file_groups {
-            for file in group.files() {
-                object_metas.push(file.object_meta.clone());
-            }
-        }
-        let markers = top_level_atlas_markers(&object_metas);
-
-        let mut new_groups: Vec<FileGroup> = Vec::new();
-        for marker in markers {
-            let atlas =
-                open_atlas_store(self.datasets_object_store.clone(), &marker.location).await?;
-            let mut files = Vec::new();
-            for dataset_name in atlas.list_datasets() {
-                let pf = PartitionedFile {
-                    object_meta: marker.clone(),
-                    partition_values: vec![],
-                    range: None,
-                    statistics: None,
-                    extensions: Some(Arc::new(AtlasFileInfo { dataset_name })),
-                    metadata_size_hint: None,
-                };
-                files.push(pf);
-            }
-            if !files.is_empty() {
-                new_groups.push(FileGroup::new(files));
-            }
-        }
-
         let source = AtlasSource::new(
             self.datasets_object_store.clone(),
             self.options.read_dimensions.clone(),
         );
         let conf = FileScanConfigBuilder::from(conf)
-            .with_file_groups(new_groups)
             .with_source(Arc::new(source))
             .build();
         Ok(DataSourceExec::from_data_source(conf))
@@ -534,14 +506,21 @@ mod tests {
         let ctx = SessionContext::new();
 
         let schema = format
-            .infer_schema(&ctx.state(), &dummy_object_store(), &[fixture_marker_object_meta()])
+            .infer_schema(
+                &ctx.state(),
+                &dummy_object_store(),
+                &[fixture_marker_object_meta()],
+            )
             .await
             .expect("infer");
 
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         // Winter has cycle, season, temperature, year; summer has season, temperature.
         // The super-typed schema should include all of them.
-        assert!(names.contains(&"temperature"), "missing temperature in {names:?}");
+        assert!(
+            names.contains(&"temperature"),
+            "missing temperature in {names:?}"
+        );
         assert!(names.contains(&"cycle"), "missing cycle in {names:?}");
         assert!(names.contains(&"season"), "missing season in {names:?}");
         assert!(names.contains(&"year"), "missing year in {names:?}");
@@ -574,13 +553,13 @@ mod tests {
         let store = test_store().await;
         let format = AtlasFormat::new(store, AtlasOptions::default());
         let ctx = SessionContext::new();
-        let empty_schema: arrow::datatypes::SchemaRef =
-            Arc::new(arrow::datatypes::Schema::empty());
+        let empty_schema: arrow::datatypes::SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
         let input: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(empty_schema.clone()));
 
         let conf = FileSinkConfig {
             original_url: String::new(),
-            object_store_url: datafusion::execution::object_store::ObjectStoreUrl::local_filesystem(),
+            object_store_url: datafusion::execution::object_store::ObjectStoreUrl::local_filesystem(
+            ),
             table_paths: vec![],
             file_group: FileGroup::new(vec![]),
             output_schema: empty_schema,
