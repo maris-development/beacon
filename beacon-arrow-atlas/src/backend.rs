@@ -25,6 +25,11 @@ pub trait AtlasReadable: NdArrayType {
         start: Vec<usize>,
         shape: Vec<usize>,
     ) -> anyhow::Result<ArrayD<Self>>;
+
+    /// Convert an atlas `FillValue` into this type's per-element fill,
+    /// using the same widening/sentinel rules `array_format` applies when
+    /// materializing missing chunks.
+    fn fill_element(fill: Option<&atlas::FillValue>) -> Self;
 }
 
 macro_rules! impl_atlas_readable_passthrough {
@@ -55,6 +60,10 @@ macro_rules! impl_atlas_readable_passthrough {
                         )
                     })?;
                 Ok(arr.to_owned())
+            }
+
+            fn fill_element(fill: Option<&atlas::FillValue>) -> Self {
+                <$ty as atlas::ArrayElement>::fill_element(fill)
             }
         }
     };
@@ -101,6 +110,11 @@ impl AtlasReadable for TimestampNanosecond {
         // Map element-wise: TimestampNs(i64) -> TimestampNanosecond(i64).
         // Both are #[repr(transparent)] over i64.
         Ok(arr.to_owned().mapv(|ts| TimestampNanosecond(ts.0)))
+    }
+
+    fn fill_element(fill: Option<&atlas::FillValue>) -> Self {
+        let ts = <atlas::TimestampNs as atlas::ArrayElement>::fill_element(fill);
+        TimestampNanosecond(ts.0)
     }
 }
 
@@ -247,6 +261,34 @@ mod tests {
         assert_eq!(arr.ndim(), 0);
         let raw = arr.into_raw_vec_and_offset().0;
         assert_eq!(raw, vec![42i32]);
+    }
+
+    // ── AtlasReadable::fill_element ────────────────────────────────────
+
+    #[test]
+    fn fill_element_passthrough_numeric() {
+        use atlas::FillValue;
+        assert_eq!(
+            <i32 as AtlasReadable>::fill_element(Some(&FillValue::Int(-7))),
+            -7i32
+        );
+        let nan = <f64 as AtlasReadable>::fill_element(Some(&FillValue::Float(f64::NAN)));
+        assert!(nan.is_nan(), "NaN fill must round-trip as NaN");
+        assert_eq!(<i32 as AtlasReadable>::fill_element(None), 0i32);
+    }
+
+    #[test]
+    fn fill_element_timestamp_newtype_unwraps() {
+        use atlas::FillValue;
+        // The TimestampNanosecond impl goes through atlas::TimestampNs and
+        // must end up wrapping the same i64.
+        let ts = <TimestampNanosecond as AtlasReadable>::fill_element(Some(
+            &FillValue::TimestampNs(123),
+        ));
+        assert_eq!(ts, TimestampNanosecond(123));
+        let from_int =
+            <TimestampNanosecond as AtlasReadable>::fill_element(Some(&FillValue::Int(456)));
+        assert_eq!(from_int, TimestampNanosecond(456));
     }
 
     // ── AtlasArrayBackend ──────────────────────────────────────────────

@@ -8,7 +8,10 @@
 use std::{path::Path, sync::Arc};
 
 use atlas::Atlas;
-use beacon_nd_array::{NdArrayD, dataset::{AnyDataset, Dataset}};
+use beacon_nd_array::{
+    NdArrayD,
+    dataset::{AnyDataset, Dataset},
+};
 use indexmap::IndexMap;
 
 use crate::compat;
@@ -23,34 +26,64 @@ pub async fn open_dataset<P: AsRef<Path>>(
     store_path: P,
     dataset_name: &str,
 ) -> anyhow::Result<AnyDataset> {
-    let atlas = Atlas::open_path(store_path.as_ref())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to open atlas store at {:?}: {}", store_path.as_ref(), e))?;
-    dataset_from_atlas(Arc::new(atlas), dataset_name).await
+    let atlas = Atlas::open_path(store_path.as_ref()).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to open atlas store at {:?}: {}",
+            store_path.as_ref(),
+            e
+        )
+    })?;
+    dataset_from_atlas(Arc::new(atlas), dataset_name, None).await
 }
 
 /// Build an [`AnyDataset`] from an already-open atlas handle.
+///
+/// `projected_names`:
+/// - `None` — include every array and attribute in the dataset.
+/// - `Some(names)` — include only arrays/attributes whose name appears in
+///   `names`. Names not present in the dataset are silently ignored.
+///   This lets the DataFusion source skip building `NdArrayD` backends
+///   for columns the query won't use.
 pub async fn dataset_from_atlas(
     atlas: Arc<Atlas>,
     dataset_name: &str,
+    projected_names: Option<&[String]>,
 ) -> anyhow::Result<AnyDataset> {
     let view = atlas
         .open_dataset(dataset_name)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open atlas dataset '{}': {}", dataset_name, e))?;
 
+    let included = |name: &str| projected_names.map_or(true, |names| names.iter().any(|n| n == name));
+
     let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
 
     for array_name in view.list_arrays() {
-        let schema = view
-            .array_meta(&array_name)
-            .map_err(|e| anyhow::anyhow!(
-                "Failed to read atlas schema for array '{}' in dataset '{}': {}",
+        if !included(&array_name) {
+            continue;
+        }
+        let schema = view.array_meta(&array_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Atlas schema missing for array '{}' in dataset '{}'",
+                array_name,
+                dataset_name,
+            )
+        })?;
+        let fill_value = view.array_fill_value(&array_name).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to read fill value for atlas array '{}' in dataset '{}': {}",
                 array_name,
                 dataset_name,
                 e
-            ))?;
-        match compat::array_to_nd_array(atlas.clone(), dataset_name, &array_name, &schema) {
+            )
+        })?;
+        match compat::array_to_nd_array(
+            atlas.clone(),
+            dataset_name,
+            &array_name,
+            &schema,
+            fill_value,
+        ) {
             Ok(nd) => {
                 arrays.insert(array_name, nd);
             }
@@ -66,6 +99,9 @@ pub async fn dataset_from_atlas(
     }
 
     for (attr_name, attr_value) in view.meta().attributes {
+        if !included(&attr_name) {
+            continue;
+        }
         match compat::attribute_to_nd_array(&attr_name, attr_value) {
             Ok(nd) => {
                 arrays.insert(attr_name, nd);
@@ -93,13 +129,14 @@ pub async fn dataset_from_atlas(
 pub(crate) mod test_support {
     //! Helpers for building atlas store fixtures in tests across the crate.
 
-    use atlas::{Atlas, Attr, StoreConfig};
+    use atlas::{Atlas, Attr, FillValue, StoreConfig};
     use std::path::Path;
 
     /// Build a two-dataset atlas store at `path`.
     ///
     /// Layout:
-    /// - `winter`: arrays `temperature: Float32[4]`, `cycle: Int32[4]`;
+    /// - `winter`: arrays `temperature: Float32[4]`, `cycle: Int32[4]`
+    ///   (fill_value = -1, lets us assert fill propagation end-to-end);
     ///   attribute `season: String("winter")`, `year: Int64(2024)`.
     /// - `summer`: arrays `temperature: Float32[3]`;
     ///   attribute `season: String("summer")`.
@@ -109,16 +146,19 @@ pub(crate) mod test_support {
             .expect("create atlas store");
 
         // ── winter ────────────────────────────────────────────────────
-        let mut winter = atlas
-            .create_dataset("winter")
-            .await
-            .expect("create winter");
+        let mut winter = atlas.create_dataset("winter").await.expect("create winter");
         winter
             .define_array::<f32>("temperature", vec!["obs".into()], vec![4], None, None)
             .await
             .expect("define winter.temperature");
         winter
-            .define_array::<i32>("cycle", vec!["obs".into()], vec![4], None, None)
+            .define_array::<i32>(
+                "cycle",
+                vec!["obs".into()],
+                vec![4],
+                None,
+                Some(FillValue::Int(-1)),
+            )
             .await
             .expect("define winter.cycle");
         winter.set_attribute("season", Attr::String("winter".into()));
@@ -136,10 +176,7 @@ pub(crate) mod test_support {
             .expect("write winter.cycle");
 
         // ── summer ────────────────────────────────────────────────────
-        let mut summer = atlas
-            .create_dataset("summer")
-            .await
-            .expect("create summer");
+        let mut summer = atlas.create_dataset("summer").await.expect("create summer");
         summer
             .define_array::<f32>("temperature", vec!["obs".into()], vec![3], None, None)
             .await
@@ -168,7 +205,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         build_two_dataset_store(tmp.path()).await;
 
-        let winter = open_dataset(tmp.path(), "winter").await.expect("open winter");
+        let winter = open_dataset(tmp.path(), "winter")
+            .await
+            .expect("open winter");
         assert_eq!(winter.name(), "winter");
 
         let ds = winter.dataset();
@@ -186,7 +225,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         build_two_dataset_store(tmp.path()).await;
 
-        let winter = open_dataset(tmp.path(), "winter").await.expect("open winter");
+        let winter = open_dataset(tmp.path(), "winter")
+            .await
+            .expect("open winter");
         let temp = winter
             .get_array("temperature")
             .expect("temperature array")
@@ -211,7 +252,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         build_two_dataset_store(tmp.path()).await;
 
-        let winter = open_dataset(tmp.path(), "winter").await.expect("open winter");
+        let winter = open_dataset(tmp.path(), "winter")
+            .await
+            .expect("open winter");
         let season = winter
             .get_array("season")
             .expect("season attribute")
@@ -233,15 +276,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_dataset_propagates_array_fill_value() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        build_two_dataset_store(tmp.path()).await;
+
+        let winter = open_dataset(tmp.path(), "winter")
+            .await
+            .expect("open winter");
+        let cycle = winter
+            .get_array("cycle")
+            .expect("cycle array")
+            .as_any()
+            .downcast_ref::<NdArray<i32>>()
+            .expect("downcast i32");
+        assert_eq!(cycle.fill_value().await, Some(-1i32));
+
+        // temperature was defined without a fill value.
+        let temperature = winter
+            .get_array("temperature")
+            .expect("temperature array")
+            .as_any()
+            .downcast_ref::<NdArray<f32>>()
+            .expect("downcast f32");
+        assert_eq!(temperature.fill_value().await, None);
+    }
+
+    #[tokio::test]
     async fn open_dataset_distinguishes_between_dataset_views() {
         let tmp = tempfile::tempdir().expect("temp dir");
         build_two_dataset_store(tmp.path()).await;
 
-        let winter = open_dataset(tmp.path(), "winter").await.expect("open winter");
-        let summer = open_dataset(tmp.path(), "summer").await.expect("open summer");
+        let winter = open_dataset(tmp.path(), "winter")
+            .await
+            .expect("open winter");
+        let summer = open_dataset(tmp.path(), "summer")
+            .await
+            .expect("open summer");
 
-        assert_eq!(winter.dataset().get_array("temperature").unwrap().shape(), &[4]);
-        assert_eq!(summer.dataset().get_array("temperature").unwrap().shape(), &[3]);
+        assert_eq!(
+            winter.dataset().get_array("temperature").unwrap().shape(),
+            &[4]
+        );
+        assert_eq!(
+            summer.dataset().get_array("temperature").unwrap().shape(),
+            &[3]
+        );
         // summer doesn't define `cycle` or `year`.
         assert!(summer.dataset().get_array("cycle").is_none());
         assert!(summer.dataset().get_array("year").is_none());

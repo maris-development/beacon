@@ -255,36 +255,17 @@ impl FileFormat for AtlasFormat {
         for marker in markers {
             let atlas =
                 open_atlas_store(self.datasets_object_store.clone(), &marker.location).await?;
+            let read_dimensions = self.options.read_dimensions.as_deref();
             for dataset_name in atlas.list_datasets() {
-                let dataset =
-                    crate::reader::dataset_from_atlas(atlas.clone(), &dataset_name)
-                        .await
-                        .map_err(|e| {
-                            exec_datafusion_err!(
-                                "Failed to derive schema for atlas dataset '{}' at {}: {}",
-                                dataset_name,
-                                marker.location,
-                                e
-                            )
-                        })?;
-                // Honor the dimension filter so the inferred schema only contains
-                // arrays whose dimensions match the user's `read_dimensions` selection.
-                let dataset = if let Some(dims) = self.options.read_dimensions.clone() {
-                    let proj = beacon_nd_array::projection::DatasetProjection {
-                        dimension_projection: Some(dims),
-                        index_projection: None,
-                    };
-                    dataset.project(&proj).map_err(|e| {
-                        exec_datafusion_err!(
-                            "Failed to apply dimension projection to atlas dataset '{}': {}",
-                            dataset_name,
-                            e
-                        )
-                    })?
-                } else {
-                    dataset
-                };
-                let schema = beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
+                let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
+                    exec_datafusion_err!(
+                        "Failed to open atlas dataset '{}' at {}: {}",
+                        dataset_name,
+                        marker.location,
+                        e
+                    )
+                })?;
+                let schema = crate::compat::atlas_view_arrow_schema(&view, read_dimensions)
                     .map_err(|e| {
                         exec_datafusion_err!(
                             "Failed to derive Arrow schema for atlas dataset '{}': {}",

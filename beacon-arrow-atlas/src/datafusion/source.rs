@@ -1,12 +1,9 @@
 use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
-use beacon_nd_array::{
-    arrow::{
-        batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
-        pushdown_filter::PushdownFilter,
-    },
-    projection::DatasetProjection,
+use beacon_nd_array::arrow::{
+    batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
+    pushdown_filter::PushdownFilter,
 };
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
@@ -209,38 +206,24 @@ impl AtlasOpener {
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let atlas = reader::open_atlas_store(datasets_object_store, &object_path).await?;
 
-        let dataset = crate::reader::dataset_from_atlas(atlas, &dataset_name)
-            .await
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to open atlas dataset '{dataset_name}' at {object_path}: {e}"
-                ))
-            })?;
+        let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to open atlas dataset '{dataset_name}' at {object_path}: {e}"
+            ))
+        })?;
 
-        // Apply dimension projection before deriving the file schema, so the
-        // schema reflects only arrays whose dimensions match the user's filter.
-        let dataset = if let Some(dims) = read_dimensions {
-            let proj = DatasetProjection {
-                dimension_projection: Some(dims),
-                index_projection: None,
-            };
-            dataset.project(&proj).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to apply dimension projection to atlas dataset '{dataset_name}': {e}"
-                ))
-            })?
-        } else {
-            dataset
-        };
-
-        let file_schema: SchemaRef =
-            beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema(&dataset)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to derive Arrow schema from atlas dataset '{dataset_name}': {e}"
-                    ))
-                })?
-                .into();
+        // Derive the file schema from atlas metadata alone (no backends),
+        // then ask the schema adapter which fields the query needs.
+        let file_schema: SchemaRef = crate::compat::atlas_view_arrow_schema(
+            &view,
+            read_dimensions.as_deref(),
+        )
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to derive Arrow schema for atlas dataset '{dataset_name}': {e}"
+            ))
+        })?
+        .into();
 
         let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
 
@@ -248,19 +231,22 @@ impl AtlasOpener {
             return Ok(futures::stream::empty().boxed());
         }
 
-        let dataset = if projection.len() < file_schema.fields().len() {
-            let proj = DatasetProjection {
-                dimension_projection: None,
-                index_projection: Some(projection),
-            };
-            dataset.project(&proj).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to project atlas dataset '{dataset_name}': {e}"
-                ))
-            })?
-        } else {
-            dataset
-        };
+        // Build the AnyDataset with only the queried-and-available columns.
+        let projected_names: Vec<String> = projection
+            .iter()
+            .map(|i| file_schema.field(*i).name().clone())
+            .collect();
+        let dataset = crate::reader::dataset_from_atlas(
+            atlas,
+            &dataset_name,
+            Some(&projected_names),
+        )
+        .await
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to load atlas dataset '{dataset_name}': {e}"
+            ))
+        })?;
 
         // Atlas has no filter pushdown today.
         let pushdown_filter: Option<PushdownFilter> = None;
@@ -417,6 +403,114 @@ mod tests {
         };
         let result = opener.open(file_meta, pf);
         assert!(result.is_err(), "missing AtlasFileInfo should produce error");
+    }
+
+    #[tokio::test]
+    async fn opener_summer_null_fills_missing_columns() {
+        // Summer has only `temperature` + `season` — querying with the full
+        // union schema must still produce batches whose width matches the
+        // table schema, with NULLs in the columns summer doesn't carry.
+        let (opener, schema, object) = build_opener_with_schema().await;
+        let pf = pf_for("summer", object.clone());
+        let file_meta = FileMeta {
+            object_meta: object,
+            range: None,
+            extensions: pf.extensions.clone(),
+            metadata_size_hint: None,
+        };
+
+        let stream = opener.open(file_meta, pf).expect("open").await.expect("stream");
+        let batches: Vec<arrow::record_batch::RecordBatch> = stream
+            .filter_map(|b| async move { b.ok() })
+            .collect()
+            .await;
+        assert!(!batches.is_empty(), "expected at least one batch from summer");
+
+        for batch in &batches {
+            assert_eq!(
+                batch.schema().fields().len(),
+                schema.fields().len(),
+                "table-schema width must be honored even when columns are missing",
+            );
+        }
+
+        let temp_idx = schema.index_of("temperature").expect("temperature column");
+        let cycle_idx = schema.index_of("cycle").expect("cycle column");
+        let year_idx = schema.index_of("year").expect("year column");
+
+        let mut temps = Vec::new();
+        for batch in &batches {
+            let arr = batch
+                .column(temp_idx)
+                .as_any()
+                .downcast_ref::<arrow::array::Float32Array>()
+                .expect("temperature is Float32");
+            for i in 0..arr.len() {
+                if arr.is_valid(i) {
+                    temps.push(arr.value(i));
+                }
+            }
+
+            let cycle = batch.column(cycle_idx);
+            assert_eq!(
+                cycle.null_count(),
+                cycle.len(),
+                "summer's `cycle` column should be all-null"
+            );
+            let year = batch.column(year_idx);
+            assert_eq!(
+                year.null_count(),
+                year.len(),
+                "summer's `year` column should be all-null"
+            );
+        }
+        assert_eq!(temps, vec![20.0f32, 21.0, 22.0]);
+    }
+
+    #[tokio::test]
+    async fn opener_projection_only_missing_column_yields_empty_stream() {
+        // Project the table schema down to just `cycle` and read summer,
+        // which has no `cycle`. The schema adapter's projection comes back
+        // empty so the stream must be empty (no rows of all-NULL).
+        ensure_fixture().await;
+        let store = test_store().await;
+        let format = AtlasFormat::new(store.clone(), AtlasOptions::default());
+        let ctx = SessionContext::new();
+        let object = fixture_marker_object_meta();
+
+        let dummy_store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new());
+
+        let table_schema = format
+            .infer_schema(&ctx.state(), &dummy_store, &[object.clone()])
+            .await
+            .expect("infer schema");
+        let cycle_idx = table_schema.index_of("cycle").expect("cycle column");
+
+        let source = AtlasSource::new(store, None);
+        let conf = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            table_schema.clone(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_projection(Some(vec![cycle_idx]))
+        .build();
+
+        let opener = source.create_file_opener(dummy_store, &conf, 0);
+        let pf = pf_for("summer", object.clone());
+        let file_meta = FileMeta {
+            object_meta: object,
+            range: None,
+            extensions: pf.extensions.clone(),
+            metadata_size_hint: None,
+        };
+
+        let stream = opener.open(file_meta, pf).expect("open").await.expect("stream");
+        let batches: Vec<_> = stream.collect().await;
+        assert!(
+            batches.is_empty(),
+            "summer has no `cycle`; empty projection must yield no batches"
+        );
     }
 
     #[tokio::test]
