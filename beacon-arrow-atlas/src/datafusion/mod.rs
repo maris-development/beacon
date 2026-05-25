@@ -22,16 +22,70 @@ use object_store::{ObjectMeta, ObjectStore};
 
 use crate::datafusion::{
     options::AtlasOptions,
-    reader::open_atlas_store,
     source::{AtlasSource, AtlasStreamDatasets},
 };
 
+pub mod cache;
 pub mod options;
+pub mod pushdown;
 pub mod reader;
 pub mod source;
 
-/// The extension used for atlas store marker files.
+/// Canonical marker filename used as the format identifier with
+/// DataFusion. Kept stable across atlas versions so the registered
+/// `FileFormat` lookup key doesn't churn even though the on-disk
+/// filename may be any of [`ATLAS_MARKER_NAMES`].
 const ATLAS_MARKER: &str = "atlas.json";
+
+/// All marker filenames atlas 0.8.0 may emit at the root of a store.
+/// Order matches atlas's own `META_VARIANTS` — uncompressed first within
+/// each format, JSON before MsgPack overall — so when multiple are
+/// present the priority tie-break mirrors atlas.
+const ATLAS_MARKER_NAMES: [&str; 6] = [
+    "atlas.json",
+    "atlas.json.zst",
+    "atlas.json.lz4",
+    "atlas.msgpack",
+    "atlas.msgpack.zst",
+    "atlas.msgpack.lz4",
+];
+
+#[derive(Copy, Clone)]
+enum MetaFormat {
+    Json,
+    MsgPack,
+}
+
+#[derive(Copy, Clone)]
+enum Codec {
+    None,
+    Zstd,
+    Lz4,
+}
+
+/// Map a marker filename to its `(format, compression)` encoding.
+fn atlas_marker_encoding(filename: &str) -> Option<(MetaFormat, Codec)> {
+    match filename {
+        "atlas.json" => Some((MetaFormat::Json, Codec::None)),
+        "atlas.json.zst" => Some((MetaFormat::Json, Codec::Zstd)),
+        "atlas.json.lz4" => Some((MetaFormat::Json, Codec::Lz4)),
+        "atlas.msgpack" => Some((MetaFormat::MsgPack, Codec::None)),
+        "atlas.msgpack.zst" => Some((MetaFormat::MsgPack, Codec::Zstd)),
+        "atlas.msgpack.lz4" => Some((MetaFormat::MsgPack, Codec::Lz4)),
+        _ => None,
+    }
+}
+
+/// If `p` ends in one of the known atlas marker filenames, return that
+/// filename. Used both to recognize markers and to recover the actual
+/// on-disk filename for path manipulation.
+fn atlas_marker_filename(p: &object_store::path::Path) -> Option<&'static str> {
+    let s = p.as_ref();
+    ATLAS_MARKER_NAMES
+        .iter()
+        .copied()
+        .find(|name| s == *name || s.ends_with(&format!("/{name}")))
+}
 
 #[derive(Debug, Clone)]
 pub struct AtlasFormatFactory {
@@ -123,18 +177,20 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
                 }
             };
 
+            let marker_name = atlas_marker_filename(&marker.location)
+                .expect("top_level_atlas_markers only yields recognized markers");
             let store_path = marker
                 .location
                 .as_ref()
-                .strip_suffix(ATLAS_MARKER)
+                .strip_suffix(marker_name)
                 .unwrap_or(marker.location.as_ref())
                 .trim_end_matches('/');
 
             for dataset_name in dataset_names {
                 let file_path = if store_path.is_empty() {
-                    format!("{ATLAS_MARKER}/{dataset_name}")
+                    format!("{marker_name}/{dataset_name}")
                 } else {
-                    format!("{store_path}/{ATLAS_MARKER}/{dataset_name}")
+                    format!("{store_path}/{marker_name}/{dataset_name}")
                 };
                 out.push(DatasetMetadata::new(file_path, ext.clone()));
             }
@@ -148,29 +204,52 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
     }
 }
 
-/// Parse an `atlas.json` file from disk and return the names of the
-/// datasets it registers.
+/// Parse an atlas store metadata file from disk and return the names of
+/// the datasets it registers.
 ///
-/// Atlas's on-disk layout has a stable shape:
-/// `{ "version": <u32>, "codec": ..., "datasets": { "<name>": {...}, ... } }`.
+/// Format and compression are derived from the filename — atlas 0.8.0
+/// encodes both in the on-disk name (`atlas.{json,msgpack}{,.zst,.lz4}`).
 /// We deliberately only read the `datasets` object's keys to stay
 /// compatible across minor schema additions.
 fn read_atlas_dataset_names(local_path: &str) -> anyhow::Result<Vec<String>> {
     let bytes = std::fs::read(local_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read atlas.json at {local_path}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read atlas marker at {local_path}: {e}"))?;
+
+    let filename = std::path::Path::new(local_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Atlas marker path has no filename: {local_path}"))?;
+
+    let (format, codec) = atlas_marker_encoding(filename)
+        .ok_or_else(|| anyhow::anyhow!("Unknown atlas marker filename: {filename}"))?;
+
+    let raw = match codec {
+        Codec::None => bytes,
+        Codec::Zstd => zstd::stream::decode_all(bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("Failed to zstd-decode {local_path}: {e}"))?,
+        Codec::Lz4 => lz4_flex::decompress_size_prepended(&bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to lz4-decode {local_path}: {e}"))?,
+    };
+
+    // `IgnoredAny` deserializes from any value shape, so this struct
+    // works against both JSON and MsgPack without per-format variants.
     #[derive(serde::Deserialize)]
     struct Doc {
         #[serde(default)]
-        datasets: std::collections::BTreeMap<String, serde_json::Value>,
+        datasets: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
     }
-    let doc: Doc = serde_json::from_slice(&bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to parse atlas.json at {local_path}: {e}"))?;
+
+    let doc: Doc = match format {
+        MetaFormat::Json => serde_json::from_slice(&raw)
+            .map_err(|e| anyhow::anyhow!("Failed to JSON-parse {local_path}: {e}"))?,
+        MetaFormat::MsgPack => rmp_serde::from_slice(&raw)
+            .map_err(|e| anyhow::anyhow!("Failed to MsgPack-parse {local_path}: {e}"))?,
+    };
     Ok(doc.datasets.into_keys().collect())
 }
 
 fn is_atlas_marker(obj: &ObjectMeta) -> bool {
-    let loc = obj.location.to_string();
-    loc == ATLAS_MARKER || loc.ends_with(&format!("/{ATLAS_MARKER}"))
+    atlas_marker_filename(&obj.location).is_some()
 }
 
 /// Filter `objects` down to the unique top-level `atlas.json` files.
@@ -202,8 +281,8 @@ fn top_level_atlas_markers(objects: &[ObjectMeta]) -> Vec<ObjectMeta> {
 
 fn marker_parent(p: &object_store::path::Path) -> Option<String> {
     let s = p.as_ref();
-    s.strip_suffix(ATLAS_MARKER)
-        .map(|s| s.trim_end_matches('/').to_string())
+    let name = atlas_marker_filename(p)?;
+    Some(s.strip_suffix(name)?.trim_end_matches('/').to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -256,7 +335,7 @@ impl FileFormat for AtlasFormat {
         let mut schemas = Vec::new();
         for marker in markers {
             let atlas =
-                open_atlas_store(self.datasets_object_store.clone(), &marker.location).await?;
+                cache::get_or_open_atlas(self.datasets_object_store.clone(), &marker).await?;
             let read_dimensions = self.options.read_dimensions.as_deref();
             for dataset_name in atlas.list_datasets() {
                 let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
@@ -394,8 +473,10 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{ensure_fixture, fixture_marker_object_meta, test_store};
     use super::*;
+    use beacon_object_storage::get_datasets_object_store;
     use datafusion::prelude::SessionContext;
     use object_store::local::LocalFileSystem;
+    use object_store::path::Path as OsPath;
 
     fn dummy_object_store() -> Arc<dyn ObjectStore> {
         Arc::new(LocalFileSystem::new())
@@ -574,5 +655,260 @@ mod tests {
             .expect_err("writing should be unsupported");
         let msg = format!("{err}");
         assert!(msg.to_lowercase().contains("not"), "{msg}");
+    }
+
+    // ── Atlas 0.8.0 marker variants ────────────────────────────────────
+
+    fn marker_obj(path: &str) -> ObjectMeta {
+        ObjectMeta {
+            location: object_store::path::Path::from(path),
+            last_modified: chrono::Utc::now(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn is_atlas_marker_matches_all_six_variants() {
+        for name in &ATLAS_MARKER_NAMES {
+            assert!(
+                is_atlas_marker(&marker_obj(name)),
+                "bare {name} should be recognized",
+            );
+            assert!(
+                is_atlas_marker(&marker_obj(&format!("store/{name}"))),
+                "store/{name} should be recognized",
+            );
+            assert!(
+                is_atlas_marker(&marker_obj(&format!("a/b/c/{name}"))),
+                "a/b/c/{name} should be recognized",
+            );
+        }
+
+        // Lookalikes must not match.
+        for negative in [
+            "foo/data.af",
+            "store/atlas.json.tmp",
+            "store/atlas.jsona",
+            "store/atlas.msgpack.bak",
+            "atlas.json/inner",
+        ] {
+            assert!(
+                !is_atlas_marker(&marker_obj(negative)),
+                "{negative} should NOT be recognized",
+            );
+        }
+    }
+
+    #[test]
+    fn marker_parent_strips_each_variant() {
+        for name in &ATLAS_MARKER_NAMES {
+            assert_eq!(
+                marker_parent(&object_store::path::Path::from(format!("store/{name}"))),
+                Some("store".to_string()),
+                "marker_parent should strip {name}",
+            );
+            assert_eq!(
+                marker_parent(&object_store::path::Path::from(*name)),
+                Some(String::new()),
+                "marker_parent of bare {name} is empty",
+            );
+        }
+        assert_eq!(
+            marker_parent(&object_store::path::Path::from("foo.txt")),
+            None,
+            "marker_parent of a non-marker is None",
+        );
+    }
+
+    // ── read_atlas_dataset_names: one test per variant ─────────────────
+
+    /// Atlas's on-disk meta shape, mirrored just well enough to encode
+    /// fixtures. We don't import atlas's own `StoreMeta` because it's
+    /// `pub(crate)`.
+    #[derive(serde::Serialize)]
+    struct FixtureMeta {
+        version: u32,
+        codec: &'static str,
+        datasets: std::collections::BTreeMap<String, FixtureDataset>,
+    }
+
+    #[derive(serde::Serialize, Default)]
+    struct FixtureDataset {
+        arrays: std::collections::BTreeMap<String, serde_json::Value>,
+        attributes: std::collections::BTreeMap<String, serde_json::Value>,
+    }
+
+    fn sample_meta() -> FixtureMeta {
+        let mut datasets = std::collections::BTreeMap::new();
+        datasets.insert("a".to_string(), FixtureDataset::default());
+        datasets.insert("b".to_string(), FixtureDataset::default());
+        FixtureMeta {
+            version: 1,
+            codec: "Zstd",
+            datasets,
+        }
+    }
+
+    fn encode_meta(meta: &FixtureMeta, format: MetaFormat) -> Vec<u8> {
+        match format {
+            MetaFormat::Json => serde_json::to_vec(meta).expect("encode json"),
+            MetaFormat::MsgPack => rmp_serde::to_vec_named(meta).expect("encode msgpack"),
+        }
+    }
+
+    fn compress_meta(bytes: Vec<u8>, codec: Codec) -> Vec<u8> {
+        match codec {
+            Codec::None => bytes,
+            Codec::Zstd => zstd::stream::encode_all(bytes.as_slice(), 0).expect("zstd"),
+            Codec::Lz4 => lz4_flex::compress_prepend_size(&bytes),
+        }
+    }
+
+    fn write_fixture_marker(filename: &str, format: MetaFormat, codec: Codec) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = compress_meta(encode_meta(&sample_meta(), format), codec);
+        std::fs::write(dir.path().join(filename), bytes).expect("write fixture");
+        dir
+    }
+
+    fn assert_dataset_names(dir: &std::path::Path, filename: &str) {
+        let path = dir.join(filename);
+        let names =
+            read_atlas_dataset_names(path.to_str().expect("utf-8 path")).expect("read names");
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn read_atlas_dataset_names_json_uncompressed() {
+        let dir = write_fixture_marker("atlas.json", MetaFormat::Json, Codec::None);
+        assert_dataset_names(dir.path(), "atlas.json");
+    }
+
+    #[test]
+    fn read_atlas_dataset_names_json_zstd() {
+        let dir = write_fixture_marker("atlas.json.zst", MetaFormat::Json, Codec::Zstd);
+        assert_dataset_names(dir.path(), "atlas.json.zst");
+    }
+
+    #[test]
+    fn read_atlas_dataset_names_json_lz4() {
+        let dir = write_fixture_marker("atlas.json.lz4", MetaFormat::Json, Codec::Lz4);
+        assert_dataset_names(dir.path(), "atlas.json.lz4");
+    }
+
+    #[test]
+    fn read_atlas_dataset_names_msgpack_uncompressed() {
+        let dir = write_fixture_marker("atlas.msgpack", MetaFormat::MsgPack, Codec::None);
+        assert_dataset_names(dir.path(), "atlas.msgpack");
+    }
+
+    #[test]
+    fn read_atlas_dataset_names_msgpack_zstd() {
+        let dir = write_fixture_marker("atlas.msgpack.zst", MetaFormat::MsgPack, Codec::Zstd);
+        assert_dataset_names(dir.path(), "atlas.msgpack.zst");
+    }
+
+    #[test]
+    fn read_atlas_dataset_names_msgpack_lz4() {
+        let dir = write_fixture_marker("atlas.msgpack.lz4", MetaFormat::MsgPack, Codec::Lz4);
+        assert_dataset_names(dir.path(), "atlas.msgpack.lz4");
+    }
+
+    #[test]
+    fn read_atlas_dataset_names_rejects_unknown_filename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("not_an_atlas_marker");
+        std::fs::write(&path, b"{}").expect("write");
+        let err =
+            read_atlas_dataset_names(path.to_str().expect("utf-8")).expect_err("should reject");
+        assert!(
+            format!("{err}").contains("Unknown atlas marker filename"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn top_level_markers_dedupes_across_different_formats() {
+        // Outer store uses atlas.json; nested store uses atlas.msgpack.zst.
+        // The nested one must be dropped even though the filenames differ.
+        let objs = vec![
+            marker_obj("a/atlas.json"),
+            marker_obj("a/b/atlas.msgpack.zst"),
+            marker_obj("c/atlas.msgpack"),
+        ];
+        let kept: Vec<String> = top_level_atlas_markers(&objs)
+            .iter()
+            .map(|m| m.location.to_string())
+            .collect();
+        assert!(kept.contains(&"a/atlas.json".to_string()));
+        assert!(kept.contains(&"c/atlas.msgpack".to_string()));
+        assert!(!kept.iter().any(|p| p == "a/b/atlas.msgpack.zst"));
+    }
+
+    // ── End-to-end: discover_datasets against a non-default marker ─────
+
+    const MSGPACK_ZST_FIXTURE_DIR: &str = "beacon-arrow-atlas-tests/two_datasets.msgpack.zst.atlas";
+
+    /// Build the msgpack.zst fixture once per test run.
+    async fn ensure_msgpack_zst_fixture() -> std::path::PathBuf {
+        use crate::reader::test_support::build_two_dataset_store_with_config;
+        use atlas::{Codec as AtlasCodec, MetaFormat as AtlasMetaFormat, StoreConfig};
+
+        static FIXTURE: tokio::sync::OnceCell<std::path::PathBuf> =
+            tokio::sync::OnceCell::const_new();
+        FIXTURE
+            .get_or_init(|| async {
+                let dst = beacon_config::DATASETS_DIR_PATH.join(MSGPACK_ZST_FIXTURE_DIR);
+                let marker = dst.join("atlas.msgpack.zst");
+                if !marker.exists() {
+                    if dst.exists() {
+                        std::fs::remove_dir_all(&dst).expect("cleanup partial fixture");
+                    }
+                    std::fs::create_dir_all(&dst).expect("create fixture dir");
+                    let config = StoreConfig {
+                        meta_format: AtlasMetaFormat::MsgPack,
+                        meta_compression: AtlasCodec::Zstd,
+                        ..Default::default()
+                    };
+                    build_two_dataset_store_with_config(&dst, config).await;
+                }
+                dst
+            })
+            .await
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn discover_datasets_finds_msgpack_zst_store() {
+        ensure_msgpack_zst_fixture().await;
+        let store = get_datasets_object_store().await;
+        let factory = AtlasFormatFactory::new(store, AtlasOptions::default());
+
+        let marker = ObjectMeta {
+            location: OsPath::from(format!("{MSGPACK_ZST_FIXTURE_DIR}/atlas.msgpack.zst")),
+            last_modified: chrono::Utc::now(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        };
+        let datasets = factory.discover_datasets(&[marker]).expect("discover");
+
+        assert_eq!(datasets.len(), 2, "expected 2 datasets, got {datasets:?}");
+        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+        // Synthetic paths must preserve the actual on-disk marker name.
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with("/atlas.msgpack.zst/winter")),
+            "missing winter in {paths:?}",
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with("/atlas.msgpack.zst/summer")),
+            "missing summer in {paths:?}",
+        );
     }
 }

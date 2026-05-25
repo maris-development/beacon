@@ -141,7 +141,14 @@ pub(crate) mod test_support {
     /// - `summer`: arrays `temperature: Float32[3]`;
     ///   attribute `season: String("summer")`.
     pub async fn build_two_dataset_store(path: &Path) {
-        let mut atlas = Atlas::create_path(path, StoreConfig::default())
+        build_two_dataset_store_with_config(path, StoreConfig::default()).await;
+    }
+
+    /// Same as [`build_two_dataset_store`] but lets the caller pick the
+    /// metadata format / compression so tests can exercise non-default
+    /// atlas marker filenames (e.g. `atlas.msgpack.zst`).
+    pub async fn build_two_dataset_store_with_config(path: &Path, config: StoreConfig) {
+        let mut atlas = Atlas::create_path(path, config)
             .await
             .expect("create atlas store");
 

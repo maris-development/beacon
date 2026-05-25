@@ -1,8 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::{collections::HashMap, sync::LazyLock};
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
-use atlas::Atlas;
 use beacon_nd_array::arrow::{
     batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
     pushdown_filter::PushdownFilter,
@@ -23,40 +22,10 @@ use datafusion::{
 };
 use futures::future;
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use object_store::ObjectMeta;
 use tokio::sync::Mutex;
 
-use crate::datafusion::reader;
-
 const ATLAS_DATASET_CONCURRENCY: usize = 8;
-
-/// Per-opener cache of opened atlas stores keyed by `atlas.json` path.
-///
-/// All `read_task` futures spawned by one `AtlasOpener` share this
-/// map, so the N datasets in a single atlas store pay `Atlas::open_path`
-/// exactly once. The mutex is held across the open so concurrent first
-/// reads of the same marker coalesce instead of double-opening.
-static ATLAS_CACHE: LazyLock<Mutex<HashMap<object_store::path::Path, Arc<Atlas>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub async fn get_or_open_atlas(
-    datasets_object_store: Arc<DatasetsStore>,
-    object_path: &object_store::path::Path,
-) -> datafusion::error::Result<Arc<Atlas>> {
-    let mut guard = ATLAS_CACHE.lock().await;
-    if let Some(atlas) = guard.get(object_path) {
-        return Ok(atlas.clone());
-    }
-    let atlas = reader::open_atlas_store(datasets_object_store, object_path)
-        .await
-        .map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to open atlas store at {}: {e}",
-                object_path
-            ))
-        })?;
-    guard.insert(object_path.clone(), atlas.clone());
-    Ok(atlas)
-}
 
 /// Per-file payload attached to each `PartitionedFile.extensions`.
 ///
@@ -138,6 +107,7 @@ impl FileSource for AtlasSource {
             metrics: self.execution_plan_metrics.clone(),
             partition,
             read_dimensions: self.read_dimensions.clone(),
+            predicate: self.predicate.clone(),
             stream_cache: self.stream_cache.clone(),
         })
     }
@@ -230,6 +200,7 @@ struct AtlasOpener {
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
     read_dimensions: Option<Vec<String>>,
+    predicate: Option<Arc<dyn PhysicalExpr>>,
 
     stream_cache: Arc<Mutex<HashMap<String, AtlasStreamDatasets>>>,
 }
@@ -237,14 +208,18 @@ struct AtlasOpener {
 impl AtlasOpener {
     async fn read_task(
         datasets_object_store: Arc<DatasetsStore>,
-        object_path: object_store::path::Path,
+        object_meta: ObjectMeta,
         stream_cache: Arc<Mutex<HashMap<String, AtlasStreamDatasets>>>,
         schema_adapter: Arc<dyn SchemaAdapter>,
         batch_size: usize,
         metrics: Option<DatasetReadMetrics>,
         read_dimensions: Option<Vec<String>>,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let atlas = get_or_open_atlas(datasets_object_store, &object_path).await?;
+        let atlas =
+            crate::datafusion::cache::get_or_open_atlas(datasets_object_store, &object_meta)
+                .await?;
+        let object_path = object_meta.location.clone();
 
         let stream_datasets_handle = {
             let mut guard = stream_cache.lock().await;
@@ -267,16 +242,18 @@ impl AtlasOpener {
                 let read_dimensions = read_dimensions.clone();
                 let metrics = metrics.clone();
                 let object_path = object_path.clone();
-                async move {
-                    let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
+                {
+                    let predicate_cloned = predicate.clone();
+                    async move {
+                        let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
                         datafusion::error::DataFusionError::Execution(format!(
                             "Failed to open atlas dataset '{dataset_name}' at {object_path}: {e}"
                         ))
                     })?;
 
-                    // Derive the file schema from atlas metadata alone (no backends),
-                    // then ask the schema adapter which fields the query needs.
-                    let file_schema: SchemaRef = crate::compat::atlas_view_arrow_schema(
+                        // Derive the file schema from atlas metadata alone (no backends),
+                        // then ask the schema adapter which fields the query needs.
+                        let file_schema: SchemaRef = crate::compat::atlas_view_arrow_schema(
                         &view,
                         read_dimensions.as_deref(),
                     )
@@ -287,56 +264,59 @@ impl AtlasOpener {
                     })?
                     .into();
 
-                    let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+                        let (schema_mapper, projection) =
+                            schema_adapter.map_schema(&file_schema)?;
 
-                    if projection.is_empty() {
-                        return Ok::<
-                            BoxStream<'static, datafusion::error::Result<RecordBatch>>,
-                            datafusion::error::DataFusionError,
-                        >(futures::stream::empty().boxed());
-                    }
+                        if projection.is_empty() {
+                            return Ok::<
+                                BoxStream<'static, datafusion::error::Result<RecordBatch>>,
+                                datafusion::error::DataFusionError,
+                            >(futures::stream::empty().boxed());
+                        }
 
-                    // Build the AnyDataset with only the queried-and-available columns.
-                    let projected_names: Vec<String> = projection
-                        .iter()
-                        .map(|i| file_schema.field(*i).name().clone())
-                        .collect();
-                    let dataset = crate::reader::dataset_from_atlas(
-                        atlas,
-                        &dataset_name,
-                        Some(&projected_names),
-                    )
-                    .await
-                    .map_err(|e| {
-                        datafusion::error::DataFusionError::Execution(format!(
-                            "Failed to load atlas dataset '{dataset_name}': {e}"
-                        ))
-                    })?;
-
-                    // Atlas has no filter pushdown today.
-                    let pushdown_filter: Option<PushdownFilter> = None;
-                    let dataset_stream = any_dataset_as_record_batch_stream(
-                        dataset,
-                        batch_size,
-                        pushdown_filter,
-                        metrics,
-                    )
-                    .map_err(|e| {
-                        datafusion::error::DataFusionError::Execution(format!(
-                            "Error reading atlas dataset as Arrow stream: {e}"
-                        ))
-                    })
-                    .and_then(move |batch| {
-                        let mapped = schema_mapper.map_batch(batch).map_err(|e| {
+                        // Build the AnyDataset with only the queried-and-available columns.
+                        let projected_names: Vec<String> = projection
+                            .iter()
+                            .map(|i| file_schema.field(*i).name().clone())
+                            .collect();
+                        let dataset = crate::reader::dataset_from_atlas(
+                            atlas,
+                            &dataset_name,
+                            Some(&projected_names),
+                        )
+                        .await
+                        .map_err(|e| {
                             datafusion::error::DataFusionError::Execution(format!(
-                                "Failed to map atlas batch schema: {e}"
+                                "Failed to load atlas dataset '{dataset_name}': {e}"
                             ))
-                        });
-                        future::ready(mapped)
-                    })
-                    .boxed();
+                        })?;
 
-                    Ok(dataset_stream)
+                        // Atlas has no filter pushdown today.
+                        let pushdown_filter: Option<PushdownFilter> =
+                            predicate_cloned.map(PushdownFilter::new);
+                        let dataset_stream = any_dataset_as_record_batch_stream(
+                            dataset,
+                            batch_size,
+                            pushdown_filter,
+                            metrics,
+                        )
+                        .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "Error reading atlas dataset as Arrow stream: {e}"
+                            ))
+                        })
+                        .and_then(move |batch| {
+                            let mapped = schema_mapper.map_batch(batch).map_err(|e| {
+                                datafusion::error::DataFusionError::Execution(format!(
+                                    "Failed to map atlas batch schema: {e}"
+                                ))
+                            });
+                            future::ready(mapped)
+                        })
+                        .boxed();
+
+                        Ok(dataset_stream)
+                    }
                 }
             })
             .buffer_unordered(ATLAS_DATASET_CONCURRENCY)
@@ -356,12 +336,13 @@ impl FileOpener for AtlasOpener {
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
             self.datasets_object_store.clone(),
-            file_meta.object_meta.location,
+            file_meta.object_meta,
             self.stream_cache.clone(),
             self.schema_adapter.clone(),
             self.batch_size,
             metrics,
             self.read_dimensions.clone(),
+            self.predicate.clone(),
         );
         Ok(Box::pin(fut))
     }
