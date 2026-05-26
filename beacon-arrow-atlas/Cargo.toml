@@ -20,7 +20,7 @@ rmp-serde = "1"
 zstd = "0.13"
 lz4_flex = "0.11"
 ndarray = "0.17"
-atlas = { git = "https://github.com/robinskil/atlas.git", version = "0.8.0" }
+atlas = { git = "https://github.com/maris-development/atlas.git", version = "0.8.0" }
 crossbeam = { workspace = true }
 moka = { workspace = true }
 

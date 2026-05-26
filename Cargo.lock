@@ -625,7 +625,7 @@ dependencies = [
 [[package]]
 name = "atlas"
 version = "0.8.0"
-source = "git+https://github.com/robinskil/atlas.git#dbd673e8cccf44bd8b663456e2be25928e97322c"
+source = "git+https://github.com/maris-development/atlas.git#859bd319070ad10cc1d85a6277606b6c8cfdb16a"
 dependencies = [
  "array-format",
  "chrono",
