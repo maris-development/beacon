@@ -24,6 +24,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # COPY SOURCE
 
 COPY beacon-api/ /beacon-api/
+COPY beacon-arrow-atlas/ /beacon-arrow-atlas/
 COPY beacon-arrow-netcdf/ /beacon-arrow-netcdf/
 COPY beacon-arrow-tiff/ /beacon-arrow-tiff/
 COPY beacon-arrow-zarr/ /beacon-arrow-zarr/
