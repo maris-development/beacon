@@ -1,0 +1,34 @@
+[package]
+name = "beacon-arrow-atlas"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+object_store = { workspace = true }
+datafusion = { workspace = true }
+arrow = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+indexmap = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = "1"
+zstd = "0.13"
+lz4_flex = "0.11"
+ndarray = "0.17"
+atlas = { git = "https://github.com/robinskil/atlas.git", version = "0.8.0" }
+crossbeam = { workspace = true }
+moka = { workspace = true }
+
+beacon-object-storage = { path = "../beacon-object-storage" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-config = { path = "../beacon-config" }
+beacon-common = { path = "../beacon-common" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

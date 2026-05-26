@@ -334,7 +334,7 @@ impl AsyncOdvDecoder {
         schema_mapper: Arc<OdvSchemaMapper>,
     ) -> impl Stream<Item = Result<RecordBatch, ArrowError>> {
         let decoder = arrow::csv::reader::ReaderBuilder::new(schema_mapper.input_schema.clone())
-            .with_batch_size(16 * 1024)
+            .with_batch_size(32 * 1024)
             .with_comment(b'/')
             .with_delimiter(b'\t')
             .with_header(true)
@@ -439,5 +439,31 @@ mod tests {
             let batch = batch.unwrap();
             writer.write(&batch).unwrap();
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "This needs to be fixed"]
+    async fn test_full_file_compressed() {
+        let object_store =
+            object_store::local::LocalFileSystem::new_with_prefix("./test-data/").unwrap();
+        let path = object_store::path::Path::from("large_test_odv.txt");
+
+        let reader = OdvObjectReader::try_new(Arc::new(object_store), path)
+            .await
+            .unwrap();
+        let mut async_stream = reader.read_async(None).await;
+
+        let output_file = std::fs::File::create("./test-data/test_output_compressed.csv").unwrap();
+        let mut writer = arrow::csv::Writer::new(output_file);
+
+        let mut counter = 0;
+        while let Some(batch) = async_stream.next().await {
+            let batch = batch.unwrap();
+            counter += batch.num_rows();
+            println!("Writing batch: {}", batch.num_rows());
+            writer.write(&batch).unwrap();
+            println!("Total rows written so far: {}", counter);
+        }
+        println!("Total rows written: {}", counter);
     }
 }

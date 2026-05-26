@@ -578,7 +578,7 @@ pub fn dataset_as_record_batch_stream(
                                     m.output_rows.add(batch.num_rows());
                                     m.output_batches.add(1);
                                 }
-                                tracing::debug!("Emitting batch with {} rows", batch.num_rows());
+                                // tracing::debug!("Emitting batch with {} rows", batch.num_rows());
                                 Some(Ok(batch))
                             }
                             Ok(_) => None,

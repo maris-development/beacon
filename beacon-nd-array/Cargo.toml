@@ -12,7 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
-ndarray = { version = "0.17.1" }
+ndarray = { version = "0.17" }
 anyhow = { workspace=true }
 async-trait = { workspace=true }
 futures = { workspace=true }

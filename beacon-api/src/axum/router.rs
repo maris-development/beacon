@@ -59,8 +59,9 @@ pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Route
 
     // SwaggerUi is merged outside the base_path nest to avoid doubling the prefix
     // in the openapi.json URL (/{base_path}/{base_path}/openapi.json).
-    let swagger_ui = SwaggerUi::new(swagger_url)
-        .urls(vec![(Url::new("Docs", &openapi_url), docs)]);
+    let openapi_url_static: &'static str = openapi_url.leak();
+    let swagger_ui =
+        SwaggerUi::new(swagger_url).urls(vec![(Url::new("Docs", openapi_url_static), docs)]);
 
     if base_path.is_empty() {
         Ok(Router::new()

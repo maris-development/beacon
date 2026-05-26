@@ -12,6 +12,7 @@ use datafusion::{
 
 pub mod list_datasets;
 pub mod read_arrow;
+pub mod read_atlas;
 pub mod read_bbf;
 pub mod read_csv;
 pub mod read_netcdf;
@@ -70,12 +71,18 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
-            datasets_object_store,
+            datasets_object_store.clone(),
         )),
         Arc::new(read_odv_ascii::ReadOdvAsciiFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
+        )),
+        Arc::new(read_atlas::ReadAtlasFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
+            datasets_object_store,
         )),
         Arc::new(list_datasets::ListDatasetsFunc::new(
             runtime_handle,

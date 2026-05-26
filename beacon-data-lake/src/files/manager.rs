@@ -103,6 +103,8 @@ impl FileManager {
         let session_state = self.session_context.state();
         let extension = if file_pattern.ends_with("zarr.json") {
             "zarr.json".to_string()
+        } else if file_pattern.contains("/atlas.json") {
+            "atlas.json".to_string()
         } else {
             match Path::new(file_pattern).extension() {
                 Some(ext) => ext.to_string_lossy().to_string(),

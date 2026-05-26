@@ -137,17 +137,21 @@ dependencies = [
 
 [[package]]
 name = "array-format"
-version = "0.2.0"
-source = "git+https://github.com/robinskil/array-format.git#95a99a03c54d9ecdc37d0e3a510c7afcbe7cdd0e"
+version = "0.8.0"
+source = "git+https://github.com/robinskil/array-format.git#97245fffdaf700a29c004dc8644e46297259d6e7"
 dependencies = [
  "bytes",
  "futures",
- "lz4_flex",
+ "indexmap 1.9.3",
+ "lz4_flex 0.11.5",
  "moka",
+ "ndarray",
  "object_store 0.13.2",
  "rkyv",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
+ "zerocopy",
  "zstd",
 ]
 
@@ -385,7 +389,7 @@ dependencies = [
  "arrow-schema 56.2.0",
  "arrow-select 56.2.0",
  "flatbuffers",
- "lz4_flex",
+ "lz4_flex 0.11.5",
  "zstd",
 ]
 
@@ -619,6 +623,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas"
+version = "0.8.0"
+source = "git+https://github.com/robinskil/atlas.git#dbd673e8cccf44bd8b663456e2be25928e97322c"
+dependencies = [
+ "array-format",
+ "chrono",
+ "futures",
+ "indexmap 2.13.0",
+ "lz4_flex 0.11.5",
+ "ndarray",
+ "num_cpus",
+ "object_store 0.13.2",
+ "parking_lot",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -798,6 +825,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-arrow-atlas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "atlas",
+ "beacon-common",
+ "beacon-config",
+ "beacon-datafusion-ext",
+ "beacon-nd-array",
+ "beacon-object-storage",
+ "chrono",
+ "crossbeam",
+ "datafusion",
+ "futures",
+ "indexmap 2.13.0",
+ "lz4_flex 0.11.5",
+ "moka",
+ "ndarray",
+ "object_store 0.12.4",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
 name = "beacon-arrow-netcdf"
 version = "1.6.0"
 dependencies = [
@@ -817,7 +875,7 @@ dependencies = [
  "hifitime",
  "indexmap 2.13.0",
  "moka",
- "ndarray 0.17.2",
+ "ndarray",
  "netcdf",
  "netcdf-sys",
  "num-traits",
@@ -846,7 +904,7 @@ dependencies = [
  "futures",
  "futures-util",
  "indexmap 2.13.0",
- "lz4_flex",
+ "lz4_flex 0.11.5",
  "object_store 0.12.4",
  "quick-xml 0.37.5",
  "regex",
@@ -879,7 +937,7 @@ dependencies = [
  "datafusion",
  "futures",
  "indexmap 2.13.0",
- "ndarray 0.17.2",
+ "ndarray",
  "object_store 0.12.4",
  "serde",
  "tokio",
@@ -909,42 +967,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-atlas"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "array-format",
- "arrow",
- "async-trait",
- "beacon-common",
- "beacon-datafusion-ext",
- "beacon-nd-array",
- "beacon-nd-arrow",
- "bincode",
- "bloomfilter",
- "bytes",
- "chrono",
- "crossbeam",
- "datafusion",
- "flume",
- "futures",
- "indexmap 2.13.0",
- "moka",
- "ndarray 0.17.2",
- "object_store 0.12.4",
- "once_cell",
- "ordered-float 5.1.0",
- "parking_lot",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-test",
- "typetag",
- "zstd",
-]
-
-[[package]]
 name = "beacon-binary-format"
 version = "2.1.3"
 dependencies = [
@@ -961,7 +983,7 @@ dependencies = [
  "futures",
  "indexmap 2.13.0",
  "itertools 0.14.0",
- "lz4_flex",
+ "lz4_flex 0.11.5",
  "lzzzz",
  "moka",
  "munge_macro",
@@ -1018,7 +1040,6 @@ dependencies = [
  "async-trait",
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
- "beacon-atlas",
  "beacon-common",
  "beacon-config",
  "beacon-data-lake",
@@ -1060,7 +1081,6 @@ dependencies = [
  "arrow",
  "async-trait",
  "beacon-arrow-zarr",
- "beacon-atlas",
  "beacon-binary-format",
  "beacon-common",
  "beacon-config",
@@ -1121,11 +1141,11 @@ dependencies = [
  "arrow-flight",
  "async-trait",
  "async_zip",
+ "beacon-arrow-atlas",
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
  "beacon-arrow-tiff",
  "beacon-arrow-zarr",
- "beacon-atlas",
  "beacon-binary-format",
  "beacon-common",
  "beacon-config",
@@ -1143,7 +1163,7 @@ dependencies = [
  "lru 0.16.3",
  "moka",
  "nd-arrow-array",
- "ndarray 0.17.2",
+ "ndarray",
  "num-traits",
  "num_cpus",
  "object_store 0.12.4",
@@ -1175,6 +1195,7 @@ version = "1.6.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "beacon-arrow-atlas",
  "beacon-arrow-netcdf",
  "beacon-arrow-tiff",
  "beacon-common",
@@ -1218,7 +1239,7 @@ dependencies = [
  "datafusion",
  "futures",
  "indexmap 2.13.0",
- "ndarray 0.17.2",
+ "ndarray",
  "pin-project",
  "rand 0.8.5",
  "rkyv",
@@ -1243,7 +1264,7 @@ dependencies = [
  "chrono",
  "criterion 0.5.1",
  "futures",
- "ndarray 0.17.2",
+ "ndarray",
  "pin-project",
  "rand 0.8.5",
  "serde",
@@ -1383,24 +1404,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bit-vec"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2c54ff287cfc0a34f38a6b832ea1bd8e448a330b3e40a50859e6488bee07f22"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1445,17 +1448,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bloomfilter"
-version = "1.0.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c541c70a910b485670304fd420f0eab8f7bde68439db6a8d98819c3d2774d7e2"
-dependencies = [
- "bit-vec",
- "getrandom 0.2.17",
- "siphasher",
-]
-
-[[package]]
 name = "blosc-src"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1466,6 +1458,19 @@ dependencies = [
  "lz4-sys",
  "snappy_src",
  "zstd-sys",
+]
+
+[[package]]
+name = "blusc"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4e0c17eaa785d2673fe58c22fc817946c2330ed47f3d9f79835d65950d32a45"
+dependencies = [
+ "flate2",
+ "lz4_flex 0.12.2",
+ "pkg-config",
+ "snap",
+ "zstd",
 ]
 
 [[package]]
@@ -2894,7 +2899,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3731,7 +3736,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -4027,7 +4032,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4319,6 +4324,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90071f8077f8e40adfc4b7fe9cd495ce316263f19e75c2211eeff3fdf475a3d9"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "lzma-rs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4458,9 +4472,9 @@ dependencies = [
 
 [[package]]
 name = "monostate"
-version = "0.1.18"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3341a273f6c9d5bef1908f17b7267bbab0e95c9bf69a0d4dcf8e9e1b2c76ef67"
+checksum = "bb4cc965c89dd0615a9e822ff8002f7633d2466143d51bd58693e4b2c75aabad"
 dependencies = [
  "monostate-impl",
  "serde",
@@ -4469,9 +4483,9 @@ dependencies = [
 
 [[package]]
 name = "monostate-impl"
-version = "0.1.18"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4db6d5580af57bf992f59068d4ea26fd518574ff48d7639b255a36f9de6e7e9"
+checksum = "23f5b99488110875b5904839d396c2cdfaf241ff6622638acb879cc7effad5de"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4535,21 +4549,6 @@ dependencies = [
 
 [[package]]
 name = "ndarray"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
-dependencies = [
- "matrixmultiply",
- "num-complex",
- "num-integer",
- "num-traits",
- "portable-atomic",
- "portable-atomic-util",
- "rawpointer",
-]
-
-[[package]]
-name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
@@ -4570,7 +4569,7 @@ source = "git+https://github.com/robinskil/netcdf.git#35cc74866e5f337f883fe8b70c
 dependencies = [
  "bitflags 2.10.0",
  "libc",
- "ndarray 0.17.2",
+ "ndarray",
  "netcdf-sys",
  "semver",
 ]
@@ -4996,7 +4995,7 @@ dependencies = [
  "flate2",
  "half",
  "hashbrown 0.15.5",
- "lz4_flex",
+ "lz4_flex 0.11.5",
  "num",
  "num-bigint",
  "paste",
@@ -5030,7 +5029,7 @@ dependencies = [
  "futures",
  "half",
  "hashbrown 0.16.1",
- "lz4_flex",
+ "lz4_flex 0.11.5",
  "num",
  "num-bigint",
  "object_store 0.12.4",
@@ -5292,7 +5291,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn",
@@ -5390,7 +5389,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -5427,9 +5426,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5750,6 +5749,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmp"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "rmp-serde"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
+dependencies = [
+ "rmp",
+ "serde",
+]
+
+[[package]]
 name = "robust"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5881,7 +5899,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6172,9 +6190,6 @@ name = "siphasher"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "slab"
@@ -6324,6 +6339,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
+ "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
@@ -6460,7 +6476,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6671,17 +6687,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -7349,7 +7354,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -7914,15 +7919,16 @@ dependencies = [
 
 [[package]]
 name = "zarrs"
-version = "0.22.10"
+version = "0.23.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfbcfd7f9ae28f00972fcc4ca97e88c161d98ff8fde6959dc4955bb223eb9205"
+checksum = "251f4ec1a9e60ca9c693ade9b29a0b981a61e68ea3e2ae85fa9da31bcdca5dbe"
 dependencies = [
  "async-generic",
  "async-lock",
  "async-trait",
  "base64",
  "blosc-src",
+ "blusc",
  "bytemuck",
  "bytes",
  "crc32c",
@@ -7934,12 +7940,14 @@ dependencies = [
  "inventory",
  "itertools 0.14.0",
  "itoa",
+ "libz-sys",
  "log",
  "lru 0.16.3",
  "moka",
- "ndarray 0.16.1",
+ "ndarray",
  "num",
  "num-complex",
+ "paste",
  "quick_cache",
  "rayon",
  "rayon_iter_concurrent_limit",
@@ -7949,26 +7957,82 @@ dependencies = [
  "thread_local",
  "unsafe_cell_slice",
  "uuid",
+ "zarrs_chunk_grid",
+ "zarrs_chunk_key_encoding",
+ "zarrs_codec",
  "zarrs_data_type",
  "zarrs_filesystem",
  "zarrs_metadata",
  "zarrs_metadata_ext",
  "zarrs_plugin",
- "zarrs_registry",
  "zarrs_storage",
  "zstd",
 ]
 
 [[package]]
-name = "zarrs_data_type"
-version = "0.4.2"
+name = "zarrs_chunk_grid"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff78d0d99d9a9ab702460adf5f95f4a0538d0c100bbe34bddd238211e30ae3f4"
+checksum = "1cf67386fd96a0336cd3e5ab5ca6cb14e0e05aee80f1acae8c4d3cf562a8bb65"
+dependencies = [
+ "derive_more",
+ "inventory",
+ "itertools 0.14.0",
+ "rayon",
+ "thiserror 2.0.17",
+ "tinyvec",
+ "zarrs_metadata",
+ "zarrs_plugin",
+]
+
+[[package]]
+name = "zarrs_chunk_key_encoding"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9040e7feaa92d1904d492acd0cd91b97214f1791c5b5738e6c05b2ca4145a382"
+dependencies = [
+ "derive_more",
+ "inventory",
+ "zarrs_metadata",
+ "zarrs_plugin",
+ "zarrs_storage",
+]
+
+[[package]]
+name = "zarrs_codec"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "383a129a6a0cbb2c80cdba23809e5cab85159756464b7d0f112468a495c128da"
+dependencies = [
+ "async-trait",
+ "bytemuck",
+ "derive_more",
+ "futures",
+ "inventory",
+ "itertools 0.14.0",
+ "rayon",
+ "thiserror 2.0.17",
+ "unsafe_cell_slice",
+ "zarrs_chunk_grid",
+ "zarrs_data_type",
+ "zarrs_metadata",
+ "zarrs_plugin",
+ "zarrs_storage",
+]
+
+[[package]]
+name = "zarrs_data_type"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bc7c594c9363278fcd9db4c205514f009944206eb093ea7ad40b85f50009f31"
 dependencies = [
  "derive_more",
  "half",
  "inventory",
  "num",
+ "paste",
+ "serde",
+ "serde_json",
  "thiserror 2.0.17",
  "zarrs_metadata",
  "zarrs_plugin",
@@ -7994,9 +8058,9 @@ dependencies = [
 
 [[package]]
 name = "zarrs_metadata"
-version = "0.6.2"
+version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "579803c6537c827b366fcd6cb0d78469f6a2978e6ab9768ce67526fdb85d7205"
+checksum = "d60c4c363a8a302d7babb3c29017850a7b4e0af6ca5f9ba2946263a185b62fea"
 dependencies = [
  "derive_more",
  "half",
@@ -8008,13 +8072,11 @@ dependencies = [
 
 [[package]]
 name = "zarrs_metadata_ext"
-version = "0.2.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5522075a04b3a6ea09c0fb1c98e34a1be7385e91d3d0ffe4fc621f8329f9cd79"
+checksum = "2048e07848ca99c7450518e0584929300b1b6a3cf442f18b26ffd3520814bd5b"
 dependencies = [
  "derive_more",
- "half",
- "log",
  "monostate",
  "num",
  "serde",
@@ -8022,7 +8084,6 @@ dependencies = [
  "serde_repr",
  "thiserror 2.0.17",
  "zarrs_metadata",
- "zarrs_registry",
 ]
 
 [[package]]
@@ -8039,27 +8100,21 @@ dependencies = [
 
 [[package]]
 name = "zarrs_plugin"
-version = "0.2.3"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da996f69dd0f1a22486cc9a25081dbd382034bed2659e04fb4bb7a57da5da227"
+checksum = "5cbe0ed432aee86856f70ca33be36eaf4a0dae21ab730750d9280a7ca1e95046"
 dependencies = [
+ "paste",
+ "regex",
+ "serde_json",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "zarrs_registry"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82282c3a6b1be79662d92594319584c6efee313654fd6cee59d5b958497a4e1c"
-dependencies = [
- "regex",
-]
-
-[[package]]
 name = "zarrs_storage"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6151db6a755786bdafe905cb51b5f9d87c2818b75d3977025ed9e9d1571ed144"
+checksum = "7d098796d2ed4cf94896569615101e0432e870a7665396da5cc32300fb68f7c1"
 dependencies = [
  "async-trait",
  "auto_impl",

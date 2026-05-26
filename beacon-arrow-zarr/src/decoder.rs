@@ -128,45 +128,45 @@ impl ArrowFillValue {
         array_data_type: &zarrs::array::DataType,
         fill_value_attr: Option<&AttributeValue>,
     ) -> Option<Self> {
-        match array_data_type {
-            zarrs::array::DataType::Bool => fill_value_attr
+        match crate::data_types::classify(array_data_type) {
+            crate::data_types::ZarrDtypeKind::Bool => fill_value_attr
                 .and_then(|attr| attr.as_bool())
                 .map(ArrowFillValue::Bool),
-            zarrs::array::DataType::Int8 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::Int8 => fill_value_attr
                 .and_then(|attr| attr.as_f64().and_then(|v| i8::try_from(v as i64).ok()))
                 .map(ArrowFillValue::Int8),
-            zarrs::array::DataType::Int16 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::Int16 => fill_value_attr
                 .and_then(|attr| attr.as_f64().and_then(|v| i16::try_from(v as i64).ok()))
                 .map(ArrowFillValue::Int16),
-            zarrs::array::DataType::Int32 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::Int32 => fill_value_attr
                 .and_then(|attr| attr.as_f64().and_then(|v| i32::try_from(v as i64).ok()))
                 .map(ArrowFillValue::Int32),
-            zarrs::array::DataType::Int64 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::Int64 => fill_value_attr
                 .and_then(|attr| attr.as_f64().map(|v| v as i64).or(None))
                 .map(ArrowFillValue::Int64),
-            zarrs::array::DataType::UInt8 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::UInt8 => fill_value_attr
                 .and_then(|attr| attr.as_f64().and_then(|v| u8::try_from(v as u64).ok()))
                 .map(ArrowFillValue::UInt8),
-            zarrs::array::DataType::UInt16 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::UInt16 => fill_value_attr
                 .and_then(|attr| attr.as_f64().and_then(|v| u16::try_from(v as u64).ok()))
                 .map(ArrowFillValue::UInt16),
-            zarrs::array::DataType::UInt32 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::UInt32 => fill_value_attr
                 .and_then(|attr| attr.as_f64().and_then(|v| u32::try_from(v as u64).ok()))
                 .map(ArrowFillValue::UInt32),
 
-            zarrs::array::DataType::UInt64 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::UInt64 => fill_value_attr
                 .and_then(|attr| attr.as_f64().map(|v| v as u64).or(None))
                 .map(ArrowFillValue::UInt64),
 
-            zarrs::array::DataType::Float32 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::Float32 => fill_value_attr
                 .and_then(|attr| attr.as_f64().map(|v| v as f32).or(None))
                 .map(ArrowFillValue::Float32),
 
-            zarrs::array::DataType::Float64 => fill_value_attr
+            crate::data_types::ZarrDtypeKind::Float64 => fill_value_attr
                 .and_then(|attr| attr.as_f64())
                 .map(ArrowFillValue::Float64),
 
-            zarrs::array::DataType::String => {
+            crate::data_types::ZarrDtypeKind::String => {
                 // Interpret fill_bytes as UTF-8 string
                 fill_value_attr
                     .and_then(|attr| attr.as_str().map(|s| s.to_string()))

@@ -22,7 +22,7 @@ beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-nd-array = { path = "../beacon-nd-array" }
-ndarray = { version = "0.17.1" }
+ndarray = { version = "0.17" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 
 [dev-dependencies]

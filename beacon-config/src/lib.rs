@@ -13,6 +13,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub cors: CorsConfig,
     pub netcdf: NetcdfConfig,
+    pub atlas: AtlasConfig,
 }
 
 #[derive(Debug)]
@@ -99,6 +100,12 @@ pub struct NetcdfConfig {
     pub use_reader_cache: bool,
     pub reader_cache_size: usize,
     pub enable_statistics: bool,
+}
+
+#[derive(Debug)]
+pub struct AtlasConfig {
+    pub use_reader_cache: bool,
+    pub reader_cache_size: u64,
 }
 
 #[derive(Debug)]
@@ -210,6 +217,11 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_READER_CACHE_SIZE", default = "128")]
     netcdf_reader_cache_size: usize,
 
+    #[envconfig(from = "BEACON_ATLAS_USE_READER_CACHE", default = "true")]
+    atlas_use_reader_cache: bool,
+    #[envconfig(from = "BEACON_ATLAS_READER_CACHE_SIZE", default = "32")]
+    atlas_reader_cache_size: u64,
+
     /// The batch size for NetCDF reads, in number of rows. This is used for both local and MPIO reads.
     #[envconfig(from = "BEACON_BATCH_SIZE", default = "64000")]
     beacon_batch_size: usize,
@@ -284,6 +296,10 @@ impl From<RawConfig> for Config {
                 use_reader_cache: raw.netcdf_use_reader_cache,
                 reader_cache_size: raw.netcdf_reader_cache_size,
                 enable_statistics: raw.netcdf_enable_statistics,
+            },
+            atlas: AtlasConfig {
+                use_reader_cache: raw.atlas_use_reader_cache,
+                reader_cache_size: raw.atlas_reader_cache_size,
             },
         }
     }
