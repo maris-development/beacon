@@ -1,4 +1,5 @@
 pub mod analyzer_rules;
+pub mod auth;
 pub mod format_ext;
 pub mod listing_table_factory_ext;
 pub mod stats_cache;
