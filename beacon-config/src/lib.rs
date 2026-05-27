@@ -128,7 +128,7 @@ struct RawConfig {
     log_level: String,
 
     //VM Settings
-    #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "8192")]
+    #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "32000")] // 32 GB
     vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     default_table: String,
@@ -165,7 +165,7 @@ struct RawConfig {
     sql_stream_coalesce_max_rows: usize,
     #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
     st_within_point_cache_size: usize,
-    #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
+    #[envconfig(from = "BEACON_WORKER_THREADS", default = "32")]
     worker_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
     base_path: String,

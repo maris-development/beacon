@@ -94,6 +94,16 @@ impl TableFileFormat for ZarrFileFormat {
     }
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct AtlasFileFormat;
+
+#[typetag::serde(name = "atlas")]
+impl TableFileFormat for AtlasFileFormat {
+    fn file_ext(&self) -> String {
+        "atlas.json".to_string()
+    }
+}
+
 // Support for BBF File Format
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct BBFFileFormat;

@@ -17,7 +17,8 @@ use datafusion::{
     physical_expr::{PhysicalExpr, conjunction},
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
-        metrics::ExecutionPlanMetricsSet,
+        metrics::{ExecutionPlanMetricsSet, SplitMetrics},
+        stream::{BatchSplitStream, RecordBatchStreamAdapter},
     },
 };
 use futures::future;
@@ -98,13 +99,15 @@ impl FileSource for AtlasSource {
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
 
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema.clone());
+        let schema_adapter =
+            schema_adapter_factory.create(projected_schema.clone(), table_schema.clone());
 
         Arc::new(AtlasOpener {
             datasets_object_store: self.datasets_object_store.clone(),
             schema_adapter: Arc::from(schema_adapter),
             batch_size: self.batch_size,
             metrics: self.execution_plan_metrics.clone(),
+            projected_schema: projected_schema.clone(),
             partition,
             read_dimensions: self.read_dimensions.clone(),
             predicate: self.predicate.clone(),
@@ -191,8 +194,6 @@ impl FileSource for AtlasSource {
     }
 }
 
-// ─── FileOpener ────────────────────────────────────────────────────────────
-
 struct AtlasOpener {
     datasets_object_store: Arc<DatasetsStore>,
     schema_adapter: Arc<dyn SchemaAdapter>,
@@ -201,6 +202,7 @@ struct AtlasOpener {
     partition: usize,
     read_dimensions: Option<Vec<String>>,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    projected_schema: SchemaRef,
 
     stream_cache: Arc<Mutex<HashMap<String, AtlasStreamDatasets>>>,
 }
@@ -215,6 +217,9 @@ impl AtlasOpener {
         metrics: Option<DatasetReadMetrics>,
         read_dimensions: Option<Vec<String>>,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        partition: usize,
+        execution_plan_metrics: ExecutionPlanMetricsSet,
+        projected_schema: SchemaRef,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let atlas =
             crate::datafusion::cache::get_or_open_atlas(datasets_object_store, &object_meta)
@@ -294,6 +299,7 @@ impl AtlasOpener {
                         // Atlas has no filter pushdown today.
                         let pushdown_filter: Option<PushdownFilter> =
                             predicate_cloned.map(PushdownFilter::new);
+
                         let dataset_stream = any_dataset_as_record_batch_stream(
                             dataset,
                             batch_size,
@@ -323,7 +329,14 @@ impl AtlasOpener {
             .try_flatten()
             .boxed();
 
-        Ok(stream)
+        let split_metrics = SplitMetrics::new(&execution_plan_metrics, partition);
+
+        let stream_adapter = RecordBatchStreamAdapter::new(projected_schema, stream);
+
+        let split_stream =
+            BatchSplitStream::new(Box::pin(stream_adapter), 64 * 1024, split_metrics);
+
+        Ok(Box::pin(split_stream))
     }
 }
 
@@ -343,6 +356,9 @@ impl FileOpener for AtlasOpener {
             metrics,
             self.read_dimensions.clone(),
             self.predicate.clone(),
+            self.partition,
+            self.metrics.clone(),
+            self.projected_schema.clone(),
         );
         Ok(Box::pin(fut))
     }
