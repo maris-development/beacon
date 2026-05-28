@@ -1,6 +1,7 @@
 use crate::parser::statement::{
     AlterAtlasTableStatement, BeaconStatement, CreateAtlasTableStatement,
-    DeleteAtlasDatasetsStatement, IngestStatement,
+    CreateMaterializedViewStatement, DeleteAtlasDatasetsStatement, IngestStatement,
+    RefreshMaterializedViewStatement,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -11,6 +12,8 @@ pub(crate) enum StatementKind {
     CreateAtlasTable,
     AlterAtlas,
     CreateTable,
+    CreateMaterializedView,
+    RefreshMaterializedView,
 }
 
 pub(crate) enum StatementPayload {
@@ -19,6 +22,8 @@ pub(crate) enum StatementPayload {
     DeleteAtlasDatasets(DeleteAtlasDatasetsStatement),
     CreateAtlasTable(CreateAtlasTableStatement),
     AlterAtlas(AlterAtlasTableStatement),
+    CreateMaterializedView(CreateMaterializedViewStatement),
+    RefreshMaterializedView(RefreshMaterializedViewStatement),
 }
 
 impl StatementPayload {
@@ -29,6 +34,8 @@ impl StatementPayload {
             Self::DeleteAtlasDatasets(_) => StatementKind::DeleteAtlasDatasets,
             Self::CreateAtlasTable(_) => StatementKind::CreateAtlasTable,
             Self::AlterAtlas(_) => StatementKind::AlterAtlas,
+            Self::CreateMaterializedView(_) => StatementKind::CreateMaterializedView,
+            Self::RefreshMaterializedView(_) => StatementKind::RefreshMaterializedView,
         }
     }
 
@@ -66,6 +73,24 @@ impl StatementPayload {
             _ => Err(anyhow::anyhow!("Expected AlterAtlas payload")),
         }
     }
+
+    pub(crate) fn into_create_materialized_view(
+        self,
+    ) -> anyhow::Result<CreateMaterializedViewStatement> {
+        match self {
+            Self::CreateMaterializedView(statement) => Ok(statement),
+            _ => Err(anyhow::anyhow!("Expected CreateMaterializedView payload")),
+        }
+    }
+
+    pub(crate) fn into_refresh_materialized_view(
+        self,
+    ) -> anyhow::Result<RefreshMaterializedViewStatement> {
+        match self {
+            Self::RefreshMaterializedView(statement) => Ok(statement),
+            _ => Err(anyhow::anyhow!("Expected RefreshMaterializedView payload")),
+        }
+    }
 }
 
 impl From<BeaconStatement> for StatementPayload {
@@ -76,6 +101,12 @@ impl From<BeaconStatement> for StatementPayload {
             BeaconStatement::DeleteAtlasDatasets(statement) => Self::DeleteAtlasDatasets(statement),
             BeaconStatement::CreateAtlasTable(statement) => Self::CreateAtlasTable(statement),
             BeaconStatement::AlterAtlas(statement) => Self::AlterAtlas(statement),
+            BeaconStatement::CreateMaterializedView(statement) => {
+                Self::CreateMaterializedView(statement)
+            }
+            BeaconStatement::RefreshMaterializedView(statement) => {
+                Self::RefreshMaterializedView(statement)
+            }
         }
     }
 }

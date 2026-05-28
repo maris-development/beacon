@@ -9,6 +9,38 @@ pub enum BeaconStatement {
     DeleteAtlasDatasets(DeleteAtlasDatasetsStatement),
     CreateAtlasTable(CreateAtlasTableStatement),
     AlterAtlas(AlterAtlasTableStatement),
+    CreateMaterializedView(CreateMaterializedViewStatement),
+    RefreshMaterializedView(RefreshMaterializedViewStatement),
+}
+
+/// CREATE MATERIALIZED VIEW <view_name> AS <query>
+#[derive(Debug, Clone)]
+pub struct CreateMaterializedViewStatement {
+    pub view_name: ObjectName,
+    /// The SQL text of the defining query (everything after `AS`).
+    pub query_sql: String,
+}
+
+impl Display for CreateMaterializedViewStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CREATE MATERIALIZED VIEW {} AS {}",
+            self.view_name, self.query_sql
+        )
+    }
+}
+
+/// REFRESH <view_name>
+#[derive(Debug, Clone)]
+pub struct RefreshMaterializedViewStatement {
+    pub view_name: ObjectName,
+}
+
+impl Display for RefreshMaterializedViewStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "REFRESH {}", self.view_name)
+    }
 }
 
 /// ALTER ATLAS TABLE <table_name> ON PARTITION <partition_name> ALTER COLUMN <column_name> SET DATA TYPE <data_type>
@@ -99,6 +131,8 @@ impl Display for BeaconStatement {
             Self::DeleteAtlasDatasets(s) => write!(f, "{s}"),
             Self::CreateAtlasTable(s) => write!(f, "{s}"),
             Self::AlterAtlas(s) => write!(f, "{s}"),
+            Self::CreateMaterializedView(s) => write!(f, "{s}"),
+            Self::RefreshMaterializedView(s) => write!(f, "{s}"),
         }
     }
 }
