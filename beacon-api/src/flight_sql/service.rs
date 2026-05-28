@@ -61,11 +61,12 @@ impl BeaconFlightSqlService {
 
         Ok(Self {
             metadata: FlightSqlMetadata::new(runtime.clone())?,
-            runtime,
             authenticator: Authenticator::new(
+                runtime.clone(),
                 allow_anonymous,
                 Duration::from_secs(flight_sql.token_ttl_secs),
             ),
+            runtime,
             statements: SqlHandleStore::new(Duration::from_secs(flight_sql.statement_ttl_secs)),
             prepared_statements: SqlHandleStore::new(Duration::from_secs(
                 flight_sql.prepared_statement_ttl_secs,
@@ -160,7 +161,8 @@ impl FlightSqlService for BeaconFlightSqlService {
             .unwrap_or_default();
         let auth = self
             .authenticator
-            .authorize_handshake(auth_value.as_deref(), first_request.as_ref())?;
+            .authorize_handshake(auth_value.as_deref(), first_request.as_ref())
+            .await?;
         // Flight SQL clients reuse the bearer token returned by the handshake for subsequent RPCs.
         let token = self.authenticator.issue_token(auth).await;
 

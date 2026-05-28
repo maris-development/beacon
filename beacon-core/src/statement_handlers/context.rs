@@ -18,6 +18,7 @@ pub(crate) struct HandlerContext {
     file_manager: Arc<FileManager>,
     loader_registry: IngestFormatLoaderRegistry,
     listing_table_factory: Arc<ListingTableFactoryExt>,
+    auth: Arc<beacon_auth::AuthContext>,
 }
 
 impl HandlerContext {
@@ -26,17 +27,23 @@ impl HandlerContext {
         file_manager: Arc<FileManager>,
         loader_registry: IngestFormatLoaderRegistry,
         listing_table_factory: Arc<ListingTableFactoryExt>,
+        auth: Arc<beacon_auth::AuthContext>,
     ) -> Self {
         Self {
             session_ctx,
             file_manager,
             loader_registry,
             listing_table_factory,
+            auth,
         }
     }
 
     pub(crate) fn session_ctx(&self) -> Arc<SessionContext> {
         self.session_ctx.clone()
+    }
+
+    pub(crate) fn auth_context(&self) -> &beacon_auth::AuthContext {
+        &self.auth
     }
 
     #[cfg(test)]
@@ -108,6 +115,9 @@ mod tests {
             Arc::new(ListingTableFactoryExt::new(
                 file_manager.data_object_store_url(),
             )),
+            Arc::new(beacon_auth::AuthContext::new(Arc::new(
+                beacon_auth::BasicAuthProvider::new(),
+            ))),
         );
 
         assert!(Arc::ptr_eq(&context.file_manager(), &file_manager));
@@ -136,6 +146,9 @@ mod tests {
             file_manager,
             IngestFormatLoaderRegistry::new(),
             table_factory,
+            Arc::new(beacon_auth::AuthContext::new(Arc::new(
+                beacon_auth::BasicAuthProvider::new(),
+            ))),
         );
 
         let mut stream = context.empty_record_batch_stream();

@@ -39,6 +39,7 @@ pub struct Runtime {
     file_manager: Arc<FileManager>,
     listing_table_factory: Arc<ListingTableFactoryExt>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
+    auth: Arc<beacon_auth::AuthContext>,
 }
 
 impl Runtime {
@@ -119,7 +120,51 @@ impl Runtime {
             )),
             file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
+            auth: Self::init_auth()?,
         })
+    }
+
+    /// Builds the authorization context with the default in-memory basic-auth provider, seeding the
+    /// configured admin as a super-user (built-in `admin` role with a global `ALL` grant) so the
+    /// auth management SQL is reachable on a fresh instance.
+    fn init_auth() -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
+        let mut auth =
+            beacon_auth::AuthContext::new(Arc::new(beacon_auth::BasicAuthProvider::new()));
+
+        auth.create_role("admin")?;
+        auth.grant(
+            "admin",
+            beacon_auth::PrivilegeRule::new(beacon_auth::Privilege::All, None),
+        )?;
+
+        let admin = &beacon_config::CONFIG.admin;
+        auth.create_user(&admin.username, &admin.password)?;
+        auth.grant_role_to_user(&admin.username, "admin")?;
+
+        // Seed the built-in anonymous user (empty password, no roles) unless disabled. Admins can
+        // assign roles to it via `GRANT ROLE <role> TO USER anonymous`.
+        if beacon_config::CONFIG.auth.anonymous_enabled {
+            auth.create_user(beacon_auth::ANONYMOUS_USERNAME, "")?;
+            auth.set_anonymous_user(beacon_auth::ANONYMOUS_USERNAME);
+        }
+
+        Ok(Arc::new(auth))
+    }
+
+    /// Authenticates a credential string against the configured auth provider and resolves the
+    /// principal's roles into an identity.
+    pub async fn authenticate(&self, auth_str: &str) -> anyhow::Result<beacon_auth::AuthIdentity> {
+        self.auth.authenticate(auth_str).await
+    }
+
+    /// Resolves the anonymous principal's identity, erroring when anonymous access is disabled.
+    pub async fn authenticate_anonymous(&self) -> anyhow::Result<beacon_auth::AuthIdentity> {
+        self.auth.authenticate_anonymous().await
+    }
+
+    /// Whether anonymous access is enabled.
+    pub fn anonymous_enabled(&self) -> bool {
+        self.auth.anonymous_enabled()
     }
 
     fn init_ctx(memory_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
@@ -453,8 +498,11 @@ impl Runtime {
                 .with_allow_statements(false)
         };
 
-        let statement_executor =
-            SqlStatementExecutor::new(self.session_ctx.clone(), self.file_manager.clone());
+        let statement_executor = SqlStatementExecutor::new(
+            self.session_ctx.clone(),
+            self.file_manager.clone(),
+            self.auth.clone(),
+        );
 
         statement_executor.execute(statement, &sql_options).await
     }

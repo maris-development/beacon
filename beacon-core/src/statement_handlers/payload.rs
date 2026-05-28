@@ -1,5 +1,5 @@
 use crate::parser::statement::{
-    AlterAtlasTableStatement, BeaconStatement, CreateAtlasTableStatement,
+    AlterAtlasTableStatement, AuthStatement, BeaconStatement, CreateAtlasTableStatement,
     DeleteAtlasDatasetsStatement, IngestStatement,
 };
 
@@ -11,6 +11,7 @@ pub(crate) enum StatementKind {
     CreateAtlasTable,
     AlterAtlas,
     CreateTable,
+    Auth,
 }
 
 pub(crate) enum StatementPayload {
@@ -19,6 +20,7 @@ pub(crate) enum StatementPayload {
     DeleteAtlasDatasets(DeleteAtlasDatasetsStatement),
     CreateAtlasTable(CreateAtlasTableStatement),
     AlterAtlas(AlterAtlasTableStatement),
+    Auth(AuthStatement),
 }
 
 impl StatementPayload {
@@ -29,6 +31,7 @@ impl StatementPayload {
             Self::DeleteAtlasDatasets(_) => StatementKind::DeleteAtlasDatasets,
             Self::CreateAtlasTable(_) => StatementKind::CreateAtlasTable,
             Self::AlterAtlas(_) => StatementKind::AlterAtlas,
+            Self::Auth(_) => StatementKind::Auth,
         }
     }
 
@@ -66,6 +69,13 @@ impl StatementPayload {
             _ => Err(anyhow::anyhow!("Expected AlterAtlas payload")),
         }
     }
+
+    pub(crate) fn into_auth(self) -> anyhow::Result<AuthStatement> {
+        match self {
+            Self::Auth(statement) => Ok(statement),
+            _ => Err(anyhow::anyhow!("Expected Auth payload")),
+        }
+    }
 }
 
 impl From<BeaconStatement> for StatementPayload {
@@ -76,6 +86,7 @@ impl From<BeaconStatement> for StatementPayload {
             BeaconStatement::DeleteAtlasDatasets(statement) => Self::DeleteAtlasDatasets(statement),
             BeaconStatement::CreateAtlasTable(statement) => Self::CreateAtlasTable(statement),
             BeaconStatement::AlterAtlas(statement) => Self::AlterAtlas(statement),
+            BeaconStatement::Auth(statement) => Self::Auth(statement),
         }
     }
 }

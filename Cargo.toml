@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format", "beacon-object-storage", "beacon-nd-arrow", "beacon-datafusion-ext", "beacon-table", "beacon-nd-array", "beacon-statistics-index", "beacon-arrow-tiff", "beacon-arrow-atlas"]
+members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-auth", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format", "beacon-object-storage", "beacon-nd-arrow", "beacon-datafusion-ext", "beacon-table", "beacon-nd-array", "beacon-statistics-index", "beacon-arrow-tiff", "beacon-arrow-atlas"]
 exclude = ["beacon-binary-format-toolbox"]
 
 [workspace.dependencies]

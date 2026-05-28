@@ -6,6 +6,7 @@ use lazy_static::lazy_static;
 #[derive(Debug)]
 pub struct Config {
     pub admin: AdminConfig,
+    pub auth: AuthConfig,
     pub server: ServerConfig,
     pub runtime: RuntimeConfig,
     pub sql: SqlConfig,
@@ -20,6 +21,12 @@ pub struct Config {
 pub struct AdminConfig {
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug)]
+pub struct AuthConfig {
+    /// Whether the built-in anonymous user (empty password) is seeded for unauthenticated access.
+    pub anonymous_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -120,6 +127,8 @@ struct RawConfig {
     admin_username: String,
     #[envconfig(from = "BEACON_ADMIN_PASSWORD", default = "beacon-password")]
     admin_password: String,
+    #[envconfig(from = "BEACON_AUTH_ANONYMOUS_ENABLED", default = "true")]
+    auth_anonymous_enabled: bool,
     #[envconfig(from = "BEACON_PORT", default = "5001")]
     port: u16,
     #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
@@ -237,6 +246,9 @@ impl From<RawConfig> for Config {
             admin: AdminConfig {
                 username: raw.admin_username,
                 password: raw.admin_password,
+            },
+            auth: AuthConfig {
+                anonymous_enabled: raw.auth_anonymous_enabled,
             },
             server: ServerConfig {
                 port: raw.port,

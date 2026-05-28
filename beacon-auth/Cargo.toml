@@ -1,0 +1,15 @@
+[package]
+name = "beacon-auth"
+version = "1.6.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+futures = { workspace = true }
+glob = { workspace = true }
+argon2 = { version = "0.5.3", features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
