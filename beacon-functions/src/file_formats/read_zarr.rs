@@ -5,7 +5,7 @@ use arrow::{
     datatypes::{DataType, Field},
 };
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_formats::zarr::{statistics::ZarrStatisticsSelection, ZarrFormat};
+use beacon_formats::zarr::ZarrFormat;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
@@ -57,18 +57,11 @@ impl BeaconTableFunctionImpl for ReadZarrFunc {
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
-        Some(vec![
-            Field::new(
-                "glob_paths",
-                DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
-                false,
-            ),
-            Field::new(
-                "statistics_columns",
-                DataType::List(Arc::new(Field::new("column", DataType::Utf8, false))),
-                true,
-            ),
-        ])
+        Some(vec![Field::new(
+            "glob_paths",
+            DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
+            false,
+        )])
     }
 }
 
@@ -112,57 +105,15 @@ impl TableFunctionImpl for ReadZarrFunc {
 
         tracing::debug!("read_zarr glob paths: {:?}", glob_paths);
 
-        let statistics_columns: Option<Vec<String>> = if let Some(expr) = args.get(1) {
-            match expr {
-                Expr::Literal(ScalarValue::List(values), _) => {
-                    let string_array = values.as_ref().values();
-                    match string_array
-                        .as_any()
-                        .downcast_ref::<arrow::array::StringArray>()
-                    {
-                        Some(str_arr) => {
-                            let mut cols = vec![];
-                            str_arr.iter().for_each(|opt_str| {
-                                if let Some(s) = opt_str {
-                                    cols.push(s.to_string());
-                                }
-                            });
-                            Some(cols)
-                        }
-                        None => {
-                            return plan_err!(
-                                "read_zarr second argument statistics_columns must be a List<Utf8>"
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    return plan_err!(
-                        "read_zarr second argument statistics_columns must be a List<Utf8>"
-                    );
-                }
-            }
-        } else {
-            None
-        };
-
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_zarr processing path: {}", path);
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
-        let pushdown_statistics = match statistics_columns {
-            Some(cols) => {
-                let mut stats = ZarrStatisticsSelection::default();
-                stats.columns = cols;
-                stats
-            }
-            None => ZarrStatisticsSelection::default(),
-        };
-
-        let file_format =
-            ZarrFormat::default().with_zarr_statistics(Some(Arc::new(pushdown_statistics)));
+        // Predicate pushdown is handled automatically by the shared engine, so
+        // no manual statistics/column selection is needed.
+        let file_format = ZarrFormat::default();
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

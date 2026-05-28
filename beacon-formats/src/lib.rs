@@ -18,7 +18,13 @@ pub mod csv;
 pub mod geo_parquet;
 pub mod odv_ascii;
 pub mod parquet;
-pub mod zarr;
+
+/// Re-export of the Zarr DataFusion integration, which now lives in the
+/// `beacon-arrow-zarr` crate alongside the other N-D formats. Kept here so
+/// existing `beacon_formats::zarr::ZarrFormat` references keep resolving.
+pub mod zarr {
+    pub use beacon_arrow_zarr::datafusion::{ZarrFormat, ZarrFormatFactory};
+}
 
 /// Register file formats with the session state that can be used for reading
 pub fn file_formats(

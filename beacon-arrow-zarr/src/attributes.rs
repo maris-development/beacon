@@ -1,7 +1,7 @@
-use std::sync::Arc;
+//! Minimal model of zarr JSON attribute values supported by Beacon.
 
-use nd_arrow_array::NdArrowArray;
-
+/// A scalar zarr attribute value parsed from JSON.
+#[derive(Debug, Clone)]
 pub enum AttributeValue {
     String(String),
     Float64(f64),
@@ -36,43 +36,6 @@ impl AttributeValue {
         match self {
             AttributeValue::Bool(b) => Some(*b),
             _ => None,
-        }
-    }
-
-    pub fn arrow_data_type(&self) -> arrow::datatypes::DataType {
-        match self {
-            AttributeValue::String(_) => arrow::datatypes::DataType::Utf8,
-            AttributeValue::Float64(_) => arrow::datatypes::DataType::Float64,
-            AttributeValue::Bool(_) => arrow::datatypes::DataType::Boolean,
-        }
-    }
-
-    pub fn as_nd_arrow_array(&self) -> NdArrowArray {
-        match self {
-            AttributeValue::String(s) => {
-                let array = arrow::array::StringArray::from(vec![s.as_str()]);
-                NdArrowArray::new(
-                    Arc::new(array) as arrow::array::ArrayRef,
-                    nd_arrow_array::dimensions::Dimensions::Scalar,
-                )
-                .unwrap()
-            }
-            AttributeValue::Float64(f) => {
-                let array = arrow::array::Float64Array::from(vec![*f]);
-                NdArrowArray::new(
-                    Arc::new(array) as arrow::array::ArrayRef,
-                    nd_arrow_array::dimensions::Dimensions::Scalar,
-                )
-                .unwrap()
-            }
-            AttributeValue::Bool(b) => {
-                let array = arrow::array::BooleanArray::from(vec![*b]);
-                NdArrowArray::new(
-                    Arc::new(array) as arrow::array::ArrayRef,
-                    nd_arrow_array::dimensions::Dimensions::Scalar,
-                )
-                .unwrap()
-            }
         }
     }
 }

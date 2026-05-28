@@ -11,7 +11,6 @@ use beacon_data_lake::{
     files::collection::FileCollection, table::table_formats::NetCDFFileFormat, FileManager,
     TableManager,
 };
-use beacon_formats::zarr::statistics::ZarrStatisticsSelection;
 use beacon_formats::{
     arrow::ArrowFormat, csv::CsvFormat, odv_ascii::OdvFormat, parquet::ParquetFormat,
 };
@@ -121,10 +120,7 @@ pub enum FromFormat {
     #[serde(rename = "tiff")]
     Tiff { paths: Vec<String> },
     #[serde(rename = "zarr")]
-    Zarr {
-        paths: Vec<String>,
-        statistics_columns: Option<Vec<String>>,
-    },
+    Zarr { paths: Vec<String> },
     #[serde(rename = "bbf")]
     Bbf { paths: Vec<String> },
 }
@@ -173,16 +169,8 @@ impl FromFormat {
                 Ok(Arc::new(TiffFormat::new(Default::default())) as Arc<dyn FileFormat>)
             }
             FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>),
-            FromFormat::Zarr {
-                statistics_columns, ..
-            } => {
-                let zarr_selections = statistics_columns
-                    .clone()
-                    .map(|columns| Arc::new(ZarrStatisticsSelection { columns }));
-                let zarr_format = beacon_formats::zarr::ZarrFormat::default()
-                    .with_zarr_statistics(zarr_selections);
-
-                Ok(Arc::new(zarr_format) as Arc<dyn FileFormat>)
+            FromFormat::Zarr { .. } => {
+                Ok(Arc::new(beacon_formats::zarr::ZarrFormat::default()) as Arc<dyn FileFormat>)
             }
             FromFormat::Bbf { .. } => {
                 Ok(Arc::new(beacon_formats::bbf::BBFFormat::default()) as Arc<dyn FileFormat>)
