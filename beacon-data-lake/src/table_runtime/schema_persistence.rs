@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use beacon_datafusion_ext::table_ext::{ExternalTable, TableDefinition, ViewTableDefinition};
+use beacon_datafusion_ext::table_ext::{
+    ExternalTable, MaterializedView, TableDefinition, ViewTableDefinition,
+};
 use beacon_table::BeaconTable;
 use datafusion::{
     catalog::TableProvider, datasource::ViewTable, error::DataFusionError,
@@ -83,6 +85,9 @@ impl SchemaPersistenceService {
                 let definition = table.definition();
                 Arc::new(definition)
             } else if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {
+                let definition = table.definition();
+                Arc::new(definition.clone())
+            } else if let Some(table) = table.as_any().downcast_ref::<MaterializedView>() {
                 let definition = table.definition();
                 Arc::new(definition.clone())
             } else if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
