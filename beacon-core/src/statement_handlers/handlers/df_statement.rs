@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
+use beacon_datafusion_ext::table_ext::MaterializedView;
 use beacon_table::BeaconTable;
 use datafusion::{
     catalog::{TableProvider, TableProviderFactory},
@@ -301,7 +302,26 @@ impl StatementHandler for DFStatementHandler {
         match &plan {
             LogicalPlan::Ddl(DdlStatement::DropTable(drop_table_statement)) => {
                 Self::ensure_drop_table_exists(&session_ctx, drop_table_statement)?;
+
+                // If this is a materialized view, capture its data prefix so the
+                // persisted Parquet can be reclaimed after deregistering.
+                let materialized_prefix = session_ctx
+                    .table_provider(drop_table_statement.name.clone())
+                    .await
+                    .ok()
+                    .and_then(|provider| {
+                        provider
+                            .as_any()
+                            .downcast_ref::<MaterializedView>()
+                            .map(|mv| mv.base_storage_prefix())
+                    });
+
                 session_ctx.deregister_table(drop_table_statement.name.clone())?;
+
+                if let Some(prefix) = materialized_prefix {
+                    super::materialized_view::delete_datasets_prefix(&session_ctx, &prefix).await;
+                }
+
                 Ok(Self::empty_ddl_stream(&plan))
             }
             LogicalPlan::Ddl(DdlStatement::CreateExternalTable(create_external)) => {

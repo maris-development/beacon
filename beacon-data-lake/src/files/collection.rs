@@ -59,6 +59,17 @@ impl FileCollection {
         self.inner_table.table_paths()
     }
 
+    /// The non-glob prefixes of the listing URLs backing this collection.
+    ///
+    /// Used to match incoming storage events to the table that owns them.
+    pub fn listing_prefixes(&self) -> Vec<object_store::path::Path> {
+        self.inner_table
+            .table_paths()
+            .iter()
+            .map(|url| url.prefix().clone())
+            .collect()
+    }
+
     pub fn with_pushdown_projection(
         &self,
         projection: Vec<String>,

@@ -77,6 +77,11 @@ impl FileManager {
 
         while let Some(entry) = entry_stream.next().await {
             if let Ok(entry) = entry {
+                // Skip Beacon-internal storage (e.g. materialized view data) so it is
+                // not surfaced as a user dataset.
+                if entry.location.as_ref().starts_with("__beacon__/") {
+                    continue;
+                }
                 objects.push(entry);
             }
         }

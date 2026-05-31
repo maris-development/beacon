@@ -258,10 +258,6 @@ impl DataLake {
         self.table_manager.create_table(table).await
     }
 
-    pub async fn refresh_table(&self, table_name: &str) -> anyhow::Result<()> {
-        self.table_manager.refresh_table(table_name).await
-    }
-
     pub async fn apply_operation(
         &self,
         table_name: &str,

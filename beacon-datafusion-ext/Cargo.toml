@@ -18,8 +18,12 @@ moka = { workspace = true }
 parking_lot = { workspace = true }
 futures = { workspace = true }
 object_store = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
+beacon-object-storage = { path = "../beacon-object-storage" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = { workspace = true }

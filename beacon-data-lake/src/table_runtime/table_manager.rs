@@ -262,25 +262,6 @@ impl TableManager {
         Ok(())
     }
 
-    pub async fn refresh_table(&self, table_name: &str) -> anyhow::Result<()> {
-        let table = self
-            .registry
-            .lock()
-            .get(table_name)
-            .and_then(|entry| entry.table.clone())
-            .ok_or(anyhow::anyhow!("Table not found: {}", table_name))?;
-
-        let lifecycle = self.table_lifecycle_service();
-        let refreshed_table_provider = lifecycle.refresh_provider(&table).await?;
-
-        let mut registry = self.registry.lock();
-        if let Some(entry) = registry.get_mut(table_name) {
-            entry.provider = refreshed_table_provider;
-        }
-
-        Ok(())
-    }
-
     pub async fn apply_operation(
         &self,
         table_name: &str,

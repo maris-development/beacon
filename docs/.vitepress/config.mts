@@ -261,6 +261,16 @@ export default defineConfig({
                   text: 'CREATE VIEW',
                   link: '/docs/1.6.0/sql/create-view',
                 },
+                {
+                  text: 'CREATE MATERIALIZED VIEW',
+                  link: '/docs/1.6.0/sql/create-materialized-view',
+                  collapsed: true,
+                  items: [
+                    { text: 'Querying', link: '/docs/1.6.0/sql/create-materialized-view#querying' },
+                    { text: 'REFRESH', link: '/docs/1.6.0/sql/create-materialized-view#refresh' },
+                    { text: 'DROP', link: '/docs/1.6.0/sql/create-materialized-view#drop' },
+                  ]
+                },
               ]
             },
             {

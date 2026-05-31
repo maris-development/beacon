@@ -1,6 +1,7 @@
 use crate::parser::statement::{
     AlterAtlasTableStatement, AuthStatement, BeaconStatement, CreateAtlasTableStatement,
-    DeleteAtlasDatasetsStatement, IngestStatement,
+    CreateMaterializedViewStatement, DeleteAtlasDatasetsStatement, IngestStatement,
+    RefreshStatement,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -12,6 +13,8 @@ pub(crate) enum StatementKind {
     AlterAtlas,
     CreateTable,
     Auth,
+    CreateMaterializedView,
+    Refresh,
 }
 
 pub(crate) enum StatementPayload {
@@ -21,6 +24,8 @@ pub(crate) enum StatementPayload {
     CreateAtlasTable(CreateAtlasTableStatement),
     AlterAtlas(AlterAtlasTableStatement),
     Auth(AuthStatement),
+    CreateMaterializedView(CreateMaterializedViewStatement),
+    Refresh(RefreshStatement),
 }
 
 impl StatementPayload {
@@ -32,6 +37,8 @@ impl StatementPayload {
             Self::CreateAtlasTable(_) => StatementKind::CreateAtlasTable,
             Self::AlterAtlas(_) => StatementKind::AlterAtlas,
             Self::Auth(_) => StatementKind::Auth,
+            Self::CreateMaterializedView(_) => StatementKind::CreateMaterializedView,
+            Self::Refresh(_) => StatementKind::Refresh,
         }
     }
 
@@ -76,6 +83,22 @@ impl StatementPayload {
             _ => Err(anyhow::anyhow!("Expected Auth payload")),
         }
     }
+
+    pub(crate) fn into_create_materialized_view(
+        self,
+    ) -> anyhow::Result<CreateMaterializedViewStatement> {
+        match self {
+            Self::CreateMaterializedView(statement) => Ok(statement),
+            _ => Err(anyhow::anyhow!("Expected CreateMaterializedView payload")),
+        }
+    }
+
+    pub(crate) fn into_refresh(self) -> anyhow::Result<RefreshStatement> {
+        match self {
+            Self::Refresh(statement) => Ok(statement),
+            _ => Err(anyhow::anyhow!("Expected Refresh payload")),
+        }
+    }
 }
 
 impl From<BeaconStatement> for StatementPayload {
@@ -87,6 +110,10 @@ impl From<BeaconStatement> for StatementPayload {
             BeaconStatement::CreateAtlasTable(statement) => Self::CreateAtlasTable(statement),
             BeaconStatement::AlterAtlas(statement) => Self::AlterAtlas(statement),
             BeaconStatement::Auth(statement) => Self::Auth(statement),
+            BeaconStatement::CreateMaterializedView(statement) => {
+                Self::CreateMaterializedView(statement)
+            }
+            BeaconStatement::Refresh(statement) => Self::Refresh(statement),
         }
     }
 }

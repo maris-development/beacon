@@ -37,6 +37,7 @@ impl SqlStatementExecutor {
         let mut statement_registry = StatementRegistry::new();
         let table_factory = Arc::new(ListingTableFactoryExt::new(
             file_manager.data_object_store_url(),
+            Arc::downgrade(&session_ctx),
         ));
         let context = Arc::new(HandlerContext::new(
             session_ctx,
