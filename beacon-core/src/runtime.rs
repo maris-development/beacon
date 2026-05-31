@@ -111,12 +111,15 @@ impl Runtime {
             }
         });
 
+        let listing_table_factory = Arc::new(ListingTableFactoryExt::new(
+            file_manager.data_object_store_url(),
+            Arc::downgrade(&session_ctx),
+        ));
+
         Ok(Self {
             session_ctx,
             table_manager,
-            listing_table_factory: Arc::new(ListingTableFactoryExt::new(
-                file_manager.data_object_store_url(),
-            )),
+            listing_table_factory,
             file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
         })

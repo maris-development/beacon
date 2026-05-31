@@ -4,6 +4,9 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
+use beacon_datafusion_ext::table_ext::{
+    MaterializedView, MaterializedViewDefinition, TableDefinition,
+};
 use datafusion::{
     config::TableParquetOptions,
     datasource::{
@@ -15,6 +18,7 @@ use datafusion::{
     logical_expr::dml::InsertOp,
     parquet::arrow::ArrowWriter,
     prelude::{DataFrame, SessionContext},
+    sql::{TableReference, sqlparser::ast::ObjectName},
 };
 use futures::StreamExt;
 
@@ -106,4 +110,57 @@ pub(crate) async fn delete_datasets_prefix(session_ctx: &SessionContext, prefix:
             }
         }
     }
+}
+
+/// Recompute a materialized view and atomically swap the catalog pointer.
+///
+/// Re-runs the view's stored SQL into a fresh versioned Parquet directory, so
+/// the existing data remains usable if anything fails before the swap, then
+/// reclaims the old directory.
+///
+/// Errors if `view_name` does not resolve to a `MaterializedView` provider.
+pub(crate) async fn refresh_materialized_view(
+    session_ctx: &Arc<SessionContext>,
+    view_name: &ObjectName,
+) -> anyhow::Result<()> {
+    let name = view_name.to_string();
+    let table_ref = TableReference::parse_str(&name);
+
+    let provider = session_ctx
+        .table_provider(table_ref.clone())
+        .await
+        .map_err(|_| anyhow::anyhow!("Materialized view '{name}' does not exist"))?;
+
+    let old_definition = provider
+        .as_any()
+        .downcast_ref::<MaterializedView>()
+        .ok_or_else(|| anyhow::anyhow!("Object '{name}' is not a materialized view"))?
+        .definition()
+        .clone();
+
+    let df = session_ctx.sql(&old_definition.definition).await?;
+    let dir_path = format!("__beacon__/{}/{}", name, uuid::Uuid::new_v4());
+    let schema = write_query_to_datasets_parquet(session_ctx, df, &dir_path).await?;
+    let new_storage_location = format!("{dir_path}/");
+
+    let new_definition = MaterializedViewDefinition {
+        name: name.clone(),
+        definition: old_definition.definition.clone(),
+        schema,
+        storage_location: new_storage_location,
+        created_at: old_definition.created_at,
+        last_refreshed: Some(now_millis()),
+    };
+
+    let store_url = DATASETS_OBJECT_STORE_URL.clone();
+    let new_provider = new_definition
+        .build_provider(session_ctx.clone(), &store_url)
+        .await?;
+
+    session_ctx.register_table(table_ref, new_provider)?;
+
+    delete_datasets_prefix(session_ctx, &old_definition.storage_location).await;
+
+    tracing::info!("Refreshed materialized view '{name}'");
+    Ok(())
 }

@@ -9,7 +9,7 @@ use datafusion::sql::{
 use super::statement::{
     AlterAtlasTableStatement, AtlasOp, BeaconStatement, CreateAtlasTableStatement,
     CreateMaterializedViewStatement, DeleteAtlasDatasetsStatement, IngestStatement,
-    RefreshMaterializedViewStatement,
+    RefreshStatement,
 };
 
 /// A parser that extends `DFParser` with custom Beacon SQL syntax.
@@ -26,6 +26,10 @@ impl<'a> BeaconParser<'a> {
 
     /// Parse a single statement, returning a `BeaconStatement`.
     pub fn parse_statement(&mut self) -> Result<BeaconStatement> {
+        if self.is_refresh() {
+            return self.parse_refresh();
+        }
+
         // ToDo: Implement custom parsing for non-DF statements before falling back to DF parsing
         // if self.is_ingest() {
         //     return self.parse_ingest();
@@ -43,10 +47,6 @@ impl<'a> BeaconParser<'a> {
         //     return self.parse_alter_atlas_table();
         // }
 
-        if self.is_refresh() {
-            return self.parse_refresh();
-        }
-
         if self.is_create_materialized_view() {
             return self.parse_create_materialized_view();
         }
@@ -54,28 +54,6 @@ impl<'a> BeaconParser<'a> {
         let df_statement = Box::new(self.df_parser.parse_statement()?);
 
         Ok(BeaconStatement::DFStatement(df_statement))
-    }
-
-    /// Check if the next tokens form a REFRESH statement.
-    fn is_refresh(&self) -> bool {
-        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
-        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "REFRESH")
-    }
-
-    /// Parse: REFRESH <view_name>
-    fn parse_refresh(&mut self) -> Result<BeaconStatement> {
-        // Consume REFRESH
-        self.df_parser.parser.next_token();
-
-        let view_name = self
-            .df_parser
-            .parser
-            .parse_object_name(false)
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-        Ok(BeaconStatement::RefreshMaterializedView(
-            RefreshMaterializedViewStatement { view_name },
-        ))
     }
 
     /// Check if the next tokens form a CREATE MATERIALIZED VIEW statement.
@@ -121,6 +99,32 @@ impl<'a> BeaconParser<'a> {
                 query_sql: query.to_string(),
             },
         ))
+    }
+
+    /// Check if the next tokens form a REFRESH statement.
+    fn is_refresh(&self) -> bool {
+        let t = &self.df_parser.parser.peek_nth_token(0).token;
+        matches!(t, Token::Word(w) if w.value.to_uppercase() == "REFRESH")
+    }
+
+    /// Parse: REFRESH [TABLE] <name>
+    fn parse_refresh(&mut self) -> Result<BeaconStatement> {
+        // Consume REFRESH
+        self.df_parser.parser.next_token();
+
+        // Optional TABLE keyword
+        let t = &self.df_parser.parser.peek_nth_token(0).token;
+        if matches!(t, Token::Word(w) if w.keyword == Keyword::TABLE) {
+            self.df_parser.parser.next_token();
+        }
+
+        let name = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        Ok(BeaconStatement::Refresh(RefreshStatement { name }))
     }
 
     /// Check if the next tokens form an INGEST statement.
@@ -456,6 +460,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_refresh_statement() {
+        for sql in ["REFRESH my_table", "REFRESH TABLE my_table"] {
+            let mut parser = BeaconParser::new(sql).unwrap();
+            let stmt = parser.parse_statement().unwrap();
+            match stmt {
+                BeaconStatement::Refresh(refresh) => {
+                    assert_eq!(refresh.name.to_string(), "my_table");
+                }
+                _ => panic!("Expected Refresh statement for `{sql}`"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_refresh_display() {
+        let sql = "REFRESH schema.table";
+        let mut parser = BeaconParser::new(sql).unwrap();
+        let stmt = parser.parse_statement().unwrap();
+        assert_eq!(stmt.to_string(), "REFRESH schema.table");
+    }
+
+    #[test]
     fn test_parse_ingest_missing_from() {
         let sql = "INGEST INTO ATLAS my_table ON PARTITION p0 '/data/*.csv' WITH csv";
         let mut parser = BeaconParser::new(sql).unwrap();
@@ -650,7 +676,10 @@ mod tests {
         let sql = "CREATE MATERIALIZED VIEW mv AS SELECT 1 AS a";
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
-        assert_eq!(stmt.to_string(), "CREATE MATERIALIZED VIEW mv AS SELECT 1 AS a");
+        assert_eq!(
+            stmt.to_string(),
+            "CREATE MATERIALIZED VIEW mv AS SELECT 1 AS a"
+        );
     }
 
     #[test]
@@ -666,28 +695,6 @@ mod tests {
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
         assert!(matches!(stmt, BeaconStatement::DFStatement(_)));
-    }
-
-    #[test]
-    fn test_parse_refresh() {
-        let sql = "REFRESH monthly_sales";
-        let mut parser = BeaconParser::new(sql).unwrap();
-        let stmt = parser.parse_statement().unwrap();
-
-        match stmt {
-            BeaconStatement::RefreshMaterializedView(s) => {
-                assert_eq!(s.view_name.to_string(), "monthly_sales");
-            }
-            _ => panic!("Expected RefreshMaterializedView statement"),
-        }
-    }
-
-    #[test]
-    fn test_parse_refresh_display() {
-        let sql = "REFRESH schema.mv";
-        let mut parser = BeaconParser::new(sql).unwrap();
-        let stmt = parser.parse_statement().unwrap();
-        assert_eq!(stmt.to_string(), "REFRESH schema.mv");
     }
 
     #[test]

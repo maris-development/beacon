@@ -1,7 +1,7 @@
 use crate::parser::statement::{
     AlterAtlasTableStatement, BeaconStatement, CreateAtlasTableStatement,
     CreateMaterializedViewStatement, DeleteAtlasDatasetsStatement, IngestStatement,
-    RefreshMaterializedViewStatement,
+    RefreshStatement,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -13,7 +13,7 @@ pub(crate) enum StatementKind {
     AlterAtlas,
     CreateTable,
     CreateMaterializedView,
-    RefreshMaterializedView,
+    Refresh,
 }
 
 pub(crate) enum StatementPayload {
@@ -23,7 +23,7 @@ pub(crate) enum StatementPayload {
     CreateAtlasTable(CreateAtlasTableStatement),
     AlterAtlas(AlterAtlasTableStatement),
     CreateMaterializedView(CreateMaterializedViewStatement),
-    RefreshMaterializedView(RefreshMaterializedViewStatement),
+    Refresh(RefreshStatement),
 }
 
 impl StatementPayload {
@@ -35,7 +35,7 @@ impl StatementPayload {
             Self::CreateAtlasTable(_) => StatementKind::CreateAtlasTable,
             Self::AlterAtlas(_) => StatementKind::AlterAtlas,
             Self::CreateMaterializedView(_) => StatementKind::CreateMaterializedView,
-            Self::RefreshMaterializedView(_) => StatementKind::RefreshMaterializedView,
+            Self::Refresh(_) => StatementKind::Refresh,
         }
     }
 
@@ -83,12 +83,10 @@ impl StatementPayload {
         }
     }
 
-    pub(crate) fn into_refresh_materialized_view(
-        self,
-    ) -> anyhow::Result<RefreshMaterializedViewStatement> {
+    pub(crate) fn into_refresh(self) -> anyhow::Result<RefreshStatement> {
         match self {
-            Self::RefreshMaterializedView(statement) => Ok(statement),
-            _ => Err(anyhow::anyhow!("Expected RefreshMaterializedView payload")),
+            Self::Refresh(statement) => Ok(statement),
+            _ => Err(anyhow::anyhow!("Expected Refresh payload")),
         }
     }
 }
@@ -104,9 +102,7 @@ impl From<BeaconStatement> for StatementPayload {
             BeaconStatement::CreateMaterializedView(statement) => {
                 Self::CreateMaterializedView(statement)
             }
-            BeaconStatement::RefreshMaterializedView(statement) => {
-                Self::RefreshMaterializedView(statement)
-            }
+            BeaconStatement::Refresh(statement) => Self::Refresh(statement),
         }
     }
 }

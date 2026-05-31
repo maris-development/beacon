@@ -10,7 +10,7 @@ pub enum BeaconStatement {
     CreateAtlasTable(CreateAtlasTableStatement),
     AlterAtlas(AlterAtlasTableStatement),
     CreateMaterializedView(CreateMaterializedViewStatement),
-    RefreshMaterializedView(RefreshMaterializedViewStatement),
+    Refresh(RefreshStatement),
 }
 
 /// CREATE MATERIALIZED VIEW <view_name> AS <query>
@@ -31,15 +31,15 @@ impl Display for CreateMaterializedViewStatement {
     }
 }
 
-/// REFRESH <view_name>
+/// REFRESH [TABLE] <name> — applies to external tables and materialized views.
 #[derive(Debug, Clone)]
-pub struct RefreshMaterializedViewStatement {
-    pub view_name: ObjectName,
+pub struct RefreshStatement {
+    pub name: ObjectName,
 }
 
-impl Display for RefreshMaterializedViewStatement {
+impl Display for RefreshStatement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "REFRESH {}", self.view_name)
+        write!(f, "REFRESH {}", self.name)
     }
 }
 
@@ -132,7 +132,7 @@ impl Display for BeaconStatement {
             Self::CreateAtlasTable(s) => write!(f, "{s}"),
             Self::AlterAtlas(s) => write!(f, "{s}"),
             Self::CreateMaterializedView(s) => write!(f, "{s}"),
-            Self::RefreshMaterializedView(s) => write!(f, "{s}"),
+            Self::Refresh(s) => write!(f, "{s}"),
         }
     }
 }

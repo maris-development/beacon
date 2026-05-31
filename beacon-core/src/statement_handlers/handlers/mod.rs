@@ -5,7 +5,7 @@ mod delete_atlas_datasets;
 mod df_statement;
 mod ingest;
 mod materialized_view;
-mod refresh_materialized_view;
+mod refresh;
 
 use std::sync::Arc;
 
@@ -15,14 +15,14 @@ use create_materialized_view::CreateMaterializedViewStatementHandler;
 use delete_atlas_datasets::DeleteAtlasDatasetsStatementHandler;
 use df_statement::DFStatementHandler;
 use ingest::IngestStatementHandler;
-use refresh_materialized_view::RefreshMaterializedViewStatementHandler;
+use refresh::RefreshStatementHandler;
 
 use crate::statement_handlers::registry::StatementRegistry;
 
 pub(crate) fn register_default_statement_handlers(registry: &mut StatementRegistry) {
     registry.register_handler(Arc::new(DFStatementHandler));
     registry.register_handler(Arc::new(CreateMaterializedViewStatementHandler));
-    registry.register_handler(Arc::new(RefreshMaterializedViewStatementHandler));
+    registry.register_handler(Arc::new(RefreshStatementHandler));
     // ToDo: Re-enable when the handlers are implemented
     // registry.register_handler(Arc::new(IngestStatementHandler));
     // registry.register_handler(Arc::new(DeleteAtlasDatasetsStatementHandler));

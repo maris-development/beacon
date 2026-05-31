@@ -3,6 +3,7 @@ use object_store::ObjectMeta;
 pub type EventError = Box<dyn std::error::Error + Send + Sync>;
 pub type ObjectEventResult<T> = Result<T, EventError>;
 
+#[derive(Debug, Clone)]
 pub enum ObjectEvent {
     Created(ObjectMeta),
     Modified(ObjectMeta),
