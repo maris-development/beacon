@@ -3,6 +3,10 @@ name = "beacon-core"
 version = "1.6.0"
 edition = "2021"
 
+[features]
+# Exposes test-only helpers (e.g. an ephemeral in-memory auth runtime) to downstream crates' tests.
+test-util = []
+
 [dependencies]
 futures = { workspace=true}
 futures-util = { workspace=true}

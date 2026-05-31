@@ -43,8 +43,21 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Boots the Beacon execution environment and initializes runtime-local state.
+    /// Boots the Beacon execution environment with the persistent SQLite-backed auth directory.
     pub async fn new() -> anyhow::Result<Self> {
+        Self::new_with_auth(Self::init_auth()?).await
+    }
+
+    /// Boots a runtime with an ephemeral in-memory auth context (no on-disk SQLite directory).
+    /// Used by tests so they don't contend on the shared persistent auth database.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn new_with_in_memory_auth() -> anyhow::Result<Self> {
+        Self::new_with_auth(Self::init_in_memory_auth()?).await
+    }
+
+    /// Boots the Beacon execution environment and initializes runtime-local state around the given
+    /// authorization context.
+    async fn new_with_auth(auth: Arc<beacon_auth::AuthContext>) -> anyhow::Result<Self> {
         let memory_pool = Arc::new(FairSpillPool::new(
             beacon_config::CONFIG.runtime.vm_memory_size * 1024 * 1024,
         ));
@@ -123,7 +136,7 @@ impl Runtime {
             listing_table_factory,
             file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
-            auth: Self::init_auth()?,
+            auth,
         })
     }
 
@@ -137,11 +150,28 @@ impl Runtime {
     fn init_auth() -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
         let store = beacon_auth::SqliteStore::open(beacon_config::USERS_DIR.join("directory.db"))?;
         let role_provider = beacon_auth::RoleProvider::with_persistence(store.clone())?;
-        let mut auth = beacon_auth::AuthContext::with_role_provider(
+        let auth = beacon_auth::AuthContext::with_role_provider(
             Arc::new(beacon_auth::SqliteAuthProvider::new(store)),
             role_provider,
         );
+        Self::bootstrap_auth(auth)
+    }
 
+    /// Builds an ephemeral, non-persistent auth context backed by the in-memory basic-auth provider.
+    /// Used by tests to avoid contending on the shared on-disk SQLite directory.
+    #[cfg(any(test, feature = "test-util"))]
+    fn init_in_memory_auth() -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
+        let auth =
+            beacon_auth::AuthContext::new(Arc::new(beacon_auth::BasicAuthProvider::new()));
+        Self::bootstrap_auth(auth)
+    }
+
+    /// Seeds the built-in `admin` role (global `ALL` grant), the configured admin super-user, and the
+    /// optional anonymous user. Idempotent: existing roles/users are left in place, so it is safe to
+    /// run against an already-populated (persistent) auth context.
+    fn bootstrap_auth(
+        mut auth: beacon_auth::AuthContext,
+    ) -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
         if !auth.role_provider().role_exists("admin") {
             auth.create_role("admin")?;
         }
@@ -622,18 +652,30 @@ mod materialized_view_tests {
     use super::Runtime;
     use futures::TryStreamExt;
 
+    fn super_user_identity() -> beacon_auth::AuthIdentity {
+        beacon_auth::AuthIdentity {
+            username: "test".to_string(),
+            roles: vec![],
+            is_super_user: true,
+        }
+    }
+
     async fn collect_sql(
         runtime: &Runtime,
         sql: &str,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
-        let stream = runtime.run_sql(sql.to_string(), true).await?;
+        let stream = runtime
+            .run_sql(sql.to_string(), super_user_identity())
+            .await?;
         let batches = stream.try_collect::<Vec<_>>().await?;
         Ok(batches)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_create_query_refresh_and_drop() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth()
+            .await
+            .expect("runtime should start");
 
         let suffix = uuid::Uuid::new_v4().simple();
         let mv = format!("mv_test_{suffix}");
@@ -705,7 +747,9 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_handles_zero_row_result() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth()
+            .await
+            .expect("runtime should start");
         let mv = format!("mv_empty_{}", uuid::Uuid::new_v4().simple());
 
         // A query with no rows must still create a queryable, Parquet-backed view.

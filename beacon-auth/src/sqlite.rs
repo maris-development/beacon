@@ -72,6 +72,9 @@ impl SqliteStore {
     }
 
     fn from_connection(conn: Connection) -> anyhow::Result<Arc<Self>> {
+        // Wait (rather than failing immediately) when another connection to the same database file
+        // holds a lock, e.g. a second runtime instance opening the store concurrently.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
         Ok(Arc::new(Self {

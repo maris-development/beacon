@@ -15,7 +15,11 @@ async fn spawn_server(allow_anonymous: bool) -> (SocketAddr, tokio::task::JoinHa
     drop(tmp);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let runtime = Arc::new(beacon_core::runtime::Runtime::new().await.unwrap());
+    let runtime = Arc::new(
+        beacon_core::runtime::Runtime::new_with_in_memory_auth()
+            .await
+            .unwrap(),
+    );
     let service = BeaconFlightSqlService::new_with_options(runtime, allow_anonymous).unwrap();
 
     let handle = tokio::spawn(async move {

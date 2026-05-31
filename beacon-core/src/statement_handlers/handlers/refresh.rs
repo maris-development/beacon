@@ -27,7 +27,10 @@ impl StatementHandler for RefreshStatementHandler {
         let statement = payload.into_refresh()?;
         let name = statement.name.to_string();
 
-        let provider = context.resolve_table_provider(&statement.name).await?;
+        let provider = context
+            .resolve_table_provider(&statement.name)
+            .await
+            .map_err(|_| anyhow::anyhow!("REFRESH target '{name}' does not exist"))?;
 
         if let Some(external) = provider.as_any().downcast_ref::<ExternalTable>() {
             external.refresh().await?;
@@ -35,7 +38,7 @@ impl StatementHandler for RefreshStatementHandler {
             refresh_materialized_view(&context.session_ctx(), &statement.name).await?;
         } else {
             return Err(anyhow::anyhow!(
-                "REFRESH is only supported for external tables and materialized views: '{name}'"
+                "'{name}' is not a materialized view or external table"
             ));
         }
 

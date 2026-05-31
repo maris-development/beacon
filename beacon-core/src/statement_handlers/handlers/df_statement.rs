@@ -41,7 +41,6 @@ impl DFStatementHandler {
                     WriteOp::Update => Privilege::Update,
                     WriteOp::Delete => Privilege::Delete,
                     WriteOp::Ctas => Privilege::Create,
-                    _ => Privilege::Insert,
                 };
                 (
                     privilege,

@@ -11,6 +11,8 @@ pub enum BeaconStatement {
     CreateAtlasTable(CreateAtlasTableStatement),
     AlterAtlas(AlterAtlasTableStatement),
     Auth(AuthStatement),
+    CreateMaterializedView(CreateMaterializedViewStatement),
+    Refresh(RefreshStatement),
 }
 
 /// Authentication and authorization management statements (users, roles, grants, denies).
@@ -111,8 +113,6 @@ impl Display for AuthStatement {
             }
         }
     }
-    CreateMaterializedView(CreateMaterializedViewStatement),
-    Refresh(RefreshStatement),
 }
 
 /// CREATE MATERIALIZED VIEW <view_name> AS <query>
