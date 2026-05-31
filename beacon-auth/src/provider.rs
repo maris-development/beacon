@@ -27,4 +27,6 @@ pub trait UserDirectory: Send + Sync {
     fn drop_user(&self, username: &str) -> anyhow::Result<()>;
     fn grant_role(&self, username: &str, role: &str) -> anyhow::Result<()>;
     fn revoke_role(&self, username: &str, role: &str) -> anyhow::Result<()>;
+    /// Whether a user with `username` exists. Used for idempotent bootstrap.
+    fn user_exists(&self, username: &str) -> bool;
 }

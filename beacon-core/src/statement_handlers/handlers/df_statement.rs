@@ -7,7 +7,7 @@ use datafusion::{
     catalog::{TableProvider, TableProviderFactory},
     datasource::{physical_plan, ViewTable},
     execution::{object_store::ObjectStoreUrl, SendableRecordBatchStream},
-    logical_expr::{dml::InsertOp, CreateMemoryTable, DdlStatement, LogicalPlan},
+    logical_expr::{dml::InsertOp, CreateMemoryTable, DdlStatement, LogicalPlan, WriteOp},
     physical_plan::EmptyRecordBatchStream,
     prelude::{DataFrame, SQLOptions, SessionContext},
 };
@@ -21,6 +21,77 @@ use crate::statement_handlers::{
 pub(crate) struct DFStatementHandler;
 
 impl DFStatementHandler {
+    /// Authorizes the write/DDL root of a plan. Beacon intercepts DDL/DML for manual execution, so
+    /// (unlike read scans, which the planner authorizes) their privilege checks live here.
+    ///
+    /// No-op when enforcement is off or the caller is a super-user. Read-only roots pass through;
+    /// write/DDL kinds we don't recognize are denied (fail-closed) under enforcement.
+    fn authorize_write(plan: &LogicalPlan, context: &HandlerContext) -> anyhow::Result<()> {
+        use beacon_auth::{ConcreteTarget, Privilege};
+
+        if !beacon_config::CONFIG.auth.enforce || context.identity().is_super_user {
+            return Ok(());
+        }
+
+        let (privilege, target) = match plan {
+            LogicalPlan::Dml(dml) => {
+                let privilege = match &dml.op {
+                    WriteOp::Insert(_) => Privilege::Insert,
+                    WriteOp::Update => Privilege::Update,
+                    WriteOp::Delete => Privilege::Delete,
+                    WriteOp::Ctas => Privilege::Create,
+                    _ => Privilege::Insert,
+                };
+                (
+                    privilege,
+                    ConcreteTarget::Table(dml.table_name.table().to_string()),
+                )
+            }
+            LogicalPlan::Ddl(ddl) => match ddl {
+                DdlStatement::CreateExternalTable(c) => (
+                    Privilege::Create,
+                    ConcreteTarget::Table(c.name.table().to_string()),
+                ),
+                DdlStatement::CreateMemoryTable(c) => (
+                    Privilege::Create,
+                    ConcreteTarget::Table(c.name.table().to_string()),
+                ),
+                DdlStatement::CreateView(c) => (
+                    Privilege::Create,
+                    ConcreteTarget::Table(c.name.table().to_string()),
+                ),
+                DdlStatement::DropTable(c) => (
+                    Privilege::Drop,
+                    ConcreteTarget::Table(c.name.table().to_string()),
+                ),
+                DdlStatement::DropView(c) => (
+                    Privilege::Drop,
+                    ConcreteTarget::Table(c.name.table().to_string()),
+                ),
+                _ => anyhow::bail!("permission denied: this DDL operation is not permitted"),
+            },
+            LogicalPlan::Copy(copy) => (
+                Privilege::Insert,
+                ConcreteTarget::Path(copy.output_url.clone()),
+            ),
+            // Not a write/DDL root; reads are authorized separately by the planner.
+            _ => return Ok(()),
+        };
+
+        if context
+            .auth_context()
+            .is_allowed(&context.identity().roles, privilege, &target)
+        {
+            Ok(())
+        } else {
+            let what = match &target {
+                ConcreteTarget::Table(name) => format!("table '{name}'"),
+                ConcreteTarget::Path(path) => format!("path '{path}'"),
+            };
+            anyhow::bail!("permission denied: {privilege} on {what}");
+        }
+    }
+
     fn empty_ddl_stream(plan: &LogicalPlan) -> SendableRecordBatchStream {
         Box::pin(EmptyRecordBatchStream::new(
             plan.schema().as_arrow().clone().into(),
@@ -215,6 +286,17 @@ impl StatementHandler for DFStatementHandler {
         let plan = state.statement_to_plan(statement).await?;
 
         sql_options.verify_plan(&plan)?;
+
+        // Reads (table scans) are authorized by the planner; writes/DDL are intercepted and
+        // authorized here, where Beacon executes them.
+        beacon_planner::prelude::authorize_logical_plan(
+            &plan,
+            &session_ctx,
+            context.auth_context(),
+            context.identity(),
+            beacon_config::CONFIG.auth.enforce,
+        )?;
+        Self::authorize_write(&plan, context)?;
 
         match &plan {
             LogicalPlan::Ddl(DdlStatement::DropTable(drop_table_statement)) => {

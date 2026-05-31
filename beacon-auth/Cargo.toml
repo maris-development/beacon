@@ -9,7 +9,9 @@ thiserror = { workspace = true }
 parking_lot = { workspace = true }
 futures = { workspace = true }
 glob = { workspace = true }
+rusqlite = { workspace = true }
 argon2 = { version = "0.5.3", features = ["std"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = { workspace = true }

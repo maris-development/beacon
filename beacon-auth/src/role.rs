@@ -4,6 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     str::FromStr,
+    sync::Arc,
 };
 
 use glob::{MatchOptions, Pattern};
@@ -129,15 +130,43 @@ impl Role {
     }
 }
 
+/// Durable backend for the role model. Implemented by a persistent store (e.g. the SQLite auth
+/// directory) so role/grant changes survive restarts. Mutations are written through after the
+/// in-memory state is validated; [`load_roles`](RoleStore::load_roles) hydrates the cache at startup.
+pub trait RoleStore: std::fmt::Debug + Send + Sync {
+    /// Loads all roles and their grant/deny rules from durable storage.
+    fn load_roles(&self) -> anyhow::Result<HashMap<String, Role>>;
+    fn persist_create_role(&self, name: &str) -> anyhow::Result<()>;
+    fn persist_drop_role(&self, name: &str) -> anyhow::Result<()>;
+    fn persist_insert_rule(&self, role: &str, is_deny: bool, rule: &PrivilegeRule)
+        -> anyhow::Result<()>;
+    fn persist_remove_rule(&self, role: &str, is_deny: bool, rule: &PrivilegeRule)
+        -> anyhow::Result<()>;
+}
+
 /// In-memory registry of roles, with interior mutability for SQL-driven management.
+///
+/// When constructed with [`with_persistence`](RoleProvider::with_persistence) the in-memory map is
+/// hydrated from durable storage and every mutation is written through. The default constructor has
+/// no backend (used by tests and ephemeral contexts).
 #[derive(Debug, Default)]
 pub struct RoleProvider {
     roles: RwLock<HashMap<String, Role>>,
+    persistence: Option<Arc<dyn RoleStore>>,
 }
 
 impl RoleProvider {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Builds a role provider hydrated from `store`, writing every later mutation through to it.
+    pub fn with_persistence(store: Arc<dyn RoleStore>) -> anyhow::Result<Self> {
+        let roles = store.load_roles()?;
+        Ok(Self {
+            roles: RwLock::new(roles),
+            persistence: Some(store),
+        })
     }
 
     pub fn role_exists(&self, name: &str) -> bool {
@@ -149,14 +178,22 @@ impl RoleProvider {
         if roles.contains_key(name) {
             anyhow::bail!("role '{name}' already exists");
         }
+        if let Some(store) = &self.persistence {
+            store.persist_create_role(name)?;
+        }
         roles.insert(name.to_string(), Role::new(name));
         Ok(())
     }
 
     pub fn drop_role(&self, name: &str) -> anyhow::Result<()> {
-        if self.roles.write().remove(name).is_none() {
+        let mut roles = self.roles.write();
+        if !roles.contains_key(name) {
             anyhow::bail!("role '{name}' does not exist");
         }
+        if let Some(store) = &self.persistence {
+            store.persist_drop_role(name)?;
+        }
+        roles.remove(name);
         Ok(())
     }
 
@@ -165,6 +202,9 @@ impl RoleProvider {
         let entry = roles
             .get_mut(role)
             .ok_or_else(|| anyhow::anyhow!("role '{role}' does not exist"))?;
+        if let Some(store) = &self.persistence {
+            store.persist_insert_rule(role, false, &rule)?;
+        }
         entry.grants.insert(rule);
         Ok(())
     }
@@ -174,6 +214,9 @@ impl RoleProvider {
         let entry = roles
             .get_mut(role)
             .ok_or_else(|| anyhow::anyhow!("role '{role}' does not exist"))?;
+        if let Some(store) = &self.persistence {
+            store.persist_insert_rule(role, true, &rule)?;
+        }
         entry.denies.insert(rule);
         Ok(())
     }
@@ -184,6 +227,9 @@ impl RoleProvider {
         let entry = roles
             .get_mut(role)
             .ok_or_else(|| anyhow::anyhow!("role '{role}' does not exist"))?;
+        if let Some(store) = &self.persistence {
+            store.persist_remove_rule(role, is_deny, rule)?;
+        }
         if is_deny {
             entry.denies.remove(rule);
         } else {

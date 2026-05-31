@@ -124,27 +124,42 @@ impl Runtime {
         })
     }
 
-    /// Builds the authorization context with the default in-memory basic-auth provider, seeding the
-    /// configured admin as a super-user (built-in `admin` role with a global `ALL` grant) so the
+    /// Builds the authorization context backed by the SQLite auth directory (users, roles, and
+    /// grants persisted under [`beacon_config::USERS_DIR`], next to the tables directory), seeding
+    /// the configured admin as a super-user (built-in `admin` role with a global `ALL` grant) so the
     /// auth management SQL is reachable on a fresh instance.
+    ///
+    /// State persists across restarts, so the bootstrap is idempotent: existing roles/users are
+    /// left in place rather than re-created.
     fn init_auth() -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
-        let mut auth =
-            beacon_auth::AuthContext::new(Arc::new(beacon_auth::BasicAuthProvider::new()));
+        let store = beacon_auth::SqliteStore::open(beacon_config::USERS_DIR.join("directory.db"))?;
+        let role_provider = beacon_auth::RoleProvider::with_persistence(store.clone())?;
+        let mut auth = beacon_auth::AuthContext::with_role_provider(
+            Arc::new(beacon_auth::SqliteAuthProvider::new(store)),
+            role_provider,
+        );
 
-        auth.create_role("admin")?;
+        if !auth.role_provider().role_exists("admin") {
+            auth.create_role("admin")?;
+        }
+        // Re-granting the same rule is idempotent (deduped in memory and in storage).
         auth.grant(
             "admin",
             beacon_auth::PrivilegeRule::new(beacon_auth::Privilege::All, None),
         )?;
 
         let admin = &beacon_config::CONFIG.admin;
-        auth.create_user(&admin.username, &admin.password)?;
+        if !auth.user_exists(&admin.username) {
+            auth.create_user(&admin.username, &admin.password)?;
+        }
         auth.grant_role_to_user(&admin.username, "admin")?;
 
         // Seed the built-in anonymous user (empty password, no roles) unless disabled. Admins can
         // assign roles to it via `GRANT ROLE <role> TO USER anonymous`.
         if beacon_config::CONFIG.auth.anonymous_enabled {
-            auth.create_user(beacon_auth::ANONYMOUS_USERNAME, "")?;
+            if !auth.user_exists(beacon_auth::ANONYMOUS_USERNAME) {
+                auth.create_user(beacon_auth::ANONYMOUS_USERNAME, "")?;
+            }
             auth.set_anonymous_user(beacon_auth::ANONYMOUS_USERNAME);
         }
 
@@ -206,12 +221,18 @@ impl Runtime {
         Ok(Arc::new(SessionContext::new_with_state(session_state)))
     }
 
-    pub async fn run_client_query(&self, query: QueryRequest) -> anyhow::Result<QueryResult> {
+    pub async fn run_client_query(
+        &self,
+        query: QueryRequest,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<QueryResult> {
         let plan = beacon_planner::prelude::plan_query(
             self.session_ctx.clone(),
             self.table_manager.as_ref(),
             self.file_manager.as_ref(),
             query.into_query()?,
+            &self.auth,
+            &identity,
         )
         .await?;
 
@@ -236,7 +257,11 @@ impl Runtime {
             })
     }
 
-    pub async fn explain_client_query(&self, query: QueryRequest) -> anyhow::Result<String> {
+    pub async fn explain_client_query(
+        &self,
+        query: QueryRequest,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<String> {
         let plan = beacon_query::parser::Parser::parse(
             self.session_ctx.as_ref(),
             self.table_manager.as_ref(),
@@ -244,6 +269,13 @@ impl Runtime {
             query.into_query()?,
         )
         .await?;
+        beacon_planner::prelude::authorize_logical_plan(
+            &plan.datafusion_plan,
+            &self.session_ctx,
+            &self.auth,
+            &identity,
+            beacon_config::CONFIG.auth.enforce,
+        )?;
         let json = plan.datafusion_plan.display_pg_json().to_string();
         Ok(json)
     }
@@ -475,33 +507,33 @@ impl Runtime {
         self.file_manager.delete_file(file_path).await
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, identity))]
     pub async fn run_sql(
         &self,
         sql: String,
-        is_super_user: bool,
+        identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let statement = Self::parse_beacon_statement(&sql)?;
+        let is_super_user = identity.is_super_user;
         if !is_super_user {
+            // Auth-management / ingest / atlas statements remain super-user only.
             Self::ensure_anonymous_statement_allowed(&statement)?;
         }
 
-        let sql_options = if is_super_user {
-            SQLOptions::new()
-                .with_allow_ddl(true)
-                .with_allow_dml(true)
-                .with_allow_statements(true)
-        } else {
-            SQLOptions::new()
-                .with_allow_ddl(false)
-                .with_allow_dml(false)
-                .with_allow_statements(false)
-        };
+        // Super-users may run any DDL/DML. When enforcement is on, allow the plan to be built and let
+        // per-resource privilege checks (in the statement handler) be the gate. When enforcement is
+        // off, non-super callers keep the previous read-only behavior.
+        let allow_writes = is_super_user || beacon_config::CONFIG.auth.enforce;
+        let sql_options = SQLOptions::new()
+            .with_allow_ddl(allow_writes)
+            .with_allow_dml(allow_writes)
+            .with_allow_statements(allow_writes);
 
         let statement_executor = SqlStatementExecutor::new(
             self.session_ctx.clone(),
             self.file_manager.clone(),
             self.auth.clone(),
+            identity,
         );
 
         statement_executor.execute(statement, &sql_options).await

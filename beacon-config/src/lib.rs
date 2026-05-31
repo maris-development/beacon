@@ -27,6 +27,8 @@ pub struct AdminConfig {
 pub struct AuthConfig {
     /// Whether the built-in anonymous user (empty password) is seeded for unauthenticated access.
     pub anonymous_enabled: bool,
+    /// Whether query-time authorization is enforced. When false, queries are not privilege-checked.
+    pub enforce: bool,
 }
 
 #[derive(Debug)]
@@ -129,6 +131,8 @@ struct RawConfig {
     admin_password: String,
     #[envconfig(from = "BEACON_AUTH_ANONYMOUS_ENABLED", default = "true")]
     auth_anonymous_enabled: bool,
+    #[envconfig(from = "BEACON_AUTH_ENFORCE", default = "false")]
+    auth_enforce: bool,
     #[envconfig(from = "BEACON_PORT", default = "5001")]
     port: u16,
     #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
@@ -249,6 +253,7 @@ impl From<RawConfig> for Config {
             },
             auth: AuthConfig {
                 anonymous_enabled: raw.auth_anonymous_enabled,
+                enforce: raw.auth_enforce,
             },
             server: ServerConfig {
                 port: raw.port,
@@ -347,6 +352,14 @@ lazy_static! {
     pub static ref TABLES_DIR: PathBuf = {
         let dir = DATA_DIR.join("tables");
         std::fs::create_dir_all(&dir).expect("Failed to create tables dir");
+        dir
+    };
+
+    /// The path to the users directory, holding the persisted auth directory database
+    /// (users, roles, and privilege grants), sitting next to the tables directory.
+    pub static ref USERS_DIR: PathBuf = {
+        let dir = DATA_DIR.join("users");
+        std::fs::create_dir_all(&dir).expect("Failed to create users dir");
         dir
     };
 

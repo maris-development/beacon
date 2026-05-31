@@ -20,7 +20,9 @@ pub struct ClientApiDoc;
 
 /// Builds the client router and returns the generated OpenAPI document alongside it.
 #[allow(deprecated)]
-pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
+pub(crate) fn setup_client_router(
+    beacon_runtime: Arc<Runtime>,
+) -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ClientApiDoc::openapi())
         .routes(routes!(query::query))
         .routes(routes!(query::parse_query))
@@ -40,5 +42,9 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(functions::list_functions))
         .routes(routes!(functions::list_table_functions))
         .routes(routes!(info::system_info))
+        .layer(::axum::middleware::from_fn_with_state(
+            beacon_runtime,
+            crate::axum::auth::resolve_identity,
+        ))
         .split_for_parts()
 }

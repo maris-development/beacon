@@ -17,20 +17,22 @@ use crate::auth::{parse_basic_auth_credentials, parse_bearer_token};
 /// Per-request authorization context shared with the execution layer.
 #[derive(Clone)]
 pub(super) struct AuthContext {
-    pub(super) is_super_user: bool,
+    pub(super) identity: AuthIdentity,
 }
 
 impl AuthContext {
     fn anonymous() -> Self {
         Self {
-            is_super_user: false,
+            identity: AuthIdentity {
+                username: String::new(),
+                roles: Vec::new(),
+                is_super_user: false,
+            },
         }
     }
 
     fn from_identity(identity: AuthIdentity) -> Self {
-        Self {
-            is_super_user: identity.is_super_user,
-        }
+        Self { identity }
     }
 }
 

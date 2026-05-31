@@ -37,6 +37,8 @@ pub async fn plan_query(
     table_manager: &beacon_data_lake::TableManager,
     file_manager: &beacon_data_lake::FileManager,
     query: Query,
+    auth: &beacon_auth::AuthContext,
+    identity: &beacon_auth::AuthIdentity,
 ) -> anyhow::Result<BeaconQueryPlan> {
     let query_id = uuid::Uuid::new_v4();
     let state = session_ctx.state();
@@ -48,6 +50,15 @@ pub async fn plan_query(
     let parsed_plan =
         beacon_query::parser::Parser::parse(&session_ctx, table_manager, file_manager, query)
             .await?;
+
+    // Authorize the logical plan before any (expensive) optimization or physical planning.
+    crate::authz::authorize_logical_plan(
+        &parsed_plan.datafusion_plan,
+        &session_ctx,
+        auth,
+        identity,
+        beacon_config::CONFIG.auth.enforce,
+    )?;
 
     // Optimize the logical plan.
     let optimized_plan = state.optimize(&parsed_plan.datafusion_plan)?;

@@ -54,6 +54,11 @@ impl FileCollection {
         Ok(Self { inner_table: table })
     }
 
+    /// The listing URLs (path + optional glob, relative to the datasets store) this collection scans.
+    pub fn table_paths(&self) -> &[ListingTableUrl] {
+        self.inner_table.table_paths()
+    }
+
     pub fn with_pushdown_projection(
         &self,
         projection: Vec<String>,

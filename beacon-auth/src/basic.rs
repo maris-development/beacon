@@ -30,10 +30,6 @@ impl InMemoryUserStore {
         Self::default()
     }
 
-    pub fn user_exists(&self, username: &str) -> bool {
-        self.users.read().contains_key(username)
-    }
-
     /// Returns the role names assigned to a user after verifying their password.
     fn verify(&self, username: &str, password: &str) -> anyhow::Result<Vec<String>> {
         let users = self.users.read();
@@ -87,6 +83,10 @@ impl UserDirectory for InMemoryUserStore {
             .ok_or_else(|| anyhow::anyhow!("user '{username}' does not exist"))?;
         record.roles.remove(role);
         Ok(())
+    }
+
+    fn user_exists(&self, username: &str) -> bool {
+        self.users.read().contains_key(username)
     }
 }
 

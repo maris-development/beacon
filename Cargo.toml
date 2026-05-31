@@ -30,6 +30,7 @@ tracing-appender = "0.2.4"
 tracing-test = { version = "0.2.5", features = ["no-env-filter"]}
 glob = "0.3.2"
 tempfile = "3.15.0"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
 typetag = "0.2.19"
 indexmap = { version = "2.7.1", features = ["serde"]}
 chrono = { version = "0.4.41", features = ["serde"] }

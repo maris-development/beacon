@@ -5,12 +5,13 @@ use ::axum::{
     extract::{Path, State},
     http::{header, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    Json,
+    Extension, Json,
 };
 use beacon_core::runtime::Runtime;
 use beacon_core::{
     api::{QueryMetricsView, QueryRequest},
     query_result::QueryOutputFile,
+    AuthIdentity,
 };
 use futures::TryStreamExt;
 use std::sync::Arc;
@@ -36,9 +37,10 @@ use std::sync::Arc;
 )]
 pub(crate) async fn query(
     State(state): State<Arc<Runtime>>,
+    Extension(identity): Extension<AuthIdentity>,
     Json(query_obj): Json<QueryRequest>,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
-    let query_result = state.run_client_query(query_obj).await.map_err(|err| {
+    let query_result = state.run_client_query(query_obj, identity).await.map_err(|err| {
         tracing::error!("Error running beacon query: {}", err);
         (StatusCode::BAD_REQUEST, Json(err.to_string()))
     })?;
@@ -241,9 +243,10 @@ pub(crate) async fn query_metrics(
 )]
 pub(crate) async fn explain_query(
     State(state): State<Arc<Runtime>>,
+    Extension(identity): Extension<AuthIdentity>,
     Json(query_obj): Json<QueryRequest>,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
-    let result = state.explain_client_query(query_obj).await;
+    let result = state.explain_client_query(query_obj, identity).await;
     match result {
         Ok(explanation) => Ok((
             [

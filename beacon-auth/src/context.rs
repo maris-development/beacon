@@ -29,8 +29,17 @@ pub struct AuthContext {
 
 impl AuthContext {
     pub fn new(auth_provider: Arc<dyn AuthProvider>) -> Self {
+        Self::with_role_provider(auth_provider, RoleProvider::new())
+    }
+
+    /// Builds a context around a pre-built role provider, allowing a persistence-backed provider
+    /// (hydrated from durable storage) to be supplied instead of the default in-memory one.
+    pub fn with_role_provider(
+        auth_provider: Arc<dyn AuthProvider>,
+        role_provider: RoleProvider,
+    ) -> Self {
         Self {
-            role_provider: RoleProvider::new(),
+            role_provider,
             auth_provider,
             anonymous_user: None,
         }
@@ -118,6 +127,14 @@ impl AuthContext {
         self.auth_provider
             .user_directory()
             .ok_or_else(|| anyhow::anyhow!("the active auth provider does not support user management"))
+    }
+
+    /// Whether a user exists in the active provider's directory (false if it has none).
+    pub fn user_exists(&self, username: &str) -> bool {
+        self.auth_provider
+            .user_directory()
+            .map(|dir| dir.user_exists(username))
+            .unwrap_or(false)
     }
 
     pub fn create_user(&self, username: &str, password: &str) -> anyhow::Result<()> {
