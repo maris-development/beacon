@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use object_store::ObjectStoreExt;
 
 use beacon_datafusion_ext::table_ext::{
     ExternalTable, MaterializedView, TableDefinition, ViewTableDefinition,
@@ -155,7 +156,7 @@ mod tests {
         datasource::ViewTable, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
     };
     use futures::StreamExt;
-    use object_store::{ObjectStore, memory::InMemory, path::Path};
+    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
     use std::sync::Arc;
     use url::Url;
 

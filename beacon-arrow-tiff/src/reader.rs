@@ -12,7 +12,7 @@ use beacon_nd_array::{
 
 use crate::backend::{BandConfig, TiffTileBackend};
 use indexmap::IndexMap;
-use object_store::{ObjectStore, path::Path};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 
 #[derive(Clone)]
 pub(crate) struct ObjectStoreAsyncReader {

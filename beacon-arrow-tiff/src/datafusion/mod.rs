@@ -155,7 +155,11 @@ impl FileFormat for TiffFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let source = TiffSource::new();
+        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
+            conf.file_schema().clone(),
+            conf.table_partition_cols().clone(),
+        );
+        let source = TiffSource::new(table_schema);
 
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -164,8 +168,11 @@ impl FileFormat for TiffFormat {
         Ok(DataSourceExec::from_data_source(conf))
     }
 
-    fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(TiffSource::new())
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
+        Arc::new(TiffSource::new(table_schema))
     }
 }
 
@@ -177,6 +184,7 @@ mod tests {
     use futures::StreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use object_store::ObjectStoreExt;
 
     const TEST_TIF_BYTES: &[u8] = include_bytes!("../../test-files/test.tif");
 
@@ -233,27 +241,21 @@ mod tests {
             .await
             .expect("schema");
 
-        let source = source::TiffSource::new();
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(table_schema);
+        let source = source::TiffSource::new(ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
                 ObjectStoreUrl::parse("memory://").expect("url"),
-                table_schema,
                 Arc::new(source.clone()) as Arc<dyn FileSource>,
             )
             .build();
-            source.create_file_opener(object_store, &conf, 0)
+            source
+                .create_file_opener(object_store, &conf, 0)
+                .expect("file opener")
         };
 
         let stream = file_opener
-            .open(
-                datafusion::datasource::physical_plan::FileMeta {
-                    object_meta: object,
-                    range: None,
-                    extensions: None,
-                    metadata_size_hint: None,
-                },
-                datafusion::datasource::listing::PartitionedFile::new("ignored", 0),
-            )
+            .open(datafusion::datasource::listing::PartitionedFile::from(object))
             .expect("open")
             .await
             .expect("stream");
@@ -342,7 +344,10 @@ mod tests {
 
         // Push the predicate into a TiffSource via try_pushdown_filters.
         let source_with_predicate: Arc<dyn FileSource> = {
-            let base_source = source::TiffSource::new();
+            let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
+                table_schema.clone(),
+            );
+            let base_source = source::TiffSource::new(ts);
             let pushdown = base_source
                 .try_pushdown_filters(vec![predicate], &ConfigOptions::default())
                 .expect("try_pushdown_filters");
@@ -352,23 +357,16 @@ mod tests {
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
                 ObjectStoreUrl::parse("memory://").expect("url"),
-                table_schema.clone(),
                 source_with_predicate.clone(),
             )
             .build();
-            source_with_predicate.create_file_opener(object_store, &conf, 0)
+            source_with_predicate
+                .create_file_opener(object_store, &conf, 0)
+                .expect("file opener")
         };
 
         let stream = file_opener
-            .open(
-                datafusion::datasource::physical_plan::FileMeta {
-                    object_meta: object,
-                    range: None,
-                    extensions: None,
-                    metadata_size_hint: None,
-                },
-                datafusion::datasource::listing::PartitionedFile::new("ignored", 0),
-            )
+            .open(datafusion::datasource::listing::PartitionedFile::from(object))
             .expect("open")
             .await
             .expect("stream");

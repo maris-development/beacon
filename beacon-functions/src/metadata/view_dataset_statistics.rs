@@ -42,7 +42,7 @@ use datafusion::{
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
 };
-use object_store::{ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 
 use crate::file_formats::BeaconTableFunctionImpl;
 use super::helpers::{ColumnStatRow, column_stat_rows};
@@ -136,10 +136,13 @@ impl TableFunctionImpl for ViewDatasetStatisticsFunc {
                 .await?;
 
                 if let Some(ref cache) = cache {
-                    if let Some(cached) = cache.get_with_extra(&meta.location, &meta) {
+                    if let Some(cached) = cache
+                        .get(&meta.location)
+                        .filter(|cached| cached.is_valid_for(&meta))
+                    {
                         return Ok::<_, datafusion::error::DataFusionError>((
                             schema.clone(),
-                            cached.clone(),
+                            Arc::clone(&cached.statistics),
                         ));
                     }
                 }
@@ -149,7 +152,14 @@ impl TableFunctionImpl for ViewDatasetStatisticsFunc {
                 );
 
                 if let Some(cache) = cache {
-                    cache.put_with_extra(&meta.location, stats.clone(), &meta);
+                    cache.put(
+                        &meta.location,
+                        datafusion::execution::cache::cache_manager::CachedFileMetadata::new(
+                            meta.clone(),
+                            Arc::clone(&stats),
+                            None,
+                        ),
+                    );
                 }
 
                 Ok((schema, stats))

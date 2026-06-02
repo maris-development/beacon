@@ -36,7 +36,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use futures::StreamExt;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::sync::Mutex;
 
 use crate::manifest::{self, DataFile};
@@ -339,7 +339,7 @@ pub struct ZOrderSortExec {
     /// Child plan that produces the data to sort.
     child: Arc<dyn ExecutionPlan>,
     /// Cached plan properties.
-    props: PlanProperties,
+    props: Arc<PlanProperties>,
 }
 
 impl ZOrderSortExec {
@@ -347,12 +347,12 @@ impl ZOrderSortExec {
     pub fn new(columns: Vec<String>, child: Arc<dyn ExecutionPlan>) -> Self {
         let schema = child.schema();
         let eq = EquivalenceProperties::new(schema);
-        let props = PlanProperties::new(
+        let props = Arc::new(PlanProperties::new(
             eq,
             Partitioning::UnknownPartitioning(1),
             datafusion::physical_plan::execution_plan::EmissionType::Final,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        );
+        ));
         Self {
             columns,
             child,
@@ -380,7 +380,7 @@ impl ExecutionPlan for ZOrderSortExec {
         self.child.schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
 
@@ -506,7 +506,7 @@ pub struct CreateIndexExec {
     /// The new index configuration to store in the manifest.
     new_index: TableIndex,
     /// Cached plan properties.
-    props: PlanProperties,
+    props: Arc<PlanProperties>,
 }
 
 impl CreateIndexExec {
@@ -527,12 +527,12 @@ impl CreateIndexExec {
 
         let schema = count_schema();
         let eq = EquivalenceProperties::new(schema);
-        let props = PlanProperties::new(
+        let props = Arc::new(PlanProperties::new(
             eq,
             Partitioning::UnknownPartitioning(1),
             datafusion::physical_plan::execution_plan::EmissionType::Final,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        );
+        ));
 
         Self {
             store,
@@ -569,7 +569,7 @@ impl ExecutionPlan for CreateIndexExec {
         count_schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
 

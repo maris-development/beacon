@@ -12,14 +12,15 @@ use datafusion::{
     datasource::{
         file_format::file_compression_type::FileCompressionType,
         listing::PartitionedFile,
-        physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileScanConfig, FileSource},
+        physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        table_schema::TableSchema,
     },
     physical_expr::LexOrdering,
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use crate::odv_ascii::OdvFormat;
 
@@ -30,32 +31,20 @@ use crate::odv_ascii::OdvFormat;
 pub struct OdvSource {
     /// Optional factory for schema adapters.
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
-    /// Optional schema override.
-    override_schema: Option<SchemaRef>,
-    /// Optional column projection.
-    projection: Option<Vec<usize>>,
+    /// The table schema (file schema + partition columns).
+    table_schema: TableSchema,
     /// Execution plan metrics.
     execution_plan_metrics: ExecutionPlanMetricsSet,
-    /// Optional projected statistics.
-    projected_statistics: Option<Statistics>,
 }
 
 impl OdvSource {
-    /// Creates a new [`OdvSource`] with default settings.
-    pub fn new() -> Self {
+    /// Creates a new [`OdvSource`] with the given table schema.
+    pub fn new(table_schema: TableSchema) -> Self {
         Self {
             schema_adapter_factory: None,
-            override_schema: None,
-            projection: None,
+            table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
-            projected_statistics: None,
         }
-    }
-}
-
-impl Default for OdvSource {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -67,25 +56,25 @@ impl FileSource for OdvSource {
         object_store: Arc<dyn ObjectStore>,
         base_config: &FileScanConfig,
         _partition: usize,
-    ) -> Arc<dyn FileOpener> {
-        // Determine the schema to use (override or from config)
-        let table_schema = self
-            .override_schema
-            .clone()
-            .unwrap_or_else(|| base_config.file_schema.clone());
-        let projected_schema = base_config.projected_schema();
+    ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
+        let file_schema = self.table_schema.file_schema().clone();
+        let projected_schema = base_config.projected_schema()?;
 
         // Use provided schema adapter factory or default
         let schema_adapter_factory = self
             .schema_adapter_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
+        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema);
 
-        Arc::new(OdvOpener {
+        Ok(Arc::new(OdvOpener {
             schema_adapter: Arc::from(schema_adapter),
             object_store,
-        })
+        }))
+    }
+
+    fn table_schema(&self) -> &TableSchema {
+        &self.table_schema
     }
 
     fn repartitioned(
@@ -108,46 +97,9 @@ impl FileSource for OdvSource {
         Arc::new(self.clone())
     }
 
-    /// Returns a new [`FileSource`] with the given schema.
-    fn with_schema(&self, schema: SchemaRef) -> Arc<dyn FileSource> {
-        Arc::new(OdvSource {
-            override_schema: Some(schema),
-            ..self.clone()
-        })
-    }
-
-    /// Returns a new [`FileSource`] with the given projection.
-    fn with_projection(&self, config: &FileScanConfig) -> Arc<dyn FileSource> {
-        Arc::new(OdvSource {
-            projection: config.projection.clone(),
-            ..self.clone()
-        })
-    }
-
-    /// Returns a new [`FileSource`] with the given statistics.
-    fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
-        Arc::new(OdvSource {
-            projected_statistics: Some(statistics),
-            ..self.clone()
-        })
-    }
-
     /// Returns the execution plan metrics.
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
-    }
-
-    /// Returns the projected statistics, or computes unknown statistics if possible.
-    fn statistics(&self) -> datafusion::error::Result<Statistics> {
-        if let Some(statistics) = &self.projected_statistics {
-            Ok(statistics.clone())
-        } else if let Some(schema) = self.override_schema.as_ref() {
-            Ok(Statistics::new_unknown(schema))
-        } else {
-            Err(datafusion::error::DataFusionError::Execution(
-                "Schema must be set to compute statistics".to_string(),
-            ))
-        }
     }
 
     /// Returns the file type string ("txt").
@@ -161,10 +113,8 @@ impl FileSource for OdvSource {
         factory: Arc<dyn SchemaAdapterFactory>,
     ) -> datafusion::error::Result<Arc<dyn FileSource>> {
         Ok(Arc::new(Self {
-            override_schema: self.override_schema.clone(),
-            projection: self.projection.clone(),
+            table_schema: self.table_schema.clone(),
             execution_plan_metrics: self.execution_plan_metrics.clone(),
-            projected_statistics: self.projected_statistics.clone(),
             schema_adapter_factory: Some(factory),
         }))
     }
@@ -187,18 +137,17 @@ struct OdvOpener {
 
 impl FileOpener for OdvOpener {
     /// Opens an ODV file and returns a stream of record batches.
-    fn open(
-        &self,
-        file_meta: FileMeta,
-        _file: PartitionedFile,
-    ) -> datafusion::error::Result<FileOpenFuture> {
+    fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let schema_adapter = self.schema_adapter.clone();
         let object_store = self.object_store.clone();
-        let compression = OdvFormat::infer_compression(&file_meta.object_meta);
+        let compression = OdvFormat::infer_compression(&file.object_meta);
 
         Ok(Box::pin(async move {
             // Open and decode the schema from the file
-            let input_stream = object_store.get(file_meta.location()).await?.into_stream();
+            let input_stream = object_store
+                .get(&file.object_meta.location)
+                .await?
+                .into_stream();
             let uncompressed_stream =
                 compression.convert_stream(Box::pin(input_stream.map_err(Into::into)))?;
             let odv_schema_mapper =
@@ -212,7 +161,10 @@ impl FileOpener for OdvOpener {
             let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
 
             // Open and decode the file body
-            let body_stream = object_store.get(file_meta.location()).await?.into_stream();
+            let body_stream = object_store
+                .get(&file.object_meta.location)
+                .await?
+                .into_stream();
             let uncompressed_body_stream =
                 compression.convert_stream(Box::pin(body_stream.map_err(Into::into)))?;
 

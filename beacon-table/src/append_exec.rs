@@ -37,7 +37,7 @@ pub struct AppendExec {
     /// The child execution plans to concatenate.
     inputs: Vec<Arc<dyn ExecutionPlan>>,
     /// Cached plan properties (single partition, incremental, bounded).
-    props: PlanProperties,
+    props: Arc<PlanProperties>,
     /// The shared output schema (must be identical across all children).
     schema: SchemaRef,
 }
@@ -74,12 +74,12 @@ impl AppendExec {
         // Exact constructor details vary by DataFusion version.
         let eq = inputs[0].equivalence_properties().clone();
         let partitioning = Partitioning::UnknownPartitioning(1);
-        let props = PlanProperties::new(
+        let props = Arc::new(PlanProperties::new(
             eq,
             partitioning,
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        );
+        ));
 
         Ok(Self {
             inputs,
@@ -111,7 +111,7 @@ impl ExecutionPlan for AppendExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
 

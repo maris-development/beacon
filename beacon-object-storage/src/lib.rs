@@ -39,7 +39,7 @@ use std::{env::temp_dir, fmt::Display, ops::Deref, path::PathBuf, sync::Arc};
 use ::notify::{RecommendedWatcher, Watcher, recommended_watcher};
 use futures::stream::BoxStream;
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, aws::AmazonS3Builder,
     local::LocalFileSystem, path::Path,
 };
@@ -626,8 +626,11 @@ impl ObjectStore for DatasetsStore {
         self.deref().get_opts(location, options).await
     }
 
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        self.deref().delete(location).await
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.deref().delete_stream(locations)
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -638,12 +641,13 @@ impl ObjectStore for DatasetsStore {
         self.deref().list_with_delimiter(prefix).await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.deref().copy(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.deref().copy_if_not_exists(from, to).await
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.deref().copy_opts(from, to, options).await
     }
 }
 

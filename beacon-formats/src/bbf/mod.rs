@@ -159,14 +159,21 @@ impl FileFormat for BBFFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let source = BBFSource::default();
+        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
+            conf.file_schema().clone(),
+            conf.table_partition_cols().clone(),
+        );
+        let source = BBFSource::new(table_schema);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
         Ok(DataSourceExec::from_data_source(conf))
     }
 
-    fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(BBFSource::default())
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
+        Arc::new(BBFSource::new(table_schema))
     }
 }

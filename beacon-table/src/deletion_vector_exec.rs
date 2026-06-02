@@ -84,7 +84,7 @@ impl ExecutionPlan for DeletionVectorExec {
         "DeletionVectorExec"
     }
 
-    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
+    fn properties(&self) -> &Arc<datafusion::physical_plan::PlanProperties> {
         self.data.properties()
     }
 
@@ -127,10 +127,6 @@ impl ExecutionPlan for DeletionVectorExec {
         _config: &datafusion::config::ConfigOptions,
     ) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
         Ok(None)
-    }
-
-    fn statistics(&self) -> DataFusionResult<Statistics> {
-        Ok(Statistics::new_unknown(&self.schema()))
     }
 
     fn execute(

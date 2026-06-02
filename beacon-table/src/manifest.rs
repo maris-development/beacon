@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use crate::index_exec::TableIndex;
 

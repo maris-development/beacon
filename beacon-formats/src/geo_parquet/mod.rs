@@ -203,7 +203,7 @@ impl FileFormat for GeoParquetFormat {
         Ok(Arc::new(DataSinkExec::new(input, sink, order_requirements)))
     }
 
-    fn file_source(&self) -> Arc<dyn FileSource> {
+    fn file_source(&self, table_schema: datafusion::datasource::table_schema::TableSchema) -> Arc<dyn FileSource> {
         panic!("GeoParquetFormat does not support file source");
     }
 }

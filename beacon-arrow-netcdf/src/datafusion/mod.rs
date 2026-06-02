@@ -201,9 +201,14 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
+            conf.file_schema().clone(),
+            conf.table_partition_cols().clone(),
+        );
         let source = NetCDFSource::new(
             self.datasets_object_store.clone(),
             self.options.read_dimensions.clone(),
+            table_schema,
         );
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -264,10 +269,14 @@ impl FileFormat for NetcdfFormat {
         }
     }
 
-    fn file_source(&self) -> Arc<dyn FileSource> {
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
         Arc::new(NetCDFSource::new(
             self.datasets_object_store.clone(),
             self.options.read_dimensions.clone(),
+            table_schema,
         ))
     }
 }
@@ -277,7 +286,6 @@ mod tests {
     use super::*;
     use beacon_object_storage::get_datasets_object_store;
     use datafusion::datasource::listing::PartitionedFile;
-    use datafusion::datasource::physical_plan::FileMeta;
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures::StreamExt;
     use object_store::path::Path;
@@ -439,7 +447,11 @@ mod tests {
     async fn file_source_returns_netcdf_type() {
         let store = test_store().await;
         let format = test_format(store);
-        let source = format.file_source();
+        let source = format.file_source(
+            datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+                arrow::datatypes::Schema::empty(),
+            )),
+        );
         assert_eq!(source.file_type(), "netcdf");
     }
 
@@ -452,30 +464,27 @@ mod tests {
             .await
             .expect("schema");
 
-        let opener = source::NetCDFSource::new(store, None);
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
+            table_schema.clone(),
+        );
+        let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
                 ObjectStoreUrl::local_filesystem(),
-                table_schema.clone(),
                 Arc::new(opener.clone()) as Arc<dyn FileSource>,
             )
             .build();
-            opener.create_file_opener(
-                Arc::new(object_store::local::LocalFileSystem::new()),
-                &conf,
-                0,
-            )
-        };
-
-        let file_meta = FileMeta {
-            object_meta: wod_object_meta(),
-            range: None,
-            extensions: None,
-            metadata_size_hint: None,
+            opener
+                .create_file_opener(
+                    Arc::new(object_store::local::LocalFileSystem::new()),
+                    &conf,
+                    0,
+                )
+                .expect("file opener")
         };
 
         let stream = file_opener
-            .open(file_meta, PartitionedFile::new("ignored", 0))
+            .open(PartitionedFile::from(wod_object_meta()))
             .expect("open")
             .await
             .expect("stream future");
@@ -495,30 +504,27 @@ mod tests {
             .await
             .expect("schema");
 
-        let opener = source::NetCDFSource::new(store, None);
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
+            table_schema.clone(),
+        );
+        let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
                 ObjectStoreUrl::local_filesystem(),
-                table_schema.clone(),
                 Arc::new(opener.clone()) as Arc<dyn FileSource>,
             )
             .build();
-            opener.create_file_opener(
-                Arc::new(object_store::local::LocalFileSystem::new()),
-                &conf,
-                0,
-            )
-        };
-
-        let file_meta = FileMeta {
-            object_meta: gridded_object_meta(),
-            range: None,
-            extensions: None,
-            metadata_size_hint: None,
+            opener
+                .create_file_opener(
+                    Arc::new(object_store::local::LocalFileSystem::new()),
+                    &conf,
+                    0,
+                )
+                .expect("file opener")
         };
 
         let stream = file_opener
-            .open(file_meta, PartitionedFile::new("ignored", 0))
+            .open(PartitionedFile::from(gridded_object_meta()))
             .expect("open")
             .await
             .expect("stream future");
@@ -541,31 +547,29 @@ mod tests {
         // Project to only the first column.
         let projected_schema: SchemaRef = Arc::new(table_schema.project(&[0]).expect("project"));
 
-        let opener = source::NetCDFSource::new(store, None);
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
+            table_schema.clone(),
+        );
+        let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
                 ObjectStoreUrl::local_filesystem(),
-                table_schema.clone(),
                 Arc::new(opener.clone()) as Arc<dyn FileSource>,
             )
-            .with_projection(Some(vec![0]))
+            .with_projection_indices(Some(vec![0]))
+            .unwrap()
             .build();
-            opener.create_file_opener(
-                Arc::new(object_store::local::LocalFileSystem::new()),
-                &conf,
-                0,
-            )
-        };
-
-        let file_meta = FileMeta {
-            object_meta: gridded_object_meta(),
-            range: None,
-            extensions: None,
-            metadata_size_hint: None,
+            opener
+                .create_file_opener(
+                    Arc::new(object_store::local::LocalFileSystem::new()),
+                    &conf,
+                    0,
+                )
+                .expect("file opener")
         };
 
         let stream = file_opener
-            .open(file_meta, PartitionedFile::new("ignored", 0))
+            .open(PartitionedFile::from(gridded_object_meta()))
             .expect("open")
             .await
             .expect("stream future");
@@ -598,30 +602,27 @@ mod tests {
         .await
         .expect("dim schema");
 
-        let opener = source::NetCDFSource::new(store, Some(vec!["time".to_string()]));
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
+            dim_schema.clone(),
+        );
+        let opener = source::NetCDFSource::new(store, Some(vec!["time".to_string()]), ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
                 ObjectStoreUrl::local_filesystem(),
-                dim_schema.clone(),
                 Arc::new(opener.clone()) as Arc<dyn FileSource>,
             )
             .build();
-            opener.create_file_opener(
-                Arc::new(object_store::local::LocalFileSystem::new()),
-                &conf,
-                0,
-            )
-        };
-
-        let file_meta = FileMeta {
-            object_meta: gridded_object_meta(),
-            range: None,
-            extensions: None,
-            metadata_size_hint: None,
+            opener
+                .create_file_opener(
+                    Arc::new(object_store::local::LocalFileSystem::new()),
+                    &conf,
+                    0,
+                )
+                .expect("file opener")
         };
 
         let stream = file_opener
-            .open(file_meta, PartitionedFile::new("ignored", 0))
+            .open(PartitionedFile::from(gridded_object_meta()))
             .expect("open")
             .await
             .expect("stream future");

@@ -42,7 +42,7 @@ use datafusion::{
 };
 use futures::TryStreamExt;
 use futures::{AsyncWrite, AsyncWriteExt, StreamExt, future::try_join_all};
-use object_store::{ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 use parquet::arrow::async_writer::AsyncFileWriter;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::compat::{FuturesAsyncWriteCompatExt, TokioAsyncWriteCompatExt};
@@ -226,7 +226,11 @@ impl FileFormat for OdvFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let source = OdvSource::new();
+        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
+            conf.file_schema().clone(),
+            conf.table_partition_cols().clone(),
+        );
+        let source = OdvSource::new(table_schema);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -274,14 +278,17 @@ impl FileFormat for OdvFormat {
         )))
     }
 
-    fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(OdvSource::new())
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
+        Arc::new(OdvSource::new(table_schema))
     }
 }
 
 #[derive(Debug)]
 pub struct OdvExec {
-    plan_properties: PlanProperties,
+    plan_properties: Arc<PlanProperties>,
     file_scan_config: FileScanConfig,
     projection: Option<Arc<[usize]>>,
     table_schema: SchemaRef,
@@ -290,20 +297,20 @@ pub struct OdvExec {
 
 impl OdvExec {
     pub fn new(file_scan_conf: FileScanConfig) -> Self {
-        let projected_schema = file_scan_conf
-            .projection
+        let projection_indices = file_scan_conf.file_column_projection_indices();
+        let projected_schema = projection_indices
             .as_ref()
-            .map(|p| Arc::new(file_scan_conf.file_schema.project(p).unwrap()))
-            .unwrap_or(file_scan_conf.file_schema.clone());
+            .map(|p| Arc::new(file_scan_conf.file_schema().project(p).unwrap()))
+            .unwrap_or_else(|| file_scan_conf.file_schema().clone());
 
         Self {
-            plan_properties: Self::plan_properties(
+            plan_properties: Arc::new(Self::plan_properties(
                 file_scan_conf.file_groups.len(),
                 projected_schema,
-            ),
-            projection: file_scan_conf.projection.clone().map(Arc::from),
+            )),
+            projection: projection_indices.map(Arc::from),
             schema_adapter_factory: Arc::new(DefaultSchemaAdapterFactory),
-            table_schema: file_scan_conf.file_schema.clone(),
+            table_schema: file_scan_conf.file_schema().clone(),
             file_scan_config: file_scan_conf,
         }
     }
@@ -387,7 +394,7 @@ impl ExecutionPlan for OdvExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.plan_properties
     }
 

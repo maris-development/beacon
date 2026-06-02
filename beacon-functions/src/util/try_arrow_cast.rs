@@ -5,7 +5,7 @@ use datafusion::common::{
     exec_datafusion_err, exec_err, internal_err, DataFusionError, ExprSchema,
 };
 use datafusion::functions::core::arrow_cast::ArrowCastFunc;
-use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
+use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyContext};
 use datafusion::logical_expr::{
     ColumnarValue, ExprSchemable, ReturnFieldArgs, ScalarUDF, Signature, Volatility,
 };
@@ -79,7 +79,7 @@ impl ScalarUDFImpl for TryArrowCastFunc {
     fn simplify(
         &self,
         mut args: Vec<Expr>,
-        info: &dyn SimplifyInfo,
+        info: &SimplifyContext,
     ) -> datafusion::error::Result<ExprSimplifyResult> {
         // convert this into a real cast
         let target_type = data_type_from_args(&args)?;

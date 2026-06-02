@@ -8,7 +8,7 @@ serde = { workspace=true}
 tokio = { workspace = true }
 indexmap = { workspace = true }
 arrow = { workspace=true}
-arrow-csv = "^56.0.0"
+arrow-csv = "^58"
 anyhow = { workspace=true}
 async-trait = { workspace=true}
 futures = { workspace=true}
@@ -19,7 +19,9 @@ csv = "1.3.1"
 tar = "0.4.44"
 zstd = "0.13.3"
 lz4_flex = "0.11.3"
-zip = "2.2.3"
+# default-features disabled to drop xz/lzma support (xz2 -> lzma-sys conflicts with
+# datafusion 53's liblzma on the native `lzma` links). Only deflate is used.
+zip = { version = "2.2.3", default-features = false, features = ["deflate"] }
 async_zip = { version = "0.0.18", features = ["tokio", "zstd", "deflate"] }
 tokio-util = "0.7.16"
 walkdir = "2.5.0"
