@@ -128,7 +128,7 @@ impl FileFormatFactory for AtlasFormatFactory {
 
 impl GetExt for AtlasFormatFactory {
     fn get_ext(&self) -> String {
-        ATLAS_MARKER.to_string()
+        "atlas".to_string()
     }
 }
 

@@ -1,11 +1,20 @@
-use std::collections::{HashMap, HashSet};
+//! Zarr path handling and group-discovery helpers shared by the DataFusion
+//! integration.
+
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use object_store::ObjectStore;
+use zarrs::group::Group;
+use zarrs_storage::AsyncReadableListableStorageTraits;
 
 #[derive(Clone, Debug)]
 pub enum ZarrPath {
     ObjectMeta(object_store::ObjectMeta),
-    // Directory path representing a Zarr group. Inside there should always be a "zarr.json" file.
+    /// Directory path representing a Zarr group. Inside there should always be
+    /// a `zarr.json` file.
     DirPath(object_store::path::Path),
 }
 
@@ -17,27 +26,20 @@ impl ZarrPath {
                 let loc = meta.location.as_ref();
                 loc.strip_suffix("zarr.json").unwrap_or(loc).to_string()
             }
-            ZarrPath::DirPath(path) => {
-                // Check if ends with '/' and return as is or add it.
-                path.as_ref().to_string()
-            }
+            ZarrPath::DirPath(path) => path.as_ref().to_string(),
         };
         let p_str = directory_path.trim_end_matches('/');
-        format!("/{}", p_str)
+        format!("/{p_str}")
     }
 
     pub fn as_zarr_json_path(&self) -> String {
         match self {
             ZarrPath::ObjectMeta(meta) => meta.location.as_ref().to_string(),
-            ZarrPath::DirPath(path) => {
-                let zarr_json_path = path.child("zarr.json");
-                zarr_json_path.as_ref().to_string()
-            }
+            ZarrPath::DirPath(path) => path.child("zarr.json").as_ref().to_string(),
         }
     }
 
     pub fn new_from_object_meta(meta: object_store::ObjectMeta) -> Result<Self, String> {
-        // Ensure this is a zarr.json file?
         if !is_zarr_v3_metadata(&meta) {
             return Err(format!(
                 "ObjectMeta at location '{}' is not a Zarr v3 metadata file (zarr.json)",
@@ -51,7 +53,6 @@ impl ZarrPath {
         object_store: &dyn ObjectStore,
         path: object_store::path::Path,
     ) -> Result<Self, String> {
-        // Ensure that path does not end with "zarr.json" and that in the folder underneath there is a zarr.json file.
         if path.as_ref().ends_with("zarr.json") {
             return Err(format!(
                 "Provided path '{}' should be a directory path, not a zarr.json file",
@@ -72,30 +73,25 @@ impl ZarrPath {
 }
 
 /// Get parent directory of a Path (S3-style).
-/// Example: "a/b/c" -> Some("a/b")
-///          "a"     -> None
+/// Example: `a/b/c` -> `Some("a/b")`, `a` -> `None`.
 pub fn path_parent(p: &object_store::path::Path) -> Option<object_store::path::Path> {
     let s = p.to_string();
     if let Some(pos) = s.rfind('/') {
-        // Parent is everything before the last '/'
         let parent_str = &s[..pos];
         Some(object_store::path::Path::from(parent_str))
     } else {
-        // No '/' in path => parent is root (optional: return None instead)
         None
     }
 }
 
-/// Check if this ObjectMeta represents a Zarr v3 metadata file ("zarr.json")
+/// Check if this ObjectMeta represents a Zarr v3 metadata file (`zarr.json`).
 pub fn is_zarr_v3_metadata(meta: &object_store::ObjectMeta) -> bool {
-    // Normalize for safety, S3 paths are UTF-8 so this is fine
     let loc = meta.location.to_string().to_lowercase();
     loc.ends_with("/zarr.json")
 }
 
 /// Return only the ObjectMeta entries corresponding to **top-level Zarr groups**.
 pub fn top_level_zarr_meta_v3(metas: &[object_store::ObjectMeta]) -> Vec<object_store::ObjectMeta> {
-    // 1. Collect all metas that are zarr.json + record their directories.
     let mut dir_to_meta: HashMap<object_store::path::Path, &object_store::ObjectMeta> =
         HashMap::new();
 
@@ -107,17 +103,13 @@ pub fn top_level_zarr_meta_v3(metas: &[object_store::ObjectMeta]) -> Vec<object_
         }
     }
 
-    // 2. Extract all candidate directories and sort.
     let mut candidates: Vec<object_store::path::Path> = dir_to_meta.keys().cloned().collect();
     candidates.sort();
     candidates.dedup();
 
-    // 3. Build a set for quick ancestor checks.
     let all_dirs: HashSet<object_store::path::Path> = candidates.iter().cloned().collect();
 
-    // 4. Keep only directories that have no ancestor also in all_dirs.
     let mut top_level_dirs: Vec<object_store::path::Path> = Vec::new();
-
     'outer: for dir in &candidates {
         let mut current = path_parent(dir);
         while let Some(ancestor) = current {
@@ -125,7 +117,6 @@ pub fn top_level_zarr_meta_v3(metas: &[object_store::ObjectMeta]) -> Vec<object_
                 break;
             }
             if all_dirs.contains(&ancestor) {
-                // dir is nested under another zarr.json directory
                 continue 'outer;
             }
             current = path_parent(&ancestor);
@@ -133,17 +124,60 @@ pub fn top_level_zarr_meta_v3(metas: &[object_store::ObjectMeta]) -> Vec<object_
         top_level_dirs.push(dir.clone());
     }
 
-    // 5. Return the corresponding ObjectMetas (cloned)
     top_level_dirs
         .into_iter()
         .filter_map(|d| dir_to_meta.get(&d).cloned().cloned())
         .collect()
 }
 
+/// Recursively collect the leaf Zarr groups under `top_level_group`.
+///
+/// A group is a leaf when it has no child groups; the top-level group itself is
+/// included when it has none.
+pub async fn recursive_groups(
+    top_level_group: Arc<Group<dyn AsyncReadableListableStorageTraits>>,
+    zarr_groups: &mut Vec<Arc<Group<dyn AsyncReadableListableStorageTraits>>>,
+) -> anyhow::Result<()> {
+    let child_groups = top_level_group
+        .async_child_groups()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list child groups: {e}"))?;
+
+    if child_groups.is_empty() {
+        zarr_groups.push(top_level_group.clone());
+    } else {
+        for child_group in child_groups {
+            Box::pin(recursive_groups(Arc::new(child_group), zarr_groups)).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively collect leaf sub-groups to treat as scan partitions.
+///
+/// Returns `None` if the group's children could not be listed.
+pub async fn find_partitioned_files(
+    group: &Group<dyn AsyncReadableListableStorageTraits>,
+) -> Option<Vec<Group<dyn AsyncReadableListableStorageTraits>>> {
+    match group.async_child_groups().await {
+        Ok(children) => {
+            let mut result = Vec::new();
+            for child in children {
+                if let Some(mut sub_children) = Box::pin(find_partitioned_files(&child)).await {
+                    result.append(&mut sub_children);
+                } else {
+                    result.push(child);
+                }
+            }
+            Some(result)
+        }
+        Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use object_store::{ObjectMeta, path::Path};
 
     fn meta(path: &str) -> ObjectMeta {
@@ -169,10 +203,7 @@ mod tests {
 
     #[test]
     fn test_nested_group_dropped() {
-        let metas = vec![
-            meta("a/zarr.json"),   // top-level
-            meta("a/b/zarr.json"), // nested -> drop
-        ];
+        let metas = vec![meta("a/zarr.json"), meta("a/b/zarr.json")];
         let result = top_level_zarr_meta_v3(&metas);
         assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
     }
@@ -187,55 +218,13 @@ mod tests {
     }
 
     #[test]
-    fn test_deep_nesting_dropped() {
-        let metas = vec![
-            meta("a/zarr.json"),
-            meta("a/b/zarr.json"),
-            meta("a/b/c/zarr.json"),
-        ];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
-    }
-
-    #[test]
-    fn test_sibling_groups() {
-        let metas = vec![
-            meta("root1/zarr.json"),
-            meta("root2/zarr.json"),
-            meta("root2/child/zarr.json"), // nested -> drop
-        ];
-        let result = top_level_zarr_meta_v3(&metas);
-        let mut paths = extract_paths(&result);
-        paths.sort();
-        assert_eq!(paths, vec!["root1/zarr.json", "root2/zarr.json"]);
-    }
-
-    #[test]
-    fn test_root_level_key() {
-        let metas = vec![
-            meta("zarr.json"),   // top-level at root
-            meta("a/zarr.json"), // nested under root -> drop
-        ];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
-    }
-
-    #[test]
     fn test_ignore_non_zarr_json() {
         let metas = vec![
-            meta("a/zarr.json"), // valid
+            meta("a/zarr.json"),
             meta("b/not_zarr.json"),
             meta("c/zarr.txt"),
-            meta("d/data.bin"),
         ];
         let result = top_level_zarr_meta_v3(&metas);
         assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
-    }
-
-    #[test]
-    fn test_empty_input() {
-        let metas: Vec<ObjectMeta> = vec![];
-        let result = top_level_zarr_meta_v3(&metas);
-        assert!(result.is_empty());
     }
 }

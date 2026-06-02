@@ -31,9 +31,6 @@ lru = { workspace = true }
 
 async_zip = { version = "0.0.18", features = ["tokio", "zstd", "deflate"] }
 tokio-util = "0.7.16"
-zarrs_object_store = "0.5.0"
-zarrs_storage = "0.4.2"
-zarrs = {"version" = "0.23.12", features = ["async"]}
 
 url = "2.5.4"
 glob = "0.3.3"

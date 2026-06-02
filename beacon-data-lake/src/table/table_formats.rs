@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use beacon_binary_format::object_store::ArrowBBFObjectWriter;
-use beacon_formats::zarr::{ZarrFormat, statistics::ZarrStatisticsSelection};
+use beacon_formats::zarr::ZarrFormat;
 use datafusion::{
     datasource::{file_format::FileFormat, listing::ListingTableUrl},
     prelude::SessionContext,
@@ -75,11 +75,8 @@ impl TableFileFormat for NetCDFFileFormat {
     }
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct ZarrFileFormat {
-    #[serde(default)]
-    pub statistics: Option<Arc<ZarrStatisticsSelection>>,
-}
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+pub struct ZarrFileFormat;
 
 #[typetag::serde(name = "zarr")]
 impl TableFileFormat for ZarrFileFormat {
@@ -88,9 +85,7 @@ impl TableFileFormat for ZarrFileFormat {
     }
 
     fn file_format(&self) -> Option<Arc<dyn FileFormat>> {
-        Some(Arc::new(
-            ZarrFormat::default().with_zarr_statistics(self.statistics.clone()),
-        ))
+        Some(Arc::new(ZarrFormat::default()))
     }
 }
 

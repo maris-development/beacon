@@ -948,17 +948,23 @@ dependencies = [
 name = "beacon-arrow-zarr"
 version = "1.6.0"
 dependencies = [
+ "anyhow",
  "arrow",
+ "async-trait",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "beacon-nd-array",
  "crossbeam",
+ "datafusion",
  "futures",
  "hifitime",
  "indexmap 2.13.0",
- "nd-arrow-array",
+ "ndarray",
  "object_store 0.12.4",
  "parking_lot",
- "pin-project",
  "regex",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "zarrs",
@@ -1187,9 +1193,6 @@ dependencies = [
  "typetag",
  "url",
  "which",
- "zarrs",
- "zarrs_object_store",
- "zarrs_storage",
 ]
 
 [[package]]
