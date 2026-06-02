@@ -1,27 +1,22 @@
-use std::any::Any;
-use std::borrow::Cow;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use beacon_common::listing_url::parse_listing_table_url;
+use datafusion::arrow::datatypes::Schema;
 use datafusion::common::{
-    Constraints, DataFusionError, Statistics, ToDFSchema, arrow_datafusion_err,
-    config_datafusion_err, plan_err,
+    DataFusionError, ToDFSchema, arrow_datafusion_err, config_datafusion_err, plan_err,
 };
-use datafusion::datasource::TableType;
-use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
+use datafusion::datasource::listing::ListingOptions;
 use datafusion::execution::SessionState;
 use datafusion::execution::object_store::ObjectStoreUrl;
-use datafusion::logical_expr::{CreateExternalTable, LogicalPlan, TableProviderFilterPushDown};
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::prelude::Expr;
-use datafusion::sql::TableReference;
+use datafusion::logical_expr::CreateExternalTable;
+use datafusion::prelude::SessionContext;
 use datafusion::{
     arrow::datatypes::{DataType, SchemaRef},
     catalog::{Session, TableProvider, TableProviderFactory},
 };
 
-use crate::table_ext::{ExternalTable, ExternalTableDefinition};
+use crate::table_ext::{ExternalTable, ExternalTableDefinition, ExternalTableRebuild, build_listing_table};
 
 type PartitionCols = Vec<(String, DataType)>;
 
@@ -29,12 +24,18 @@ type PartitionCols = Vec<(String, DataType)>;
 #[derive(Debug)]
 pub struct ListingTableFactoryExt {
     store_url: ObjectStoreUrl,
+    /// Weak link to the owning session context so created external tables can
+    /// re-infer their schema on refresh without forming a reference cycle.
+    session_ctx: Weak<SessionContext>,
 }
 
 impl ListingTableFactoryExt {
     /// Creates a new `ListingTableFactoryExt`
-    pub fn new(store_url: ObjectStoreUrl) -> Self {
-        Self { store_url }
+    pub fn new(store_url: ObjectStoreUrl, session_ctx: Weak<SessionContext>) -> Self {
+        Self {
+            store_url,
+            session_ctx,
+        }
     }
 }
 
@@ -56,6 +57,7 @@ impl TableProviderFactory for ListingTableFactoryExt {
         let file_format = file_format_factory.create(session_state, &cmd.options)?;
 
         let (provided_schema, table_partition_cols) = resolve_schema_and_partition_cols(cmd)?;
+        let schema_inferred = provided_schema.is_none();
 
         let mut listing_table_url = parse_listing_table_url(&self.store_url, &cmd.location)?;
 
@@ -63,47 +65,43 @@ impl TableProviderFactory for ListingTableFactoryExt {
             .with_file_extension("") // file extension is not needed for listing table factory since the file format will handle it in `infer_schema` and `infer_partition_schema`
             .with_session_config_options(session_state.config())
             .with_collect_stat(true)
-            .with_table_partition_cols(table_partition_cols);
+            .with_table_partition_cols(table_partition_cols)
+            .with_file_sort_order(cmd.order_exprs.clone());
 
         options
             .validate_partitions(session_state, &listing_table_url)
             .await?;
 
-        let resolved_schema = match provided_schema {
-            None => {
-                listing_table_url = maybe_apply_default_glob(listing_table_url, &options, cmd)?;
+        // When inferring, apply the default glob now so that the rebuild spec
+        // lists files identically on every subsequent refresh.
+        if schema_inferred {
+            listing_table_url = maybe_apply_default_glob(listing_table_url, &options, cmd)?;
+        }
 
-                let schema = options
-                    .infer_schema(session_state, &listing_table_url)
-                    .await?;
-                let df_schema = Arc::clone(&schema).to_dfschema()?;
-                let column_refs: HashSet<_> = cmd
-                    .order_exprs
-                    .iter()
-                    .flat_map(|sort| sort.iter())
-                    .flat_map(|s| s.expr.column_refs())
-                    .collect();
-
-                for column in &column_refs {
-                    if !df_schema.has_column(column) {
-                        return plan_err!("Column {column} is not in schema");
-                    }
-                }
-
-                schema
-            }
-            Some(s) => s,
+        let rebuild = ExternalTableRebuild {
+            listing_table_url,
+            options,
+            provided_schema,
+            constraints: cmd.constraints.clone(),
+            column_defaults: cmd.column_defaults.clone(),
+            definition_sql: cmd.definition.clone(),
         };
 
-        let config = ListingTableConfig::new(listing_table_url)
-            .with_listing_options(options.with_file_sort_order(cmd.order_exprs.clone()))
-            .with_schema(resolved_schema);
-        let provider = ListingTable::try_new(config)?
-            .with_cache(state.runtime_env().cache_manager.get_file_statistic_cache());
-        let table = provider
-            .with_definition(cmd.definition.clone())
-            .with_constraints(cmd.constraints.clone())
-            .with_column_defaults(cmd.column_defaults.clone());
+        let table = build_listing_table(session_state, &rebuild).await?;
+
+        // Validate ORDER BY columns against the resolved schema.
+        let df_schema = Arc::clone(&table.schema()).to_dfschema()?;
+        let column_refs: HashSet<_> = cmd
+            .order_exprs
+            .iter()
+            .flat_map(|sort| sort.iter())
+            .flat_map(|s| s.expr.column_refs())
+            .collect();
+        for column in &column_refs {
+            if !df_schema.has_column(column) {
+                return plan_err!("Column {column} is not in schema");
+            }
+        }
 
         let definition = ExternalTableDefinition {
             definition: cmd.definition.clone(),
@@ -113,10 +111,25 @@ impl TableProviderFactory for ListingTableFactoryExt {
             location: cmd.location.clone(),
             partition_cols: cmd.table_partition_cols.clone(),
             if_not_exists: cmd.if_not_exists,
-            schema: table.schema(),
+            // Persist an empty schema when it was inferred so that on reload the
+            // table re-infers (and keeps re-inferring on refresh) instead of
+            // pinning this snapshot.
+            schema: if schema_inferred {
+                Arc::new(Schema::empty())
+            } else {
+                table.schema()
+            },
         };
 
-        let external_table = ExternalTable::new(definition, table);
+        let events = crate::table_ext::datasets_store_events(&self.store_url).await;
+
+        let external_table = ExternalTable::new_self_refreshing(
+            definition,
+            table,
+            rebuild,
+            self.session_ctx.clone(),
+            events,
+        );
 
         Ok(Arc::new(external_table))
     }

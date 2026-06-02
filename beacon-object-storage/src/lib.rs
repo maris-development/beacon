@@ -487,6 +487,17 @@ impl DatasetsStore {
         }
     }
 
+    /// Subscribe to object events from this datasets store.
+    ///
+    /// Returns `None` when event-driven caching is disabled (the `Default`
+    /// variant), in which case no events are ever emitted.
+    pub fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<event::ObjectEvent>> {
+        match &self.inner {
+            BeaconObjectStoreType::Default(_) => None,
+            BeaconObjectStoreType::Notified(store, _) => Some(store.subscribe()),
+        }
+    }
+
     /// Translate a given object path to a NetCDF-friendly URL/path.
     ///
     /// Behavior:

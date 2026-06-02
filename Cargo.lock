@@ -1126,6 +1126,7 @@ dependencies = [
  "arrow-schema 56.2.0",
  "async-trait",
  "beacon-common",
+ "beacon-object-storage",
  "datafusion",
  "futures",
  "indexmap 2.13.0",
@@ -1135,7 +1136,9 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tracing",
  "typetag",
 ]
 

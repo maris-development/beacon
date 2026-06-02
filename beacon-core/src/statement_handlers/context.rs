@@ -101,13 +101,15 @@ mod tests {
             vec![],
         ));
 
+        let table_factory = Arc::new(ListingTableFactoryExt::new(
+            file_manager.data_object_store_url(),
+            Arc::downgrade(&session_ctx),
+        ));
         let context = HandlerContext::new(
             session_ctx,
             file_manager.clone(),
             IngestFormatLoaderRegistry::new(),
-            Arc::new(ListingTableFactoryExt::new(
-                file_manager.data_object_store_url(),
-            )),
+            table_factory,
         );
 
         assert!(Arc::ptr_eq(&context.file_manager(), &file_manager));
@@ -129,6 +131,7 @@ mod tests {
         ));
         let table_factory = Arc::new(ListingTableFactoryExt::new(
             file_manager.data_object_store_url(),
+            Arc::downgrade(&session_ctx),
         ));
 
         let context = HandlerContext::new(

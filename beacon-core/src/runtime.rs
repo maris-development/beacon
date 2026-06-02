@@ -111,12 +111,15 @@ impl Runtime {
             }
         });
 
+        let listing_table_factory = Arc::new(ListingTableFactoryExt::new(
+            file_manager.data_object_store_url(),
+            Arc::downgrade(&session_ctx),
+        ));
+
         Ok(Self {
             session_ctx,
             table_manager,
-            listing_table_factory: Arc::new(ListingTableFactoryExt::new(
-                file_manager.data_object_store_url(),
-            )),
+            listing_table_factory,
             file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -531,5 +534,128 @@ impl Runtime {
                 "anonymous SQL access only supports metadata and read-only SELECT queries"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod materialized_view_tests {
+    use super::Runtime;
+    use futures::TryStreamExt;
+
+    async fn collect_sql(
+        runtime: &Runtime,
+        sql: &str,
+    ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
+        let stream = runtime.run_sql(sql.to_string(), true).await?;
+        let batches = stream.try_collect::<Vec<_>>().await?;
+        Ok(batches)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn materialized_view_create_query_refresh_and_drop() {
+        let runtime = Runtime::new().await.expect("runtime should start");
+
+        let suffix = uuid::Uuid::new_v4().simple();
+        let mv = format!("mv_test_{suffix}");
+        let rv = format!("rv_test_{suffix}");
+
+        // CREATE
+        collect_sql(
+            &runtime,
+            &format!("CREATE MATERIALIZED VIEW {mv} AS SELECT 1 AS a, 2 AS b"),
+        )
+        .await
+        .expect("create materialized view should succeed");
+
+        // QUERY reads from the persisted Parquet result.
+        let batches = collect_sql(&runtime, &format!("SELECT * FROM {mv}"))
+            .await
+            .expect("query of materialized view should succeed");
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 1);
+        assert_eq!(batches[0].num_columns(), 2);
+
+        // REFRESH recomputes and replaces the stored data.
+        collect_sql(&runtime, &format!("REFRESH {mv}"))
+            .await
+            .expect("refresh should succeed");
+        let rows: usize = collect_sql(&runtime, &format!("SELECT * FROM {mv}"))
+            .await
+            .expect("query after refresh should succeed")
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 1);
+
+        // REFRESH of an unknown view fails clearly.
+        let err = collect_sql(&runtime, &format!("REFRESH {mv}_missing"))
+            .await
+            .expect_err("refresh of unknown view should fail");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+
+        // REFRESH of a regular view fails clearly.
+        collect_sql(&runtime, &format!("CREATE VIEW {rv} AS SELECT 1 AS a"))
+            .await
+            .expect("create regular view should succeed");
+        let err = collect_sql(&runtime, &format!("REFRESH {rv}"))
+            .await
+            .expect_err("refresh of a regular view should fail");
+        assert!(
+            err.to_string().contains("is not a materialized view"),
+            "unexpected error: {err}"
+        );
+
+        // DROP removes the materialized view; it is no longer queryable.
+        collect_sql(&runtime, &format!("DROP TABLE {mv}"))
+            .await
+            .expect("drop should succeed");
+        assert!(
+            collect_sql(&runtime, &format!("SELECT * FROM {mv}"))
+                .await
+                .is_err(),
+            "materialized view should not be queryable after drop"
+        );
+
+        // Cleanup the regular view.
+        let _ = collect_sql(&runtime, &format!("DROP VIEW {rv}")).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn materialized_view_handles_zero_row_result() {
+        let runtime = Runtime::new().await.expect("runtime should start");
+        let mv = format!("mv_empty_{}", uuid::Uuid::new_v4().simple());
+
+        // A query with no rows must still create a queryable, Parquet-backed view.
+        collect_sql(
+            &runtime,
+            &format!("CREATE MATERIALIZED VIEW {mv} AS SELECT 1 AS a WHERE false"),
+        )
+        .await
+        .expect("create materialized view with empty result should succeed");
+
+        let batches = collect_sql(&runtime, &format!("SELECT * FROM {mv}"))
+            .await
+            .expect("query of empty materialized view should succeed");
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 0);
+
+        // Refresh of an empty result must also succeed and stay empty.
+        collect_sql(&runtime, &format!("REFRESH {mv}"))
+            .await
+            .expect("refresh of empty materialized view should succeed");
+        let rows: usize = collect_sql(&runtime, &format!("SELECT * FROM {mv}"))
+            .await
+            .expect("query after refresh should succeed")
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 0);
+
+        collect_sql(&runtime, &format!("DROP TABLE {mv}"))
+            .await
+            .expect("drop should succeed");
     }
 }

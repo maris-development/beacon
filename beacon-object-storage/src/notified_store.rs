@@ -14,9 +14,15 @@ use crate::{
 
 pub type StorageResult<T> = Result<T, StorageError>;
 
+/// Capacity of the per-store event broadcast channel. Subscribers that fall
+/// further behind than this lag (and drop events); those tables are then only
+/// caught by the periodic full refresh.
+const EVENT_CHANNEL_CAPACITY: usize = 4096;
+
 #[derive(Debug, Clone)]
 pub struct NotifiedStore<O: ObjectStore> {
     object_cache: Arc<parking_lot::Mutex<ObjectCache>>,
+    event_tx: tokio::sync::broadcast::Sender<ObjectEvent>,
     inner: O,
 }
 
@@ -38,11 +44,21 @@ impl<O: ObjectStore> NotifiedStore<O> {
             }
         }
         let object_cache = Arc::new(parking_lot::Mutex::new(ObjectCache::new(objects)));
+        let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
         NotifiedStore {
             object_cache,
+            event_tx,
             inner,
         }
+    }
+
+    /// Subscribe to object events handled by this store.
+    ///
+    /// Events are published only after the in-memory cache has been updated, so
+    /// a subscriber that re-lists the store in response will observe the change.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ObjectEvent> {
+        self.event_tx.subscribe()
     }
 
     pub fn handle_event<H, I>(&self, input: I) -> StorageResult<()>
@@ -60,6 +76,9 @@ impl<O: ObjectStore> NotifiedStore<O> {
                     self.object_cache.lock().remove(path);
                 }
             }
+            // Publish after the cache update so subscribers that re-list observe
+            // the change. A send error just means there are no subscribers.
+            let _ = self.event_tx.send(event);
         }
         Ok(())
     }
