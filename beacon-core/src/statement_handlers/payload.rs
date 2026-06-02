@@ -1,5 +1,5 @@
 use crate::parser::statement::{
-    AlterAtlasTableStatement, BeaconStatement, CreateAtlasTableStatement,
+    AlterAtlasTableStatement, AuthStatement, BeaconStatement, CreateAtlasTableStatement,
     CreateMaterializedViewStatement, DeleteAtlasDatasetsStatement, IngestStatement,
     RefreshStatement,
 };
@@ -12,6 +12,7 @@ pub(crate) enum StatementKind {
     CreateAtlasTable,
     AlterAtlas,
     CreateTable,
+    Auth,
     CreateMaterializedView,
     Refresh,
 }
@@ -22,6 +23,7 @@ pub(crate) enum StatementPayload {
     DeleteAtlasDatasets(DeleteAtlasDatasetsStatement),
     CreateAtlasTable(CreateAtlasTableStatement),
     AlterAtlas(AlterAtlasTableStatement),
+    Auth(AuthStatement),
     CreateMaterializedView(CreateMaterializedViewStatement),
     Refresh(RefreshStatement),
 }
@@ -34,6 +36,7 @@ impl StatementPayload {
             Self::DeleteAtlasDatasets(_) => StatementKind::DeleteAtlasDatasets,
             Self::CreateAtlasTable(_) => StatementKind::CreateAtlasTable,
             Self::AlterAtlas(_) => StatementKind::AlterAtlas,
+            Self::Auth(_) => StatementKind::Auth,
             Self::CreateMaterializedView(_) => StatementKind::CreateMaterializedView,
             Self::Refresh(_) => StatementKind::Refresh,
         }
@@ -74,6 +77,13 @@ impl StatementPayload {
         }
     }
 
+    pub(crate) fn into_auth(self) -> anyhow::Result<AuthStatement> {
+        match self {
+            Self::Auth(statement) => Ok(statement),
+            _ => Err(anyhow::anyhow!("Expected Auth payload")),
+        }
+    }
+
     pub(crate) fn into_create_materialized_view(
         self,
     ) -> anyhow::Result<CreateMaterializedViewStatement> {
@@ -99,6 +109,7 @@ impl From<BeaconStatement> for StatementPayload {
             BeaconStatement::DeleteAtlasDatasets(statement) => Self::DeleteAtlasDatasets(statement),
             BeaconStatement::CreateAtlasTable(statement) => Self::CreateAtlasTable(statement),
             BeaconStatement::AlterAtlas(statement) => Self::AlterAtlas(statement),
+            BeaconStatement::Auth(statement) => Self::Auth(statement),
             BeaconStatement::CreateMaterializedView(statement) => {
                 Self::CreateMaterializedView(statement)
             }

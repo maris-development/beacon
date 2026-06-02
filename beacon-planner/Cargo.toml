@@ -17,7 +17,11 @@ uuid = { version = "1.16.0", features = ["serde"] }
 chrono = { workspace = true}
 
 beacon-config = { path = "../beacon-config" }
+beacon-auth = { path = "../beacon-auth" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-query = { path = "../beacon-query" }
 beacon-data-lake = { path = "../beacon-data-lake" }
 beacon-formats = { path = "../beacon-formats" }
+
+[dev-dependencies]
+beacon-common = { path = "../beacon-common" }

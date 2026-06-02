@@ -25,7 +25,12 @@ pub(crate) struct SqlStatementExecutor {
 }
 
 impl SqlStatementExecutor {
-    pub(crate) fn new(session_ctx: Arc<SessionContext>, file_manager: Arc<FileManager>) -> Self {
+    pub(crate) fn new(
+        session_ctx: Arc<SessionContext>,
+        file_manager: Arc<FileManager>,
+        auth: Arc<beacon_auth::AuthContext>,
+        identity: beacon_auth::AuthIdentity,
+    ) -> Self {
         let mut loader_registry = IngestFormatLoaderRegistry::new();
         register_default_ingest_loaders(&mut loader_registry);
 
@@ -39,6 +44,8 @@ impl SqlStatementExecutor {
             file_manager,
             loader_registry,
             table_factory,
+            auth,
+            identity,
         ));
 
         register_default_statement_handlers(&mut statement_registry);

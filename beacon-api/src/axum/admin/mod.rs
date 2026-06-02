@@ -20,14 +20,19 @@ mod file;
 #[openapi(modifiers(&SecurityAddon))]
 pub struct AdminApiDoc;
 
-/// Builds the admin router and attaches basic-auth middleware.
-pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
+/// Builds the admin router and attaches super-user basic-auth middleware.
+pub(crate) fn setup_admin_router(
+    beacon_runtime: Arc<Runtime>,
+) -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
         .routes(routes!(file::upload_file))
         .routes(routes!(file::download_handler))
         .routes(routes!(file::delete_file))
         .routes(routes!(check::check))
-        .layer(::axum::middleware::from_fn(basic_auth))
+        .layer(::axum::middleware::from_fn_with_state(
+            beacon_runtime,
+            basic_auth,
+        ))
         .layer(DefaultBodyLimit::disable())
         .split_for_parts();
 

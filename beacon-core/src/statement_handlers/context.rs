@@ -18,6 +18,8 @@ pub(crate) struct HandlerContext {
     file_manager: Arc<FileManager>,
     loader_registry: IngestFormatLoaderRegistry,
     listing_table_factory: Arc<ListingTableFactoryExt>,
+    auth: Arc<beacon_auth::AuthContext>,
+    identity: beacon_auth::AuthIdentity,
 }
 
 impl HandlerContext {
@@ -26,17 +28,29 @@ impl HandlerContext {
         file_manager: Arc<FileManager>,
         loader_registry: IngestFormatLoaderRegistry,
         listing_table_factory: Arc<ListingTableFactoryExt>,
+        auth: Arc<beacon_auth::AuthContext>,
+        identity: beacon_auth::AuthIdentity,
     ) -> Self {
         Self {
             session_ctx,
             file_manager,
             loader_registry,
             listing_table_factory,
+            auth,
+            identity,
         }
     }
 
     pub(crate) fn session_ctx(&self) -> Arc<SessionContext> {
         self.session_ctx.clone()
+    }
+
+    pub(crate) fn auth_context(&self) -> &beacon_auth::AuthContext {
+        &self.auth
+    }
+
+    pub(crate) fn identity(&self) -> &beacon_auth::AuthIdentity {
+        &self.identity
     }
 
     #[cfg(test)]
@@ -90,6 +104,14 @@ mod tests {
 
     use super::HandlerContext;
 
+    fn test_identity() -> beacon_auth::AuthIdentity {
+        beacon_auth::AuthIdentity {
+            username: "test".to_string(),
+            roles: vec![],
+            is_super_user: true,
+        }
+    }
+
     #[tokio::test]
     async fn handler_context_exposes_manager_references() {
         let session_ctx = Arc::new(SessionContext::new());
@@ -110,6 +132,10 @@ mod tests {
             file_manager.clone(),
             IngestFormatLoaderRegistry::new(),
             table_factory,
+            Arc::new(beacon_auth::AuthContext::new(Arc::new(
+                beacon_auth::BasicAuthProvider::new(),
+            ))),
+            test_identity(),
         );
 
         assert!(Arc::ptr_eq(&context.file_manager(), &file_manager));
@@ -139,6 +165,10 @@ mod tests {
             file_manager,
             IngestFormatLoaderRegistry::new(),
             table_factory,
+            Arc::new(beacon_auth::AuthContext::new(Arc::new(
+                beacon_auth::BasicAuthProvider::new(),
+            ))),
+            test_identity(),
         );
 
         let mut stream = context.empty_record_batch_stream();

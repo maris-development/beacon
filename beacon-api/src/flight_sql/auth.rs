@@ -7,29 +7,32 @@ use std::{
 };
 
 use arrow_flight::{BasicAuth, HandshakeRequest};
+use beacon_core::{runtime::Runtime, AuthIdentity};
 use prost::Message;
 use tonic::{Request, Status};
 use uuid::Uuid;
 
-use crate::auth::{parse_bearer_token, validate_basic_auth_credentials, verify_basic_auth_value};
+use crate::auth::{parse_basic_auth_credentials, parse_bearer_token};
 
 /// Per-request authorization context shared with the execution layer.
 #[derive(Clone)]
 pub(super) struct AuthContext {
-    pub(super) is_super_user: bool,
+    pub(super) identity: AuthIdentity,
 }
 
 impl AuthContext {
-    fn admin() -> Self {
+    fn anonymous() -> Self {
         Self {
-            is_super_user: true,
+            identity: AuthIdentity {
+                username: String::new(),
+                roles: Vec::new(),
+                is_super_user: false,
+            },
         }
     }
 
-    fn anonymous() -> Self {
-        Self {
-            is_super_user: false,
-        }
+    fn from_identity(identity: AuthIdentity) -> Self {
+        Self { identity }
     }
 }
 
@@ -41,6 +44,7 @@ struct AuthToken {
 /// Authenticates Flight SQL requests and manages short-lived bearer sessions.
 #[derive(Clone)]
 pub(super) struct Authenticator {
+    runtime: Arc<Runtime>,
     allow_anonymous: bool,
     token_ttl: Duration,
     auth_tokens: Arc<tokio::sync::RwLock<HashMap<String, AuthToken>>>,
@@ -48,8 +52,9 @@ pub(super) struct Authenticator {
 
 impl Authenticator {
     /// Creates a new authenticator with the configured anonymous-access policy and token TTL.
-    pub(super) fn new(allow_anonymous: bool, token_ttl: Duration) -> Self {
+    pub(super) fn new(runtime: Arc<Runtime>, allow_anonymous: bool, token_ttl: Duration) -> Self {
         Self {
+            runtime,
             allow_anonymous,
             token_ttl,
             auth_tokens: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -88,21 +93,30 @@ impl Authenticator {
     ) -> Result<AuthContext, Status> {
         match auth_value {
             Some(auth_value) => self.authorize_value(auth_value).await,
-            None if self.allow_anonymous => Ok(AuthContext::anonymous()),
+            None if self.allow_anonymous => Ok(self.anonymous_context().await),
             None => Err(Status::unauthenticated("missing authorization metadata")),
         }
     }
 
-    /// Authenticates the Flight SQL handshake and decides whether the session is admin or anonymous.
-    pub(super) fn authorize_handshake(
+    /// Resolves the anonymous principal's context, falling back to a role-less context when the
+    /// anonymous user is disabled in the auth model.
+    async fn anonymous_context(&self) -> AuthContext {
+        match self.runtime.authenticate_anonymous().await {
+            Ok(identity) => AuthContext::from_identity(identity),
+            Err(_) => AuthContext::anonymous(),
+        }
+    }
+
+    /// Authenticates the Flight SQL handshake and resolves the principal's roles.
+    pub(super) async fn authorize_handshake(
         &self,
         auth_value: Option<&str>,
         handshake: Option<&HandshakeRequest>,
     ) -> Result<AuthContext, Status> {
         if let Some(auth_value) = auth_value {
-            verify_basic_auth_value(auth_value)
+            let (username, password) = parse_basic_auth_credentials(auth_value)
                 .map_err(|_| Status::unauthenticated("invalid credentials"))?;
-            return Ok(AuthContext::admin());
+            return self.authenticate(&username, &password).await;
         }
 
         // Some Flight SQL clients send credentials in the handshake payload rather than metadata.
@@ -110,16 +124,14 @@ impl Authenticator {
             if !request.payload.is_empty() {
                 let credentials = BasicAuth::decode(request.payload.clone())
                     .map_err(|_| Status::unauthenticated("invalid credentials"))?;
-                if validate_basic_auth_credentials(&credentials.username, &credentials.password) {
-                    return Ok(AuthContext::admin());
-                }
-
-                return Err(Status::unauthenticated("invalid credentials"));
+                return self
+                    .authenticate(&credentials.username, &credentials.password)
+                    .await;
             }
         }
 
         if self.allow_anonymous {
-            Ok(AuthContext::anonymous())
+            Ok(self.anonymous_context().await)
         } else {
             Err(Status::unauthenticated("invalid credentials"))
         }
@@ -144,10 +156,19 @@ impl Authenticator {
             return self.authorize_bearer(token).await;
         }
 
-        verify_basic_auth_value(&auth_value)
+        let (username, password) = parse_basic_auth_credentials(&auth_value)
             .map_err(|_| Status::unauthenticated("invalid credentials"))?;
+        self.authenticate(&username, &password).await
+    }
 
-        Ok(AuthContext::admin())
+    /// Authenticates a username/password pair against the runtime's auth provider.
+    async fn authenticate(&self, username: &str, password: &str) -> Result<AuthContext, Status> {
+        let identity = self
+            .runtime
+            .authenticate(&format!("{username}:{password}"))
+            .await
+            .map_err(|_| Status::unauthenticated("invalid credentials"))?;
+        Ok(AuthContext::from_identity(identity))
     }
 
     /// Validates a bearer token and evicts expired sessions on access.

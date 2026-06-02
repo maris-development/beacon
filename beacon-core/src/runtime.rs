@@ -39,11 +39,25 @@ pub struct Runtime {
     file_manager: Arc<FileManager>,
     listing_table_factory: Arc<ListingTableFactoryExt>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
+    auth: Arc<beacon_auth::AuthContext>,
 }
 
 impl Runtime {
-    /// Boots the Beacon execution environment and initializes runtime-local state.
+    /// Boots the Beacon execution environment with the persistent SQLite-backed auth directory.
     pub async fn new() -> anyhow::Result<Self> {
+        Self::new_with_auth(Self::init_auth()?).await
+    }
+
+    /// Boots a runtime with an ephemeral in-memory auth context (no on-disk SQLite directory).
+    /// Used by tests so they don't contend on the shared persistent auth database.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn new_with_in_memory_auth() -> anyhow::Result<Self> {
+        Self::new_with_auth(Self::init_in_memory_auth()?).await
+    }
+
+    /// Boots the Beacon execution environment and initializes runtime-local state around the given
+    /// authorization context.
+    async fn new_with_auth(auth: Arc<beacon_auth::AuthContext>) -> anyhow::Result<Self> {
         let memory_pool = Arc::new(FairSpillPool::new(
             beacon_config::CONFIG.runtime.vm_memory_size * 1024 * 1024,
         ));
@@ -122,7 +136,83 @@ impl Runtime {
             listing_table_factory,
             file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
+            auth,
         })
+    }
+
+    /// Builds the authorization context backed by the SQLite auth directory (users, roles, and
+    /// grants persisted under [`beacon_config::USERS_DIR`], next to the tables directory), seeding
+    /// the configured admin as a super-user (built-in `admin` role with a global `ALL` grant) so the
+    /// auth management SQL is reachable on a fresh instance.
+    ///
+    /// State persists across restarts, so the bootstrap is idempotent: existing roles/users are
+    /// left in place rather than re-created.
+    fn init_auth() -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
+        let store = beacon_auth::SqliteStore::open(beacon_config::USERS_DIR.join("directory.db"))?;
+        let role_provider = beacon_auth::RoleProvider::with_persistence(store.clone())?;
+        let auth = beacon_auth::AuthContext::with_role_provider(
+            Arc::new(beacon_auth::SqliteAuthProvider::new(store)),
+            role_provider,
+        );
+        Self::bootstrap_auth(auth)
+    }
+
+    /// Builds an ephemeral, non-persistent auth context backed by the in-memory basic-auth provider.
+    /// Used by tests to avoid contending on the shared on-disk SQLite directory.
+    #[cfg(any(test, feature = "test-util"))]
+    fn init_in_memory_auth() -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
+        let auth =
+            beacon_auth::AuthContext::new(Arc::new(beacon_auth::BasicAuthProvider::new()));
+        Self::bootstrap_auth(auth)
+    }
+
+    /// Seeds the built-in `admin` role (global `ALL` grant), the configured admin super-user, and the
+    /// optional anonymous user. Idempotent: existing roles/users are left in place, so it is safe to
+    /// run against an already-populated (persistent) auth context.
+    fn bootstrap_auth(
+        mut auth: beacon_auth::AuthContext,
+    ) -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
+        if !auth.role_provider().role_exists("admin") {
+            auth.create_role("admin")?;
+        }
+        // Re-granting the same rule is idempotent (deduped in memory and in storage).
+        auth.grant(
+            "admin",
+            beacon_auth::PrivilegeRule::new(beacon_auth::Privilege::All, None),
+        )?;
+
+        let admin = &beacon_config::CONFIG.admin;
+        if !auth.user_exists(&admin.username) {
+            auth.create_user(&admin.username, &admin.password)?;
+        }
+        auth.grant_role_to_user(&admin.username, "admin")?;
+
+        // Seed the built-in anonymous user (empty password, no roles) unless disabled. Admins can
+        // assign roles to it via `GRANT ROLE <role> TO USER anonymous`.
+        if beacon_config::CONFIG.auth.anonymous_enabled {
+            if !auth.user_exists(beacon_auth::ANONYMOUS_USERNAME) {
+                auth.create_user(beacon_auth::ANONYMOUS_USERNAME, "")?;
+            }
+            auth.set_anonymous_user(beacon_auth::ANONYMOUS_USERNAME);
+        }
+
+        Ok(Arc::new(auth))
+    }
+
+    /// Authenticates a credential string against the configured auth provider and resolves the
+    /// principal's roles into an identity.
+    pub async fn authenticate(&self, auth_str: &str) -> anyhow::Result<beacon_auth::AuthIdentity> {
+        self.auth.authenticate(auth_str).await
+    }
+
+    /// Resolves the anonymous principal's identity, erroring when anonymous access is disabled.
+    pub async fn authenticate_anonymous(&self) -> anyhow::Result<beacon_auth::AuthIdentity> {
+        self.auth.authenticate_anonymous().await
+    }
+
+    /// Whether anonymous access is enabled.
+    pub fn anonymous_enabled(&self) -> bool {
+        self.auth.anonymous_enabled()
     }
 
     fn init_ctx(memory_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
@@ -164,12 +254,18 @@ impl Runtime {
         Ok(Arc::new(SessionContext::new_with_state(session_state)))
     }
 
-    pub async fn run_client_query(&self, query: QueryRequest) -> anyhow::Result<QueryResult> {
+    pub async fn run_client_query(
+        &self,
+        query: QueryRequest,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<QueryResult> {
         let plan = beacon_planner::prelude::plan_query(
             self.session_ctx.clone(),
             self.table_manager.as_ref(),
             self.file_manager.as_ref(),
             query.into_query()?,
+            &self.auth,
+            &identity,
         )
         .await?;
 
@@ -194,7 +290,11 @@ impl Runtime {
             })
     }
 
-    pub async fn explain_client_query(&self, query: QueryRequest) -> anyhow::Result<String> {
+    pub async fn explain_client_query(
+        &self,
+        query: QueryRequest,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<String> {
         let plan = beacon_query::parser::Parser::parse(
             self.session_ctx.as_ref(),
             self.table_manager.as_ref(),
@@ -202,6 +302,13 @@ impl Runtime {
             query.into_query()?,
         )
         .await?;
+        beacon_planner::prelude::authorize_logical_plan(
+            &plan.datafusion_plan,
+            &self.session_ctx,
+            &self.auth,
+            &identity,
+            beacon_config::CONFIG.auth.enforce,
+        )?;
         let json = plan.datafusion_plan.display_pg_json().to_string();
         Ok(json)
     }
@@ -433,31 +540,34 @@ impl Runtime {
         self.file_manager.delete_file(file_path).await
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(skip(self, identity))]
     pub async fn run_sql(
         &self,
         sql: String,
-        is_super_user: bool,
+        identity: beacon_auth::AuthIdentity,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let statement = Self::parse_beacon_statement(&sql)?;
+        let is_super_user = identity.is_super_user;
         if !is_super_user {
+            // Auth-management / ingest / atlas statements remain super-user only.
             Self::ensure_anonymous_statement_allowed(&statement)?;
         }
 
-        let sql_options = if is_super_user {
-            SQLOptions::new()
-                .with_allow_ddl(true)
-                .with_allow_dml(true)
-                .with_allow_statements(true)
-        } else {
-            SQLOptions::new()
-                .with_allow_ddl(false)
-                .with_allow_dml(false)
-                .with_allow_statements(false)
-        };
+        // Super-users may run any DDL/DML. When enforcement is on, allow the plan to be built and let
+        // per-resource privilege checks (in the statement handler) be the gate. When enforcement is
+        // off, non-super callers keep the previous read-only behavior.
+        let allow_writes = is_super_user || beacon_config::CONFIG.auth.enforce;
+        let sql_options = SQLOptions::new()
+            .with_allow_ddl(allow_writes)
+            .with_allow_dml(allow_writes)
+            .with_allow_statements(allow_writes);
 
-        let statement_executor =
-            SqlStatementExecutor::new(self.session_ctx.clone(), self.file_manager.clone());
+        let statement_executor = SqlStatementExecutor::new(
+            self.session_ctx.clone(),
+            self.file_manager.clone(),
+            self.auth.clone(),
+            identity,
+        );
 
         statement_executor.execute(statement, &sql_options).await
     }
@@ -542,18 +652,30 @@ mod materialized_view_tests {
     use super::Runtime;
     use futures::TryStreamExt;
 
+    fn super_user_identity() -> beacon_auth::AuthIdentity {
+        beacon_auth::AuthIdentity {
+            username: "test".to_string(),
+            roles: vec![],
+            is_super_user: true,
+        }
+    }
+
     async fn collect_sql(
         runtime: &Runtime,
         sql: &str,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
-        let stream = runtime.run_sql(sql.to_string(), true).await?;
+        let stream = runtime
+            .run_sql(sql.to_string(), super_user_identity())
+            .await?;
         let batches = stream.try_collect::<Vec<_>>().await?;
         Ok(batches)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_create_query_refresh_and_drop() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth()
+            .await
+            .expect("runtime should start");
 
         let suffix = uuid::Uuid::new_v4().simple();
         let mv = format!("mv_test_{suffix}");
@@ -625,7 +747,9 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_handles_zero_row_result() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth()
+            .await
+            .expect("runtime should start");
         let mv = format!("mv_empty_{}", uuid::Uuid::new_v4().simple());
 
         // A query with no rows must still create a queryable, Parquet-backed view.

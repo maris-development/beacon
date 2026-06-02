@@ -61,11 +61,12 @@ impl BeaconFlightSqlService {
 
         Ok(Self {
             metadata: FlightSqlMetadata::new(runtime.clone())?,
-            runtime,
             authenticator: Authenticator::new(
+                runtime.clone(),
                 allow_anonymous,
                 Duration::from_secs(flight_sql.token_ttl_secs),
             ),
+            runtime,
             statements: SqlHandleStore::new(Duration::from_secs(flight_sql.statement_ttl_secs)),
             prepared_statements: SqlHandleStore::new(Duration::from_secs(
                 flight_sql.prepared_statement_ttl_secs,
@@ -82,7 +83,7 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightInfo, Status> {
         let stream = self
             .runtime
-            .run_sql(sql.clone(), auth.is_super_user)
+            .run_sql(sql.clone(), auth.identity.clone())
             .await
             .map_err(to_internal_status)?;
         let schema = stream.schema();
@@ -107,7 +108,7 @@ impl BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_sql(sql, auth.identity.clone())
             .await
             .map_err(to_internal_status)?;
 
@@ -122,7 +123,7 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightDataStream, Status> {
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_sql(sql, auth.identity.clone())
             .await
             .map_err(to_internal_status)?;
         let schema = stream.schema();
@@ -160,7 +161,8 @@ impl FlightSqlService for BeaconFlightSqlService {
             .unwrap_or_default();
         let auth = self
             .authenticator
-            .authorize_handshake(auth_value.as_deref(), first_request.as_ref())?;
+            .authorize_handshake(auth_value.as_deref(), first_request.as_ref())
+            .await?;
         // Flight SQL clients reuse the bearer token returned by the handshake for subsequent RPCs.
         let token = self.authenticator.issue_token(auth).await;
 
@@ -363,7 +365,7 @@ impl FlightSqlService for BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_sql(sql, auth.identity.clone())
             .await
             .map_err(to_internal_status)?;
 
@@ -395,7 +397,7 @@ impl FlightSqlService for BeaconFlightSqlService {
         } else {
             let stream = self
                 .runtime
-                .run_sql(query.query.clone(), auth.is_super_user)
+                .run_sql(query.query.clone(), auth.identity.clone())
                 .await
                 .map_err(to_internal_status)?;
             encode_schema(stream.schema().as_ref())?

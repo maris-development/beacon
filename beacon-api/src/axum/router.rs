@@ -29,8 +29,8 @@ const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// contains invalid origins, methods, or headers — validated once at startup
 /// rather than on every request.
 pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Router> {
-    let (client_router, mut api_docs_client) = setup_client_router();
-    let (admin_router, api_docs_admin) = setup_admin_router();
+    let (client_router, mut api_docs_client) = setup_client_router(beacon_runtime.clone());
+    let (admin_router, api_docs_admin) = setup_admin_router(beacon_runtime.clone());
 
     api_docs_client.merge(api_docs_admin);
     api_docs_client = set_api_docs_info(api_docs_client);

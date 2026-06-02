@@ -54,6 +54,11 @@ impl FileCollection {
         Ok(Self { inner_table: table })
     }
 
+    /// The listing URLs (path + optional glob, relative to the datasets store) this collection scans.
+    pub fn table_paths(&self) -> &[ListingTableUrl] {
+        self.inner_table.table_paths()
+    }
+
     /// The non-glob prefixes of the listing URLs backing this collection.
     ///
     /// Used to match incoming storage events to the table that owns them.
