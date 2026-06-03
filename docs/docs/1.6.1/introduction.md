@@ -14,6 +14,7 @@ Clients query Beacon using **SQL** or **JSON** and receive results as a file (Pa
 | ------ | ----- |
 | NetCDF | `.nc`, `.nc4`, `.cdf` |
 | Zarr | v2 and v3 |
+| Atlas | Array store optimized for NetCDF/Zarr query performance |
 | Parquet | Native columnar, Hive partitioning supported |
 | GeoTIFF / COG | Cloud-Optimized GeoTIFF supported |
 | ODV ASCII | Ocean Data View spreadsheet format |

@@ -11,10 +11,10 @@ hero:
   actions:
     - theme: brand
       text: Get Started
-      link: /docs/1.6.0/getting-started
+      link: /docs/1.6.1/getting-started
     - theme: alt
       text: Read the Docs
-      link: /docs/1.6.0/introduction
+      link: /docs/1.6.1/introduction
     - theme: alt
       text: Explore Public Nodes 
       link: /available-nodes/available-nodes
@@ -25,7 +25,7 @@ features:
     icon: 🚀
 
   - title: Works with existing formats
-    details: Query NetCDF, Zarr, Parquet, CSV, ODV, Arrow, TIFF and BBF datasets without converting everything into a proprietary warehouse.
+    details: Query NetCDF, Zarr, Parquet, CSV, ODV, Arrow, TIFF, Atlas and BBF datasets without converting everything into a proprietary warehouse.
     icon: 🧩
 
   - title: Create tables and views

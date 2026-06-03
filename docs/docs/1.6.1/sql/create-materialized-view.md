@@ -14,6 +14,10 @@ A materialized view runs its defining query **once**, at creation time, and pers
 set as Parquet files. Querying the view reads straight from the persisted Parquet instead of
 recomputing the original query — useful for expensive, repeated, or aggregation-heavy queries.
 
+The defining query can read from any source Beacon knows about — registered tables,
+[external tables](../data-lake/external-tables.md), [views](./create-view.md), or table functions
+such as `read_netcdf()`, `read_zarr()`, or `read_atlas()`.
+
 Unlike a regular [view](./create-view.md) (which recomputes on every reference), a materialized
 view only changes when you explicitly [`REFRESH`](#refresh) it.
 

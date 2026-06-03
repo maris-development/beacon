@@ -55,19 +55,18 @@ LIMIT 1
 
 ```text
 read_zarr(glob_paths)
-read_zarr(glob_paths, statistics_columns)
 ```
 
 Reads Zarr stores matching one or more glob patterns. Each path should point at a `zarr.json` entry file.
 
-The optional `statistics_columns` argument names coordinate columns for which Beacon has pre-computed chunk statistics. Supplying these enables 1D slice pushdown — Beacon skips chunks that cannot satisfy a `WHERE` predicate on those columns.
+Predicate pushdown is automatic: Beacon prunes chunks and slices coordinate dimensions (e.g. `time`, `latitude`, `longitude`) based on the query's `WHERE` clause — no statistics columns need to be declared.
 
 ```sql
 SELECT * FROM read_zarr(['sst/*/zarr.json'])
 
--- With statistics columns for faster range queries
+-- Range queries are pruned automatically
 SELECT time, sst
-FROM read_zarr(['sst/*/zarr.json'], ['time', 'latitude', 'longitude'])
+FROM read_zarr(['sst/*/zarr.json'])
 WHERE time >= '2024-01-01'
 ```
 
@@ -85,6 +84,26 @@ LIMIT 1
 SELECT ".Conventions", sst
 FROM read_zarr(['sst/*/zarr.json'])
 LIMIT 1
+```
+
+## `read_atlas`
+
+```text
+read_atlas(glob_paths)
+read_atlas(glob_paths, dimensions)
+```
+
+Reads [Atlas](../data-lake/datasets.md#atlas) array stores matching one or more glob patterns. Each path must point at an `atlas.json` marker file — an exact path or a glob such as `**/atlas.json`.
+
+The optional `dimensions` argument filters the arrays to those matching the listed dimension names. Atlas prunes whole datasets using per-column statistics, so range queries over large collections only read the datasets that can match the predicate.
+
+```sql
+SELECT * FROM read_atlas(['collections/sensor/atlas.json'])
+
+-- Combine every Atlas store under a prefix, keeping a subset of dimensions
+SELECT time, temperature
+FROM read_atlas(['collections/**/atlas.json'], ['time', 'latitude', 'longitude'])
+WHERE time >= '2024-01-01'
 ```
 
 ## `read_parquet`

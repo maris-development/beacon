@@ -1,5 +1,14 @@
 # Changelog
 
+## (v1.6.1 - 2026-06-04)
+
+- **Added**: Support for the Atlas file format. Atlas is a directory-based array store — a single `atlas.json` registry describing one or more datasets — that Beacon discovers and queries automatically, just like Parquet or Zarr. Query a store with the `read_atlas()` table function or register it as an external table with `STORED AS ATLAS`. Atlas keeps per-dataset column statistics, so Beacon prunes whole datasets before reading any array data and only loads the projected arrays. This makes re-encoding large NetCDF or Zarr collections into a single Atlas collection the recommended way to speed up repeated spatial/temporal range queries. See [github.com/maris-development/atlas](https://github.com/maris-development/atlas).
+- **Added**: Materialized views. `CREATE MATERIALIZED VIEW` runs a query once and persists the result as Parquet, so repeated, aggregation-heavy queries read straight from the cached result instead of recomputing. Use the new `REFRESH` statement to recompute a view when its underlying data changes — a full recompute that atomically swaps in the new result, leaving the previous result intact if the refresh fails.
+- **Added**: Configurable base path via the `BEACON_BASE_PATH` environment variable. The HTTP API, OpenAPI document, and Swagger UI can now be served under a path prefix, making it easier to run Beacon behind a reverse proxy or on a shared subpath.
+- **Added**: Support for decompressing LZW-compressed, stripped GeoTIFFs, broadening the range of GeoTIFF/COG files Beacon can read.
+- **Changed**: Upgraded the query engine to DataFusion 53 and Arrow 58. The Arrow version is now configurable at build time to ease integration with downstream tooling.
+- **Fixed**: EDMO code extraction now uses the last set of parentheses in a SeaDataNet originator string, so institution names that themselves contain parentheses are mapped to the correct EDMO code.
+
 ## (v1.6.0 - 2026-05-08)
 
 - **Added**: Support for Flight SQL. In addition to the existing HTTP query endpoint, users can now query datasets using the Flight SQL protocol. This provides a more efficient and performant interface for querying datasets. It also allows Beacon to be used with a wider range of clients (JetBrains DataGrip, DBeaver) and tools that support Flight SQL, such as Apache Arrow Flight clients and BI tools.

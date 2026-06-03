@@ -41,7 +41,7 @@ Limitations:
 - S3 / object-store backends only support anonymous access. Authenticated S3 reads are not yet supported.
 
 :::tip
-For best performance with NetCDF, convert files to [Beacon Binary Format](#beacon-binary-format) using the beacon-binary-format-toolbox. BBF supports efficient chunk-level pruning and full S3 authentication.
+For best performance with large NetCDF collections, convert the files into a single [Atlas](#atlas) collection. Atlas consolidates many NetCDF files into one statistics-aware array store, so Beacon can prune whole datasets and read only the projected arrays — typically much faster than scanning the original NetCDF files.
 :::
 
 ## Zarr
@@ -72,7 +72,9 @@ Limitations:
 - User-defined data types are not supported.
 
 :::tip
-Declare `statistics_columns` in the `read_zarr()` table function or configure statistics on an external table to enable 1D slice pushdown for large coordinate dimensions like `time`, `latitude`, and `longitude`.
+Predicate pushdown is automatic — Beacon prunes chunks and slices coordinate dimensions like `time`, `latitude`, and `longitude` based on your query's filters, with nothing to configure.
+
+For collections that are queried repeatedly, convert the Zarr stores into a single [Atlas](#atlas) collection — a statistics-aware array store that lets Beacon prune whole datasets before any chunk is read.
 :::
 
 ## Arrow IPC
@@ -112,6 +114,47 @@ SELECT band_1, "band_1.nodata", "band_1.scale", ".crs"
 FROM read_tiff(['rasters/elevation.tif'])
 LIMIT 1
 ```
+
+## Atlas
+
+[Atlas](https://github.com/maris-development/atlas) is a directory-based array store designed for fast analytical access to multi-dimensional scientific data. Like Parquet or Zarr, it is just another file format: place Atlas stores in the datasets folder and Beacon discovers and queries them automatically — no registration step is required. An Atlas store is a directory containing a single `atlas.json` registry that describes one or more named datasets, each holding its own set of arrays.
+
+What it does:
+
+- **Statistics-based dataset pruning.** Atlas keeps per-dataset, per-column statistics. When a query carries a predicate (e.g. a time or latitude range), Beacon drops whole datasets that cannot match *before reading any array data*, so range queries over large collections only touch the relevant data.
+- **Column projection.** Only the arrays referenced by a query are read, keeping I/O proportional to the columns actually selected.
+- **Compact, self-describing layout.** Arrays are stored compressed (zstd) and the `atlas.json` registry is opened once and cached for the lifetime of the process, avoiding repeated metadata parsing across queries.
+- **Object-store friendly.** Atlas stores can live on local disk or S3-compatible object storage.
+
+Query an Atlas store with the [`read_atlas()`](../sql/table-functions.md#read_atlas) table function, pointing at its `atlas.json` marker file — an exact path or a glob such as `**/atlas.json`. An optional second argument filters the arrays to those matching the listed dimensions.
+
+```sql
+SELECT * FROM read_atlas(['collections/sensor/atlas.json'])
+```
+
+### External tables over Atlas
+
+For a stable, reusable table name, register the store as an [External Table](./external-tables.md#atlas). Like Zarr, point the `LOCATION` at the `atlas.json` marker (or a glob over several markers):
+
+```sql
+CREATE EXTERNAL TABLE sensor_atlas
+STORED AS ATLAS
+LOCATION 'collections/sensor/atlas.json';
+
+SELECT time, temperature
+FROM sensor_atlas
+WHERE time >= '2024-01-01';
+```
+
+### Optimizing NetCDF and Zarr with Atlas
+
+Atlas is the recommended way to speed up repeated queries over large NetCDF or Zarr collections: convert the source files into a single Atlas collection. Consolidating many NetCDF or Zarr files into one statistics-aware store lets Beacon prune whole datasets using column statistics and read only the projected arrays, so spatial and temporal range queries are typically much faster than scanning the original files directly.
+
+See the [Atlas repository](https://github.com/maris-development/atlas) for the store format and tooling to build Atlas collections.
+
+:::tip
+Heavy, repeated aggregations over an Atlas collection — or any other table — can be cached with a [materialized view](../sql/create-materialized-view.md) and recomputed with `REFRESH` when the underlying data changes.
+:::
 
 ## Beacon Binary Format (BBF)
 

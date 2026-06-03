@@ -45,17 +45,8 @@ The location is resolved relative to Beacon's configured dataset storage root, s
 ### Format-specific notes
 
 - Zarr tables should point at `zarr.json` entry files, for example `datasets/*/zarr.json`.
-- CSV and Arrow IPC collections are supported, but predicate pruning is less efficient than with Parquet, BBF, or suitably configured Zarr datasets.
+- CSV and Arrow IPC collections are supported, but predicate pruning is less efficient than with Parquet, BBF, or Zarr datasets.
 - Beacon applies file-format specific options through the SQL DDL path, so keep collection definitions in SQL alongside the queries that depend on them.
-
-### Atlas-backed tables
-
-Beacon also supports Atlas-backed tables through Beacon SQL.
-
-```sql
-CREATE ATLAS TABLE sensor_data
-LOCATION '/collections/sensor'
-```
 
 ### Removing a table
 
