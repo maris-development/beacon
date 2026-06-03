@@ -136,7 +136,7 @@ dependencies = [
  "lz4_flex 0.11.6",
  "moka",
  "ndarray",
- "object_store",
+ "object_store 0.13.2",
  "rkyv",
  "tempfile",
  "thiserror 2.0.18",
@@ -962,7 +962,7 @@ dependencies = [
  "lz4_flex 0.11.6",
  "ndarray",
  "num_cpus",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "rmp-serde",
  "serde",
@@ -1173,7 +1173,7 @@ dependencies = [
  "lz4_flex 0.11.6",
  "moka",
  "ndarray",
- "object_store",
+ "object_store 0.13.2",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -1207,7 +1207,7 @@ dependencies = [
  "netcdf",
  "netcdf-sys",
  "num-traits",
- "object_store",
+ "object_store 0.13.2",
  "ordered-float 5.3.0",
  "regex",
  "serde",
@@ -1233,7 +1233,7 @@ dependencies = [
  "futures-util",
  "indexmap 2.14.0",
  "lz4_flex 0.11.6",
- "object_store",
+ "object_store 0.13.2",
  "quick-xml 0.37.5",
  "regex",
  "serde",
@@ -1266,7 +1266,7 @@ dependencies = [
  "futures",
  "indexmap 2.14.0",
  "ndarray",
- "object_store",
+ "object_store 0.13.2",
  "serde",
  "tokio",
  "tracing",
@@ -1288,7 +1288,7 @@ dependencies = [
  "hifitime",
  "indexmap 2.14.0",
  "ndarray",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "regex",
  "serde_json",
@@ -1322,7 +1322,8 @@ dependencies = [
  "moka",
  "munge_macro",
  "nd-arrow-array",
- "object_store",
+ "object_store 0.12.5",
+ "object_store 0.13.2",
  "parking_lot",
  "rand 0.9.4",
  "rkyv",
@@ -1348,7 +1349,7 @@ dependencies = [
  "futures-util",
  "glob",
  "indexmap 2.14.0",
- "object_store",
+ "object_store 0.13.2",
  "regex",
  "thiserror 2.0.18",
  "tracing",
@@ -1361,7 +1362,7 @@ version = "1.6.0"
 dependencies = [
  "envconfig",
  "lazy_static",
- "object_store",
+ "object_store 0.13.2",
 ]
 
 [[package]]
@@ -1393,7 +1394,7 @@ dependencies = [
  "glob",
  "indexmap 2.14.0",
  "inventory",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "pathdiff",
  "serde",
@@ -1431,7 +1432,7 @@ dependencies = [
  "geoparquet",
  "glob",
  "indexmap 2.14.0",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "parquet",
  "serde",
@@ -1459,7 +1460,7 @@ dependencies = [
  "futures",
  "indexmap 2.14.0",
  "moka",
- "object_store",
+ "object_store 0.13.2",
  "ordered-float 5.3.0",
  "parking_lot",
  "serde",
@@ -1503,7 +1504,7 @@ dependencies = [
  "ndarray",
  "num-traits",
  "num_cpus",
- "object_store",
+ "object_store 0.13.2",
  "once_cell",
  "ordered-float 5.3.0",
  "parking_lot",
@@ -1547,7 +1548,7 @@ dependencies = [
  "inventory",
  "lazy_static",
  "lru 0.14.0",
- "object_store",
+ "object_store 0.13.2",
  "once_cell",
  "ordered-float 5.3.0",
  "serde",
@@ -1619,7 +1620,7 @@ dependencies = [
  "flume",
  "futures",
  "notify",
- "object_store",
+ "object_store 0.13.2",
  "once_cell",
  "parking_lot",
  "radix_trie",
@@ -1693,7 +1694,7 @@ dependencies = [
  "datafusion",
  "indexmap 2.14.0",
  "moka",
- "object_store",
+ "object_store 0.13.2",
  "serde",
  "serde_json",
  "tracing",
@@ -1711,7 +1712,7 @@ dependencies = [
  "bytes",
  "datafusion",
  "futures",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "parquet",
  "serde",
@@ -2442,7 +2443,7 @@ dependencies = [
  "itertools 0.14.0",
  "liblzma",
  "log",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "parquet",
  "rand 0.9.4",
@@ -2475,7 +2476,7 @@ dependencies = [
  "futures",
  "itertools 0.14.0",
  "log",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "tokio",
 ]
@@ -2500,7 +2501,7 @@ dependencies = [
  "futures",
  "itertools 0.14.0",
  "log",
- "object_store",
+ "object_store 0.13.2",
 ]
 
 [[package]]
@@ -2519,7 +2520,7 @@ dependencies = [
  "itertools 0.14.0",
  "libc",
  "log",
- "object_store",
+ "object_store 0.13.2",
  "parquet",
  "paste",
  "recursive",
@@ -2566,7 +2567,7 @@ dependencies = [
  "itertools 0.14.0",
  "liblzma",
  "log",
- "object_store",
+ "object_store 0.13.2",
  "rand 0.9.4",
  "tokio",
  "tokio-util",
@@ -2594,7 +2595,7 @@ dependencies = [
  "datafusion-session",
  "futures",
  "itertools 0.14.0",
- "object_store",
+ "object_store 0.13.2",
  "tokio",
 ]
 
@@ -2616,7 +2617,7 @@ dependencies = [
  "datafusion-physical-plan",
  "datafusion-session",
  "futures",
- "object_store",
+ "object_store 0.13.2",
  "regex",
  "tokio",
 ]
@@ -2639,7 +2640,7 @@ dependencies = [
  "datafusion-physical-plan",
  "datafusion-session",
  "futures",
- "object_store",
+ "object_store 0.13.2",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -2669,7 +2670,7 @@ dependencies = [
  "futures",
  "itertools 0.14.0",
  "log",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "parquet",
  "tokio",
@@ -2697,7 +2698,7 @@ dependencies = [
  "datafusion-physical-expr-common",
  "futures",
  "log",
- "object_store",
+ "object_store 0.13.2",
  "parking_lot",
  "rand 0.9.4",
  "tempfile",
@@ -5101,6 +5102,42 @@ dependencies = [
 
 [[package]]
 name = "object_store"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbfbfff40aeccab00ec8a910b57ca8ecf4319b335c542f2edcd19dd25a1e2a00"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "form_urlencoded",
+ "futures",
+ "http",
+ "http-body-util",
+ "humantime",
+ "hyper",
+ "itertools 0.14.0",
+ "md-5",
+ "parking_lot",
+ "percent-encoding",
+ "quick-xml 0.38.4",
+ "rand 0.9.4",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "walkdir",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
+name = "object_store"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "622acbc9100d3c10e2ee15804b0caa40e55c933d5aa53814cd520805b7958a49"
@@ -5245,7 +5282,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
- "object_store",
+ "object_store 0.13.2",
  "paste",
  "seq-macro",
  "simdutf8",
@@ -5548,6 +5585,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -8300,7 +8347,7 @@ checksum = "ba1662bcdc585be1923a8b98ee5d6314d19af8c5775d6516a69ca33fd88b46af"
 dependencies = [
  "async-trait",
  "futures",
- "object_store",
+ "object_store 0.13.2",
  "zarrs_storage",
 ]
 

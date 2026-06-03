@@ -40,6 +40,6 @@ beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-config = { path = "../beacon-config" }
 beacon-formats = { path = "../beacon-formats" }
 beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }
-beacon-binary-format = { path = "../beacon-binary-format", default-features = false, features = ["arrow-58"] }
+beacon-binary-format = { path = "../beacon-binary-format", default-features = false, features = ["arrow-58", "object-store-13"] }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-table = { path = "../beacon-table" }
