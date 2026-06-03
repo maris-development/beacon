@@ -11,9 +11,8 @@ use beacon_data_lake::{
     files::collection::FileCollection, table::table_formats::NetCDFFileFormat, FileManager,
     TableManager,
 };
-use beacon_formats::{
-    arrow::ArrowFormat, csv::CsvFormat, odv_ascii::OdvFormat, parquet::ParquetFormat,
-};
+use beacon_arrow_odv::datafusion::OdvFormat;
+use beacon_formats::{arrow::ArrowFormat, csv::CsvFormat, parquet::ParquetFormat};
 use datafusion::{
     datasource::{file_format::FileFormat, listing::ListingTableUrl, provider_as_source},
     logical_expr::{LogicalPlanBuilder, TableSource},

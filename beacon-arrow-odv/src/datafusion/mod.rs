@@ -1,51 +1,25 @@
-use std::{
-    any::Any,
-    fmt::{Debug, Formatter},
-    fs::File,
-    io::BufWriter,
-    sync::Arc,
-};
+use std::{any::Any, sync::Arc};
 
-use crate::odv_ascii::{sink::OdvSink, source::OdvSource};
 use arrow::datatypes::SchemaRef;
-use async_zip::{ZipEntry, ZipEntryBuilder, tokio::write::ZipFileWriter};
-use beacon_arrow_odv::{
-    reader::{AsyncOdvDecoder, OdvObjectReader},
-    writer::{AsyncOdvWriter, OdvOptions},
-};
 use beacon_common::super_typing;
 use datafusion::{
-    catalog::{Session, memory::DataSourceExec},
+    catalog::{memory::DataSourceExec, Session},
     common::{Column, DFSchema, GetExt, Statistics},
     datasource::{
-        file_format::{
-            FileFormat, FileFormatFactory, csv::CsvFormat,
-            file_compression_type::FileCompressionType, write::ObjectWriterBuilder,
-        },
-        physical_plan::{
-            CsvSource, FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource,
-        },
-        schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapterFactory},
-        sink::{DataSink, DataSinkExec},
+        file_format::{file_compression_type::FileCompressionType, FileFormat, FileFormatFactory},
+        physical_plan::{FileScanConfig, FileScanConfigBuilder, FileSinkConfig, FileSource},
+        sink::DataSinkExec,
     },
-    execution::{SendableRecordBatchStream, SessionState, TaskContext},
-    logical_expr::SortExpr,
-    physical_expr::{
-        EquivalenceProperties, LexOrdering, LexRequirement, PhysicalSortExpr,
-        create_physical_sort_exprs,
-    },
-    physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
-        sorts::sort::SortExec, stream::RecordBatchStreamAdapter,
-    },
+    physical_expr::{create_physical_sort_exprs, LexOrdering, LexRequirement},
+    physical_plan::{sorts::sort::SortExec, ExecutionPlan},
     prelude::Expr,
 };
-use futures::TryStreamExt;
-use futures::{AsyncWrite, AsyncWriteExt, StreamExt, future::try_join_all};
+use futures::{future::try_join_all, TryStreamExt};
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
-use parquet::arrow::async_writer::AsyncFileWriter;
-use tokio::io::AsyncWriteExt as _;
-use tokio_util::compat::{FuturesAsyncWriteCompatExt, TokioAsyncWriteCompatExt};
+
+use crate::datafusion::{sink::OdvSink, source::OdvSource};
+use crate::reader::AsyncOdvDecoder;
+use crate::writer::OdvOptions;
 
 pub mod sink;
 pub mod source;
@@ -283,195 +257,5 @@ impl FileFormat for OdvFormat {
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
         Arc::new(OdvSource::new(table_schema))
-    }
-}
-
-#[derive(Debug)]
-pub struct OdvExec {
-    plan_properties: Arc<PlanProperties>,
-    file_scan_config: FileScanConfig,
-    projection: Option<Arc<[usize]>>,
-    table_schema: SchemaRef,
-    schema_adapter_factory: Arc<dyn SchemaAdapterFactory>,
-}
-
-impl OdvExec {
-    pub fn new(file_scan_conf: FileScanConfig) -> Self {
-        let projection_indices = file_scan_conf.file_column_projection_indices();
-        let projected_schema = projection_indices
-            .as_ref()
-            .map(|p| Arc::new(file_scan_conf.file_schema().project(p).unwrap()))
-            .unwrap_or_else(|| file_scan_conf.file_schema().clone());
-
-        Self {
-            plan_properties: Arc::new(Self::plan_properties(
-                file_scan_conf.file_groups.len(),
-                projected_schema,
-            )),
-            projection: projection_indices.map(Arc::from),
-            schema_adapter_factory: Arc::new(DefaultSchemaAdapterFactory),
-            table_schema: file_scan_conf.file_schema().clone(),
-            file_scan_config: file_scan_conf,
-        }
-    }
-
-    pub fn file_scan_config(&self) -> &FileScanConfig {
-        &self.file_scan_config
-    }
-
-    fn plan_properties(num_partitions: usize, schema: SchemaRef) -> PlanProperties {
-        let schema = schema.clone();
-
-        PlanProperties::new(
-            EquivalenceProperties::new(schema),
-            datafusion::physical_plan::Partitioning::UnknownPartitioning(num_partitions),
-            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        )
-    }
-
-    fn read_partition(&self, partition: usize) -> SendableRecordBatchStream {
-        let partition = self.file_scan_config.file_groups[partition].clone();
-
-        let table_schema = self.table_schema.clone();
-        let projected_table_schema = if let Some(projection) = &self.projection {
-            Arc::new(table_schema.project(projection).unwrap())
-        } else {
-            table_schema.clone()
-        };
-
-        let schema_adapter = self
-            .schema_adapter_factory
-            .create(projected_table_schema.clone(), self.table_schema.clone());
-        // let stream = try_stream! {
-        //     for sub_partition in partition {
-        //         let file_path = sub_partition.path().to_string();
-        //         let mut reader = beacon_arrow_odv::reader::OdvReader::new(format!(
-        //             "{}/{}",
-        //             beacon_config::DATA_DIR.to_string_lossy(),
-        //             file_path
-        //         ), 4096).map_err(|e| {
-        //             datafusion::error::DataFusionError::Execution(format!("Failed to create ODV reader: {}", e))
-        //         })?;
-
-        //         let file_schema = reader.schema().clone();
-
-        //         let (schema_mapper, adapted_projection) = schema_adapter
-        //             .map_schema(&file_schema)
-        //             .expect("map_schema failed");
-
-        //         while let Some(batch)= reader.read(Some(&adapted_projection)) {
-        //             let batch = batch.map_err(|e| {
-        //                 datafusion::error::DataFusionError::Execution(format!("Failed to read ODV batch: {}", e))
-        //             })?;
-
-        //             let mapped_batch = schema_mapper.map_batch(batch).unwrap();
-
-        //             yield mapped_batch;
-        //         }
-        //     }
-        // };
-
-        // let adapter = RecordBatchStreamAdapter::new(self.schema(), stream);
-
-        // Box::pin(adapter)
-        todo!()
-    }
-}
-
-impl DisplayAs for OdvExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "OdvExec")
-    }
-}
-
-impl ExecutionPlan for OdvExec {
-    fn name(&self) -> &'static str {
-        "OdvExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn properties(&self) -> &Arc<PlanProperties> {
-        &self.plan_properties
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        _: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        Ok(self)
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> datafusion::error::Result<SendableRecordBatchStream> {
-        Ok(self.read_partition(partition))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use async_zip::ZipFileBuilder;
-    use futures::AsyncWriteExt;
-    use object_store::GetOptions;
-    use parquet::arrow::async_writer::AsyncFileWriter;
-    use tokio::io::AsyncWriteExt as TokioAsyncWriteCompatExt;
-    use tokio_util::compat::TokioAsyncWriteCompatExt as _;
-
-    use super::*;
-
-    #[ignore]
-    #[tokio::test]
-    async fn test_name() {
-        let object_store =
-            Arc::new(object_store::local::LocalFileSystem::new_with_prefix("./data").unwrap());
-        let fs_path = object_store.path_to_filesystem(&object_store::path::Path::from("test.zip"));
-        println!("fs_path: {:?}", fs_path);
-
-        let mut writer = ObjectWriterBuilder::new(
-            FileCompressionType::UNCOMPRESSED,
-            &object_store::path::Path::from("test.zip"),
-            object_store.clone(),
-        )
-        .build()
-        .unwrap()
-        .compat_write();
-
-        // object_store.get_opts(location, GetOptions::)
-
-        // let reader = object_store::buffered::BufReader::new();
-
-        // let mut writer = object_store::buffered::BufWriter::new(
-        //     object_store.clone(),
-        //     object_store::path::Path::from("test.txt"),
-        // );
-
-        // let mut zip_writer = ZipFileWriter::new(writer);
-
-        // let entry = ZipEntryBuilder::new("file.txt".into(), async_zip::Compression::Stored).build();
-        // let mut x = zip_writer.write_entry_stream(entry).await.unwrap();
-
-        // let z = x.write_all(b"hello").await.unwrap();
-
-        // x.flush().await.unwrap();
-        // x.close().await.unwrap();
-
-        // let mut writer = zip_writer.close().await.unwrap();
-
-        // let writer = AsyncOdvWriter::new_from_dyn(writer, ).await;
-
-        // writer.flush().await.unwrap();
-
-        // writer.write_all(b"hello").await.unwrap();
-        // writer.into_inner().complete().await.unwrap();
     }
 }
