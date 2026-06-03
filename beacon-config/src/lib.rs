@@ -176,7 +176,9 @@ struct RawConfig {
     s3_enable_virtual_hosting: bool,
     #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
     s3_data_lake: bool,
-    #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "false")]
+    // Filesystem change events are on by default for the local datasets store;
+    // set BEACON_ENABLE_FS_EVENTS=false to disable the watcher.
+    #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "true")]
     enable_fs_events: bool,
     #[envconfig(from = "BEACON_ENABLE_S3_EVENTS", default = "false")]
     enable_s3_events: bool,

@@ -31,6 +31,21 @@ impl TrieKey for ObjectKey {
     }
 }
 
+/// Returns `true` if `key` falls under `prefix` on a path-segment basis.
+///
+/// Mirrors `object_store::path::Path::prefix_match`: the prefix must either
+/// equal the key or be followed by a `/` boundary. Both arguments are assumed to
+/// already be normalized object-store paths. An empty prefix matches everything.
+fn segment_prefix_matches(key: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    match key.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
+
 impl ObjectCache {
     /// Build a new index from an initial set of object metadata.
     pub fn new(input: Vec<ObjectMeta>) -> Self {
@@ -75,16 +90,18 @@ impl ObjectCache {
             .map(|m| self.build_meta(path, m))
     }
 
-    /// List all entries whose key starts with `prefix`.
+    /// List all entries that fall under `prefix`, evaluated on a path-segment
+    /// basis (matching [`object_store::ObjectStore::list`] semantics): `a` is a
+    /// prefix of `a/b` but not of `ab`. An empty prefix lists everything.
     pub fn list_prefix(&self, prefix: &str) -> impl Iterator<Item = ObjectMeta> + '_ {
-        let prefix = SmolStr::new(prefix);
+        // Normalize the prefix the same way object_store does (e.g. trims a
+        // trailing slash) so segment matching against stored keys is correct.
+        let prefix = SmolStr::new(object_store::path::Path::from(prefix).as_ref());
         // Note: `radix_trie::TrieCommon::subtrie` returns `None` unless the prefix
-        // exists as an explicit node in the trie. In our use-case we want
-        // "string starts with" semantics regardless of whether `prefix` was
-        // inserted as a key.
+        // exists as an explicit node in the trie, so we scan and filter instead.
         self.tree
             .iter()
-            .filter(move |(k, _)| k.0.starts_with(prefix.as_str()))
+            .filter(move |(k, _)| segment_prefix_matches(&k.0, prefix.as_str()))
             .map(move |(k, v)| self.build_meta(&k.0, v))
     }
 
@@ -202,5 +219,29 @@ mod tests {
         items.sort();
 
         assert_eq!(items, vec!["p/a", "p/a/deeper", "p/b"]);
+    }
+
+    #[test]
+    fn list_prefix_matches_on_segment_boundaries() {
+        let dt = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let index = ObjectCache::new(vec![
+            meta("a", 1, dt),
+            meta("a/b", 2, dt),
+            meta("a/b/c", 3, dt),
+            meta("ab/x", 4, dt), // sibling that must not match prefix "a"
+        ]);
+
+        // A bare prefix without a trailing slash still matches on segment
+        // boundaries: "ab/x" is excluded, but the exact key "a" is included.
+        let mut items: Vec<_> = index
+            .list_prefix("a")
+            .map(|m| m.location.to_string())
+            .collect();
+        items.sort();
+        assert_eq!(items, vec!["a", "a/b", "a/b/c"]);
+
+        // The empty prefix lists everything.
+        let all: Vec<_> = index.list_prefix("").collect();
+        assert_eq!(all.len(), 4);
     }
 }
