@@ -1,7 +1,6 @@
 use std::{any::Any, fmt::Formatter, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_arrow_odv::writer::{AsyncOdvWriter, OdvOptions};
 use datafusion::{
     datasource::{
         file_format::{file_compression_type::FileCompressionType, write::ObjectWriterBuilder},
@@ -15,6 +14,8 @@ use futures::StreamExt;
 use object_store::ObjectStore;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
+
+use crate::writer::{AsyncOdvWriter, OdvOptions};
 
 /// A DataFusion sink for writing data in ODV ASCII format to an object store.
 ///

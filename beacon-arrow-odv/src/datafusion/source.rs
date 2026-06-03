@@ -5,12 +5,9 @@
 
 use std::{any::Any, sync::Arc};
 
-use arrow::{datatypes::SchemaRef, error::ArrowError};
-use beacon_arrow_odv::reader::AsyncOdvDecoder;
 use datafusion::{
-    common::{Statistics, exec_datafusion_err},
+    common::exec_datafusion_err,
     datasource::{
-        file_format::file_compression_type::FileCompressionType,
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
@@ -22,7 +19,9 @@ use datafusion::{
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use object_store::{ObjectStore, ObjectStoreExt};
 
-use crate::odv_ascii::OdvFormat;
+use crate::reader::AsyncOdvDecoder;
+
+use super::OdvFormat;
 
 /// [`OdvSource`] implements [`FileSource`] for ODV ASCII files.
 ///

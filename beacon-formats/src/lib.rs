@@ -16,7 +16,6 @@ pub mod arrow;
 pub mod bbf;
 pub mod csv;
 pub mod geo_parquet;
-pub mod odv_ascii;
 pub mod parquet;
 
 /// Re-export of the Zarr DataFusion integration, which now lives in the

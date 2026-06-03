@@ -6,13 +6,13 @@
 use std::sync::Arc;
 
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory};
+use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_data_lake::FileManager;
 use beacon_formats::{
     arrow::ArrowFormatFactory,
     csv::CsvFormatFactory,
     geo_parquet::{GeoParquetFormatFactory, GeoParquetOptions},
-    odv_ascii::OdvFileFormatFactory,
     parquet::ParquetFormatFactory,
 };
 use datafusion::{

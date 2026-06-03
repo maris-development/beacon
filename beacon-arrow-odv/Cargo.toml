@@ -9,6 +9,9 @@ tokio = { workspace = true }
 indexmap = { workspace = true }
 arrow = { workspace=true}
 arrow-csv = "^58"
+datafusion = { workspace = true }
+tracing = { workspace = true }
+beacon-common = { path = "../beacon-common" }
 anyhow = { workspace=true}
 async-trait = { workspace=true}
 futures = { workspace=true}
