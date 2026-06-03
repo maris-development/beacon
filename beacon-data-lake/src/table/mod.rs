@@ -5,7 +5,7 @@ use datafusion::{
     catalog::TableProvider, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 use futures::StreamExt;
-use object_store::{ObjectStore, PutPayload, path::Path};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 
 use crate::table::{_type::TableType, error::TableError};
 

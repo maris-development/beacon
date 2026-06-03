@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use zarrs::group::Group;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 

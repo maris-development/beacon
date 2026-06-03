@@ -35,7 +35,7 @@ use datafusion::{
     logical_expr::{Signature, Volatility},
     prelude::{Expr, SessionContext},
 };
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::runtime::Handle;
 
 use crate::file_formats::BeaconTableFunctionImpl;

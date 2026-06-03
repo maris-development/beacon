@@ -50,12 +50,12 @@ beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }
 beacon-config = { path = "../beacon-config" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main", version = "2.0.0", default-features = false, features = ["arrow-56"] }
+nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main", version = "2.0.0", default-features = false, features = ["arrow-58"] }
 
 # Add beacon binary format
-beacon-binary-format = { path = "../beacon-binary-format", default-features = false, features = ["arrow-56"] }
+beacon-binary-format = { path = "../beacon-binary-format", default-features = false, features = ["arrow-58", "object-store-13"] }
 arrow-flight = { workspace = true }
-tonic = "0.13"
-prost = "0.13"
+tonic = "0.14"
+prost = "0.14"
 [dev-dependencies]
 tempfile = "3.10"

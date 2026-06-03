@@ -18,7 +18,7 @@ use datafusion::{
     common::pruning::PruningStatistics,
     datasource::{
         listing::PartitionedFile,
-        physical_plan::{FileMeta, FileOpenFuture, FileOpener},
+        physical_plan::{FileOpenFuture, FileOpener},
         schema_adapter::SchemaAdapter,
     },
     physical_optimizer::pruning::PruningPredicate,
@@ -42,13 +42,9 @@ pub struct BBFOpener {
 }
 
 impl FileOpener for BBFOpener {
-    fn open(
-        &self,
-        file_meta: FileMeta,
-        _file: PartitionedFile,
-    ) -> datafusion::error::Result<FileOpenFuture> {
+    fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let async_reader = ArrowBBFObjectReader::new(
-            file_meta.object_meta.location.clone(),
+            file.object_meta.location.clone(),
             self.object_store.clone(),
         );
         let adapter = self.schema_adapter.clone();
@@ -58,7 +54,7 @@ impl FileOpener for BBFOpener {
         let stream_partition_shares = self.stream_partition_shares.clone();
         let stream_partition_share = {
             let mut stream_partition_share_map = stream_partition_shares.lock();
-            let object_path = file_meta.object_meta.location.clone();
+            let object_path = file.object_meta.location.clone();
             stream_partition_share_map
                 .entry(object_path)
                 .or_insert_with(|| Arc::new(StreamShare::new()))
@@ -69,7 +65,7 @@ impl FileOpener for BBFOpener {
         let fut = async move {
             let (stream, schema_mapper, file_schema) = stream_partition_share
                 .get_or_try_init(|| async move {
-                    tracing::debug!("Opening file: {:?}", file_meta.object_meta.location);
+                    tracing::debug!("Opening file: {:?}", file.object_meta.location);
 
                     let reader = AsyncBBFReader::new(Arc::new(async_reader), 128)
                         .await

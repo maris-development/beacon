@@ -12,7 +12,7 @@ use datafusion::{
     datasource::{
         file_format::parquet::ParquetSink,
         listing::ListingTableUrl,
-        physical_plan::{FileGroup, FileSinkConfig},
+        physical_plan::{FileGroup, FileOutputMode, FileSinkConfig},
         sink::DataSinkExec,
     },
     logical_expr::dml::InsertOp,
@@ -21,6 +21,7 @@ use datafusion::{
     sql::{TableReference, sqlparser::ast::ObjectName},
 };
 use futures::StreamExt;
+use object_store::ObjectStoreExt;
 
 /// Current time as Unix epoch milliseconds (0 if the clock is before the epoch).
 pub(crate) fn now_millis() -> i64 {
@@ -58,6 +59,7 @@ pub(crate) async fn write_query_to_datasets_parquet(
         insert_op: InsertOp::Append,
         keep_partition_by_columns: false,
         file_extension: "parquet".to_string(),
+        file_output_mode: FileOutputMode::SingleFile,
     };
 
     let sink = Arc::new(ParquetSink::new(sink_config, TableParquetOptions::default()));

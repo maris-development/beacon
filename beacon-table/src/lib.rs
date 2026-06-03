@@ -53,7 +53,7 @@ use datafusion::{
             parquet::{ParquetFormat, ParquetSink},
         },
         listing::{ListingTableUrl, PartitionedFile},
-        physical_plan::{FileGroup, FileScanConfigBuilder, FileSinkConfig},
+        physical_plan::{FileGroup, FileOutputMode, FileScanConfigBuilder, FileSinkConfig},
         sink::DataSinkExec,
     },
     execution::{SessionState, object_store::ObjectStoreUrl},
@@ -65,7 +65,7 @@ use datafusion::{
     },
     prelude::{Expr, SessionContext},
 };
-use object_store::{ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 use std::{any::Any, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -272,10 +272,11 @@ impl BeaconTable {
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let parquet_format = ParquetFormat::default();
         let partitioned_file = PartitionedFile::from(object_meta.clone());
+        let table_schema =
+            datafusion::datasource::table_schema::TableSchema::from_file_schema(file_schema);
         let scan_config = FileScanConfigBuilder::new(
             self.store_url.clone(),
-            file_schema,
-            parquet_format.file_source(),
+            parquet_format.file_source(table_schema),
         )
         .with_file(partitioned_file)
         .with_projection(projection)
@@ -469,6 +470,7 @@ impl BeaconTable {
             insert_op: InsertOp::Append,
             keep_partition_by_columns: false,
             file_extension: "parquet".to_string(),
+            file_output_mode: FileOutputMode::SingleFile,
         };
 
         let sink = Arc::new(ParquetSink::new(
@@ -544,6 +546,7 @@ impl BeaconTable {
             insert_op: InsertOp::Append,
             keep_partition_by_columns: false,
             file_extension: "parquet".to_string(),
+            file_output_mode: FileOutputMode::SingleFile,
         };
 
         let sink = Arc::new(ParquetSink::new(
@@ -678,6 +681,7 @@ impl TableProvider for BeaconTable {
             insert_op,
             keep_partition_by_columns: false,
             file_extension: "parquet".to_string(),
+            file_output_mode: FileOutputMode::SingleFile,
         };
 
         let sink = Arc::new(ParquetSink::new(

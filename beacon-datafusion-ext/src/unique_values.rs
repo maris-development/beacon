@@ -52,7 +52,7 @@ pub struct UniqueValuesExec {
     schema: Arc<Schema>,
     columns_to_track: Vec<usize>,
     handle_collection: UniqueValuesHandleCollection,
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl UniqueValuesExec {
@@ -82,7 +82,7 @@ impl UniqueValuesExec {
                 schema: schema.clone(),
                 columns_to_track: columns_to_track_indices,
                 handle_collection: handle_collection.clone(),
-                cache: Self::create_plan_properties(input.clone()),
+                cache: Arc::new(Self::create_plan_properties(input.clone())),
                 input,
             },
             handle_collection,
@@ -119,16 +119,12 @@ impl ExecutionPlan for UniqueValuesExec {
         self
     }
 
-    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
+    fn properties(&self) -> &Arc<datafusion::physical_plan::PlanProperties> {
         &self.cache
     }
 
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
-    }
-
-    fn statistics(&self) -> Result<Statistics> {
-        Ok(Statistics::default())
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -150,7 +146,7 @@ impl ExecutionPlan for UniqueValuesExec {
             schema: self.schema.clone(),
             columns_to_track: self.columns_to_track.clone(),
             handle_collection: self.handle_collection.clone(),
-            cache: Self::create_plan_properties(children[0].clone()),
+            cache: Arc::new(Self::create_plan_properties(children[0].clone())),
         }))
     }
 

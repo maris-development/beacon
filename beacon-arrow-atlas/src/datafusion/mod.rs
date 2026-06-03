@@ -386,9 +386,14 @@ impl FileFormat for AtlasFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
+            conf.file_schema().clone(),
+            conf.table_partition_cols().clone(),
+        );
         let source = AtlasSource::new(
             self.datasets_object_store.clone(),
             self.options.read_dimensions.clone(),
+            table_schema,
         );
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -408,10 +413,14 @@ impl FileFormat for AtlasFormat {
         ))
     }
 
-    fn file_source(&self) -> Arc<dyn FileSource> {
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
         Arc::new(AtlasSource::new(
             self.datasets_object_store.clone(),
             self.options.read_dimensions.clone(),
+            table_schema,
         ))
     }
 }
@@ -625,7 +634,16 @@ mod tests {
         let store = test_store().await;
         ensure_fixture().await;
         let format = AtlasFormat::new(store, AtlasOptions::default());
-        assert_eq!(format.file_source().file_type(), "atlas");
+        assert_eq!(
+            format
+                .file_source(
+                    datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+                        arrow::datatypes::Schema::empty()
+                    ))
+                )
+                .file_type(),
+            "atlas"
+        );
     }
 
     #[tokio::test]
@@ -648,6 +666,8 @@ mod tests {
             insert_op: datafusion::logical_expr::dml::InsertOp::Append,
             keep_partition_by_columns: false,
             file_extension: "atlas.json".to_string(),
+            file_output_mode:
+                datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
         };
         let err = format
             .create_writer_physical_plan(input, &ctx.state(), conf, None)

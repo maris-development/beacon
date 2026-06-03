@@ -176,8 +176,8 @@ impl FileFormat for ParquetFormat {
             .await
     }
 
-    fn file_source(&self) -> Arc<dyn FileSource> {
-        self.inner.file_source()
+    fn file_source(&self, table_schema: datafusion::datasource::table_schema::TableSchema) -> Arc<dyn FileSource> {
+        self.inner.file_source(table_schema)
     }
 }
 

@@ -2,8 +2,8 @@ use std::{fmt::Display, sync::Arc};
 
 use futures::{StreamExt, stream::BoxStream};
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, path::Path,
 };
 
 use crate::{
@@ -113,8 +113,11 @@ impl<O: ObjectStore> ObjectStore for NotifiedStore<O> {
         self.inner.get_opts(location, options).await
     }
 
-    async fn delete(&self, location: &object_store::path::Path) -> object_store::Result<()> {
-        self.inner.delete(location).await
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
     }
 
     fn list(
@@ -138,20 +141,13 @@ impl<O: ObjectStore> ObjectStore for NotifiedStore<O> {
         self.inner.list_with_delimiter(prefix).await
     }
 
-    async fn copy(
+    async fn copy_opts(
         &self,
-        from: &object_store::path::Path,
-        to: &object_store::path::Path,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
     ) -> object_store::Result<()> {
-        self.inner.copy(from, to).await
-    }
-
-    async fn copy_if_not_exists(
-        &self,
-        from: &object_store::path::Path,
-        to: &object_store::path::Path,
-    ) -> object_store::Result<()> {
-        self.inner.copy_if_not_exists(from, to).await
+        self.inner.copy_opts(from, to, options).await
     }
 }
 

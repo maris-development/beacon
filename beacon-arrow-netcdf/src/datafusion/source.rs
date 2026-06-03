@@ -14,8 +14,10 @@ use datafusion::{
     common::{pruning::PrunableStatistics, Statistics},
     config::ConfigOptions,
     datasource::{
-        physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileSource},
+        listing::PartitionedFile,
+        physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        table_schema::TableSchema,
     },
     physical_expr::{conjunction, PhysicalExpr},
     physical_optimizer::pruning::PruningPredicate,
@@ -38,9 +40,8 @@ use super::reader;
 pub struct NetCDFSource {
     datasets_object_store: Arc<DatasetsStore>,
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
-    override_schema: Option<SchemaRef>,
+    table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
-    projected_statistics: Option<Statistics>,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -50,13 +51,13 @@ impl NetCDFSource {
     pub fn new(
         datasets_object_store: Arc<DatasetsStore>,
         read_dimensions: Option<Vec<String>>,
+        table_schema: TableSchema,
     ) -> Self {
         Self {
             datasets_object_store,
             schema_adapter_factory: None,
-            override_schema: None,
+            table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
-            projected_statistics: None,
             read_dimensions,
             batch_size: usize::MAX,
             predicate: None,
@@ -68,35 +69,36 @@ impl FileSource for NetCDFSource {
     fn create_file_opener(
         &self,
         _object_store: Arc<dyn object_store::ObjectStore>,
-        base_config: &datafusion::datasource::physical_plan::FileScanConfig,
+        base_config: &FileScanConfig,
         partition: usize,
-    ) -> Arc<dyn FileOpener> {
-        let table_schema = self
-            .override_schema
-            .clone()
-            .unwrap_or_else(|| base_config.file_schema.clone());
-        let projected_schema = base_config.projected_schema();
+    ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
+        let file_schema = self.table_schema.file_schema().clone();
+        let projected_schema = base_config.projected_schema()?;
         let schema_adapter_factory = self
             .schema_adapter_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
 
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema.clone());
+        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema.clone());
 
-        Arc::new(NetCDFOpener::new(
+        Ok(Arc::new(NetCDFOpener::new(
             self.datasets_object_store.clone(),
             Arc::from(schema_adapter),
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
-            table_schema,
+            file_schema,
             self.execution_plan_metrics.clone(),
             partition,
-        ))
+        )))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn table_schema(&self) -> &TableSchema {
+        &self.table_schema
     }
 
     fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
@@ -106,52 +108,18 @@ impl FileSource for NetCDFSource {
         })
     }
 
-    fn with_schema(&self, schema: SchemaRef) -> Arc<dyn FileSource> {
-        Arc::new(Self {
-            override_schema: Some(schema),
-            ..self.clone()
-        })
-    }
-
-    fn with_projection(
-        &self,
-        _config: &datafusion::datasource::physical_plan::FileScanConfig,
-    ) -> Arc<dyn FileSource> {
-        Arc::new(self.clone())
-    }
-
-    fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
-        Arc::new(Self {
-            projected_statistics: Some(statistics),
-            ..self.clone()
-        })
-    }
-
     fn repartitioned(
         &self,
         _target_partitions: usize,
         _repartition_file_min_size: usize,
         _output_ordering: Option<datafusion::physical_expr::LexOrdering>,
-        _config: &datafusion::datasource::physical_plan::FileScanConfig,
-    ) -> datafusion::error::Result<Option<datafusion::datasource::physical_plan::FileScanConfig>>
-    {
+        _config: &FileScanConfig,
+    ) -> datafusion::error::Result<Option<FileScanConfig>> {
         Ok(None)
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
-    }
-
-    fn statistics(&self) -> datafusion::error::Result<Statistics> {
-        if let Some(statistics) = &self.projected_statistics {
-            Ok(statistics.clone())
-        } else if let Some(schema) = self.override_schema.as_ref() {
-            Ok(Statistics::new_unknown(schema))
-        } else {
-            Err(datafusion::error::DataFusionError::Execution(
-                "Schema must be set to compute statistics".to_string(),
-            ))
-        }
     }
 
     fn file_type(&self) -> &str {
@@ -313,20 +281,16 @@ impl NetCDFOpener {
 }
 
 impl FileOpener for NetCDFOpener {
-    fn open(
-        &self,
-        file_meta: FileMeta,
-        file: datafusion::datasource::listing::PartitionedFile,
-    ) -> datafusion::error::Result<FileOpenFuture> {
+    fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         if let (Some(stats), Some(prune)) = (&file.statistics, &self.pruning_predicate) {
             let result = prune.prune(&PrunableStatistics::new(
-                vec![stats.clone()],
+                vec![Arc::clone(stats)],
                 self.table_schema.clone(),
             ))?[0];
             if !result {
                 tracing::debug!(
                     "Pruning NetCDF file {} based on statistics.",
-                    file_meta.object_meta.location
+                    file.object_meta.location
                 );
                 // File is pruned, return empty stream.
                 let stream = EmptyRecordBatchStream::new(self.table_schema.clone()).boxed();
@@ -337,7 +301,7 @@ impl FileOpener for NetCDFOpener {
 
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
-            file_meta.object_meta,
+            file.object_meta,
             self.datasets_object_store.clone(),
             self.schema_adapter.clone(),
             self.read_dimensions.clone(),

@@ -20,8 +20,9 @@ use datafusion::{
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
-        physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileScanConfig, FileSource},
+        physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        table_schema::TableSchema,
     },
     error::DataFusionError,
     physical_expr::conjunction,
@@ -43,29 +44,21 @@ use crate::{reader::dataset_from_group, util::ZarrPath};
 #[derive(Clone)]
 pub struct ZarrSource {
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
-    override_schema: Option<SchemaRef>,
+    table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
-    projected_statistics: Option<Statistics>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
 }
 
-impl Default for ZarrSource {
-    fn default() -> Self {
+impl ZarrSource {
+    pub fn new(table_schema: TableSchema) -> Self {
         Self {
             schema_adapter_factory: None,
-            override_schema: None,
+            table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
-            projected_statistics: None,
             batch_size: usize::MAX,
             predicate: None,
         }
-    }
-}
-
-impl ZarrSource {
-    pub fn new() -> Self {
-        Self::default()
     }
 }
 
@@ -75,30 +68,31 @@ impl FileSource for ZarrSource {
         object_store: Arc<dyn ObjectStore>,
         base_config: &FileScanConfig,
         partition: usize,
-    ) -> Arc<dyn FileOpener> {
-        let table_schema = self
-            .override_schema
-            .clone()
-            .unwrap_or_else(|| base_config.file_schema.clone());
-        let projected_schema = base_config.projected_schema();
+    ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
+        let file_schema = self.table_schema.file_schema().clone();
+        let projected_schema = base_config.projected_schema()?;
         let schema_adapter_factory = self
             .schema_adapter_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema);
+        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema);
 
-        Arc::new(ZarrOpener {
+        Ok(Arc::new(ZarrOpener {
             object_store,
             schema_adapter: Arc::from(schema_adapter),
             predicate: self.predicate.clone(),
             batch_size: self.batch_size,
             metrics: self.execution_plan_metrics.clone(),
             partition,
-        })
+        }))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn table_schema(&self) -> &TableSchema {
+        &self.table_schema
     }
 
     fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
@@ -108,38 +102,8 @@ impl FileSource for ZarrSource {
         })
     }
 
-    fn with_schema(&self, schema: SchemaRef) -> Arc<dyn FileSource> {
-        Arc::new(Self {
-            override_schema: Some(schema),
-            ..self.clone()
-        })
-    }
-
-    fn with_projection(&self, _config: &FileScanConfig) -> Arc<dyn FileSource> {
-        Arc::new(self.clone())
-    }
-
-    fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
-        Arc::new(Self {
-            projected_statistics: Some(statistics),
-            ..self.clone()
-        })
-    }
-
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
-    }
-
-    fn statistics(&self) -> datafusion::error::Result<Statistics> {
-        if let Some(statistics) = &self.projected_statistics {
-            Ok(statistics.clone())
-        } else if let Some(schema) = self.override_schema.as_ref() {
-            Ok(Statistics::new_unknown(schema))
-        } else {
-            Err(DataFusionError::Execution(
-                "Schema must be set to compute statistics".to_string(),
-            ))
-        }
     }
 
     fn file_type(&self) -> &str {
@@ -197,11 +161,7 @@ struct ZarrOpener {
 }
 
 impl FileOpener for ZarrOpener {
-    fn open(
-        &self,
-        _file_meta: FileMeta,
-        file: PartitionedFile,
-    ) -> datafusion::error::Result<FileOpenFuture> {
+    fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let zarr_path = ZarrPath::new_from_object_meta(file.object_meta.clone()).map_err(|e| {
             DataFusionError::Execution(format!("Failed to create ZarrPath from object metadata: {e}"))
         })?;

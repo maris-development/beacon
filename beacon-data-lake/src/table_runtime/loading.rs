@@ -44,7 +44,7 @@ pub async fn load_tables_from_object_store(
 mod tests {
     use super::load_tables_from_object_store;
     use crate::table::{_type::TableType, Table, TableFormat, empty::EmptyTable};
-    use object_store::{ObjectStore, memory::InMemory, path::Path};
+    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
     fn legacy_table_format(name: &str) -> TableFormat {
         TableFormat::Legacy(Table {

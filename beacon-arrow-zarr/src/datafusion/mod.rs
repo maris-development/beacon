@@ -237,7 +237,11 @@ impl FileFormat for ZarrFormat {
             file_groups.push(file);
         }
 
-        let source = ZarrSource::default();
+        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
+            conf.file_schema().clone(),
+            conf.table_partition_cols().clone(),
+        );
+        let source = ZarrSource::new(table_schema);
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -245,8 +249,11 @@ impl FileFormat for ZarrFormat {
         Ok(DataSourceExec::from_data_source(conf))
     }
 
-    fn file_source(&self) -> Arc<dyn FileSource> {
-        Arc::new(ZarrSource::default())
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
+        Arc::new(ZarrSource::new(table_schema))
     }
 }
 

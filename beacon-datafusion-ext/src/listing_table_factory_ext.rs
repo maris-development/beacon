@@ -157,7 +157,7 @@ fn resolve_schema_and_partition_cols(
         return Ok((None, partition_cols));
     }
 
-    let schema: SchemaRef = Arc::new(cmd.schema.as_ref().to_owned().into());
+    let schema: SchemaRef = Arc::clone(cmd.schema.inner());
     let partition_cols = partition_cols_from_schema(&schema, &cmd.table_partition_cols)?;
     let projected_schema = project_out_partition_columns(&schema, &cmd.table_partition_cols)?;
 

@@ -19,7 +19,7 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::sync::Mutex;
 
 use crate::manifest::{self, DataFile};
@@ -71,7 +71,7 @@ pub struct VacuumExec {
     /// Child execution plan that scans all existing table data.
     child: Arc<dyn ExecutionPlan>,
     /// Cached plan properties (single partition, bounded, final emission).
-    props: PlanProperties,
+    props: Arc<PlanProperties>,
 }
 
 impl VacuumExec {
@@ -106,12 +106,12 @@ impl VacuumExec {
 
         let schema = count_schema();
         let eq = EquivalenceProperties::new(schema);
-        let props = PlanProperties::new(
+        let props = Arc::new(PlanProperties::new(
             eq,
             Partitioning::UnknownPartitioning(1),
             datafusion::physical_plan::execution_plan::EmissionType::Final,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        );
+        ));
 
         Self {
             store,
@@ -150,7 +150,7 @@ impl ExecutionPlan for VacuumExec {
         count_schema()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
 

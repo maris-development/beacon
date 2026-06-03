@@ -14,9 +14,16 @@
 //!
 //! [`DefaultFileStatisticsCache`]: datafusion::execution::cache::cache_unit::DefaultFileStatisticsCache
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use datafusion::{common::Statistics, execution::cache::CacheAccessor};
+use datafusion::{
+    common::Statistics,
+    execution::cache::{
+        CacheAccessor,
+        cache_manager::{CachedFileMetadata, FileStatisticsCache, FileStatisticsCacheEntry},
+    },
+};
 use moka::sync::Cache;
 use object_store::{ObjectMeta, path::Path};
 
@@ -45,7 +52,7 @@ const DEFAULT_MAX_CAPACITY: u64 = 10_000;
 /// Cache entries are invalidated on size or last-modified mismatch, matching
 /// the behaviour of DataFusion's built-in `DefaultFileStatisticsCache`.
 pub struct BeaconFileStatisticsCache {
-    inner: Cache<Path, (ObjectMeta, Arc<Statistics>)>,
+    inner: Cache<Path, CachedFileMetadata>,
 }
 
 impl BeaconFileStatisticsCache {
@@ -67,51 +74,51 @@ impl BeaconFileStatisticsCache {
     pub fn list_entries(&self) -> Vec<(Path, ObjectMeta, Arc<Statistics>)> {
         self.inner
             .iter()
-            .map(|(path, (meta, stats))| ((*path).clone(), meta.clone(), Arc::clone(&stats)))
+            .map(|(path, cached)| {
+                ((*path).clone(), cached.meta.clone(), Arc::clone(&cached.statistics))
+            })
             .collect()
-    }
-}
-
-// ─── CacheAccessor impl ──────────────────────────────────────────────────────
-
-impl CacheAccessor<Path, Arc<Statistics>> for BeaconFileStatisticsCache {
-    type Extra = ObjectMeta;
-
-    fn get(&self, k: &Path) -> Option<Arc<Statistics>> {
-        self.inner.get(k).map(|(_, stats)| stats)
     }
 
     /// Returns `None` if the entry does not exist or the file has changed
     /// (size or last-modified mismatch).
-    fn get_with_extra(&self, k: &Path, e: &ObjectMeta) -> Option<Arc<Statistics>> {
-        self.inner.get(k).and_then(|(saved_meta, stats)| {
-            if saved_meta.size == e.size && saved_meta.last_modified == e.last_modified {
-                Some(stats)
-            } else {
-                None
-            }
-        })
+    pub fn get_with_extra(&self, k: &Path, e: &ObjectMeta) -> Option<Arc<Statistics>> {
+        self.inner
+            .get(k)
+            .filter(|cached| cached.is_valid_for(e))
+            .map(|cached| Arc::clone(&cached.statistics))
     }
 
-    fn put(&self, _key: &Path, _value: Arc<Statistics>) -> Option<Arc<Statistics>> {
-        panic!(
-            "put() without ObjectMeta is not supported by BeaconFileStatisticsCache; use put_with_extra()"
-        )
-    }
-
-    fn put_with_extra(
+    /// Insert `value` keyed by `key`, validating against the file metadata `e`.
+    /// Returns the previously cached statistics, if any.
+    pub fn put_with_extra(
         &self,
         key: &Path,
         value: Arc<Statistics>,
         e: &ObjectMeta,
     ) -> Option<Arc<Statistics>> {
-        let old = self.inner.get(key).map(|(_, stats)| stats);
-        self.inner.insert(key.clone(), (e.clone(), value));
+        let old = self.inner.get(key).map(|cached| Arc::clone(&cached.statistics));
+        self.inner
+            .insert(key.clone(), CachedFileMetadata::new(e.clone(), value, None));
+        old
+    }
+}
+
+// ─── DataFusion CacheAccessor / FileStatisticsCache impls ────────────────────
+
+impl CacheAccessor<Path, CachedFileMetadata> for BeaconFileStatisticsCache {
+    fn get(&self, k: &Path) -> Option<CachedFileMetadata> {
+        self.inner.get(k)
+    }
+
+    fn put(&self, key: &Path, value: CachedFileMetadata) -> Option<CachedFileMetadata> {
+        let old = self.inner.get(key);
+        self.inner.insert(key.clone(), value);
         old
     }
 
-    fn remove(&mut self, k: &Path) -> Option<Arc<Statistics>> {
-        let old = self.inner.get(k).map(|(_, stats)| stats);
+    fn remove(&self, k: &Path) -> Option<CachedFileMetadata> {
+        let old = self.inner.get(k);
         self.inner.invalidate(k);
         old
     }
@@ -130,5 +137,26 @@ impl CacheAccessor<Path, Arc<Statistics>> for BeaconFileStatisticsCache {
 
     fn name(&self) -> String {
         "BeaconFileStatisticsCache".to_string()
+    }
+}
+
+impl FileStatisticsCache for BeaconFileStatisticsCache {
+    fn list_entries(&self) -> HashMap<Path, FileStatisticsCacheEntry> {
+        self.inner
+            .iter()
+            .map(|(path, cached)| {
+                (
+                    (*path).clone(),
+                    FileStatisticsCacheEntry {
+                        object_meta: cached.meta.clone(),
+                        num_rows: cached.statistics.num_rows,
+                        num_columns: cached.statistics.column_statistics.len(),
+                        table_size_bytes: cached.statistics.total_byte_size,
+                        statistics_size_bytes: 0,
+                        has_ordering: cached.ordering.is_some(),
+                    },
+                )
+            })
+            .collect()
     }
 }

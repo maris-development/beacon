@@ -4,6 +4,7 @@ use arrow::datatypes::SchemaRef;
 use beacon_common::listing_url::parse_listing_table_url;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use bytes::Bytes;
+use object_store::ObjectStoreExt;
 use datafusion::{
     catalog::TableProvider, datasource::listing::ListingTableUrl, error::DataFusionError,
     execution::object_store::ObjectStoreUrl, prelude::SessionContext,

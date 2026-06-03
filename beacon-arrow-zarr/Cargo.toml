@@ -5,10 +5,7 @@ edition = "2024"
 
 [dependencies]
 zarrs = {"version" = "0.23.12", features = ["async"]}
-# zarrs_object_store stays on 0.5.x: 0.6.x requires object_store ^0.13 but
-# the workspace pins object_store 0.12.x. Both 0.5.x and 0.6.x share
-# zarrs_storage 0.4.x so the trait composition with zarrs 0.23 still works.
-zarrs_object_store = "0.5.0"
+zarrs_object_store = "0.6.0"
 zarrs_storage = "0.4.2"
 object_store = { workspace = true }
 tokio = { workspace = true }

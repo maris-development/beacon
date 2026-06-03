@@ -11,8 +11,10 @@ use datafusion::{
     common::Statistics,
     config::ConfigOptions,
     datasource::{
-        physical_plan::{FileMeta, FileOpenFuture, FileOpener, FileSource},
+        listing::PartitionedFile,
+        physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
         schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        table_schema::TableSchema,
     },
     physical_expr::{PhysicalExpr, conjunction},
     physical_plan::{
@@ -52,9 +54,8 @@ impl AtlasStreamDatasets {
 pub struct AtlasSource {
     datasets_object_store: Arc<DatasetsStore>,
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
-    override_schema: Option<SchemaRef>,
+    table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
-    projected_statistics: Option<Statistics>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     read_dimensions: Option<Vec<String>>,
@@ -66,13 +67,13 @@ impl AtlasSource {
     pub fn new(
         datasets_object_store: Arc<DatasetsStore>,
         read_dimensions: Option<Vec<String>>,
+        table_schema: TableSchema,
     ) -> Self {
         Self {
             datasets_object_store,
             schema_adapter_factory: None,
-            override_schema: None,
+            table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
-            projected_statistics: None,
             batch_size: usize::MAX,
             predicate: None,
             read_dimensions,
@@ -85,22 +86,19 @@ impl FileSource for AtlasSource {
     fn create_file_opener(
         &self,
         _object_store: Arc<dyn object_store::ObjectStore>,
-        base_config: &datafusion::datasource::physical_plan::FileScanConfig,
+        base_config: &FileScanConfig,
         partition: usize,
-    ) -> Arc<dyn FileOpener> {
-        let table_schema = self
-            .override_schema
-            .clone()
-            .unwrap_or_else(|| base_config.file_schema.clone());
-        let projected_schema = base_config.projected_schema();
+    ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
+        let file_schema = self.table_schema.file_schema().clone();
+        let projected_schema = base_config.projected_schema()?;
         let schema_adapter_factory = self
             .schema_adapter_factory
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
 
-        let schema_adapter = schema_adapter_factory.create(projected_schema, table_schema.clone());
+        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema);
 
-        Arc::new(AtlasOpener {
+        Ok(Arc::new(AtlasOpener {
             datasets_object_store: self.datasets_object_store.clone(),
             schema_adapter: Arc::from(schema_adapter),
             batch_size: self.batch_size,
@@ -109,11 +107,15 @@ impl FileSource for AtlasSource {
             read_dimensions: self.read_dimensions.clone(),
             predicate: self.predicate.clone(),
             stream_cache: self.stream_cache.clone(),
-        })
+        }))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn table_schema(&self) -> &TableSchema {
+        &self.table_schema
     }
 
     fn with_batch_size(&self, batch_size: usize) -> Arc<dyn FileSource> {
@@ -123,41 +125,8 @@ impl FileSource for AtlasSource {
         })
     }
 
-    fn with_schema(&self, schema: SchemaRef) -> Arc<dyn FileSource> {
-        Arc::new(Self {
-            override_schema: Some(schema),
-            ..self.clone()
-        })
-    }
-
-    fn with_projection(
-        &self,
-        _config: &datafusion::datasource::physical_plan::FileScanConfig,
-    ) -> Arc<dyn FileSource> {
-        Arc::new(self.clone())
-    }
-
-    fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
-        Arc::new(Self {
-            projected_statistics: Some(statistics),
-            ..self.clone()
-        })
-    }
-
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.execution_plan_metrics
-    }
-
-    fn statistics(&self) -> datafusion::error::Result<Statistics> {
-        if let Some(statistics) = &self.projected_statistics {
-            Ok(statistics.clone())
-        } else if let Some(schema) = self.override_schema.as_ref() {
-            Ok(Statistics::new_unknown(schema))
-        } else {
-            Err(datafusion::error::DataFusionError::Execution(
-                "Schema must be set to compute statistics".to_string(),
-            ))
-        }
     }
 
     fn file_type(&self) -> &str {
@@ -328,15 +297,11 @@ impl AtlasOpener {
 }
 
 impl FileOpener for AtlasOpener {
-    fn open(
-        &self,
-        file_meta: FileMeta,
-        _file: datafusion::datasource::listing::PartitionedFile,
-    ) -> datafusion::error::Result<FileOpenFuture> {
+    fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
             self.datasets_object_store.clone(),
-            file_meta.object_meta,
+            file.object_meta,
             self.stream_cache.clone(),
             self.schema_adapter.clone(),
             self.batch_size,
@@ -357,7 +322,8 @@ mod tests {
     use arrow::array::Array;
     use datafusion::datasource::file_format::FileFormat;
     use datafusion::datasource::listing::PartitionedFile;
-    use datafusion::datasource::physical_plan::{FileMeta, FileScanConfigBuilder, FileSource};
+    use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
+    use datafusion::datasource::table_schema::TableSchema;
     use datafusion::execution::object_store::ObjectStoreUrl;
     use datafusion::prelude::SessionContext;
     use futures::StreamExt;
@@ -382,15 +348,17 @@ mod tests {
             .await
             .expect("infer schema");
 
-        let source = AtlasSource::new(store, None);
+        let source =
+            AtlasSource::new(store, None, TableSchema::from_file_schema(table_schema.clone()));
         let conf = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
-            table_schema.clone(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
         )
         .build();
 
-        let opener = source.create_file_opener(dummy_store, &conf, 0);
+        let opener = source
+            .create_file_opener(dummy_store, &conf, 0)
+            .expect("file opener");
         (opener, table_schema, object)
     }
 
@@ -402,15 +370,7 @@ mod tests {
             statistics: None,
             extensions: None,
             metadata_size_hint: None,
-        }
-    }
-
-    fn file_meta_for(object: object_store::ObjectMeta) -> FileMeta {
-        FileMeta {
-            object_meta: object,
-            range: None,
-            extensions: None,
-            metadata_size_hint: None,
+            ordering: None,
         }
     }
 
@@ -440,10 +400,9 @@ mod tests {
         // batches from every dataset in the atlas (winter + summer).
         let (opener, schema, object) = build_opener_with_schema().await;
         let pf = pf_for(object.clone());
-        let file_meta = file_meta_for(object);
 
         let stream = opener
-            .open(file_meta, pf)
+            .open(pf)
             .expect("open")
             .await
             .expect("stream");
@@ -472,10 +431,9 @@ mod tests {
         // batches must have real values there.
         let (opener, schema, object) = build_opener_with_schema().await;
         let pf = pf_for(object.clone());
-        let file_meta = file_meta_for(object);
 
         let stream = opener
-            .open(file_meta, pf)
+            .open(pf)
             .expect("open")
             .await
             .expect("stream");
@@ -526,21 +484,23 @@ mod tests {
             .expect("infer schema");
         let cycle_idx = table_schema.index_of("cycle").expect("cycle column");
 
-        let source = AtlasSource::new(store, None);
+        let source =
+            AtlasSource::new(store, None, TableSchema::from_file_schema(table_schema.clone()));
         let conf = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
-            table_schema.clone(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
         )
-        .with_projection(Some(vec![cycle_idx]))
+        .with_projection_indices(Some(vec![cycle_idx]))
+        .unwrap()
         .build();
 
-        let opener = source.create_file_opener(dummy_store, &conf, 0);
+        let opener = source
+            .create_file_opener(dummy_store, &conf, 0)
+            .expect("file opener");
         let pf = pf_for(object.clone());
-        let file_meta = file_meta_for(object);
 
         let stream = opener
-            .open(file_meta, pf)
+            .open(pf)
             .expect("open")
             .await
             .expect("stream");
@@ -566,7 +526,7 @@ mod tests {
 
         // First open drains the queue.
         let stream = opener
-            .open(file_meta_for(object.clone()), pf_for(object.clone()))
+            .open(pf_for(object.clone()))
             .expect("open")
             .await
             .expect("stream");
@@ -576,7 +536,7 @@ mod tests {
         // Second open sees an empty queue (same stream_cache entry) and
         // therefore produces no batches.
         let stream = opener
-            .open(file_meta_for(object.clone()), pf_for(object))
+            .open(pf_for(object))
             .expect("open")
             .await
             .expect("stream");
