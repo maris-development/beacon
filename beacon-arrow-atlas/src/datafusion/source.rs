@@ -321,7 +321,15 @@ impl AtlasOpener {
                         })
                         .boxed();
 
-                        Ok(dataset_stream)
+                        let batches = dataset_stream.take_while(|res| {
+                            if let Err(err) = res {
+                                tracing::warn!(?err, "ending stream after RecordBatch error");
+                            }
+
+                            std::future::ready(res.is_ok())
+                        });
+
+                        Ok(Box::pin(batches))
                     }
                 }
             })

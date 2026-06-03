@@ -59,8 +59,10 @@ impl<T: NdArrayType + Clone> ArrayBackend<T> for InMemoryArrayBackend<T> {
         let data_view = self.array.view();
         let sliced_values = data_view.slice_each_axis(|axis| {
             let axis_index = axis.axis.index();
-            let start = subset.start[axis_index] as isize;
-            let end = (subset.start[axis_index] + subset.shape[axis_index]) as isize;
+            let start = subset.start.get(axis_index).copied().unwrap_or(0) as isize;
+            let end = (subset.start.get(axis_index).copied().unwrap_or(0)
+                + subset.shape.get(axis_index).copied().unwrap_or(0))
+                as isize;
             ndarray::Slice::new(start, Some(end), 1)
         });
 
