@@ -1682,25 +1682,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-statistics-index"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "beacon-common",
- "beacon-config",
- "beacon-datafusion-ext",
- "beacon-object-storage",
- "chrono",
- "datafusion",
- "indexmap 2.14.0",
- "moka",
- "object_store 0.13.2",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "beacon-table"
 version = "1.6.0"
 dependencies = [

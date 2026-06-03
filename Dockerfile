@@ -29,7 +29,6 @@ COPY beacon-arrow-netcdf/ /beacon-arrow-netcdf/
 COPY beacon-arrow-tiff/ /beacon-arrow-tiff/
 COPY beacon-arrow-zarr/ /beacon-arrow-zarr/
 COPY beacon-arrow-odv/ /beacon-arrow-odv/
-COPY beacon-atlas/ /beacon-atlas/
 COPY beacon-binary-format/ /beacon-binary-format/
 COPY beacon-common/ /beacon-common/
 COPY beacon-config/ /beacon-config/
@@ -43,7 +42,6 @@ COPY beacon-nd-arrow/ /beacon-nd-arrow/
 COPY beacon-object-storage/ /beacon-object-storage/
 COPY beacon-planner/ /beacon-planner/
 COPY beacon-query/ /beacon-query/
-COPY beacon-statistics-index/ /beacon-statistics-index/
 COPY beacon-table/ /beacon-table/
 COPY Cargo.toml /
 COPY Cargo.lock /
