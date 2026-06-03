@@ -16,7 +16,7 @@ use crate::{
     error::{self, StorageResult},
     event::ObjectEvent,
     fs_event_listener::FsEventListener,
-    object_cache::ObjectCache,
+    object_cache::{ObjectCache, segment_prefix_matches},
 };
 
 /// Build the datasets [`DatasetsStore`] from the process-wide Beacon configuration.
@@ -230,23 +230,32 @@ impl DatasetsStore {
             }
             let path = location.as_ref();
             for (prefix, tx) in subs.iter() {
-                if path.starts_with(prefix.as_str()) {
+                // Segment-aware match (consistent with listings): `obs` matches
+                // `obs/a.parquet` but not `obstacle/...`; an empty prefix matches all.
+                if segment_prefix_matches(path, prefix.as_str()) {
                     let _ = tx.send(event.clone());
                 }
             }
         }
     }
 
-    /// Subscribe to object events whose path starts with `prefix`.
+    /// Subscribe to object events whose path falls under `prefix`, matched on a
+    /// path-segment basis (so `obs` matches `obs/a` but not `obstacle/a`; an empty
+    /// prefix matches everything).
     ///
     /// This is intended for downstream consumers such as external tables that
     /// need to know when files were added to or removed from their dataset
     /// (identified by a path prefix). Subscribers for the same prefix share a
-    /// single broadcast channel.
+    /// single broadcast channel. A trailing `/` is trimmed so `obs` and `obs/`
+    /// are equivalent.
     ///
     /// Note: events are only ever produced when the store was built with an
     /// [`EventListener`]; otherwise the returned receiver simply never yields.
     pub fn subscribe_events(&self, prefix: &str) -> broadcast::Receiver<ObjectEvent> {
+        // Normalize so the stored key matches `dispatch_events`' segment-aware
+        // comparison regardless of a caller-supplied trailing slash.
+        let prefix = prefix.trim_end_matches('/');
+
         let mut subs = self.subscribers.write();
 
         // Reuse the existing sender for this prefix if one is already live.
@@ -1007,6 +1016,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_events_matches_on_segment_boundary() {
+        // A prefix without a trailing slash must still match on path-segment
+        // boundaries: `obs` matches `obs/...` but never a sibling like
+        // `obstacle/...`. This is what lets external tables subscribe with their
+        // raw object-store prefix and skip client-side filtering.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let inner = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).expect("local fs"))
+            as Arc<dyn ObjectStore + Send + Sync>;
+        let (tx, rx) = flume::unbounded();
+        let store = DatasetsStore::new(inner, Some(Arc::new(ChannelListener { rx }))).await;
+
+        let mut sub = store.subscribe_events("obs");
+
+        tx.send(vec![
+            // Sibling sharing the leading text — must NOT be delivered.
+            ObjectEvent::Created(meta("obstacle/x.parquet", 1)),
+            // Child of the prefix — must be delivered.
+            ObjectEvent::Created(meta("obs/a.parquet", 2)),
+        ])
+        .unwrap();
+
+        match recv(&mut sub).await {
+            ObjectEvent::Created(m) => assert_eq!(m.location.as_ref(), "obs/a.parquet"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn subscribe_events_skips_internal_prefix() {
         let dir = tempfile::tempdir().expect("temp dir");
         let inner = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).expect("local fs"))
@@ -1068,10 +1105,11 @@ mod tests {
         drop(store.subscribe_events("dead/"));
         assert_eq!(store.subscribers.read().len(), 1);
 
-        // Subscribing to a different prefix prunes the now-dead sender.
+        // Subscribing to a different prefix prunes the now-dead sender. The
+        // stored key is normalized (trailing slash trimmed).
         let _live = store.subscribe_events("live/");
         let subs = store.subscribers.read();
         assert_eq!(subs.len(), 1);
-        assert!(subs.contains_key("live/"));
+        assert!(subs.contains_key("live"));
     }
 }

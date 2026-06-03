@@ -36,7 +36,7 @@ impl TrieKey for ObjectKey {
 /// Mirrors `object_store::path::Path::prefix_match`: the prefix must either
 /// equal the key or be followed by a `/` boundary. Both arguments are assumed to
 /// already be normalized object-store paths. An empty prefix matches everything.
-fn segment_prefix_matches(key: &str, prefix: &str) -> bool {
+pub(crate) fn segment_prefix_matches(key: &str, prefix: &str) -> bool {
     if prefix.is_empty() {
         return true;
     }

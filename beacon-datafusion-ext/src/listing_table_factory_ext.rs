@@ -3,9 +3,7 @@ use std::sync::{Arc, Weak};
 
 use beacon_common::listing_url::parse_listing_table_url;
 use datafusion::arrow::datatypes::Schema;
-use datafusion::common::{
-    DataFusionError, ToDFSchema, arrow_datafusion_err, config_datafusion_err, plan_err,
-};
+use datafusion::common::{ToDFSchema, arrow_datafusion_err, config_datafusion_err, plan_err};
 use datafusion::datasource::listing::ListingOptions;
 use datafusion::execution::SessionState;
 use datafusion::execution::object_store::ObjectStoreUrl;
@@ -17,6 +15,7 @@ use datafusion::{
 };
 
 use crate::table_ext::{ExternalTable, ExternalTableDefinition, ExternalTableRebuild, build_listing_table};
+use object_store::path::Path as ObjectPath;
 
 type PartitionCols = Vec<(String, DataType)>;
 
@@ -89,6 +88,13 @@ impl TableProviderFactory for ListingTableFactoryExt {
 
         let table = build_listing_table(session_state, &rebuild).await?;
 
+        // Subscribe per storage prefix; the store filters events to each prefix.
+        let prefixes: Vec<ObjectPath> = table
+            .table_paths()
+            .iter()
+            .map(|url| url.prefix().clone())
+            .collect();
+
         // Validate ORDER BY columns against the resolved schema.
         let df_schema = Arc::clone(&table.schema()).to_dfschema()?;
         let column_refs: HashSet<_> = cmd
@@ -121,14 +127,15 @@ impl TableProviderFactory for ListingTableFactoryExt {
             },
         };
 
-        let events = crate::table_ext::datasets_store_events(&self.store_url).await;
+        let event_receivers =
+            crate::table_ext::datasets_store_subscriptions(&self.store_url, &prefixes).await;
 
         let external_table = ExternalTable::new_self_refreshing(
             definition,
             table,
             rebuild,
             self.session_ctx.clone(),
-            events,
+            event_receivers,
         );
 
         Ok(Arc::new(external_table))
