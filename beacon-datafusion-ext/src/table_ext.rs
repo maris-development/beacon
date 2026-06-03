@@ -140,9 +140,13 @@ pub(crate) async fn datasets_store_events(
     if data_store_url.as_str() != DATASETS_STORE_URL {
         return None;
     }
-    beacon_object_storage::get_datasets_object_store()
-        .await
-        .subscribe()
+    // Subscribe at the store root; events are filtered per-table by
+    // `path_under_prefix` below, since a table may span multiple prefixes.
+    Some(
+        beacon_object_storage::get_datasets_object_store()
+            .await
+            .subscribe_events(""),
+    )
 }
 
 /// Returns the object path an event refers to.
