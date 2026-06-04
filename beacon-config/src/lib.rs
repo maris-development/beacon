@@ -136,7 +136,7 @@ struct RawConfig {
     table_sync_interval_secs: u64,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
     sanitize_schema: bool,
-    #[envconfig(from = "BEACON_ENABLE_SQL", default = "false")]
+    #[envconfig(from = "BEACON_ENABLE_SQL", default = "true")]
     enable_sql: bool,
     #[envconfig(from = "BEACON_FLIGHT_SQL_ENABLE", default = "true")]
     flight_sql_enable: bool,
