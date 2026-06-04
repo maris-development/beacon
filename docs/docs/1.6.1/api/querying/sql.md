@@ -73,14 +73,14 @@ Content-Type: application/json
 }
 ```
 
-Supply `statistics_columns` as a second argument to enable 1D slice pushdown for large coordinate dimensions:
+Predicate pushdown is automatic — Beacon prunes chunks and slices coordinate dimensions based on your `WHERE` clause, with no extra arguments to configure:
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-  "sql": "SELECT time, latitude, longitude, sst FROM read_zarr(['sst/*/zarr.json'], ['time', 'latitude', 'longitude']) WHERE time >= '2025-01-01' LIMIT 1000",
+  "sql": "SELECT time, latitude, longitude, sst FROM read_zarr(['sst/*/zarr.json']) WHERE time >= '2025-01-01' LIMIT 1000",
   "output": { "format": "csv" }
 }
 ```

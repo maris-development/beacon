@@ -16,6 +16,7 @@ Some of the configuration options can be set using environment variables. The fo
 
 - `BEACON_HOST` - IP address to listen on. (Default is `0.0.0.0`)
 - `BEACON_PORT` - Port number to listen on. (Default is `5001`)
+- `BEACON_BASE_PATH` - Optional URL path prefix to serve the HTTP API, OpenAPI document, and Swagger UI under (default is empty, i.e. served at the root). Useful when running Beacon behind a reverse proxy or on a shared subpath, e.g. `/beacon`.
 - `BEACON_ADMIN_USERNAME` - The admin username for the beacon admin panel.
 - `BEACON_ADMIN_PASSWORD` - The admin password for the beacon admin panel.
 - `BEACON_VM_MEMORY_SIZE` - The amount of memory to allocate to the Beacon Virtual Machine in MB (default is 4096MB). More is better for performance, especially when working with larger datasets and performing actions such as spatial joins and group by.
@@ -51,12 +52,10 @@ Some of the configuration options can be set using environment variables. The fo
 - `BEACON_NETCDF_USE_READER_CACHE` - Whether to cache opened NetCDF readers in-memory (default is `true`).
 - `BEACON_NETCDF_READER_CACHE_SIZE` - Max number of reader entries to keep in the in-memory reader cache (default is `128`).
 
-### NetCDF multiplexer (MPIO)
+### Atlas
 
-- `BEACON_ENABLE_MULTIPLEXER_NETCDF` - Enable NetCDF multiplexer mode (multi-process worker pool) (default is `false`).
-- `BEACON_NETCDF_MULTIPLEXER_PROCESSES` - Number of worker processes to spawn when NetCDF multiplexer is enabled (default is half of CPU cores).
-- `BEACON_NETCDF_MPIO_WORKER` - Optional path to the `beacon-arrow-netcdf-mpio` executable (used when NetCDF MPIO is enabled).
-- `BEACON_NETCDF_MPIO_REQUEST_TIMEOUT_MS` - Per-request timeout (in milliseconds) for NetCDF MPIO worker requests. Set to `0` to disable (default is `0`).
+- `BEACON_ATLAS_USE_READER_CACHE` - Whether to cache opened Atlas store readers in-memory (default is `true`). This avoids re-opening the same `atlas.json` store across queries.
+- `BEACON_ATLAS_READER_CACHE_SIZE` - Max number of Atlas reader entries to keep in the in-memory reader cache (default is `32`).
 
 ### Beacon Binary Format
 

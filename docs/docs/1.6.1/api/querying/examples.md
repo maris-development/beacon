@@ -135,7 +135,9 @@ Content-Type: application/json
 }
 ```
 
-### Query Zarr with statistics columns
+### Query Zarr with a coordinate range
+
+Predicate pushdown is automatic — Beacon prunes chunks and slices coordinate dimensions from your `filters`:
 
 ```http
 POST /api/query
@@ -144,8 +146,7 @@ Content-Type: application/json
 {
   "from": {
     "zarr": {
-      "paths": ["sst/*/zarr.json"],
-      "statistics_columns": ["time", "latitude", "longitude"]
+      "paths": ["sst/*/zarr.json"]
     }
   },
   "select": ["time", "latitude", "longitude", "sst"],

@@ -76,6 +76,26 @@ STORED AS ZARR
 LOCATION 'sst/*/zarr.json'
 ```
 
+### Atlas
+
+Like Zarr, Atlas tables point at the store's `atlas.json` marker file rather than a folder:
+
+```sql
+CREATE EXTERNAL TABLE sensor_atlas
+STORED AS ATLAS
+LOCATION 'collections/sensor/atlas.json'
+```
+
+To combine several Atlas stores under one table, use a glob over their markers:
+
+```sql
+CREATE EXTERNAL TABLE sensor_atlas
+STORED AS ATLAS
+LOCATION 'collections/*/atlas.json'
+```
+
+See [Atlas](./datasets.md#atlas) for what the format does and how it speeds up NetCDF/Zarr workloads.
+
 ### CSV
 
 ```sql
@@ -182,6 +202,7 @@ DESCRIBE ocean_profiles;
 | `PARQUET`         | `.parquet`                          |
 | `NETCDF`          | `.nc`, `.nc4`, `.cdf`               |
 | `ZARR`            | Zarr v2 / v3 (`zarr.json`)          |
+| `ATLAS`           | Atlas array store (`atlas.json`)    |
 | `CSV`             | `.csv`                              |
 | `ARROW`           | Arrow IPC stream (`.arrow`, `.ipc`) |
 | `ODV`             | ODV ASCII spreadsheet               |

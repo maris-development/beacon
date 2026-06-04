@@ -108,7 +108,7 @@ Content-Type: application/json
 }
 ```
 
-To enable 1D slice pushdown for large Zarr stores, supply `statistics_columns`:
+Predicate pushdown is automatic for large Zarr stores — Beacon prunes chunks and slices coordinate dimensions from your `filters`, with no extra options to configure:
 
 ```http
 POST /api/query
@@ -117,8 +117,7 @@ Content-Type: application/json
 {
   "from": {
     "zarr": {
-      "paths": ["sst/*/zarr.json"],
-      "statistics_columns": ["time", "latitude", "longitude"]
+      "paths": ["sst/*/zarr.json"]
     }
   },
   "select": ["time", "latitude", "longitude", "sst"],

@@ -87,7 +87,6 @@ NetCDF performance in Beacon is mainly affected by:
 
 - How often Beacon needs to open the file and infer schema
 - Whether opened readers/schemas are cached
-- Whether NetCDF reads are offloaded to a multi-process worker pool (MPIO mode)
 
 ::: tip
 NetCDF scans currently read a single Arrow `RecordBatch` per file. If you have extremely large `.nc` files, performance may improve by splitting them into smaller files or converting to chunk-friendly formats (e.g. Zarr), depending on your access pattern.
@@ -129,36 +128,28 @@ For a “many NetCDF files” deployment:
 - `BEACON_NETCDF_USE_READER_CACHE=true`
 - `BEACON_NETCDF_READER_CACHE_SIZE=16484`
 
-## Zarr statistics (predicate pruning)
+## Zarr predicate pushdown
 
-Beacon’s Zarr reader can use lightweight statistics for predicate-aware IO reduction. When enabled, Beacon can:
+Beacon’s Zarr reader applies predicate pushdown **automatically** through the shared N-dimensional engine. Based on your query’s filters, Beacon:
 
-- Prune entire Zarr groups that cannot satisfy your filter (based on per-column min/max)
-- Push down 1D slicing for selected “coordinate-like” arrays (for example time/lat/lon), so only relevant ranges are read
+- Prunes Zarr chunks that cannot satisfy the predicate, so only the relevant chunks are read.
+- Slices 1D “coordinate-like” arrays (for example `time`, `latitude`, `longitude`) to the requested ranges.
 
-### Enable statistics for a Zarr collection
+There is nothing to configure — no `statistics_columns` to declare and no statistics to pre-compute. Just read the store and filter; the engine handles the rest.
 
-When you create a logical Zarr table or collection through SQL DDL, include the corresponding Zarr statistics options on the table definition so Beacon can compute and use those min/max summaries for predicate pruning.
-
-The important part is the configuration itself, not a separate admin endpoint: keep the collection definition in SQL so the lifecycle remains consistent with the rest of the catalog.
-
-### Enable statistics for ad-hoc reads (SQL)
-
-`read_zarr` supports an optional second argument: a list of `statistics_columns`.
+### SQL
 
 ```http
 POST /api/query
 Content-Type: application/json
 
 {
-	"sql": "SELECT * FROM read_zarr(['datasets/**/*.zarr/zarr.json'], ['valid_time', 'latitude', 'longitude']) WHERE valid_time >= '2025-01-01' AND longitude < 30 LIMIT 100",
+	"sql": "SELECT * FROM read_zarr(['datasets/**/*.zarr/zarr.json']) WHERE valid_time >= '2025-01-01' AND longitude < 30 LIMIT 100",
 	"output": { "format": "csv" }
 }
 ```
 
-### Enable statistics for ad-hoc reads (JSON)
-
-For JSON queries, set `from.zarr.statistics_columns`:
+### JSON
 
 ```http
 POST /api/query
@@ -167,8 +158,7 @@ Content-Type: application/json
 {
 	"from": {
 		"zarr": {
-			"paths": ["datasets/**/*.zarr/zarr.json"],
-			"statistics_columns": ["valid_time", "latitude", "longitude"]
+			"paths": ["datasets/**/*.zarr/zarr.json"]
 		}
 	},
 	"select": ["valid_time", "latitude", "longitude"],
@@ -181,6 +171,21 @@ Content-Type: application/json
 }
 ```
 
-::: warning
-Statistics are computed by reading the full values of the selected arrays (and slice pushdown only applies to 1D arrays). Only enable statistics for a small set of frequently-filtered, coordinate-like columns.
+::: tip
+For collections that are queried repeatedly, re-encode the Zarr stores into a single [Atlas](./datasets.md#atlas) collection. Atlas adds per-dataset statistics pruning on top of chunk pruning, dropping whole datasets before any chunk is read.
 :::
+
+## Atlas Tuning
+
+[Atlas](./datasets.md#atlas) stores are opened through a `atlas.json` registry. To avoid re-opening the same store on every query, Beacon keeps a cache of opened Atlas readers.
+
+### Reader cache (avoid reopening stores)
+
+#### `BEACON_ATLAS_USE_READER_CACHE` and `BEACON_ATLAS_READER_CACHE_SIZE`
+
+With reader caching enabled, Beacon reuses opened Atlas readers across queries instead of re-parsing the `atlas.json` registry each time.
+
+Recommendations:
+
+- Keep `BEACON_ATLAS_USE_READER_CACHE=true` (default) when the same Atlas collections are queried repeatedly.
+- Increase `BEACON_ATLAS_READER_CACHE_SIZE` (default `32`) if you query more distinct Atlas stores than the cache can hold at once.
