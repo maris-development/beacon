@@ -1,5 +1,6 @@
-use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
-use beacon_datafusion_ext::table_ext::{MaterializedViewDefinition, TableDefinition};
+use beacon_datafusion_ext::table_ext::{
+    MaterializedViewDefinition, TableDefinition, internal_object_store_url,
+};
 use datafusion::{execution::SendableRecordBatchStream, prelude::SQLOptions, sql::TableReference};
 
 use async_trait::async_trait;
@@ -37,9 +38,9 @@ impl StatementHandler for CreateMaterializedViewStatementHandler {
             ));
         }
 
-        // Execute the defining query and persist its result as Parquet.
+        // Execute the defining query and persist its result as a single Parquet file.
         let df = session_ctx.sql(&statement.query_sql).await?;
-        let dir_path = format!("__beacon__/{}/{}", name, uuid::Uuid::new_v4());
+        let dir_path = format!("{}/{}", name, uuid::Uuid::new_v4());
         let schema = write_query_to_datasets_parquet(&session_ctx, df, &dir_path).await?;
         let storage_location = format!("{dir_path}/");
 
@@ -53,7 +54,7 @@ impl StatementHandler for CreateMaterializedViewStatementHandler {
             last_refreshed: Some(now),
         };
 
-        let store_url = DATASETS_OBJECT_STORE_URL.clone();
+        let store_url = internal_object_store_url();
         let provider = definition
             .build_provider(session_ctx.clone(), &store_url)
             .await?;

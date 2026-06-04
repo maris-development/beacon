@@ -21,11 +21,12 @@ use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     error::DataFusionError,
-    physical_expr::conjunction,
+    physical_expr::{conjunction, projection::ProjectionExprs},
+    physical_expr_adapter::BatchAdapterFactory,
     physical_plan::{
         PhysicalExpr,
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
@@ -48,6 +49,8 @@ pub struct ZarrSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// Projection pushed down by the scan, applied on top of the table schema.
+    projection: Option<ProjectionExprs>,
 }
 
 impl ZarrSource {
@@ -58,7 +61,16 @@ impl ZarrSource {
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             batch_size: usize::MAX,
             predicate: None,
+            projection: None,
         }
+    }
+
+    /// Returns a copy of this source carrying the given projection. Used to
+    /// preserve a pushed-down projection when the format rebuilds the source
+    /// in `create_physical_plan`.
+    pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -69,17 +81,11 @@ impl FileSource for ZarrSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
-        let schema_adapter_factory = self
-            .schema_adapter_factory
-            .clone()
-            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema);
 
         Ok(Arc::new(ZarrOpener {
             object_store,
-            schema_adapter: Arc::from(schema_adapter),
+            projected_schema,
             predicate: self.predicate.clone(),
             batch_size: self.batch_size,
             metrics: self.execution_plan_metrics.clone(),
@@ -124,6 +130,25 @@ impl FileSource for ZarrSource {
         self.schema_adapter_factory.clone()
     }
 
+    fn projection(&self) -> Option<&ProjectionExprs> {
+        self.projection.as_ref()
+    }
+
+    fn try_pushdown_projection(
+        &self,
+        projection: &ProjectionExprs,
+    ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
+        let merged = match &self.projection {
+            Some(existing) => existing.try_merge(projection)?,
+            None => projection.clone(),
+        };
+        let source = Self {
+            projection: Some(merged),
+            ..self.clone()
+        };
+        Ok(Some(Arc::new(source)))
+    }
+
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,
@@ -153,7 +178,7 @@ impl FileSource for ZarrSource {
 
 struct ZarrOpener {
     object_store: Arc<dyn ObjectStore>,
-    schema_adapter: Arc<dyn SchemaAdapter>,
+    projected_schema: SchemaRef,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     batch_size: usize,
     metrics: ExecutionPlanMetricsSet,
@@ -167,7 +192,7 @@ impl FileOpener for ZarrOpener {
         })?;
 
         let object_store = self.object_store.clone();
-        let schema_adapter = self.schema_adapter.clone();
+        let projected_schema = self.projected_schema.clone();
         let predicate = self.predicate.clone();
         let batch_size = self.batch_size;
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
@@ -193,10 +218,24 @@ impl FileOpener for ZarrOpener {
                 |e| DataFusionError::Execution(format!("Failed to derive Zarr Arrow schema: {e}")),
             )?);
 
-            let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+            // Columns of this group that the query needs, in file order — used
+            // both to prune the read and as the source schema for the adapter.
+            let projection: Vec<usize> = file_schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
+                .map(|(i, _)| i)
+                .collect();
             if projection.is_empty() {
                 return Ok(futures::stream::empty().boxed());
             }
+
+            // Adapt batches (read with `projection`) onto the projected output
+            // schema: reorder, cast, and null-fill columns the group lacks.
+            let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
+            let adapter =
+                BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
 
             let projected = full
                 .project(&DatasetProjection::new_with_index_projection(projection))
@@ -215,8 +254,8 @@ impl FileOpener for ZarrOpener {
                 DataFusionError::Execution(format!("Error reading Zarr dataset as Arrow: {e}"))
             })
             .and_then(move |batch| {
-                let mapped = schema_mapper.map_batch(batch).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to map Zarr batch schema: {e}"))
+                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+                    DataFusionError::Execution(format!("Failed to adapt Zarr batch schema: {e}"))
                 });
                 future::ready(mapped)
             })

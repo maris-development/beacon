@@ -241,7 +241,10 @@ impl FileFormat for ZarrFormat {
             conf.file_schema().clone(),
             conf.table_partition_cols().clone(),
         );
-        let source = ZarrSource::new(table_schema);
+        // Preserve a projection that the scan pushed down into the incoming
+        // source — rebuilding the source below would otherwise drop it.
+        let projection = conf.file_source().projection().cloned();
+        let source = ZarrSource::new(table_schema).with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -450,5 +453,62 @@ mod tests {
             .unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 0, "impossible lat predicate should prune all rows");
+    }
+
+    #[tokio::test]
+    async fn predicate_pushdown_selects_subset_through_datafusion() {
+        use arrow::array::{Float32Array, Int64Array};
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        // Discover the latitude range, then filter on its midpoint so the
+        // predicate is guaranteed to keep some — but not all — rows.
+        let stats = ctx
+            .sql("SELECT min(lat) AS mn, max(lat) AS mx, count(*) AS n FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let row = &stats[0];
+        let f32_at = |i: usize| {
+            row.column(i)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap()
+                .value(0)
+        };
+        let (mn, mx) = (f32_at(0), f32_at(1));
+        let total = row
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert!(mx > mn, "lat must span a range");
+        let mid = mn + (mx - mn) / 2.0;
+
+        let batches = ctx
+            .sql(&format!("SELECT lat FROM gridded WHERE lat > {mid}"))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut kept = 0i64;
+        for b in &batches {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap();
+            for i in 0..col.len() {
+                assert!(col.value(i) > mid, "every returned lat must satisfy the predicate");
+            }
+            kept += b.num_rows() as i64;
+        }
+        assert!(kept > 0, "midpoint predicate should keep some rows");
+        assert!(kept < total, "midpoint predicate should drop some rows");
     }
 }

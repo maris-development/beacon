@@ -390,11 +390,15 @@ impl FileFormat for AtlasFormat {
             conf.file_schema().clone(),
             conf.table_partition_cols().clone(),
         );
+        // Preserve a projection that the scan pushed down into the incoming
+        // source — rebuilding the source below would otherwise drop it.
+        let projection = conf.file_source().projection().cloned();
         let source = AtlasSource::new(
             self.datasets_object_store.clone(),
             self.options.read_dimensions.clone(),
             table_schema,
-        );
+        )
+        .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -548,11 +552,14 @@ mod tests {
     // ── AtlasFormatFactory ─────────────────────────────────────────────
 
     #[tokio::test]
-    async fn factory_get_ext_returns_atlas_json() {
+    async fn factory_get_ext_returns_atlas() {
         let store = test_store().await;
         let factory = AtlasFormatFactory::new(store, AtlasOptions::default());
-        assert_eq!(factory.get_ext(), "atlas.json");
-        assert_eq!(factory.file_format_name(), "atlas.json");
+        // `get_ext` is the format identity used to register and resolve
+        // external tables (`STORED AS ATLAS`), not the marker filename
+        // (`atlas.json`).
+        assert_eq!(factory.get_ext(), "atlas");
+        assert_eq!(factory.file_format_name(), "atlas");
     }
 
     #[tokio::test]
@@ -568,7 +575,9 @@ mod tests {
         assert!(paths.iter().any(|p| p.ends_with("/atlas.json/winter")));
         assert!(paths.iter().any(|p| p.ends_with("/atlas.json/summer")));
         for ds in &datasets {
-            assert_eq!(ds.format, "atlas.json");
+            // `format` is the factory identity (`get_ext`), used to resolve the
+            // reader — the marker filename `atlas.json` only appears in the path.
+            assert_eq!(ds.format, "atlas");
         }
     }
 
@@ -930,5 +939,106 @@ mod tests {
                 .any(|p| p.ends_with("/atlas.msgpack.zst/summer")),
             "missing summer in {paths:?}",
         );
+    }
+
+    // ── End-to-end via SessionContext (projection + predicate pushdown) ──
+
+    /// Register the `two_datasets.atlas` fixture as a DataFusion table backed by
+    /// [`AtlasFormat`] over the `datasets://` object store.
+    async fn register_example(ctx: &SessionContext, store: Arc<DatasetsStore>) {
+        use beacon_common::super_table::SuperListingTable;
+        use datafusion::datasource::file_format::FileFormat;
+        use datafusion::datasource::listing::ListingTableUrl;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        ctx.register_object_store(store_url.as_ref(), store.clone());
+
+        let format: Arc<dyn FileFormat> =
+            Arc::new(AtlasFormat::new(store, AtlasOptions::default()));
+        let url = ListingTableUrl::parse(
+            "datasets:///beacon-arrow-atlas-tests/two_datasets.atlas/atlas.json",
+        )
+        .unwrap();
+        let table = SuperListingTable::new(&ctx.state(), format, vec![url])
+            .await
+            .unwrap();
+        ctx.register_table("atlas_t", Arc::new(table)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn projection_pushdown_through_datafusion() {
+        ensure_fixture().await;
+        let store = test_store().await;
+        let ctx = SessionContext::new();
+        register_example(&ctx, store).await;
+
+        let df = ctx.sql("SELECT temperature FROM atlas_t").await.unwrap();
+        let names: Vec<String> = df
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert_eq!(names, vec!["temperature".to_string()]);
+
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches[0].num_columns(), 1);
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 7, "winter (4) + summer (3) temperature rows");
+    }
+
+    #[tokio::test]
+    async fn predicate_pushdown_prunes_through_datafusion() {
+        ensure_fixture().await;
+        let store = test_store().await;
+        let ctx = SessionContext::new();
+        register_example(&ctx, store).await;
+
+        // The maximum temperature in the fixture is 22.
+        let rows: usize = ctx
+            .sql("SELECT temperature FROM atlas_t WHERE temperature > 1000000")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 0, "no temperature exceeds 1e6");
+    }
+
+    #[tokio::test]
+    async fn predicate_pushdown_selects_subset_through_datafusion() {
+        use arrow::array::Float32Array;
+
+        ensure_fixture().await;
+        let store = test_store().await;
+        let ctx = SessionContext::new();
+        register_example(&ctx, store).await;
+
+        // winter = [1,2,3,4], summer = [20,21,22]; `> 10` keeps only summer.
+        let batches = ctx
+            .sql("SELECT temperature FROM atlas_t WHERE temperature > 10")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut temps: Vec<f32> = vec![];
+        for b in &batches {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap();
+            for i in 0..col.len() {
+                assert!(col.value(i) > 10.0, "every returned temperature must satisfy the predicate");
+                temps.push(col.value(i));
+            }
+        }
+        temps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(temps, vec![20.0f32, 21.0, 22.0], "only summer's temperatures remain");
     }
 }

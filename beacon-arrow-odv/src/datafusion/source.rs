@@ -10,14 +10,17 @@ use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    physical_expr::LexOrdering,
+    physical_expr::{LexOrdering, projection::ProjectionExprs},
+    physical_expr_adapter::BatchAdapterFactory,
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use object_store::{ObjectStore, ObjectStoreExt};
+
+use arrow::datatypes::SchemaRef;
 
 use crate::reader::AsyncOdvDecoder;
 
@@ -34,6 +37,8 @@ pub struct OdvSource {
     table_schema: TableSchema,
     /// Execution plan metrics.
     execution_plan_metrics: ExecutionPlanMetricsSet,
+    /// Projection pushed down by the scan, applied on top of the table schema.
+    projection: Option<ProjectionExprs>,
 }
 
 impl OdvSource {
@@ -43,7 +48,16 @@ impl OdvSource {
             schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
+            projection: None,
         }
+    }
+
+    /// Returns a copy of this source carrying the given projection. Used to
+    /// preserve a pushed-down projection when the format rebuilds the source
+    /// in `create_physical_plan`.
+    pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -56,18 +70,10 @@ impl FileSource for OdvSource {
         base_config: &FileScanConfig,
         _partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
 
-        // Use provided schema adapter factory or default
-        let schema_adapter_factory = self
-            .schema_adapter_factory
-            .clone()
-            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema);
-
         Ok(Arc::new(OdvOpener {
-            schema_adapter: Arc::from(schema_adapter),
+            projected_schema,
             object_store,
         }))
     }
@@ -115,6 +121,7 @@ impl FileSource for OdvSource {
             table_schema: self.table_schema.clone(),
             execution_plan_metrics: self.execution_plan_metrics.clone(),
             schema_adapter_factory: Some(factory),
+            projection: self.projection.clone(),
         }))
     }
 
@@ -122,14 +129,33 @@ impl FileSource for OdvSource {
     fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
         self.schema_adapter_factory.clone()
     }
+
+    fn projection(&self) -> Option<&ProjectionExprs> {
+        self.projection.as_ref()
+    }
+
+    fn try_pushdown_projection(
+        &self,
+        projection: &ProjectionExprs,
+    ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
+        let merged = match &self.projection {
+            Some(existing) => existing.try_merge(projection)?,
+            None => projection.clone(),
+        };
+        let source = Self {
+            projection: Some(merged),
+            ..self.clone()
+        };
+        Ok(Some(Arc::new(source)))
+    }
 }
 
 /// [`OdvOpener`] implements [`FileOpener`] for ODV ASCII files.
 ///
 /// It uses a schema adapter and handles file compression.
 struct OdvOpener {
-    /// Schema adapter for reading ODV files.
-    schema_adapter: Arc<dyn SchemaAdapter>,
+    /// The projected output schema each mapped batch is produced in.
+    projected_schema: SchemaRef,
     /// Object store for file access.
     object_store: Arc<dyn ObjectStore>,
 }
@@ -137,7 +163,7 @@ struct OdvOpener {
 impl FileOpener for OdvOpener {
     /// Opens an ODV file and returns a stream of record batches.
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
-        let schema_adapter = self.schema_adapter.clone();
+        let projected_schema = self.projected_schema.clone();
         let object_store = self.object_store.clone();
         let compression = OdvFormat::infer_compression(&file.object_meta);
 
@@ -156,8 +182,21 @@ impl FileOpener for OdvOpener {
 
             let file_schema = odv_schema_mapper.output_schema();
 
-            // Map the file schema to the projected schema
-            let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+            // Columns of this file that the query needs, in file order — used
+            // both to prune the decode and as the source schema for the adapter.
+            let projection: Vec<usize> = file_schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
+                .map(|(i, _)| i)
+                .collect();
+
+            // Adapt decoded batches onto the projected output schema: reorder,
+            // cast, and null-fill columns the file lacks.
+            let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
+            let adapter =
+                BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
 
             // Open and decode the file body
             let body_stream = object_store
@@ -177,7 +216,7 @@ impl FileOpener for OdvOpener {
             .map(move |maybe_batch| {
                 maybe_batch
                     .map_err(|e| exec_datafusion_err!("Failed to decode ODV batch: {}", e))
-                    .and_then(|batch| schema_mapper.clone().map_batch(batch))
+                    .and_then(|batch| adapter.adapt_batch(&batch))
             });
             let stream = batch_stream
                 .map_err(|e| exec_datafusion_err!("Error reading ODV ASCII file: {}", e))

@@ -12,9 +12,8 @@ use crate::{
     statement_handlers::{
         context::HandlerContext,
         handlers::register_default_statement_handlers,
-        loaders::register_default_ingest_loaders,
         payload::StatementPayload,
-        registry::{IngestFormatLoaderRegistry, StatementRegistry},
+        registry::StatementRegistry,
         stream_coalescer::coalesce_sql_stream,
     },
 };
@@ -26,9 +25,6 @@ pub(crate) struct SqlStatementExecutor {
 
 impl SqlStatementExecutor {
     pub(crate) fn new(session_ctx: Arc<SessionContext>, file_manager: Arc<FileManager>) -> Self {
-        let mut loader_registry = IngestFormatLoaderRegistry::new();
-        register_default_ingest_loaders(&mut loader_registry);
-
         let mut statement_registry = StatementRegistry::new();
         let table_factory = Arc::new(ListingTableFactoryExt::new(
             file_manager.data_object_store_url(),
@@ -37,7 +33,6 @@ impl SqlStatementExecutor {
         let context = Arc::new(HandlerContext::new(
             session_ctx,
             file_manager,
-            loader_registry,
             table_factory,
         ));
 

@@ -6,10 +6,10 @@ use datafusion::{
     config::ConfigOptions,
     datasource::{
         physical_plan::{FileOpener, FileScanConfig, FileSource},
-        schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    physical_expr::conjunction,
+    physical_expr::{conjunction, projection::ProjectionExprs},
     physical_optimizer::pruning::PruningPredicate,
     physical_plan::{
         PhysicalExpr,
@@ -40,6 +40,8 @@ pub struct BBFSource {
     stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<StreamShare>>>>,
     /// Global Metrics
     global_metrics: BBFGlobalMetrics,
+    /// Projection pushed down by the scan, applied on top of the table schema.
+    projection: Option<ProjectionExprs>,
 }
 
 impl BBFSource {
@@ -55,7 +57,16 @@ impl BBFSource {
             file_tracer: Arc::new(Mutex::new(Arc::new(Mutex::new(vec![])))),
             stream_partition_shares: Arc::new(Mutex::new(HashMap::new())),
             global_metrics,
+            projection: None,
         }
+    }
+
+    /// Returns a copy of this source carrying the given projection. Used to
+    /// preserve a pushed-down projection when the format rebuilds the source
+    /// in `create_physical_plan`.
+    pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
+        self.projection = projection;
+        self
     }
 
     pub fn set_file_tracer(&self, tracer: Arc<Mutex<Vec<String>>>) {
@@ -74,15 +85,8 @@ impl FileSource for BBFSource {
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
         let table_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
-        let schema_adapter_factory = self
-            .schema_adapter_factory
-            .clone()
-            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-        let schema_adapter =
-            schema_adapter_factory.create(projected_schema, table_schema.clone());
-        let arc_schema_adapter: Arc<dyn SchemaAdapter> = Arc::from(schema_adapter);
         Ok(Arc::new(BBFOpener::new(
-            arc_schema_adapter,
+            projected_schema,
             self.predicate
                 .clone()
                 .map(|p| PruningPredicate::try_new(p, table_schema.clone()).unwrap()),
@@ -117,6 +121,25 @@ impl FileSource for BBFSource {
 
     fn schema_adapter_factory(&self) -> Option<Arc<dyn SchemaAdapterFactory>> {
         self.schema_adapter_factory.clone()
+    }
+
+    fn projection(&self) -> Option<&ProjectionExprs> {
+        self.projection.as_ref()
+    }
+
+    fn try_pushdown_projection(
+        &self,
+        projection: &ProjectionExprs,
+    ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
+        let merged = match &self.projection {
+            Some(existing) => existing.try_merge(projection)?,
+            None => projection.clone(),
+        };
+        let source = BBFSource {
+            projection: Some(merged),
+            ..self.clone()
+        };
+        Ok(Some(Arc::new(source)))
     }
 
     fn with_schema_adapter_factory(

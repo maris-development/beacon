@@ -1,7 +1,6 @@
 mod context;
 mod executor;
 mod handlers;
-mod loaders;
 mod payload;
 mod registry;
 mod stream_coalescer;

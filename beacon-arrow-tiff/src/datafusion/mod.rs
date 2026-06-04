@@ -159,7 +159,10 @@ impl FileFormat for TiffFormat {
             conf.file_schema().clone(),
             conf.table_partition_cols().clone(),
         );
-        let source = TiffSource::new(table_schema);
+        // Preserve a projection that the scan pushed down into the incoming
+        // source — rebuilding the source below would otherwise drop it.
+        let projection = conf.file_source().projection().cloned();
+        let source = TiffSource::new(table_schema).with_projection(projection);
 
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -393,5 +396,101 @@ mod tests {
             full.num_rows()
         );
         assert!(full.num_rows() > 0, "predicate should keep some rows");
+    }
+
+    // ── End-to-end via SessionContext (projection + predicate pushdown) ──
+
+    /// Register the bundled `test.tif` as a DataFusion table backed by
+    /// [`TiffFormat`] + `ListingTable` over the local filesystem.
+    async fn register_example(ctx: &datafusion::prelude::SessionContext) {
+        use datafusion::datasource::file_format::FileFormat;
+        use datafusion::datasource::listing::{
+            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+        };
+
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/test-files/test.tif");
+        let table_path = ListingTableUrl::parse(format!("file://{file}")).unwrap();
+        let format: Arc<dyn FileFormat> = Arc::new(TiffFormat::new(Default::default()));
+        let listing_options = ListingOptions::new(format).with_file_extension("tif");
+        let config = ListingTableConfig::new(table_path)
+            .with_listing_options(listing_options)
+            .infer_schema(&ctx.state())
+            .await
+            .unwrap();
+        let table = ListingTable::try_new(config).unwrap();
+        ctx.register_table("tiff_t", Arc::new(table)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn projection_pushdown_through_datafusion() {
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx).await;
+
+        let df = ctx
+            .sql("SELECT \"band.0\", \"geo.lat\" FROM tiff_t")
+            .await
+            .unwrap();
+
+        // Only the two projected columns flow through the plan.
+        let names: Vec<String> = df
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert_eq!(names, vec!["band.0".to_string(), "geo.lat".to_string()]);
+
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches[0].num_columns(), 2);
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert!(rows > 0);
+    }
+
+    #[tokio::test]
+    async fn predicate_pushdown_prunes_through_datafusion() {
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx).await;
+
+        // Latitude never exceeds ~47°, so this predicate excludes every row.
+        let rows: usize = ctx
+            .sql("SELECT \"geo.lat\" FROM tiff_t WHERE \"geo.lat\" > 1000")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 0, "impossible latitude predicate should yield no rows");
+    }
+
+    #[tokio::test]
+    async fn predicate_pushdown_selects_subset_through_datafusion() {
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx).await;
+
+        let batches = ctx
+            .sql("SELECT \"geo.lat\" FROM tiff_t WHERE \"geo.lat\" > 40")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let mut total = 0usize;
+        for b in &batches {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .expect("geo.lat is Float64");
+            for i in 0..col.len() {
+                assert!(col.value(i) > 40.0, "every returned lat must satisfy the predicate");
+            }
+            total += b.num_rows();
+        }
+        assert!(total > 0, "satisfiable predicate should keep some rows");
+        assert!(total < 380 * 1287, "predicate should drop some rows");
     }
 }

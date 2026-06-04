@@ -129,6 +129,19 @@ impl Drop for RefreshListener {
 /// The object-store URL whose events drive external-table self-refresh.
 const DATASETS_STORE_URL: &str = "datasets://";
 
+/// Object store URL for Beacon-internal storage rooted at the `__beacon__`
+/// prefix. Materialized views persist and read their Parquet data here. The
+/// runtime registers the backing store against this URL (see `beacon-data-lake`);
+/// routing through a dedicated store keeps internal data readable by Beacon while
+/// it stays hidden from user-facing dataset listings, and bypasses the datasets
+/// store's metadata cache so freshly written data is immediately visible.
+pub const INTERNAL_STORE_URL: &str = "internal://";
+
+/// Parsed form of [`INTERNAL_STORE_URL`].
+pub fn internal_object_store_url() -> ObjectStoreUrl {
+    ObjectStoreUrl::parse(INTERNAL_STORE_URL).expect("internal store url is valid")
+}
+
 /// Subscribe to datasets-store events for a table on `data_store_url`.
 ///
 /// Only the datasets store emits events, so tables on any other store (e.g. the
@@ -188,6 +201,12 @@ async fn rebuild_into(
         return Ok(());
     };
     let state = context.state();
+    // DataFusion caches directory listings per session (enabled by default in
+    // the SessionContext). Drop them so the rebuild re-lists the current
+    // objects — otherwise a refresh never observes newly added or removed files.
+    if let Some(cache) = state.runtime_env().cache_manager.get_list_files_cache() {
+        cache.clear();
+    }
     let table = build_listing_table(&state, rebuild).await?;
     *inner.write() = Arc::new(table);
     Ok(())
@@ -659,20 +678,15 @@ impl ViewTableDefinition {
     pub async fn into_view_table(self, context: Arc<SessionContext>) -> anyhow::Result<ViewTable> {
         let options = SQLOptions::new().with_allow_ddl(true);
         let df = context.sql_with_options(&self.definition, options).await?;
-        let cloned_plan = df.logical_plan();
-        if let LogicalPlan::Ddl(DdlStatement::CreateView(plan)) = cloned_plan {
-            Ok(ViewTable::new(
-                plan.input.as_ref().clone(),
-                Some(self.definition),
-            ))
-        } else {
-            // This should never happen because the definition must have come from a ViewTable, but we defensively handle it just in case.
-            anyhow::bail!(
-                "Expected logical plan for view '{}' to be a CreateView DDL, but got: {:?}",
-                self.name,
-                cloned_plan
-            );
-        }
+        // The stored definition is the view body (a `SELECT`), which DataFusion
+        // plans straight to the view's input plan. Older definitions stored the
+        // full `CREATE VIEW … AS …`, which wraps the input in a `CreateView` DDL;
+        // unwrap that case for backward compatibility.
+        let input = match df.logical_plan() {
+            LogicalPlan::Ddl(DdlStatement::CreateView(plan)) => plan.input.as_ref().clone(),
+            plan => plan.clone(),
+        };
+        Ok(ViewTable::new(input, Some(self.definition)))
     }
 }
 
@@ -685,23 +699,16 @@ impl TableDefinition for ViewTableDefinition {
         context: Arc<SessionContext>,
         _data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
-        // Compile the SQL definition into a DataFusion logical plan and use it to create a ViewTable provider.
+        // Compile the SQL definition into a DataFusion logical plan and use it to
+        // create a ViewTable provider. The definition is the view body (`SELECT`),
+        // which plans straight to the input plan; older `CREATE VIEW … AS …`
+        // definitions wrap it in a `CreateView` DDL, which we unwrap.
         let state = context.state();
-        let plan = state.create_logical_plan(&self.definition).await?;
-
-        if let LogicalPlan::Ddl(DdlStatement::CreateView(plan)) = plan {
-            Ok(Arc::new(ViewTable::new(
-                plan.input.as_ref().clone(),
-                Some(self.definition.clone()),
-            )))
-        } else {
-            // This should never happen because the definition must have come from a ViewTable, but we defensively handle it just in case.
-            anyhow::bail!(
-                "Expected logical plan for view '{}' to be a CreateView DDL, but got: {:?}",
-                self.name,
-                plan
-            );
-        }
+        let input = match state.create_logical_plan(&self.definition).await? {
+            LogicalPlan::Ddl(DdlStatement::CreateView(plan)) => plan.input.as_ref().clone(),
+            plan => plan,
+        };
+        Ok(Arc::new(ViewTable::new(input, Some(self.definition.clone()))))
     }
 
     fn table_name(&self) -> &str {
@@ -738,10 +745,11 @@ impl MaterializedView {
         &self.definition
     }
 
-    /// Storage prefix (relative to the datasets object store) that holds all
-    /// versioned data directories for this materialized view.
+    /// Storage prefix (relative to the internal object store, see
+    /// [`INTERNAL_STORE_URL`]) that holds all versioned data directories for this
+    /// materialized view.
     pub fn base_storage_prefix(&self) -> String {
-        format!("__beacon__/{}", self.definition.name)
+        self.definition.name.clone()
     }
 }
 
@@ -810,8 +818,9 @@ pub struct MaterializedViewDefinition {
     pub definition: String,
     /// Output schema of the query, recorded for catalog/metadata purposes.
     pub schema: SchemaRef,
-    /// Active data directory (relative to the datasets object store) holding the
-    /// persisted Parquet files, e.g. `__beacon__/<name>/<uuid>/`.
+    /// Active data directory (relative to the internal object store, see
+    /// [`INTERNAL_STORE_URL`]) holding the persisted Parquet files, e.g.
+    /// `<name>/<uuid>/`.
     pub storage_location: String,
     /// Creation timestamp (Unix epoch milliseconds).
     pub created_at: i64,
@@ -829,7 +838,7 @@ impl TableDefinition for MaterializedViewDefinition {
     async fn build_provider(
         &self,
         context: Arc<SessionContext>,
-        data_store_url: &ObjectStoreUrl,
+        _data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
         let session_state = context.state();
         let file_format_factory = session_state
@@ -841,7 +850,11 @@ impl TableDefinition for MaterializedViewDefinition {
         let file_format =
             file_format_factory.create(&session_state, &std::collections::HashMap::new())?;
 
-        let mut listing_table_url = parse_listing_table_url(data_store_url, &self.storage_location)?;
+        // Materialized views always read from the Beacon-internal store, where
+        // their data is written, irrespective of the caller's default store.
+        let internal_store_url = internal_object_store_url();
+        let mut listing_table_url =
+            parse_listing_table_url(&internal_store_url, &self.storage_location)?;
 
         let options = ListingOptions::new(file_format)
             .with_file_extension("")
@@ -1218,7 +1231,7 @@ mod tests {
     /// Verifies legacy view JSON without dependencies remains deserializable.
     fn view_table_definition_deserializes_without_dependencies_for_compatibility() {
         let legacy_json = r#"{
-  "type": "view_table",
+  "definition_type": "view_table",
   "name": "legacy_view",
   "definition": "SELECT 1 AS x"
 }"#;
@@ -1353,7 +1366,7 @@ mod tests {
             .sql("SELECT 1 AS a, 2 AS b")
             .await
             .expect("query should plan");
-        let write_url = format!("file://{}/", root.to_string_lossy());
+        let write_url = format!("file://{}/data/", root.to_string_lossy());
         df.write_parquet(&write_url, DataFrameWriteOptions::new(), None)
             .await
             .expect("parquet result should be written");
@@ -1362,16 +1375,21 @@ mod tests {
             name: "mv".to_string(),
             definition: "SELECT 1 AS a, 2 AS b".to_string(),
             schema: Arc::new(Schema::empty()),
-            storage_location: format!("{}/", to_store_relative_location(&root)),
+            storage_location: "data/".to_string(),
             created_at: 0,
             last_refreshed: None,
         };
 
+        // Materialized views always read from the internal store; register it
+        // rooted at the temp directory so `storage_location` resolves under it.
         let context = Arc::new(SessionContext::new());
-        let store_url = ObjectStoreUrl::parse("file://").unwrap();
+        let internal_store_url = super::internal_object_store_url();
+        let internal_store =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(&root).unwrap());
+        context.register_object_store(internal_store_url.as_ref(), internal_store);
 
         let provider = definition
-            .build_provider(context.clone(), &store_url)
+            .build_provider(context.clone(), &internal_store_url)
             .await
             .expect("materialized view provider should be built");
 
@@ -1379,7 +1397,7 @@ mod tests {
             .as_any()
             .downcast_ref::<MaterializedView>()
             .expect("provider should be a MaterializedView");
-        assert_eq!(materialized.base_storage_prefix(), "__beacon__/mv");
+        assert_eq!(materialized.base_storage_prefix(), "mv");
 
         let schema = provider.schema();
         assert_eq!(schema.fields().len(), 2);

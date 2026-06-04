@@ -205,11 +205,15 @@ impl FileFormat for NetcdfFormat {
             conf.file_schema().clone(),
             conf.table_partition_cols().clone(),
         );
+        // Preserve a projection that the scan pushed down into the incoming
+        // source — rebuilding the source below would otherwise drop it.
+        let projection = conf.file_source().projection().cloned();
         let source = NetCDFSource::new(
             self.datasets_object_store.clone(),
             self.options.read_dimensions.clone(),
             table_schema,
-        );
+        )
+        .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -430,15 +434,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn infer_schema_empty_objects_returns_error() {
+    async fn infer_schema_empty_objects_returns_empty_schema() {
         let store = test_store().await;
         let format = test_format(store.clone());
         let dummy_store: Arc<dyn ObjectStore> =
             Arc::new(object_store::local::LocalFileSystem::new());
         let ctx = datafusion::prelude::SessionContext::new();
 
-        let result = format.infer_schema(&ctx.state(), &dummy_store, &[]).await;
-        assert!(result.is_err());
+        // With no objects there is nothing to infer, so the format yields an
+        // empty schema — consistent with the zarr/tiff N-D formats.
+        let schema = format
+            .infer_schema(&ctx.state(), &dummy_store, &[])
+            .await
+            .expect("empty object list should infer an empty schema");
+        assert_eq!(schema.fields().len(), 0);
     }
 
     // ── file_source ────────────────────────────────────────────────────
@@ -585,6 +594,82 @@ mod tests {
         );
     }
 
+    /// When a file is scanned under a merged (super-typed) schema that includes
+    /// columns it does not have, the `BatchAdapterFactory` must null-fill those
+    /// columns. We merge the gridded + ragged schemas, read the ragged file, and
+    /// assert a gridded-only column comes back all-null at the merged width.
+    #[tokio::test]
+    async fn opener_null_fills_columns_missing_from_a_file() {
+        use arrow::array::Array;
+
+        let store = test_store().await;
+        let format = test_format(store.clone());
+        let dummy_store: Arc<dyn ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new());
+        let ctx = datafusion::prelude::SessionContext::new();
+
+        // Merged (super-typed) schema across the ragged + gridded files.
+        let merged: SchemaRef = format
+            .infer_schema(
+                &ctx.state(),
+                &dummy_store,
+                &[wod_object_meta(), gridded_object_meta()],
+            )
+            .await
+            .expect("merged schema");
+
+        // Pick a merged column the ragged (wod) file does not provide.
+        let wod_schema = reader::fetch_schema(store.clone(), wod_object_meta(), None)
+            .await
+            .expect("wod schema");
+        let missing = merged
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .find(|name| wod_schema.index_of(name).is_err())
+            .expect("merged schema should contain a column the wod file lacks");
+        let missing_idx = merged.index_of(&missing).unwrap();
+
+        // No projection pushed → the opener reads under the full merged schema.
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(merged.clone());
+        let opener = source::NetCDFSource::new(store, None, ts);
+        let conf = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(opener.clone()) as Arc<dyn FileSource>,
+        )
+        .build();
+        let file_opener = opener
+            .create_file_opener(
+                Arc::new(object_store::local::LocalFileSystem::new()),
+                &conf,
+                0,
+            )
+            .expect("file opener");
+
+        let stream = file_opener
+            .open(PartitionedFile::from(wod_object_meta()))
+            .expect("open")
+            .await
+            .expect("stream future");
+        let batches: Vec<_> = stream.collect().await;
+        assert!(!batches.is_empty(), "ragged file should produce batches");
+
+        for batch in &batches {
+            let batch = batch.as_ref().expect("batch ok");
+            assert_eq!(
+                batch.schema().fields().len(),
+                merged.fields().len(),
+                "batch must conform to the merged schema width"
+            );
+            let col = batch.column(missing_idx);
+            assert_eq!(
+                col.null_count(),
+                col.len(),
+                "column `{missing}` (absent from the wod file) must be all-null",
+            );
+        }
+    }
+
     #[tokio::test]
     async fn opener_with_read_dimensions_limits_columns() {
         let store = test_store().await;
@@ -637,5 +722,138 @@ mod tests {
             first.num_columns(),
             full_schema.fields().len(),
         );
+    }
+
+    // ── End-to-end via SessionContext (projection + predicate pushdown) ──
+
+    /// Register `gridded-example.nc` as a DataFusion table backed by
+    /// [`NetcdfFormat`] over the `datasets://` object store.
+    async fn register_example(
+        ctx: &datafusion::prelude::SessionContext,
+        store: Arc<beacon_object_storage::DatasetsStore>,
+    ) {
+        use beacon_common::super_table::SuperListingTable;
+        use datafusion::datasource::file_format::FileFormat;
+        use datafusion::datasource::listing::ListingTableUrl;
+
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        ctx.register_object_store(store_url.as_ref(), store.clone());
+
+        let format: Arc<dyn FileFormat> =
+            Arc::new(NetcdfFormat::new(store, NetcdfOptions::default()));
+        let url =
+            ListingTableUrl::parse("datasets:///beacon-arrow-netcdf-tests/gridded-example.nc")
+                .unwrap();
+        let table = SuperListingTable::new(&ctx.state(), format, vec![url])
+            .await
+            .unwrap();
+        ctx.register_table("gridded_nc", Arc::new(table)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn projection_pushdown_through_datafusion() {
+        let store = test_store().await;
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx, store).await;
+
+        let df = ctx
+            .sql("SELECT analysed_sst, lat FROM gridded_nc")
+            .await
+            .unwrap();
+        let names: Vec<String> = df
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert_eq!(names, vec!["analysed_sst".to_string(), "lat".to_string()]);
+
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches[0].num_columns(), 2);
+        assert!(batches.iter().map(|b| b.num_rows()).sum::<usize>() > 0);
+    }
+
+    #[tokio::test]
+    async fn predicate_pushdown_prunes_through_datafusion() {
+        let store = test_store().await;
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx, store).await;
+
+        // Latitude is geographic (≤ 90°), so this excludes every row.
+        let rows: usize = ctx
+            .sql("SELECT lat FROM gridded_nc WHERE lat > 100000")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 0, "impossible latitude predicate should yield no rows");
+    }
+
+    #[tokio::test]
+    async fn predicate_pushdown_selects_subset_through_datafusion() {
+        use arrow::array::{Float64Array, Int64Array};
+
+        let store = test_store().await;
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx, store).await;
+
+        // Filter on the midpoint of the latitude range so the predicate keeps
+        // some — but not all — rows. Cast to f64 so the test is type-agnostic.
+        let stats = ctx
+            .sql(
+                "SELECT min(CAST(lat AS DOUBLE)) AS mn, max(CAST(lat AS DOUBLE)) AS mx, \
+                 count(*) AS n FROM gridded_nc",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let row = &stats[0];
+        let d = |i: usize| {
+            row.column(i)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0)
+        };
+        let (mn, mx) = (d(0), d(1));
+        let total = row
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert!(mx > mn, "lat must span a range");
+        let mid = mn + (mx - mn) / 2.0;
+
+        let batches = ctx
+            .sql(&format!(
+                "SELECT CAST(lat AS DOUBLE) AS latd FROM gridded_nc \
+                 WHERE CAST(lat AS DOUBLE) > {mid}"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut kept = 0i64;
+        for b in &batches {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for i in 0..col.len() {
+                assert!(col.value(i) > mid, "every returned lat must satisfy the predicate");
+            }
+            kept += b.num_rows() as i64;
+        }
+        assert!(kept > 0, "midpoint predicate should keep some rows");
+        assert!(kept < total, "midpoint predicate should drop some rows");
     }
 }

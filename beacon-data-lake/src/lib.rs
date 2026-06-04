@@ -156,6 +156,13 @@ impl DataLake {
             .expect("Failed to initialize Data Lake Engine...");
         let datasets_object_store = get_datasets_object_store().await;
         let datasets_object_store_url = DATASETS_OBJECT_STORE_URL.clone();
+        // Register the Beacon-internal store (rooted at the `__beacon__` prefix)
+        // used by materialized views to persist and read their data directly,
+        // bypassing the datasets store's user-facing hiding and metadata cache.
+        session_context.register_object_store(
+            &Url::parse(beacon_datafusion_ext::table_ext::INTERNAL_STORE_URL).unwrap(),
+            datasets_object_store.internal_store(),
+        );
         // Register datasets object store
         session_context.register_object_store(
             &Url::parse(datasets_object_store_url.as_str()).unwrap(),

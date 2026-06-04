@@ -204,7 +204,10 @@ impl FileFormat for OdvFormat {
             conf.file_schema().clone(),
             conf.table_partition_cols().clone(),
         );
-        let source = OdvSource::new(table_schema);
+        // Preserve a projection that the scan pushed down into the incoming
+        // source — rebuilding the source below would otherwise drop it.
+        let projection = conf.file_source().projection().cloned();
+        let source = OdvSource::new(table_schema).with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();

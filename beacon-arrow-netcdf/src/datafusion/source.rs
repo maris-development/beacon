@@ -16,10 +16,11 @@ use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    physical_expr::{conjunction, PhysicalExpr},
+    physical_expr::{conjunction, projection::ProjectionExprs, PhysicalExpr},
+    physical_expr_adapter::BatchAdapterFactory,
     physical_optimizer::pruning::PruningPredicate,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
@@ -45,6 +46,8 @@ pub struct NetCDFSource {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// Projection pushed down by the scan, applied on top of the table schema.
+    projection: Option<ProjectionExprs>,
 }
 
 impl NetCDFSource {
@@ -61,7 +64,16 @@ impl NetCDFSource {
             read_dimensions,
             batch_size: usize::MAX,
             predicate: None,
+            projection: None,
         }
+    }
+
+    /// Returns a copy of this source carrying the given projection. Used to
+    /// preserve a pushed-down projection when the format rebuilds the source
+    /// in `create_physical_plan`.
+    pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -74,16 +86,10 @@ impl FileSource for NetCDFSource {
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
         let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
-        let schema_adapter_factory = self
-            .schema_adapter_factory
-            .clone()
-            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-
-        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema.clone());
 
         Ok(Arc::new(NetCDFOpener::new(
             self.datasets_object_store.clone(),
-            Arc::from(schema_adapter),
+            projected_schema,
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
@@ -130,6 +136,25 @@ impl FileSource for NetCDFSource {
         self.schema_adapter_factory.clone()
     }
 
+    fn projection(&self) -> Option<&ProjectionExprs> {
+        self.projection.as_ref()
+    }
+
+    fn try_pushdown_projection(
+        &self,
+        projection: &ProjectionExprs,
+    ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
+        let merged = match &self.projection {
+            Some(existing) => existing.try_merge(projection)?,
+            None => projection.clone(),
+        };
+        let source = Self {
+            projection: Some(merged),
+            ..self.clone()
+        };
+        Ok(Some(Arc::new(source)))
+    }
+
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,
@@ -159,7 +184,7 @@ impl FileSource for NetCDFSource {
 /// [`RecordBatch`]es via [`any_dataset_as_record_batch_stream`].
 struct NetCDFOpener {
     datasets_object_store: Arc<DatasetsStore>,
-    schema_adapter: Arc<dyn SchemaAdapter>,
+    projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -172,7 +197,7 @@ struct NetCDFOpener {
 impl NetCDFOpener {
     fn new(
         datasets_object_store: Arc<DatasetsStore>,
-        schema_adapter: Arc<dyn SchemaAdapter>,
+        projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -186,7 +211,7 @@ impl NetCDFOpener {
 
         Self {
             datasets_object_store,
-            schema_adapter,
+            projected_schema,
             read_dimensions,
             batch_size,
             predicate,
@@ -200,7 +225,7 @@ impl NetCDFOpener {
     async fn read_task(
         object: ObjectMeta,
         datasets_object_store: Arc<DatasetsStore>,
-        schema_adapter: Arc<dyn SchemaAdapter>,
+        projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
@@ -239,11 +264,24 @@ impl NetCDFOpener {
                 })?
                 .into();
 
-        let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+        // Columns of this file that the query needs, in file order — used both
+        // to prune the read and as the source schema for the batch adapter.
+        let projection: Vec<usize> = file_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
+            .map(|(i, _)| i)
+            .collect();
 
         if projection.is_empty() {
             return Ok(futures::stream::empty().boxed());
         }
+
+        // Adapt batches (read with `projection`) onto the projected output
+        // schema: reorder, cast, and null-fill columns this file lacks.
+        let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
+        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
 
         let dataset = if projection.len() < file_schema.fields().len() {
             let proj = DatasetProjection {
@@ -267,9 +305,9 @@ impl NetCDFOpener {
                 ))
             })
             .and_then(move |batch| {
-                let mapped = schema_mapper.map_batch(batch).map_err(|e| {
+                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to map NetCDF batch schema: {e}"
+                        "Failed to adapt NetCDF batch schema: {e}"
                     ))
                 });
                 futures::future::ready(mapped)
@@ -303,7 +341,7 @@ impl FileOpener for NetCDFOpener {
         let fut = Self::read_task(
             file.object_meta,
             self.datasets_object_store.clone(),
-            self.schema_adapter.clone(),
+            self.projected_schema.clone(),
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),

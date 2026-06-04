@@ -7,16 +7,17 @@ use beacon_nd_array::arrow::{
     pushdown_filter::PushdownFilter,
 };
 use beacon_object_storage::DatasetsStore;
+use datafusion::physical_expr_adapter::BatchAdapterFactory;
 use datafusion::{
     common::Statistics,
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    physical_expr::{PhysicalExpr, conjunction},
+    physical_expr::{PhysicalExpr, conjunction, projection::ProjectionExprs},
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::ExecutionPlanMetricsSet,
@@ -59,6 +60,8 @@ pub struct AtlasSource {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     read_dimensions: Option<Vec<String>>,
+    /// Projection pushed down by the scan, applied on top of the table schema.
+    projection: Option<ProjectionExprs>,
 
     stream_cache: Arc<Mutex<HashMap<String, AtlasStreamDatasets>>>,
 }
@@ -77,8 +80,17 @@ impl AtlasSource {
             batch_size: usize::MAX,
             predicate: None,
             read_dimensions,
+            projection: None,
             stream_cache: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Returns a copy of this source carrying the given projection. Used to
+    /// preserve a pushed-down projection when the format rebuilds the source
+    /// in `create_physical_plan`.
+    pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -89,18 +101,11 @@ impl FileSource for AtlasSource {
         base_config: &FileScanConfig,
         partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
-        let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
-        let schema_adapter_factory = self
-            .schema_adapter_factory
-            .clone()
-            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-
-        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema);
 
         Ok(Arc::new(AtlasOpener {
             datasets_object_store: self.datasets_object_store.clone(),
-            schema_adapter: Arc::from(schema_adapter),
+            projected_schema,
             batch_size: self.batch_size,
             metrics: self.execution_plan_metrics.clone(),
             partition,
@@ -137,6 +142,31 @@ impl FileSource for AtlasSource {
         self.schema_adapter_factory.clone()
     }
 
+    fn projection(&self) -> Option<&ProjectionExprs> {
+        self.projection.as_ref()
+    }
+
+    fn try_pushdown_projection(
+        &self,
+        projection: &ProjectionExprs,
+    ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
+        // Merge with any projection already pushed down, then record it on a
+        // new source. `FileScanConfig::projected_schema` reads this back via
+        // `projection()`, and the opener's schema adapter applies it per
+        // atlas dataset.
+        let merged = match &self.projection {
+            Some(existing) => existing.try_merge(projection)?,
+            None => projection.clone(),
+        };
+
+        let source = Self {
+            projection: Some(merged),
+            ..self.clone()
+        };
+
+        Ok(Some(Arc::new(source)))
+    }
+
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,
@@ -164,7 +194,7 @@ impl FileSource for AtlasSource {
 
 struct AtlasOpener {
     datasets_object_store: Arc<DatasetsStore>,
-    schema_adapter: Arc<dyn SchemaAdapter>,
+    projected_schema: SchemaRef,
     batch_size: usize,
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
@@ -179,7 +209,7 @@ impl AtlasOpener {
         datasets_object_store: Arc<DatasetsStore>,
         object_meta: ObjectMeta,
         stream_cache: Arc<Mutex<HashMap<String, AtlasStreamDatasets>>>,
-        schema_adapter: Arc<dyn SchemaAdapter>,
+        projected_schema: SchemaRef,
         batch_size: usize,
         metrics: Option<DatasetReadMetrics>,
         read_dimensions: Option<Vec<String>>,
@@ -207,7 +237,7 @@ impl AtlasOpener {
         let stream = futures_stream
             .map(move |dataset_name| {
                 let atlas = atlas.clone();
-                let schema_adapter = schema_adapter.clone();
+                let projected_schema = projected_schema.clone();
                 let read_dimensions = read_dimensions.clone();
                 let metrics = metrics.clone();
                 let object_path = object_path.clone();
@@ -233,8 +263,16 @@ impl AtlasOpener {
                     })?
                     .into();
 
-                        let (schema_mapper, projection) =
-                            schema_adapter.map_schema(&file_schema)?;
+                        // Columns of this dataset that the query needs, in file
+                        // order — used both to prune the read and as the source
+                        // schema for the batch adapter.
+                        let projection: Vec<usize> = file_schema
+                            .fields()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
+                            .map(|(i, _)| i)
+                            .collect();
 
                         if projection.is_empty() {
                             return Ok::<
@@ -248,6 +286,14 @@ impl AtlasOpener {
                             .iter()
                             .map(|i| file_schema.field(*i).name().clone())
                             .collect();
+
+                        // Adapt batches (read with `projection`) onto the
+                        // projected output schema: reorder, cast, and null-fill
+                        // columns this dataset does not provide.
+                        let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
+                        let adapter = BatchAdapterFactory::new(projected_schema)
+                            .make_adapter(&source_schema)?;
+
                         let dataset = crate::reader::dataset_from_atlas(
                             atlas,
                             &dataset_name,
@@ -275,9 +321,9 @@ impl AtlasOpener {
                             ))
                         })
                         .and_then(move |batch| {
-                            let mapped = schema_mapper.map_batch(batch).map_err(|e| {
+                            let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                                 datafusion::error::DataFusionError::Execution(format!(
-                                    "Failed to map atlas batch schema: {e}"
+                                    "Failed to adapt atlas batch schema: {e}"
                                 ))
                             });
                             future::ready(mapped)
@@ -303,7 +349,7 @@ impl FileOpener for AtlasOpener {
             self.datasets_object_store.clone(),
             file.object_meta,
             self.stream_cache.clone(),
-            self.schema_adapter.clone(),
+            self.projected_schema.clone(),
             self.batch_size,
             metrics,
             self.read_dimensions.clone(),
@@ -348,8 +394,11 @@ mod tests {
             .await
             .expect("infer schema");
 
-        let source =
-            AtlasSource::new(store, None, TableSchema::from_file_schema(table_schema.clone()));
+        let source = AtlasSource::new(
+            store,
+            None,
+            TableSchema::from_file_schema(table_schema.clone()),
+        );
         let conf = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
@@ -401,11 +450,7 @@ mod tests {
         let (opener, schema, object) = build_opener_with_schema().await;
         let pf = pf_for(object.clone());
 
-        let stream = opener
-            .open(pf)
-            .expect("open")
-            .await
-            .expect("stream");
+        let stream = opener.open(pf).expect("open").await.expect("stream");
         let batches: Vec<arrow::record_batch::RecordBatch> =
             stream.filter_map(|b| async move { b.ok() }).collect().await;
         assert!(!batches.is_empty(), "expected batches from drained queue");
@@ -432,11 +477,7 @@ mod tests {
         let (opener, schema, object) = build_opener_with_schema().await;
         let pf = pf_for(object.clone());
 
-        let stream = opener
-            .open(pf)
-            .expect("open")
-            .await
-            .expect("stream");
+        let stream = opener.open(pf).expect("open").await.expect("stream");
         let batches: Vec<arrow::record_batch::RecordBatch> =
             stream.filter_map(|b| async move { b.ok() }).collect().await;
         assert!(!batches.is_empty());
@@ -484,8 +525,11 @@ mod tests {
             .expect("infer schema");
         let cycle_idx = table_schema.index_of("cycle").expect("cycle column");
 
-        let source =
-            AtlasSource::new(store, None, TableSchema::from_file_schema(table_schema.clone()));
+        let source = AtlasSource::new(
+            store,
+            None,
+            TableSchema::from_file_schema(table_schema.clone()),
+        );
         let conf = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()) as Arc<dyn FileSource>,
@@ -499,11 +543,7 @@ mod tests {
             .expect("file opener");
         let pf = pf_for(object.clone());
 
-        let stream = opener
-            .open(pf)
-            .expect("open")
-            .await
-            .expect("stream");
+        let stream = opener.open(pf).expect("open").await.expect("stream");
         let batches: Vec<arrow::record_batch::RecordBatch> =
             stream.filter_map(|b| async move { b.ok() }).collect().await;
 
@@ -545,6 +585,117 @@ mod tests {
             second_batches.is_empty(),
             "second open must observe a drained queue, got {} batches",
             second_batches.len(),
+        );
+    }
+
+    // ── Schema adaptation (BatchAdapterFactory) ────────────────────────
+    //
+    // These tests lock the contract our openers rely on after the
+    // DataFusion 52/53 `SchemaAdapter` removal: every opener reads only the
+    // file columns the query needs, then adapts each batch onto the
+    // projected output schema with `BatchAdapterFactory`. They reproduce
+    // that exact wiring against hand-built schemas (no fixtures), so the
+    // behavior is verified independently of any one format reader.
+
+    /// Build the read projection the way every opener does: the file columns
+    /// present in the projected output schema, in file order.
+    fn needed_file_columns(
+        file_schema: &arrow::datatypes::Schema,
+        projected_schema: &arrow::datatypes::Schema,
+    ) -> Vec<usize> {
+        file_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn batch_adapter_reorders_casts_and_null_fills() {
+        use arrow::array::{Array, ArrayRef, Int32Array, Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::physical_expr_adapter::BatchAdapterFactory;
+
+        // What the query wants out.
+        let projected: arrow::datatypes::SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Utf8, true),
+            Field::new("c", DataType::Float64, true),
+        ]));
+        // This file provides b then a (reordered), a is Int32 (needs a cast),
+        // and it has no `c` column at all (must be null-filled).
+        let file = Schema::new(vec![
+            Field::new("b", DataType::Utf8, true),
+            Field::new("a", DataType::Int32, true),
+        ]);
+
+        let projection = needed_file_columns(&file, &projected);
+        assert_eq!(projection, vec![0, 1]);
+
+        let source_schema: arrow::datatypes::SchemaRef =
+            Arc::new(file.project(&projection).unwrap());
+        let adapter = BatchAdapterFactory::new(projected.clone())
+            .make_adapter(&source_schema)
+            .unwrap();
+
+        // A batch read with `projection`: columns [b, a] in projection order.
+        let batch = RecordBatch::try_new(
+            source_schema,
+            vec![
+                Arc::new(StringArray::from(vec!["x", "y"])) as ArrayRef,
+                Arc::new(Int32Array::from(vec![1, 2])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let out = adapter.adapt_batch(&batch).unwrap();
+        assert_eq!(out.schema(), projected);
+        let a = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(a.values(), &[1, 2], "Int32 column cast to Int64");
+        let b = out
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(b.value(0), "x");
+        assert_eq!(out.column(2).null_count(), 2, "missing column null-filled");
+    }
+
+    #[test]
+    fn batch_adapter_empty_projection_preserves_row_count() {
+        use arrow::array::RecordBatchOptions;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::physical_expr_adapter::BatchAdapterFactory;
+
+        // `SELECT count(*)` projects to zero output columns.
+        let projected: arrow::datatypes::SchemaRef = Arc::new(Schema::new(Vec::<Field>::new()));
+        let file = Schema::new(vec![Field::new("a", DataType::Int32, true)]);
+
+        let projection = needed_file_columns(&file, &projected);
+        assert!(projection.is_empty());
+
+        let source_schema: arrow::datatypes::SchemaRef =
+            Arc::new(file.project(&projection).unwrap());
+        let adapter = BatchAdapterFactory::new(projected)
+            .make_adapter(&source_schema)
+            .unwrap();
+
+        // A zero-column batch carrying a row count, as a reader would emit it.
+        let batch = RecordBatch::try_new_with_options(
+            source_schema,
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(3)),
+        )
+        .unwrap();
+
+        let out = adapter.adapt_batch(&batch).unwrap();
+        assert_eq!(out.num_columns(), 0);
+        assert_eq!(
+            out.num_rows(),
+            3,
+            "row count preserved through empty projection"
         );
     }
 }

@@ -25,7 +25,7 @@
 //! ```no_run
 //! # async fn example() -> anyhow::Result<()> {
 //! let any = beacon_arrow_netcdf::reader::open_dataset("data.nc").await?;
-//! for name in any.dataset().get_array_names() {
+//! for name in any.dataset().arrays.keys() {
 //!     println!("{name}");
 //! }
 //! # Ok(())
