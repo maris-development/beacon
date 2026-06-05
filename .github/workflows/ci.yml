@@ -50,7 +50,7 @@ jobs:
       - name: Run tests
         env:
           RUST_BACKTRACE: "1"
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --workspace --tests --no-fail-fast
 
       - name: Build
         run: cargo build --workspace
