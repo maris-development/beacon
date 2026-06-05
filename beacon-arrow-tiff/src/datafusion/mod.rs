@@ -23,6 +23,7 @@ const TIF_EXTENSION: &str = "tif";
 pub mod options;
 pub mod reader;
 pub mod source;
+pub mod statistics;
 
 #[derive(Debug, Clone)]
 pub struct TiffFormatFactory {
@@ -143,11 +144,24 @@ impl FileFormat for TiffFormat {
     async fn infer_stats(
         &self,
         _state: &dyn Session,
-        _store: &Arc<dyn ObjectStore>,
+        store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
-        _object: &ObjectMeta,
+        object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
-        Ok(Statistics::new_unknown(&table_schema))
+        // Per-file min/max for metadata + coordinate columns lets the scan prune
+        // files whose spatial extent cannot match a query predicate. Stats failures
+        // must never break a scan, so fall back to unknown.
+        Ok(
+            statistics::generate_statistics(store.clone(), object, &table_schema)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to generate statistics for TIFF object {}: {e}",
+                        object.location
+                    );
+                    Statistics::new_unknown(&table_schema)
+                }),
+        )
     }
 
     async fn create_physical_plan(
@@ -185,9 +199,9 @@ mod tests {
     use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures::StreamExt;
+    use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStoreExt;
 
     const TEST_TIF_BYTES: &[u8] = include_bytes!("../../test-files/test.tif");
 
@@ -258,7 +272,9 @@ mod tests {
         };
 
         let stream = file_opener
-            .open(datafusion::datasource::listing::PartitionedFile::from(object))
+            .open(datafusion::datasource::listing::PartitionedFile::from(
+                object,
+            ))
             .expect("open")
             .await
             .expect("stream");
@@ -369,7 +385,9 @@ mod tests {
         };
 
         let stream = file_opener
-            .open(datafusion::datasource::listing::PartitionedFile::from(object))
+            .open(datafusion::datasource::listing::PartitionedFile::from(
+                object,
+            ))
             .expect("open")
             .await
             .expect("stream");
@@ -396,6 +414,123 @@ mod tests {
             full.num_rows()
         );
         assert!(full.num_rows() > 0, "predicate should keep some rows");
+    }
+
+    /// Build a `TiffSource` opener carrying `predicate`, and open `object` with the
+    /// given per-file `statistics` attached. Returns (batches, files_pruned).
+    async fn open_with_predicate_and_stats(
+        object_store: Arc<dyn ObjectStore>,
+        object: ObjectMeta,
+        table_schema: SchemaRef,
+        predicate: Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        stats: Statistics,
+    ) -> (usize, usize) {
+        use datafusion::config::ConfigOptions;
+        use datafusion::datasource::listing::PartitionedFile;
+
+        let source_with_predicate: Arc<dyn FileSource> = {
+            let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
+                table_schema.clone(),
+            );
+            let base_source = source::TiffSource::new(ts);
+            let pushdown = base_source
+                .try_pushdown_filters(vec![predicate], &ConfigOptions::default())
+                .expect("try_pushdown_filters");
+            pushdown.updated_node.expect("updated node with predicate")
+        };
+
+        let file_opener = {
+            let conf = FileScanConfigBuilder::new(
+                ObjectStoreUrl::parse("memory://").expect("url"),
+                source_with_predicate.clone(),
+            )
+            .build();
+            source_with_predicate
+                .create_file_opener(object_store, &conf, 0)
+                .expect("file opener")
+        };
+
+        let mut pf = PartitionedFile::from(object);
+        pf.statistics = Some(Arc::new(stats));
+
+        let stream = file_opener.open(pf).expect("open").await.expect("stream");
+        let batches: Vec<_> = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all batches ok");
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        let files_pruned = source_with_predicate
+            .metrics()
+            .clone_inner()
+            .sum_by_name("files_pruned")
+            .map(|m| m.as_usize())
+            .unwrap_or(0);
+
+        (total_rows, files_pruned)
+    }
+
+    fn gt_lon_predicate(table_schema: &SchemaRef, value: f64) -> Arc<dyn datafusion::physical_expr::PhysicalExpr> {
+        use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+        use datafusion::scalar::ScalarValue;
+
+        let lon_idx = table_schema.index_of("geo.lon").expect("geo.lon field");
+        Arc::new(BinaryExpr::new(
+            Arc::new(Column::new("geo.lon", lon_idx)),
+            Operator::Gt,
+            Arc::new(Literal::new(ScalarValue::Float64(Some(value)))),
+        ))
+    }
+
+    #[tokio::test]
+    async fn opener_prunes_file_whose_stats_cannot_match() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let path = Path::from("tests/datafusion/test_prune.tif");
+        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
+
+        let table_schema = reader::fetch_schema(object_store.clone(), object.clone())
+            .await
+            .expect("schema");
+        let stats = statistics::generate_statistics(object_store.clone(), &object, &table_schema)
+            .await
+            .expect("stats");
+
+        // geo.lon spans ~-17.3 .. 36.3, so `geo.lon > 1000` can never match this file.
+        let predicate = gt_lon_predicate(&table_schema, 1000.0);
+        let (rows, pruned) =
+            open_with_predicate_and_stats(object_store, object, table_schema, predicate, stats)
+                .await;
+
+        assert_eq!(rows, 0, "pruned file must yield no rows");
+        assert_eq!(pruned, 1, "files_pruned metric should be 1");
+    }
+
+    #[tokio::test]
+    async fn opener_does_not_prune_when_stats_overlap_predicate() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let path = Path::from("tests/datafusion/test_noprune.tif");
+        let object = put_fixture(&store, &path, TEST_TIF_BYTES).await;
+
+        let table_schema = reader::fetch_schema(object_store.clone(), object.clone())
+            .await
+            .expect("schema");
+        let stats = statistics::generate_statistics(object_store.clone(), &object, &table_schema)
+            .await
+            .expect("stats");
+
+        // `geo.lon > 0` overlaps the file's range (max ~36.3), so it must not be pruned.
+        let predicate = gt_lon_predicate(&table_schema, 0.0);
+        let (rows, pruned) =
+            open_with_predicate_and_stats(object_store, object, table_schema, predicate, stats)
+                .await;
+
+        assert!(rows > 0, "overlapping predicate should keep rows");
+        assert_eq!(pruned, 0, "no file should be pruned");
     }
 
     // ── End-to-end via SessionContext (projection + predicate pushdown) ──
@@ -462,7 +597,10 @@ mod tests {
             .iter()
             .map(|b| b.num_rows())
             .sum();
-        assert_eq!(rows, 0, "impossible latitude predicate should yield no rows");
+        assert_eq!(
+            rows, 0,
+            "impossible latitude predicate should yield no rows"
+        );
     }
 
     #[tokio::test]
@@ -486,7 +624,10 @@ mod tests {
                 .downcast_ref::<arrow::array::Float64Array>()
                 .expect("geo.lat is Float64");
             for i in 0..col.len() {
-                assert!(col.value(i) > 40.0, "every returned lat must satisfy the predicate");
+                assert!(
+                    col.value(i) > 40.0,
+                    "every returned lat must satisfy the predicate"
+                );
             }
             total += b.num_rows();
         }

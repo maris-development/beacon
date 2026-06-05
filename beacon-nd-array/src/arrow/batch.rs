@@ -192,11 +192,10 @@ fn ragged_dataset_as_record_batch_stream(
             offsets,
             passing_indices,
             ranges,
-            metrics,
         ))
     })
     .map(|init| match init {
-        Ok((ragged, schema, obs_dims, offsets, passing_indices, ranges, metrics)) => {
+        Ok((ragged, schema, obs_dims, offsets, passing_indices, ranges)) => {
             futures::stream::iter(ranges)
                 .then(move |range| {
                     let ragged = ragged.clone();
@@ -204,7 +203,6 @@ fn ragged_dataset_as_record_batch_stream(
                     let obs_dims = obs_dims.clone();
                     let offsets = offsets.clone();
                     let passing_indices = passing_indices.clone();
-                    let metrics = metrics.clone();
                     async move {
                         // Map filtered range back to original indices for reading.
                         let batch_indices: Vec<usize> =
@@ -238,10 +236,7 @@ fn ragged_dataset_as_record_batch_stream(
                         )
                         .await?;
 
-                        if let Some(m) = &metrics {
-                            m.output_rows.add(batch.num_rows());
-                            m.output_batches.add(1);
-                        }
+                        // Output rows/batches are tracked by DataFusion's FileStream.
                         Ok(batch)
                     }
                 })
@@ -547,7 +542,6 @@ pub fn dataset_as_record_batch_stream(
         // Create locals from the captured `metrics` field so they can be moved
         // into the inner closures (you cannot move a captured FnMut field directly).
         let metrics_for_then = metrics.clone();
-        let metrics_for_filter = metrics.clone();
         match result {
             Ok((arrays, subsets, schema, max_dims, dim_masks)) => futures::stream::iter(subsets)
                 .then(move |subset| {
@@ -569,21 +563,12 @@ pub fn dataset_as_record_batch_stream(
                         result
                     }
                 })
-                .filter_map(move |result| {
-                    let metrics = metrics_for_filter.clone();
-                    async move {
-                        match result {
-                            Ok(Some(batch)) if batch.num_rows() > 0 => {
-                                if let Some(m) = &metrics {
-                                    m.output_rows.add(batch.num_rows());
-                                    m.output_batches.add(1);
-                                }
-                                // tracing::debug!("Emitting batch with {} rows", batch.num_rows());
-                                Some(Ok(batch))
-                            }
-                            Ok(_) => None,
-                            Err(e) => Some(Err(e)),
-                        }
+                .filter_map(move |result| async move {
+                    // Output rows/batches are tracked by DataFusion's FileStream.
+                    match result {
+                        Ok(Some(batch)) if batch.num_rows() > 0 => Some(Ok(batch)),
+                        Ok(_) => None,
+                        Err(e) => Some(Err(e)),
                     }
                 })
                 .boxed(),

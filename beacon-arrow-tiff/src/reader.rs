@@ -1,7 +1,6 @@
 use std::{ops::Range, sync::Arc};
 
 use async_tiff::ImageFileDirectory;
-use async_tiff::decoder::DecoderRegistry;
 use async_tiff::metadata::{TiffMetadataReader, cache::ReadaheadMetadataCache};
 use async_tiff::reader::AsyncFileReader;
 use async_tiff::tags::{PlanarConfiguration, Predictor, SampleFormat};
@@ -10,7 +9,7 @@ use beacon_nd_array::{
     dataset::{AnyDataset, Dataset},
 };
 
-use crate::backend::{BandConfig, TiffTileBackend};
+use crate::backend::{BandConfig, TiffStripBackend, TiffTileBackend};
 use indexmap::IndexMap;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 
@@ -149,9 +148,8 @@ pub async fn open_dataset(
         read_pixel_bands(Arc::clone(&first_ifd), &reader, nodata_value)
             .map_err(|e| anyhow::anyhow!("Failed to build TIFF tile backends: {e}"))?
     } else {
-        read_pixel_bands_stripped(&first_ifd, &reader, nodata_value)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read TIFF strip data: {e}"))?
+        read_pixel_bands_stripped(Arc::clone(&first_ifd), &reader, nodata_value)
+            .map_err(|e| anyhow::anyhow!("Failed to build TIFF strip backends: {e}"))?
     };
     for (band_idx, band_array) in bands.into_iter().enumerate() {
         arrays.insert(format!("band.{band_idx}"), band_array);
@@ -330,8 +328,12 @@ fn read_pixel_bands(
     }
 
     match (sample_format, bits_per_sample) {
-        (SampleFormat::Float, 32) => make_backends!(f32, nodata_value.map(|v| v as f32)),
-        (SampleFormat::Float, 64) => make_backends!(f64, nodata_value),
+        // Float bands without an explicit GDAL nodata tag default to NaN, the
+        // conventional "missing" sentinel for floating-point rasters.
+        (SampleFormat::Float, 32) => {
+            make_backends!(f32, Some(nodata_value.map(|v| v as f32).unwrap_or(f32::NAN)))
+        }
+        (SampleFormat::Float, 64) => make_backends!(f64, Some(nodata_value.unwrap_or(f64::NAN))),
         (SampleFormat::Uint, 8) => make_backends!(u8, nodata_value.map(|v| v as u8)),
         (SampleFormat::Uint, 16) => make_backends!(u16, nodata_value.map(|v| v as u16)),
         (SampleFormat::Uint, 32) => make_backends!(u32, nodata_value.map(|v| v as u32)),
@@ -346,13 +348,16 @@ fn read_pixel_bands(
     }
 }
 
-/// Fetch and decode every strip for `ifd`, then assemble one `NdArray` per band.
+/// Build one lazy [`TiffStripBackend`] per band for a stripped TIFF.
 ///
-/// Only little-endian TIFFs are supported. Each strip is decompressed with the
-/// compression method declared by the IFD (e.g. LZW, Deflate) via `async-tiff`'s
-/// [`DecoderRegistry`] before the pixel bytes are interpreted.
-async fn read_pixel_bands_stripped(
-    ifd: &ImageFileDirectory,
+/// No strip data is fetched here. Each backend records the strip geometry and
+/// reports [`chunk_shape`] = `[rows_per_strip, image_width]` so that callers
+/// stream data one strip at a time, decompressing on demand.
+///
+/// Only `Predictor::None` is supported; predictors are rejected up front so that
+/// schema inference and the read path fail fast rather than emit wrong pixels.
+fn read_pixel_bands_stripped(
+    ifd: Arc<ImageFileDirectory>,
     reader: &ObjectStoreAsyncReader,
     nodata_value: Option<f64>,
 ) -> anyhow::Result<Vec<Arc<dyn NdArrayD>>> {
@@ -372,127 +377,74 @@ async fn read_pixel_bands_stripped(
 
     let image_width = ifd.image_width() as usize;
     let image_height = ifd.image_height() as usize;
+    // Clamp RowsPerStrip: some encoders write 0xFFFFFFFF ("all rows in one strip").
+    let rows_per_strip = ifd
+        .rows_per_strip()
+        .map(|r| r as usize)
+        .unwrap_or(image_height)
+        .clamp(1, image_height.max(1));
+
     let n_bands = ifd.samples_per_pixel() as usize;
+    let is_planar = ifd.planar_configuration() == PlanarConfiguration::Planar;
     let bits_per_sample = ifd.bits_per_sample().first().copied().unwrap_or(8) as usize;
     let sample_format = ifd
         .sample_format()
         .first()
         .copied()
         .unwrap_or(SampleFormat::Uint);
-    let is_planar = ifd.planar_configuration() == PlanarConfiguration::Planar;
 
-    // A predictor is a reversible transform applied before compression. We don't yet
-    // reverse it here, so reject anything other than "no predictor" rather than emit
-    // silently wrong pixels.
+    // A predictor is a reversible transform applied before compression. We don't
+    // reverse it, so reject anything other than "no predictor" up front rather than
+    // emit silently wrong pixels later during reads.
     let predictor = ifd.predictor().unwrap_or(Predictor::None);
     anyhow::ensure!(
         predictor == Predictor::None,
         "Unsupported predictor {predictor:?} for stripped TIFF (only Predictor::None is supported)"
     );
 
-    // Look up a decoder for the IFD's compression method. The default registry covers
-    // None, LZW, Deflate, JPEG and ZSTD.
-    let compression = ifd.compression();
-    let registry = DecoderRegistry::default();
-    let decoder = registry.as_ref().get(&compression).ok_or_else(|| {
-        anyhow::anyhow!("Unsupported TIFF compression {compression:?} for stripped layout")
-    })?;
-    let photometric = ifd.photometric_interpretation();
-    let jpeg_tables = ifd.jpeg_tables();
-
-    // Decompress each strip and concatenate into one contiguous, little-endian byte buffer.
-    let total: u64 = strip_byte_counts.iter().sum();
-    let mut raw: Vec<u8> = Vec::with_capacity(total as usize);
-    for (&offset, &count) in strip_offsets.iter().zip(strip_byte_counts.iter()) {
-        let bytes = reader
-            .get_bytes(offset..offset + count)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read strip at offset {offset}: {e}"))?;
-        let decoded = decoder
-            .decode_tile(
-                bytes,
-                photometric,
-                jpeg_tables,
-                n_bands as u16,
-                bits_per_sample as u16,
-                None,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to decompress strip at offset {offset} ({compression:?}): {e}")
-            })?;
-        raw.extend_from_slice(&decoded);
-    }
-
-    // Decode raw bytes as little-endian `$T`, then assemble into per-band 2-D buffers.
-    macro_rules! decode_strips {
-        ($T:ty, $N:expr) => {{
-            let values: Vec<$T> = raw
-                .chunks_exact($N)
-                .map(|chunk| {
-                    let arr: [u8; $N] = chunk.try_into().unwrap();
-                    <$T>::from_le_bytes(arr)
-                })
-                .collect();
-
-            let mut band_bufs: Vec<Vec<$T>> = (0..n_bands)
-                .map(|_| vec![<$T as Default>::default(); image_height * image_width])
-                .collect();
-
-            if !is_planar {
-                // Chunky: samples interleaved as px0_b0 px0_b1 … px1_b0 …
-                for (i, v) in values.into_iter().enumerate() {
-                    let band = i % n_bands;
-                    let pixel = i / n_bands;
-                    let row = pixel / image_width;
-                    let col = pixel % image_width;
-                    if row < image_height {
-                        band_bufs[band][row * image_width + col] = v;
-                    }
-                }
-            } else {
-                // Planar: all of band 0, then all of band 1, …
-                let plane_size = image_height * image_width;
-                for (i, v) in values.into_iter().enumerate() {
-                    let band = i / plane_size;
-                    let pixel = i % plane_size;
-                    if band < n_bands {
-                        band_bufs[band][pixel] = v;
-                    }
-                }
-            }
-
-            band_bufs
-                .into_iter()
-                .map(|buf| -> anyhow::Result<Arc<dyn NdArrayD>> {
-                    let nd = NdArray::try_new_from_vec_in_mem(
-                        buf,
-                        vec![image_height, image_width],
-                        vec!["y".to_string(), "x".to_string()],
-                        nodata_value.map(|v| v as $T),
-                    )?;
+    macro_rules! make_backends {
+        ($T:ty, $nodata:expr) => {{
+            (0..n_bands)
+                .map(|band_idx| -> anyhow::Result<Arc<dyn NdArrayD>> {
+                    let backend = TiffStripBackend::<$T> {
+                        reader: reader.clone(),
+                        ifd: Arc::clone(&ifd),
+                        image_width,
+                        image_height,
+                        rows_per_strip,
+                        band_config: BandConfig {
+                            band_index: band_idx,
+                            n_bands,
+                            planar: is_planar,
+                        },
+                        fill_value: $nodata,
+                    };
+                    let nd = NdArray::new_with_backend(backend)?;
                     Ok(Arc::new(nd) as Arc<dyn NdArrayD>)
                 })
-                .collect::<anyhow::Result<Vec<_>>>()?
+                .collect::<anyhow::Result<Vec<Arc<dyn NdArrayD>>>>()
         }};
     }
 
-    let bands = match (sample_format, bits_per_sample) {
-        (SampleFormat::Uint, 8) => decode_strips!(u8, 1),
-        (SampleFormat::Uint, 16) => decode_strips!(u16, 2),
-        (SampleFormat::Uint, 32) => decode_strips!(u32, 4),
-        (SampleFormat::Uint, 64) => decode_strips!(u64, 8),
-        (SampleFormat::Int, 8) => decode_strips!(i8, 1),
-        (SampleFormat::Int, 16) => decode_strips!(i16, 2),
-        (SampleFormat::Int, 32) => decode_strips!(i32, 4),
-        (SampleFormat::Int, 64) => decode_strips!(i64, 8),
-        (SampleFormat::Float, 32) => decode_strips!(f32, 4),
-        (SampleFormat::Float, 64) => decode_strips!(f64, 8),
+    match (sample_format, bits_per_sample) {
+        // Float bands without an explicit GDAL nodata tag default to NaN, the
+        // conventional "missing" sentinel for floating-point rasters.
+        (SampleFormat::Float, 32) => {
+            make_backends!(f32, Some(nodata_value.map(|v| v as f32).unwrap_or(f32::NAN)))
+        }
+        (SampleFormat::Float, 64) => make_backends!(f64, Some(nodata_value.unwrap_or(f64::NAN))),
+        (SampleFormat::Uint, 8) => make_backends!(u8, nodata_value.map(|v| v as u8)),
+        (SampleFormat::Uint, 16) => make_backends!(u16, nodata_value.map(|v| v as u16)),
+        (SampleFormat::Uint, 32) => make_backends!(u32, nodata_value.map(|v| v as u32)),
+        (SampleFormat::Uint, 64) => make_backends!(u64, nodata_value.map(|v| v as u64)),
+        (SampleFormat::Int, 8) => make_backends!(i8, nodata_value.map(|v| v as i8)),
+        (SampleFormat::Int, 16) => make_backends!(i16, nodata_value.map(|v| v as i16)),
+        (SampleFormat::Int, 32) => make_backends!(i32, nodata_value.map(|v| v as i32)),
+        (SampleFormat::Int, 64) => make_backends!(i64, nodata_value.map(|v| v as i64)),
         _ => anyhow::bail!(
             "Unsupported stripped TIFF format: {sample_format:?} / {bits_per_sample} bits per sample"
         ),
-    };
-
-    Ok(bands)
+    }
 }
 
 #[cfg(test)]
@@ -641,6 +593,59 @@ mod tests {
             (observed_max - DATA_MAX).abs() < 1e-4,
             "observed max {observed_max} should match gradient maximum {DATA_MAX}"
         );
+    }
+
+    /// A windowed read from the lazy strip backend must match the same window of a
+    /// full read. The fixture has 6 rows/strip, so rows 10..20 span three strips —
+    /// this exercises the strip-intersection copy across strip boundaries.
+    #[tokio::test]
+    async fn strip_backend_partial_subset_matches_full_read() {
+        use beacon_nd_array::array::subset::ArraySubset;
+
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let path = Path::from("tests/synthetic_lzw_subset.tif");
+        store
+            .put(
+                &path,
+                bytes::Bytes::copy_from_slice(LZW_STRIPPED_TIF_BYTES).into(),
+            )
+            .await
+            .expect("should write LZW GeoTIFF fixture into object store");
+
+        let dataset = open_dataset(object_store, path).await.unwrap();
+        let band = dataset.get_array("band.0").unwrap();
+        let band_nd = band.as_any().downcast_ref::<NdArray<f32>>().unwrap();
+
+        const WIDTH: usize = 64;
+        let full = band_nd.clone_into_raw_vec().await;
+
+        let (row_start, n_rows) = (10usize, 10usize);
+        let (col_start, n_cols) = (5usize, 25usize);
+        let window = band_nd
+            .subset(ArraySubset::new(
+                vec![row_start, col_start],
+                vec![n_rows, n_cols],
+            ))
+            .await
+            .unwrap()
+            .clone_into_raw_vec()
+            .await;
+
+        assert_eq!(window.len(), n_rows * n_cols);
+        for r in 0..n_rows {
+            for c in 0..n_cols {
+                let expected = full[(row_start + r) * WIDTH + (col_start + c)];
+                let actual = window[r * n_cols + c];
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "mismatch at window ({r},{c}) -> image ({},{})",
+                    row_start + r,
+                    col_start + c
+                );
+            }
+        }
     }
 
     #[tokio::test]

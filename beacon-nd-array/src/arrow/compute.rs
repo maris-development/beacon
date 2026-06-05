@@ -47,6 +47,24 @@ macro_rules! value_range_typed {
     }};
 }
 
+macro_rules! float_value_range_typed {
+    ($array:expr, $rust_ty:ty, $arrow_ty:ty) => {{
+        let nd = $array.as_any().downcast_ref::<NdArray<$rust_ty>>()?;
+        let values = nd.clone_into_raw_vec().await;
+        let fill = nd.fill_value().await;
+        // Always drop NaN (never a valid min/max), and drop the fill value when set.
+        // NaN can't be matched by equality, so excluding NaN also covers a NaN fill.
+        let filtered: Vec<$rust_ty> = values
+            .into_iter()
+            .filter(|v| !v.is_nan() && fill.map_or(true, |f| *v != f))
+            .collect();
+        let (min, max) = value_range_impl(&filtered)?;
+        let min_array: ArrayRef = Arc::new(<$arrow_ty>::from(vec![min]));
+        let max_array: ArrayRef = Arc::new(<$arrow_ty>::from(vec![max]));
+        Some((min_array, max_array))
+    }};
+}
+
 pub async fn value_range(array: &dyn NdArrayD) -> Option<(ArrayRef, ArrayRef)> {
     match array.datatype() {
         NdArrayDataType::Bool => value_range_typed!(array, bool, BooleanArray),
@@ -58,8 +76,8 @@ pub async fn value_range(array: &dyn NdArrayD) -> Option<(ArrayRef, ArrayRef)> {
         NdArrayDataType::U16 => value_range_typed!(array, u16, UInt16Array),
         NdArrayDataType::U32 => value_range_typed!(array, u32, UInt32Array),
         NdArrayDataType::U64 => value_range_typed!(array, u64, UInt64Array),
-        NdArrayDataType::F32 => value_range_typed!(array, f32, Float32Array),
-        NdArrayDataType::F64 => value_range_typed!(array, f64, Float64Array),
+        NdArrayDataType::F32 => float_value_range_typed!(array, f32, Float32Array),
+        NdArrayDataType::F64 => float_value_range_typed!(array, f64, Float64Array),
         NdArrayDataType::Timestamp => {
             let nd = array
                 .as_any()
@@ -135,6 +153,29 @@ mod tests {
     async fn test_all_fill_returns_none() {
         let nd = make_nd(vec![-9999i32, -9999, -9999], Some(-9999));
         assert!(value_range(&nd).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_nan_fill_excluded_from_range() {
+        // With a NaN fill value, NaN elements must be excluded so they don't
+        // corrupt min/max (NaN can't be matched by equality).
+        let nd = make_nd(vec![5.0f32, f32::NAN, -2.0, f32::NAN, 8.0], Some(f32::NAN));
+        let (min, max) = value_range(&nd).await.unwrap();
+        let min = min.as_any().downcast_ref::<Float32Array>().unwrap();
+        let max = max.as_any().downcast_ref::<Float32Array>().unwrap();
+        assert_eq!(min.value(0), -2.0);
+        assert_eq!(max.value(0), 8.0);
+    }
+
+    #[tokio::test]
+    async fn test_nan_excluded_without_fill() {
+        // Stray NaN must never become the min/max even when no fill is set.
+        let nd = make_nd(vec![5.0f64, f64::NAN, 8.0], None);
+        let (min, max) = value_range(&nd).await.unwrap();
+        let min = min.as_any().downcast_ref::<Float64Array>().unwrap();
+        let max = max.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(min.value(0), 5.0);
+        assert_eq!(max.value(0), 8.0);
     }
 
     #[tokio::test]

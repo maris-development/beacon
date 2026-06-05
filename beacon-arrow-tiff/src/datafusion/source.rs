@@ -23,10 +23,12 @@ use datafusion::{
     physical_expr_adapter::BatchAdapterFactory,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
-        metrics::{ExecutionPlanMetricsSet, SplitMetrics},
+        metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder, SplitMetrics},
         stream::{BatchSplitStream, RecordBatchStreamAdapter},
     },
 };
+use datafusion::common::pruning::PrunableStatistics;
+use datafusion::physical_optimizer::pruning::PruningPredicate;
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
 use object_store::ObjectMeta;
 
@@ -172,6 +174,8 @@ struct TiffOpener {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     partition: usize,
     metrics: ExecutionPlanMetricsSet,
+    /// Number of files skipped because their statistics cannot satisfy the predicate.
+    files_pruned: Count,
 }
 
 impl TiffOpener {
@@ -184,6 +188,7 @@ impl TiffOpener {
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Self {
+        let files_pruned = MetricBuilder::new(&metrics).counter("files_pruned", partition);
         Self {
             table_schema,
             object_store,
@@ -192,7 +197,25 @@ impl TiffOpener {
             predicate,
             partition,
             metrics,
+            files_pruned,
         }
+    }
+
+    /// Decide whether `file` can be skipped: its per-file statistics provably cannot
+    /// satisfy the pushed-down predicate. Best-effort — any missing input or
+    /// unsupported predicate falls back to "keep" so matching rows are never dropped.
+    fn can_prune(&self, file: &PartitionedFile) -> bool {
+        let (Some(predicate), Some(stats)) = (&self.predicate, &file.statistics) else {
+            return false;
+        };
+        let Ok(pruning_predicate) =
+            PruningPredicate::try_new(predicate.clone(), self.table_schema.clone())
+        else {
+            return false;
+        };
+        let prunable = PrunableStatistics::new(vec![stats.clone()], self.table_schema.clone());
+        // `prune` returns one bool per container (file); `false` = cannot match.
+        matches!(pruning_predicate.prune(&prunable), Ok(keep) if keep.first() == Some(&false))
     }
 
     async fn read_task(
@@ -288,6 +311,18 @@ impl TiffOpener {
 
 impl FileOpener for TiffOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
+        // Skip files whose statistics cannot satisfy the predicate, without opening
+        // them. The empty stream is schema-agnostic (no batches), so it adapts to any
+        // projection.
+        if self.can_prune(&file) {
+            self.files_pruned.add(1);
+            let empty: BoxStream<'static, datafusion::error::Result<RecordBatch>> =
+                futures::stream::empty().boxed();
+            return Ok(
+                futures::future::ready(Ok::<_, datafusion::error::DataFusionError>(empty)).boxed(),
+            );
+        }
+
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
             file.object_meta,

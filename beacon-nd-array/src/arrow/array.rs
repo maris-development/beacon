@@ -42,6 +42,39 @@ macro_rules! convert_ndarray {
     }};
 }
 
+/// Like [`convert_ndarray`] but NaN-aware for floating-point arrays.
+///
+/// A NaN fill value cannot be matched by equality (`NaN != NaN`), so when the fill
+/// value is NaN we mask every NaN element as null directly instead of comparing.
+macro_rules! convert_float_ndarray {
+    ($ndarray:expr, $rust_ty:ty, $arrow_ty:ty, $label:expr) => {{
+        let nd = $ndarray
+            .as_any()
+            .downcast_ref::<NdArray<$rust_ty>>()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Failed to downcast NdArray to NdArray<{}> for Arrow conversion.",
+                    $label
+                )
+            })?;
+        let values = nd.clone_into_raw_vec().await;
+        let array = <$arrow_ty>::from(values);
+        if let Some(fill_value) = nd.fill_value().await {
+            let null_mask = if fill_value.is_nan() {
+                array.values().iter().map(|v| !v.is_nan()).collect::<NullBuffer>()
+            } else {
+                let scalar = Scalar::new(Arc::new(<$arrow_ty>::from(vec![fill_value])) as ArrayRef);
+                let fill_mask = neq(&array, &scalar)?;
+                NullBuffer::new(fill_mask.values().clone())
+            };
+            return Ok(
+                Arc::new(<$arrow_ty>::new(array.values().clone(), Some(null_mask))) as ArrayRef,
+            );
+        }
+        Ok(Arc::new(array) as ArrayRef)
+    }};
+}
+
 /// Applies a fill-value null mask to an already-built Arrow array via ArrayData reconstruction.
 fn apply_fill_mask_via_data(
     array: impl arrow::array::Array,
@@ -66,8 +99,8 @@ pub async fn ndarray_to_arrow_array(ndarray: &dyn NdArrayD) -> anyhow::Result<Ar
         NdArrayDataType::U16 => convert_ndarray!(ndarray, u16, UInt16Array, "u16"),
         NdArrayDataType::U32 => convert_ndarray!(ndarray, u32, UInt32Array, "u32"),
         NdArrayDataType::U64 => convert_ndarray!(ndarray, u64, UInt64Array, "u64"),
-        NdArrayDataType::F32 => convert_ndarray!(ndarray, f32, Float32Array, "f32"),
-        NdArrayDataType::F64 => convert_ndarray!(ndarray, f64, Float64Array, "f64"),
+        NdArrayDataType::F32 => convert_float_ndarray!(ndarray, f32, Float32Array, "f32"),
+        NdArrayDataType::F64 => convert_float_ndarray!(ndarray, f64, Float64Array, "f64"),
         NdArrayDataType::Timestamp => {
             let nd = ndarray
                 .as_any()
@@ -359,6 +392,34 @@ mod tests {
         -9999.0f64,
         1
     );
+
+    // ---- NaN fill (float) ----
+
+    #[tokio::test]
+    async fn test_f32_nan_fill_masks_nan() {
+        // A NaN fill value can't be matched by equality; NaN elements must still
+        // become nulls, and finite values stay valid.
+        let nd = make_nd(vec![1.0f32, f32::NAN, 3.0], Some(f32::NAN));
+        let arr = ndarray_to_arrow_array(&nd).await.unwrap();
+        let pa = arr.as_any().downcast_ref::<Float32Array>().unwrap();
+        assert_eq!(pa.len(), 3);
+        assert!(pa.is_valid(0));
+        assert!(pa.is_null(1));
+        assert!(pa.is_valid(2));
+        assert_eq!(pa.value(0), 1.0);
+        assert_eq!(pa.value(2), 3.0);
+    }
+
+    #[tokio::test]
+    async fn test_f64_nan_fill_masks_nan() {
+        let nd = make_nd(vec![f64::NAN, 2.0, f64::NAN], Some(f64::NAN));
+        let arr = ndarray_to_arrow_array(&nd).await.unwrap();
+        let pa = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!(pa.is_null(0));
+        assert!(pa.is_valid(1));
+        assert!(pa.is_null(2));
+        assert_eq!(pa.value(1), 2.0);
+    }
 
     // ---- Timestamp ----
 
