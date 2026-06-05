@@ -3,25 +3,17 @@
 use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
-use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
 use beacon_datafusion_ext::table_ext::{
-    MaterializedView, MaterializedViewDefinition, TableDefinition,
+    internal_object_store_url, MaterializedView, MaterializedViewDefinition, TableDefinition,
 };
 use datafusion::{
-    config::TableParquetOptions,
-    datasource::{
-        file_format::parquet::ParquetSink,
-        listing::ListingTableUrl,
-        physical_plan::{FileGroup, FileOutputMode, FileSinkConfig},
-        sink::DataSinkExec,
-    },
-    logical_expr::dml::InsertOp,
+    dataframe::DataFrameWriteOptions,
     parquet::arrow::ArrowWriter,
     prelude::{DataFrame, SessionContext},
-    sql::{TableReference, sqlparser::ast::ObjectName},
+    sql::{sqlparser::ast::ObjectName, TableReference},
 };
 use futures::StreamExt;
-use object_store::ObjectStoreExt;
+use object_store::{GetOptions, ObjectStore, ObjectStoreExt};
 
 /// Current time as Unix epoch milliseconds (0 if the clock is before the epoch).
 pub(crate) fn now_millis() -> i64 {
@@ -31,69 +23,69 @@ pub(crate) fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// Writes a query's result to Parquet under `dir_path` (relative to the datasets
-/// object store) and returns the output schema.
+/// Writes a query's result as a single Parquet file inside `dir_path` (relative to
+/// the internal object store) and returns the output schema.
 ///
-/// Uses an explicit `object_store_url` in the sink config — the same pattern as
-/// `BeaconTable` — so the store is resolved by scheme (`datasets://`) rather than
-/// from the URL authority, which would otherwise be parsed from the path prefix.
+/// Uses [`DataFrame::write_parquet`] with single-file output, so the directory
+/// holds exactly one `part.parquet` rather than a fan of part files. The view
+/// reads it back by listing `dir_path/`.
 pub(crate) async fn write_query_to_datasets_parquet(
     session_ctx: &SessionContext,
     df: DataFrame,
     dir_path: &str,
 ) -> anyhow::Result<SchemaRef> {
-    let store_url = DATASETS_OBJECT_STORE_URL.clone();
-    let physical_plan = df.create_physical_plan().await?;
-    let output_schema = physical_plan.schema();
+    let store_url = internal_object_store_url();
+    let output_schema: SchemaRef = Arc::new(df.schema().as_arrow().clone());
 
-    let original_url = format!("{store_url}{dir_path}");
-    let parsed_url = ListingTableUrl::parse(&original_url)?;
+    // Write the result as a single Parquet file inside the version directory. The
+    // view reads it back by listing `dir_path/`, which round-trips cleanly through
+    // the internal prefix store (unlike a bare single-file path).
+    let file_path = format!("{}/part.parquet", dir_path.trim_end_matches('/'));
+    let file_url = format!("{store_url}{file_path}");
+    df.write_parquet(
+        &file_url,
+        DataFrameWriteOptions::new().with_single_file_output(true),
+        None,
+    )
+    .await?;
 
-    let sink_config = FileSinkConfig {
-        original_url,
-        object_store_url: store_url.clone(),
-        file_group: FileGroup::default(),
-        table_paths: vec![parsed_url],
-        output_schema: output_schema.clone(),
-        table_partition_cols: vec![],
-        insert_op: InsertOp::Append,
-        keep_partition_by_columns: false,
-        file_extension: "parquet".to_string(),
-        file_output_mode: FileOutputMode::SingleFile,
-    };
-
-    let sink = Arc::new(ParquetSink::new(sink_config, TableParquetOptions::default()));
-    let sink_exec = Arc::new(DataSinkExec::new(physical_plan, sink, None));
-    let task_ctx = session_ctx.task_ctx();
-    datafusion::physical_plan::collect(sink_exec, task_ctx).await?;
-
-    // Guarantee at least one Parquet file exists, even when the query produced zero
-    // rows (DataFusion's sink writes no file for an empty result). Otherwise the
-    // view's ListingTable would have no file to infer a schema from, and reads /
-    // refresh would fail. The empty file carries the schema, so reads return zero rows.
+    // A zero-row result produces no file (DataFusion writes nothing for an empty
+    // stream). Write an empty Parquet (schema only) so the view always has a file to
+    // read and infer its schema from; reads then return zero rows.
     let store = session_ctx.runtime_env().object_store(&store_url)?;
-    let prefix = object_store::path::Path::from(dir_path.trim_end_matches('/'));
-    let wrote_any = store.list(Some(&prefix)).next().await.is_some();
-    if !wrote_any {
+    let path = object_store::path::Path::from(file_path);
+    let exists = store
+        .get_opts(
+            &path,
+            GetOptions {
+                head: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .is_ok();
+    if !exists {
         let mut buffer: Vec<u8> = Vec::new();
         let mut writer = ArrowWriter::try_new(&mut buffer, output_schema.clone(), None)?;
         writer.write(&RecordBatch::new_empty(output_schema.clone()))?;
         writer.close()?;
-        store.put(&prefix.child("part-0.parquet"), buffer.into()).await?;
+        store.put(&path, buffer.into()).await?;
     }
 
     Ok(output_schema)
 }
 
-/// Best-effort recursive delete of every object under `prefix` in the datasets
+/// Best-effort recursive delete of every object under `prefix` in the internal
 /// object store. Failures are logged rather than propagated, since this is only
 /// used to reclaim space for replaced/dropped materialized-view data.
 pub(crate) async fn delete_datasets_prefix(session_ctx: &SessionContext, prefix: &str) {
-    let store_url = DATASETS_OBJECT_STORE_URL.clone();
+    let store_url = internal_object_store_url();
     let store = match session_ctx.runtime_env().object_store(&store_url) {
         Ok(store) => store,
         Err(error) => {
-            tracing::warn!("Failed to resolve datasets object store for cleanup of '{prefix}': {error}");
+            tracing::warn!(
+                "Failed to resolve internal object store for cleanup of '{prefix}': {error}"
+            );
             return;
         }
     };
@@ -104,7 +96,10 @@ pub(crate) async fn delete_datasets_prefix(session_ctx: &SessionContext, prefix:
         match entry {
             Ok(meta) => {
                 if let Err(error) = store.delete(&meta.location).await {
-                    tracing::warn!("Failed to delete '{}' during cleanup: {error}", meta.location);
+                    tracing::warn!(
+                        "Failed to delete '{}' during cleanup: {error}",
+                        meta.location
+                    );
                 }
             }
             Err(error) => {
@@ -116,9 +111,9 @@ pub(crate) async fn delete_datasets_prefix(session_ctx: &SessionContext, prefix:
 
 /// Recompute a materialized view and atomically swap the catalog pointer.
 ///
-/// Re-runs the view's stored SQL into a fresh versioned Parquet directory, so
-/// the existing data remains usable if anything fails before the swap, then
-/// reclaims the old directory.
+/// Re-runs the view's stored SQL into a fresh versioned Parquet file, so the
+/// existing data remains usable if anything fails before the swap, then reclaims
+/// the old file.
 ///
 /// Errors if `view_name` does not resolve to a `MaterializedView` provider.
 pub(crate) async fn refresh_materialized_view(
@@ -141,20 +136,19 @@ pub(crate) async fn refresh_materialized_view(
         .clone();
 
     let df = session_ctx.sql(&old_definition.definition).await?;
-    let dir_path = format!("__beacon__/{}/{}", name, uuid::Uuid::new_v4());
+    let dir_path = format!("{}/{}", name, uuid::Uuid::new_v4());
     let schema = write_query_to_datasets_parquet(session_ctx, df, &dir_path).await?;
-    let new_storage_location = format!("{dir_path}/");
 
     let new_definition = MaterializedViewDefinition {
         name: name.clone(),
         definition: old_definition.definition.clone(),
         schema,
-        storage_location: new_storage_location,
+        storage_location: format!("{dir_path}/"),
         created_at: old_definition.created_at,
         last_refreshed: Some(now_millis()),
     };
 
-    let store_url = DATASETS_OBJECT_STORE_URL.clone();
+    let store_url = internal_object_store_url();
     let new_provider = new_definition
         .build_provider(session_ctx.clone(), &store_url)
         .await?;

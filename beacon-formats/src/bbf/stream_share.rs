@@ -2,14 +2,14 @@ use std::{future::Future, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_binary_format::reader::async_reader::stream::AsyncStreamProducer;
-use datafusion::datasource::schema_adapter::SchemaMapper;
+use datafusion::physical_expr_adapter::BatchAdapter;
 use nd_arrow_array::batch::NdRecordBatch;
 
 #[derive(Debug)]
 pub struct StreamShare {
     inner: tokio::sync::OnceCell<(
         AsyncStreamProducer<NdRecordBatch>,
-        Arc<dyn SchemaMapper>,
+        Arc<BatchAdapter>,
         SchemaRef,
     )>,
 }
@@ -28,7 +28,7 @@ impl StreamShare {
         Output = Result<
             &(
                 AsyncStreamProducer<NdRecordBatch>,
-                Arc<dyn SchemaMapper>,
+                Arc<BatchAdapter>,
                 SchemaRef,
             ),
             datafusion::error::DataFusionError,
@@ -40,7 +40,7 @@ impl StreamShare {
             Output = Result<
                 (
                     AsyncStreamProducer<NdRecordBatch>,
-                    Arc<dyn SchemaMapper>,
+                    Arc<BatchAdapter>,
                     SchemaRef,
                 ),
                 datafusion::error::DataFusionError,

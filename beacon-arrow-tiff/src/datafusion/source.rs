@@ -15,11 +15,12 @@ use datafusion::{
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
-        schema_adapter::{DefaultSchemaAdapterFactory, SchemaAdapter, SchemaAdapterFactory},
+        schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
     execution::SendableRecordBatchStream,
-    physical_expr::{PhysicalExpr, conjunction},
+    physical_expr::{PhysicalExpr, conjunction, projection::ProjectionExprs},
+    physical_expr_adapter::BatchAdapterFactory,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
         metrics::{ExecutionPlanMetricsSet, SplitMetrics},
@@ -38,6 +39,8 @@ pub struct TiffSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// Projection pushed down by the scan, applied on top of the table schema.
+    projection: Option<ProjectionExprs>,
 }
 
 impl TiffSource {
@@ -48,7 +51,16 @@ impl TiffSource {
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             batch_size: 128 * 1024,
             predicate: None,
+            projection: None,
         }
+    }
+
+    /// Returns a copy of this source carrying the given projection. Used to
+    /// preserve a pushed-down projection when the format rebuilds the source
+    /// in `create_physical_plan`.
+    pub fn with_projection(mut self, projection: Option<ProjectionExprs>) -> Self {
+        self.projection = projection;
+        self
     }
 }
 
@@ -61,17 +73,11 @@ impl FileSource for TiffSource {
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
         let file_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
-        let schema_adapter_factory = self
-            .schema_adapter_factory
-            .clone()
-            .unwrap_or_else(|| Arc::new(DefaultSchemaAdapterFactory));
-
-        let schema_adapter = schema_adapter_factory.create(projected_schema, file_schema.clone());
 
         Ok(Arc::new(TiffOpener::new(
             file_schema,
             object_store,
-            Arc::from(schema_adapter),
+            projected_schema,
             self.batch_size,
             self.predicate.clone(),
             self.execution_plan_metrics.clone(),
@@ -116,6 +122,25 @@ impl FileSource for TiffSource {
         self.schema_adapter_factory.clone()
     }
 
+    fn projection(&self) -> Option<&ProjectionExprs> {
+        self.projection.as_ref()
+    }
+
+    fn try_pushdown_projection(
+        &self,
+        projection: &ProjectionExprs,
+    ) -> datafusion::error::Result<Option<Arc<dyn FileSource>>> {
+        let merged = match &self.projection {
+            Some(existing) => existing.try_merge(projection)?,
+            None => projection.clone(),
+        };
+        let source = Self {
+            projection: Some(merged),
+            ..self.clone()
+        };
+        Ok(Some(Arc::new(source)))
+    }
+
     fn try_pushdown_filters(
         &self,
         filters: Vec<Arc<dyn PhysicalExpr>>,
@@ -142,7 +167,7 @@ impl FileSource for TiffSource {
 struct TiffOpener {
     table_schema: SchemaRef,
     object_store: Arc<dyn object_store::ObjectStore>,
-    schema_adapter: Arc<dyn SchemaAdapter>,
+    projected_schema: SchemaRef,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     partition: usize,
@@ -153,7 +178,7 @@ impl TiffOpener {
     fn new(
         table_schema: SchemaRef,
         object_store: Arc<dyn object_store::ObjectStore>,
-        schema_adapter: Arc<dyn SchemaAdapter>,
+        projected_schema: SchemaRef,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ExecutionPlanMetricsSet,
@@ -162,7 +187,7 @@ impl TiffOpener {
         Self {
             table_schema,
             object_store,
-            schema_adapter,
+            projected_schema,
             batch_size,
             predicate,
             partition,
@@ -173,7 +198,7 @@ impl TiffOpener {
     async fn read_task(
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
-        schema_adapter: Arc<dyn SchemaAdapter>,
+        projected_schema: SchemaRef,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: Option<DatasetReadMetrics>,
@@ -196,7 +221,15 @@ impl TiffOpener {
                 })?
                 .into();
 
-        let (schema_mapper, projection) = schema_adapter.map_schema(&file_schema)?;
+        // Columns of this file that the query needs, in file order — used both
+        // to prune the read and as the source schema for the batch adapter.
+        let projection: Vec<usize> = file_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
+            .map(|(i, _)| i)
+            .collect();
 
         if projection.is_empty() {
             return Ok(any_dataset_as_row_size(dataset)
@@ -212,6 +245,11 @@ impl TiffOpener {
                 })
                 .boxed());
         }
+
+        // Adapt batches (read with `projection`) onto the projected output
+        // schema: reorder, cast, and null-fill columns this file lacks.
+        let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
+        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
 
         let dataset = if projection.len() < file_schema.fields().len() {
             let proj = DatasetProjection {
@@ -235,9 +273,9 @@ impl TiffOpener {
                 ))
             })
             .and_then(move |batch| {
-                let mapped = schema_mapper.map_batch(batch).map_err(|e| {
+                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to map TIFF batch schema: {e}"
+                        "Failed to adapt TIFF batch schema: {e}"
                     ))
                 });
                 futures::future::ready(mapped)
@@ -254,7 +292,7 @@ impl FileOpener for TiffOpener {
         let fut = Self::read_task(
             file.object_meta,
             self.object_store.clone(),
-            self.schema_adapter.clone(),
+            self.projected_schema.clone(),
             self.batch_size,
             self.predicate.clone(),
             metrics,

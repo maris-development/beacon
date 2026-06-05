@@ -11,12 +11,9 @@ use datafusion::{
     sql::{sqlparser::ast::ObjectName, TableReference},
 };
 
-use crate::statement_handlers::{registry::IngestFormatLoaderRegistry, traits::IngestFormatLoader};
-
 pub(crate) struct HandlerContext {
     session_ctx: Arc<SessionContext>,
     file_manager: Arc<FileManager>,
-    loader_registry: IngestFormatLoaderRegistry,
     listing_table_factory: Arc<ListingTableFactoryExt>,
 }
 
@@ -24,13 +21,11 @@ impl HandlerContext {
     pub(crate) fn new(
         session_ctx: Arc<SessionContext>,
         file_manager: Arc<FileManager>,
-        loader_registry: IngestFormatLoaderRegistry,
         listing_table_factory: Arc<ListingTableFactoryExt>,
     ) -> Self {
         Self {
             session_ctx,
             file_manager,
-            loader_registry,
             listing_table_factory,
         }
     }
@@ -46,10 +41,6 @@ impl HandlerContext {
 
     pub(crate) fn data_object_store_url(&self) -> ObjectStoreUrl {
         self.file_manager.data_object_store_url()
-    }
-
-    pub(crate) fn ingest_loader(&self, format: &str) -> Option<Arc<dyn IngestFormatLoader>> {
-        self.loader_registry.get_loader(format)
     }
 
     pub(crate) fn listing_table_factory(&self) -> Arc<ListingTableFactoryExt> {
@@ -86,8 +77,6 @@ mod tests {
     use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
     use futures::StreamExt;
 
-    use crate::statement_handlers::registry::IngestFormatLoaderRegistry;
-
     use super::HandlerContext;
 
     #[tokio::test]
@@ -105,12 +94,7 @@ mod tests {
             file_manager.data_object_store_url(),
             Arc::downgrade(&session_ctx),
         ));
-        let context = HandlerContext::new(
-            session_ctx,
-            file_manager.clone(),
-            IngestFormatLoaderRegistry::new(),
-            table_factory,
-        );
+        let context = HandlerContext::new(session_ctx, file_manager.clone(), table_factory);
 
         assert!(Arc::ptr_eq(&context.file_manager(), &file_manager));
         assert_eq!(
@@ -134,12 +118,7 @@ mod tests {
             Arc::downgrade(&session_ctx),
         ));
 
-        let context = HandlerContext::new(
-            session_ctx,
-            file_manager,
-            IngestFormatLoaderRegistry::new(),
-            table_factory,
-        );
+        let context = HandlerContext::new(session_ctx, file_manager, table_factory);
 
         let mut stream = context.empty_record_batch_stream();
         assert!(stream.next().await.is_none());

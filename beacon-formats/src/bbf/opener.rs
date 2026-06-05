@@ -5,7 +5,7 @@ use std::{
 
 use arrow::{
     array::{BooleanArray, RecordBatch, new_null_array},
-    datatypes::Schema,
+    datatypes::{Schema, SchemaRef},
     error::ArrowError,
 };
 use beacon_binary_format::{
@@ -14,12 +14,12 @@ use beacon_binary_format::{
     object_store::ArrowBBFObjectReader,
     reader::async_reader::{AsyncBBFReader, AsyncPruningIndexReader},
 };
+use datafusion::physical_expr_adapter::BatchAdapterFactory;
 use datafusion::{
     common::pruning::PruningStatistics,
     datasource::{
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener},
-        schema_adapter::SchemaAdapter,
     },
     physical_optimizer::pruning::PruningPredicate,
     prelude::Column,
@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 use crate::bbf::{metrics::BBFGlobalMetrics, stream_share::StreamShare};
 
 pub struct BBFOpener {
-    schema_adapter: Arc<dyn SchemaAdapter>,
+    projected_schema: SchemaRef,
     pruning_predicate: Option<PruningPredicate>,
     object_store: Arc<dyn ObjectStore>,
     table_schema: Arc<Schema>,
@@ -47,7 +47,7 @@ impl FileOpener for BBFOpener {
             file.object_meta.location.clone(),
             self.object_store.clone(),
         );
-        let adapter = self.schema_adapter.clone();
+        let projected_schema = self.projected_schema.clone();
         let pruning_predicate = self.pruning_predicate.clone();
         let table_schema = self.table_schema.clone();
         let file_tracer = self.file_tracer.clone();
@@ -73,9 +73,22 @@ impl FileOpener for BBFOpener {
 
                     let file_schema = reader.arrow_schema();
 
-                    let (schema_mapper, projection) = adapter
-                        .map_schema(&file_schema)
-                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                    // Columns of this file that the query needs, in file order —
+                    // used both to prune the read and as the source schema for
+                    // the batch adapter.
+                    let projection: Vec<usize> = file_schema
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
+                        .map(|(i, _)| i)
+                        .collect();
+                    let source_schema: SchemaRef =
+                        Arc::new(file_schema.project(&projection)?);
+                    let schema_mapper = Arc::new(
+                        BatchAdapterFactory::new(projected_schema)
+                            .make_adapter(&source_schema)?,
+                    );
                     let mut selection: Option<BooleanArray> = None;
                     if let Some(pruning_predicate) = pruning_predicate {
                         selection =
@@ -131,7 +144,7 @@ impl FileOpener for BBFOpener {
                             RecordBatch::new_empty(file_schema.clone())
                         });
                         let mapped_batch = schema_mapper
-                            .map_batch(arrow_batch)
+                            .adapt_batch(&arrow_batch)
                             .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
                         metrics.add_rows(mapped_batch.num_rows());
                         Ok(mapped_batch)
@@ -180,7 +193,7 @@ fn split_record_batch(batch: RecordBatch, chunk_size: usize) -> Vec<RecordBatch>
 
 impl BBFOpener {
     pub fn new(
-        schema_adapter: Arc<dyn SchemaAdapter>,
+        projected_schema: SchemaRef,
         pruning_predicate: Option<PruningPredicate>,
         object_store: Arc<dyn ObjectStore>,
         table_schema: Arc<Schema>,
@@ -189,7 +202,7 @@ impl BBFOpener {
         metrics: BBFGlobalMetrics,
     ) -> Self {
         Self {
-            schema_adapter,
+            projected_schema,
             object_store,
             pruning_predicate,
             table_schema,
