@@ -83,6 +83,8 @@ pub fn array_to_nd_array(
     let scale = attributes.get("scale_factor").and_then(|a| a.as_f64());
     let offset = attributes.get("add_offset").and_then(|a| a.as_f64());
     let units = attributes.get("units").and_then(|a| a.as_str());
+    // Optional CF `calendar` attribute (defaults to Gregorian when absent).
+    let calendar = attributes.get("calendar").and_then(|a| a.as_str());
 
     // CF scale_factor / add_offset packing → f64.
     if is_numeric(kind) && (scale.is_some() || offset.is_some()) {
@@ -102,7 +104,7 @@ pub fn array_to_nd_array(
     // CF time units → nanosecond timestamps.
     if is_numeric(kind)
         && let Some(units) = units
-        && let Some((epoch, unit)) = parse_cf_time_units(units)
+        && let Some((epoch, unit)) = parse_cf_time_units(units, calendar)
     {
         let backend = CfTimeBackend::new(
             array, kind, shape, dimensions, chunk_shape, epoch, unit, raw_fill,
