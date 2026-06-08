@@ -178,7 +178,7 @@ fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit), String> {
         .ok_or_else(|| format!("Failed to parse Julian epoch from units string: {units}"))?;
 
     // Parse the date into year, month, day
-    let year: i32 = caps["year"]
+    let mut year: i32 = caps["year"]
         .parse()
         .map_err(|e| format!("Invalid year in units string: {units}. Error: {e}"))?;
     let month_num: u32 = caps["month"]
@@ -191,6 +191,14 @@ fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit), String> {
         .map_err(|e| format!("Invalid day in units string: {units}. Error: {e}"))?;
 
     let jul_cal = julian::Calendar::JULIAN;
+
+    if year < 0 {
+        // The `julian` crate uses astronomical year numbering, so the year 0
+        // corresponds to 1 BCE, -1 to 2 BCE, etc. Adjust negative years
+        // accordingly.
+        year += 1;
+    }
+
     let epoch_date = jul_cal.at_ymd(year, month, day).map_err(|e| {
         format!("Failed to parse Julian epoch date from units string: {units}. Error: {e}")
     })?;
@@ -210,8 +218,7 @@ fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit), String> {
     // to 12:00 on the calendar day. Midnight (00:00) is therefore half a day
     // earlier: JD = JDN - 0.5 + time_of_day. This keeps `T12:00:00` mapping
     // exactly onto the integer JDN.
-    let offset_juld =
-        epoch_date.julian_day_number() as f64 - 0.5 + time_seconds as f64 / 86400.0;
+    let offset_juld = epoch_date.julian_day_number() as f64 - 0.5 + time_seconds as f64 / 86400.0;
     let base_epoch = Epoch::from_jde_utc(offset_juld);
 
     let units_opt = extract_units(units);
