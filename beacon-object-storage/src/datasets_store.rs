@@ -62,7 +62,8 @@ pub(crate) async fn create_datasets_store() -> Result<DatasetsStore, String> {
 
         let root = beacon_config::DATASETS_DIR_PATH.clone();
         let store = LocalFileSystem::new_with_prefix(&root)
-            .map_err(|e| format!("Failed to build local filesystem object store: {e}"))?;
+            .map_err(|e| format!("Failed to build local filesystem object store: {e}"))?
+            .with_automatic_cleanup(true);
         let inner = Arc::new(store) as Arc<dyn ObjectStore + Send + Sync>;
 
         // Watch the datasets directory for changes (on by default; see
@@ -96,7 +97,7 @@ pub trait EventListener: Send + Sync {
 
 // Prefix that Beacon uses to write to for locally produced data (e.g. compaction output, materialized views, etc.).
 // This is to avoid conflicts with user data. Listing, head requests, etc. for this prefix should be blocked.
-const DATASETS_WRITEABLE_PREFIX: &str = "__beacon__";
+pub const DATASETS_WRITEABLE_PREFIX: &str = "__beacon__";
 
 /// Capacity of each per-prefix broadcast channel. A subscriber that lags further
 /// behind than this will observe a [`broadcast::error::RecvError::Lagged`] and

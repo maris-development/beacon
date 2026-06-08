@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format", "beacon-object-storage", "beacon-nd-arrow", "beacon-datafusion-ext", "beacon-table", "beacon-nd-array", "beacon-arrow-tiff", "beacon-arrow-atlas"]
+members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-query", "beacon-planner", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format", "beacon-object-storage", "beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "beacon-nd-array", "beacon-arrow-tiff", "beacon-arrow-atlas"]
 exclude = ["beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
@@ -20,7 +20,7 @@ utoipa-scalar = { version = "0.3.0", features = ["axum"] }
 utoipa-swagger-ui = { version = "9.0.0", features = ["axum"] }
 
 serde = { version = "^1.0.2", features = ["rc", "derive"] }
-serde_json = "=1.0.120"
+serde_json = "1.0.145"
 anyhow = "1.0.95"
 thiserror = "2.0.12"
 
@@ -44,6 +44,10 @@ bincode = "1"
 datafusion = "^53"
 geodatafusion = "0.4.0"
 object_store = { version = "0.13.1", features = ["aws"] }
+
+iceberg-rust = "0.10"
+datafusion_iceberg = "0.10"
+iceberg-file-catalog = "0.10"
 
 arrow = { version = "^58", features = ["prettyprint"]}
 arrow-schema = { version = "^58", features = ["serde"] }

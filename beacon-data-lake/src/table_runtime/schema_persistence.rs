@@ -4,7 +4,6 @@ use object_store::ObjectStoreExt;
 use beacon_datafusion_ext::table_ext::{
     ExternalTable, MaterializedView, TableDefinition, ViewTableDefinition,
 };
-use beacon_table::BeaconTable;
 use datafusion::{
     catalog::TableProvider, datasource::ViewTable, error::DataFusionError,
     execution::object_store::ObjectStoreUrl, prelude::SessionContext,
@@ -82,9 +81,8 @@ impl SchemaPersistenceService {
         table: &dyn TableProvider,
     ) -> datafusion::error::Result<String> {
         let definition: Arc<dyn TableDefinition> =
-            if let Some(table) = table.as_any().downcast_ref::<BeaconTable>() {
-                let definition = table.definition();
-                Arc::new(definition)
+            if let Some(table) = table.as_any().downcast_ref::<beacon_iceberg::IcebergTable>() {
+                Arc::new(table.definition().clone())
             } else if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {
                 let definition = table.definition();
                 Arc::new(definition.clone())

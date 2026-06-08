@@ -79,6 +79,13 @@ impl Runtime {
             .unwrap()
             .register_schema("public", table_manager.clone())?;
 
+        // Build the shared Iceberg catalog before discovering tables: startup
+        // table discovery rebuilds Iceberg providers via the catalog, and the
+        // CREATE/DROP handlers need it too. The warehouse lives in the datasets
+        // store's internal area (`__beacon__/iceberg`), so it follows the same
+        // local/S3 backend as the datasets.
+        beacon_iceberg::catalog::init_datasets_warehouse().await?;
+
         geodatafusion::register(&session_ctx);
 
         for udf in beacon_functions::geo::geo_udfs() {

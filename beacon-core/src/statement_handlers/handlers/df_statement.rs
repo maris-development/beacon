@@ -3,11 +3,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
 use beacon_datafusion_ext::table_ext::MaterializedView;
-use beacon_table::BeaconTable;
 use datafusion::{
     catalog::{TableProvider, TableProviderFactory},
     datasource::{physical_plan, ViewTable},
-    execution::{object_store::ObjectStoreUrl, SendableRecordBatchStream},
+    execution::SendableRecordBatchStream,
     logical_expr::{dml::InsertOp, CreateMemoryTable, DdlStatement, LogicalPlan},
     physical_plan::EmptyRecordBatchStream,
     prelude::{DataFrame, SQLOptions, SessionContext},
@@ -70,30 +69,52 @@ impl DFStatementHandler {
         Ok(())
     }
 
+    /// Handle `CREATE TABLE` (incl. `CREATE TABLE AS SELECT`) by creating an
+    /// Iceberg-backed managed table and populating it from the input plan.
+    ///
+    /// DataFusion lowers both `CREATE TABLE t (cols...)` and
+    /// `CREATE TABLE t AS SELECT ...` to [`CreateMemoryTable`]; the former carries
+    /// an empty input (zero rows), the latter the query plan. Creating the table
+    /// from the input's Arrow schema and then inserting the input handles both.
     async fn execute_create_table(
         session_ctx: &SessionContext,
         table_cmd: &CreateMemoryTable,
     ) -> anyhow::Result<SendableRecordBatchStream> {
-        let table_name = table_cmd.name.to_string();
-        let schema = table_cmd.input.schema();
-        let store_url = DATASETS_OBJECT_STORE_URL.clone();
-        let store = session_ctx.runtime_env().object_store(&store_url).expect(
-            "Datasets Store URL invalid. Check that DATASETS_OBJECT_STORE_URL is set correctly.",
-        );
+        // The bare table name (drop any catalog/schema qualification) is the
+        // Iceberg table name; registration uses the original reference.
+        let table_ref = table_cmd.name.clone();
+        let table_name = table_ref.table().to_string();
 
-        let table = BeaconTable::new(
-            store,
-            store_url,
-            table_name.clone(),
-            object_store::path::Path::from("__beacon_tables__").child(table_name.clone()),
-            Some(schema.as_arrow().clone().into()),
-        )
-        .await?;
+        if session_ctx.table_exist(table_ref.clone())? {
+            if table_cmd.if_not_exists {
+                return Ok(Self::empty_ddl_stream(&LogicalPlan::Ddl(
+                    DdlStatement::CreateMemoryTable(table_cmd.clone()),
+                )));
+            }
+            return Err(anyhow::anyhow!("Table '{}' already exists", table_name));
+        }
 
-        // Register the table in the session context so it can be queried
-        session_ctx.register_table(&table_name, Arc::new(table))?;
+        let arrow_schema = table_cmd.input.schema().as_arrow().clone();
+        let catalog = beacon_iceberg::get_catalog()?;
+        let namespace = beacon_iceberg::beacon_namespace();
 
-        // Execute the input plan to populate the table with data
+        let table =
+            beacon_iceberg::create_iceberg_table(&catalog, &namespace, &table_name, &arrow_schema)
+                .await?;
+
+        // Register so the table is queryable and its `table.json` pointer is
+        // persisted by the TableManager.
+        session_ctx.register_table(table_ref, Arc::new(table))?;
+
+        // A bare `CREATE TABLE t (cols...)` lowers to an empty input relation:
+        // there is nothing to insert, so return an empty result. Only CTAS
+        // carries a real query plan to populate the table from.
+        if matches!(table_cmd.input.as_ref(), LogicalPlan::EmptyRelation(_)) {
+            return Ok(Box::pin(EmptyRecordBatchStream::new(Arc::new(
+                arrow::datatypes::Schema::empty(),
+            ))));
+        }
+
         Self::execute_insert_into_table(
             session_ctx,
             &table_name,
@@ -103,6 +124,10 @@ impl DFStatementHandler {
         .await
     }
 
+    /// Insert the rows produced by `input` into an existing managed table.
+    ///
+    /// Works for any [`TableProvider`] that supports `insert_into` (Iceberg
+    /// tables do); no provider downcast is required.
     async fn execute_insert_into_table(
         session_ctx: &SessionContext,
         table_name: &str,
@@ -110,91 +135,14 @@ impl DFStatementHandler {
         input: Arc<LogicalPlan>,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let provider = session_ctx.table_provider(table_name).await?;
-        let beacon_table = provider
-            .as_any()
-            .downcast_ref::<BeaconTable>()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Table '{}' is not a BeaconTable and cannot be inserted into",
-                    table_name
-                )
-            })?;
-        // Compile the logical plan to a physical plan and execute it to get the record batches to insert
 
         let state = session_ctx.state();
         let phys_plan = state.create_physical_plan(input.as_ref()).await?;
-        let insert_plan = beacon_table
-            .insert_into(&state, phys_plan, *insert_op)
-            .await?;
+        let insert_plan = provider.insert_into(&state, phys_plan, *insert_op).await?;
         let task_ctx = session_ctx.task_ctx();
         let stream = datafusion::physical_plan::execute_stream(insert_plan.clone(), task_ctx)?;
 
         Ok(stream)
-    }
-
-    async fn execute_create_index(
-        session_ctx: &SessionContext,
-        index_cmd: &datafusion::logical_expr::CreateIndex,
-    ) -> anyhow::Result<()> {
-        let table_name = index_cmd.table.to_string();
-        let provider = session_ctx.table_provider(index_cmd.table.clone()).await?;
-        let beacon_table = provider
-            .as_any()
-            .downcast_ref::<BeaconTable>()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Table '{}' is not a BeaconTable and does not support CREATE INDEX",
-                    table_name
-                )
-            })?;
-
-        // Extract column names from SortExpr, requiring plain column references
-        let column_names: Vec<(String, bool)> = index_cmd
-            .columns
-            .iter()
-            .map(|sort_expr| match &sort_expr.expr {
-                datafusion::prelude::Expr::Column(col) => {
-                    Ok((col.name().to_string(), sort_expr.asc))
-                }
-                other => Err(anyhow::anyhow!(
-                    "CREATE INDEX only supports plain column references, found: {other}"
-                )),
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        // Determine index type from USING clause (default: clustered)
-        let using = index_cmd.using.as_deref().unwrap_or("clustered");
-        let table_index = match using.to_lowercase().as_str() {
-            "clustered" => {
-                beacon_table::BeaconTableIndex::Clustered(beacon_table::ClusteredIndex {
-                    columns: column_names
-                        .into_iter()
-                        .map(|(name, asc)| beacon_table::ClusteredIndexColumn {
-                            name,
-                            ascending: asc,
-                        })
-                        .collect(),
-                })
-            }
-            "zorder" | "z_order" | "z-order" => {
-                beacon_table::BeaconTableIndex::ZOrder(beacon_table::ZOrderIndex {
-                    columns: column_names.into_iter().map(|(name, _)| name).collect(),
-                })
-            }
-            other => {
-                return Err(anyhow::anyhow!(
-                    "Unsupported index type '{other}'. Supported types: 'clustered', 'zorder'"
-                ));
-            }
-        };
-
-        let state = session_ctx.state();
-        let plan = beacon_table.create_index(&state, table_index).await?;
-        let task_ctx = session_ctx.task_ctx();
-        datafusion::physical_plan::collect(plan, task_ctx).await?;
-
-        tracing::info!("Created {using} index on table '{table_name}'");
-        Ok(())
     }
 }
 
@@ -221,23 +169,41 @@ impl StatementHandler for DFStatementHandler {
             LogicalPlan::Ddl(DdlStatement::DropTable(drop_table_statement)) => {
                 Self::ensure_drop_table_exists(&session_ctx, drop_table_statement)?;
 
-                // If this is a materialized view, capture its data prefix so the
-                // persisted Parquet can be reclaimed after deregistering.
-                let materialized_prefix = session_ctx
+                // Inspect the provider before deregistering so we can reclaim its
+                // backing storage afterwards: materialized views persist Parquet
+                // under a data prefix, Iceberg tables own metadata+data in the
+                // Iceberg warehouse.
+                let provider = session_ctx
                     .table_provider(drop_table_statement.name.clone())
                     .await
-                    .ok()
-                    .and_then(|provider| {
-                        provider
-                            .as_any()
-                            .downcast_ref::<MaterializedView>()
-                            .map(|mv| mv.base_storage_prefix())
-                    });
+                    .ok();
+                let materialized_prefix = provider.as_ref().and_then(|provider| {
+                    provider
+                        .as_any()
+                        .downcast_ref::<MaterializedView>()
+                        .map(|mv| mv.base_storage_prefix())
+                });
+                let iceberg_definition = provider.as_ref().and_then(|provider| {
+                    provider
+                        .as_any()
+                        .downcast_ref::<beacon_iceberg::IcebergTable>()
+                        .map(|table| table.definition().clone())
+                });
 
                 session_ctx.deregister_table(drop_table_statement.name.clone())?;
 
                 if let Some(prefix) = materialized_prefix {
                     super::materialized_view::delete_datasets_prefix(&session_ctx, &prefix).await;
+                }
+
+                if let Some(definition) = iceberg_definition {
+                    let store = beacon_iceberg::get_warehouse_store()?;
+                    beacon_iceberg::drop_iceberg_table(
+                        &store,
+                        &definition.namespace,
+                        &definition.name,
+                    )
+                    .await?;
                 }
 
                 Ok(Self::empty_ddl_stream(&plan))
@@ -251,42 +217,32 @@ impl StatementHandler for DFStatementHandler {
                 Self::execute_create_view(&session_ctx, create_view)?;
                 Ok(Self::empty_ddl_stream(&plan))
             }
-            // LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) => {
-            //     let stream = Self::execute_create_table(&session_ctx, table).await?;
-            //     Ok(stream)
-            // }
-            // LogicalPlan::Ddl(DdlStatement::CreateIndex(index)) => {
-            //     Self::execute_create_index(&session_ctx, index).await?;
-            //     Ok(Self::empty_ddl_stream(&plan))
-            // }
-            // LogicalPlan::Dml(dml_statement) => match dml_statement.op {
-            //     datafusion::logical_expr::WriteOp::Insert(insert_op) => {
-            //         tracing::debug!(
-            //             "Executing INSERT INTO for table '{}'",
-            //             dml_statement.table_name.to_string()
-            //         );
-            //         let stream = Self::execute_insert_into_table(
-            //             &session_ctx,
-            //             &dml_statement.table_name.to_string(),
-            //             &insert_op,
-            //             dml_statement.input.clone(),
-            //         )
-            //         .await?;
-            //         Ok(stream)
-            //     }
-            //     datafusion::logical_expr::WriteOp::Ctas => {
-            //         tracing::debug!(
-            //             "Executing CTAS for table '{}'",
-            //             dml_statement.table_name.to_string()
-            //         );
-            //         let df = DataFrame::new(state, plan);
-            //         Ok(df.execute_stream().await?)
-            //     }
-            //     _ => {
-            //         let df = DataFrame::new(state, plan);
-            //         Ok(df.execute_stream().await?)
-            //     }
-            // },
+            LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) => {
+                let stream = Self::execute_create_table(&session_ctx, table).await?;
+                Ok(stream)
+            }
+            LogicalPlan::Dml(dml_statement)
+                if matches!(
+                    dml_statement.op,
+                    datafusion::logical_expr::WriteOp::Insert(_)
+                ) =>
+            {
+                let datafusion::logical_expr::WriteOp::Insert(insert_op) = dml_statement.op else {
+                    unreachable!("guarded by matches! above")
+                };
+                tracing::debug!(
+                    "Executing INSERT INTO for table '{}'",
+                    dml_statement.table_name.to_string()
+                );
+                let stream = Self::execute_insert_into_table(
+                    &session_ctx,
+                    &dml_statement.table_name.table().to_string(),
+                    &insert_op,
+                    dml_statement.input.clone(),
+                )
+                .await?;
+                Ok(stream)
+            }
             LogicalPlan::Copy(copy) => {
                 let mut copy_cleaned = copy.clone();
                 copy_cleaned.output_url =
