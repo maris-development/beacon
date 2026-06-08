@@ -2,7 +2,7 @@
 //! endpoint (`Runtime::run_sql`): CREATE, INSERT, SELECT, CTAS and DROP.
 
 use beacon_core::runtime::Runtime;
-use datafusion::arrow::array::Int64Array;
+use datafusion::arrow::array::{Int64Array, StringArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use futures::TryStreamExt;
 
@@ -26,6 +26,17 @@ fn scalar_count(batches: &[RecordBatch]) -> i64 {
         .downcast_ref::<Int64Array>()
         .expect("count column should be Int64")
         .value(0)
+}
+
+/// First-column single-row Utf8 value.
+fn scalar_string(batches: &[RecordBatch]) -> String {
+    batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("column should be Utf8")
+        .value(0)
+        .to_string()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -63,6 +74,27 @@ async fn iceberg_create_insert_select_ctas_drop() {
     let copy_count = scalar_count(&run(&runtime, &format!("SELECT count(*) FROM {copy}")).await);
     assert_eq!(copy_count, 2, "CTAS should copy all rows");
 
+    // UPDATE WHERE: only the matching row changes; the other is untouched.
+    run(&runtime, &format!("UPDATE {table} SET name = 'Z' WHERE id = 1")).await;
+    let updated = scalar_string(&run(&runtime, &format!("SELECT name FROM {table} WHERE id = 1")).await);
+    assert_eq!(updated, "Z", "UPDATE WHERE id = 1 should set name to 'Z'");
+    let untouched = scalar_string(&run(&runtime, &format!("SELECT name FROM {table} WHERE id = 2")).await);
+    assert_eq!(untouched, "b", "non-matching row should be unchanged");
+    let row_count = scalar_count(&run(&runtime, &format!("SELECT count(*) FROM {table}")).await);
+    assert_eq!(row_count, 2, "UPDATE must not change the row count");
+
+    // UPDATE all rows (no WHERE).
+    run(&runtime, &format!("UPDATE {table} SET name = 'all'")).await;
+    let distinct_names =
+        scalar_count(&run(&runtime, &format!("SELECT count(DISTINCT name) FROM {table}")).await);
+    assert_eq!(distinct_names, 1, "UPDATE without WHERE should set every row");
+    let any_name = scalar_string(&run(&runtime, &format!("SELECT name FROM {table} LIMIT 1")).await);
+    assert_eq!(any_name, "all", "every row should have the updated value");
+
+    // Restore a known state for the DELETE cases below.
+    run(&runtime, &format!("UPDATE {table} SET name = 'a' WHERE id = 1")).await;
+    run(&runtime, &format!("UPDATE {table} SET name = 'b' WHERE id = 2")).await;
+
     // DELETE WHERE: remove one row, the other survives unchanged.
     run(&runtime, &format!("DELETE FROM {table} WHERE id = 1")).await;
     let after_delete = scalar_count(&run(&runtime, &format!("SELECT count(*) FROM {table}")).await);
@@ -84,6 +116,13 @@ async fn iceberg_create_insert_select_ctas_drop() {
     assert!(
         delete_view.is_err(),
         "DELETE on a non-Iceberg table should error"
+    );
+    let update_view = runtime
+        .run_sql(format!("UPDATE {view_name} SET id = 2 WHERE id = 1"), true)
+        .await;
+    assert!(
+        update_view.is_err(),
+        "UPDATE on a non-Iceberg table should error"
     );
     run(&runtime, &format!("DROP TABLE {view_name}")).await;
 

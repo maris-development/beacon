@@ -145,16 +145,14 @@ impl DFStatementHandler {
         Ok(stream)
     }
 
-    /// Execute `DELETE FROM t [WHERE p]` against an Iceberg table by copy-on-write:
-    /// recompute the surviving rows (`NOT p`, or none when there is no `WHERE`)
-    /// and atomically replace the table's data files.
-    async fn execute_delete(
+    /// Replace **all** rows of an Iceberg table with the result of `new_contents`
+    /// (copy-on-write). Shared by `DELETE` (surviving rows) and `UPDATE` (updated
+    /// rows). Requires the target be an Iceberg table; rejects anything else.
+    async fn replace_table_with_plan(
         session_ctx: &SessionContext,
-        dml: &datafusion::logical_expr::DmlStatement,
+        table_ref: datafusion::sql::TableReference,
+        new_contents: LogicalPlan,
     ) -> anyhow::Result<()> {
-        let table_ref = dml.table_name.clone();
-
-        // DELETE is only supported on Iceberg-backed tables.
         let provider = session_ctx.table_provider(table_ref.clone()).await?;
         let definition = provider
             .as_any()
@@ -162,11 +160,43 @@ impl DFStatementHandler {
             .map(|table| table.definition().clone())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "DELETE is only supported on Iceberg tables, but '{}' is not one",
+                    "Row mutations are only supported on Iceberg tables, but '{}' is not one",
                     table_ref.table()
                 )
             })?;
 
+        let state = session_ctx.state();
+        let phys_plan = state.create_physical_plan(&new_contents).await?;
+        let task_ctx = session_ctx.task_ctx();
+        let stream = datafusion::physical_plan::execute_stream(phys_plan, task_ctx.clone())?;
+
+        let catalog = beacon_iceberg::get_catalog()?;
+        beacon_iceberg::replace_table_contents(
+            &catalog,
+            &definition.namespace,
+            &definition.name,
+            stream,
+            &task_ctx,
+        )
+        .await?;
+
+        // The registered provider caches its snapshot and will not observe the
+        // catalog-level replace; rebuild it so subsequent scans see the new data.
+        let fresh = definition
+            .build_provider(Arc::new(session_ctx.clone()), &DATASETS_OBJECT_STORE_URL)
+            .await?;
+        session_ctx.register_table(table_ref, fresh)?;
+
+        Ok(())
+    }
+
+    /// Execute `DELETE FROM t [WHERE p]` against an Iceberg table by copy-on-write:
+    /// recompute the surviving rows (`NOT p`, or none when there is no `WHERE`)
+    /// and atomically replace the table's data files.
+    async fn execute_delete(
+        session_ctx: &SessionContext,
+        dml: &datafusion::logical_expr::DmlStatement,
+    ) -> anyhow::Result<()> {
         // Build the "keep" plan by inverting the delete predicate, reusing the
         // Dml input's own TableScan child so column qualifiers line up.
         let keep_plan = match dml.input.as_ref() {
@@ -193,29 +223,62 @@ impl DFStatementHandler {
             }
         };
 
-        let state = session_ctx.state();
-        let phys_plan = state.create_physical_plan(&keep_plan).await?;
-        let task_ctx = session_ctx.task_ctx();
-        let keep_stream = datafusion::physical_plan::execute_stream(phys_plan, task_ctx.clone())?;
+        Self::replace_table_with_plan(session_ctx, dml.table_name.clone(), keep_plan).await
+    }
 
-        let catalog = beacon_iceberg::get_catalog()?;
-        beacon_iceberg::replace_table_contents(
-            &catalog,
-            &definition.namespace,
-            &definition.name,
-            keep_stream,
-            &task_ctx,
-        )
-        .await?;
+    /// Execute `UPDATE t SET col = expr [, …] [WHERE p]` against an Iceberg table
+    /// by copy-on-write. DataFusion lowers this to a projection (assignment or
+    /// passthrough per column, aliased to the column name) over the *matching*
+    /// rows; the full post-update table is rebuilt as a single CASE projection
+    /// over the unfiltered scan: `CASE WHEN p THEN <new> ELSE <old> END`.
+    async fn execute_update(
+        session_ctx: &SessionContext,
+        dml: &datafusion::logical_expr::DmlStatement,
+    ) -> anyhow::Result<()> {
+        let LogicalPlan::Projection(projection) = dml.input.as_ref() else {
+            return Err(anyhow::anyhow!(
+                "Unsupported UPDATE plan shape: {}",
+                dml.input.display()
+            ));
+        };
 
-        // The registered provider caches its snapshot and will not observe the
-        // catalog-level replace; rebuild it so subsequent scans see the new data.
-        let fresh = definition
-            .build_provider(Arc::new(session_ctx.clone()), &DATASETS_OBJECT_STORE_URL)
-            .await?;
-        session_ctx.register_table(table_ref, fresh)?;
+        let new_contents = match projection.input.as_ref() {
+            LogicalPlan::Filter(filter) => {
+                let scan = filter.input.as_ref();
+                // Positional column mapping below assumes the scan's columns are
+                // exactly the table's columns (no FROM/join).
+                if projection.expr.len() != scan.schema().fields().len() {
+                    return Err(anyhow::anyhow!(
+                        "UPDATE ... FROM / joins are not supported"
+                    ));
+                }
+                let scan_cols = scan.schema().columns();
+                let predicate = &filter.predicate;
 
-        Ok(())
+                let case_exprs = projection
+                    .expr
+                    .iter()
+                    .enumerate()
+                    .map(|(i, expr)| {
+                        let name = projection.schema.field(i).name().clone();
+                        let new_value = expr.clone().unalias();
+                        let old_value =
+                            datafusion::prelude::Expr::Column(scan_cols[i].clone());
+                        Ok(datafusion::logical_expr::when(predicate.clone(), new_value)
+                            .otherwise(old_value)?
+                            .alias(name))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+
+                datafusion::logical_expr::LogicalPlanBuilder::from(scan.clone())
+                    .project(case_exprs)?
+                    .build()?
+            }
+            // No WHERE clause: the projection already covers every row.
+            _ => dml.input.as_ref().clone(),
+        };
+
+        Self::replace_table_with_plan(session_ctx, dml.table_name.clone(), new_contents).await
     }
 }
 
@@ -324,6 +387,16 @@ impl StatementHandler for DFStatementHandler {
                     dml_statement.table_name.to_string()
                 );
                 Self::execute_delete(&session_ctx, dml_statement).await?;
+                Ok(Self::empty_ddl_stream(&plan))
+            }
+            LogicalPlan::Dml(dml_statement)
+                if matches!(dml_statement.op, datafusion::logical_expr::WriteOp::Update) =>
+            {
+                tracing::debug!(
+                    "Executing UPDATE for table '{}'",
+                    dml_statement.table_name.to_string()
+                );
+                Self::execute_update(&session_ctx, dml_statement).await?;
                 Ok(Self::empty_ddl_stream(&plan))
             }
             LogicalPlan::Copy(copy) => {
