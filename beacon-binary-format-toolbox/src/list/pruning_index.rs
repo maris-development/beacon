@@ -8,11 +8,11 @@ use arrow::{
 use beacon_binary_format::{
     entry::{self, EntryKey},
     index::{
-        ArchivedIndex, Index,
         pruning::{
             ArchivedCombinedColumnStatistics, CombinedColumnStatistics, PruningIndex,
             PruningIndexReader,
         },
+        ArchivedIndex, Index,
     },
     reader::async_reader::{AsyncBBFReader, AsyncRangeRead},
 };

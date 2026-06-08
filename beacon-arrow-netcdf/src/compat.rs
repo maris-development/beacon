@@ -189,10 +189,18 @@ pub fn variable_to_nd_array(
         .collect::<Vec<_>>();
     let var_type = var.vartype();
 
+    // The optional CF `calendar` attribute selects how the reference date is
+    // interpreted (defaults to Gregorian when absent).
+    let calendar = match attributes.get("calendar") {
+        Some(AttributeValue::Str(cal)) => Some(cal.clone()),
+        Some(AttributeValue::Strs(cals)) if cals.len() == 1 => Some(cals[0].clone()),
+        _ => None,
+    };
+
     let cf_time_epoch_unit = match attributes.get("units") {
-        Some(AttributeValue::Str(units_str)) => parse_time_units(units_str),
+        Some(AttributeValue::Str(units_str)) => parse_time_units(units_str, calendar.as_deref()),
         Some(AttributeValue::Strs(units_strs)) if units_strs.len() == 1 => {
-            parse_time_units(&units_strs[0])
+            parse_time_units(&units_strs[0], calendar.as_deref())
         }
         _ => None,
     };

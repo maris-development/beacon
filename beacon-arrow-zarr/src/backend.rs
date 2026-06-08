@@ -10,7 +10,7 @@
 //!
 //! Plus [`AttributeBackend`] for scalar attributes surfaced as rank-0 arrays.
 
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use beacon_nd_array::{
     array::{backend::ArrayBackend, subset::ArraySubset},
@@ -18,7 +18,6 @@ use beacon_nd_array::{
 };
 use hifitime::Epoch;
 use ndarray::ArrayD;
-use regex::Regex;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use crate::data_types::ZarrDtypeKind;
@@ -392,36 +391,9 @@ impl<T: NdArrayType> ArrayBackend<T> for AttributeBackend<T> {
 
 /// Parse a CF time `units` string (e.g. `"days since 1950-01-01"`) into an
 /// `(epoch, unit)` pair, or `None` if it is not a recognized CF time unit.
-pub fn parse_cf_time_units(units: &str) -> Option<(Epoch, hifitime::Unit)> {
-    let unit = extract_units(units)?;
-    let epoch = extract_epoch(units)?;
-    Some((epoch, unit))
-}
-
-fn extract_units(input: &str) -> Option<hifitime::Unit> {
-    let re = Regex::new(r"^(?P<units>\w+) since").unwrap();
-    re.captures(input)
-        .and_then(|caps| match caps["units"].to_string().as_str() {
-            "seconds" => Some(hifitime::Unit::Second),
-            "milliseconds" => Some(hifitime::Unit::Millisecond),
-            "microseconds" => Some(hifitime::Unit::Microsecond),
-            "nanoseconds" => Some(hifitime::Unit::Nanosecond),
-            "minutes" => Some(hifitime::Unit::Minute),
-            "hours" => Some(hifitime::Unit::Hour),
-            "days" => Some(hifitime::Unit::Day),
-            "weeks" => Some(hifitime::Unit::Week),
-            _ => None,
-        })
-}
-
-fn extract_epoch(input: &str) -> Option<Epoch> {
-    let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})").unwrap();
-    re.captures(input).and_then(|caps| {
-        let epoch_str = caps["epoch"].to_string();
-        let mut epoch = Epoch::from_str(&epoch_str).ok();
-        if epoch.is_none() && epoch_str == "-4713-01-01" {
-            epoch = Some(Epoch::from_jde_utc(0.0));
-        }
-        epoch
-    })
+///
+/// `calendar` is the CF `calendar` attribute (`None` defaults to Gregorian).
+/// Thin wrapper over [`beacon_common::cf_time::parse_cf_time`].
+pub fn parse_cf_time_units(units: &str, calendar: Option<&str>) -> Option<(Epoch, hifitime::Unit)> {
+    beacon_common::cf_time::parse_cf_time(units, calendar).ok()
 }

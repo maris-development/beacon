@@ -1202,6 +1202,7 @@ dependencies = [
  "futures",
  "hifitime",
  "indexmap 2.14.0",
+ "julian",
  "moka",
  "ndarray",
  "netcdf",
@@ -1347,11 +1348,14 @@ dependencies = [
  "arrow 58.3.0",
  "async-stream",
  "async-trait",
+ "chrono",
  "datafusion",
  "futures",
  "futures-util",
  "glob",
+ "hifitime",
  "indexmap 2.14.0",
+ "julian",
  "object_store 0.13.2",
  "regex",
  "thiserror 2.0.18",
@@ -4385,6 +4389,15 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "julian"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f6a512aa084efd924c90124c684e806617166753ba4619dc76aa077a84bde4e"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]

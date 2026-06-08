@@ -21,6 +21,7 @@ num-traits = "0.2.19"
 hifitime = "4.0.2"
 regex = "1.11.1"
 bytemuck = {version = "1.25.0", features = ["derive"]}
+julian = "0.7.1"
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

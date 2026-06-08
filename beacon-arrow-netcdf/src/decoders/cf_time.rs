@@ -3,13 +3,11 @@
 //! This module converts numeric NetCDF time variables with units like
 //! `"days since 1970-01-01"` into nanosecond timestamps.
 
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use beacon_nd_array::datatypes::TimestampNanosecond;
-use hifitime::Epoch;
 use netcdf::NcTypeDescriptor;
 use num_traits::AsPrimitive;
-use regex::Regex;
 
 use crate::decoders::VariableDecoder;
 
@@ -83,50 +81,25 @@ where
     array
 }
 
-pub(crate) fn parse_time_units(units_str: &str) -> Option<(hifitime::Epoch, hifitime::Unit)> {
-    let unit = extract_units(units_str)?;
-    let epoch = extract_epoch(units_str)?;
-    Some((epoch, unit))
-}
-
-/// Extract the time unit from a CF units string.
+/// Parse a CF `units` (and optional `calendar`) attribute into a reference
+/// epoch and unit.
 ///
-/// Example accepted prefixes: `seconds since`, `days since`, `weeks since`.
-pub(crate) fn extract_units(input: &str) -> Option<hifitime::Unit> {
-    let re = Regex::new(r"^(?P<units>\w+) since").unwrap();
-    re.captures(input)
-        .and_then(|caps| match caps["units"].to_string().as_str() {
-            "seconds" => Some(hifitime::Unit::Second),
-            "milliseconds" => Some(hifitime::Unit::Millisecond),
-            "microseconds" => Some(hifitime::Unit::Microsecond),
-            "nanoseconds" => Some(hifitime::Unit::Nanosecond),
-            "days" => Some(hifitime::Unit::Day),
-            "weeks" => Some(hifitime::Unit::Week),
-            _ => None,
-        })
-}
-
-/// Extract the epoch date from a string like `days since -4713-11-24`.
-pub(crate) fn extract_epoch(input: &str) -> Option<Epoch> {
-    let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})").unwrap();
-    let result = re.captures(input).and_then(|caps| {
-        let epoch_str = caps["epoch"].to_string();
-        let mut epoch = Epoch::from_str(&epoch_str).ok();
-
-        if epoch.is_none() && epoch_str == "-4713-01-01" {
-            epoch = Some(Epoch::from_jde_utc(0.0));
-        }
-
-        epoch
-    });
-
-    result
+/// Thin wrapper over [`beacon_common::cf_time::parse_cf_time`]; returns `None`
+/// when the attributes cannot be interpreted as a CF time reference (so a
+/// non-time variable is simply left as plain numbers).
+pub(crate) fn parse_time_units(
+    units_str: &str,
+    calendar: Option<&str>,
+) -> Option<(hifitime::Epoch, hifitime::Unit)> {
+    beacon_common::cf_time::parse_cf_time(units_str, calendar).ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{str::FromStr, sync::Arc};
 
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    use hifitime::{Duration, Epoch};
     use tempfile::Builder;
 
     use super::CFTimeVariableDecoder;
@@ -342,5 +315,19 @@ mod tests {
         };
 
         assert_eq!(decoder.variable_name(), "time");
+    }
+
+    #[test]
+    fn test_time_extract() {
+        let jul_cal = julian::Calendar::JULIAN;
+        let start = jul_cal.at_ymd(-4713, julian::Month::January, 1).unwrap();
+
+        println!("Start of Julian calendar: {start}");
+
+        let num = start.julian_day_number();
+        println!("Julian day number for {start}: {num}");
+
+        // let epoch = Epoch::from
+        // println!("Epoch: {epoch}");
     }
 }

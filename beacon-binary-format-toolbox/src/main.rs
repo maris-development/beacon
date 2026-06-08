@@ -254,7 +254,8 @@ async fn main() {
                 csv_delimiter,
                 skip_column_on_error,
                 fail_fast,
-            );
+            )
+            .await;
         }
         Commands::ListDatasetsRegex {
             file_path,
