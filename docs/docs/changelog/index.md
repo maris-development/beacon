@@ -1,5 +1,11 @@
 # Changelog
 
+## (Unreleased)
+
+- **Changed**: Managed SQL tables (`CREATE TABLE`) are now backed by [Apache Iceberg](https://iceberg.apache.org/) instead of the previous Parquet-manifest format, giving them an ACID, schema-tracked, snapshot-based storage layer. Their data and metadata live in Beacon's internal area of the configured storage (local or S3), alongside the datasets.
+- **Added**: Row mutations on managed tables. In addition to `INSERT`, managed tables now support `DELETE ... WHERE`, `UPDATE ... SET ... WHERE`, and `CREATE TABLE AS SELECT`. `DELETE` and `UPDATE` are copy-on-write.
+- **Added**: Schema evolution with `ALTER TABLE` on managed tables — `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `ALTER COLUMN ... TYPE` (safe widening promotions). Existing rows keep reading correctly: added columns read `NULL` and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.6.1/sql/managed-tables).
+
 ## (v1.6.1 - 2026-06-04)
 
 - **Added**: Support for the Atlas file format. Atlas is a directory-based array store — a single `atlas.json` registry describing one or more datasets — that Beacon discovers and queries automatically, just like Parquet or Zarr. Query a store with the `read_atlas()` table function or register it as an external table with `STORED AS ATLAS`. Atlas keeps per-dataset column statistics, so Beacon prunes whole datasets before reading any array data and only loads the projected arrays. This makes re-encoding large NetCDF or Zarr collections into a single Atlas collection the recommended way to speed up repeated spatial/temporal range queries. See [github.com/maris-development/atlas](https://github.com/maris-development/atlas).
