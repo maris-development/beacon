@@ -535,11 +535,25 @@ impl Runtime {
     }
 
     fn ensure_anonymous_statement_allowed(statement: &BeaconStatement) -> anyhow::Result<()> {
+        let deny = || {
+            anyhow::anyhow!("anonymous SQL access only supports metadata and read-only SELECT queries")
+        };
         match statement {
-            BeaconStatement::DFStatement(_) => Ok(()),
-            _ => Err(anyhow::anyhow!(
-                "anonymous SQL access only supports metadata and read-only SELECT queries"
-            )),
+            // DDL/DML carried by a DFStatement is rejected downstream by
+            // `sql_options.verify_plan`, except `ALTER TABLE`, which beacon
+            // handles before planning and so must be gated here explicitly.
+            BeaconStatement::DFStatement(df) => {
+                if let datafusion::sql::parser::Statement::Statement(sql) = df.as_ref() {
+                    if matches!(
+                        sql.as_ref(),
+                        datafusion::sql::sqlparser::ast::Statement::AlterTable(_)
+                    ) {
+                        return Err(deny());
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(deny()),
         }
     }
 }

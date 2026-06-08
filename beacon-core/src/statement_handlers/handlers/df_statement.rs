@@ -12,6 +12,12 @@ use datafusion::{
     prelude::{DataFrame, SQLOptions, SessionContext},
 };
 
+use datafusion::sql::sqlparser::ast::{
+    AlterColumnOperation, AlterTableOperation, ColumnDef as SqlColumnDef, Ident as SqlIdent,
+    ObjectName, Statement as SqlAstStatement,
+};
+use datafusion::sql::TableReference;
+
 use crate::statement_handlers::{
     context::HandlerContext,
     payload::{StatementKind, StatementPayload},
@@ -280,6 +286,162 @@ impl DFStatementHandler {
 
         Self::replace_table_with_plan(session_ctx, dml.table_name.clone(), new_contents).await
     }
+
+    /// Execute `ALTER TABLE t …` against an Iceberg table by mapping the parsed
+    /// operations to schema changes and rebuilding the table under the new schema.
+    async fn execute_alter_table(
+        session_ctx: &SessionContext,
+        name: &ObjectName,
+        operations: &[AlterTableOperation],
+    ) -> anyhow::Result<()> {
+        let table_ref = TableReference::parse_str(&name.to_string());
+
+        // ALTER is only supported on Iceberg-backed tables.
+        let provider = session_ctx.table_provider(table_ref.clone()).await?;
+        let definition = provider
+            .as_any()
+            .downcast_ref::<beacon_iceberg::IcebergTable>()
+            .map(|table| table.definition().clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ALTER TABLE is only supported on Iceberg tables, but '{}' is not one",
+                    table_ref.table()
+                )
+            })?;
+
+        let mut changes = Vec::new();
+        for operation in operations {
+            match operation {
+                AlterTableOperation::AddColumn { column_def, .. } => {
+                    changes.push(beacon_iceberg::SchemaChange::AddColumn {
+                        name: column_def.name.value.clone(),
+                        data_type: Self::sql_column_type_to_arrow(column_def)?,
+                    });
+                }
+                AlterTableOperation::DropColumn { column_names, .. } => {
+                    for column_name in column_names {
+                        changes.push(beacon_iceberg::SchemaChange::DropColumn {
+                            name: column_name.value.clone(),
+                        });
+                    }
+                }
+                AlterTableOperation::RenameColumn {
+                    old_column_name,
+                    new_column_name,
+                } => {
+                    changes.push(beacon_iceberg::SchemaChange::RenameColumn {
+                        from: old_column_name.value.clone(),
+                        to: new_column_name.value.clone(),
+                    });
+                }
+                AlterTableOperation::AlterColumn { column_name, op } => match op {
+                    AlterColumnOperation::SetDataType { data_type, .. } => {
+                        let column_def = SqlColumnDef {
+                            name: SqlIdent::new("c"),
+                            data_type: data_type.clone(),
+                            options: Vec::new(),
+                        };
+                        changes.push(beacon_iceberg::SchemaChange::AlterColumnType {
+                            name: column_name.value.clone(),
+                            data_type: Self::sql_column_type_to_arrow(&column_def)?,
+                        });
+                    }
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "Unsupported ALTER COLUMN operation: {other}"
+                        ));
+                    }
+                },
+                other => {
+                    return Err(anyhow::anyhow!("Unsupported ALTER TABLE operation: {other}"));
+                }
+            }
+        }
+
+        let catalog = beacon_iceberg::get_catalog()?;
+        let store = beacon_iceberg::get_warehouse_store()?;
+        beacon_iceberg::alter_table_schema(
+            &catalog,
+            &store,
+            &definition.namespace,
+            &definition.name,
+            &changes,
+        )
+        .await?;
+
+        // Rebuild the registered provider so subsequent queries see the new schema.
+        let fresh = definition
+            .build_provider(Arc::new(session_ctx.clone()), &DATASETS_OBJECT_STORE_URL)
+            .await?;
+        session_ctx.register_table(table_ref, fresh)?;
+
+        Ok(())
+    }
+
+    /// Convert a SQL column definition's type to an Arrow type, reusing
+    /// DataFusion's full type support (no catalog access is needed).
+    fn sql_column_type_to_arrow(
+        column_def: &SqlColumnDef,
+    ) -> anyhow::Result<arrow::datatypes::DataType> {
+        let provider = AlterTypeContextProvider::default();
+        let planner = datafusion::sql::planner::SqlToRel::new(&provider);
+        let schema = planner
+            .build_schema(vec![column_def.clone()])
+            .map_err(|error| anyhow::anyhow!("Unsupported column type: {error}"))?;
+        Ok(schema.field(0).data_type().clone())
+    }
+}
+
+/// Minimal [`ContextProvider`] used only to convert SQL column types to Arrow
+/// types (via `SqlToRel::build_schema`); type conversion never touches the
+/// catalog, functions, or variables.
+#[derive(Default)]
+struct AlterTypeContextProvider {
+    options: datafusion::config::ConfigOptions,
+}
+
+impl datafusion::sql::planner::ContextProvider for AlterTypeContextProvider {
+    fn get_table_source(
+        &self,
+        name: TableReference,
+    ) -> datafusion::error::Result<Arc<dyn datafusion::logical_expr::TableSource>> {
+        datafusion::common::plan_err!("ALTER type conversion does not resolve table '{name}'")
+    }
+
+    fn get_function_meta(&self, _name: &str) -> Option<Arc<datafusion::logical_expr::ScalarUDF>> {
+        None
+    }
+
+    fn get_aggregate_meta(
+        &self,
+        _name: &str,
+    ) -> Option<Arc<datafusion::logical_expr::AggregateUDF>> {
+        None
+    }
+
+    fn get_window_meta(&self, _name: &str) -> Option<Arc<datafusion::logical_expr::WindowUDF>> {
+        None
+    }
+
+    fn get_variable_type(&self, _variable: &[String]) -> Option<arrow::datatypes::DataType> {
+        None
+    }
+
+    fn options(&self) -> &datafusion::config::ConfigOptions {
+        &self.options
+    }
+
+    fn udf_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn udaf_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn udwf_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[async_trait]
@@ -297,6 +459,18 @@ impl StatementHandler for DFStatementHandler {
         let statement = payload.into_df_statement()?;
         let session_ctx = context.session_ctx();
         let state = session_ctx.state();
+
+        // DataFusion has no `ALTER TABLE` planning, so intercept it here and drive
+        // Iceberg schema evolution directly.
+        if let datafusion::sql::parser::Statement::Statement(sql_stmt) = &statement {
+            if let SqlAstStatement::AlterTable(alter) = sql_stmt.as_ref() {
+                Self::execute_alter_table(&session_ctx, &alter.name, &alter.operations).await?;
+                return Ok(Box::pin(EmptyRecordBatchStream::new(Arc::new(
+                    arrow::datatypes::Schema::empty(),
+                ))));
+            }
+        }
+
         let plan = state.statement_to_plan(statement).await?;
 
         sql_options.verify_plan(&plan)?;

@@ -10,6 +10,7 @@
 //! for `CREATE TABLE` / `DROP TABLE`; discovery rebuilds providers via the
 //! definition's `build_provider`.
 
+pub mod alter;
 pub mod catalog;
 pub mod definition;
 pub mod provider;
@@ -28,6 +29,7 @@ use iceberg_rust::catalog::Catalog;
 use iceberg_rust::table::Table;
 use object_store::{ObjectStore, ObjectStoreExt};
 
+pub use alter::{alter_table_schema, is_allowed_promotion, SchemaChange};
 pub use catalog::{
     beacon_namespace, get_catalog, get_warehouse_store, init_catalog, BEACON_NAMESPACE,
 };
@@ -361,5 +363,132 @@ mod tests {
             0,
             "delete-all leaves an empty table"
         );
+    }
+
+    /// Register a fresh provider from the catalog and run a query, returning the
+    /// result batches. Used after schema evolution (the catalog is the source of
+    /// truth; a stale in-session provider must not be reused).
+    async fn query_from_catalog(
+        catalog: &Arc<dyn Catalog>,
+        namespace: &[String],
+        name: &str,
+        sql: &str,
+    ) -> Vec<datafusion::arrow::record_batch::RecordBatch> {
+        let tabular = catalog
+            .clone()
+            .load_tabular(&Identifier::new(namespace, name))
+            .await
+            .expect("table should load");
+        let table = match tabular {
+            Tabular::Table(table) => table,
+            _ => panic!("expected a table"),
+        };
+        let ctx = SessionContext::new();
+        ctx.register_table(name, Arc::new(DataFusionTable::from(table)))
+            .expect("provider should register");
+        ctx.sql(sql).await.unwrap().collect().await.unwrap()
+    }
+
+    /// A warehouse object store rooted at the catalog's temp dir, matching the
+    /// layout `build_local_file_catalog` writes (`<dir>/<namespace>/<table>/`).
+    fn warehouse_store(dir: &std::path::Path) -> Arc<dyn object_store::ObjectStore> {
+        Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir).unwrap())
+    }
+
+    #[tokio::test]
+    async fn alter_add_rename_drop_preserves_existing_data() {
+        use datafusion::arrow::array::StringArray;
+
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = catalog::build_local_file_catalog(dir.path())
+            .await
+            .expect("catalog should build");
+        let store = warehouse_store(dir.path());
+        let namespace = beacon_namespace();
+
+        let table = create_iceberg_table(&catalog, &namespace, "orders", &sample_schema())
+            .await
+            .expect("table should be created");
+        let ctx = SessionContext::new();
+        ctx.register_table("orders", Arc::new(table)).unwrap();
+        ctx.sql("INSERT INTO orders VALUES (1, 'a'), (2, 'b')")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        // ADD COLUMN age INT  -> existing rows read NULL for the new column.
+        alter_table_schema(
+            &catalog,
+            &store,
+            &namespace,
+            "orders",
+            &[SchemaChange::AddColumn {
+                name: "age".to_string(),
+                data_type: DataType::Int32,
+            }],
+        )
+        .await
+        .expect("add column should commit");
+
+        let batches =
+            query_from_catalog(&catalog, &namespace, "orders", "SELECT count(age) AS c FROM orders")
+                .await;
+        let non_null_age = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(non_null_age, 0, "pre-existing rows must read NULL for age");
+
+        // RENAME COLUMN name -> full_name  -> values preserved (same field id).
+        alter_table_schema(
+            &catalog,
+            &store,
+            &namespace,
+            "orders",
+            &[SchemaChange::RenameColumn {
+                from: "name".to_string(),
+                to: "full_name".to_string(),
+            }],
+        )
+        .await
+        .expect("rename column should commit");
+
+        let batches = query_from_catalog(
+            &catalog,
+            &namespace,
+            "orders",
+            "SELECT full_name FROM orders WHERE id = 1",
+        )
+        .await;
+        let value = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(value, "a", "renamed column should keep its values");
+
+        // DROP COLUMN full_name  -> only id + age remain.
+        alter_table_schema(
+            &catalog,
+            &store,
+            &namespace,
+            "orders",
+            &[SchemaChange::DropColumn {
+                name: "full_name".to_string(),
+            }],
+        )
+        .await
+        .expect("drop column should commit");
+
+        let batches =
+            query_from_catalog(&catalog, &namespace, "orders", "SELECT * FROM orders").await;
+        let schema = batches[0].schema();
+        let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(columns, vec!["id", "age"], "dropped column should be gone");
     }
 }

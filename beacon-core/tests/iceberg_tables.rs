@@ -91,6 +91,34 @@ async fn iceberg_create_insert_select_ctas_drop() {
     let any_name = scalar_string(&run(&runtime, &format!("SELECT name FROM {table} LIMIT 1")).await);
     assert_eq!(any_name, "all", "every row should have the updated value");
 
+    // ALTER TABLE schema evolution (on the independent `copy` table, which still
+    // holds the original rows (1,'a'),(2,'b')).
+    // ADD COLUMN: existing rows read NULL.
+    run(&runtime, &format!("ALTER TABLE {copy} ADD COLUMN age INT")).await;
+    let non_null_age = scalar_count(&run(&runtime, &format!("SELECT count(age) FROM {copy}")).await);
+    assert_eq!(non_null_age, 0, "existing rows must read NULL for a new column");
+    // New rows can populate the new column.
+    run(&runtime, &format!("INSERT INTO {copy} VALUES (3, 'c', 30)")).await;
+    // ALTER COLUMN TYPE: int -> bigint (a safe promotion).
+    run(&runtime, &format!("ALTER TABLE {copy} ALTER COLUMN age TYPE BIGINT")).await;
+    let age = scalar_count(&run(&runtime, &format!("SELECT age FROM {copy} WHERE id = 3")).await);
+    assert_eq!(age, 30, "inserted value survives the type promotion");
+    // RENAME COLUMN: values preserved under the new name.
+    run(&runtime, &format!("ALTER TABLE {copy} RENAME COLUMN name TO label")).await;
+    let label = scalar_string(&run(&runtime, &format!("SELECT label FROM {copy} WHERE id = 1")).await);
+    assert_eq!(label, "a", "renamed column keeps its values");
+    // DROP COLUMN.
+    run(&runtime, &format!("ALTER TABLE {copy} DROP COLUMN label")).await;
+    let cols = run(&runtime, &format!("SELECT * FROM {copy} ORDER BY id")).await;
+    let schema = cols[0].schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(names, vec!["id", "age"], "dropped column should be gone");
+    // A narrowing type change is rejected.
+    let narrow = runtime
+        .run_sql(format!("ALTER TABLE {copy} ALTER COLUMN age TYPE INT"), true)
+        .await;
+    assert!(narrow.is_err(), "narrowing type change should be rejected");
+
     // Restore a known state for the DELETE cases below.
     run(&runtime, &format!("UPDATE {table} SET name = 'a' WHERE id = 1")).await;
     run(&runtime, &format!("UPDATE {table} SET name = 'b' WHERE id = 2")).await;
@@ -123,6 +151,13 @@ async fn iceberg_create_insert_select_ctas_drop() {
     assert!(
         update_view.is_err(),
         "UPDATE on a non-Iceberg table should error"
+    );
+    let alter_view = runtime
+        .run_sql(format!("ALTER TABLE {view_name} ADD COLUMN x INT"), true)
+        .await;
+    assert!(
+        alter_view.is_err(),
+        "ALTER on a non-Iceberg table should error"
     );
     run(&runtime, &format!("DROP TABLE {view_name}")).await;
 
