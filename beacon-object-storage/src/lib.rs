@@ -20,7 +20,7 @@ pub mod event;
 pub mod fs_event_listener;
 pub mod object_cache;
 
-pub use datasets_store::DatasetsStore;
+pub use datasets_store::{DATASETS_WRITEABLE_PREFIX, DatasetsStore};
 
 use crate::error::StorageResult;
 
@@ -61,7 +61,8 @@ pub async fn get_tables_object_store() -> Arc<dyn ObjectStore> {
             // For tables, we always use the local filesystem
             Arc::new(
                 LocalFileSystem::new_with_prefix(beacon_config::TABLES_DIR.clone())
-                    .expect("Failed to initialize tables object store"),
+                    .expect("Failed to initialize tables object store")
+                    .with_automatic_cleanup(true),
             ) as Arc<dyn ObjectStore>
         })
         .await

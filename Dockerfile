@@ -37,12 +37,12 @@ COPY beacon-data-lake/ /beacon-data-lake/
 COPY beacon-datafusion-ext/ /beacon-datafusion-ext/
 COPY beacon-formats/ /beacon-formats/
 COPY beacon-functions/ /beacon-functions/
+COPY beacon-iceberg/ /beacon-iceberg/
 COPY beacon-nd-array/ /beacon-nd-array/
 COPY beacon-nd-arrow/ /beacon-nd-arrow/
 COPY beacon-object-storage/ /beacon-object-storage/
 COPY beacon-planner/ /beacon-planner/
 COPY beacon-query/ /beacon-query/
-COPY beacon-table/ /beacon-table/
 COPY Cargo.toml /
 COPY Cargo.lock /
 COPY rust-toolchain /

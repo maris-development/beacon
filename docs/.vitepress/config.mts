@@ -268,6 +268,19 @@ export default defineConfig({
                   ]
                 },
                 {
+                  text: 'CREATE TABLE (Managed)',
+                  link: '/docs/1.6.1/sql/managed-tables',
+                  collapsed: true,
+                  items: [
+                    { text: 'CREATE TABLE AS SELECT', link: '/docs/1.6.1/sql/managed-tables#create-table-as-select' },
+                    { text: 'INSERT INTO', link: '/docs/1.6.1/sql/managed-tables#insert-into' },
+                    { text: 'DELETE', link: '/docs/1.6.1/sql/managed-tables#delete' },
+                    { text: 'UPDATE', link: '/docs/1.6.1/sql/managed-tables#update' },
+                    { text: 'ALTER TABLE', link: '/docs/1.6.1/sql/managed-tables#alter-table' },
+                    { text: 'DROP TABLE', link: '/docs/1.6.1/sql/managed-tables#drop-table' },
+                  ]
+                },
+                {
                   text: 'CREATE VIEW',
                   link: '/docs/1.6.1/sql/create-view',
                 },

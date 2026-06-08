@@ -79,6 +79,13 @@ impl Runtime {
             .unwrap()
             .register_schema("public", table_manager.clone())?;
 
+        // Build the shared Iceberg catalog before discovering tables: startup
+        // table discovery rebuilds Iceberg providers via the catalog, and the
+        // CREATE/DROP handlers need it too. The warehouse lives in the datasets
+        // store's internal area (`__beacon__/iceberg`), so it follows the same
+        // local/S3 backend as the datasets.
+        beacon_iceberg::catalog::init_datasets_warehouse().await?;
+
         geodatafusion::register(&session_ctx);
 
         for udf in beacon_functions::geo::geo_udfs() {
@@ -528,11 +535,25 @@ impl Runtime {
     }
 
     fn ensure_anonymous_statement_allowed(statement: &BeaconStatement) -> anyhow::Result<()> {
+        let deny = || {
+            anyhow::anyhow!("anonymous SQL access only supports metadata and read-only SELECT queries")
+        };
         match statement {
-            BeaconStatement::DFStatement(_) => Ok(()),
-            _ => Err(anyhow::anyhow!(
-                "anonymous SQL access only supports metadata and read-only SELECT queries"
-            )),
+            // DDL/DML carried by a DFStatement is rejected downstream by
+            // `sql_options.verify_plan`, except `ALTER TABLE`, which beacon
+            // handles before planning and so must be gated here explicitly.
+            BeaconStatement::DFStatement(df) => {
+                if let datafusion::sql::parser::Statement::Statement(sql) = df.as_ref() {
+                    if matches!(
+                        sql.as_ref(),
+                        datafusion::sql::sqlparser::ast::Statement::AlterTable(_)
+                    ) {
+                        return Err(deny());
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(deny()),
         }
     }
 }
