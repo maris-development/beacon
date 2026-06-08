@@ -63,6 +63,30 @@ async fn iceberg_create_insert_select_ctas_drop() {
     let copy_count = scalar_count(&run(&runtime, &format!("SELECT count(*) FROM {copy}")).await);
     assert_eq!(copy_count, 2, "CTAS should copy all rows");
 
+    // DELETE WHERE: remove one row, the other survives unchanged.
+    run(&runtime, &format!("DELETE FROM {table} WHERE id = 1")).await;
+    let after_delete = scalar_count(&run(&runtime, &format!("SELECT count(*) FROM {table}")).await);
+    assert_eq!(after_delete, 1, "DELETE WHERE id = 1 should remove one row");
+    let surviving_id = scalar_count(&run(&runtime, &format!("SELECT id FROM {table}")).await);
+    assert_eq!(surviving_id, 2, "the surviving row should be id = 2");
+
+    // DELETE all rows.
+    run(&runtime, &format!("DELETE FROM {table}")).await;
+    let after_delete_all = scalar_count(&run(&runtime, &format!("SELECT count(*) FROM {table}")).await);
+    assert_eq!(after_delete_all, 0, "DELETE without WHERE should empty the table");
+
+    // DELETE on a non-Iceberg relation must be rejected.
+    let view_name = format!("{table}_view");
+    run(&runtime, &format!("CREATE VIEW {view_name} AS SELECT 1 AS id")).await;
+    let delete_view = runtime
+        .run_sql(format!("DELETE FROM {view_name} WHERE id = 1"), true)
+        .await;
+    assert!(
+        delete_view.is_err(),
+        "DELETE on a non-Iceberg table should error"
+    );
+    run(&runtime, &format!("DROP TABLE {view_name}")).await;
+
     // DROP both tables.
     run(&runtime, &format!("DROP TABLE {table}")).await;
     run(&runtime, &format!("DROP TABLE {copy}")).await;

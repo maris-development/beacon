@@ -18,8 +18,12 @@ pub mod schema_convert;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
+use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion_iceberg::table::write_parquet_data_files;
 use datafusion_iceberg::DataFusionTable;
 use futures::StreamExt;
+use iceberg_rust::catalog::identifier::Identifier;
+use iceberg_rust::catalog::tabular::Tabular;
 use iceberg_rust::catalog::Catalog;
 use iceberg_rust::table::Table;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -82,6 +86,46 @@ pub async fn drop_iceberg_table(
             .await
             .map_err(|error| anyhow::anyhow!("Failed to delete Iceberg table file: {error}"))?;
     }
+
+    Ok(())
+}
+
+/// Replace **all** rows of an Iceberg table with the rows produced by `new_rows`
+/// (copy-on-write). Used to implement `DELETE`: the caller passes the surviving
+/// rows (everything that does *not* match the delete predicate), and this writes
+/// them as fresh data files and atomically swaps the table's data files via an
+/// Iceberg `replace` transaction.
+///
+/// An empty `new_rows` stream replaces the table with zero data files (i.e.
+/// `DELETE` with no `WHERE`, or a predicate matching every row).
+pub async fn replace_table_contents(
+    catalog: &Arc<dyn Catalog>,
+    namespace: &[String],
+    name: &str,
+    new_rows: SendableRecordBatchStream,
+    task_ctx: &Arc<TaskContext>,
+) -> anyhow::Result<()> {
+    let identifier = Identifier::new(namespace, name);
+    let mut table = match catalog
+        .clone()
+        .load_tabular(&identifier)
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to load Iceberg table '{name}': {error}"))?
+    {
+        Tabular::Table(table) => table,
+        _ => anyhow::bail!("Iceberg identifier '{name}' does not refer to a table"),
+    };
+
+    let data_files = write_parquet_data_files(&table, new_rows, task_ctx, None)
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to write Iceberg data files: {error}"))?;
+
+    table
+        .new_transaction(None)
+        .replace(data_files)
+        .commit()
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to commit Iceberg replace: {error}"))?;
 
     Ok(())
 }
@@ -214,5 +258,108 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(count, 1, "row written before restart should survive discovery");
+    }
+
+    /// Count rows by loading a fresh provider straight from the catalog (the
+    /// catalog is the source of truth after a `replace`, so a stale in-session
+    /// provider must not be reused).
+    async fn count_from_catalog(
+        catalog: &Arc<dyn Catalog>,
+        namespace: &[String],
+        name: &str,
+    ) -> i64 {
+        let tabular = catalog
+            .clone()
+            .load_tabular(&Identifier::new(namespace, name))
+            .await
+            .expect("table should load");
+        let table = match tabular {
+            Tabular::Table(table) => table,
+            _ => panic!("expected a table"),
+        };
+        let ctx = SessionContext::new();
+        ctx.register_table(name, Arc::new(DataFusionTable::from(table)))
+            .expect("provider should register");
+        let batches = ctx
+            .sql(&format!("SELECT count(*) AS c FROM {name}"))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0)
+    }
+
+    #[tokio::test]
+    async fn replace_contents_deletes_matching_and_all_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = catalog::build_local_file_catalog(dir.path())
+            .await
+            .expect("catalog should build");
+        let namespace = beacon_namespace();
+
+        let table = create_iceberg_table(&catalog, &namespace, "orders", &sample_schema())
+            .await
+            .expect("table should be created");
+        let ctx = SessionContext::new();
+        ctx.register_table("orders", Arc::new(table)).unwrap();
+        ctx.sql("INSERT INTO orders VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        // DELETE WHERE id = 1  ->  keep rows where id <> 1.
+        let keep = ctx
+            .sql("SELECT * FROM orders WHERE id <> 1")
+            .await
+            .unwrap()
+            .execute_stream()
+            .await
+            .unwrap();
+        replace_table_contents(&catalog, &namespace, "orders", keep, &ctx.task_ctx())
+            .await
+            .expect("replace should succeed");
+        assert_eq!(
+            count_from_catalog(&catalog, &namespace, "orders").await,
+            2,
+            "one row removed, two survive"
+        );
+
+        // DELETE (all)  ->  keep nothing (empty stream).
+        let fresh = SessionContext::new();
+        let tabular = catalog
+            .clone()
+            .load_tabular(&Identifier::new(&namespace, "orders"))
+            .await
+            .unwrap();
+        let table = match tabular {
+            Tabular::Table(table) => table,
+            _ => panic!("expected a table"),
+        };
+        fresh
+            .register_table("orders", Arc::new(DataFusionTable::from(table)))
+            .unwrap();
+        let none = fresh
+            .sql("SELECT * FROM orders WHERE 1 = 0")
+            .await
+            .unwrap()
+            .execute_stream()
+            .await
+            .unwrap();
+        replace_table_contents(&catalog, &namespace, "orders", none, &fresh.task_ctx())
+            .await
+            .expect("delete-all replace should succeed");
+        assert_eq!(
+            count_from_catalog(&catalog, &namespace, "orders").await,
+            0,
+            "delete-all leaves an empty table"
+        );
     }
 }
