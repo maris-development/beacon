@@ -1,16 +1,20 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use arrow::{
+    array::RecordBatchOptions,
+    datatypes::{Schema, SchemaRef},
+    record_batch::RecordBatch,
+};
 use beacon_nd_array::{
     arrow::{
-        batch::{any_dataset_as_record_batch_stream, any_dataset_as_row_size},
+        batch::{ParallelDatasetStream, any_dataset_as_row_size},
         metrics::DatasetReadMetrics,
         pushdown_filter::PushdownFilter,
     },
     projection::DatasetProjection,
 };
 use datafusion::{
-    common::Statistics,
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
@@ -18,19 +22,27 @@ use datafusion::{
         schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    execution::SendableRecordBatchStream,
     physical_expr::{PhysicalExpr, conjunction, projection::ProjectionExprs},
     physical_expr_adapter::BatchAdapterFactory,
     physical_plan::{
         filter_pushdown::{FilterPushdownPropagation, PushedDown},
-        metrics::{ExecutionPlanMetricsSet, SplitMetrics},
-        stream::{BatchSplitStream, RecordBatchStreamAdapter},
+        metrics::ExecutionPlanMetricsSet,
     },
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
-use object_store::ObjectMeta;
+use object_store::{ObjectMeta, path::Path};
 
 use super::reader;
+use crate::datafusion::stream_share::{SharedTiffStream, TiffStreamShare};
+
+/// Number of chunks read concurrently per file, and the work-sharing channel
+/// capacity. Chosen by this (TIFF) consumer; falls back to 4 when the platform
+/// parallelism is unavailable.
+fn default_read_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
 
 #[derive(Debug, Clone)]
 pub struct TiffSource {
@@ -41,6 +53,11 @@ pub struct TiffSource {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
+    /// Number of chunks read concurrently per file (and channel capacity).
+    read_parallelism: usize,
+    /// Per-file shared parallel read, keyed by object path, so that partitions
+    /// opening the same file work-share a single producer.
+    stream_partition_shares: Arc<Mutex<HashMap<Path, Arc<TiffStreamShare>>>>,
 }
 
 impl TiffSource {
@@ -52,6 +69,8 @@ impl TiffSource {
             batch_size: 128 * 1024,
             predicate: None,
             projection: None,
+            read_parallelism: default_read_parallelism(),
+            stream_partition_shares: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -82,6 +101,8 @@ impl FileSource for TiffSource {
             self.predicate.clone(),
             self.execution_plan_metrics.clone(),
             partition,
+            self.read_parallelism,
+            self.stream_partition_shares.clone(),
         )))
     }
 
@@ -172,9 +193,12 @@ struct TiffOpener {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     partition: usize,
     metrics: ExecutionPlanMetricsSet,
+    read_parallelism: usize,
+    stream_partition_shares: Arc<Mutex<HashMap<Path, Arc<TiffStreamShare>>>>,
 }
 
 impl TiffOpener {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         table_schema: SchemaRef,
         object_store: Arc<dyn object_store::ObjectStore>,
@@ -183,6 +207,8 @@ impl TiffOpener {
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
+        read_parallelism: usize,
+        stream_partition_shares: Arc<Mutex<HashMap<Path, Arc<TiffStreamShare>>>>,
     ) -> Self {
         Self {
             table_schema,
@@ -192,17 +218,23 @@ impl TiffOpener {
             predicate,
             partition,
             metrics,
+            read_parallelism,
+            stream_partition_shares,
         }
     }
 
-    async fn read_task(
+    /// Build (once per file) the shared read for `object`: open the dataset,
+    /// resolve the projection, and either spawn a [`ParallelDatasetStream`] or,
+    /// for an empty projection, capture the dataset row count.
+    async fn build_shared_stream(
         object: ObjectMeta,
         object_store: Arc<dyn object_store::ObjectStore>,
         projected_schema: SchemaRef,
         batch_size: usize,
+        read_parallelism: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         metrics: Option<DatasetReadMetrics>,
-    ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
+    ) -> datafusion::error::Result<SharedTiffStream> {
         let dataset = reader::open_dataset(object_store, object.clone())
             .await
             .map_err(|e| {
@@ -232,24 +264,30 @@ impl TiffOpener {
             .collect();
 
         if projection.is_empty() {
-            return Ok(any_dataset_as_row_size(dataset)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to compute row size for empty projection on TIFF dataset: {e}"
-                    ))
-                })?
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
+            // Empty projection (e.g. count(*)): derive the row count once. Read
+            // a single batch from the (cheap) row-size stream and keep its
+            // length; each opener rebuilds the row-count batch from it.
+            let mut row_size_stream = any_dataset_as_row_size(dataset).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Failed to compute row size for empty projection on TIFF dataset: {e}"
+                ))
+            })?;
+            let rows = match row_size_stream.next().await {
+                Some(Ok(batch)) => batch.num_rows(),
+                Some(Err(e)) => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
                         "Failed to read TIFF dataset with empty projection: {e}"
-                    ))
-                })
-                .boxed());
+                    )));
+                }
+                None => 0,
+            };
+            return Ok(SharedTiffStream::RowSize { rows });
         }
 
         // Adapt batches (read with `projection`) onto the projected output
         // schema: reorder, cast, and null-fill columns this file lacks.
         let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
-        let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
+        let adapter = Arc::new(BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?);
 
         let dataset = if projection.len() < file_schema.fields().len() {
             let proj = DatasetProjection {
@@ -266,34 +304,93 @@ impl TiffOpener {
         };
 
         let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading TIFF as Arrow stream: {e}"
-                ))
-            })
-            .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to adapt TIFF batch schema: {e}"
-                    ))
-                });
-                futures::future::ready(mapped)
-            })
-            .boxed();
+        let stream =
+            ParallelDatasetStream::spawn(dataset, batch_size, pushdown_filter, metrics, read_parallelism);
 
-        Ok(stream)
+        Ok(SharedTiffStream::Data { stream, adapter })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn read_task(
+        share: Arc<TiffStreamShare>,
+        object: ObjectMeta,
+        object_store: Arc<dyn object_store::ObjectStore>,
+        projected_schema: SchemaRef,
+        batch_size: usize,
+        read_parallelism: usize,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
+        metrics: Option<DatasetReadMetrics>,
+    ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
+        // First partition to reach this file opens it and spawns the parallel
+        // producer; later partitions clone the same handle and work-share its
+        // batches. (The producer is spawned with the initializing partition's
+        // metrics.)
+        let shared = share
+            .get_or_try_init(|| {
+                Self::build_shared_stream(
+                    object,
+                    object_store,
+                    projected_schema,
+                    batch_size,
+                    read_parallelism,
+                    predicate,
+                    metrics,
+                )
+            })
+            .await?
+            .clone();
+
+        match shared {
+            SharedTiffStream::Data { stream, adapter } => Ok(stream
+                .into_stream()
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Error reading TIFF as Arrow stream: {e}"
+                    ))
+                })
+                .and_then(move |batch| {
+                    let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to adapt TIFF batch schema: {e}"
+                        ))
+                    });
+                    futures::future::ready(mapped)
+                })
+                .boxed()),
+            SharedTiffStream::RowSize { rows } => {
+                let schema = Arc::new(Schema::empty());
+                let options = RecordBatchOptions::new().with_row_count(Some(rows));
+                let batch = RecordBatch::try_new_with_options(schema, vec![], &options)?;
+                Ok(futures::stream::once(async move { Ok(batch) }).boxed())
+            }
+        }
     }
 }
 
 impl FileOpener for TiffOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
+
+        // Get (or create) the shared handle for this file path so that all
+        // partitions opening the same file share one parallel producer.
+        let share = {
+            let mut shares = self
+                .stream_partition_shares
+                .lock()
+                .expect("stream_partition_shares mutex poisoned");
+            shares
+                .entry(file.object_meta.location.clone())
+                .or_insert_with(|| Arc::new(TiffStreamShare::new()))
+                .clone()
+        };
+
         let fut = Self::read_task(
+            share,
             file.object_meta,
             self.object_store.clone(),
             self.projected_schema.clone(),
             self.batch_size,
+            self.read_parallelism,
             self.predicate.clone(),
             metrics,
         )

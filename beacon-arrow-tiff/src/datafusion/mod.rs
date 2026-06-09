@@ -23,6 +23,7 @@ const TIF_EXTENSION: &str = "tif";
 pub mod options;
 pub mod reader;
 pub mod source;
+pub mod stream_share;
 
 #[derive(Debug, Clone)]
 pub struct TiffFormatFactory {

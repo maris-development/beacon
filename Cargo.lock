@@ -1652,6 +1652,7 @@ dependencies = [
  "chrono",
  "criterion 0.5.1",
  "datafusion",
+ "flume",
  "futures",
  "indexmap 2.14.0",
  "ndarray",
