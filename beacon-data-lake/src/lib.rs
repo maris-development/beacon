@@ -211,26 +211,6 @@ impl DataLake {
         self.table_manager.init_tables().await
     }
 
-    pub fn spawn_sync_table_refresh(self: &Arc<Self>, interval_secs: u64) {
-        if interval_secs == 0 {
-            tracing::info!("Table sync interval is set to 0, skipping table refresh task.");
-            return;
-        }
-        let data_lake = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-            //Consume the first tick
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                tracing::info!("Refreshing tables...");
-                if let Err(e) = data_lake.init_tables().await {
-                    tracing::error!("Failed to refresh tables: {}", e);
-                }
-            }
-        });
-    }
-
     pub async fn list_datasets(
         &self,
         offset: Option<usize>,

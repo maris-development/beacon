@@ -35,7 +35,6 @@ pub struct ServerConfig {
 #[derive(Debug)]
 pub struct RuntimeConfig {
     pub vm_memory_size: usize,
-    pub table_sync_interval_secs: u64,
     pub sanitize_schema: bool,
     pub st_within_point_cache_size: usize,
     pub enable_sys_info: bool,
@@ -132,8 +131,6 @@ struct RawConfig {
     vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     default_table: String,
-    #[envconfig(from = "BEACON_TABLE_SYNC_INTERVAL_SECS", default = "300")] // 5 minutes
-    table_sync_interval_secs: u64,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
     sanitize_schema: bool,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "true")]
@@ -249,7 +246,6 @@ impl From<RawConfig> for Config {
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
-                table_sync_interval_secs: raw.table_sync_interval_secs,
                 sanitize_schema: raw.sanitize_schema,
                 st_within_point_cache_size: raw.st_within_point_cache_size,
                 enable_sys_info: raw.enable_sys_info,
