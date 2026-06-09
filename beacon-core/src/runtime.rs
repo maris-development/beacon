@@ -102,22 +102,6 @@ impl Runtime {
 
         table_manager.init_tables().await?;
 
-        let refresh_table_manager = table_manager.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                beacon_config::CONFIG.runtime.table_sync_interval_secs,
-            ));
-
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                tracing::info!("Refreshing tables...");
-                if let Err(error) = refresh_table_manager.init_tables().await {
-                    tracing::error!("Failed to refresh tables: {}", error);
-                }
-            }
-        });
-
         let listing_table_factory = Arc::new(ListingTableFactoryExt::new(
             file_manager.data_object_store_url(),
             Arc::downgrade(&session_ctx),

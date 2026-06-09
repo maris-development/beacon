@@ -145,7 +145,6 @@ Beacon is configured entirely through `BEACON_*` environment variables. The most
 | `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request specifies no source. |
 | `BEACON_WORKER_THREADS` | `8` | Number of query worker threads. |
 | `BEACON_ENABLE_SQL` | `true` | Enable the read-only raw SQL query interface. |
-| `BEACON_TABLE_SYNC_INTERVAL_SECS` | `300` | How often tables are re-synced from disk. |
 | `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable the Arrow Flight SQL endpoint. |
 | `BEACON_FLIGHT_SQL_PORT` | `32011` | Arrow Flight SQL port. |
 
