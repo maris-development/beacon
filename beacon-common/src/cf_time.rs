@@ -272,10 +272,12 @@ mod tests {
     #[test]
     fn julian_noon_maps_to_integer_jdn() {
         // The JDN rolls over at noon, so 12:00:00 lands exactly on the integer
-        // JDN. -4712-01-01 has JDN 0, so its noon is JD 0.0.
+        // JDN. The parser applies the conventional "no year zero" adjustment, so
+        // the input -4713-01-01 maps to astronomical -4712-01-01, which has
+        // JDN 0; its noon is JD 0.0.
         assert_eq!(jdn(-4712, 1, 1), 0);
         let (epoch, unit) =
-            parse_cf_time("days since -4712-01-01T12:00:00", Some("julian")).unwrap();
+            parse_cf_time("days since -4713-01-01T12:00:00", Some("julian")).unwrap();
         assert_eq!(unit, Unit::Day);
         assert!((epoch.to_jde_utc_days() - 0.0).abs() < JD_EPS);
     }
@@ -283,18 +285,18 @@ mod tests {
     #[test]
     fn julian_midnight_is_half_a_day_before_jdn() {
         // Midnight (00:00) precedes the integer JDN by half a day.
-        let (epoch, _) = parse_cf_time("days since -4712-01-01T00:00:00", Some("julian")).unwrap();
+        let (epoch, _) = parse_cf_time("days since -4713-01-01T00:00:00", Some("julian")).unwrap();
         assert!((epoch.to_jde_utc_days() - (-0.5)).abs() < JD_EPS);
     }
 
     #[test]
     fn julian_epoch_one_day_later() {
         // Consecutive midnights are exactly one day apart.
-        let day1 = parse_cf_time("days since -4712-01-01T00:00:00", Some("julian"))
+        let day1 = parse_cf_time("days since -4713-01-01T00:00:00", Some("julian"))
             .unwrap()
             .0
             .to_jde_utc_days();
-        let day2 = parse_cf_time("days since -4712-01-02T00:00:00", Some("julian"))
+        let day2 = parse_cf_time("days since -4713-01-02T00:00:00", Some("julian"))
             .unwrap()
             .0
             .to_jde_utc_days();
@@ -305,12 +307,12 @@ mod tests {
     fn julian_epoch_with_time_of_day() {
         // 06:00 is a quarter day past midnight, i.e. JDN - 0.5 + 0.25 = -0.25.
         let (epoch, _) =
-            parse_cf_time("seconds since -4712-01-01T06:00:00", Some("julian")).unwrap();
+            parse_cf_time("seconds since -4713-01-01T06:00:00", Some("julian")).unwrap();
         assert!((epoch.to_jde_utc_days() - (-0.25)).abs() < JD_EPS);
 
         // 18:00 is three quarters past midnight: JDN - 0.5 + 0.75 = 0.25.
         let (epoch, _) =
-            parse_cf_time("seconds since -4712-01-01T18:00:00", Some("julian")).unwrap();
+            parse_cf_time("seconds since -4713-01-01T18:00:00", Some("julian")).unwrap();
         assert!((epoch.to_jde_utc_days() - 0.25).abs() < JD_EPS);
     }
 
