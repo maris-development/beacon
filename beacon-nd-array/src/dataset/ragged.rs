@@ -129,7 +129,14 @@ impl RaggedDataset {
         let mut variables: IndexMap<String, RaggedArray> = IndexMap::new();
 
         for (name, array) in &dataset.arrays {
-            // Skip row-size variable attributes (e.g. "z_row_size.sample_dimension").
+            // Global attributes use the leading-dot convention (e.g. ".Conventions").
+            if name.starts_with('.') {
+                variables.insert(name.clone(), RaggedArray::Attribute(array.clone()));
+                continue;
+            }
+
+            // Variable attributes are "var.attr". Skip those belonging to a
+            // row-size variable (e.g. "z_row_size.sample_dimension").
             if name.contains('.') {
                 let var_part = name.split('.').next().unwrap_or("");
                 if row_size_var_set.contains(var_part) {
@@ -321,16 +328,18 @@ impl RaggedDataset {
 
         // ── Second pass: attributes ──────────────────────────────────────
         for (name, var) in &self.variables {
-            if let RaggedArray::Attribute(array) = var
-                && let Some(var_part) = name.split('.').next()
-            {
-                if name.contains('.') {
+            if let RaggedArray::Attribute(array) = var {
+                // A variable attribute is "var.attr" (an interior dot, not
+                // leading). Leading-dot globals and dimensionless attributes
+                // are global and always included.
+                if !name.starts_with('.') && name.contains('.') {
+                    let var_part = name.split('.').next().unwrap_or("");
                     // Variable attribute — include only if parent variable is present.
                     if arrays.contains_key(var_part) {
                         arrays.insert(name.clone(), array.clone());
                     }
                 } else {
-                    // Global attribute (dimensionless, no dot).
+                    // Global attribute (leading-dot or dimensionless).
                     arrays.insert(name.clone(), array.clone());
                 }
             }
@@ -402,16 +411,18 @@ impl RaggedDataset {
 
         // ── Second pass: attributes ──────────────────────────────────────
         for (name, var) in &self.variables {
-            if let RaggedArray::Attribute(array) = var
-                && let Some(var_part) = name.split('.').next()
-            {
-                if name.contains('.') {
+            if let RaggedArray::Attribute(array) = var {
+                // A variable attribute is "var.attr" (an interior dot, not
+                // leading). Leading-dot globals and dimensionless attributes
+                // are global and always included.
+                if !name.starts_with('.') && name.contains('.') {
+                    let var_part = name.split('.').next().unwrap_or("");
                     // Variable attribute — include only if parent variable is present.
                     if arrays.contains_key(var_part) {
                         arrays.insert(name.clone(), array.clone());
                     }
                 } else {
-                    // Global attribute (dimensionless, no dot).
+                    // Global attribute (leading-dot or dimensionless).
                     arrays.insert(name.clone(), array.clone());
                 }
             }
