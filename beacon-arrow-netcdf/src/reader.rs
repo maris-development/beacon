@@ -18,7 +18,8 @@
 //! - Each NetCDF variable becomes a named array in the dataset.
 //! - Variable attributes are surfaced as additional arrays using the dotted
 //!   name convention `"variable_name.attribute_name"`.
-//! - Global file attributes use their bare name.
+//! - Global file attributes are surfaced with a leading dot, e.g.
+//!   `".attribute_name"`.
 //!
 //! # Example
 //!
@@ -107,8 +108,9 @@ pub fn read_arrays<P: AsRef<Path>>(path: P) -> anyhow::Result<IndexMap<String, A
 
     // ── Global file attributes ──────────────────────────────────────────
     for (attr_name, attr_value) in global_attribute_values(&file_ref)? {
-        if let Ok(array) = compat::attribute_to_nd_array(&attr_name, attr_value) {
-            arrays.insert(attr_name, array);
+        let key = format!(".{attr_name}");
+        if let Ok(array) = compat::attribute_to_nd_array(&key, attr_value) {
+            arrays.insert(key, array);
         }
     }
 
@@ -117,8 +119,6 @@ pub fn read_arrays<P: AsRef<Path>>(path: P) -> anyhow::Result<IndexMap<String, A
 
     Ok(arrays)
 }
-
-// ─── Private helpers ───────────────────────────────────────────────────────
 
 /// Collect every attribute of a NetCDF *file* into a map.
 fn global_attribute_values(file: &netcdf::File) -> anyhow::Result<HashMap<String, AttributeValue>> {
@@ -357,14 +357,15 @@ mod tests {
     }
 
     #[test]
-    fn global_attribute_surfaced_by_name() {
+    fn global_attribute_surfaced_with_leading_dot() {
         let tmp = Builder::new().suffix(".nc").tempfile().unwrap();
         {
             let mut nc = netcdf::create(tmp.path()).unwrap();
             nc.add_attribute("Conventions", "CF-1.6").unwrap();
         }
         let arrays = read_arrays(tmp.path()).unwrap();
-        assert!(arrays.contains_key("Conventions"));
+        assert!(arrays.contains_key(".Conventions"));
+        assert!(!arrays.contains_key("Conventions"));
     }
 
     // ── Data correctness (via NdArray downcasting) ─────────────────────
@@ -698,7 +699,7 @@ mod tests {
             let schema = batches[0].schema();
             let field_names: Vec<&str> =
                 schema.fields().iter().map(|f| f.name().as_str()).collect();
-            assert!(field_names.contains(&"Conventions"));
+            assert!(field_names.contains(&".Conventions"));
 
             // Verify the global attribute is repeated in each row.
             for batch in &batches {
@@ -706,7 +707,7 @@ mod tests {
                     continue;
                 }
                 let conv = batch
-                    .column_by_name("Conventions")
+                    .column_by_name(".Conventions")
                     .unwrap()
                     .as_any()
                     .downcast_ref::<StringArray>()
