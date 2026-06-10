@@ -75,15 +75,37 @@ pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Route
 }
 
 /// Fills in the top-level OpenAPI metadata exposed by the HTTP documentation endpoints.
+///
+/// Title, description, contact, and license are sourced from
+/// [`static@beacon_config::CONFIG`] so deployments can brand the docs via
+/// `BEACON_API_*` environment variables without recompiling. The version is
+/// always the compiled crate version.
 fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::OpenApi {
-    openapi.info.title = "Beacon API".to_string();
+    use utoipa::openapi::{Contact, License};
+
+    let cfg = &beacon_config::CONFIG.api_docs;
+
+    openapi.info.title = cfg.title.clone();
     openapi.info.version = BEACON_VERSION.to_string();
-    openapi.info.description = Some(
-        "Beacon HTTP API. Exposes read-only client endpoints for querying the Beacon runtime \
-         (datasets, tables, functions, SQL queries) and authenticated admin endpoints for \
-         managing tables and data lake files."
-            .to_string(),
-    );
+    openapi.info.description = Some(cfg.description.clone());
+    openapi.info.terms_of_service = cfg.terms_of_service.clone();
+
+    // Only attach a contact object if at least one contact field is set.
+    if cfg.contact_name.is_some() || cfg.contact_url.is_some() || cfg.contact_email.is_some() {
+        let mut contact = Contact::new();
+        contact.name = cfg.contact_name.clone();
+        contact.url = cfg.contact_url.clone();
+        contact.email = cfg.contact_email.clone();
+        openapi.info.contact = Some(contact);
+    }
+
+    // The license object requires a name, so only attach it when one is given.
+    if let Some(name) = &cfg.license_name {
+        let mut license = License::new(name.clone());
+        license.url = cfg.license_url.clone();
+        license.identifier = cfg.license_identifier.clone();
+        openapi.info.license = Some(license);
+    }
 
     openapi
 }

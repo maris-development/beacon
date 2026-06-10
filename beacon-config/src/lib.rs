@@ -14,6 +14,7 @@ pub struct Config {
     pub cors: CorsConfig,
     pub netcdf: NetcdfConfig,
     pub atlas: AtlasConfig,
+    pub api_docs: ApiDocsConfig,
 }
 
 #[derive(Debug)]
@@ -105,6 +106,22 @@ pub struct NetcdfConfig {
 pub struct AtlasConfig {
     pub use_reader_cache: bool,
     pub reader_cache_size: u64,
+}
+
+/// Metadata exposed at the top level of the OpenAPI document (and the Swagger /
+/// Scalar UIs). All fields are configurable so deployments can brand their own
+/// API docs without recompiling.
+#[derive(Debug)]
+pub struct ApiDocsConfig {
+    pub title: String,
+    pub description: String,
+    pub terms_of_service: Option<String>,
+    pub contact_name: Option<String>,
+    pub contact_url: Option<String>,
+    pub contact_email: Option<String>,
+    pub license_name: Option<String>,
+    pub license_url: Option<String>,
+    pub license_identifier: Option<String>,
 }
 
 #[derive(Debug)]
@@ -200,7 +217,7 @@ struct RawConfig {
     allowed_credentials: bool,
     #[envconfig(from = "BEACON_CORS_MAX_AGE", default = "3600")]
     max_age: u64,
-    #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "false")]
+    #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "true")]
     enable_pushdown_projection: bool,
 
     #[envconfig(from = "BEACON_NETCDF_USE_SCHEMA_CACHE", default = "true")]
@@ -228,6 +245,29 @@ struct RawConfig {
     /// Whether to split streams into 16k row slices for better memory management and parallelism.
     #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
     bbf_split_streams_slice: bool,
+
+    // OpenAPI documentation metadata
+    #[envconfig(from = "BEACON_API_TITLE", default = "Beacon Rest API")]
+    api_title: String,
+    #[envconfig(
+        from = "BEACON_API_DESCRIPTION",
+        default = "Beacon HTTP API. Exposes read-only client endpoints for querying the Beacon runtime (datasets, tables, functions, SQL queries) and authenticated admin endpoints for managing tables and data lake files."
+    )]
+    api_description: String,
+    #[envconfig(from = "BEACON_API_TERMS_OF_SERVICE")]
+    api_terms_of_service: Option<String>,
+    #[envconfig(from = "BEACON_API_CONTACT_NAME")]
+    api_contact_name: Option<String>,
+    #[envconfig(from = "BEACON_API_CONTACT_URL")]
+    api_contact_url: Option<String>,
+    #[envconfig(from = "BEACON_API_CONTACT_EMAIL")]
+    api_contact_email: Option<String>,
+    #[envconfig(from = "BEACON_API_LICENSE_NAME")]
+    api_license_name: Option<String>,
+    #[envconfig(from = "BEACON_API_LICENSE_URL")]
+    api_license_url: Option<String>,
+    #[envconfig(from = "BEACON_API_LICENSE_IDENTIFIER")]
+    api_license_identifier: Option<String>,
 }
 
 impl From<RawConfig> for Config {
@@ -298,6 +338,17 @@ impl From<RawConfig> for Config {
             atlas: AtlasConfig {
                 use_reader_cache: raw.atlas_use_reader_cache,
                 reader_cache_size: raw.atlas_reader_cache_size,
+            },
+            api_docs: ApiDocsConfig {
+                title: raw.api_title,
+                description: raw.api_description,
+                terms_of_service: raw.api_terms_of_service,
+                contact_name: raw.api_contact_name,
+                contact_url: raw.api_contact_url,
+                contact_email: raw.api_contact_email,
+                license_name: raw.api_license_name,
+                license_url: raw.api_license_url,
+                license_identifier: raw.api_license_identifier,
             },
         }
     }

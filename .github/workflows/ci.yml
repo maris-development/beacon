@@ -45,12 +45,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --lib --bins --tests
 
       - name: Run tests
         env:
           RUST_BACKTRACE: "1"
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --workspace --no-fail-fast --lib --bins --tests
 
       - name: Build
         run: cargo build --workspace

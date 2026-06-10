@@ -43,10 +43,8 @@ pub struct BBFOpener {
 
 impl FileOpener for BBFOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
-        let async_reader = ArrowBBFObjectReader::new(
-            file.object_meta.location.clone(),
-            self.object_store.clone(),
-        );
+        let async_reader =
+            ArrowBBFObjectReader::new(file.object_meta.location.clone(), self.object_store.clone());
         let projected_schema = self.projected_schema.clone();
         let pruning_predicate = self.pruning_predicate.clone();
         let table_schema = self.table_schema.clone();
@@ -61,6 +59,7 @@ impl FileOpener for BBFOpener {
                 .clone()
         };
         let metrics = self.metrics.clone();
+        let fut_projected_schema = projected_schema.clone();
 
         let fut = async move {
             let (stream, schema_mapper, file_schema) = stream_partition_share
@@ -80,13 +79,12 @@ impl FileOpener for BBFOpener {
                         .fields()
                         .iter()
                         .enumerate()
-                        .filter(|(_, f)| projected_schema.index_of(f.name()).is_ok())
+                        .filter(|(_, f)| fut_projected_schema.index_of(f.name()).is_ok())
                         .map(|(i, _)| i)
                         .collect();
-                    let source_schema: SchemaRef =
-                        Arc::new(file_schema.project(&projection)?);
+                    let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
                     let schema_mapper = Arc::new(
-                        BatchAdapterFactory::new(projected_schema)
+                        BatchAdapterFactory::new(fut_projected_schema.clone())
                             .make_adapter(&source_schema)?,
                     );
                     let mut selection: Option<BooleanArray> = None;
@@ -135,7 +133,7 @@ impl FileOpener for BBFOpener {
                         arrow::array::RecordBatch,
                         datafusion::error::DataFusionError,
                     > {
-                        let schema_mapper = schema_mapper.clone();
+                        // let schema_mapper = schema_mapper.clone();
                         let arrow_batch = nd_batch.to_arrow_record_batch().unwrap_or_else(|e| {
                             tracing::error!(
                                 "Error converting NdRecordBatch to Arrow RecordBatch: {:?}",
@@ -143,6 +141,10 @@ impl FileOpener for BBFOpener {
                             );
                             RecordBatch::new_empty(file_schema.clone())
                         });
+                        let batch_schema = arrow_batch.schema();
+                        // Map the batch schema to the table schema.
+                        let schema_mapper = BatchAdapterFactory::new(projected_schema.clone())
+                            .make_adapter(&batch_schema)?;
                         let mapped_batch = schema_mapper
                             .adapt_batch(&arrow_batch)
                             .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
