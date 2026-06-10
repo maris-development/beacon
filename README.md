@@ -4,7 +4,6 @@
 [![Docs](https://img.shields.io/github/actions/workflow/status/maris-development/beacon/pages.yml?label=docs)](https://maris-development.github.io/beacon/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/maris-development/beacon/pkgs/container/beacon)
 [![License](https://img.shields.io/github/license/maris-development/beacon)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/maris-development/beacon?style=social)](https://github.com/maris-development/beacon/stargazers)
 [![Slack](https://img.shields.io/badge/slack-join-4A154B?logo=slack&logoColor=white)](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg)
 
 Beacon is a lightweight, high-performance **data lakehouse query engine** for scientific data. It lets you discover, read, transform, and serve large collections of array and tabular datasets **in place** — no copying into a warehouse, no rigid ETL pipeline. Point Beacon at a directory or object-storage bucket of files and query them directly over HTTP, with results streamed back in the format you ask for.
