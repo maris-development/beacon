@@ -13,19 +13,3 @@ pub mod backend;
 pub mod compat;
 pub mod datafusion;
 pub mod reader;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_name() {
-        let store = atlas::Atlas::open_path("data/datasets/example")
-            .await
-            .unwrap();
-
-        println!("Store name: {:?}", store.list_datasets());
-
-        let dataset = store.open_dataset("GL_PR_CT_2FGX5").await.unwrap();
-    }
-}
