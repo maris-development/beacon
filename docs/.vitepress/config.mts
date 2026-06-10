@@ -25,9 +25,9 @@ export default defineConfig({
       {
         text: 'Docs', items: [
           {
-            text: '1.6.1 (latest)',
-            link: '/docs/1.6.1/introduction',
-            activeMatch: '/docs/1.6.1/introduction'
+            text: '1.7.0 (latest)',
+            link: '/docs/1.7.0/introduction',
+            activeMatch: '/docs/1.7.0/introduction'
           },
         ]
       },
@@ -44,23 +44,23 @@ export default defineConfig({
     ],
 
     sidebar: {
-      '/docs/1.6.1/': [
+      '/docs/1.7.0/': [
         {
           text: 'Introduction',
-          link: '/docs/1.6.1/introduction',
+          link: '/docs/1.7.0/introduction',
         },
         {
           text: 'Getting Started',
-          link: '/docs/1.6.1/getting-started',
+          link: '/docs/1.7.0/getting-started',
           collapsed: false,
           items: [
             {
               text: 'Local',
-              link: '/docs/1.6.1/getting-started#local',
+              link: '/docs/1.7.0/getting-started#local',
             },
             {
               text: 'S3 / Object Storage',
-              link: '/docs/1.6.1/getting-started#s3-compatible-object-storage',
+              link: '/docs/1.7.0/getting-started#s3-compatible-object-storage',
             }
           ]
         },
@@ -70,67 +70,67 @@ export default defineConfig({
           items: [
             {
               text: 'JetBrains DataGrip',
-              link: '/docs/1.6.1/connect/jetbrains-datagrip',
+              link: '/docs/1.7.0/connect/jetbrains-datagrip',
             },
             {
               text: 'Beacon CLI',
-              link: '/docs/1.6.1/connect/beacon-cli',
+              link: '/docs/1.7.0/connect/beacon-cli',
             },
             {
               text: 'Beacon Python SDK',
-              link: '/docs/1.6.1/connect/beacon-python-sdk',
+              link: '/docs/1.7.0/connect/beacon-python-sdk',
             },
             {
               text: 'Python ADBC Driver',
-              link: '/docs/1.6.1/connect/python-adbc',
+              link: '/docs/1.7.0/connect/python-adbc',
             }
           ]
         },
         {
           text: 'Data Lakehouse Setup',
-          link: '/docs/1.6.1/data-lake',
+          link: '/docs/1.7.0/data-lake',
           collapsed: false,
           items: [
             {
               text: 'Supported Formats',
-              link: '/docs/1.6.1/data-lake/datasets',
+              link: '/docs/1.7.0/data-lake/datasets',
               collapsed: true,
               items: [
                 {
                   text: 'Parquet',
-                  link: '/docs/1.6.1/data-lake/datasets#parquet'
+                  link: '/docs/1.7.0/data-lake/datasets#parquet'
                 },
                 {
                   text: 'NetCDF',
-                  link: '/docs/1.6.1/data-lake/datasets#netcdf'
+                  link: '/docs/1.7.0/data-lake/datasets#netcdf'
                 },
                 {
                   text: 'Zarr',
-                  link: '/docs/1.6.1/data-lake/datasets#zarr'
+                  link: '/docs/1.7.0/data-lake/datasets#zarr'
                 },
                 {
                   text: 'Arrow IPC',
-                  link: '/docs/1.6.1/data-lake/datasets#arrow-ipc'
+                  link: '/docs/1.7.0/data-lake/datasets#arrow-ipc'
                 },
                 {
                   text: 'ODV ASCII',
-                  link: '/docs/1.6.1/data-lake/datasets#odv-ascii'
+                  link: '/docs/1.7.0/data-lake/datasets#odv-ascii'
                 },
                 {
                   text: 'CSV',
-                  link: '/docs/1.6.1/data-lake/datasets#csv'
+                  link: '/docs/1.7.0/data-lake/datasets#csv'
                 },
                 {
                   text: 'GeoTIFF',
-                  link: '/docs/1.6.1/data-lake/datasets#geotiff--cloud-optimized-geotiff'
+                  link: '/docs/1.7.0/data-lake/datasets#geotiff--cloud-optimized-geotiff'
                 },
                 {
                   text: 'Atlas',
-                  link: '/docs/1.6.1/data-lake/datasets#atlas'
+                  link: '/docs/1.7.0/data-lake/datasets#atlas'
                 },
                 {
                   text: 'Beacon Binary Format',
-                  link: '/docs/1.6.1/data-lake/datasets#beacon-binary-format-bbf'
+                  link: '/docs/1.7.0/data-lake/datasets#beacon-binary-format-bbf'
                 },
               ]
             },
@@ -140,49 +140,49 @@ export default defineConfig({
               items: [
                 {
                   text: 'External Tables',
-                  link: '/docs/1.6.1/data-lake/external-tables',
+                  link: '/docs/1.7.0/data-lake/external-tables',
                   collapsed: true,
                   items: [
-                    { text: 'Parquet', link: '/docs/1.6.1/data-lake/external-tables#parquet' },
-                    { text: 'NetCDF', link: '/docs/1.6.1/data-lake/external-tables#netcdf' },
-                    { text: 'Zarr', link: '/docs/1.6.1/data-lake/external-tables#zarr' },
-                    { text: 'Atlas', link: '/docs/1.6.1/data-lake/external-tables#atlas' },
-                    { text: 'CSV', link: '/docs/1.6.1/data-lake/external-tables#csv' },
-                    { text: 'Arrow IPC', link: '/docs/1.6.1/data-lake/external-tables#arrow-ipc' },
-                    { text: 'ODV ASCII', link: '/docs/1.6.1/data-lake/external-tables#odv-ascii' },
-                    { text: 'GeoTIFF / COG', link: '/docs/1.6.1/data-lake/external-tables#geotiff-cog' },
+                    { text: 'Parquet', link: '/docs/1.7.0/data-lake/external-tables#parquet' },
+                    { text: 'NetCDF', link: '/docs/1.7.0/data-lake/external-tables#netcdf' },
+                    { text: 'Zarr', link: '/docs/1.7.0/data-lake/external-tables#zarr' },
+                    { text: 'Atlas', link: '/docs/1.7.0/data-lake/external-tables#atlas' },
+                    { text: 'CSV', link: '/docs/1.7.0/data-lake/external-tables#csv' },
+                    { text: 'Arrow IPC', link: '/docs/1.7.0/data-lake/external-tables#arrow-ipc' },
+                    { text: 'ODV ASCII', link: '/docs/1.7.0/data-lake/external-tables#odv-ascii' },
+                    { text: 'GeoTIFF / COG', link: '/docs/1.7.0/data-lake/external-tables#geotiff-cog' },
                   ]
                 },
                 {
                   text: 'Views',
-                  link: '/docs/1.6.1/data-lake/view',
+                  link: '/docs/1.7.0/data-lake/view',
                 }
               ]
             },
             {
               text: 'Configuration',
-              link: '/docs/1.6.1/data-lake/configuration',
+              link: '/docs/1.7.0/data-lake/configuration',
             },
             {
               text: 'Performance Tuning',
-              link: '/docs/1.6.1/data-lake/performance-tuning',
+              link: '/docs/1.7.0/data-lake/performance-tuning',
               collapsed: true,
               items: [
                 {
                   text: 'Settings',
-                  link: '/docs/1.6.1/data-lake/performance-tuning#beacon-query-engine-settings'
+                  link: '/docs/1.7.0/data-lake/performance-tuning#beacon-query-engine-settings'
                 },
                 {
                   text: 'NetCDF',
-                  link: '/docs/1.6.1/data-lake/performance-tuning#netcdf-tuning'
+                  link: '/docs/1.7.0/data-lake/performance-tuning#netcdf-tuning'
                 },
                 {
                   text: 'Zarr',
-                  link: '/docs/1.6.1/data-lake/performance-tuning#zarr-predicate-pushdown'
+                  link: '/docs/1.7.0/data-lake/performance-tuning#zarr-predicate-pushdown'
                 },
                 {
                   text: 'Atlas',
-                  link: '/docs/1.6.1/data-lake/performance-tuning#atlas-tuning'
+                  link: '/docs/1.7.0/data-lake/performance-tuning#atlas-tuning'
                 }
               ]
             }
@@ -190,66 +190,67 @@ export default defineConfig({
         },
         {
           text: 'SQL Guide',
-          link: '/docs/1.6.1/sql/',
-          collapsed: false,
+          link: '/docs/1.7.0/sql/',
+          collapsed: true,
           items: [
             {
               text: 'Introduction',
-              link: '/docs/1.6.1/sql/',
+              link: '/docs/1.7.0/sql/',
             },
             {
               text: 'Querying',
+              collapsed: true,
               items: [
                 {
                   text: 'SELECT',
-                  link: '/docs/1.6.1/sql/select',
+                  link: '/docs/1.7.0/sql/select',
                 },
                 {
                   text: 'WHERE',
-                  link: '/docs/1.6.1/sql/where',
+                  link: '/docs/1.7.0/sql/where',
                   collapsed: true,
                   items: [
-                    { text: 'Comparison', link: '/docs/1.6.1/sql/where#comparison-operators' },
-                    { text: 'BETWEEN', link: '/docs/1.6.1/sql/where#between' },
-                    { text: 'IN', link: '/docs/1.6.1/sql/where#in' },
-                    { text: 'LIKE', link: '/docs/1.6.1/sql/where#like' },
-                    { text: 'IS NULL', link: '/docs/1.6.1/sql/where#is-null--is-not-null' },
-                    { text: 'AND / OR / NOT', link: '/docs/1.6.1/sql/where#and--or--not' },
-                    { text: 'Date & time', link: '/docs/1.6.1/sql/where#date-and-time-filtering' },
+                    { text: 'Comparison', link: '/docs/1.7.0/sql/where#comparison-operators' },
+                    { text: 'BETWEEN', link: '/docs/1.7.0/sql/where#between' },
+                    { text: 'IN', link: '/docs/1.7.0/sql/where#in' },
+                    { text: 'LIKE', link: '/docs/1.7.0/sql/where#like' },
+                    { text: 'IS NULL', link: '/docs/1.7.0/sql/where#is-null--is-not-null' },
+                    { text: 'AND / OR / NOT', link: '/docs/1.7.0/sql/where#and--or--not' },
+                    { text: 'Date & time', link: '/docs/1.7.0/sql/where#date-and-time-filtering' },
                   ]
                 },
                 {
                   text: 'GROUP BY',
-                  link: '/docs/1.6.1/sql/group-by',
+                  link: '/docs/1.7.0/sql/group-by',
                 },
                 {
                   text: 'JOIN',
-                  link: '/docs/1.6.1/sql/join',
+                  link: '/docs/1.7.0/sql/join',
                   collapsed: true,
                   items: [
-                    { text: 'INNER JOIN', link: '/docs/1.6.1/sql/join#inner-join' },
-                    { text: 'LEFT JOIN', link: '/docs/1.6.1/sql/join#left-join' },
+                    { text: 'INNER JOIN', link: '/docs/1.7.0/sql/join#inner-join' },
+                    { text: 'LEFT JOIN', link: '/docs/1.7.0/sql/join#left-join' },
                   ]
                 },
                 {
                   text: 'Reading Files',
-                  link: '/docs/1.6.1/sql/table-functions',
+                  link: '/docs/1.7.0/sql/table-functions',
                   collapsed: true,
                   items: [
-                    { text: 'read_netcdf', link: '/docs/1.6.1/sql/table-functions#read_netcdf' },
-                    { text: 'read_zarr', link: '/docs/1.6.1/sql/table-functions#read_zarr' },
-                    { text: 'read_atlas', link: '/docs/1.6.1/sql/table-functions#read_atlas' },
-                    { text: 'read_parquet', link: '/docs/1.6.1/sql/table-functions#read_parquet' },
-                    { text: 'read_arrow', link: '/docs/1.6.1/sql/table-functions#read_arrow' },
-                    { text: 'read_csv', link: '/docs/1.6.1/sql/table-functions#read_csv' },
-                    { text: 'read_odv_ascii', link: '/docs/1.6.1/sql/table-functions#read_odv_ascii' },
-                    { text: 'read_bbf', link: '/docs/1.6.1/sql/table-functions#read_bbf' },
-                    { text: 'read_tiff', link: '/docs/1.6.1/sql/table-functions#read_tiff' },
+                    { text: 'read_netcdf', link: '/docs/1.7.0/sql/table-functions#read_netcdf' },
+                    { text: 'read_zarr', link: '/docs/1.7.0/sql/table-functions#read_zarr' },
+                    { text: 'read_atlas', link: '/docs/1.7.0/sql/table-functions#read_atlas' },
+                    { text: 'read_parquet', link: '/docs/1.7.0/sql/table-functions#read_parquet' },
+                    { text: 'read_arrow', link: '/docs/1.7.0/sql/table-functions#read_arrow' },
+                    { text: 'read_csv', link: '/docs/1.7.0/sql/table-functions#read_csv' },
+                    { text: 'read_odv_ascii', link: '/docs/1.7.0/sql/table-functions#read_odv_ascii' },
+                    { text: 'read_bbf', link: '/docs/1.7.0/sql/table-functions#read_bbf' },
+                    { text: 'read_tiff', link: '/docs/1.7.0/sql/table-functions#read_tiff' },
                   ]
                 },
                 {
                   text: 'UNION ALL BY NAME',
-                  link: '/docs/1.6.1/sql/union-by-name',
+                  link: '/docs/1.7.0/sql/union-by-name',
                 },
               ]
             },
@@ -258,103 +259,103 @@ export default defineConfig({
               items: [
                 {
                   text: 'CREATE EXTERNAL TABLE',
-                  link: '/docs/1.6.1/sql/create-table',
+                  link: '/docs/1.7.0/sql/create-table',
                   collapsed: true,
                   items: [
-                    { text: 'IF NOT EXISTS', link: '/docs/1.6.1/sql/create-table#if-not-exists' },
-                    { text: 'OR REPLACE', link: '/docs/1.6.1/sql/create-table#or-replace' },
-                    { text: 'PARTITIONED BY', link: '/docs/1.6.1/sql/create-table#partitioned-by' },
-                    { text: 'DROP TABLE', link: '/docs/1.6.1/sql/create-table#drop-table' },
+                    { text: 'IF NOT EXISTS', link: '/docs/1.7.0/sql/create-table#if-not-exists' },
+                    { text: 'OR REPLACE', link: '/docs/1.7.0/sql/create-table#or-replace' },
+                    { text: 'PARTITIONED BY', link: '/docs/1.7.0/sql/create-table#partitioned-by' },
+                    { text: 'DROP TABLE', link: '/docs/1.7.0/sql/create-table#drop-table' },
                   ]
                 },
                 {
                   text: 'CREATE TABLE (Managed)',
-                  link: '/docs/1.6.1/sql/managed-tables',
+                  link: '/docs/1.7.0/sql/managed-tables',
                   collapsed: true,
                   items: [
-                    { text: 'CREATE TABLE AS SELECT', link: '/docs/1.6.1/sql/managed-tables#create-table-as-select' },
-                    { text: 'INSERT INTO', link: '/docs/1.6.1/sql/managed-tables#insert-into' },
-                    { text: 'DELETE', link: '/docs/1.6.1/sql/managed-tables#delete' },
-                    { text: 'UPDATE', link: '/docs/1.6.1/sql/managed-tables#update' },
-                    { text: 'ALTER TABLE', link: '/docs/1.6.1/sql/managed-tables#alter-table' },
-                    { text: 'DROP TABLE', link: '/docs/1.6.1/sql/managed-tables#drop-table' },
+                    { text: 'CREATE TABLE AS SELECT', link: '/docs/1.7.0/sql/managed-tables#create-table-as-select' },
+                    { text: 'INSERT INTO', link: '/docs/1.7.0/sql/managed-tables#insert-into' },
+                    { text: 'DELETE', link: '/docs/1.7.0/sql/managed-tables#delete' },
+                    { text: 'UPDATE', link: '/docs/1.7.0/sql/managed-tables#update' },
+                    { text: 'ALTER TABLE', link: '/docs/1.7.0/sql/managed-tables#alter-table' },
+                    { text: 'DROP TABLE', link: '/docs/1.7.0/sql/managed-tables#drop-table' },
                   ]
                 },
                 {
                   text: 'CREATE VIEW',
-                  link: '/docs/1.6.1/sql/create-view',
+                  link: '/docs/1.7.0/sql/create-view',
                 },
                 {
                   text: 'CREATE MATERIALIZED VIEW',
-                  link: '/docs/1.6.1/sql/create-materialized-view',
+                  link: '/docs/1.7.0/sql/create-materialized-view',
                   collapsed: true,
                   items: [
-                    { text: 'Querying', link: '/docs/1.6.1/sql/create-materialized-view#querying' },
-                    { text: 'REFRESH', link: '/docs/1.6.1/sql/create-materialized-view#refresh' },
-                    { text: 'DROP', link: '/docs/1.6.1/sql/create-materialized-view#drop' },
+                    { text: 'Querying', link: '/docs/1.7.0/sql/create-materialized-view#querying' },
+                    { text: 'REFRESH', link: '/docs/1.7.0/sql/create-materialized-view#refresh' },
+                    { text: 'DROP', link: '/docs/1.7.0/sql/create-materialized-view#drop' },
                   ]
                 },
               ]
             },
             {
               text: 'Introspection',
-              link: '/docs/1.6.1/sql/table-functions-utility',
+              link: '/docs/1.7.0/sql/table-functions-utility',
               collapsed: true,
               items: [
-                { text: 'read_schema', link: '/docs/1.6.1/sql/table-functions-utility#read_schema' },
-                { text: 'list_datasets', link: '/docs/1.6.1/sql/table-functions-utility#list_datasets' },
-                { text: 'view_dataset_statistics', link: '/docs/1.6.1/sql/table-functions-utility#view_dataset_statistics' },
-                { text: 'view_external_table_statistics', link: '/docs/1.6.1/sql/table-functions-utility#view_external_table_statistics' },
-                { text: 'view_statistics_cache', link: '/docs/1.6.1/sql/table-functions-utility#view_statistics_cache' },
+                { text: 'read_schema', link: '/docs/1.7.0/sql/table-functions-utility#read_schema' },
+                { text: 'list_datasets', link: '/docs/1.7.0/sql/table-functions-utility#list_datasets' },
+                { text: 'view_dataset_statistics', link: '/docs/1.7.0/sql/table-functions-utility#view_dataset_statistics' },
+                { text: 'view_external_table_statistics', link: '/docs/1.7.0/sql/table-functions-utility#view_external_table_statistics' },
+                { text: 'view_statistics_cache', link: '/docs/1.7.0/sql/table-functions-utility#view_statistics_cache' },
               ]
             },
             {
               text: 'Function Reference',
-              link: '/docs/1.6.1/sql/function-reference',
+              link: '/docs/1.7.0/sql/function-reference',
               collapsed: true,
               items: [
-                { text: 'Aggregate', link: '/docs/1.6.1/sql/function-reference#aggregate-functions' },
-                { text: 'Math', link: '/docs/1.6.1/sql/function-reference#math-functions' },
-                { text: 'String', link: '/docs/1.6.1/sql/function-reference#string-functions' },
-                { text: 'Regular Expressions', link: '/docs/1.6.1/sql/function-reference#regular-expression-functions' },
-                { text: 'Binary String', link: '/docs/1.6.1/sql/function-reference#binary-string-functions' },
-                { text: 'Date & Time', link: '/docs/1.6.1/sql/function-reference#date-and-time-functions' },
-                { text: 'Conditional', link: '/docs/1.6.1/sql/function-reference#conditional-expressions' },
-                { text: 'Casting', link: '/docs/1.6.1/sql/function-reference#casting' },
+                { text: 'Aggregate', link: '/docs/1.7.0/sql/function-reference#aggregate-functions' },
+                { text: 'Math', link: '/docs/1.7.0/sql/function-reference#math-functions' },
+                { text: 'String', link: '/docs/1.7.0/sql/function-reference#string-functions' },
+                { text: 'Regular Expressions', link: '/docs/1.7.0/sql/function-reference#regular-expression-functions' },
+                { text: 'Binary String', link: '/docs/1.7.0/sql/function-reference#binary-string-functions' },
+                { text: 'Date & Time', link: '/docs/1.7.0/sql/function-reference#date-and-time-functions' },
+                { text: 'Conditional', link: '/docs/1.7.0/sql/function-reference#conditional-expressions' },
+                { text: 'Casting', link: '/docs/1.7.0/sql/function-reference#casting' },
                 {
                   text: 'Beacon-specific',
-                  link: '/docs/1.6.1/sql/function-reference#beacon-specific-functions',
+                  link: '/docs/1.7.0/sql/function-reference#beacon-specific-functions',
                   collapsed: true,
                   items: [
-                    { text: 'beacon_version', link: '/docs/1.6.1/sql/function-reference#beacon_version' },
-                    { text: 'coalesce_label', link: '/docs/1.6.1/sql/function-reference#coalesce_label' },
-                    { text: 'cast_int8_as_char', link: '/docs/1.6.1/sql/function-reference#cast_int8_as_charn' },
-                    { text: 'try_arrow_cast', link: '/docs/1.6.1/sql/function-reference#try_arrow_castexpr-type_str' },
+                    { text: 'beacon_version', link: '/docs/1.7.0/sql/function-reference#beacon_version' },
+                    { text: 'coalesce_label', link: '/docs/1.7.0/sql/function-reference#coalesce_label' },
+                    { text: 'cast_int8_as_char', link: '/docs/1.7.0/sql/function-reference#cast_int8_as_charn' },
+                    { text: 'try_arrow_cast', link: '/docs/1.7.0/sql/function-reference#try_arrow_castexpr-type_str' },
                   ]
                 },
                 {
                   text: 'Geospatial',
-                  link: '/docs/1.6.1/sql/function-reference#geospatial-functions',
+                  link: '/docs/1.7.0/sql/function-reference#geospatial-functions',
                   collapsed: true,
                   items: [
-                    { text: 'st_within_point', link: '/docs/1.6.1/sql/function-reference#st_within_point' },
-                    { text: 'st_geojson_as_wkt', link: '/docs/1.6.1/sql/function-reference#st_geojson_as_wkt' },
+                    { text: 'st_within_point', link: '/docs/1.7.0/sql/function-reference#st_within_point' },
+                    { text: 'st_geojson_as_wkt', link: '/docs/1.7.0/sql/function-reference#st_geojson_as_wkt' },
                   ]
                 },
                 {
                   text: 'Domain Mapping',
-                  link: '/docs/1.6.1/sql/function-reference#domain-mapping-functions',
+                  link: '/docs/1.7.0/sql/function-reference#domain-mapping-functions',
                   collapsed: true,
                   items: [
-                    { text: 'pressure_to_depth_teos_10', link: '/docs/1.6.1/sql/function-reference#pressure_to_depth_teos_10' },
-                    { text: 'map_units', link: '/docs/1.6.1/sql/function-reference#map_units' },
-                    { text: 'Common', link: '/docs/1.6.1/sql/function-reference#common' },
-                    { text: 'CMEMS', link: '/docs/1.6.1/sql/function-reference#cmems' },
-                    { text: 'CORA', link: '/docs/1.6.1/sql/function-reference#cora' },
-                    { text: 'EMODnet Chemistry', link: '/docs/1.6.1/sql/function-reference#emodnet-chemistry' },
-                    { text: 'SeaDataNet', link: '/docs/1.6.1/sql/function-reference#seadatanet' },
-                    { text: 'Argo', link: '/docs/1.6.1/sql/function-reference#argo' },
-                    { text: 'World Ocean Database', link: '/docs/1.6.1/sql/function-reference#world-ocean-database-wod' },
+                    { text: 'pressure_to_depth_teos_10', link: '/docs/1.7.0/sql/function-reference#pressure_to_depth_teos_10' },
+                    { text: 'map_units', link: '/docs/1.7.0/sql/function-reference#map_units' },
+                    { text: 'Common', link: '/docs/1.7.0/sql/function-reference#common' },
+                    { text: 'CMEMS', link: '/docs/1.7.0/sql/function-reference#cmems' },
+                    { text: 'CORA', link: '/docs/1.7.0/sql/function-reference#cora' },
+                    { text: 'EMODnet Chemistry', link: '/docs/1.7.0/sql/function-reference#emodnet-chemistry' },
+                    { text: 'SeaDataNet', link: '/docs/1.7.0/sql/function-reference#seadatanet' },
+                    { text: 'Argo', link: '/docs/1.7.0/sql/function-reference#argo' },
+                    { text: 'World Ocean Database', link: '/docs/1.7.0/sql/function-reference#world-ocean-database-wod' },
                   ]
                 },
               ]
@@ -363,54 +364,54 @@ export default defineConfig({
         },
         {
           text: 'REST API',
-          link: '/docs/1.6.1/api/',
-          collapsed: false,
+          link: '/docs/1.7.0/api/',
+          collapsed: true,
           items: [
             {
               text: 'Introduction',
-              link: '/docs/1.6.1/api/',
+              link: '/docs/1.7.0/api/',
             },
             {
               text: 'Exploring the Data Lake',
-              link: '/docs/1.6.1/api/exploring-data-lake',
+              link: '/docs/1.7.0/api/exploring-data-lake',
               collapsed: true,
               items: [
-                { text: 'Datasets', link: '/docs/1.6.1/api/exploring-data-lake#datasets' },
-                { text: 'Tables', link: '/docs/1.6.1/api/exploring-data-lake#tables' },
-                { text: 'Functions', link: '/docs/1.6.1/api/exploring-data-lake#functions' },
-                { text: 'Admin', link: '/docs/1.6.1/api/exploring-data-lake#admin-file-management' },
+                { text: 'Datasets', link: '/docs/1.7.0/api/exploring-data-lake#datasets' },
+                { text: 'Tables', link: '/docs/1.7.0/api/exploring-data-lake#tables' },
+                { text: 'Functions', link: '/docs/1.7.0/api/exploring-data-lake#functions' },
+                { text: 'Admin', link: '/docs/1.7.0/api/exploring-data-lake#admin-file-management' },
               ]
             },
             {
               text: 'Querying',
-              link: '/docs/1.6.1/api/querying',
+              link: '/docs/1.7.0/api/querying',
               collapsed: false,
               items: [
                 {
                   text: 'JSON Query DSL',
-                  link: '/docs/1.6.1/api/querying/json',
+                  link: '/docs/1.7.0/api/querying/json',
                   collapsed: true,
                   items: [
-                    { text: 'Selecting Columns', link: '/docs/1.6.1/api/querying/json#selecting-columns' },
-                    { text: 'Data Source', link: '/docs/1.6.1/api/querying/json#choosing-the-data-source-from' },
-                    { text: 'Filters', link: '/docs/1.6.1/api/querying/json#filters' },
-                    { text: 'Sorting & Pagination', link: '/docs/1.6.1/api/querying/json#sorting-and-pagination' },
-                    { text: 'Output Formats', link: '/docs/1.6.1/api/querying/json#output-formats' },
+                    { text: 'Selecting Columns', link: '/docs/1.7.0/api/querying/json#selecting-columns' },
+                    { text: 'Data Source', link: '/docs/1.7.0/api/querying/json#choosing-the-data-source-from' },
+                    { text: 'Filters', link: '/docs/1.7.0/api/querying/json#filters' },
+                    { text: 'Sorting & Pagination', link: '/docs/1.7.0/api/querying/json#sorting-and-pagination' },
+                    { text: 'Output Formats', link: '/docs/1.7.0/api/querying/json#output-formats' },
                   ]
                 },
                 {
                   text: 'SQL',
-                  link: '/docs/1.6.1/api/querying/sql',
+                  link: '/docs/1.7.0/api/querying/sql',
                   collapsed: true,
                   items: [
-                    { text: 'Query a Table', link: '/docs/1.6.1/api/querying/sql#query-a-registered-table' },
-                    { text: 'Table Functions', link: '/docs/1.6.1/api/querying/sql#query-files-directly' },
-                    { text: 'Output Formats', link: '/docs/1.6.1/api/querying/sql#output-formats' },
+                    { text: 'Query a Table', link: '/docs/1.7.0/api/querying/sql#query-a-registered-table' },
+                    { text: 'Table Functions', link: '/docs/1.7.0/api/querying/sql#query-files-directly' },
+                    { text: 'Output Formats', link: '/docs/1.7.0/api/querying/sql#output-formats' },
                   ]
                 },
                 {
                   text: 'Examples',
-                  link: '/docs/1.6.1/api/querying/examples',
+                  link: '/docs/1.7.0/api/querying/examples',
                 },
               ]
             },
@@ -759,6 +760,10 @@ export default defineConfig({
         {
           text: 'Changelog',
           items: [
+            {
+              text: '1.7.0',
+              link: '/docs/changelog'
+            },
             {
               text: '1.6.1',
               link: '/docs/changelog'
