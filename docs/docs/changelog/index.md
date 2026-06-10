@@ -2,9 +2,11 @@
 
 ## (Unreleased)
 
+## (v1.7.0 - 2026-06-10)
+
 - **Changed**: Managed SQL tables (`CREATE TABLE`) are now backed by [Apache Iceberg](https://iceberg.apache.org/) instead of the previous Parquet-manifest format, giving them an ACID, schema-tracked, snapshot-based storage layer. Their data and metadata live in Beacon's internal area of the configured storage (local or S3), alongside the datasets.
 - **Added**: Row mutations on managed tables. In addition to `INSERT`, managed tables now support `DELETE ... WHERE`, `UPDATE ... SET ... WHERE`, and `CREATE TABLE AS SELECT`. `DELETE` and `UPDATE` are copy-on-write.
-- **Added**: Schema evolution with `ALTER TABLE` on managed tables — `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `ALTER COLUMN ... TYPE` (safe widening promotions). Existing rows keep reading correctly: added columns read `NULL` and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.6.1/sql/managed-tables).
+- **Added**: Schema evolution with `ALTER TABLE` on managed tables — `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN`, and `ALTER COLUMN ... TYPE` (safe widening promotions). Existing rows keep reading correctly: added columns read `NULL` and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.7.0/sql/managed-tables).
 
 ## (v1.6.1 - 2026-06-04)
 

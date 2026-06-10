@@ -11,10 +11,10 @@ hero:
   actions:
     - theme: brand
       text: Get Started
-      link: /docs/1.6.1/getting-started
+      link: /docs/1.7.0/getting-started
     - theme: alt
       text: Read the Docs
-      link: /docs/1.6.1/introduction
+      link: /docs/1.7.0/introduction
     - theme: alt
       text: Explore Public Nodes 
       link: /available-nodes/available-nodes
