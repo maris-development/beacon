@@ -44,6 +44,7 @@ fn main() -> anyhow::Result<()> {
 /// Initializes shared services and starts all configured API transports.
 async fn async_main() -> anyhow::Result<()> {
     setup_tracing();
+    install_panic_hook();
 
     tracing::info!("Beacon v{}", BEACON_VERSION);
     let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new().await?);
@@ -84,6 +85,16 @@ async fn serve_http(router: ::axum::Router, addr: std::net::SocketAddr) -> anyho
         .context("HTTP server failed")?;
 
     Ok(())
+}
+
+/// Routes panics through `tracing` (so they land in the rolling log file) while
+/// preserving the default hook's stderr output.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing_panic::panic_hook(info); // ERROR event -> stdout + rolling log file
+        default_hook(info); // preserve default stderr output
+    }));
 }
 
 /// Configures stdout and rolling-file tracing subscribers for the API process.
