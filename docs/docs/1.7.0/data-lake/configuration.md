@@ -16,7 +16,7 @@ Some of the configuration options can be set using environment variables. The fo
 
 - `BEACON_HOST` - IP address to listen on. (Default is `0.0.0.0`)
 - `BEACON_PORT` - Port number to listen on. (Default is `5001`)
-- `BEACON_BASE_PATH` - Optional URL path prefix to serve the HTTP API, OpenAPI document, and Swagger UI under (default is empty, i.e. served at the root). Useful when running Beacon behind a reverse proxy or on a shared subpath, e.g. `/beacon`.
+- `BEACON_BASE_PATH` - Optional URL path prefix to serve the HTTP API, OpenAPI document, and Swagger UI under (default is empty, i.e. served at the root). Useful when running Beacon behind a reverse proxy or on a shared subpath, e.g. `/beacon`. The value is normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character (e.g. spaces, `?`, `#`, `%`) causes Beacon to exit at startup with a descriptive error.
 - `BEACON_ADMIN_USERNAME` - The admin username for the beacon admin panel.
 - `BEACON_ADMIN_PASSWORD` - The admin password for the beacon admin panel.
 - `BEACON_VM_MEMORY_SIZE` - The amount of memory to allocate to the Beacon Virtual Machine in MB (default is 4096MB). More is better for performance, especially when working with larger datasets and performing actions such as spatial joins and group by.

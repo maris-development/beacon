@@ -7,3 +7,4 @@ edition = "2021"
 lazy_static = "1.4.0"
 envconfig = "0.11.0"
 object_store = { workspace = true }
+anyhow = { workspace = true }
