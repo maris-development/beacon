@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use envconfig::Envconfig;
 use lazy_static::lazy_static;
@@ -354,16 +355,87 @@ impl From<RawConfig> for Config {
     }
 }
 
+/// Normalizes and validates a configured base path. Returns the canonical form:
+/// exactly one leading `/` and no trailing `/`. A blank value yields `""` (root).
+/// Errors (with a descriptive message) if the path contains characters outside the
+/// URL "unreserved" set or has an empty internal segment, instead of letting an
+/// invalid value reach axum/utoipa, which panic on malformed paths.
+fn normalize_base_path(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    for segment in trimmed.split('/') {
+        if segment.is_empty() {
+            return Err(format!("'{raw}' contains an empty path segment"));
+        }
+        if let Some(bad) = segment
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')))
+        {
+            return Err(format!(
+                "'{raw}' contains invalid character '{bad}'; only letters, digits, \
+                 '-', '_', '.', '~' and '/' are allowed"
+            ));
+        }
+    }
+    Ok(format!("/{trimmed}"))
+}
+
 impl Config {
-    pub fn init() -> Config {
-        RawConfig::init_from_env()
-            .map(Into::into)
-            .expect("Failed to load config")
+    /// Loads the configuration from the environment, normalizing and validating
+    /// fields. Returns a descriptive error instead of panicking, so callers can
+    /// report the problem cleanly and exit.
+    pub fn load() -> anyhow::Result<Config> {
+        let mut config: Config = RawConfig::init_from_env()
+            .map_err(|e| anyhow::anyhow!("failed to load configuration from environment: {e}"))?
+            .into();
+        config.server.base_path = normalize_base_path(&config.server.base_path)
+            .map_err(|e| anyhow::anyhow!("invalid BEACON_BASE_PATH: {e}"))?;
+        Ok(config)
     }
 }
 
+static CONFIG_CELL: OnceLock<Config> = OnceLock::new();
+
+/// Loads, normalizes, and validates the configuration and stores it in the
+/// process-global cell. Returns a descriptive error instead of panicking, so the
+/// binary can surface configuration problems and exit cleanly.
+///
+/// Call this once early in `main`. It is idempotent: subsequent calls return the
+/// already-initialized [`Config`].
+pub fn init() -> anyhow::Result<&'static Config> {
+    if let Some(config) = CONFIG_CELL.get() {
+        return Ok(config);
+    }
+    let config = Config::load()?;
+    // A concurrent caller may have won the race; either value is equally valid.
+    let _ = CONFIG_CELL.set(config);
+    Ok(CONFIG_CELL.get().expect("config cell populated above"))
+}
+
+/// Zero-sized handle that dereferences to the process-global [`Config`].
+///
+/// All `beacon_config::CONFIG.<field>` accesses go through this. Binaries should
+/// call [`init`] in `main` to surface configuration errors cleanly; this handle
+/// falls back to lazy loading for code paths (e.g. unit tests in other crates)
+/// that do not call [`init`] first.
+pub struct ConfigHandle;
+
+impl std::ops::Deref for ConfigHandle {
+    type Target = Config;
+
+    fn deref(&self) -> &Self::Target {
+        CONFIG_CELL.get_or_init(|| {
+            Config::load().expect("failed to load Beacon configuration from environment")
+        })
+    }
+}
+
+/// Process-global configuration handle. Dereferences to [`Config`].
+pub static CONFIG: ConfigHandle = ConfigHandle;
+
 lazy_static! {
-    pub static ref CONFIG: Config = Config::init();
     pub static ref DATA_DIR: PathBuf = {
         std::fs::create_dir_all("./data").expect("Failed to create data dir");
         PathBuf::from("./data")
@@ -415,4 +487,50 @@ lazy_static! {
     /// The prefix for the cache directory for object store paths
     pub static ref CACHE_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("cache");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_base_path;
+
+    #[test]
+    fn empty_and_blank_serve_at_root() {
+        assert_eq!(normalize_base_path(""), Ok(String::new()));
+        assert_eq!(normalize_base_path("   "), Ok(String::new()));
+        assert_eq!(normalize_base_path("/"), Ok(String::new()));
+        assert_eq!(normalize_base_path("///"), Ok(String::new()));
+    }
+
+    #[test]
+    fn normalizes_to_single_leading_slash_no_trailing() {
+        assert_eq!(normalize_base_path("mybeacon"), Ok("/mybeacon".to_string()));
+        assert_eq!(normalize_base_path("foo"), Ok("/foo".to_string()));
+        assert_eq!(normalize_base_path("/foo"), Ok("/foo".to_string()));
+        assert_eq!(normalize_base_path("/foo/"), Ok("/foo".to_string()));
+        assert_eq!(normalize_base_path("///foo///"), Ok("/foo".to_string()));
+        assert_eq!(normalize_base_path("  /foo/  "), Ok("/foo".to_string()));
+    }
+
+    #[test]
+    fn preserves_nested_segments_and_unreserved_chars() {
+        assert_eq!(normalize_base_path("foo/bar"), Ok("/foo/bar".to_string()));
+        assert_eq!(normalize_base_path("/foo/bar/"), Ok("/foo/bar".to_string()));
+        assert_eq!(
+            normalize_base_path("my-app_v2.1~beta"),
+            Ok("/my-app_v2.1~beta".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_characters() {
+        assert!(normalize_base_path("my path").is_err());
+        assert!(normalize_base_path("foo?bar").is_err());
+        assert!(normalize_base_path("foo#bar").is_err());
+        assert!(normalize_base_path("foo%20bar").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_internal_segment() {
+        assert!(normalize_base_path("a//b").is_err());
+    }
 }

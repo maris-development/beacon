@@ -27,8 +27,13 @@ const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Builds the Tokio runtime and hands control to the async entrypoint.
 fn main() -> anyhow::Result<()> {
+    // Load and validate configuration up front so problems (e.g. a malformed
+    // `BEACON_BASE_PATH`) surface as a clean error here rather than panicking
+    // later when the global config is first accessed.
+    let config = beacon_config::init().context("failed to load configuration")?;
+
     let rt = Builder::new_multi_thread()
-        .worker_threads(beacon_config::CONFIG.server.worker_threads)
+        .worker_threads(config.server.worker_threads)
         .enable_all()
         .build()
         .context("failed to build Tokio runtime")?;

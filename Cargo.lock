@@ -1412,6 +1412,7 @@ dependencies = [
 name = "beacon-config"
 version = "1.7.0"
 dependencies = [
+ "anyhow",
  "envconfig",
  "lazy_static",
  "object_store 0.13.2",
