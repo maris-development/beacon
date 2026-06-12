@@ -3,11 +3,11 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 
 const tab = ref('sql')
 // Start from the typing state so the server-rendered frame matches where the
-// animation begins — otherwise the finished card paints first and visibly
-// "rewinds" once JS boots. onMounted drives it forward (or jumps to the
-// finished state for reduced-motion).
-const phase = ref('typing')  // 'typing' | 'running' | 'results'
-const typed = ref(0)         // number of chars revealed
+// animation begins — otherwise the finished card paints first and "rewinds"
+// once JS boots. onMounted drives it forward (or jumps to the finished state
+// under prefers-reduced-motion).
+const phase = ref('typing') // 'typing' | 'running' | 'results'
+const typed = ref(0)        // number of chars revealed
 
 const rows = [
   ['2024-01-03', '36.21', '-5.43', '21.8'],
@@ -55,7 +55,11 @@ const tokens = {
     { t: '=', c: 'o' },
     { t: ' client.', c: '' },
     { t: 'sql_query', c: 'fn' },
-    { t: '(query).', c: '' },
+    { t: '(\n    ', c: '' },
+    { t: `"SELECT * FROM read_netcdf(['argo/**/*.nc']) "`, c: 's' },
+    { t: '\n    ', c: '' },
+    { t: `"WHERE temperature > 20 LIMIT 5"`, c: 's' },
+    { t: '\n).', c: '' },
     { t: 'to_pandas_dataframe', c: 'fn' },
     { t: '()', c: '' },
   ],
@@ -86,6 +90,7 @@ const visible = computed(() => {
 })
 
 const showCursor = computed(() => phase.value === 'typing')
+const drawerUp = computed(() => phase.value !== 'typing')
 
 let timer = null
 const clear = () => {
@@ -111,9 +116,10 @@ function animate() {
     if (typed.value >= len) {
       clear()
       phase.value = 'running'
-      timer = setTimeout(() => { phase.value = 'results' }, 700)
+      // let the drawer finish sliding up, spinner spins, then results land
+      timer = setTimeout(() => { phase.value = 'results' }, 900)
     }
-  }, 24)
+  }, 18)
 }
 
 onMounted(animate)
@@ -143,44 +149,45 @@ onBeforeUnmount(clear)
       </div>
     </div>
 
-    <pre class="hq-code"><code><span v-for="(tk, i) in visible" :key="i" :class="tk.c">{{ tk.t }}</span><span v-if="showCursor" class="hq-cursor" aria-hidden="true"></span></code></pre>
+    <div class="hq-body">
+      <pre class="hq-code"><code><span v-for="(tk, i) in visible" :key="i" :class="tk.c">{{ tk.t }}</span><span v-if="showCursor" class="hq-cursor" aria-hidden="true"></span></code></pre>
 
-    <div class="hq-result">
-      <table :class="{ 'hq-df': tab === 'python' }">
-        <thead>
-          <tr>
-            <th v-if="tab === 'python'" class="hq-idx"></th>
-            <th>time</th>
-            <th>latitude</th>
-            <th>longitude</th>
-            <th>temperature</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="(r, i) in rows"
-            :key="i"
-            class="hq-row"
-            :class="{ show: phase === 'results' }"
-            :style="{ transitionDelay: (i * 55) + 'ms' }"
-          >
-            <td v-if="tab === 'python'" class="hq-idx">{{ i }}</td>
-            <td>{{ r[0] }}</td><td>{{ r[1] }}</td><td>{{ r[2] }}</td><td>{{ r[3] }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="hq-drawer" :class="{ up: drawerUp }">
+        <table :class="{ 'hq-df': tab === 'python' }">
+          <thead>
+            <tr>
+              <th v-if="tab === 'python'" class="hq-idx"></th>
+              <th>time</th>
+              <th>latitude</th>
+              <th>longitude</th>
+              <th>temperature</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(r, i) in rows"
+              :key="i"
+              class="hq-row"
+              :class="{ show: phase === 'results' }"
+              :style="{ transitionDelay: (i * 55) + 'ms' }"
+            >
+              <td v-if="tab === 'python'" class="hq-idx">{{ i }}</td>
+              <td>{{ r[0] }}</td><td>{{ r[1] }}</td><td>{{ r[2] }}</td><td>{{ r[3] }}</td>
+            </tr>
+          </tbody>
+        </table>
 
-      <div v-if="phase === 'running'" class="hq-running" aria-hidden="true">
-        <span class="hq-spin"></span> running query…
-      </div>
+        <div v-if="phase === 'running'" class="hq-running" aria-hidden="true">
+          <span class="hq-spin"></span> running query…
+        </div>
 
-      <div class="hq-foot">
-        <template v-if="phase === 'results'">
-          <span class="hq-ok">●</span>
-          {{ tab === 'python' ? 'pandas.DataFrame · 5 rows × 4 columns' : '5 rows · 12 ms · Arrow IPC' }}
-        </template>
-        <template v-else-if="phase === 'running'">executing…</template>
-        <template v-else>&nbsp;</template>
+        <div class="hq-foot">
+          <template v-if="phase === 'results'">
+            <span class="hq-ok">●</span>
+            {{ tab === 'python' ? 'pandas.DataFrame · 5 rows × 4 columns' : '5 rows · 12 ms · Arrow IPC' }}
+          </template>
+          <template v-else>executing…</template>
+        </div>
       </div>
     </div>
   </div>
@@ -247,19 +254,24 @@ onBeforeUnmount(clear)
   border-color: color-mix(in srgb, var(--vp-c-brand-1) 30%, transparent);
 }
 
+/* body holds the code (full height) and the results drawer that slides over it */
+.hq-body {
+  position: relative;
+  height: 380px;
+}
+
 /* code */
 .hq-code {
+  position: absolute;
+  inset: 0;
   margin: 0;
   padding: 18px 20px;
-  box-sizing: border-box;
-  /* Pinned so every phase/tab keeps the (ideal) SQL height — no jump */
-  min-height: 124px;
   font-size: 13px;
   line-height: 1.7;
   color: var(--vp-c-text-1);
   background: var(--vp-c-bg);
   white-space: pre;
-  overflow-x: auto;
+  overflow: hidden;
 }
 .hq-code code { font-family: inherit; }
 
@@ -280,33 +292,44 @@ onBeforeUnmount(clear)
 }
 @keyframes hq-blink { 50% { opacity: 0; } }
 
-/* result table */
-.hq-result {
-  position: relative;
-  border-top: 1px solid var(--vp-c-divider);
+/* results drawer — slides up from the bottom to fill ~half the card */
+.hq-drawer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 190px;
+  display: flex;
+  flex-direction: column;
   background: var(--vp-c-bg-soft);
+  border-top: 1px solid var(--vp-c-divider);
+  box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.14);
+  transform: translateY(100%);
+  transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
 }
+.hq-drawer.up { transform: translateY(0); }
 
-.hq-result table {
+.hq-drawer table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
 }
 
-.hq-result th,
-.hq-result td {
-  padding: 8px 14px;
+.hq-drawer th,
+.hq-drawer td {
+  padding: 5px 14px;
   text-align: right;
   border-bottom: 1px solid var(--vp-c-divider);
   font-variant-numeric: tabular-nums;
 }
 
-.hq-result th:first-child,
-.hq-result td:first-child {
+.hq-drawer th:first-child,
+.hq-drawer td:first-child {
   text-align: left;
 }
 
-.hq-result thead th {
+.hq-drawer thead th {
   color: var(--vp-c-text-3);
   font-weight: 600;
   text-transform: uppercase;
@@ -315,10 +338,10 @@ onBeforeUnmount(clear)
   background: var(--vp-c-bg);
 }
 
-.hq-result tbody td { color: var(--vp-c-text-2); }
-.hq-result tbody tr:last-child td { border-bottom: none; }
+.hq-drawer tbody td { color: var(--vp-c-text-2); }
+.hq-drawer tbody tr:last-child td { border-bottom: none; }
 
-/* rows are laid out always (height stays constant); they fade in on results */
+/* rows fade in once results land */
 .hq-row {
   opacity: 0;
   transform: translateY(3px);
@@ -335,10 +358,10 @@ onBeforeUnmount(clear)
   letter-spacing: 0;
 }
 
-/* running overlay */
+/* loading symbol, centered over the drawer's table area */
 .hq-running {
   position: absolute;
-  inset: 34px 0 30px;
+  inset: 0 0 30px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -348,8 +371,8 @@ onBeforeUnmount(clear)
   pointer-events: none;
 }
 .hq-spin {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   border: 2px solid var(--vp-c-divider);
   border-top-color: var(--vp-c-brand-1);
   border-radius: 50%;
@@ -358,15 +381,18 @@ onBeforeUnmount(clear)
 @keyframes hq-spin { to { transform: rotate(360deg); } }
 
 .hq-foot {
-  padding: 9px 14px;
+  margin-top: auto;
+  padding: 8px 14px;
   color: var(--vp-c-text-3);
   font-size: 11.5px;
   border-top: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
 }
 .hq-ok { color: #27c93f; font-size: 9px; vertical-align: middle; }
 
 @media (prefers-reduced-motion: reduce) {
   .hq-row { opacity: 1; transform: none; transition: none; }
+  .hq-drawer { transition: none; }
   .hq-cursor, .hq-spin { animation: none; }
 }
 </style>
