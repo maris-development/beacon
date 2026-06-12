@@ -25,6 +25,7 @@
 /* Make the VitePress home hero screenshot larger */
 .VPHero.has-image .container {
   max-width: 1180px;
+  align-items: center;
 }
 
 .VPHero.has-image .main {
@@ -34,6 +35,10 @@
 
 .VPHero.has-image .image {
   flex-grow: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
 }
 
 .VPHero.has-image .image-container {

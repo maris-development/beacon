@@ -1,39 +1,105 @@
+<script setup>
+import { ref } from 'vue'
+
+const tab = ref('sql')
+
+const rows = [
+  ['2024-01-03', '36.21', '-5.43', '21.8'],
+  ['2024-01-03', '35.88', '-6.10', '22.4'],
+  ['2024-01-04', '37.02', '-4.77', '20.9'],
+  ['2024-01-04', '36.55', '-5.92', '23.1'],
+  ['2024-01-05', '35.40', '-6.58', '22.0'],
+]
+</script>
+
 <template>
-  <div class="hero-query" aria-label="Example Beacon SQL query and its results">
+  <div class="hero-query" aria-label="Example Beacon query and its results">
     <div class="hq-bar">
       <span class="hq-dot"></span>
       <span class="hq-dot"></span>
       <span class="hq-dot"></span>
-      <span class="hq-file">query.sql</span>
+      <div class="hq-tabs" role="tablist">
+        <button
+          :class="['hq-tab', { active: tab === 'sql' }]"
+          role="tab"
+          :aria-selected="tab === 'sql'"
+          @click="tab = 'sql'"
+        >SQL</button>
+        <button
+          :class="['hq-tab', { active: tab === 'python' }]"
+          role="tab"
+          :aria-selected="tab === 'python'"
+          @click="tab = 'python'"
+        >Python</button>
+      </div>
     </div>
 
-    <pre class="hq-code"><code><span class="k">SELECT</span> time, latitude, longitude, temperature
+    <!-- SQL -->
+    <template v-if="tab === 'sql'">
+      <pre class="hq-code"><code><span class="k">SELECT</span> time, latitude, longitude, temperature
 <span class="k">FROM</span> <span class="fn">read_netcdf</span>(<span class="s">'argo/**/*.nc'</span>)
 <span class="k">WHERE</span> temperature <span class="o">&gt;</span> <span class="n">20</span>
 <span class="k">LIMIT</span> <span class="n">5</span>;</code></pre>
 
-    <div class="hq-result">
-      <table>
-        <thead>
-          <tr>
-            <th>time</th>
-            <th>latitude</th>
-            <th>longitude</th>
-            <th>temperature</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td>2024-01-03</td><td>36.21</td><td>-5.43</td><td>21.8</td></tr>
-          <tr><td>2024-01-03</td><td>35.88</td><td>-6.10</td><td>22.4</td></tr>
-          <tr><td>2024-01-04</td><td>37.02</td><td>-4.77</td><td>20.9</td></tr>
-          <tr><td>2024-01-04</td><td>36.55</td><td>-5.92</td><td>23.1</td></tr>
-          <tr><td>2024-01-05</td><td>35.40</td><td>-6.58</td><td>22.0</td></tr>
-        </tbody>
-      </table>
-      <div class="hq-foot">
-        <span class="hq-ok">●</span> 5 rows · 12&nbsp;ms · Arrow IPC
+      <div class="hq-result">
+        <table>
+          <thead>
+            <tr>
+              <th>time</th>
+              <th>latitude</th>
+              <th>longitude</th>
+              <th>temperature</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(r, i) in rows" :key="i">
+              <td>{{ r[0] }}</td><td>{{ r[1] }}</td><td>{{ r[2] }}</td><td>{{ r[3] }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="hq-foot">
+          <span class="hq-ok">●</span> 5 rows · 12&nbsp;ms · Arrow IPC
+        </div>
       </div>
-    </div>
+    </template>
+
+    <!-- Python -->
+    <template v-else>
+      <pre class="hq-code"><code><span class="k">from</span> beacon_api <span class="k">import</span> <span class="fn">Client</span>
+
+client <span class="o">=</span> <span class="fn">Client</span>(<span class="s">"https://beacon.example.com"</span>)
+
+df <span class="o">=</span> client.<span class="fn">sql_query</span>(
+    <span class="s">"SELECT time, latitude, longitude, temperature "</span>
+    <span class="s">"FROM read_netcdf(['argo/**/*.nc']) "</span>
+    <span class="s">"WHERE temperature &gt; 20 LIMIT 5"</span>
+).<span class="fn">to_pandas_dataframe</span>()
+
+df.<span class="fn">head</span>()</code></pre>
+
+      <div class="hq-result">
+        <table class="hq-df">
+          <thead>
+            <tr>
+              <th class="hq-idx"></th>
+              <th>time</th>
+              <th>latitude</th>
+              <th>longitude</th>
+              <th>temperature</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(r, i) in rows" :key="i">
+              <td class="hq-idx">{{ i }}</td>
+              <td>{{ r[0] }}</td><td>{{ r[1] }}</td><td>{{ r[2] }}</td><td>{{ r[3] }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="hq-foot">
+          <span class="hq-ok">●</span> pandas.DataFrame · 5 rows × 4 columns
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -53,7 +119,7 @@
   text-align: left;
 }
 
-/* window bar */
+/* window bar + tabs */
 .hq-bar {
   display: flex;
   align-items: center;
@@ -67,24 +133,42 @@
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  background: var(--vp-c-gray-2, var(--vp-c-divider));
 }
 .hq-dot:nth-child(1) { background: #ff5f56; }
 .hq-dot:nth-child(2) { background: #ffbd2e; }
 .hq-dot:nth-child(3) { background: #27c93f; }
 
-.hq-file {
-  margin-left: 6px;
+.hq-tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.hq-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 12px;
+  background: transparent;
   color: var(--vp-c-text-3);
+  font-family: var(--vp-font-family-base);
   font-size: 12px;
-  letter-spacing: 0.02em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.2s, background-color 0.2s, border-color 0.2s;
+}
+.hq-tab:hover { color: var(--vp-c-text-1); }
+.hq-tab.active {
+  color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
+  border-color: color-mix(in srgb, var(--vp-c-brand-1) 30%, transparent);
 }
 
 /* code */
 .hq-code {
   margin: 0;
   padding: 18px 20px;
-  font-size: 13.5px;
+  font-size: 13px;
   line-height: 1.7;
   color: var(--vp-c-text-1);
   background: var(--vp-c-bg);
@@ -133,12 +217,16 @@
   background: var(--vp-c-bg);
 }
 
-.hq-result tbody td {
-  color: var(--vp-c-text-2);
-}
+.hq-result tbody td { color: var(--vp-c-text-2); }
+.hq-result tbody tr:last-child td { border-bottom: none; }
 
-.hq-result tbody tr:last-child td {
-  border-bottom: none;
+/* pandas-style index column */
+.hq-df .hq-idx {
+  width: 1%;
+  color: var(--vp-c-text-3);
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .hq-foot {
