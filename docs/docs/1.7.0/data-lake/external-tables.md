@@ -8,6 +8,10 @@ LOCATION 'profiles/'
 
 An external table is a standard SQL table backed by files in Beacon's storage. Once created, you can `SELECT`, `JOIN`, and `DROP` it like any other table — Beacon reads the underlying files on demand without copying them.
 
+:::tip External vs managed tables
+An **external table** only points at existing files — Beacon reads them in place and never writes to them. If you want a table Beacon **owns** and can mutate with `INSERT` / `UPDATE` / `DELETE`, use a [managed table](../sql/managed-tables.md) instead.
+:::
+
 Table definitions are persisted automatically and survive restarts.
 
 Table definitions are persisted automatically and survive restarts. All DDL can be submitted through any of Beacon's SQL surfaces:
