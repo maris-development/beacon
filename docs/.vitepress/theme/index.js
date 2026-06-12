@@ -4,6 +4,8 @@ import FormatBadges from './components/FormatBadges.vue'
 import IntegrationBadges from './components/IntegrationBadges.vue'
 import HeroQuery from './components/HeroQuery.vue'
 import ArchDiagram from './components/ArchDiagram.vue'
+import FeaturesIntro from './components/FeaturesIntro.vue'
+import GetStartedCta from './components/GetStartedCta.vue'
 import './custom.css'
 
 export default {
@@ -14,6 +16,8 @@ export default {
         app.component('IntegrationBadges', IntegrationBadges)
         app.component('HeroQuery', HeroQuery)
         app.component('ArchDiagram', ArchDiagram)
+        app.component('FeaturesIntro', FeaturesIntro)
+        app.component('GetStartedCta', GetStartedCta)
     },
 
     Layout() {
@@ -24,7 +28,9 @@ export default {
                     h(FormatBadges),
                     h(IntegrationBadges),
                     h(ArchDiagram)
-                ])
+                ]),
+            'home-features-before': () => h(FeaturesIntro),
+            'home-features-after': () => h(GetStartedCta)
         })
     }
 }
