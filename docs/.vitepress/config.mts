@@ -758,6 +758,19 @@ export default defineConfig({
       ],
       '/docs/changelog': [
         {
+          text: 'Release Posts',
+          items: [
+            {
+              text: 'What\'s new in 1.7.0',
+              link: '/docs/changelog/release-1.7.0'
+            },
+            {
+              text: 'What\'s new in 1.6.0',
+              link: '/docs/changelog/release-1.6.0'
+            },
+          ]
+        },
+        {
           text: 'Changelog',
           items: [
             {
