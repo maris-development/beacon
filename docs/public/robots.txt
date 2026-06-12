@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://maris-development.github.io/beacon/sitemap.xml
