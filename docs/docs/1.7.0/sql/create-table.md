@@ -34,16 +34,19 @@ CREATE EXTERNAL TABLE argo STORED AS NETCDF LOCATION 'argo/**/*.nc'
 | `PARQUET`   | `.parquet` |
 | `NETCDF`    | `.nc`, `.nc4`, `.cdf` |
 | `ZARR`      | Zarr v2/v3 (`zarr.json`) |
+| `ATLAS`     | Atlas array store (`atlas.json`) |
 | `CSV`       | `.csv` |
 | `ARROW`     | Arrow IPC (`.arrow`, `.ipc`) |
 | `ODV`       | ODV ASCII spreadsheet |
 | `TIFF`      | GeoTIFF / Cloud-Optimized GeoTIFF |
-| `BBF`       | BBF format |
+| `BBF`       | Beacon Binary Format |
 
-Zarr tables should point at `zarr.json` entry files:
+Zarr tables should point at `zarr.json` entry files, and Atlas tables at `atlas.json` markers:
 
 ```sql
 CREATE EXTERNAL TABLE sst STORED AS ZARR LOCATION 'sst/*/zarr.json'
+
+CREATE EXTERNAL TABLE sensor STORED AS ATLAS LOCATION 'sensor/atlas.json'
 ```
 
 ## `IF NOT EXISTS`
@@ -99,4 +102,4 @@ SHOW TABLES;
 DESCRIBE ocean_profiles;
 ```
 
-See the [External Tables](../data-lake/external-tables.md) page for the full setup guide, including the HTTP API for listing tables.
+See the [External Tables](../data-lake/external-tables.md) setup guide for per-format examples and the HTTP API for listing tables.

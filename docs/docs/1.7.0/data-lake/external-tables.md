@@ -6,11 +6,15 @@ STORED AS PARQUET
 LOCATION 'profiles/'
 ```
 
-An external table is a standard SQL table backed by files in Beacon's storage. Once created, you can `SELECT`, `JOIN`, and `DROP` it like any other table — Beacon reads the underlying files on demand without copying them.
+An external table is a standard SQL table backed by files in Beacon's storage. Once created, you can `SELECT`, `JOIN`, and `DROP` it like any other table — Beacon reads the underlying files on demand without copying them. Table definitions are persisted automatically and survive restarts.
 
-Table definitions are persisted automatically and survive restarts.
+:::tip External vs managed tables
+An **external table** only points at existing files — Beacon reads them in place and never writes to them. If you want a table Beacon **owns** and can mutate with `INSERT` / `UPDATE` / `DELETE`, use a [managed table](../sql/managed-tables.md) instead.
+:::
 
-Table definitions are persisted automatically and survive restarts. All DDL can be submitted through any of Beacon's SQL surfaces:
+This page is a **setup guide** with per-format examples. For the full statement grammar and every clause (`OR REPLACE`, `IF NOT EXISTS`, `PARTITIONED BY`, `DROP TABLE`), see the [`CREATE EXTERNAL TABLE`](../sql/create-table.md) reference.
+
+DDL can be submitted through any of Beacon's SQL surfaces:
 
 - **HTTP** — `POST /api/query` with `{ "sql": "CREATE EXTERNAL TABLE ..." }`
 - **Arrow Flight SQL** — any Flight SQL client (DataGrip, ADBC, DBeaver, …)
@@ -19,20 +23,14 @@ Table definitions are persisted automatically and survive restarts. All DDL can 
 SQL must be enabled (`BEACON_ENABLE_SQL=true`) to run DDL statements over the HTTP API. Arrow Flight SQL does not require this flag.
 :::
 
-## Creating an external table
-
-The base syntax is:
-
-```sql
-CREATE [OR REPLACE] EXTERNAL TABLE [IF NOT EXISTS] <table_name>
-STORED AS <format>
-LOCATION '<path>'
-```
+## Where files live
 
 The `LOCATION` is resolved relative to Beacon's configured dataset storage root (`/beacon/data/datasets` in the default Docker container, or the S3 prefix when using object storage). It may be:
 
 - A folder path — Beacon scans all matching files inside it
 - A glob pattern — e.g. `argo/**/*.nc`, `data/*.parquet`
+
+## Formats
 
 ### Parquet
 
@@ -128,50 +126,17 @@ STORED AS TIFF
 LOCATION 'rasters/elevation.tif'
 ```
 
-## Partitioned tables
+## Partitioned data
 
-When your files are organized in Hive-style partitioned directories (`year=2024/month=01/...`), declare the partition columns with `PARTITIONED BY`. Beacon will use them for partition pruning:
-
-```sql
-CREATE EXTERNAL TABLE observations
-STORED AS PARQUET
-LOCATION 'obs/'
-PARTITIONED BY (year, month)
-```
-
-Partition columns are encoded in the directory names and are available in queries:
-
-```sql
-SELECT * FROM observations WHERE year = 2024 AND month = 6
-```
-
-## `IF NOT EXISTS`
-
-Prevent an error if the table is already registered:
-
-```sql
-CREATE EXTERNAL TABLE IF NOT EXISTS argo
-STORED AS PARQUET
-LOCATION 'argo/'
-```
+If your files are laid out in Hive-style partition directories (`year=2024/month=01/...`), declare the partition columns so Beacon can prune them at query time. The columns are encoded in the directory names and become queryable columns. See [`PARTITIONED BY`](../sql/create-table.md#partitioned-by) for the syntax.
 
 ## Views
 
 Views let you define a persistent SQL query over any external table or table function. See the [Views](./view.md) page for the full reference, including `UNION ALL BY NAME` for harmonizing datasets with different schemas.
 
-## Removing tables
+## Removing a table
 
-Remove a registered table from the catalog. The underlying files are not deleted.
-
-```sql
-DROP TABLE argo
-```
-
-Use `IF EXISTS` to suppress errors when the table may not be registered:
-
-```sql
-DROP TABLE IF EXISTS argo
-```
+Dropping an external table removes it from the catalog — the underlying files are **not** deleted. See [`DROP TABLE`](../sql/create-table.md#drop-table).
 
 ## Listing and inspecting tables
 
@@ -187,23 +152,4 @@ Inspect a table's columns and data types:
 GET /api/table-schema?table_name=ocean_profiles
 ```
 
-Or with SQL:
-
-```sql
-SHOW TABLES;
-
-DESCRIBE ocean_profiles;
-```
-
-## Format reference
-
-| `STORED AS` value | File types                          |
-| ----------------- | ----------------------------------- |
-| `PARQUET`         | `.parquet`                          |
-| `NETCDF`          | `.nc`, `.nc4`, `.cdf`               |
-| `ZARR`            | Zarr v2 / v3 (`zarr.json`)          |
-| `ATLAS`           | Atlas array store (`atlas.json`)    |
-| `CSV`             | `.csv`                              |
-| `ARROW`           | Arrow IPC stream (`.arrow`, `.ipc`) |
-| `ODV`             | ODV ASCII spreadsheet               |
-| `TIFF`            | GeoTIFF / Cloud-Optimized GeoTIFF   |
+For the SQL equivalents (`SHOW TABLES`, `DESCRIBE`), see the [`CREATE EXTERNAL TABLE`](../sql/create-table.md#querying-and-inspecting) reference.
