@@ -68,14 +68,7 @@ const rows = [
       <pre class="hq-code"><code><span class="k">from</span> beacon_api <span class="k">import</span> <span class="fn">Client</span>
 
 client <span class="o">=</span> <span class="fn">Client</span>(<span class="s">"https://beacon.example.com"</span>)
-
-df <span class="o">=</span> client.<span class="fn">sql_query</span>(
-    <span class="s">"SELECT time, latitude, longitude, temperature "</span>
-    <span class="s">"FROM read_netcdf(['argo/**/*.nc']) "</span>
-    <span class="s">"WHERE temperature &gt; 20 LIMIT 5"</span>
-).<span class="fn">to_pandas_dataframe</span>()
-
-df.<span class="fn">head</span>()</code></pre>
+df <span class="o">=</span> client.<span class="fn">sql_query</span>(query).<span class="fn">to_pandas_dataframe</span>()</code></pre>
 
       <div class="hq-result">
         <table class="hq-df">
@@ -168,6 +161,9 @@ df.<span class="fn">head</span>()</code></pre>
 .hq-code {
   margin: 0;
   padding: 18px 20px;
+  box-sizing: border-box;
+  /* Pinned so both tabs keep the (ideal) SQL height — no jump on switch */
+  min-height: 124px;
   font-size: 13px;
   line-height: 1.7;
   color: var(--vp-c-text-1);
