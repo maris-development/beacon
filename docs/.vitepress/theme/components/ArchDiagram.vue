@@ -3,25 +3,47 @@ import { ref, computed } from 'vue'
 import { withBase } from 'vitepress'
 
 const logo = withBase('/beacon-logo-small.png')
-const mode = ref('cloud') // 'cloud' | 'onprem'
+const mode = ref('cloud') // 'cloud' | 'onprem' | 'local'
 
-const view = computed(() =>
-  mode.value === 'cloud'
-    ? {
-        region: 'AWS Cloud',
-        regionClass: 'region-cloud',
-        beaconSub: 'on EC2',
-        store: { ico: '🪣', title: 'S3 Bucket', sub: 'object storage' },
-        link2: 'reads via S3 API',
-      }
-    : {
-        region: 'On-premise server',
-        regionClass: 'region-onprem',
-        beaconSub: 'local process',
-        store: { ico: '💾', title: 'Local disk', sub: 'NetCDF · Parquet' },
-        link2: 'reads local files',
-      }
-)
+const MODES = {
+  cloud: {
+    regions: [
+      { x: 10, w: 228, label: 'Internet', class: '' },
+      { x: 298, w: 612, label: 'AWS Cloud', class: 'region-cloud' },
+    ],
+    jupyterSub: 'Notebook client',
+    link1: 'SQL / Flight SQL',
+    beaconSub: 'on EC2',
+    link2: 'reads via S3 API',
+    store: { ico: '🪣', title: 'S3 Bucket', sub: 'object storage' },
+    aria: 'A Jupyter notebook on the internet queries Beacon running on EC2, which reads data from an S3 bucket.',
+  },
+  onprem: {
+    regions: [
+      { x: 10, w: 228, label: 'Internet', class: '' },
+      { x: 298, w: 612, label: 'On-premise server', class: 'region-onprem' },
+    ],
+    jupyterSub: 'Notebook client',
+    link1: 'SQL / Flight SQL',
+    beaconSub: 'local process',
+    link2: 'reads local files',
+    store: { ico: '💾', title: 'Local disk', sub: 'NetCDF · Parquet' },
+    aria: 'A Jupyter notebook on the internet queries Beacon running on an on-premise server, which reads data from local disk on that same server.',
+  },
+  local: {
+    regions: [
+      { x: 10, w: 900, label: 'Your laptop', class: 'region-local' },
+    ],
+    jupyterSub: 'Notebook (local)',
+    link1: 'localhost',
+    beaconSub: 'localhost:5001',
+    link2: 'reads local files',
+    store: { ico: '💾', title: 'Local files', sub: 'NetCDF · Parquet' },
+    aria: 'A Jupyter notebook, Beacon, and the data files all run on a single local machine.',
+  },
+}
+
+const view = computed(() => MODES[mode.value])
 </script>
 
 <template>
@@ -31,28 +53,27 @@ const view = computed(() =>
     <div class="arch-tabs" role="tablist">
       <button
         :class="['arch-tab', { active: mode === 'cloud' }]"
-        role="tab"
-        :aria-selected="mode === 'cloud'"
+        role="tab" :aria-selected="mode === 'cloud'"
         @click="mode = 'cloud'"
       >☁️ Cloud (AWS)</button>
       <button
         :class="['arch-tab', { active: mode === 'onprem' }]"
-        role="tab"
-        :aria-selected="mode === 'onprem'"
+        role="tab" :aria-selected="mode === 'onprem'"
         @click="mode = 'onprem'"
       >🖥️ On-premise</button>
+      <button
+        :class="['arch-tab', { active: mode === 'local' }]"
+        role="tab" :aria-selected="mode === 'local'"
+        @click="mode = 'local'"
+      >💻 Local</button>
     </div>
 
-    <svg class="arch-svg" viewBox="0 0 920 250" role="img"
-         :aria-label="mode === 'cloud'
-           ? 'A Jupyter notebook on the internet queries Beacon running on EC2, which reads data from an S3 bucket.'
-           : 'A Jupyter notebook on the internet queries Beacon running on an on-premise server, which reads data from local disk on that same server.'">
+    <svg class="arch-svg" viewBox="0 0 920 250" role="img" :aria-label="view.aria">
       <!-- regions -->
-      <rect class="region" x="10" y="30" width="228" height="200" rx="14" />
-      <text class="region-label" x="26" y="52">Internet</text>
-
-      <rect class="region" :class="view.regionClass" x="298" y="30" width="612" height="200" rx="14" />
-      <text class="region-label" x="314" y="52">{{ view.region }}</text>
+      <g v-for="(rg, i) in view.regions" :key="i">
+        <rect class="region" :class="rg.class" :x="rg.x" y="30" :width="rg.w" height="200" rx="14" />
+        <text class="region-label" :x="rg.x + 16" y="52">{{ rg.label }}</text>
+      </g>
 
       <!-- connectors (behind nodes) -->
       <path class="wire" d="M210 158 H336" />
@@ -64,7 +85,7 @@ const view = computed(() =>
       <circle class="pkt-back back2" cx="708" cy="158" r="3.5" />
 
       <!-- connector labels -->
-      <text class="wire-label" x="273" y="144">SQL / Flight SQL</text>
+      <text class="wire-label" x="273" y="144">{{ view.link1 }}</text>
       <text class="wire-label" x="607" y="144">{{ view.link2 }}</text>
 
       <!-- Jupyter client -->
@@ -72,7 +93,7 @@ const view = computed(() =>
         <rect x="40" y="112" width="170" height="92" rx="12" />
         <text class="ico" x="74" y="166">💻</text>
         <text class="n-title" x="98" y="152">Jupyter</text>
-        <text class="n-sub" x="98" y="172">Notebook client</text>
+        <text class="n-sub" x="98" y="172">{{ view.jupyterSub }}</text>
       </g>
 
       <!-- Beacon -->
@@ -83,7 +104,7 @@ const view = computed(() =>
         <text class="n-sub" x="392" y="172">{{ view.beaconSub }}</text>
       </g>
 
-      <!-- Storage (S3 bucket or local disk) -->
+      <!-- Storage -->
       <g class="node">
         <rect x="708" y="112" width="170" height="92" rx="12" />
         <text class="ico" x="742" y="166">{{ view.store.ico }}</text>
@@ -156,6 +177,7 @@ const view = computed(() =>
 }
 .region-cloud { fill: color-mix(in srgb, var(--vp-c-brand-soft) 28%, transparent); }
 .region-onprem { fill: color-mix(in srgb, var(--vp-c-green-soft, var(--vp-c-bg-soft)) 40%, transparent); }
+.region-local { fill: color-mix(in srgb, var(--vp-c-yellow-soft, var(--vp-c-bg-soft)) 36%, transparent); }
 
 .region-label {
   fill: var(--vp-c-text-3);
