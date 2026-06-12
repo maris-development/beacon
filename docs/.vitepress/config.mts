@@ -65,28 +65,6 @@ export default defineConfig({
           ]
         },
         {
-          text: 'Connect',
-          collapsed: false,
-          items: [
-            {
-              text: 'JetBrains DataGrip',
-              link: '/docs/1.7.0/connect/jetbrains-datagrip',
-            },
-            {
-              text: 'Beacon CLI',
-              link: '/docs/1.7.0/connect/beacon-cli',
-            },
-            {
-              text: 'Beacon Python SDK',
-              link: '/docs/1.7.0/connect/beacon-python-sdk',
-            },
-            {
-              text: 'Python ADBC Driver',
-              link: '/docs/1.7.0/connect/python-adbc',
-            }
-          ]
-        },
-        {
           text: 'Data Lakehouse Setup',
           link: '/docs/1.7.0/data-lake',
           collapsed: false,
@@ -152,6 +130,10 @@ export default defineConfig({
                     { text: 'ODV ASCII', link: '/docs/1.7.0/data-lake/external-tables#odv-ascii' },
                     { text: 'GeoTIFF / COG', link: '/docs/1.7.0/data-lake/external-tables#geotiff-cog' },
                   ]
+                },
+                {
+                  text: 'Managed Tables',
+                  link: '/docs/1.7.0/sql/managed-tables',
                 },
                 {
                   text: 'Views',
@@ -415,6 +397,28 @@ export default defineConfig({
                 },
               ]
             },
+          ]
+        },
+        {
+          text: 'Connect',
+          collapsed: true,
+          items: [
+            {
+              text: 'JetBrains DataGrip',
+              link: '/docs/1.7.0/connect/jetbrains-datagrip',
+            },
+            {
+              text: 'Beacon CLI',
+              link: '/docs/1.7.0/connect/beacon-cli',
+            },
+            {
+              text: 'Beacon Python SDK',
+              link: '/docs/1.7.0/connect/beacon-python-sdk',
+            },
+            {
+              text: 'Python ADBC Driver',
+              link: '/docs/1.7.0/connect/python-adbc',
+            }
           ]
         }
       ],

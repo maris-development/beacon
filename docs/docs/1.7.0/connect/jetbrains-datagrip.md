@@ -80,7 +80,7 @@ SELECT * FROM read_netcdf(['my_dataset.nc'], ['TIME', 'DEPTH']) LIMIT 100;
 ```
 
 :::tip
-Beacon tables are named after your dataset files or configured collection names. If you don't see tables immediately, right-click the data source and choose **Refresh**.
+Beacon tables are named after your dataset files or registered external table names. If you don't see tables immediately, right-click the data source and choose **Refresh**.
 :::
 
 ## Configuration reference

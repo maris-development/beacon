@@ -37,7 +37,7 @@ info = client.get_server_info()  # metadata from /api/info
 print(info.get("beacon_version"))
 ```
 
-## Explore tables (collections)
+## Explore tables
 
 `list_tables()` returns a mapping of table names to `DataTable` helpers.
 
