@@ -11,7 +11,7 @@
 <style scoped>
 .feat-intro {
   max-width: 720px;
-  margin: 1rem auto -1rem;
+  margin: 2.5rem auto 2rem;
   padding: 0 1.5rem;
   text-align: center;
 }
