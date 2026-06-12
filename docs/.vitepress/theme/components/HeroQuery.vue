@@ -2,9 +2,12 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 
 const tab = ref('sql')
-// SSR / no-JS / reduced-motion default: the finished state.
-const phase = ref('results') // 'typing' | 'running' | 'results'
-const typed = ref(Infinity)  // number of chars revealed (Infinity = all)
+// Start from the typing state so the server-rendered frame matches where the
+// animation begins — otherwise the finished card paints first and visibly
+// "rewinds" once JS boots. onMounted drives it forward (or jumps to the
+// finished state for reduced-motion).
+const phase = ref('typing')  // 'typing' | 'running' | 'results'
+const typed = ref(0)         // number of chars revealed
 
 const rows = [
   ['2024-01-03', '36.21', '-5.43', '21.8'],
