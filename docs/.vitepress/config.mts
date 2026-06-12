@@ -1,5 +1,32 @@
 import { defineConfig } from 'vitepress'
 
+const SITE_URL = 'https://maris-development.github.io/beacon/'
+const OG_IMAGE = SITE_URL + 'hero.png'
+const DESCRIPTION =
+  'Beacon is an open-source (AGPL-3.0) data lakehouse query engine for scientific and climate data — query NetCDF, Zarr, Parquet, GeoTIFF, CSV, ODV, Arrow and Atlas files in place over SQL and JSON APIs, on local storage or S3, with no data migration.'
+
+const structuredData = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'WebSite',
+    name: 'Beacon',
+    url: SITE_URL,
+    description: DESCRIPTION
+  },
+  {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    name: 'Beacon',
+    applicationCategory: 'DeveloperApplication',
+    operatingSystem: 'Linux, macOS, Docker',
+    description: DESCRIPTION,
+    url: SITE_URL,
+    license: 'https://www.gnu.org/licenses/agpl-3.0.html',
+    offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+    sameAs: ['https://github.com/maris-development/beacon']
+  }
+]
+
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
   markdown: {
@@ -8,12 +35,46 @@ export default defineConfig({
       light: 'light-plus',
     }
   },
-  head: [['link', { rel: 'icon', href: '/beacon/favicon.ico' }]],
+  head: [
+    ['link', { rel: 'icon', href: '/beacon/favicon.ico' }],
+    ['meta', { name: 'author', content: 'MARIS' }],
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: 'Beacon' }],
+    ['meta', { property: 'og:image', content: OG_IMAGE }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: OG_IMAGE }],
+    ['script', { type: 'application/ld+json' }, JSON.stringify(structuredData[0])],
+    ['script', { type: 'application/ld+json' }, JSON.stringify(structuredData[1])],
+  ],
   base: '/beacon/',
   ignoreDeadLinks: true,
   title: "Beacon",
-  description: "Beacon Documentation",
+  description: DESCRIPTION,
   lastUpdated: true,
+  sitemap: { hostname: SITE_URL },
+  transformHead({ pageData }) {
+    const path = pageData.relativePath
+      .replace(/\.md$/, '.html')
+      .replace(/(^|\/)index\.html$/, '$1')
+    const url = SITE_URL + path
+    const isHome =
+      pageData.frontmatter?.layout === 'home' ||
+      !pageData.title ||
+      pageData.title === 'Beacon'
+    const title = isHome
+      ? 'Beacon — a data lakehouse for scientific data'
+      : `${pageData.title} | Beacon`
+    const description =
+      pageData.description || pageData.frontmatter?.description || DESCRIPTION
+    return [
+      ['link', { rel: 'canonical', href: url }],
+      ['meta', { property: 'og:title', content: title }],
+      ['meta', { property: 'og:description', content: description }],
+      ['meta', { property: 'og:url', content: url }],
+      ['meta', { name: 'twitter:title', content: title }],
+      ['meta', { name: 'twitter:description', content: description }]
+    ]
+  },
   themeConfig: {
     search: {
       provider: 'local'
@@ -817,6 +878,14 @@ export default defineConfig({
     socialLinks: [
       { icon: 'slack', link: 'https://join.slack.com/t/beacontechnic-wwa5548/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg' },
       { icon: 'github', link: 'https://github.com/maris-development/beacon' },
-    ]
+    ],
+    editLink: {
+      pattern: 'https://github.com/maris-development/beacon/edit/main/docs/:path',
+      text: 'Edit this page on GitHub'
+    },
+    footer: {
+      message: 'Released under the AGPL-3.0 License.',
+      copyright: 'Copyright © MARIS & the Beacon contributors'
+    }
   }
 })

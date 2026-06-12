@@ -74,7 +74,7 @@ const cards = [
 <style scoped>
 .arch {
   margin: 3.75rem auto 1rem;
-  max-width: 880px;
+  max-width: 1000px;
   padding: 0 1.5rem;
   text-align: center;
 }
@@ -92,15 +92,15 @@ const cards = [
 .depcards {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 0.8rem;
+  gap: 1rem;
 }
 
 .depcard {
   border: 1px solid var(--vp-c-divider);
-  border-top: 3px solid var(--vp-c-divider);
-  border-radius: 12px;
+  border-top: 4px solid var(--vp-c-divider);
+  border-radius: 14px;
   background: var(--vp-c-bg-soft);
-  padding: 16px 14px 14px;
+  padding: 22px 20px 20px;
   text-align: left;
 }
 .accent-cloud  { border-top-color: var(--vp-c-brand-1); }
@@ -110,13 +110,13 @@ const cards = [
 .depcard-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 14px;
-  font-size: 14px;
+  gap: 10px;
+  margin-bottom: 18px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--vp-c-text-1);
 }
-.dh-ico { font-size: 16px; }
+.dh-ico { font-size: 18px; }
 
 .depflow {
   display: flex;
@@ -126,38 +126,38 @@ const cards = [
 .dep-node {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 12px;
+  padding: 11px 13px;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--vp-c-bg);
 }
 .dn-ico {
-  width: 24px;
+  width: 28px;
   text-align: center;
-  font-size: 17px;
+  font-size: 20px;
   flex: none;
 }
 .dn-logo {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   flex: none;
 }
-.dn-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
-.dn-text b { font-size: 13px; color: var(--vp-c-text-1); }
-.dn-text small { font-size: 11px; color: var(--vp-c-text-3); }
+.dn-text { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+.dn-text b { font-size: 14.5px; color: var(--vp-c-text-1); }
+.dn-text small { font-size: 12px; color: var(--vp-c-text-3); }
 
 /* vertical connector + label, aligned under the node icon column */
 .dep-link {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 2px 0 2px 21px;
+  gap: 10px;
+  padding: 3px 0 3px 26px;
 }
 .dl-line {
   position: relative;
   width: 2px;
-  height: 22px;
+  height: 28px;
   background: var(--vp-c-divider);
   flex: none;
 }
@@ -175,18 +175,18 @@ const cards = [
   0%   { top: -5px; opacity: 0; }
   15%  { opacity: 1; }
   85%  { opacity: 1; }
-  100% { top: 22px; opacity: 0; }
+  100% { top: 28px; opacity: 0; }
 }
 .dep-link em {
   font-style: normal;
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--vp-c-text-3);
 }
 
 .depcard-foot {
-  margin: 14px 0 0;
-  font-size: 11.5px;
-  line-height: 1.45;
+  margin: 18px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
   color: var(--vp-c-text-2);
 }
 
@@ -194,7 +194,7 @@ const cards = [
   .dl-dot { display: none; }
 }
 
-@media (max-width: 640px) {
-  .depcards { grid-template-columns: 1fr; max-width: 360px; margin-inline: auto; }
+@media (max-width: 720px) {
+  .depcards { grid-template-columns: 1fr; max-width: 380px; margin-inline: auto; }
 }
 </style>

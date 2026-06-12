@@ -1,3 +1,7 @@
+---
+description: How Beacon fits together — send SQL or JSON to the query engine, read NetCDF, Zarr, Parquet, GeoTIFF and more in place from local files or S3, and stream results back as Parquet, NetCDF or Arrow.
+---
+
 # Introduction
 
 :::info Open Source (AGPL V3)
@@ -6,24 +10,48 @@ Beacon is open source under the AGPL V3 license. Source code and contributions: 
 
 Beacon is a data lakehouse query engine built for scientific datasets. Point it at your existing files — on disk or in S3 — and it exposes a SQL query API instantly, with no data migration or preprocessing required.
 
+<QueryFlow />
+
 Clients query Beacon using **SQL** or **JSON** and receive results as a file (Parquet, NetCDF, Arrow IPC, …) or a streaming Arrow IPC response. Beacon handles filtering, aggregation, and joins across files entirely server-side.
 
 ## Your first query
 
-You can query files directly, with no setup, or register them once and query by name:
+The same query three ways — as raw SQL, over the HTTP API, or from the Python SDK. No setup required: `read_netcdf()` reads the files in place.
 
-```sql
--- Query files directly, no setup required
-SELECT * FROM read_netcdf(['argo/**/*.nc']) LIMIT 100;
+::: code-group
 
--- Or register a table once, then query it by name
-SELECT temperature, latitude, longitude
-FROM ocean_profiles
-WHERE latitude BETWEEN 0 AND 70
-LIMIT 100;
+```sql [SQL]
+SELECT time, latitude, longitude, temperature
+FROM read_netcdf(['argo/**/*.nc'])
+WHERE temperature > 20
+LIMIT 100
 ```
 
-Queries are submitted over the HTTP API (`POST /api/query`) or Arrow Flight SQL.
+```http [HTTP]
+POST /api/query
+Content-Type: application/json
+
+{
+  "sql": "SELECT time, latitude, longitude, temperature FROM read_netcdf(['argo/**/*.nc']) WHERE temperature > 20 LIMIT 100",
+  "output": { "format": "csv" }
+}
+```
+
+```python [Python]
+from beacon_api import Client
+
+client = Client("https://your-beacon-node")
+
+df = client.sql_query(
+    "SELECT time, latitude, longitude, temperature "
+    "FROM read_netcdf(['argo/**/*.nc']) "
+    "WHERE temperature > 20 LIMIT 100"
+).to_pandas_dataframe()
+```
+
+:::
+
+SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`) or Arrow Flight SQL. Prefer querying by name? Register the files as an [external table](/docs/1.7.0/data-lake/external-tables) first.
 
 ## Supported formats
 
@@ -38,33 +66,6 @@ Queries are submitted over the HTTP API (`POST /api/query`) or Arrow Flight SQL.
 | CSV | Header row required, delimiter configurable |
 | Arrow IPC | `.arrow`, `.ipc` stream files |
 | Beacon Binary Format | Beacon's native ingest format |
-
-## How it fits together
-
-```text
-                    Clients
-           (notebooks · apps · scripts)
-                       |
-                  SQL / JSON
-                       |
-                       v
-               +---------------+
-               |    Beacon     |
-               | query engine  |
-               +-------+-------+
-                       |
-           +-----------+-----------+
-           |                       |
-           v                       v
-    Local files               S3 / Object Store
-    (NetCDF, Zarr, …)         (existing bucket)
-           |                       |
-           +-----------+-----------+
-                       |
-                       v
-              Result returned to client
-              (Parquet · NetCDF · Arrow)
-```
 
 ## Key concepts
 

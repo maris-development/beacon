@@ -1,3 +1,7 @@
+---
+description: Run Beacon with Docker in minutes — locally or against S3-compatible object storage — then point it at your files and query them over SQL or JSON.
+---
+
 # Getting Started
 
 This guide gets a Beacon instance running with Docker Compose. For ready-made examples including MinIO and sample datasets, see the [beacon-example repository](https://github.com/maris-development/beacon-example).

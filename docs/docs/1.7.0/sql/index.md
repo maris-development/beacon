@@ -1,3 +1,7 @@
+---
+description: Query Beacon with standard SQL (Apache DataFusion) — SELECT, WHERE, GROUP BY, JOIN, table functions like read_netcdf(), DDL, and a full function reference.
+---
+
 # SQL Guide
 
 Beacon embeds [Apache DataFusion](https://datafusion.apache.org/) as its query engine, giving you a broad standard SQL dialect — `SELECT`, `WHERE`, `GROUP BY`, `JOIN`, `ORDER BY`, window functions, and more.

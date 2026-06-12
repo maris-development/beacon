@@ -22,6 +22,46 @@
   100% { background-position: 0% 50%; }
 }
 
+/* ===== hero backdrop stacking ===== */
+.VPHome { position: relative; }
+.VPHome .VPHero,
+.VPHome .home-hero-badges {
+  position: relative;
+  z-index: 1;
+}
+
+/* ===== scroll-reveal (hidden state added by JS only -> no-JS safe) ===== */
+.reveal {
+  opacity: 0;
+  transform: translateY(26px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  will-change: opacity, transform;
+}
+.reveal.in-view {
+  opacity: 1;
+  transform: none;
+}
+/* blocks already on screen at landing cascade in (one-shot, JS-added) */
+.land-in {
+  animation: hero-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .land-in { animation: none; }
+}
+
+/* ===== feature card hover lift / glow ===== */
+.VPFeature {
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.VPFeature:hover {
+  transform: translateY(-4px);
+  border-color: color-mix(in srgb, var(--vp-c-brand-1) 55%, var(--vp-c-divider));
+  box-shadow:
+    0 14px 32px rgba(0, 0, 0, 0.10),
+    0 0 0 1px color-mix(in srgb, var(--vp-c-brand-1) 20%, transparent);
+}
+
 /* Make the VitePress home hero screenshot larger */
 .VPHero.has-image .container {
   max-width: 1180px;
@@ -84,6 +124,32 @@
     background-size: 300% 300%;
     animation: gradientMove 4s ease infinite;
 }
+
+/* ===== hero entrance on load (one-shot, staggered) =====
+   No-JS safe via `backwards` fill; the name keeps its gradient shimmer because
+   we animate the parent .heading, not the .name itself. */
+.VPHome .VPHero .heading,
+.VPHome .VPHero .tagline,
+.VPHome .VPHero .actions,
+.VPHome .VPHero .image {
+  animation: hero-in 0.65s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+.VPHome .VPHero .heading { animation-delay: 0.05s; }
+.VPHome .VPHero .image   { animation-delay: 0.18s; }
+.VPHome .VPHero .tagline { animation-delay: 0.22s; }
+.VPHome .VPHero .actions { animation-delay: 0.34s; }
+
+@keyframes hero-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .VPHome .VPHero .heading,
+  .VPHome .VPHero .tagline,
+  .VPHome .VPHero .actions,
+  .VPHome .VPHero .image { animation: none; }
+}
 .format-badges-wrap {
   margin: 1.75rem auto 3rem;
   margin-top: 0;
@@ -124,7 +190,7 @@
 
 .home-hero-badges {
   margin: 1.75rem auto 3.25rem;
-  max-width: 820px;
+  max-width: 1000px;
   padding: 0 1.5rem;
   text-align: center;
 }
