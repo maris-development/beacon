@@ -18,14 +18,14 @@ services:
         container_name: beacon
         restart: unless-stopped
         ports:
-            - "8080:8080"   # HTTP API
+            - "5001:5001"   # HTTP API
             - "32011:32011" # Arrow Flight SQL
         environment:
             - BEACON_ADMIN_USERNAME=admin
             - BEACON_ADMIN_PASSWORD=securepassword
             - BEACON_VM_MEMORY_SIZE=4096
             - BEACON_HOST=0.0.0.0
-            - BEACON_PORT=8080
+            - BEACON_PORT=5001
         volumes:
             - ./datasets:/beacon/data/datasets
             - ./tables:/beacon/data/tables
@@ -37,7 +37,7 @@ Start Beacon:
 docker compose up -d
 ```
 
-Beacon is now running. Open `http://localhost:8080/swagger` to verify and explore the API. Any files placed in `./datasets` are immediately available for querying.
+Beacon is now running. Open `http://localhost:5001/swagger` to verify and explore the API. Any files placed in `./datasets` are immediately available for querying.
 
 ## S3-Compatible Object Storage
 
@@ -50,14 +50,14 @@ services:
         container_name: beacon
         restart: unless-stopped
         ports:
-            - "8080:8080"
+            - "5001:5001"
             - "32011:32011"
         environment:
             - BEACON_ADMIN_USERNAME=admin
             - BEACON_ADMIN_PASSWORD=securepassword
             - BEACON_VM_MEMORY_SIZE=4096
             - BEACON_HOST=0.0.0.0
-            - BEACON_PORT=8080
+            - BEACON_PORT=5001
             - AWS_ENDPOINT=https://s3.amazonaws.com
             - AWS_ACCESS_KEY_ID=your-access-key
             - AWS_SECRET_ACCESS_KEY=your-secret-key
