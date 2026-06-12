@@ -1,20 +1,58 @@
 <script setup>
+import { ref, computed } from 'vue'
 import { withBase } from 'vitepress'
+
 const logo = withBase('/beacon-logo-small.png')
+const mode = ref('cloud') // 'cloud' | 'onprem'
+
+const view = computed(() =>
+  mode.value === 'cloud'
+    ? {
+        region: 'AWS Cloud',
+        regionClass: 'region-cloud',
+        beaconSub: 'on EC2',
+        store: { ico: '🪣', title: 'S3 Bucket', sub: 'object storage' },
+        link2: 'reads via S3 API',
+      }
+    : {
+        region: 'On-premise server',
+        regionClass: 'region-onprem',
+        beaconSub: 'local process',
+        store: { ico: '💾', title: 'Local disk', sub: 'NetCDF · Parquet' },
+        link2: 'reads local files',
+      }
+)
 </script>
 
 <template>
   <div class="arch">
     <p class="arch-title">A typical Beacon deployment</p>
 
+    <div class="arch-tabs" role="tablist">
+      <button
+        :class="['arch-tab', { active: mode === 'cloud' }]"
+        role="tab"
+        :aria-selected="mode === 'cloud'"
+        @click="mode = 'cloud'"
+      >☁️ Cloud (AWS)</button>
+      <button
+        :class="['arch-tab', { active: mode === 'onprem' }]"
+        role="tab"
+        :aria-selected="mode === 'onprem'"
+        @click="mode = 'onprem'"
+      >🖥️ On-premise</button>
+    </div>
+
     <svg class="arch-svg" viewBox="0 0 920 250" role="img"
-         aria-label="A Jupyter notebook on the internet queries Beacon running on EC2, which reads data from an S3 bucket.">
+         :aria-label="mode === 'cloud'
+           ? 'A Jupyter notebook on the internet queries Beacon running on EC2, which reads data from an S3 bucket.'
+           : 'A Jupyter notebook on the internet queries Beacon running on an on-premise server, which reads data from local disk on that same server.'">
       <!-- regions -->
       <rect class="region" x="10" y="30" width="228" height="200" rx="14" />
       <text class="region-label" x="26" y="52">Internet</text>
 
-      <rect class="region region-aws" x="298" y="30" width="612" height="200" rx="14" />
-      <text class="region-label" x="314" y="52">AWS Cloud</text>
+      <rect class="region" :class="view.regionClass" x="298" y="30" width="612" height="200" rx="14" />
+      <text class="region-label" x="314" y="52">{{ view.region }}</text>
 
       <!-- connectors (behind nodes) -->
       <path class="wire" d="M210 158 H336" />
@@ -27,7 +65,7 @@ const logo = withBase('/beacon-logo-small.png')
 
       <!-- connector labels -->
       <text class="wire-label" x="273" y="144">SQL / Flight SQL</text>
-      <text class="wire-label" x="607" y="144">reads files</text>
+      <text class="wire-label" x="607" y="144">{{ view.link2 }}</text>
 
       <!-- Jupyter client -->
       <g class="node">
@@ -37,20 +75,20 @@ const logo = withBase('/beacon-logo-small.png')
         <text class="n-sub" x="98" y="172">Notebook client</text>
       </g>
 
-      <!-- Beacon on EC2 -->
+      <!-- Beacon -->
       <g class="node">
         <rect x="336" y="112" width="170" height="92" rx="12" />
         <image :href="logo" x="350" y="143" width="30" height="30" />
         <text class="n-title" x="392" y="152">Beacon</text>
-        <text class="n-sub" x="392" y="172">on EC2</text>
+        <text class="n-sub" x="392" y="172">{{ view.beaconSub }}</text>
       </g>
 
-      <!-- S3 bucket -->
+      <!-- Storage (S3 bucket or local disk) -->
       <g class="node">
         <rect x="708" y="112" width="170" height="92" rx="12" />
-        <text class="ico" x="742" y="166">🪣</text>
-        <text class="n-title" x="766" y="152">S3 Bucket</text>
-        <text class="n-sub" x="766" y="172">your data lake</text>
+        <text class="ico" x="742" y="166">{{ view.store.ico }}</text>
+        <text class="n-title" x="766" y="152">{{ view.store.title }}</text>
+        <text class="n-sub" x="766" y="172">{{ view.store.sub }}</text>
       </g>
     </svg>
   </div>
@@ -65,13 +103,42 @@ const logo = withBase('/beacon-logo-small.png')
 }
 
 .arch-title {
-  margin: 0 0 1.25rem;
+  margin: 0 0 1rem;
   color: var(--vp-c-text-3);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.11em;
   line-height: 1;
   text-transform: uppercase;
+}
+
+/* toggle */
+.arch-tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: 1.5rem;
+  padding: 4px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 999px;
+  background: var(--vp-c-bg-soft);
+}
+.arch-tab {
+  appearance: none;
+  border: none;
+  border-radius: 999px;
+  padding: 5px 16px;
+  background: transparent;
+  color: var(--vp-c-text-2);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.2s, background-color 0.2s;
+}
+.arch-tab:hover { color: var(--vp-c-text-1); }
+.arch-tab.active {
+  color: var(--vp-c-brand-1);
+  background: var(--vp-c-bg);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 
 .arch-svg {
@@ -87,7 +154,8 @@ const logo = withBase('/beacon-logo-small.png')
   stroke-width: 1.5;
   stroke-dasharray: 5 5;
 }
-.region-aws { fill: color-mix(in srgb, var(--vp-c-brand-soft) 28%, transparent); }
+.region-cloud { fill: color-mix(in srgb, var(--vp-c-brand-soft) 28%, transparent); }
+.region-onprem { fill: color-mix(in srgb, var(--vp-c-green-soft, var(--vp-c-bg-soft)) 40%, transparent); }
 
 .region-label {
   fill: var(--vp-c-text-3);
