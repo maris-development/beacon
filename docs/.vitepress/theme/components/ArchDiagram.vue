@@ -90,20 +90,17 @@ const cards = [
 }
 
 .depcards {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.8rem;
 }
 
 .depcard {
-  flex: 1 1 240px;
-  max-width: 280px;
   border: 1px solid var(--vp-c-divider);
   border-top: 3px solid var(--vp-c-divider);
   border-radius: 12px;
   background: var(--vp-c-bg-soft);
-  padding: 16px 16px 14px;
+  padding: 16px 14px 14px;
   text-align: left;
 }
 .accent-cloud  { border-top-color: var(--vp-c-brand-1); }
@@ -197,7 +194,7 @@ const cards = [
   .dl-dot { display: none; }
 }
 
-@media (max-width: 720px) {
-  .depcard { max-width: 360px; flex-basis: 280px; }
+@media (max-width: 640px) {
+  .depcards { grid-template-columns: 1fr; max-width: 360px; margin-inline: auto; }
 }
 </style>
