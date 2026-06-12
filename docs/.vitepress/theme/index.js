@@ -3,6 +3,7 @@ import DefaultTheme from 'vitepress/theme'
 import FormatBadges from './components/FormatBadges.vue'
 import IntegrationBadges from './components/IntegrationBadges.vue'
 import HeroQuery from './components/HeroQuery.vue'
+import ArchDiagram from './components/ArchDiagram.vue'
 import './custom.css'
 
 export default {
@@ -12,6 +13,7 @@ export default {
         app.component('FormatBadges', FormatBadges)
         app.component('IntegrationBadges', IntegrationBadges)
         app.component('HeroQuery', HeroQuery)
+        app.component('ArchDiagram', ArchDiagram)
     },
 
     Layout() {
@@ -20,7 +22,8 @@ export default {
             'home-hero-after': () =>
                 h('div', { class: 'home-hero-badges' }, [
                     h(FormatBadges),
-                    h(IntegrationBadges)
+                    h(IntegrationBadges),
+                    h(ArchDiagram)
                 ])
         })
     }
