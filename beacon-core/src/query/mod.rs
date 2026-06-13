@@ -25,6 +25,16 @@ pub struct Query {
     pub output: Option<Output>,
 }
 
+impl Query {
+    /// A SQL query with no output formatting (the form used by the SQL transports).
+    pub fn sql(sql: String) -> Self {
+        Self {
+            inner: InnerQuery::Sql(sql),
+            output: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub enum InnerQuery {
     #[serde(rename = "sql")]

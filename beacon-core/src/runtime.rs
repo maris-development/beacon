@@ -163,26 +163,44 @@ impl Runtime {
         Ok(session_ctx)
     }
 
+    /// Execute a client query (JSON or SQL) and stream the results.
+    ///
+    /// The single entry point for query execution: the JSON form is compiled by
+    /// beacon's query compiler, the SQL form goes through beacon's SQL parser, and
+    /// both are lowered to a `LogicalPlan` and run through the unified
+    /// `create_physical_plan -> execute_stream` pipeline. `is_super_user` gates the
+    /// SQL surface (DDL/DML and beacon's custom statements) for non-super-users.
+    #[tracing::instrument(skip(self, query))]
+    pub async fn run_query(
+        &self,
+        query: crate::query::Query,
+        is_super_user: bool,
+    ) -> anyhow::Result<SendableRecordBatchStream> {
+        if query.output.is_some() {
+            anyhow::bail!("output formats are not yet supported on the unified query path");
+        }
+        let plan = self.lower_query(query, is_super_user).await?;
+        crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
+    }
+
+    /// HTTP `/query` adapter: runs a client query through [`Self::run_query`] and
+    /// wraps the stream with metrics tracking (so `query_metrics` is populated for
+    /// the metrics endpoint). HTTP client queries are read-only.
     pub async fn run_client_query(&self, query: QueryRequest) -> anyhow::Result<QueryResult> {
         let query = query.into_query()?;
 
-        // Output formats (CSV/Parquet/NetCDF/…) and rich metrics are not yet wired
-        // onto the unified execution path; reject rather than silently stream.
-        if query.output.is_some() {
-            anyhow::bail!("output formats are not yet supported on the unified query path");
+        // Client SQL is gated by the `sql.enable` config; JSON queries are always
+        // allowed (Flight SQL has its own `flight_sql.enable`).
+        if matches!(query.inner, crate::query::InnerQuery::Sql(_)) && !beacon_config::CONFIG.sql.enable
+        {
+            anyhow::bail!("SQL queries are not enabled");
         }
 
         let query_id = uuid::Uuid::new_v4();
         let query_json = serde_json::to_value(&query)?;
 
-        // JSON (and SQL-in-JSON) queries are lowered to a `LogicalPlan` and run
-        // through the same pipeline as `run_sql`, so there is a single point of
-        // entry for query execution.
-        let plan = self.plan_client_query(query).await?;
-        let stream = crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
+        let stream = self.run_query(query, false).await?;
 
-        // The stream is wrapped so output rows/bytes are still counted as it drains
-        // (existing metrics behaviour); input/file-scan metrics are deferred.
         let metrics = MetricsTracker::new(query_json, query_id);
         let output_stream = ArrowOutputStream {
             stream,
@@ -196,16 +214,14 @@ impl Runtime {
         })
     }
 
-    /// Build a DataFusion `LogicalPlan` from a client query. The SQL form goes
-    /// straight to DataFusion's SQL parser; the JSON form is compiled by beacon's
-    /// own query compiler. The `output` field is ignored here — the unified path
-    /// streams results; file-format output is handled separately.
-    async fn plan_client_query(
+    /// Lower a client query (JSON or SQL) to a `LogicalPlan` without executing it.
+    async fn lower_query(
         &self,
         query: crate::query::Query,
+        is_super_user: bool,
     ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
         match query.inner {
-            crate::query::InnerQuery::Sql(sql) => self.plan_sql_client_query(&sql).await,
+            crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql, is_super_user).await,
             crate::query::InnerQuery::Json(body) => {
                 crate::query::compile_json_query(
                     body,
@@ -218,26 +234,41 @@ impl Runtime {
         }
     }
 
-    /// Plan a read-only SQL client query via DataFusion's SQL parser (DDL/DML and
-    /// other statements are disallowed). Requires SQL queries to be enabled.
-    async fn plan_sql_client_query(
+    /// Lower a SQL statement (SELECT, DDL/DML, or a beacon custom statement) to a
+    /// `LogicalPlan`, applying the anonymous-access gating for non-super-users.
+    async fn lower_sql(
         &self,
         sql: &str,
+        is_super_user: bool,
     ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
-        if !beacon_config::CONFIG.sql.enable {
-            anyhow::bail!("SQL queries are not enabled");
+        let statement = Self::parse_beacon_statement(sql)?;
+        if !is_super_user {
+            Self::ensure_anonymous_statement_allowed(&statement)?;
         }
-        let sql_options = SQLOptions::new()
-            .with_allow_ddl(false)
-            .with_allow_dml(false)
-            .with_allow_statements(false);
-        let plan = self
-            .session_ctx
-            .sql_with_options(sql, sql_options)
-            .await?
-            .into_parts()
-            .1;
-        Ok(plan)
+
+        match statement {
+            BeaconStatement::CreateMaterializedView(statement) => {
+                Ok(crate::statement_plan::create_materialized_view_plan(statement))
+            }
+            BeaconStatement::Refresh(statement) => {
+                Ok(crate::statement_plan::refresh_plan(statement))
+            }
+            BeaconStatement::DFStatement(statement) => {
+                let sql_options = if is_super_user {
+                    SQLOptions::new()
+                        .with_allow_ddl(true)
+                        .with_allow_dml(true)
+                        .with_allow_statements(true)
+                } else {
+                    SQLOptions::new()
+                        .with_allow_ddl(false)
+                        .with_allow_dml(false)
+                        .with_allow_statements(false)
+                };
+                crate::statement_plan::lower_df_statement(&self.session_ctx, *statement, &sql_options)
+                    .await
+            }
+        }
     }
 
     pub fn system_info(&self) -> SystemInfo {
@@ -259,7 +290,7 @@ impl Runtime {
     }
 
     pub async fn explain_client_query(&self, query: QueryRequest) -> anyhow::Result<String> {
-        let plan = self.plan_client_query(query.into_query()?).await?;
+        let plan = self.lower_query(query.into_query()?, false).await?;
         let json = plan.display_pg_json().to_string();
         Ok(json)
     }
@@ -491,52 +522,6 @@ impl Runtime {
         self.file_manager.delete_file(file_path).await
     }
 
-    #[tracing::instrument(skip(self))]
-    pub async fn run_sql(
-        &self,
-        sql: String,
-        is_super_user: bool,
-    ) -> anyhow::Result<SendableRecordBatchStream> {
-        let statement = Self::parse_beacon_statement(&sql)?;
-        if !is_super_user {
-            Self::ensure_anonymous_statement_allowed(&statement)?;
-        }
-
-        // Every statement is lowered to a logical plan (with beacon extension
-        // nodes for side-effecting statements) and run through the single
-        // create_physical_plan -> execute_stream pipeline, like queries.
-        let plan = match statement {
-            BeaconStatement::CreateMaterializedView(statement) => {
-                crate::statement_plan::create_materialized_view_plan(statement)
-            }
-            BeaconStatement::Refresh(statement) => {
-                crate::statement_plan::refresh_plan(statement)
-            }
-            BeaconStatement::DFStatement(statement) => {
-                let sql_options = if is_super_user {
-                    SQLOptions::new()
-                        .with_allow_ddl(true)
-                        .with_allow_dml(true)
-                        .with_allow_statements(true)
-                } else {
-                    SQLOptions::new()
-                        .with_allow_ddl(false)
-                        .with_allow_dml(false)
-                        .with_allow_statements(false)
-                };
-                crate::statement_plan::lower_df_statement(
-                    &self.session_ctx,
-                    *statement,
-                    &sql_options,
-                )
-                .await?
-            }
-        };
-
-        crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
-    }
-
-
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
         let mut parser = BeaconParser::new(sql)?;
         parser.parse_statement().map_err(Into::into)
@@ -575,7 +560,9 @@ mod materialized_view_tests {
         runtime: &Runtime,
         sql: &str,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
-        let stream = runtime.run_sql(sql.to_string(), true).await?;
+        let stream = runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), true)
+            .await?;
         let batches = stream.try_collect::<Vec<_>>().await?;
         Ok(batches)
     }
@@ -697,7 +684,7 @@ mod client_query_tests {
 
     async fn run_sql(runtime: &Runtime, sql: &str) {
         let stream = runtime
-            .run_sql(sql.to_string(), true)
+            .run_query(crate::query::Query::sql(sql.to_string()), true)
             .await
             .expect("sql should run");
         stream

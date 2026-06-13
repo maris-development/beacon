@@ -82,7 +82,7 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightInfo, Status> {
         let stream = self
             .runtime
-            .run_sql(sql.clone(), auth.is_super_user)
+            .run_query(beacon_core::query::Query::sql(sql.clone()), auth.is_super_user)
             .await
             .map_err(to_internal_status)?;
         let schema = stream.schema();
@@ -107,7 +107,7 @@ impl BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_query(beacon_core::query::Query::sql(sql), auth.is_super_user)
             .await
             .map_err(to_internal_status)?;
 
@@ -122,7 +122,7 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightDataStream, Status> {
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_query(beacon_core::query::Query::sql(sql), auth.is_super_user)
             .await
             .map_err(to_internal_status)?;
         let schema = stream.schema();
@@ -363,7 +363,7 @@ impl FlightSqlService for BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_query(beacon_core::query::Query::sql(sql), auth.is_super_user)
             .await
             .map_err(to_internal_status)?;
 
@@ -395,7 +395,7 @@ impl FlightSqlService for BeaconFlightSqlService {
         } else {
             let stream = self
                 .runtime
-                .run_sql(query.query.clone(), auth.is_super_user)
+                .run_query(beacon_core::query::Query::sql(query.query.clone()), auth.is_super_user)
                 .await
                 .map_err(to_internal_status)?;
             encode_schema(stream.schema().as_ref())?
