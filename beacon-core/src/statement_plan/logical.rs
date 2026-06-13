@@ -16,7 +16,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::{
     common::{DFSchema, DFSchemaRef},
     error::Result,
-    logical_expr::{dml::InsertOp, CreateExternalTable, Expr, LogicalPlan, UserDefinedLogicalNodeCore},
+    logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore},
     sql::{
         sqlparser::ast::{AlterTableOperation, ObjectName},
         TableReference,
@@ -31,18 +31,8 @@ fn empty_schema() -> &'static DFSchemaRef {
     EMPTY.get_or_init(|| Arc::new(DFSchema::empty()))
 }
 
-/// Shared `count: UInt64` schema returned by row-mutating nodes (INSERT, CTAS),
-/// matching DataFusion's DML output schema. The physical exec must produce this
-/// exact schema, since `ensure_schema_matches` compares it against the node.
-fn count_schema() -> &'static DFSchemaRef {
-    static COUNT: OnceLock<DFSchemaRef> = OnceLock::new();
-    COUNT.get_or_init(|| {
-        let schema = Schema::new(vec![Field::new("count", DataType::UInt64, false)]);
-        Arc::new(DFSchema::try_from(schema).expect("count schema is valid"))
-    })
-}
-
-/// The arrow form of [`count_schema`], for the physical exec's `PlanProperties`.
+/// The `count: UInt64` schema produced by row-mutating physical execs (INSERT,
+/// CTAS), matching DataFusion's DML output schema.
 pub(crate) fn count_arrow_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![Field::new(
         "count",
@@ -51,10 +41,10 @@ pub(crate) fn count_arrow_schema() -> Arc<Schema> {
     )]))
 }
 
-/// Wraps a payload that lacks `PartialOrd`/`Hash` (e.g. DataFusion's
-/// `CreateExternalTable`, sqlparser AST) so it can live inside a
-/// [`UserDefinedLogicalNodeCore`], which requires `Eq + PartialOrd + Hash`.
-/// Ordering, equality, and hashing use only the stable string `key`.
+/// Wraps a payload that lacks `PartialOrd`/`Hash` (the sqlparser `ALTER TABLE`
+/// AST) so it can live inside a [`UserDefinedLogicalNodeCore`], which requires
+/// `Eq + PartialOrd + Hash`. Ordering, equality, and hashing use only the stable
+/// string `key`.
 #[derive(Debug, Clone)]
 pub(crate) struct Keyed<T> {
     key: String,
@@ -186,180 +176,6 @@ impl UserDefinedLogicalNodeCore for RefreshNode {
     ) -> Result<Self> {
         Ok(Self {
             name: self.name.clone(),
-        })
-    }
-}
-
-/// Logical node for `DROP TABLE [IF EXISTS] <name>`.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct DropTableNode {
-    pub(crate) name: TableReference,
-    pub(crate) if_exists: bool,
-}
-
-impl UserDefinedLogicalNodeCore for DropTableNode {
-    fn name(&self) -> &str {
-        "DropTable"
-    }
-    fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
-    }
-    fn schema(&self) -> &DFSchemaRef {
-        empty_schema()
-    }
-    fn expressions(&self) -> Vec<Expr> {
-        vec![]
-    }
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "DropTable: name={}", self.name)
-    }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self {
-            name: self.name.clone(),
-            if_exists: self.if_exists,
-        })
-    }
-}
-
-/// Logical node for `CREATE EXTERNAL TABLE <name> ...`.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct CreateExternalTableNode {
-    pub(crate) cmd: Keyed<CreateExternalTable>,
-}
-
-impl UserDefinedLogicalNodeCore for CreateExternalTableNode {
-    fn name(&self) -> &str {
-        "CreateExternalTable"
-    }
-    fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
-    }
-    fn schema(&self) -> &DFSchemaRef {
-        empty_schema()
-    }
-    fn expressions(&self) -> Vec<Expr> {
-        vec![]
-    }
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "CreateExternalTable: name={}", self.cmd.payload.name)
-    }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self {
-            cmd: self.cmd.clone(),
-        })
-    }
-}
-
-/// Logical node for `CREATE VIEW <name> AS <query>`.
-///
-/// The view's defining plan is held opaquely (not exposed via `inputs()`): a
-/// `ViewTable` stores the unoptimized logical plan and re-plans it on scan, so
-/// it must not be planned as a child here.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct CreateViewNode {
-    pub(crate) name: TableReference,
-    pub(crate) input: LogicalPlan,
-    pub(crate) definition: Option<String>,
-}
-
-impl UserDefinedLogicalNodeCore for CreateViewNode {
-    fn name(&self) -> &str {
-        "CreateView"
-    }
-    fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
-    }
-    fn schema(&self) -> &DFSchemaRef {
-        empty_schema()
-    }
-    fn expressions(&self) -> Vec<Expr> {
-        vec![]
-    }
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "CreateView: name={}", self.name)
-    }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self {
-            name: self.name.clone(),
-            input: self.input.clone(),
-            definition: self.definition.clone(),
-        })
-    }
-}
-
-/// Logical node for `CREATE TABLE <name> ...` (incl. `CREATE TABLE AS SELECT`).
-///
-/// The `input` is the rows to populate the table from; it is a real child so the
-/// planner plans it. `is_ctas` is false for a bare `CREATE TABLE (cols...)`
-/// (input is an empty relation), in which case the table is created empty and
-/// the node produces no rows; for CTAS it produces the inserted-row count.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct CreateTableNode {
-    pub(crate) name: TableReference,
-    pub(crate) input: LogicalPlan,
-    pub(crate) is_ctas: bool,
-    pub(crate) if_not_exists: bool,
-}
-
-impl UserDefinedLogicalNodeCore for CreateTableNode {
-    fn name(&self) -> &str {
-        "CreateTable"
-    }
-    fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![&self.input]
-    }
-    fn schema(&self) -> &DFSchemaRef {
-        if self.is_ctas {
-            count_schema()
-        } else {
-            empty_schema()
-        }
-    }
-    fn expressions(&self) -> Vec<Expr> {
-        vec![]
-    }
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "CreateTable: name={}", self.name)
-    }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, mut inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self {
-            name: self.name.clone(),
-            input: inputs.swap_remove(0),
-            is_ctas: self.is_ctas,
-            if_not_exists: self.if_not_exists,
-        })
-    }
-}
-
-/// Logical node for `INSERT INTO <table> ...`. Produces the inserted-row count.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
-pub(crate) struct InsertNode {
-    pub(crate) table: TableReference,
-    pub(crate) op: InsertOp,
-    pub(crate) input: LogicalPlan,
-}
-
-impl UserDefinedLogicalNodeCore for InsertNode {
-    fn name(&self) -> &str {
-        "Insert"
-    }
-    fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![&self.input]
-    }
-    fn schema(&self) -> &DFSchemaRef {
-        count_schema()
-    }
-    fn expressions(&self) -> Vec<Expr> {
-        vec![]
-    }
-    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Insert: table={}", self.table)
-    }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, mut inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self {
-            table: self.table.clone(),
-            op: self.op,
-            input: inputs.swap_remove(0),
         })
     }
 }

@@ -7,19 +7,24 @@ use async_trait::async_trait;
 use datafusion::{
     error::Result,
     execution::context::{QueryPlanner, SessionState},
-    logical_expr::{LogicalPlan, UserDefinedLogicalNode},
+    logical_expr::{dml::InsertOp, DdlStatement, LogicalPlan, UserDefinedLogicalNode, WriteOp},
     physical_plan::ExecutionPlan,
     physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner},
 };
 
 use super::{logical, physical, SessionCell};
 
-/// Beacon's [`QueryPlanner`]: delegates to DataFusion's
-/// [`DefaultPhysicalPlanner`] but wires in [`BeaconExtensionPlanner`], which
-/// lowers beacon's custom [`LogicalPlan::Extension`] statement nodes to their
-/// physical counterparts. Any plan without beacon extension nodes is planned
-/// exactly as the default planner would, so this is transparent for ordinary
-/// queries.
+/// Beacon's [`QueryPlanner`].
+///
+/// DataFusion's parser produces standard [`LogicalPlan::Ddl`]/[`LogicalPlan::Dml`]
+/// nodes for most statements, but its default physical planner would execute
+/// them against in-memory tables rather than beacon's Iceberg/catalog backends.
+/// This planner therefore intercepts those standard nodes and builds beacon's own
+/// execution plans (planning their inputs with the default planner), and wires in
+/// [`BeaconExtensionPlanner`] for the few operations DataFusion has no logical
+/// plan for (materialized views, `REFRESH`, `ALTER TABLE`, copy-on-write
+/// replacement). Everything else — `SELECT`, `COPY`, the planned inputs — is left
+/// to the default planner.
 pub(crate) struct BeaconQueryPlanner {
     session: SessionCell,
 }
@@ -27,6 +32,12 @@ pub(crate) struct BeaconQueryPlanner {
 impl BeaconQueryPlanner {
     pub(crate) fn new(session: SessionCell) -> Self {
         Self { session }
+    }
+
+    fn default_planner(&self) -> DefaultPhysicalPlanner {
+        DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
+            BeaconExtensionPlanner::new(self.session.clone()),
+        )])
     }
 }
 
@@ -43,12 +54,63 @@ impl QueryPlanner for BeaconQueryPlanner {
         logical_plan: &LogicalPlan,
         session_state: &SessionState,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let planner = DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
-            BeaconExtensionPlanner::new(self.session.clone()),
-        )]);
-        planner
-            .create_physical_plan(logical_plan, session_state)
-            .await
+        let default = self.default_planner();
+        let session = self.session.clone();
+
+        match logical_plan {
+            LogicalPlan::Ddl(DdlStatement::DropTable(drop)) => Ok(Arc::new(
+                physical::DropTableExec::new(drop.name.clone(), drop.if_exists, session),
+            )),
+
+            LogicalPlan::Ddl(DdlStatement::CreateExternalTable(cmd)) => Ok(Arc::new(
+                physical::CreateExternalTableExec::new(cmd.clone(), session),
+            )),
+
+            LogicalPlan::Ddl(DdlStatement::CreateView(view)) => {
+                Ok(Arc::new(physical::CreateViewExec::new(
+                    view.name.clone(),
+                    view.input.as_ref().clone(),
+                    view.definition.clone(),
+                    session,
+                )))
+            }
+
+            LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) => {
+                // The optimizer has already optimized the (CTAS) input; plan it as
+                // the child whose rows populate the table.
+                let child = default
+                    .create_physical_plan(table.input.as_ref(), session_state)
+                    .await?;
+                let is_ctas = !matches!(table.input.as_ref(), LogicalPlan::EmptyRelation(_));
+                Ok(Arc::new(physical::CreateTableExec::new(
+                    table.name.clone(),
+                    is_ctas,
+                    table.if_not_exists,
+                    child,
+                    session,
+                )))
+            }
+
+            LogicalPlan::Dml(dml) if matches!(dml.op, WriteOp::Insert(_)) => {
+                let WriteOp::Insert(op) = &dml.op else {
+                    unreachable!("guarded by matches! above")
+                };
+                let op: InsertOp = *op;
+                let child = default
+                    .create_physical_plan(dml.input.as_ref(), session_state)
+                    .await?;
+                Ok(Arc::new(physical::InsertExec::new(
+                    dml.table_name.clone(),
+                    op,
+                    child,
+                    session,
+                )))
+            }
+
+            // SELECT, COPY, beacon extension nodes (MV/REFRESH/ALTER/replace), and
+            // the planned inputs above are all handled by the default planner.
+            other => default.create_physical_plan(other, session_state).await,
+        }
     }
 }
 
@@ -96,52 +158,9 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
-        if let Some(drop) = any.downcast_ref::<logical::DropTableNode>() {
-            return Ok(Some(Arc::new(physical::DropTableExec::new(
-                drop.name.clone(),
-                drop.if_exists,
-                session,
-            ))));
-        }
-
-        if let Some(create) = any.downcast_ref::<logical::CreateExternalTableNode>() {
-            return Ok(Some(Arc::new(physical::CreateExternalTableExec::new(
-                create.cmd.payload.clone(),
-                session,
-            ))));
-        }
-
-        if let Some(view) = any.downcast_ref::<logical::CreateViewNode>() {
-            return Ok(Some(Arc::new(physical::CreateViewExec::new(
-                view.name.clone(),
-                view.input.clone(),
-                view.definition.clone(),
-                session,
-            ))));
-        }
-
         if let Some(alter) = any.downcast_ref::<logical::AlterTableNode>() {
             return Ok(Some(Arc::new(physical::AlterTableExec::new(
                 alter.spec.payload.clone(),
-                session,
-            ))));
-        }
-
-        if let Some(create) = any.downcast_ref::<logical::CreateTableNode>() {
-            return Ok(Some(Arc::new(physical::CreateTableExec::new(
-                create.name.clone(),
-                create.is_ctas,
-                create.if_not_exists,
-                physical_inputs[0].clone(),
-                session,
-            ))));
-        }
-
-        if let Some(insert) = any.downcast_ref::<logical::InsertNode>() {
-            return Ok(Some(Arc::new(physical::InsertExec::new(
-                insert.table.clone(),
-                insert.op,
-                physical_inputs[0].clone(),
                 session,
             ))));
         }

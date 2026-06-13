@@ -1,29 +1,35 @@
-//! Lowering of parsed DataFusion statements into beacon's
-//! [`LogicalPlan::Extension`] nodes (or, for `COPY`, a rewritten standard node).
+//! Lowering of parsed DataFusion statements into logical plans.
 //!
-//! After lowering, the plan is executed through the single
-//! `create_physical_plan` -> `execute_stream` pipeline like any query.
+//! Most statements are DataFusion-standard `LogicalPlan` nodes that the custom
+//! [`BeaconQueryPlanner`](super::query_planner::BeaconQueryPlanner) turns into
+//! beacon execution plans directly. Only a few are rewritten here:
+//!
+//! - `ALTER TABLE` — DataFusion cannot plan it, so it is built from the AST.
+//! - `DELETE`/`UPDATE` — lowered to a copy-on-write [`ReplaceTableContentsNode`].
+//!   This must happen *before* optimization: the surviving/updated rows are
+//!   derived from the predicate, which the optimizer may otherwise push into the
+//!   table scan, changing the plan's shape.
+//! - `COPY` — only its output path is rewritten into the datasets object store.
+//!
+//! Everything else passes through unchanged.
 
 use std::sync::Arc;
 
 use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
 use datafusion::{
     logical_expr::{
-        dml::CopyTo, not, when, CreateExternalTable, CreateMemoryTable, CreateView, DdlStatement,
-        DmlStatement, DropTable, Expr, Extension, Filter, LogicalPlan, LogicalPlanBuilder, WriteOp,
+        dml::CopyTo, not, when, DmlStatement, Expr, Extension, Filter, LogicalPlan,
+        LogicalPlanBuilder, WriteOp,
     },
     prelude::{lit, SessionContext, SQLOptions},
     sql::sqlparser::ast::{AlterTableOperation, ObjectName, Statement as SqlAstStatement},
 };
 
-use super::logical::{
-    AlterTableNode, AlterTableSpec, CreateExternalTableNode, CreateTableNode, CreateViewNode,
-    DropTableNode, InsertNode, Keyed, ReplaceTableContentsNode,
-};
+use super::logical::{AlterTableNode, AlterTableSpec, Keyed, ReplaceTableContentsNode};
 
 /// Lower a parsed DataFusion statement to a logical plan, applying beacon's
 /// permission gating (`verify_plan`) on the **standard** plan before any rewrite
-/// to extension nodes (which `verify_plan` cannot see).
+/// (which `verify_plan` cannot see through).
 pub(crate) async fn lower_df_statement(
     session_ctx: &Arc<SessionContext>,
     statement: datafusion::sql::parser::Statement,
@@ -42,17 +48,11 @@ pub(crate) async fn lower_df_statement(
     rewrite_logical_plan(plan)
 }
 
-/// Replace the top-level DDL/DML/Copy node with a beacon extension node (or a
-/// rewritten `Copy`); pass anything else (e.g. `SELECT`) through unchanged.
+/// Rewrite only the statements the planner cannot handle from their standard
+/// form (copy-on-write `DELETE`/`UPDATE`, and `COPY`'s output path); pass
+/// everything else (DDL, `INSERT`, `SELECT`, ...) through unchanged.
 fn rewrite_logical_plan(plan: LogicalPlan) -> anyhow::Result<LogicalPlan> {
     match plan {
-        LogicalPlan::Ddl(DdlStatement::DropTable(drop)) => Ok(drop_table_plan(drop)),
-        LogicalPlan::Ddl(DdlStatement::CreateExternalTable(cmd)) => {
-            Ok(create_external_table_plan(cmd))
-        }
-        LogicalPlan::Ddl(DdlStatement::CreateView(view)) => Ok(create_view_plan(view)),
-        LogicalPlan::Ddl(DdlStatement::CreateMemoryTable(table)) => Ok(create_table_plan(table)),
-        LogicalPlan::Dml(dml) if matches!(dml.op, WriteOp::Insert(_)) => Ok(insert_plan(dml)),
         LogicalPlan::Dml(dml) if matches!(dml.op, WriteOp::Delete) => delete_plan(dml),
         LogicalPlan::Dml(dml) if matches!(dml.op, WriteOp::Update) => update_plan(dml),
         LogicalPlan::Copy(copy) => Ok(rewrite_copy(copy)),
@@ -68,52 +68,6 @@ fn alter_table_plan(name: ObjectName, operations: Vec<AlterTableOperation>) -> L
     let key = name.to_string();
     extension(Arc::new(AlterTableNode {
         spec: Keyed::new(key, AlterTableSpec { name, operations }),
-    }))
-}
-
-fn drop_table_plan(drop: DropTable) -> LogicalPlan {
-    extension(Arc::new(DropTableNode {
-        name: drop.name,
-        if_exists: drop.if_exists,
-    }))
-}
-
-fn create_external_table_plan(cmd: CreateExternalTable) -> LogicalPlan {
-    let key = cmd.name.to_string();
-    extension(Arc::new(CreateExternalTableNode {
-        cmd: Keyed::new(key, cmd),
-    }))
-}
-
-fn create_view_plan(view: CreateView) -> LogicalPlan {
-    extension(Arc::new(CreateViewNode {
-        name: view.name,
-        input: view.input.as_ref().clone(),
-        definition: view.definition,
-    }))
-}
-
-fn create_table_plan(table: CreateMemoryTable) -> LogicalPlan {
-    // A bare `CREATE TABLE t (cols...)` lowers to an empty input relation; CTAS
-    // carries a real query plan to populate the table from.
-    let is_ctas = !matches!(table.input.as_ref(), LogicalPlan::EmptyRelation(_));
-    extension(Arc::new(CreateTableNode {
-        name: table.name,
-        input: table.input.as_ref().clone(),
-        is_ctas,
-        if_not_exists: table.if_not_exists,
-    }))
-}
-
-fn insert_plan(dml: DmlStatement) -> LogicalPlan {
-    let op = match dml.op {
-        WriteOp::Insert(op) => op,
-        _ => unreachable!("guarded by rewrite_logical_plan"),
-    };
-    extension(Arc::new(InsertNode {
-        table: dml.table_name,
-        op,
-        input: dml.input.as_ref().clone(),
     }))
 }
 
