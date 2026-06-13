@@ -1,16 +1,22 @@
-//! Shared helpers for materialized-view statement handling.
+//! Materialized-view side effects, executed by the statement-plan exec nodes.
+//!
+//! These functions hold the actual work for `CREATE MATERIALIZED VIEW` and
+//! `REFRESH`: running the defining query, persisting its result as Parquet in the
+//! internal object store, and registering/replacing the catalog provider. They
+//! are invoked from the corresponding [`super::physical`] execution-plan nodes.
 
 use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_datafusion_ext::table_ext::{
-    internal_object_store_url, MaterializedView, MaterializedViewDefinition, TableDefinition,
+    internal_object_store_url, ExternalTable, MaterializedView, MaterializedViewDefinition,
+    TableDefinition,
 };
 use datafusion::{
     dataframe::DataFrameWriteOptions,
     parquet::arrow::ArrowWriter,
     prelude::{DataFrame, SessionContext},
-    sql::{sqlparser::ast::ObjectName, TableReference},
+    sql::TableReference,
 };
 use futures::StreamExt;
 use object_store::{GetOptions, ObjectStore, ObjectStoreExt};
@@ -21,6 +27,76 @@ pub(crate) fn now_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Create a materialized view: run its defining query, persist the result, and
+/// register the provider in the catalog.
+///
+/// Errors if a table/view with `name` already exists.
+pub(crate) async fn create_materialized_view(
+    session_ctx: &Arc<SessionContext>,
+    name: &str,
+    query_sql: &str,
+) -> anyhow::Result<()> {
+    let table_ref = TableReference::parse_str(name);
+
+    if session_ctx.table_exist(table_ref.clone())? {
+        return Err(anyhow::anyhow!("Materialized view '{name}' already exists"));
+    }
+
+    // Execute the defining query and persist its result as a single Parquet file.
+    let df = session_ctx.sql(query_sql).await?;
+    let dir_path = format!("{}/{}", name, uuid::Uuid::new_v4());
+    let schema = write_query_to_datasets_parquet(session_ctx, df, &dir_path).await?;
+    let storage_location = format!("{dir_path}/");
+
+    let now = now_millis();
+    let definition = MaterializedViewDefinition {
+        name: name.to_string(),
+        definition: query_sql.to_string(),
+        schema,
+        storage_location,
+        created_at: now,
+        last_refreshed: Some(now),
+    };
+
+    let store_url = internal_object_store_url();
+    let provider = definition
+        .build_provider(session_ctx.clone(), &store_url)
+        .await?;
+
+    // Registering through the session context persists the definition to the
+    // catalog (tables://<name>/table.json) via the schema provider.
+    session_ctx.register_table(table_ref, provider)?;
+
+    tracing::info!("Created materialized view '{name}'");
+    Ok(())
+}
+
+/// Refresh an external table or a materialized view by `name`.
+///
+/// Errors if `name` does not resolve to a refreshable provider.
+pub(crate) async fn refresh_table(
+    session_ctx: &Arc<SessionContext>,
+    name: &str,
+) -> anyhow::Result<()> {
+    let table_ref = TableReference::parse_str(name);
+    let provider = session_ctx
+        .table_provider(table_ref)
+        .await
+        .map_err(|_| anyhow::anyhow!("'{name}' does not exist"))?;
+
+    if let Some(external) = provider.as_any().downcast_ref::<ExternalTable>() {
+        external.refresh().await?;
+    } else if provider.as_any().is::<MaterializedView>() {
+        refresh_materialized_view(session_ctx, name).await?;
+    } else {
+        return Err(anyhow::anyhow!(
+            "'{name}' is not a materialized view or external table; REFRESH is only supported for those"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Writes a query's result as a single Parquet file inside `dir_path` (relative to
@@ -115,13 +191,12 @@ pub(crate) async fn delete_datasets_prefix(session_ctx: &SessionContext, prefix:
 /// existing data remains usable if anything fails before the swap, then reclaims
 /// the old file.
 ///
-/// Errors if `view_name` does not resolve to a `MaterializedView` provider.
+/// Errors if `name` does not resolve to a `MaterializedView` provider.
 pub(crate) async fn refresh_materialized_view(
     session_ctx: &Arc<SessionContext>,
-    view_name: &ObjectName,
+    name: &str,
 ) -> anyhow::Result<()> {
-    let name = view_name.to_string();
-    let table_ref = TableReference::parse_str(&name);
+    let table_ref = TableReference::parse_str(name);
 
     let provider = session_ctx
         .table_provider(table_ref.clone())
@@ -140,7 +215,7 @@ pub(crate) async fn refresh_materialized_view(
     let schema = write_query_to_datasets_parquet(session_ctx, df, &dir_path).await?;
 
     let new_definition = MaterializedViewDefinition {
-        name: name.clone(),
+        name: name.to_string(),
         definition: old_definition.definition.clone(),
         schema,
         storage_location: format!("{dir_path}/"),
