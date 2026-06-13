@@ -75,24 +75,82 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
         _planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
-        _physical_inputs: &[Arc<dyn ExecutionPlan>],
+        physical_inputs: &[Arc<dyn ExecutionPlan>],
         _session_state: &SessionState,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        if let Some(create) = node
-            .as_any()
-            .downcast_ref::<logical::CreateMaterializedViewNode>()
-        {
+        let any = node.as_any();
+        let session = self.session.clone();
+
+        if let Some(create) = any.downcast_ref::<logical::CreateMaterializedViewNode>() {
             return Ok(Some(Arc::new(physical::CreateMaterializedViewExec::new(
                 create.view_name.clone(),
                 create.query_sql.clone(),
-                self.session.clone(),
+                session,
             ))));
         }
 
-        if let Some(refresh) = node.as_any().downcast_ref::<logical::RefreshNode>() {
+        if let Some(refresh) = any.downcast_ref::<logical::RefreshNode>() {
             return Ok(Some(Arc::new(physical::RefreshExec::new(
                 refresh.name.clone(),
-                self.session.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(drop) = any.downcast_ref::<logical::DropTableNode>() {
+            return Ok(Some(Arc::new(physical::DropTableExec::new(
+                drop.name.clone(),
+                drop.if_exists,
+                session,
+            ))));
+        }
+
+        if let Some(create) = any.downcast_ref::<logical::CreateExternalTableNode>() {
+            return Ok(Some(Arc::new(physical::CreateExternalTableExec::new(
+                create.cmd.payload.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(view) = any.downcast_ref::<logical::CreateViewNode>() {
+            return Ok(Some(Arc::new(physical::CreateViewExec::new(
+                view.name.clone(),
+                view.input.clone(),
+                view.definition.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(alter) = any.downcast_ref::<logical::AlterTableNode>() {
+            return Ok(Some(Arc::new(physical::AlterTableExec::new(
+                alter.spec.payload.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(create) = any.downcast_ref::<logical::CreateTableNode>() {
+            return Ok(Some(Arc::new(physical::CreateTableExec::new(
+                create.name.clone(),
+                create.is_ctas,
+                create.if_not_exists,
+                physical_inputs[0].clone(),
+                session,
+            ))));
+        }
+
+        if let Some(insert) = any.downcast_ref::<logical::InsertNode>() {
+            return Ok(Some(Arc::new(physical::InsertExec::new(
+                insert.table.clone(),
+                insert.op,
+                physical_inputs[0].clone(),
+                session,
+            ))));
+        }
+
+        if let Some(replace) = any.downcast_ref::<logical::ReplaceTableContentsNode>() {
+            return Ok(Some(Arc::new(physical::ReplaceTableContentsExec::new(
+                replace.table.clone(),
+                physical_inputs[0].clone(),
+                session,
             ))));
         }
 

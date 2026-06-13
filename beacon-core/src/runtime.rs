@@ -28,7 +28,6 @@ use crate::{
     api::{DatasetInfo, FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView},
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
     query_result::{ArrowOutputStream, QueryOutput, QueryOutputFile, QueryResult},
-    statement_handlers::SqlStatementExecutor,
     sys::{self, SystemInfo},
 };
 
@@ -447,19 +446,17 @@ impl Runtime {
             Self::ensure_anonymous_statement_allowed(&statement)?;
         }
 
-        match statement {
-            // Custom statements are lowered to physical-plan nodes and run through
-            // the same pipeline as queries (create_physical_plan -> execute_stream).
+        // Every statement is lowered to a logical plan (with beacon extension
+        // nodes for side-effecting statements) and run through the single
+        // create_physical_plan -> execute_stream pipeline, like queries.
+        let plan = match statement {
             BeaconStatement::CreateMaterializedView(statement) => {
-                let plan = crate::statement_plan::create_materialized_view_plan(statement);
-                crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
+                crate::statement_plan::create_materialized_view_plan(statement)
             }
             BeaconStatement::Refresh(statement) => {
-                let plan = crate::statement_plan::refresh_plan(statement);
-                crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
+                crate::statement_plan::refresh_plan(statement)
             }
-            // DDL/DML still flow through the legacy statement handlers.
-            statement @ BeaconStatement::DFStatement(_) => {
+            BeaconStatement::DFStatement(statement) => {
                 let sql_options = if is_super_user {
                     SQLOptions::new()
                         .with_allow_ddl(true)
@@ -471,13 +468,16 @@ impl Runtime {
                         .with_allow_dml(false)
                         .with_allow_statements(false)
                 };
-
-                let statement_executor =
-                    SqlStatementExecutor::new(self.session_ctx.clone(), self.file_manager.clone());
-
-                statement_executor.execute(statement, &sql_options).await
+                crate::statement_plan::lower_df_statement(
+                    &self.session_ctx,
+                    *statement,
+                    &sql_options,
+                )
+                .await?
             }
-        }
+        };
+
+        crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
     }
 
     #[tracing::instrument(skip(self, beacon_plan))]

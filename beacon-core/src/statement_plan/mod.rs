@@ -13,10 +13,13 @@
 //! [`LogicalPlan::Extension`]: datafusion::logical_expr::LogicalPlan::Extension
 //! [`QueryPlanner`]: datafusion::execution::context::QueryPlanner
 
+mod actions;
 mod logical;
+mod lower;
 pub(crate) mod materialized_view;
 mod physical;
 mod query_planner;
+mod stream_coalescer;
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -28,6 +31,7 @@ use datafusion::{
 
 use crate::parser::statement::{CreateMaterializedViewStatement, RefreshStatement};
 
+pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
 
 /// Late-initialized, weak handle to the [`SessionContext`] shared with the
@@ -69,11 +73,33 @@ pub(crate) fn refresh_plan(statement: RefreshStatement) -> LogicalPlan {
 /// Plan and execute a beacon statement logical plan through the single
 /// `create_physical_plan` -> `execute_stream` pipeline, coalescing the result the
 /// same way the legacy statement executor does.
+///
+/// Side-effecting statements (DDL, `DELETE`/`UPDATE`, materialized-view ops)
+/// produce no rows, i.e. an empty output schema. Those are driven to completion
+/// here so the side effect is performed and any error surfaces eagerly from
+/// `run_sql` — as the legacy handlers did — rather than only when the caller
+/// drains the stream. Row-producing statements (`SELECT`, `INSERT`, `COPY`) keep
+/// streaming lazily.
 pub(crate) async fn execute_statement_plan(
     session_ctx: &Arc<SessionContext>,
     plan: LogicalPlan,
 ) -> anyhow::Result<SendableRecordBatchStream> {
+    use futures::TryStreamExt;
+
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
     let stream = datafusion::physical_plan::execute_stream(physical_plan, session_ctx.task_ctx())?;
-    Ok(crate::statement_handlers::coalesce_sql_stream(stream))
+    let stream = stream_coalescer::coalesce_sql_stream(stream);
+
+    if stream.schema().fields().is_empty() {
+        let schema = stream.schema();
+        stream.try_collect::<Vec<_>>().await?;
+        Ok(Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::empty(),
+            ),
+        ))
+    } else {
+        Ok(stream)
+    }
 }
