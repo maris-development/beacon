@@ -503,7 +503,11 @@ impl StatementHandler for DFStatementHandler {
                 session_ctx.deregister_table(drop_table_statement.name.clone())?;
 
                 if let Some(prefix) = materialized_prefix {
-                    super::materialized_view::delete_datasets_prefix(&session_ctx, &prefix).await;
+                    crate::statement_plan::materialized_view::delete_datasets_prefix(
+                        &session_ctx,
+                        &prefix,
+                    )
+                    .await;
                 }
 
                 if let Some(definition) = iceberg_definition {

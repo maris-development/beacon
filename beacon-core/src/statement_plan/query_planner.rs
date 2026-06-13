@@ -12,7 +12,7 @@ use datafusion::{
     physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner},
 };
 
-use super::SessionCell;
+use super::{logical, physical, SessionCell};
 
 /// Beacon's [`QueryPlanner`]: delegates to DataFusion's
 /// [`DefaultPhysicalPlanner`] but wires in [`BeaconExtensionPlanner`], which
@@ -57,8 +57,8 @@ impl QueryPlanner for BeaconQueryPlanner {
 /// Returns `Ok(None)` for any node it does not recognize so the default planner
 /// (and any other extension planners) handle the rest.
 pub(crate) struct BeaconExtensionPlanner {
-    // Filled once the context exists; read by node lowering in later phases.
-    #[allow(dead_code)]
+    // Injected into each lowered exec node so it can recover the SessionContext
+    // (for `register_table`, catalog access) at execution time.
     session: SessionCell,
 }
 
@@ -73,13 +73,30 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
     async fn plan_extension(
         &self,
         _planner: &dyn PhysicalPlanner,
-        _node: &dyn UserDefinedLogicalNode,
+        node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         _physical_inputs: &[Arc<dyn ExecutionPlan>],
         _session_state: &SessionState,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        // Phase A: beacon defines no extension nodes yet; everything is handled
-        // by the default planner.
+        if let Some(create) = node
+            .as_any()
+            .downcast_ref::<logical::CreateMaterializedViewNode>()
+        {
+            return Ok(Some(Arc::new(physical::CreateMaterializedViewExec::new(
+                create.view_name.clone(),
+                create.query_sql.clone(),
+                self.session.clone(),
+            ))));
+        }
+
+        if let Some(refresh) = node.as_any().downcast_ref::<logical::RefreshNode>() {
+            return Ok(Some(Arc::new(physical::RefreshExec::new(
+                refresh.name.clone(),
+                self.session.clone(),
+            ))));
+        }
+
+        // Unrecognized node: let the default planner handle it.
         Ok(None)
     }
 }

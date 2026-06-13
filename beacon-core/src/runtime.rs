@@ -447,22 +447,37 @@ impl Runtime {
             Self::ensure_anonymous_statement_allowed(&statement)?;
         }
 
-        let sql_options = if is_super_user {
-            SQLOptions::new()
-                .with_allow_ddl(true)
-                .with_allow_dml(true)
-                .with_allow_statements(true)
-        } else {
-            SQLOptions::new()
-                .with_allow_ddl(false)
-                .with_allow_dml(false)
-                .with_allow_statements(false)
-        };
+        match statement {
+            // Custom statements are lowered to physical-plan nodes and run through
+            // the same pipeline as queries (create_physical_plan -> execute_stream).
+            BeaconStatement::CreateMaterializedView(statement) => {
+                let plan = crate::statement_plan::create_materialized_view_plan(statement);
+                crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
+            }
+            BeaconStatement::Refresh(statement) => {
+                let plan = crate::statement_plan::refresh_plan(statement);
+                crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
+            }
+            // DDL/DML still flow through the legacy statement handlers.
+            statement @ BeaconStatement::DFStatement(_) => {
+                let sql_options = if is_super_user {
+                    SQLOptions::new()
+                        .with_allow_ddl(true)
+                        .with_allow_dml(true)
+                        .with_allow_statements(true)
+                } else {
+                    SQLOptions::new()
+                        .with_allow_ddl(false)
+                        .with_allow_dml(false)
+                        .with_allow_statements(false)
+                };
 
-        let statement_executor =
-            SqlStatementExecutor::new(self.session_ctx.clone(), self.file_manager.clone());
+                let statement_executor =
+                    SqlStatementExecutor::new(self.session_ctx.clone(), self.file_manager.clone());
 
-        statement_executor.execute(statement, &sql_options).await
+                statement_executor.execute(statement, &sql_options).await
+            }
+        }
     }
 
     #[tracing::instrument(skip(self, beacon_plan))]

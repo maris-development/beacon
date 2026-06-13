@@ -1,15 +1,8 @@
 use std::sync::Arc;
 
-use arrow::datatypes::Schema;
 use beacon_data_lake::FileManager;
 use beacon_datafusion_ext::listing_table_factory_ext::ListingTableFactoryExt;
-use datafusion::{
-    datasource::{listing, TableProvider},
-    execution::{object_store::ObjectStoreUrl, SendableRecordBatchStream},
-    physical_plan::stream::RecordBatchStreamAdapter,
-    prelude::SessionContext,
-    sql::{sqlparser::ast::ObjectName, TableReference},
-};
+use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 
 pub(crate) struct HandlerContext {
     session_ctx: Arc<SessionContext>,
@@ -46,26 +39,6 @@ impl HandlerContext {
     pub(crate) fn listing_table_factory(&self) -> Arc<ListingTableFactoryExt> {
         self.listing_table_factory.clone()
     }
-
-    pub(crate) async fn resolve_table_provider(
-        &self,
-        table_name: &ObjectName,
-    ) -> anyhow::Result<Arc<dyn TableProvider>> {
-        let table_ref = TableReference::parse_str(&table_name.to_string());
-        self.session_ctx
-            .table_provider(table_ref)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub(crate) fn empty_record_batch_stream(&self) -> SendableRecordBatchStream {
-        let stream = RecordBatchStreamAdapter::new(
-            Schema::empty().into(),
-            futures::stream::empty::<datafusion::error::Result<arrow::record_batch::RecordBatch>>(),
-        );
-
-        Box::pin(stream) as SendableRecordBatchStream
-    }
 }
 
 #[cfg(test)]
@@ -75,7 +48,6 @@ mod tests {
     use beacon_data_lake::FileManager;
     use beacon_datafusion_ext::listing_table_factory_ext::ListingTableFactoryExt;
     use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
-    use futures::StreamExt;
 
     use super::HandlerContext;
 
@@ -101,26 +73,5 @@ mod tests {
             context.data_object_store_url().as_str(),
             file_manager.data_object_store_url().as_str()
         );
-    }
-
-    #[tokio::test]
-    async fn empty_record_batch_stream_is_empty() {
-        let session_ctx = Arc::new(SessionContext::new());
-        let data_store_url =
-            ObjectStoreUrl::parse("datasets://").expect("datasets url should parse");
-        let file_manager = Arc::new(FileManager::new(
-            session_ctx.clone(),
-            data_store_url,
-            vec![],
-        ));
-        let table_factory = Arc::new(ListingTableFactoryExt::new(
-            file_manager.data_object_store_url(),
-            Arc::downgrade(&session_ctx),
-        ));
-
-        let context = HandlerContext::new(session_ctx, file_manager, table_factory);
-
-        let mut stream = context.empty_record_batch_stream();
-        assert!(stream.next().await.is_none());
     }
 }
