@@ -8,11 +8,12 @@ use futures::TryStreamExt;
 
 /// Run SQL as a super-user (DDL/DML allowed) and collect the result batches.
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
-    let stream = runtime
+    runtime
         .run_query(beacon_core::query::Query::sql(sql.to_string()), true)
         .await
-        .unwrap_or_else(|error| panic!("SQL failed to plan/execute: {sql}\n{error}"));
-    stream
+        .unwrap_or_else(|error| panic!("SQL failed to plan/execute: {sql}\n{error}"))
+        .into_record_stream()
+        .unwrap_or_else(|error| panic!("expected a streamed result: {sql}\n{error}"))
         .try_collect()
         .await
         .unwrap_or_else(|error| panic!("SQL stream failed: {sql}\n{error}"))

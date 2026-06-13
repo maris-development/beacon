@@ -14,7 +14,7 @@ use datafusion::{
     catalog::TableFunctionImpl,
     execution::{
         disk_manager::DiskManagerBuilder, memory_pool::FairSpillPool,
-        runtime_env::RuntimeEnvBuilder, SendableRecordBatchStream, SessionStateBuilder,
+        runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
     prelude::{SessionConfig, SessionContext},
 };
@@ -163,44 +163,31 @@ impl Runtime {
         Ok(session_ctx)
     }
 
-    /// Execute a client query (JSON or SQL) and stream the results.
+    /// Execute a client query (JSON or SQL) and return a metrics-tracked result.
     ///
     /// The single entry point for query execution: the JSON form is compiled by
     /// beacon's query compiler, the SQL form goes through beacon's SQL parser, and
-    /// both are lowered to a `LogicalPlan`. The lowered plan is then validated
-    /// against the caller's privileges (`is_super_user`) and run through the
-    /// unified `create_physical_plan -> execute_stream` pipeline.
+    /// both are lowered to a `LogicalPlan`. The lowered plan is validated against
+    /// the caller's privileges (`is_super_user`), run through the unified
+    /// `create_physical_plan -> execute_stream` pipeline, and the resulting stream
+    /// is wrapped so output rows/bytes are recorded under a fresh `query_id` (see
+    /// [`Self::get_query_metrics`]).
     #[tracing::instrument(skip(self, query))]
     pub async fn run_query(
         &self,
         query: crate::query::Query,
         is_super_user: bool,
-    ) -> anyhow::Result<SendableRecordBatchStream> {
+    ) -> anyhow::Result<QueryResult> {
         if query.output.is_some() {
             anyhow::bail!("output formats are not yet supported on the unified query path");
-        }
-        let plan = self.lower_query(query).await?;
-        crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
-        crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
-    }
-
-    /// HTTP `/query` adapter: runs a client query through [`Self::run_query`] and
-    /// wraps the stream with metrics tracking (so `query_metrics` is populated for
-    /// the metrics endpoint). HTTP client queries are read-only.
-    pub async fn run_client_query(&self, query: QueryRequest) -> anyhow::Result<QueryResult> {
-        let query = query.into_query()?;
-
-        // Client SQL is gated by the `sql.enable` config; JSON queries are always
-        // allowed (Flight SQL has its own `flight_sql.enable`).
-        if matches!(query.inner, crate::query::InnerQuery::Sql(_)) && !beacon_config::CONFIG.sql.enable
-        {
-            anyhow::bail!("SQL queries are not enabled");
         }
 
         let query_id = uuid::Uuid::new_v4();
         let query_json = serde_json::to_value(&query)?;
 
-        let stream = self.run_query(query, false).await?;
+        let plan = self.lower_query(query).await?;
+        crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
+        let stream = crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
 
         let metrics = MetricsTracker::new(query_json, query_id);
         let output_stream = ArrowOutputStream {
@@ -522,10 +509,12 @@ mod materialized_view_tests {
         runtime: &Runtime,
         sql: &str,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
-        let stream = runtime
+        let batches = runtime
             .run_query(crate::query::Query::sql(sql.to_string()), true)
+            .await?
+            .into_record_stream()?
+            .try_collect::<Vec<_>>()
             .await?;
-        let batches = stream.try_collect::<Vec<_>>().await?;
         Ok(batches)
     }
 
@@ -641,22 +630,26 @@ mod materialized_view_tests {
 #[cfg(test)]
 mod client_query_tests {
     use super::Runtime;
-    use crate::{api::QueryRequest, query_result::QueryOutput};
+    use crate::api::QueryRequest;
     use futures::TryStreamExt;
 
     async fn run_sql(runtime: &Runtime, sql: &str) {
-        let stream = runtime
+        runtime
             .run_query(crate::query::Query::sql(sql.to_string()), true)
             .await
-            .expect("sql should run");
-        stream
+            .expect("sql should run")
+            .into_record_stream()
+            .expect("streamed result")
             .try_collect::<Vec<_>>()
             .await
             .expect("sql should drain");
     }
 
-    fn request(value: serde_json::Value) -> QueryRequest {
-        serde_json::from_value(value).expect("query request should deserialize")
+    fn query(value: serde_json::Value) -> crate::query::Query {
+        serde_json::from_value::<QueryRequest>(value)
+            .expect("query request should deserialize")
+            .into_query()
+            .expect("query request should convert")
     }
 
     /// A JSON client query is lowered to a `LogicalPlan` and executed through the
@@ -670,21 +663,18 @@ mod client_query_tests {
         run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT, b BIGINT)")).await;
         run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1, 2), (3, 4)")).await;
 
-        let result = runtime
-            .run_client_query(request(serde_json::json!({
-                "from": table,
-                "select": ["a", "b"],
-            })))
+        let batches = runtime
+            .run_query(
+                query(serde_json::json!({ "from": table, "select": ["a", "b"] })),
+                false,
+            )
             .await
-            .expect("json query should run");
-
-        let batches = match result.query_output {
-            QueryOutput::Stream(stream) => stream
-                .try_collect::<Vec<_>>()
-                .await
-                .expect("stream should drain"),
-            QueryOutput::File(_) => panic!("expected a streamed result"),
-        };
+            .expect("json query should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("stream should drain");
 
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 2, "json query should return the two inserted rows");
@@ -696,10 +686,13 @@ mod client_query_tests {
     async fn json_query_with_output_format_is_rejected() {
         let runtime = Runtime::new().await.expect("runtime should start");
         let err = runtime
-            .run_client_query(request(serde_json::json!({
-                "sql": "SELECT 1 AS a",
-                "output": { "format": "csv" },
-            })))
+            .run_query(
+                query(serde_json::json!({
+                    "sql": "SELECT 1 AS a",
+                    "output": { "format": "csv" },
+                })),
+                false,
+            )
             .await
             .err()
             .expect("output formats should be rejected on the unified path");
@@ -722,11 +715,12 @@ mod client_query_tests {
         run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
 
         // Non-super-user: read-only SELECT is allowed.
-        let stream = runtime
+        runtime
             .run_query(crate::query::Query::sql(format!("SELECT * FROM {table}")), false)
             .await
-            .expect("non-super SELECT should be allowed");
-        stream
+            .expect("non-super SELECT should be allowed")
+            .into_record_stream()
+            .expect("streamed result")
             .try_collect::<Vec<_>>()
             .await
             .expect("SELECT should drain");

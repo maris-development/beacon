@@ -12,6 +12,19 @@ pub struct QueryResult {
     pub query_id: uuid::Uuid,
 }
 
+impl QueryResult {
+    /// Extract the (metrics-tracked) record-batch stream, erroring if the result
+    /// is file-backed. Used by transports that only stream results (e.g. Flight SQL).
+    pub fn into_record_stream(self) -> anyhow::Result<ArrowOutputStream> {
+        match self.query_output {
+            QueryOutput::Stream(stream) => Ok(stream),
+            QueryOutput::File(_) => {
+                anyhow::bail!("expected a streamed query result, got a file output")
+            }
+        }
+    }
+}
+
 pub enum QueryOutput {
     File(QueryOutputFile),
     Stream(ArrowOutputStream),
