@@ -196,20 +196,48 @@ impl Runtime {
         })
     }
 
-    /// Build a DataFusion `LogicalPlan` from a client query (JSON or SQL-in-JSON)
-    /// using the beacon-query parser. The `output` field is ignored here — the
-    /// unified path streams results; file-format output is handled separately.
+    /// Build a DataFusion `LogicalPlan` from a client query. The SQL form goes
+    /// straight to DataFusion's SQL parser; the JSON form is compiled by beacon's
+    /// own query compiler. The `output` field is ignored here — the unified path
+    /// streams results; file-format output is handled separately.
     async fn plan_client_query(
         &self,
-        query: beacon_query::Query,
+        query: crate::query::Query,
     ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
-        beacon_query::parser::Parser::parse_to_logical_plan(
-            self.session_ctx.as_ref(),
-            self.table_manager.as_ref(),
-            self.file_manager.as_ref(),
-            query.inner,
-        )
-        .await
+        match query.inner {
+            crate::query::InnerQuery::Sql(sql) => self.plan_sql_client_query(&sql).await,
+            crate::query::InnerQuery::Json(body) => {
+                crate::query::compile_json_query(
+                    body,
+                    self.session_ctx.as_ref(),
+                    self.table_manager.as_ref(),
+                    self.file_manager.as_ref(),
+                )
+                .await
+            }
+        }
+    }
+
+    /// Plan a read-only SQL client query via DataFusion's SQL parser (DDL/DML and
+    /// other statements are disallowed). Requires SQL queries to be enabled.
+    async fn plan_sql_client_query(
+        &self,
+        sql: &str,
+    ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
+        if !beacon_config::CONFIG.sql.enable {
+            anyhow::bail!("SQL queries are not enabled");
+        }
+        let sql_options = SQLOptions::new()
+            .with_allow_ddl(false)
+            .with_allow_dml(false)
+            .with_allow_statements(false);
+        let plan = self
+            .session_ctx
+            .sql_with_options(sql, sql_options)
+            .await?
+            .into_parts()
+            .1;
+        Ok(plan)
     }
 
     pub fn system_info(&self) -> SystemInfo {
@@ -231,14 +259,8 @@ impl Runtime {
     }
 
     pub async fn explain_client_query(&self, query: QueryRequest) -> anyhow::Result<String> {
-        let plan = beacon_query::parser::Parser::parse(
-            self.session_ctx.as_ref(),
-            self.table_manager.as_ref(),
-            self.file_manager.as_ref(),
-            query.into_query()?,
-        )
-        .await?;
-        let json = plan.datafusion_plan.display_pg_json().to_string();
+        let plan = self.plan_client_query(query.into_query()?).await?;
+        let json = plan.display_pg_json().to_string();
         Ok(json)
     }
 

@@ -27,13 +27,16 @@ sysinfo = { version = "0.35.2", features = ["serde"]}
 uuid = "1.16.0"
 inventory = "0.3.18"
 pathdiff = "0.2.3"
+chrono = { workspace = true }
+cast = "0.3.0"
+geojson = "0.24.2"
 
 tracing = { workspace=true}
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
-beacon-query = { path = "../beacon-query" }
+beacon-arrow-tiff = { path = "../beacon-arrow-tiff" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-planner = { path = "../beacon-planner" }
 beacon-data-lake = { path = "../beacon-data-lake" }

@@ -54,16 +54,16 @@ impl QueryOutputFile {
     }
 }
 
-impl From<beacon_query::output::QueryOutputFile> for QueryOutputFile {
-    fn from(value: beacon_query::output::QueryOutputFile) -> Self {
+impl From<crate::query::output::QueryOutputFile> for QueryOutputFile {
+    fn from(value: crate::query::output::QueryOutputFile) -> Self {
         match value {
-            beacon_query::output::QueryOutputFile::Csv(file) => Self::Csv(file),
-            beacon_query::output::QueryOutputFile::Ipc(file) => Self::Ipc(file),
-            beacon_query::output::QueryOutputFile::Json(file) => Self::Json(file),
-            beacon_query::output::QueryOutputFile::Parquet(file) => Self::Parquet(file),
-            beacon_query::output::QueryOutputFile::NetCDF(file) => Self::NetCDF(file),
-            beacon_query::output::QueryOutputFile::Odv(file) => Self::Odv(file),
-            beacon_query::output::QueryOutputFile::GeoParquet(file) => Self::GeoParquet(file),
+            crate::query::output::QueryOutputFile::Csv(file) => Self::Csv(file),
+            crate::query::output::QueryOutputFile::Ipc(file) => Self::Ipc(file),
+            crate::query::output::QueryOutputFile::Json(file) => Self::Json(file),
+            crate::query::output::QueryOutputFile::Parquet(file) => Self::Parquet(file),
+            crate::query::output::QueryOutputFile::NetCDF(file) => Self::NetCDF(file),
+            crate::query::output::QueryOutputFile::Odv(file) => Self::Odv(file),
+            crate::query::output::QueryOutputFile::GeoParquet(file) => Self::GeoParquet(file),
         }
     }
 }

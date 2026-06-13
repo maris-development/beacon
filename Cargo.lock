@@ -1428,6 +1428,7 @@ dependencies = [
  "async-trait",
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
+ "beacon-arrow-tiff",
  "beacon-common",
  "beacon-config",
  "beacon-data-lake",
@@ -1438,12 +1439,14 @@ dependencies = [
  "beacon-nd-array",
  "beacon-object-storage",
  "beacon-planner",
- "beacon-query",
  "bytes",
+ "cast",
+ "chrono",
  "datafusion",
  "futures",
  "futures-util",
  "geodatafusion",
+ "geojson",
  "glob",
  "indexmap 2.14.0",
  "inventory",
@@ -1722,11 +1725,6 @@ name = "beacon-planner"
 version = "1.7.0"
 dependencies = [
  "anyhow",
- "beacon-config",
- "beacon-data-lake",
- "beacon-formats",
- "beacon-functions",
- "beacon-query",
  "chrono",
  "datafusion",
  "geojson",
@@ -1737,30 +1735,6 @@ dependencies = [
  "tracing",
  "utoipa",
  "uuid",
-]
-
-[[package]]
-name = "beacon-query"
-version = "1.7.0"
-dependencies = [
- "anyhow",
- "beacon-arrow-netcdf",
- "beacon-arrow-odv",
- "beacon-arrow-tiff",
- "beacon-config",
- "beacon-data-lake",
- "beacon-formats",
- "beacon-functions",
- "beacon-object-storage",
- "cast",
- "chrono",
- "datafusion",
- "geojson",
- "serde",
- "tempfile",
- "tokio",
- "tracing",
- "utoipa",
 ]
 
 [[package]]

@@ -98,7 +98,7 @@ pub struct QueryRequest {
 }
 
 impl QueryRequest {
-    pub fn into_query(self) -> anyhow::Result<beacon_query::Query> {
+    pub fn into_query(self) -> anyhow::Result<crate::query::Query> {
         Ok(serde_json::from_value(Value::Object(
             self.query.into_iter().collect::<Map<String, Value>>(),
         ))?)

@@ -7,10 +7,7 @@ use std::sync::Arc;
 use beacon_arrow_netcdf::datafusion::options::NetcdfOptions;
 use beacon_arrow_netcdf::datafusion::NetcdfFormat;
 use beacon_arrow_tiff::datafusion::TiffFormat;
-use beacon_data_lake::{
-    files::collection::FileCollection, table::table_formats::NetCDFFileFormat, FileManager,
-    TableManager,
-};
+use beacon_data_lake::{files::collection::FileCollection, FileManager, TableManager};
 use beacon_arrow_odv::datafusion::OdvFormat;
 use beacon_formats::{arrow::ArrowFormat, csv::CsvFormat, parquet::ParquetFormat};
 use datafusion::{

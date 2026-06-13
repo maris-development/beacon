@@ -6,7 +6,7 @@ use datafusion::{
     prelude::{lit_timestamp_nano, Expr},
 };
 
-use crate::filter::try_coerce_number_to_schema;
+use crate::query::filter::try_coerce_number_to_schema;
 
 use super::{get_column_type, parse_column_name};
 
