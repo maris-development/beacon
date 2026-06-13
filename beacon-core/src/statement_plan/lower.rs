@@ -21,19 +21,18 @@ use datafusion::{
         dml::CopyTo, not, when, DmlStatement, Expr, Extension, Filter, LogicalPlan,
         LogicalPlanBuilder, WriteOp,
     },
-    prelude::{lit, SessionContext, SQLOptions},
+    prelude::{lit, SessionContext},
     sql::sqlparser::ast::{AlterTableOperation, ObjectName, Statement as SqlAstStatement},
 };
 
 use super::logical::{AlterTableNode, AlterTableSpec, Keyed, ReplaceTableContentsNode};
 
-/// Lower a parsed DataFusion statement to a logical plan, applying beacon's
-/// permission gating (`verify_plan`) on the **standard** plan before any rewrite
-/// (which `verify_plan` cannot see through).
+/// Lower a parsed DataFusion statement to a logical plan. Permission checks are
+/// applied later by [`validate_query_plan`](super::validate_query_plan), once the
+/// plan is fully lowered.
 pub(crate) async fn lower_df_statement(
     session_ctx: &Arc<SessionContext>,
     statement: datafusion::sql::parser::Statement,
-    sql_options: &SQLOptions,
 ) -> anyhow::Result<LogicalPlan> {
     // DataFusion has no `ALTER TABLE` planning, so build the node from the AST.
     if let datafusion::sql::parser::Statement::Statement(sql_stmt) = &statement {
@@ -44,7 +43,6 @@ pub(crate) async fn lower_df_statement(
 
     let state = session_ctx.state();
     let plan = state.statement_to_plan(statement).await?;
-    sql_options.verify_plan(&plan)?;
     rewrite_logical_plan(plan)
 }
 

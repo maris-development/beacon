@@ -24,15 +24,55 @@ mod stream_coalescer;
 use std::sync::{Arc, OnceLock, Weak};
 
 use datafusion::{
+    common::tree_node::{TreeNode, TreeNodeRecursion},
     execution::SendableRecordBatchStream,
     logical_expr::{Extension, LogicalPlan},
-    prelude::SessionContext,
+    prelude::{SQLOptions, SessionContext},
 };
 
 use crate::parser::statement::{CreateMaterializedViewStatement, RefreshStatement};
 
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
+
+/// Validate a lowered query plan against the caller's privileges, just before
+/// execution — the single place permissions are enforced (rather than in the SQL
+/// parser or the JSON compiler).
+///
+/// Standard `DDL`/`DML`/`COPY` nodes are gated by DataFusion's
+/// [`SQLOptions::verify_plan`] (everything allowed for super-users, nothing for
+/// others). Any beacon [`LogicalPlan::Extension`] node — materialized views,
+/// `REFRESH`, `ALTER TABLE`, and the copy-on-write replacement behind
+/// `DELETE`/`UPDATE` — additionally requires super-user, since `verify_plan`
+/// cannot see through extension nodes.
+pub(crate) fn validate_query_plan(plan: &LogicalPlan, is_super_user: bool) -> anyhow::Result<()> {
+    let sql_options = SQLOptions::new()
+        .with_allow_ddl(is_super_user)
+        .with_allow_dml(is_super_user)
+        .with_allow_statements(is_super_user);
+    sql_options.verify_plan(plan)?;
+
+    if !is_super_user && plan_contains_extension(plan)? {
+        anyhow::bail!("this operation requires super-user privileges");
+    }
+
+    Ok(())
+}
+
+/// Whether `plan` contains any [`LogicalPlan::Extension`] node (all of beacon's
+/// extension nodes are super-user-only operations).
+fn plan_contains_extension(plan: &LogicalPlan) -> anyhow::Result<bool> {
+    let mut found = false;
+    plan.apply(|node| {
+        if matches!(node, LogicalPlan::Extension(_)) {
+            found = true;
+            Ok(TreeNodeRecursion::Stop)
+        } else {
+            Ok(TreeNodeRecursion::Continue)
+        }
+    })?;
+    Ok(found)
+}
 
 /// Late-initialized, weak handle to the [`SessionContext`] shared with the
 /// custom planner.

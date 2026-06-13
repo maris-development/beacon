@@ -16,7 +16,7 @@ use datafusion::{
         disk_manager::DiskManagerBuilder, memory_pool::FairSpillPool,
         runtime_env::RuntimeEnvBuilder, SendableRecordBatchStream, SessionStateBuilder,
     },
-    prelude::{SQLOptions, SessionConfig, SessionContext},
+    prelude::{SessionConfig, SessionContext},
 };
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
@@ -167,9 +167,9 @@ impl Runtime {
     ///
     /// The single entry point for query execution: the JSON form is compiled by
     /// beacon's query compiler, the SQL form goes through beacon's SQL parser, and
-    /// both are lowered to a `LogicalPlan` and run through the unified
-    /// `create_physical_plan -> execute_stream` pipeline. `is_super_user` gates the
-    /// SQL surface (DDL/DML and beacon's custom statements) for non-super-users.
+    /// both are lowered to a `LogicalPlan`. The lowered plan is then validated
+    /// against the caller's privileges (`is_super_user`) and run through the
+    /// unified `create_physical_plan -> execute_stream` pipeline.
     #[tracing::instrument(skip(self, query))]
     pub async fn run_query(
         &self,
@@ -179,7 +179,8 @@ impl Runtime {
         if query.output.is_some() {
             anyhow::bail!("output formats are not yet supported on the unified query path");
         }
-        let plan = self.lower_query(query, is_super_user).await?;
+        let plan = self.lower_query(query).await?;
+        crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
         crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
     }
 
@@ -214,14 +215,14 @@ impl Runtime {
         })
     }
 
-    /// Lower a client query (JSON or SQL) to a `LogicalPlan` without executing it.
+    /// Lower a client query (JSON or SQL) to a `LogicalPlan` without executing or
+    /// validating it (permission checks happen in `run_query` on the lowered plan).
     async fn lower_query(
         &self,
         query: crate::query::Query,
-        is_super_user: bool,
     ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
         match query.inner {
-            crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql, is_super_user).await,
+            crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql).await,
             crate::query::InnerQuery::Json(body) => {
                 crate::query::compile_json_query(
                     body,
@@ -235,18 +236,12 @@ impl Runtime {
     }
 
     /// Lower a SQL statement (SELECT, DDL/DML, or a beacon custom statement) to a
-    /// `LogicalPlan`, applying the anonymous-access gating for non-super-users.
+    /// `LogicalPlan`. The result is validated in `run_query` before execution.
     async fn lower_sql(
         &self,
         sql: &str,
-        is_super_user: bool,
     ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
-        let statement = Self::parse_beacon_statement(sql)?;
-        if !is_super_user {
-            Self::ensure_anonymous_statement_allowed(&statement)?;
-        }
-
-        match statement {
+        match Self::parse_beacon_statement(sql)? {
             BeaconStatement::CreateMaterializedView(statement) => {
                 Ok(crate::statement_plan::create_materialized_view_plan(statement))
             }
@@ -254,19 +249,7 @@ impl Runtime {
                 Ok(crate::statement_plan::refresh_plan(statement))
             }
             BeaconStatement::DFStatement(statement) => {
-                let sql_options = if is_super_user {
-                    SQLOptions::new()
-                        .with_allow_ddl(true)
-                        .with_allow_dml(true)
-                        .with_allow_statements(true)
-                } else {
-                    SQLOptions::new()
-                        .with_allow_ddl(false)
-                        .with_allow_dml(false)
-                        .with_allow_statements(false)
-                };
-                crate::statement_plan::lower_df_statement(&self.session_ctx, *statement, &sql_options)
-                    .await
+                crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
             }
         }
     }
@@ -290,7 +273,9 @@ impl Runtime {
     }
 
     pub async fn explain_client_query(&self, query: QueryRequest) -> anyhow::Result<String> {
-        let plan = self.lower_query(query.into_query()?, false).await?;
+        let plan = self.lower_query(query.into_query()?).await?;
+        // EXPLAIN is read-only: reject plans the anonymous client could not run.
+        crate::statement_plan::validate_query_plan(&plan, false)?;
         let json = plan.display_pg_json().to_string();
         Ok(json)
     }
@@ -526,29 +511,6 @@ impl Runtime {
         let mut parser = BeaconParser::new(sql)?;
         parser.parse_statement().map_err(Into::into)
     }
-
-    fn ensure_anonymous_statement_allowed(statement: &BeaconStatement) -> anyhow::Result<()> {
-        let deny = || {
-            anyhow::anyhow!("anonymous SQL access only supports metadata and read-only SELECT queries")
-        };
-        match statement {
-            // DDL/DML carried by a DFStatement is rejected downstream by
-            // `sql_options.verify_plan`, except `ALTER TABLE`, which beacon
-            // handles before planning and so must be gated here explicitly.
-            BeaconStatement::DFStatement(df) => {
-                if let datafusion::sql::parser::Statement::Statement(sql) = df.as_ref() {
-                    if matches!(
-                        sql.as_ref(),
-                        datafusion::sql::sqlparser::ast::Statement::AlterTable(_)
-                    ) {
-                        return Err(deny());
-                    }
-                }
-                Ok(())
-            }
-            _ => Err(deny()),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -743,6 +705,55 @@ mod client_query_tests {
             .expect("output formats should be rejected on the unified path");
         assert!(
             err.to_string().contains("output formats are not yet supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// `validate_query_plan` is the single permission gate: non-super-users may run
+    /// read-only SELECTs but not DDL/DML (standard nodes) nor any beacon extension
+    /// operation (super-user-only).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_super_user_is_gated_by_validation() {
+        let runtime = Runtime::new().await.expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("val_{suffix}");
+
+        // Super-user seeds a table.
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+
+        // Non-super-user: read-only SELECT is allowed.
+        let stream = runtime
+            .run_query(crate::query::Query::sql(format!("SELECT * FROM {table}")), false)
+            .await
+            .expect("non-super SELECT should be allowed");
+        stream
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("SELECT should drain");
+
+        // Non-super-user: standard DDL is rejected (by verify_plan).
+        runtime
+            .run_query(
+                crate::query::Query::sql(format!("CREATE TABLE {table}_2 (a BIGINT)")),
+                false,
+            )
+            .await
+            .err()
+            .expect("non-super CREATE TABLE should be rejected");
+
+        // Non-super-user: a beacon extension operation is rejected (super-user only).
+        let err = runtime
+            .run_query(
+                crate::query::Query::sql(format!(
+                    "CREATE MATERIALIZED VIEW {table}_mv AS SELECT 1 AS a"
+                )),
+                false,
+            )
+            .await
+            .err()
+            .expect("non-super CREATE MATERIALIZED VIEW should be rejected");
+        assert!(
+            err.to_string().contains("super-user"),
             "unexpected error: {err}"
         );
     }
