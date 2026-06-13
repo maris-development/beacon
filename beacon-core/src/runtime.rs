@@ -2,17 +2,14 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::{
-    array::AsArray,
-    datatypes::{SchemaRef, UInt64Type},
-};
+use arrow::datatypes::SchemaRef;
 use beacon_data_lake::{DataLake, FileManager, TableManager};
 use beacon_datafusion_ext::{
     format_ext::DatasetMetadata, listing_table_factory_ext::ListingTableFactoryExt,
     stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_planner::{metrics::ConsolidatedMetrics, plan::BeaconQueryPlan};
+use beacon_planner::metrics::{ConsolidatedMetrics, MetricsTracker};
 use datafusion::{
     catalog::TableFunctionImpl,
     execution::{
@@ -21,13 +18,13 @@ use datafusion::{
     },
     prelude::{SQLOptions, SessionConfig, SessionContext},
 };
-use futures::{stream::BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use parking_lot::Mutex;
 
 use crate::{
     api::{DatasetInfo, FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView},
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
-    query_result::{ArrowOutputStream, QueryOutput, QueryOutputFile, QueryResult},
+    query_result::{ArrowOutputStream, QueryOutput, QueryResult},
     sys::{self, SystemInfo},
 };
 
@@ -167,15 +164,52 @@ impl Runtime {
     }
 
     pub async fn run_client_query(&self, query: QueryRequest) -> anyhow::Result<QueryResult> {
-        let plan = beacon_planner::prelude::plan_query(
-            self.session_ctx.clone(),
+        let query = query.into_query()?;
+
+        // Output formats (CSV/Parquet/NetCDF/…) and rich metrics are not yet wired
+        // onto the unified execution path; reject rather than silently stream.
+        if query.output.is_some() {
+            anyhow::bail!("output formats are not yet supported on the unified query path");
+        }
+
+        let query_id = uuid::Uuid::new_v4();
+        let query_json = serde_json::to_value(&query)?;
+
+        // JSON (and SQL-in-JSON) queries are lowered to a `LogicalPlan` and run
+        // through the same pipeline as `run_sql`, so there is a single point of
+        // entry for query execution.
+        let plan = self.plan_client_query(query).await?;
+        let stream = crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
+
+        // The stream is wrapped so output rows/bytes are still counted as it drains
+        // (existing metrics behaviour); input/file-scan metrics are deferred.
+        let metrics = MetricsTracker::new(query_json, query_id);
+        let output_stream = ArrowOutputStream {
+            stream,
+            metrics,
+            all_consolidated_metrics: self.query_metrics.clone(),
+        };
+
+        Ok(QueryResult {
+            query_output: QueryOutput::Stream(output_stream),
+            query_id,
+        })
+    }
+
+    /// Build a DataFusion `LogicalPlan` from a client query (JSON or SQL-in-JSON)
+    /// using the beacon-query parser. The `output` field is ignored here — the
+    /// unified path streams results; file-format output is handled separately.
+    async fn plan_client_query(
+        &self,
+        query: beacon_query::Query,
+    ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
+        beacon_query::parser::Parser::parse_to_logical_plan(
+            self.session_ctx.as_ref(),
             self.table_manager.as_ref(),
             self.file_manager.as_ref(),
-            query.into_query()?,
+            query.inner,
         )
-        .await?;
-
-        self.run_plan(plan).await
+        .await
     }
 
     pub fn system_info(&self) -> SystemInfo {
@@ -480,65 +514,6 @@ impl Runtime {
         crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
     }
 
-    #[tracing::instrument(skip(self, beacon_plan))]
-    async fn run_plan(&self, beacon_plan: BeaconQueryPlan) -> anyhow::Result<QueryResult> {
-        let task_ctx = self.session_ctx.task_ctx();
-
-        match beacon_plan.output_file {
-            Some(output_file) => {
-                let output_file = QueryOutputFile::from(output_file);
-                let mut stream = datafusion::physical_plan::execute_stream(
-                    beacon_plan.physical_plan.clone(),
-                    task_ctx,
-                )?;
-
-                let mut total_rows: u64 = 0;
-                while let Some(maybe_batch) = stream.next().await {
-                    let batch = maybe_batch?;
-                    let num_rows_array = batch.column(0).as_primitive::<UInt64Type>();
-                    if !num_rows_array.is_empty() {
-                        let num_rows = num_rows_array.value(0);
-                        beacon_plan.metrics_tracker.add_output_rows(num_rows);
-                        total_rows += num_rows;
-                    }
-                }
-
-                tracing::info!("Query Returned {} rows", total_rows);
-                tracing::info!("Query result size in bytes: {:?}", output_file.size());
-
-                beacon_plan
-                    .metrics_tracker
-                    .add_output_bytes(output_file.size()?);
-
-                let consolidated_metrics = beacon_plan.metrics_tracker.get_consolidated_metrics();
-                self.query_metrics
-                    .lock()
-                    .insert(beacon_plan.query_id, consolidated_metrics);
-
-                Ok(QueryResult {
-                    query_output: QueryOutput::File(output_file),
-                    query_id: beacon_plan.query_id,
-                })
-            }
-            None => {
-                let stream = datafusion::physical_plan::execute_stream(
-                    beacon_plan.physical_plan.clone(),
-                    task_ctx,
-                )?;
-
-                let output_stream = ArrowOutputStream {
-                    stream,
-                    metrics: beacon_plan.metrics_tracker.clone(),
-                    all_consolidated_metrics: self.query_metrics.clone(),
-                };
-
-                Ok(QueryResult {
-                    query_output: QueryOutput::Stream(output_stream),
-                    query_id: beacon_plan.query_id,
-                })
-            }
-        }
-    }
 
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
         let mut parser = BeaconParser::new(sql)?;
@@ -689,5 +664,77 @@ mod materialized_view_tests {
         collect_sql(&runtime, &format!("DROP TABLE {mv}"))
             .await
             .expect("drop should succeed");
+    }
+}
+
+#[cfg(test)]
+mod client_query_tests {
+    use super::Runtime;
+    use crate::{api::QueryRequest, query_result::QueryOutput};
+    use futures::TryStreamExt;
+
+    async fn run_sql(runtime: &Runtime, sql: &str) {
+        let stream = runtime
+            .run_sql(sql.to_string(), true)
+            .await
+            .expect("sql should run");
+        stream
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("sql should drain");
+    }
+
+    fn request(value: serde_json::Value) -> QueryRequest {
+        serde_json::from_value(value).expect("query request should deserialize")
+    }
+
+    /// A JSON client query is lowered to a `LogicalPlan` and executed through the
+    /// same pipeline as `run_sql`, returning a streamed result.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn json_query_runs_through_unified_path() {
+        let runtime = Runtime::new().await.expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("json_q_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT, b BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1, 2), (3, 4)")).await;
+
+        let result = runtime
+            .run_client_query(request(serde_json::json!({
+                "from": table,
+                "select": ["a", "b"],
+            })))
+            .await
+            .expect("json query should run");
+
+        let batches = match result.query_output {
+            QueryOutput::Stream(stream) => stream
+                .try_collect::<Vec<_>>()
+                .await
+                .expect("stream should drain"),
+            QueryOutput::File(_) => panic!("expected a streamed result"),
+        };
+
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 2, "json query should return the two inserted rows");
+        assert_eq!(batches[0].num_columns(), 2);
+    }
+
+    /// Output formats are deferred on the unified path and rejected up front.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn json_query_with_output_format_is_rejected() {
+        let runtime = Runtime::new().await.expect("runtime should start");
+        let err = runtime
+            .run_client_query(request(serde_json::json!({
+                "sql": "SELECT 1 AS a",
+                "output": { "format": "csv" },
+            })))
+            .await
+            .err()
+            .expect("output formats should be rejected on the unified path");
+        assert!(
+            err.to_string().contains("output formats are not yet supported"),
+            "unexpected error: {err}"
+        );
     }
 }
