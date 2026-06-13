@@ -146,13 +146,25 @@ impl Runtime {
             )
             .build_arc()?;
 
+        // Register beacon's custom query planner so statements can be lowered to
+        // physical plan nodes and executed through the same pipeline as queries.
+        // The planner needs a handle back to the context, which only exists once
+        // the state is built, so it is created with an empty cell that is filled
+        // immediately afterwards (a `Weak`, to avoid a reference cycle).
+        let session_cell = crate::statement_plan::new_session_cell();
         let session_state = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(runtime_env)
             .with_default_features()
+            .with_query_planner(Arc::new(crate::statement_plan::BeaconQueryPlanner::new(
+                session_cell.clone(),
+            )))
             .build();
 
-        Ok(Arc::new(SessionContext::new_with_state(session_state)))
+        let session_ctx = Arc::new(SessionContext::new_with_state(session_state));
+        let _ = session_cell.set(Arc::downgrade(&session_ctx));
+
+        Ok(session_ctx)
     }
 
     pub async fn run_client_query(&self, query: QueryRequest) -> anyhow::Result<QueryResult> {
