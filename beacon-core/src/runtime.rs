@@ -2,7 +2,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
+use arrow::{
+    array::AsArray,
+    datatypes::{SchemaRef, UInt64Type},
+};
 use beacon_data_lake::{DataLake, FileManager, TableManager};
 use beacon_datafusion_ext::{
     format_ext::DatasetMetadata, listing_table_factory_ext::ListingTableFactoryExt,
@@ -18,13 +21,13 @@ use datafusion::{
     },
     prelude::{SessionConfig, SessionContext},
 };
-use futures::stream::BoxStream;
+use futures::{stream::BoxStream, TryStreamExt};
 use parking_lot::Mutex;
 
 use crate::{
     api::{DatasetInfo, FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView},
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
-    query_result::{ArrowOutputStream, QueryOutput, QueryResult},
+    query_result::{ArrowOutputStream, QueryOutput, QueryOutputFile, QueryResult},
     sys::{self, SystemInfo},
 };
 
@@ -167,48 +170,98 @@ impl Runtime {
     ///
     /// The single entry point for query execution: the JSON form is compiled by
     /// beacon's query compiler, the SQL form goes through beacon's SQL parser, and
-    /// both are lowered to a `LogicalPlan`. The lowered plan is validated against
-    /// the caller's privileges (`is_super_user`), run through the unified
-    /// `create_physical_plan -> execute_stream` pipeline, and the resulting stream
-    /// is wrapped so output rows/bytes are recorded under a fresh `query_id` (see
-    /// [`Self::get_query_metrics`]).
+    /// both are lowered to a `LogicalPlan` and validated against the caller's
+    /// privileges (`is_super_user`). The plan then runs through the unified
+    /// `create_physical_plan -> execute_stream` pipeline. Without an `output`
+    /// format the result is streamed (metrics recorded as the client drains);
+    /// with one, the result is written to a temporary file in that format and
+    /// returned as a file download.
     #[tracing::instrument(skip(self, query))]
     pub async fn run_query(
         &self,
         query: crate::query::Query,
         is_super_user: bool,
     ) -> anyhow::Result<QueryResult> {
-        if query.output.is_some() {
-            anyhow::bail!("output formats are not yet supported on the unified query path");
-        }
-
         let query_id = uuid::Uuid::new_v4();
         let query_json = serde_json::to_value(&query)?;
+        let crate::query::Query { inner, output } = query;
 
-        let plan = self.lower_query(query).await?;
+        let plan = self.lower_query(inner).await?;
         crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
-        let stream = crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
 
+        match output {
+            Some(output) => self.run_query_to_file(plan, output, query_id, query_json).await,
+            None => self.run_query_to_stream(plan, query_id, query_json).await,
+        }
+    }
+
+    /// Stream the plan's results, wrapping the stream so output rows/bytes are
+    /// recorded under `query_id` as the client drains it.
+    async fn run_query_to_stream(
+        &self,
+        plan: datafusion::logical_expr::LogicalPlan,
+        query_id: uuid::Uuid,
+        query_json: serde_json::Value,
+    ) -> anyhow::Result<QueryResult> {
+        let stream = crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
         let metrics = MetricsTracker::new(query_json, query_id);
         let output_stream = ArrowOutputStream {
             stream,
             metrics,
             all_consolidated_metrics: self.query_metrics.clone(),
         };
-
         Ok(QueryResult {
             query_output: QueryOutput::Stream(output_stream),
             query_id,
         })
     }
 
-    /// Lower a client query (JSON or SQL) to a `LogicalPlan` without executing or
-    /// validating it (permission checks happen in `run_query` on the lowered plan).
+    /// Write the plan's results to a temporary file in the requested `output`
+    /// format (via a `COPY TO`) and return a file download. The file write is
+    /// driven to completion here and its metrics recorded under `query_id`.
+    async fn run_query_to_file(
+        &self,
+        plan: datafusion::logical_expr::LogicalPlan,
+        output: crate::query::output::Output,
+        query_id: uuid::Uuid,
+        query_json: serde_json::Value,
+    ) -> anyhow::Result<QueryResult> {
+        // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
+        // temp file; this COPY is beacon-generated, so it is not re-validated.
+        let (copy_plan, output_file) = output
+            .parse(self.session_ctx.as_ref(), self.file_manager.as_ref(), plan)
+            .await?;
+        let output_file = QueryOutputFile::from(output_file);
+
+        let metrics = MetricsTracker::new(query_json, query_id);
+        let mut stream =
+            crate::statement_plan::execute_statement_plan(&self.session_ctx, copy_plan).await?;
+        // The COPY emits a single `count` row; drain it to complete the write.
+        while let Some(batch) = stream.try_next().await? {
+            let counts = batch.column(0).as_primitive::<UInt64Type>();
+            if !counts.is_empty() {
+                metrics.add_output_rows(counts.value(0));
+            }
+        }
+        metrics.add_output_bytes(output_file.size()?);
+        self.query_metrics
+            .lock()
+            .insert(query_id, metrics.get_consolidated_metrics());
+
+        Ok(QueryResult {
+            query_output: QueryOutput::File(output_file),
+            query_id,
+        })
+    }
+
+    /// Lower the body of a client query (JSON or SQL) to a `LogicalPlan` without
+    /// executing or validating it (permission checks and output formatting happen
+    /// in `run_query` on the lowered plan).
     async fn lower_query(
         &self,
-        query: crate::query::Query,
+        inner: crate::query::InnerQuery,
     ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
-        match query.inner {
+        match inner {
             crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql).await,
             crate::query::InnerQuery::Json(body) => {
                 crate::query::compile_json_query(
@@ -260,7 +313,7 @@ impl Runtime {
     }
 
     pub async fn explain_client_query(&self, query: QueryRequest) -> anyhow::Result<String> {
-        let plan = self.lower_query(query.into_query()?).await?;
+        let plan = self.lower_query(query.into_query()?.inner).await?;
         // EXPLAIN is read-only: reject plans the anonymous client could not run.
         crate::statement_plan::validate_query_plan(&plan, false)?;
         let json = plan.display_pg_json().to_string();
@@ -630,7 +683,7 @@ mod materialized_view_tests {
 #[cfg(test)]
 mod client_query_tests {
     use super::Runtime;
-    use crate::api::QueryRequest;
+    use crate::{api::QueryRequest, query_result::QueryOutput};
     use futures::TryStreamExt;
 
     async fn run_sql(runtime: &Runtime, sql: &str) {
@@ -681,25 +734,38 @@ mod client_query_tests {
         assert_eq!(batches[0].num_columns(), 2);
     }
 
-    /// Output formats are deferred on the unified path and rejected up front.
+    /// A query with an `output` format is written to a file and returned as a
+    /// file download.
     #[tokio::test(flavor = "multi_thread")]
-    async fn json_query_with_output_format_is_rejected() {
+    async fn query_with_output_format_produces_file() {
         let runtime = Runtime::new().await.expect("runtime should start");
-        let err = runtime
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("out_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2)")).await;
+
+        let result = runtime
             .run_query(
                 query(serde_json::json!({
-                    "sql": "SELECT 1 AS a",
+                    "from": table,
+                    "select": ["a"],
                     "output": { "format": "csv" },
                 })),
                 false,
             )
             .await
-            .err()
-            .expect("output formats should be rejected on the unified path");
-        assert!(
-            err.to_string().contains("output formats are not yet supported"),
-            "unexpected error: {err}"
-        );
+            .expect("query with output should run");
+
+        match result.query_output {
+            QueryOutput::File(file) => {
+                assert!(
+                    file.size().expect("file size") > 0,
+                    "output file should contain data"
+                );
+            }
+            QueryOutput::Stream(_) => panic!("expected a file output"),
+        }
     }
 
     /// `validate_query_plan` is the single permission gate: non-super-users may run
