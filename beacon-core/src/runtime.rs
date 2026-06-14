@@ -12,16 +12,16 @@ use beacon_datafusion_ext::{
     stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_planner::{metrics::ConsolidatedMetrics, plan::BeaconQueryPlan};
+use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use datafusion::{
     catalog::TableFunctionImpl,
     execution::{
         disk_manager::DiskManagerBuilder, memory_pool::FairSpillPool,
-        runtime_env::RuntimeEnvBuilder, SendableRecordBatchStream, SessionStateBuilder,
+        runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
     },
-    prelude::{SQLOptions, SessionConfig, SessionContext},
+    prelude::{SessionConfig, SessionContext},
 };
-use futures::{stream::BoxStream, StreamExt};
+use futures::{stream::BoxStream, TryStreamExt};
 use parking_lot::Mutex;
 
 use crate::{
@@ -166,16 +166,132 @@ impl Runtime {
         Ok(session_ctx)
     }
 
-    pub async fn run_client_query(&self, query: QueryRequest) -> anyhow::Result<QueryResult> {
-        let plan = beacon_planner::prelude::plan_query(
-            self.session_ctx.clone(),
-            self.table_manager.as_ref(),
-            self.file_manager.as_ref(),
-            query.into_query()?,
-        )
-        .await?;
+    /// Execute a client query (JSON or SQL) and return a metrics-tracked result.
+    ///
+    /// The single entry point for query execution: the JSON form is compiled by
+    /// beacon's query compiler, the SQL form goes through beacon's SQL parser, and
+    /// both are lowered to a `LogicalPlan` and validated against the caller's
+    /// privileges (`is_super_user`). The plan then runs through the unified
+    /// `create_physical_plan -> execute_stream` pipeline. Without an `output`
+    /// format the result is streamed (metrics recorded as the client drains);
+    /// with one, the result is written to a temporary file in that format and
+    /// returned as a file download.
+    #[tracing::instrument(skip(self, query))]
+    pub async fn run_query(
+        &self,
+        query: crate::query::Query,
+        is_super_user: bool,
+    ) -> anyhow::Result<QueryResult> {
+        let query_id = uuid::Uuid::new_v4();
+        let query_json = serde_json::to_value(&query)?;
+        let crate::query::Query { inner, output } = query;
 
-        self.run_plan(plan).await
+        let plan = self.lower_query(inner).await?;
+        crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
+
+        match output {
+            Some(output) => self.run_query_to_file(plan, output, query_id, query_json).await,
+            None => self.run_query_to_stream(plan, query_id, query_json).await,
+        }
+    }
+
+    /// Stream the plan's results, wrapping the stream so output rows/bytes are
+    /// recorded under `query_id` as the client drains it.
+    async fn run_query_to_stream(
+        &self,
+        plan: datafusion::logical_expr::LogicalPlan,
+        query_id: uuid::Uuid,
+        query_json: serde_json::Value,
+    ) -> anyhow::Result<QueryResult> {
+        let stream = crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
+        let metrics = MetricsTracker::new(query_json, query_id);
+        let output_stream = ArrowOutputStream {
+            stream,
+            metrics,
+            all_consolidated_metrics: self.query_metrics.clone(),
+        };
+        Ok(QueryResult {
+            query_output: QueryOutput::Stream(output_stream),
+            query_id,
+        })
+    }
+
+    /// Write the plan's results to a temporary file in the requested `output`
+    /// format (via a `COPY TO`) and return a file download. The file write is
+    /// driven to completion here and its metrics recorded under `query_id`.
+    async fn run_query_to_file(
+        &self,
+        plan: datafusion::logical_expr::LogicalPlan,
+        output: crate::query::output::Output,
+        query_id: uuid::Uuid,
+        query_json: serde_json::Value,
+    ) -> anyhow::Result<QueryResult> {
+        // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
+        // temp file; this COPY is beacon-generated, so it is not re-validated.
+        let (copy_plan, output_file) = output
+            .parse(self.session_ctx.as_ref(), self.file_manager.as_ref(), plan)
+            .await?;
+        let output_file = QueryOutputFile::from(output_file);
+
+        let metrics = MetricsTracker::new(query_json, query_id);
+        let mut stream =
+            crate::statement_plan::execute_statement_plan(&self.session_ctx, copy_plan).await?;
+        // The COPY emits a single `count` row; drain it to complete the write.
+        while let Some(batch) = stream.try_next().await? {
+            let counts = batch.column(0).as_primitive::<UInt64Type>();
+            if !counts.is_empty() {
+                metrics.add_output_rows(counts.value(0));
+            }
+        }
+        metrics.add_output_bytes(output_file.size()?);
+        self.query_metrics
+            .lock()
+            .insert(query_id, metrics.get_consolidated_metrics());
+
+        Ok(QueryResult {
+            query_output: QueryOutput::File(output_file),
+            query_id,
+        })
+    }
+
+    /// Lower the body of a client query (JSON or SQL) to a `LogicalPlan` without
+    /// executing or validating it (permission checks and output formatting happen
+    /// in `run_query` on the lowered plan).
+    async fn lower_query(
+        &self,
+        inner: crate::query::InnerQuery,
+    ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
+        match inner {
+            crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql).await,
+            crate::query::InnerQuery::Json(body) => {
+                crate::query::compile_json_query(
+                    body,
+                    self.session_ctx.as_ref(),
+                    self.table_manager.as_ref(),
+                    self.file_manager.as_ref(),
+                )
+                .await
+            }
+        }
+    }
+
+    /// Lower a SQL statement (SELECT, DDL/DML, or a beacon custom statement) to a
+    /// `LogicalPlan`. The result is validated in `run_query` before execution.
+    async fn lower_sql(
+        &self,
+        sql: &str,
+    ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
+        match Self::parse_beacon_statement(sql)? {
+            BeaconStatement::CreateMaterializedView(statement) => {
+                Ok(crate::statement_plan::create_materialized_view_plan(statement))
+            }
+            BeaconStatement::Refresh(statement) => {
+                Ok(crate::statement_plan::refresh_plan(statement))
+            }
+            BeaconStatement::DFStatement(statement) => {
+                crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
+            }
+        }
     }
 
     pub fn system_info(&self) -> SystemInfo {
@@ -197,14 +313,10 @@ impl Runtime {
     }
 
     pub async fn explain_client_query(&self, query: QueryRequest) -> anyhow::Result<String> {
-        let plan = beacon_query::parser::Parser::parse(
-            self.session_ctx.as_ref(),
-            self.table_manager.as_ref(),
-            self.file_manager.as_ref(),
-            query.into_query()?,
-        )
-        .await?;
-        let json = plan.datafusion_plan.display_pg_json().to_string();
+        let plan = self.lower_query(query.into_query()?.inner).await?;
+        // EXPLAIN is read-only: reject plans the anonymous client could not run.
+        crate::statement_plan::validate_query_plan(&plan, false)?;
+        let json = plan.display_pg_json().to_string();
         Ok(json)
     }
 
@@ -435,137 +547,9 @@ impl Runtime {
         self.file_manager.delete_file(file_path).await
     }
 
-    #[tracing::instrument(skip(self))]
-    pub async fn run_sql(
-        &self,
-        sql: String,
-        is_super_user: bool,
-    ) -> anyhow::Result<SendableRecordBatchStream> {
-        let statement = Self::parse_beacon_statement(&sql)?;
-        if !is_super_user {
-            Self::ensure_anonymous_statement_allowed(&statement)?;
-        }
-
-        // Every statement is lowered to a logical plan (with beacon extension
-        // nodes for side-effecting statements) and run through the single
-        // create_physical_plan -> execute_stream pipeline, like queries.
-        let plan = match statement {
-            BeaconStatement::CreateMaterializedView(statement) => {
-                crate::statement_plan::create_materialized_view_plan(statement)
-            }
-            BeaconStatement::Refresh(statement) => {
-                crate::statement_plan::refresh_plan(statement)
-            }
-            BeaconStatement::DFStatement(statement) => {
-                let sql_options = if is_super_user {
-                    SQLOptions::new()
-                        .with_allow_ddl(true)
-                        .with_allow_dml(true)
-                        .with_allow_statements(true)
-                } else {
-                    SQLOptions::new()
-                        .with_allow_ddl(false)
-                        .with_allow_dml(false)
-                        .with_allow_statements(false)
-                };
-                crate::statement_plan::lower_df_statement(
-                    &self.session_ctx,
-                    *statement,
-                    &sql_options,
-                )
-                .await?
-            }
-        };
-
-        crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await
-    }
-
-    #[tracing::instrument(skip(self, beacon_plan))]
-    async fn run_plan(&self, beacon_plan: BeaconQueryPlan) -> anyhow::Result<QueryResult> {
-        let task_ctx = self.session_ctx.task_ctx();
-
-        match beacon_plan.output_file {
-            Some(output_file) => {
-                let output_file = QueryOutputFile::from(output_file);
-                let mut stream = datafusion::physical_plan::execute_stream(
-                    beacon_plan.physical_plan.clone(),
-                    task_ctx,
-                )?;
-
-                let mut total_rows: u64 = 0;
-                while let Some(maybe_batch) = stream.next().await {
-                    let batch = maybe_batch?;
-                    let num_rows_array = batch.column(0).as_primitive::<UInt64Type>();
-                    if !num_rows_array.is_empty() {
-                        let num_rows = num_rows_array.value(0);
-                        beacon_plan.metrics_tracker.add_output_rows(num_rows);
-                        total_rows += num_rows;
-                    }
-                }
-
-                tracing::info!("Query Returned {} rows", total_rows);
-                tracing::info!("Query result size in bytes: {:?}", output_file.size());
-
-                beacon_plan
-                    .metrics_tracker
-                    .add_output_bytes(output_file.size()?);
-
-                let consolidated_metrics = beacon_plan.metrics_tracker.get_consolidated_metrics();
-                self.query_metrics
-                    .lock()
-                    .insert(beacon_plan.query_id, consolidated_metrics);
-
-                Ok(QueryResult {
-                    query_output: QueryOutput::File(output_file),
-                    query_id: beacon_plan.query_id,
-                })
-            }
-            None => {
-                let stream = datafusion::physical_plan::execute_stream(
-                    beacon_plan.physical_plan.clone(),
-                    task_ctx,
-                )?;
-
-                let output_stream = ArrowOutputStream {
-                    stream,
-                    metrics: beacon_plan.metrics_tracker.clone(),
-                    all_consolidated_metrics: self.query_metrics.clone(),
-                };
-
-                Ok(QueryResult {
-                    query_output: QueryOutput::Stream(output_stream),
-                    query_id: beacon_plan.query_id,
-                })
-            }
-        }
-    }
-
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
         let mut parser = BeaconParser::new(sql)?;
         parser.parse_statement().map_err(Into::into)
-    }
-
-    fn ensure_anonymous_statement_allowed(statement: &BeaconStatement) -> anyhow::Result<()> {
-        let deny = || {
-            anyhow::anyhow!("anonymous SQL access only supports metadata and read-only SELECT queries")
-        };
-        match statement {
-            // DDL/DML carried by a DFStatement is rejected downstream by
-            // `sql_options.verify_plan`, except `ALTER TABLE`, which beacon
-            // handles before planning and so must be gated here explicitly.
-            BeaconStatement::DFStatement(df) => {
-                if let datafusion::sql::parser::Statement::Statement(sql) = df.as_ref() {
-                    if matches!(
-                        sql.as_ref(),
-                        datafusion::sql::sqlparser::ast::Statement::AlterTable(_)
-                    ) {
-                        return Err(deny());
-                    }
-                }
-                Ok(())
-            }
-            _ => Err(deny()),
-        }
     }
 }
 
@@ -578,8 +562,12 @@ mod materialized_view_tests {
         runtime: &Runtime,
         sql: &str,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
-        let stream = runtime.run_sql(sql.to_string(), true).await?;
-        let batches = stream.try_collect::<Vec<_>>().await?;
+        let batches = runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), true)
+            .await?
+            .into_record_stream()?
+            .try_collect::<Vec<_>>()
+            .await?;
         Ok(batches)
     }
 
@@ -689,5 +677,144 @@ mod materialized_view_tests {
         collect_sql(&runtime, &format!("DROP TABLE {mv}"))
             .await
             .expect("drop should succeed");
+    }
+}
+
+#[cfg(test)]
+mod client_query_tests {
+    use super::Runtime;
+    use crate::{api::QueryRequest, query_result::QueryOutput};
+    use futures::TryStreamExt;
+
+    async fn run_sql(runtime: &Runtime, sql: &str) {
+        runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), true)
+            .await
+            .expect("sql should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("sql should drain");
+    }
+
+    fn query(value: serde_json::Value) -> crate::query::Query {
+        serde_json::from_value::<QueryRequest>(value)
+            .expect("query request should deserialize")
+            .into_query()
+            .expect("query request should convert")
+    }
+
+    /// A JSON client query is lowered to a `LogicalPlan` and executed through the
+    /// same pipeline as `run_sql`, returning a streamed result.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn json_query_runs_through_unified_path() {
+        let runtime = Runtime::new().await.expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("json_q_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT, b BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1, 2), (3, 4)")).await;
+
+        let batches = runtime
+            .run_query(
+                query(serde_json::json!({ "from": table, "select": ["a", "b"] })),
+                false,
+            )
+            .await
+            .expect("json query should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("stream should drain");
+
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 2, "json query should return the two inserted rows");
+        assert_eq!(batches[0].num_columns(), 2);
+    }
+
+    /// A query with an `output` format is written to a file and returned as a
+    /// file download.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn query_with_output_format_produces_file() {
+        let runtime = Runtime::new().await.expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("out_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2)")).await;
+
+        let result = runtime
+            .run_query(
+                query(serde_json::json!({
+                    "from": table,
+                    "select": ["a"],
+                    "output": { "format": "csv" },
+                })),
+                false,
+            )
+            .await
+            .expect("query with output should run");
+
+        match result.query_output {
+            QueryOutput::File(file) => {
+                assert!(
+                    file.size().expect("file size") > 0,
+                    "output file should contain data"
+                );
+            }
+            QueryOutput::Stream(_) => panic!("expected a file output"),
+        }
+    }
+
+    /// `validate_query_plan` is the single permission gate: non-super-users may run
+    /// read-only SELECTs but not DDL/DML (standard nodes) nor any beacon extension
+    /// operation (super-user-only).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_super_user_is_gated_by_validation() {
+        let runtime = Runtime::new().await.expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("val_{suffix}");
+
+        // Super-user seeds a table.
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+
+        // Non-super-user: read-only SELECT is allowed.
+        runtime
+            .run_query(crate::query::Query::sql(format!("SELECT * FROM {table}")), false)
+            .await
+            .expect("non-super SELECT should be allowed")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("SELECT should drain");
+
+        // Non-super-user: standard DDL is rejected (by verify_plan).
+        runtime
+            .run_query(
+                crate::query::Query::sql(format!("CREATE TABLE {table}_2 (a BIGINT)")),
+                false,
+            )
+            .await
+            .err()
+            .expect("non-super CREATE TABLE should be rejected");
+
+        // Non-super-user: a beacon extension operation is rejected (super-user only).
+        let err = runtime
+            .run_query(
+                crate::query::Query::sql(format!(
+                    "CREATE MATERIALIZED VIEW {table}_mv AS SELECT 1 AS a"
+                )),
+                false,
+            )
+            .await
+            .err()
+            .expect("non-super CREATE MATERIALIZED VIEW should be rejected");
+        assert!(
+            err.to_string().contains("super-user"),
+            "unexpected error: {err}"
+        );
     }
 }

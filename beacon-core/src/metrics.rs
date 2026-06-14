@@ -1,4 +1,4 @@
-//! Metrics tracking for query execution in Beacon Planner.
+//! Metrics tracking for query execution.
 //!
 //! This module provides structures and utilities to track and consolidate
 //! metrics during query planning and execution, including input/output statistics,
@@ -124,7 +124,9 @@ impl MetricsTracker {
 
     /// Consolidate all metrics into a serializable struct.
     pub fn get_consolidated_metrics(&self) -> ConsolidatedMetrics {
-        let physical_plan = self.physical_plan.read().clone().unwrap();
+        // The physical plan is optional: callers that only track output
+        // rows/bytes (e.g. the unified query path) never register one.
+        let physical_plan = self.physical_plan.read().clone();
 
         let logical_plan_json = self
             .parsed_logical_plan
@@ -152,7 +154,10 @@ impl MetricsTracker {
             file_paths: self.file_paths.lock().clone(),
             parsed_logical_plan: logical_plan_json,
             optimized_logical_plan: optimized_logical_plan_json,
-            node_metrics: collect_metrics_json(physical_plan.as_ref()),
+            node_metrics: physical_plan
+                .as_ref()
+                .map(|plan| collect_metrics_json(plan.as_ref()))
+                .unwrap_or_default(),
             execution_time_ms: self.start_time.elapsed().as_millis() as u64,
         }
     }
@@ -161,7 +166,7 @@ impl MetricsTracker {
 /// Metrics for a node in the physical execution plan.
 ///
 /// Includes operator name, metrics, and child nodes.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct NodeMetrics {
     /// Operator name.
     pub operator: String,

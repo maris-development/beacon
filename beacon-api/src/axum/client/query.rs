@@ -38,7 +38,24 @@ pub(crate) async fn query(
     State(state): State<Arc<Runtime>>,
     Json(query_obj): Json<QueryRequest>,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
-    let query_result = state.run_client_query(query_obj).await.map_err(|err| {
+    let query = query_obj.into_query().map_err(|err| {
+        tracing::error!("Error parsing beacon query: {}", err);
+        (StatusCode::BAD_REQUEST, Json(err.to_string()))
+    })?;
+
+    // SQL over the HTTP client API is gated by `sql.enable` (JSON is always
+    // allowed); the Flight SQL transport has its own `flight_sql.enable`.
+    if matches!(query.inner, beacon_core::query::InnerQuery::Sql(_))
+        && !beacon_config::CONFIG.sql.enable
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json("SQL queries are not enabled".to_string()),
+        ));
+    }
+
+    // HTTP client queries are read-only.
+    let query_result = state.run_query(query, false).await.map_err(|err| {
         tracing::error!("Error running beacon query: {}", err);
         (StatusCode::BAD_REQUEST, Json(err.to_string()))
     })?;

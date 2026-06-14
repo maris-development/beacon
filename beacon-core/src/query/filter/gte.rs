@@ -6,56 +6,59 @@ use datafusion::{
     prelude::{lit_timestamp_nano, Expr},
 };
 
-use crate::filter::try_coerce_number_to_schema;
+use crate::query::filter::try_coerce_number_to_schema;
 
 use super::{get_column_type, parse_column_name};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[serde(untagged)]
-pub enum Eq {
+pub enum Gteq {
     Number {
         #[serde(alias = "for_query_parameter")]
         column: String,
-        eq: f64,
+        #[serde(alias = "min")]
+        gt_eq: f64,
     },
     Timestamp {
         #[serde(alias = "for_query_parameter")]
         column: String,
-        eq: NaiveDateTime,
+        #[serde(alias = "min")]
+        gt_eq: NaiveDateTime,
     },
     String {
         #[serde(alias = "for_query_parameter")]
         column: String,
-        eq: String,
+        #[serde(alias = "min")]
+        gt_eq: String,
     },
 }
 
-impl Eq {
+impl Gteq {
     pub fn parse(
         &self,
         _session_state: &SessionState,
         schema: &Schema,
     ) -> datafusion::error::Result<Expr> {
         match self {
-            Eq::Number { eq, column } => {
+            Gteq::Number { gt_eq, column } => {
                 let column_type = get_column_type(schema, &column);
                 let column = parse_column_name(&column);
 
                 match column_type {
                     Some(dtype) => {
-                        let coerced_lit = try_coerce_number_to_schema(*eq, &dtype);
-                        Ok(column.eq(coerced_lit))
+                        let coerced_lit = try_coerce_number_to_schema(*gt_eq, &dtype);
+                        Ok(column.gt_eq(coerced_lit))
                     }
-                    None => Ok(column.eq(lit(*eq))),
+                    None => Ok(column.gt_eq(lit(*gt_eq))),
                 }
             }
-            Eq::Timestamp { eq, column } => {
+            Gteq::Timestamp { gt_eq, column } => {
                 let column = parse_column_name(&column);
-                Ok(column.eq(lit_timestamp_nano(eq.timestamp_nanos())))
+                Ok(column.gt_eq(lit_timestamp_nano(gt_eq.timestamp_nanos())))
             }
-            Eq::String { eq, column } => {
+            Gteq::String { gt_eq, column } => {
                 let column = parse_column_name(&column);
-                Ok(column.eq(lit(eq)))
+                Ok(column.gt_eq(lit(gt_eq)))
             }
         }
     }

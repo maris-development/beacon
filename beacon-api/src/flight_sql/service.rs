@@ -82,8 +82,10 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightInfo, Status> {
         let stream = self
             .runtime
-            .run_sql(sql.clone(), auth.is_super_user)
+            .run_query(beacon_core::query::Query::sql(sql.clone()), auth.is_super_user)
             .await
+            .map_err(to_internal_status)?
+            .into_record_stream()
             .map_err(to_internal_status)?;
         let schema = stream.schema();
         // Statement tickets are one-shot: the SQL is stored once and consumed by `do_get_statement`.
@@ -107,8 +109,10 @@ impl BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_query(beacon_core::query::Query::sql(sql), auth.is_super_user)
             .await
+            .map_err(to_internal_status)?
+            .into_record_stream()
             .map_err(to_internal_status)?;
 
         build_flight_info(stream.schema().as_ref(), &descriptor, &query.as_any())
@@ -122,8 +126,10 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightDataStream, Status> {
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_query(beacon_core::query::Query::sql(sql), auth.is_super_user)
             .await
+            .map_err(to_internal_status)?
+            .into_record_stream()
             .map_err(to_internal_status)?;
         let schema = stream.schema();
 
@@ -363,8 +369,10 @@ impl FlightSqlService for BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
-            .run_sql(sql, auth.is_super_user)
+            .run_query(beacon_core::query::Query::sql(sql), auth.is_super_user)
             .await
+            .map_err(to_internal_status)?
+            .into_record_stream()
             .map_err(to_internal_status)?;
 
         // We consume the stream to ensure the update is fully executed, but ignore any output batches.
@@ -395,9 +403,11 @@ impl FlightSqlService for BeaconFlightSqlService {
         } else {
             let stream = self
                 .runtime
-                .run_sql(query.query.clone(), auth.is_super_user)
-                .await
-                .map_err(to_internal_status)?;
+                .run_query(beacon_core::query::Query::sql(query.query.clone()), auth.is_super_user)
+            .await
+            .map_err(to_internal_status)?
+            .into_record_stream()
+            .map_err(to_internal_status)?;
             encode_schema(stream.schema().as_ref())?
         };
 

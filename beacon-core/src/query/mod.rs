@@ -1,25 +1,21 @@
-use std::{path::Path, sync::Arc};
-
 use datafusion::{
-    arrow::datatypes::DataType,
     common::Column,
-    datasource::{listing::ListingTableUrl, provider_as_source, DefaultTableSource},
     execution::SessionState,
-    logical_expr::{expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, SortExpr, TableSource},
-    prelude::{col, lit, lit_timestamp_nano, try_cast, CsvReadOptions, Expr, SessionContext},
+    logical_expr::SortExpr,
+    prelude::{col, lit, Expr},
     scalar::ScalarValue,
 };
 use filter::Filter;
 use utoipa::ToSchema;
 
-use crate::output::Output;
+use crate::query::output::Output;
 
+pub mod compiler;
 pub mod filter;
 pub mod from;
 pub mod output;
-pub mod parser;
-pub mod plan;
-pub mod util;
+
+pub use compiler::compile_json_query;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct Query {
@@ -27,6 +23,16 @@ pub struct Query {
     pub inner: InnerQuery,
     #[schema(value_type = Object)]
     pub output: Option<Output>,
+}
+
+impl Query {
+    /// A SQL query with no output formatting (the form used by the SQL transports).
+    pub fn sql(sql: String) -> Self {
+        Self {
+            inner: InnerQuery::Sql(sql),
+            output: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -47,7 +53,7 @@ pub struct QueryBody {
     #[schema(ignore)]
     filters: Option<Vec<Filter>>,
     #[serde(default)]
-    from: Option<crate::from::From>,
+    from: Option<crate::query::from::From>,
     sort_by: Option<Vec<Sort>>,
     distinct: Option<Distinct>,
     offset: Option<usize>,

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_planner::{metrics::ConsolidatedMetrics, prelude::MetricsTracker};
+use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use datafusion::execution::SendableRecordBatchStream;
 use futures::Stream;
 use parking_lot::Mutex;
@@ -10,6 +10,19 @@ use tempfile::NamedTempFile;
 pub struct QueryResult {
     pub query_output: QueryOutput,
     pub query_id: uuid::Uuid,
+}
+
+impl QueryResult {
+    /// Extract the (metrics-tracked) record-batch stream, erroring if the result
+    /// is file-backed. Used by transports that only stream results (e.g. Flight SQL).
+    pub fn into_record_stream(self) -> anyhow::Result<ArrowOutputStream> {
+        match self.query_output {
+            QueryOutput::Stream(stream) => Ok(stream),
+            QueryOutput::File(_) => {
+                anyhow::bail!("expected a streamed query result, got a file output")
+            }
+        }
+    }
 }
 
 pub enum QueryOutput {
@@ -54,16 +67,16 @@ impl QueryOutputFile {
     }
 }
 
-impl From<beacon_query::output::QueryOutputFile> for QueryOutputFile {
-    fn from(value: beacon_query::output::QueryOutputFile) -> Self {
+impl From<crate::query::output::QueryOutputFile> for QueryOutputFile {
+    fn from(value: crate::query::output::QueryOutputFile) -> Self {
         match value {
-            beacon_query::output::QueryOutputFile::Csv(file) => Self::Csv(file),
-            beacon_query::output::QueryOutputFile::Ipc(file) => Self::Ipc(file),
-            beacon_query::output::QueryOutputFile::Json(file) => Self::Json(file),
-            beacon_query::output::QueryOutputFile::Parquet(file) => Self::Parquet(file),
-            beacon_query::output::QueryOutputFile::NetCDF(file) => Self::NetCDF(file),
-            beacon_query::output::QueryOutputFile::Odv(file) => Self::Odv(file),
-            beacon_query::output::QueryOutputFile::GeoParquet(file) => Self::GeoParquet(file),
+            crate::query::output::QueryOutputFile::Csv(file) => Self::Csv(file),
+            crate::query::output::QueryOutputFile::Ipc(file) => Self::Ipc(file),
+            crate::query::output::QueryOutputFile::Json(file) => Self::Json(file),
+            crate::query::output::QueryOutputFile::Parquet(file) => Self::Parquet(file),
+            crate::query::output::QueryOutputFile::NetCDF(file) => Self::NetCDF(file),
+            crate::query::output::QueryOutputFile::Odv(file) => Self::Odv(file),
+            crate::query::output::QueryOutputFile::GeoParquet(file) => Self::GeoParquet(file),
         }
     }
 }

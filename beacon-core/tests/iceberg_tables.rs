@@ -8,11 +8,12 @@ use futures::TryStreamExt;
 
 /// Run SQL as a super-user (DDL/DML allowed) and collect the result batches.
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
-    let stream = runtime
-        .run_sql(sql.to_string(), true)
+    runtime
+        .run_query(beacon_core::query::Query::sql(sql.to_string()), true)
         .await
-        .unwrap_or_else(|error| panic!("SQL failed to plan/execute: {sql}\n{error}"));
-    stream
+        .unwrap_or_else(|error| panic!("SQL failed to plan/execute: {sql}\n{error}"))
+        .into_record_stream()
+        .unwrap_or_else(|error| panic!("expected a streamed result: {sql}\n{error}"))
         .try_collect()
         .await
         .unwrap_or_else(|error| panic!("SQL stream failed: {sql}\n{error}"))
@@ -47,8 +48,8 @@ async fn iceberg_create_insert_select_ctas_drop() {
     // warehouse, and clean any leftovers from a previous aborted run.
     let table = format!("ice_e2e_{}", std::process::id());
     let copy = format!("{table}_copy");
-    let _ = runtime.run_sql(format!("DROP TABLE IF EXISTS {table}"), true).await;
-    let _ = runtime.run_sql(format!("DROP TABLE IF EXISTS {copy}"), true).await;
+    let _ = runtime.run_query(beacon_core::query::Query::sql(format!("DROP TABLE IF EXISTS {table}")), true).await;
+    let _ = runtime.run_query(beacon_core::query::Query::sql(format!("DROP TABLE IF EXISTS {copy}")), true).await;
 
     // CREATE + INSERT + SELECT.
     run(&runtime, &format!("CREATE TABLE {table} (id BIGINT, name VARCHAR)")).await;
@@ -115,7 +116,7 @@ async fn iceberg_create_insert_select_ctas_drop() {
     assert_eq!(names, vec!["id", "age"], "dropped column should be gone");
     // A narrowing type change is rejected.
     let narrow = runtime
-        .run_sql(format!("ALTER TABLE {copy} ALTER COLUMN age TYPE INT"), true)
+        .run_query(beacon_core::query::Query::sql(format!("ALTER TABLE {copy} ALTER COLUMN age TYPE INT")), true)
         .await;
     assert!(narrow.is_err(), "narrowing type change should be rejected");
 
@@ -139,21 +140,21 @@ async fn iceberg_create_insert_select_ctas_drop() {
     let view_name = format!("{table}_view");
     run(&runtime, &format!("CREATE VIEW {view_name} AS SELECT 1 AS id")).await;
     let delete_view = runtime
-        .run_sql(format!("DELETE FROM {view_name} WHERE id = 1"), true)
+        .run_query(beacon_core::query::Query::sql(format!("DELETE FROM {view_name} WHERE id = 1")), true)
         .await;
     assert!(
         delete_view.is_err(),
         "DELETE on a non-Iceberg table should error"
     );
     let update_view = runtime
-        .run_sql(format!("UPDATE {view_name} SET id = 2 WHERE id = 1"), true)
+        .run_query(beacon_core::query::Query::sql(format!("UPDATE {view_name} SET id = 2 WHERE id = 1")), true)
         .await;
     assert!(
         update_view.is_err(),
         "UPDATE on a non-Iceberg table should error"
     );
     let alter_view = runtime
-        .run_sql(format!("ALTER TABLE {view_name} ADD COLUMN x INT"), true)
+        .run_query(beacon_core::query::Query::sql(format!("ALTER TABLE {view_name} ADD COLUMN x INT")), true)
         .await;
     assert!(
         alter_view.is_err(),
@@ -167,7 +168,7 @@ async fn iceberg_create_insert_select_ctas_drop() {
 
     // Dropped tables should no longer be queryable.
     let err = runtime
-        .run_sql(format!("SELECT count(*) FROM {table}"), true)
+        .run_query(beacon_core::query::Query::sql(format!("SELECT count(*) FROM {table}")), true)
         .await;
     assert!(err.is_err(), "querying a dropped table should error");
 }

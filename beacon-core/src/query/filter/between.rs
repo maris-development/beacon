@@ -1,6 +1,6 @@
 use datafusion::prelude::{lit, lit_timestamp_nano};
 
-use crate::filter::{get_column_type, parse_column_name};
+use crate::query::filter::{get_column_type, parse_column_name};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[serde(untagged)]
@@ -49,9 +49,9 @@ impl Between {
                 match column_type {
                     Some(dtype) => {
                         let coerced_lit =
-                            crate::filter::try_coerce_number_to_schema(*gt_eq, &dtype);
+                            crate::query::filter::try_coerce_number_to_schema(*gt_eq, &dtype);
                         let coerced_lit2 =
-                            crate::filter::try_coerce_number_to_schema(*lt_eq, &dtype);
+                            crate::query::filter::try_coerce_number_to_schema(*lt_eq, &dtype);
                         Ok(column.between(coerced_lit, coerced_lit2))
                     }
                     None => Ok(column.between(lit(*gt_eq), lit(*lt_eq))),
