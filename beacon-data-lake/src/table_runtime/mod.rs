@@ -1,4 +1,3 @@
-pub mod lifecycle;
 pub mod loading;
 pub mod ordering;
 pub mod provider_factory;

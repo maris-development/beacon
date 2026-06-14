@@ -1,23 +1,24 @@
 use std::{any::Any, collections::HashMap, sync::Arc};
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Schema, SchemaRef};
+use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::{
-    catalog::{SchemaProvider, TableProvider}, error::DataFusionError,
-    execution::object_store::ObjectStoreUrl, prelude::SessionContext,
+    catalog::{SchemaProvider, TableProvider},
+    datasource::empty::EmptyTable,
+    error::DataFusionError,
+    execution::object_store::ObjectStoreUrl,
+    prelude::SessionContext,
 };
-use object_store::{ObjectStore, path::PathPart};
-
-use crate::table::{Table, TableFormat, empty::EmptyTable, error::TableError};
+use object_store::ObjectStore;
 
 use super::{
-    lifecycle::TableLifecycleService, loading, ordering,
-    provider_factory::TableProviderFactory,
+    loading, ordering, provider_factory::TableProviderFactory,
     schema_persistence::SchemaPersistenceService,
 };
 
 #[derive(Clone)]
 struct TableRegistryEntry {
-    table: Option<TableFormat>,
+    table: Option<Arc<dyn TableDefinition>>,
     provider: Arc<dyn TableProvider>,
 }
 
@@ -89,14 +90,6 @@ impl TableManager {
         }
     }
 
-    fn table_lifecycle_service(&self) -> TableLifecycleService {
-        TableLifecycleService::new(
-            self.session_context.clone(),
-            self.data_directory_store_url.clone(),
-            self.table_directory_store_url.clone(),
-        )
-    }
-
     fn schema_persistence_service(&self) -> SchemaPersistenceService {
         SchemaPersistenceService::new(
             self.session_context.clone(),
@@ -104,19 +97,14 @@ impl TableManager {
         )
     }
 
-    async fn register_tables(&self, tables_to_register: Vec<TableFormat>) {
+    async fn register_tables(&self, tables_to_register: Vec<Arc<dyn TableDefinition>>) {
         let provider_factory = TableProviderFactory::new(
             self.session_context.clone(),
             self.data_directory_store_url.clone(),
-            self.table_directory_store_url.clone(),
         );
 
         for table in tables_to_register {
             let table_name = table.table_name().to_string();
-            let table_kind = match &table {
-                TableFormat::Legacy(_) => "legacy",
-                TableFormat::DefinitionBased(_) => "definition-based",
-            };
 
             match provider_factory.build(&table).await {
                 Ok((name, provider)) => {
@@ -127,12 +115,11 @@ impl TableManager {
                             provider,
                         },
                     );
-                    tracing::info!("Registered {} table '{}'", table_kind, name);
+                    tracing::info!("Registered table '{}'", name);
                 }
                 Err(error) => {
                     tracing::error!(
-                        "Failed to build provider for {} table '{}': {}. Skipping registration of this table.",
-                        table_kind,
+                        "Failed to build provider for table '{}': {}. Skipping registration of this table.",
                         table_name,
                         error
                     );
@@ -144,7 +131,7 @@ impl TableManager {
     async fn init_tables_impl(
         tables_object_store_url: ObjectStoreUrl,
         session_context: Arc<SessionContext>,
-    ) -> anyhow::Result<Vec<TableFormat>> {
+    ) -> anyhow::Result<Vec<Arc<dyn TableDefinition>>> {
         tracing::info!("Initializing tables from object store");
         let tables_object_store = session_context
             .runtime_env()
@@ -155,35 +142,45 @@ impl TableManager {
         Ok(discovered_tables)
     }
 
-    async fn load_tables_from_object_store(tables_object_store: Arc<dyn ObjectStore>) -> Vec<TableFormat> {
+    async fn load_tables_from_object_store(
+        tables_object_store: Arc<dyn ObjectStore>,
+    ) -> Vec<Arc<dyn TableDefinition>> {
         loading::load_tables_from_object_store(tables_object_store).await
     }
 
-    async fn order_tables(tables: &HashMap<String, TableFormat>) -> Vec<TableFormat> {
+    async fn order_tables(
+        tables: &HashMap<String, Arc<dyn TableDefinition>>,
+    ) -> Vec<Arc<dyn TableDefinition>> {
         ordering::order_tables(tables).await
     }
 
-    async fn ensure_default_table(&self) -> anyhow::Result<()> {
-        if self.table_exist("default") {
-            return Ok(());
+    /// Registers the in-memory `default` table backed by an empty provider.
+    ///
+    /// The default table is not persisted; it is recreated on every startup so
+    /// queries against the configured default table always resolve.
+    fn ensure_default_table(&self) {
+        let mut registry = self.registry.lock();
+        if registry.contains_key("default") {
+            return;
         }
 
-        let table = Table {
-            table_directory: vec![],
-            table_name: "default".to_string(),
-            table_type: crate::table::_type::TableType::Empty(EmptyTable::new()),
-            description: Some("Default Table.".to_string()),
-        };
-
-        self.create_table(table)
-            .await
-            .map_err(|error| anyhow::anyhow!("Failed to create default table: {}", error))
+        let provider: Arc<dyn TableProvider> =
+            Arc::new(EmptyTable::new(Arc::new(Schema::empty())));
+        registry.insert(
+            "default".to_string(),
+            TableRegistryEntry {
+                table: None,
+                provider,
+            },
+        );
     }
 
     pub async fn init_tables(&self) -> anyhow::Result<()> {
-        let table_formats =
-            Self::init_tables_impl(self.table_directory_store_url.clone(), self.session_context.clone())
-                .await?;
+        let table_formats = Self::init_tables_impl(
+            self.table_directory_store_url.clone(),
+            self.session_context.clone(),
+        )
+        .await?;
 
         let table_map = table_formats
             .into_iter()
@@ -194,7 +191,8 @@ impl TableManager {
         self.registry.lock().clear();
         self.register_tables(ordered_table_formats).await;
 
-        self.ensure_default_table().await
+        self.ensure_default_table();
+        Ok(())
     }
 
     pub fn table_exist(&self, name: &str) -> bool {
@@ -206,7 +204,10 @@ impl TableManager {
     }
 
     pub fn table_provider(&self, name: &str) -> Option<Arc<dyn TableProvider>> {
-        self.registry.lock().get(name).map(|entry| entry.provider.clone())
+        self.registry
+            .lock()
+            .get(name)
+            .map(|entry| entry.provider.clone())
     }
 
     pub fn list_table_schema(&self, table_name: &str) -> Option<SchemaRef> {
@@ -216,66 +217,11 @@ impl TableManager {
             .map(|entry| entry.provider.schema())
     }
 
-    pub fn list_table(&self, table_name: &str) -> Option<TableFormat> {
+    pub fn list_table(&self, table_name: &str) -> Option<Arc<dyn TableDefinition>> {
         self.registry
             .lock()
             .get(table_name)
             .and_then(|entry| entry.table.clone())
-    }
-
-    pub async fn update_table(&self, table: Table) -> Result<(), TableError> {
-        self.deregister_table(&table.table_name)?;
-        self.create_table(table).await
-    }
-
-    pub async fn create_table(&self, mut table: Table) -> Result<(), TableError> {
-        if self.registry.lock().contains_key(&table.table_name) {
-            return Err(TableError::TableAlreadyExists(table.table_name));
-        }
-
-        let table_provider = table
-            .table_provider(
-                self.session_context.clone(),
-                self.data_directory_store_url.clone(),
-                self.table_directory_store_url.clone(),
-            )
-            .await?;
-
-        let table_object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.table_directory_store_url)
-            .unwrap();
-
-        let table_directory: Vec<PathPart<'static>> =
-            vec![PathPart::from(table.table_name.clone())];
-        table.save(table_object_store, table_directory).await;
-
-        self.registry.lock().insert(
-            table.table_name.clone(),
-            TableRegistryEntry {
-                table: Some(TableFormat::Legacy(table)),
-                provider: table_provider,
-            },
-        );
-
-        Ok(())
-    }
-
-    pub async fn apply_operation(
-        &self,
-        table_name: &str,
-        op: serde_json::Value,
-    ) -> anyhow::Result<()> {
-        let table = self
-            .registry
-            .lock()
-            .get(table_name)
-            .and_then(|entry| entry.table.clone())
-            .ok_or(anyhow::anyhow!("Table not found: {}", table_name))?;
-
-        let lifecycle = self.table_lifecycle_service();
-        lifecycle.apply_operation(&table, op).await
     }
 
     pub fn register_table(

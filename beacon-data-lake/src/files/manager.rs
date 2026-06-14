@@ -2,16 +2,15 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::listing_url::parse_listing_table_url;
+use beacon_datafusion_ext::file_collection::FileCollection;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
-use bytes::Bytes;
-use object_store::ObjectStoreExt;
 use datafusion::{
     catalog::TableProvider, datasource::listing::ListingTableUrl, error::DataFusionError,
     execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
-use futures::{StreamExt, stream::BoxStream};
+use futures::StreamExt;
 
-use crate::files::{collection::FileCollection, temp_output_file::TempOutputFile};
+use crate::files::temp_output_file::TempOutputFile;
 
 pub struct FileManager {
     session_context: Arc<SessionContext>,
@@ -138,87 +137,5 @@ impl FileManager {
             FileCollection::new(&session_state, file_format, vec![listing_url]).await?;
 
         Ok(file_collection.schema())
-    }
-
-    pub async fn upload_file<S>(
-        &self,
-        file_path: &str,
-        mut stream: S,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-    where
-        S: futures::Stream<Item = Result<Bytes, Box<dyn std::error::Error + Send + Sync>>> + Unpin,
-    {
-        let object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.data_directory_store_url)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let upload_path = object_store::path::Path::from(file_path);
-        let mut writer = object_store
-            .put_multipart(&upload_path)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        while let Some(chunk) = stream.next().await {
-            let bytes = chunk?;
-            writer
-                .put_part(bytes.into())
-                .await
-                .map_err(|e: object_store::Error| Box::new(e))?;
-        }
-
-        writer
-            .complete()
-            .await
-            .map_err(|e: object_store::Error| Box::new(e))?;
-
-        Ok(())
-    }
-
-    pub async fn download_file(
-        &self,
-        file_path: &str,
-    ) -> Result<
-        BoxStream<'static, Result<Bytes, Box<dyn std::error::Error + Send + Sync>>>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
-        let object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.data_directory_store_url)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let file_path = object_store::path::Path::from(file_path);
-        let get_result = object_store
-            .get(&file_path)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let stream = get_result.into_stream();
-        let file_stream = Box::pin(stream.map(|result| {
-            result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-        }));
-
-        Ok(file_stream)
-    }
-
-    pub async fn delete_file(
-        &self,
-        file_path: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.data_directory_store_url)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        let file_path = object_store::path::Path::from(file_path);
-        object_store
-            .delete(&file_path)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-        Ok(())
     }
 }

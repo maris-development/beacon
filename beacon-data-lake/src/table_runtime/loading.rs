@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
+use beacon_datafusion_ext::table_ext::TableDefinition;
 use futures::StreamExt;
 use object_store::ObjectStore;
 
-use crate::table::TableFormat;
-
 pub async fn load_tables_from_object_store(
     tables_object_store: Arc<dyn ObjectStore>,
-) -> Vec<TableFormat> {
+) -> Vec<Arc<dyn TableDefinition>> {
     let mut discovered_tables = Vec::new();
     let mut entry_stream = tables_object_store.list(None);
 
@@ -31,7 +30,7 @@ pub async fn load_tables_from_object_store(
         .collect();
 
     for table_json in table_json_paths {
-        match TableFormat::try_open(tables_object_store.clone(), table_json).await {
+        match crate::table::try_open(tables_object_store.clone(), table_json).await {
             Ok(table) => discovered_tables.push(table),
             Err(error) => tracing::error!("Failed to load table from object store: {}", error),
         }
@@ -43,15 +42,15 @@ pub async fn load_tables_from_object_store(
 #[cfg(test)]
 mod tests {
     use super::load_tables_from_object_store;
-    use crate::table::{_type::TableType, Table, TableFormat, empty::EmptyTable};
+    use beacon_datafusion_ext::table_ext::{TableDefinition, ViewTableDefinition};
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+    use std::sync::Arc;
 
-    fn legacy_table_format(name: &str) -> TableFormat {
-        TableFormat::Legacy(Table {
-            table_directory: vec![],
-            table_name: name.to_string(),
-            table_type: TableType::Empty(EmptyTable::new()),
-            description: Some("loading test table".to_string()),
+    fn view_definition(name: &str) -> Arc<dyn TableDefinition> {
+        Arc::new(ViewTableDefinition {
+            name: name.to_string(),
+            definition: "SELECT 1 AS x".to_string(),
+            dependencies: vec![],
         })
     }
 
@@ -59,8 +58,8 @@ mod tests {
     async fn load_tables_only_reads_table_json_and_skips_invalid_entries() {
         let store = InMemory::new();
 
-        let valid = serde_json::to_vec(&legacy_table_format("ok_table"))
-            .expect("valid test table format should serialize");
+        let valid = serde_json::to_vec(&view_definition("ok_table"))
+            .expect("valid test table definition should serialize");
         store
             .put(&Path::from("ok_table/table.json"), valid.into())
             .await
@@ -82,7 +81,7 @@ mod tests {
             .await
             .expect("invalid table.json fixture should be written");
 
-        let loaded = load_tables_from_object_store(std::sync::Arc::new(store)).await;
+        let loaded = load_tables_from_object_store(Arc::new(store)).await;
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].table_name(), "ok_table");

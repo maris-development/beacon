@@ -6,6 +6,7 @@ use std::{
 
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
+use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_formats::file_formats;
 use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
@@ -15,18 +16,10 @@ use datafusion::{
     execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
-use futures::stream::BoxStream;
 use url::Url;
 
-use crate::{
-    files::temp_output_file::TempOutputFile,
-    table::{Table, TableFormat, error::TableError},
-};
+use crate::files::temp_output_file::TempOutputFile;
 
-#[cfg(test)]
-use crate::table::_type::TableType;
-#[cfg(test)]
-use crate::table::empty::EmptyTable;
 #[cfg(test)]
 use object_store::path::PathPart;
 #[cfg(test)]
@@ -35,7 +28,6 @@ use std::collections::HashMap;
 pub mod files;
 pub mod table;
 mod table_runtime;
-pub mod util;
 
 pub use files::manager::FileManager;
 pub use table_runtime::table_manager::TableManager;
@@ -93,30 +85,9 @@ impl DataLake {
     }
 
     #[cfg(test)]
-    fn merged_table_references(
-        tables: &HashMap<String, Table>,
-        table_name: &str,
-    ) -> Option<String> {
-        for (candidate_name, candidate) in tables {
-            if candidate_name == table_name {
-                continue;
-            }
-
-            if let TableType::Merged(merged_table) = &candidate.table_type
-                && merged_table
-                    .table_names
-                    .iter()
-                    .any(|name| name == table_name)
-            {
-                return Some(candidate_name.clone());
-            }
-        }
-
-        None
-    }
-
-    #[cfg(test)]
-    async fn order_tables(tables: &HashMap<String, TableFormat>) -> Vec<TableFormat> {
+    async fn order_tables(
+        tables: &HashMap<String, Arc<dyn TableDefinition>>,
+    ) -> Vec<Arc<dyn TableDefinition>> {
         table_runtime::ordering::order_tables(tables).await
     }
 
@@ -233,53 +204,8 @@ impl DataLake {
         self.table_manager.list_table_schema(table_name)
     }
 
-    pub fn list_table(&self, table_name: &str) -> Option<TableFormat> {
+    pub fn list_table(&self, table_name: &str) -> Option<Arc<dyn TableDefinition>> {
         self.table_manager.list_table(table_name)
-    }
-
-    pub async fn update_table(&self, table: Table) -> Result<(), TableError> {
-        self.table_manager.update_table(table).await
-    }
-
-    pub async fn create_table(&self, table: Table) -> Result<(), TableError> {
-        self.table_manager.create_table(table).await
-    }
-
-    pub async fn apply_operation(
-        &self,
-        table_name: &str,
-        op: serde_json::Value,
-    ) -> anyhow::Result<()> {
-        self.table_manager.apply_operation(table_name, op).await
-    }
-
-    pub async fn upload_file<S>(
-        &self,
-        file_path: &str,
-        stream: S,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-    where
-        S: futures::Stream<Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>
-            + Unpin,
-    {
-        self.file_manager.upload_file(file_path, stream).await
-    }
-
-    pub async fn download_file(
-        &self,
-        file_path: &str,
-    ) -> Result<
-        BoxStream<'static, Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
-        self.file_manager.download_file(file_path).await
-    }
-
-    pub async fn delete_file(
-        &self,
-        file_path: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.file_manager.delete_file(file_path).await
     }
 }
 
@@ -331,22 +257,7 @@ impl SchemaProvider for DataLake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::table::{_type::TableType, merged::MergedTable};
     use beacon_datafusion_ext::table_ext::{ExternalTableDefinition, ViewTableDefinition};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn test_table(name: &str, table_type: TableType) -> Table {
-        Table {
-            table_directory: vec![],
-            table_name: name.to_string(),
-            table_type,
-            description: None,
-        }
-    }
-
-    fn test_legacy_table_format(name: &str, table_type: TableType) -> TableFormat {
-        TableFormat::Legacy(test_table(name, table_type))
-    }
 
     #[test]
     fn table_directory_from_location_extracts_parent_directory() {
@@ -369,81 +280,9 @@ mod tests {
         assert!(DataLake::table_directory_from_location(&location).is_none());
     }
 
-    #[test]
-    fn merged_table_references_detects_dependency() {
-        let mut tables = HashMap::new();
-
-        tables.insert(
-            "base_table".to_string(),
-            test_table("base_table", TableType::Empty(EmptyTable::new())),
-        );
-
-        tables.insert(
-            "merged_table".to_string(),
-            test_table(
-                "merged_table",
-                TableType::Merged(MergedTable {
-                    table_names: vec!["base_table".to_string()],
-                }),
-            ),
-        );
-
-        let dependent = DataLake::merged_table_references(&tables, "base_table");
-        assert_eq!(dependent, Some("merged_table".to_string()));
-    }
-
-    #[tokio::test]
-    async fn ordered_table_names_for_refresh_puts_merged_last() {
-        let mut tables = HashMap::new();
-
-        tables.insert(
-            "base_a".to_string(),
-            test_legacy_table_format("base_a", TableType::Empty(EmptyTable::new())),
-        );
-
-        tables.insert(
-            "base_b".to_string(),
-            test_legacy_table_format("base_b", TableType::Empty(EmptyTable::new())),
-        );
-
-        tables.insert(
-            "merged_x".to_string(),
-            test_legacy_table_format(
-                "merged_x",
-                TableType::Merged(MergedTable {
-                    table_names: vec!["base_a".to_string(), "base_b".to_string()],
-                }),
-            ),
-        );
-
-        let order = DataLake::order_tables(&tables).await;
-
-        let merged_positions = order
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, table)| (table.table_name() == "merged_x").then_some(idx))
-            .collect::<Vec<_>>();
-        let base_positions = order
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, table)| {
-                ((table.table_name() == "base_a") || (table.table_name() == "base_b"))
-                    .then_some(idx)
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(merged_positions.len(), 1);
-        assert_eq!(base_positions.len(), 2);
-        assert!(
-            base_positions
-                .into_iter()
-                .all(|idx| idx < merged_positions[0])
-        );
-    }
-
     #[tokio::test]
     async fn ordered_definition_views_follow_table_scan_dependencies() {
-        let mut tables = HashMap::new();
+        let mut tables: HashMap<String, Arc<dyn TableDefinition>> = HashMap::new();
 
         let base = ExternalTableDefinition {
             name: "base_table".to_string(),
@@ -468,23 +307,14 @@ mod tests {
             dependencies: vec!["view_a".to_string()],
         };
 
-        tables.insert(
-            base.name.clone(),
-            TableFormat::DefinitionBased(Arc::new(base)),
-        );
-        tables.insert(
-            view_a.name.clone(),
-            TableFormat::DefinitionBased(Arc::new(view_a)),
-        );
-        tables.insert(
-            view_b.name.clone(),
-            TableFormat::DefinitionBased(Arc::new(view_b)),
-        );
+        tables.insert(base.name.clone(), Arc::new(base));
+        tables.insert(view_a.name.clone(), Arc::new(view_a));
+        tables.insert(view_b.name.clone(), Arc::new(view_b));
 
         let order = DataLake::order_tables(&tables).await;
         let ordered_names = order
             .iter()
-            .map(TableFormat::table_name)
+            .map(|table| table.table_name())
             .collect::<Vec<_>>();
 
         let base_pos = ordered_names
@@ -502,101 +332,5 @@ mod tests {
 
         assert!(base_pos < view_a_pos);
         assert!(view_a_pos < view_b_pos);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn init_tables_registers_base_tables_before_merged_tables() {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-
-        let base_a_name = format!("init-order-base-a-{suffix}");
-        let base_b_name = format!("init-order-base-b-{suffix}");
-        let merged_name = format!("init-order-merged-{suffix}");
-
-        let creator_ctx = Arc::new(SessionContext::new());
-        let creator = Arc::new(DataLake::new(creator_ctx.clone()).await);
-        creator_ctx
-            .catalog("datafusion")
-            .expect("default catalog should exist")
-            .register_schema("public", creator.clone())
-            .expect("schema registration should succeed");
-
-        creator
-            .create_table(test_table(
-                &base_a_name,
-                TableType::Empty(EmptyTable::new()),
-            ))
-            .await
-            .expect("base table A should be created");
-        creator
-            .create_table(test_table(
-                &base_b_name,
-                TableType::Empty(EmptyTable::new()),
-            ))
-            .await
-            .expect("base table B should be created");
-        creator
-            .create_table(test_table(
-                &merged_name,
-                TableType::Merged(MergedTable {
-                    table_names: vec![base_a_name.clone(), base_b_name.clone()],
-                }),
-            ))
-            .await
-            .expect("merged table should be created");
-
-        let reload_ctx = Arc::new(SessionContext::new());
-        let reloaded = Arc::new(DataLake::new(reload_ctx.clone()).await);
-        reload_ctx
-            .catalog("datafusion")
-            .expect("default catalog should exist")
-            .register_schema("public", reloaded.clone())
-            .expect("schema registration should succeed");
-
-        reloaded
-            .init_tables()
-            .await
-            .expect("table initialization should succeed");
-
-        assert!(reloaded.table_exist(&base_a_name));
-        assert!(reloaded.table_exist(&base_b_name));
-        assert!(reloaded.table_exist(&merged_name));
-
-        let merged_table = reloaded
-            .list_table(&merged_name)
-            .expect("merged table metadata should be present");
-        match merged_table {
-            TableFormat::Legacy(table) => match table.table_type {
-                TableType::Merged(merged) => {
-                    assert_eq!(
-                        merged.table_names,
-                        vec![base_a_name.clone(), base_b_name.clone()]
-                    );
-                }
-                other => panic!("expected merged legacy table, got {other:?}"),
-            },
-            other => panic!("expected legacy table format, got {other:?}"),
-        }
-
-        let merged_provider = reload_ctx
-            .table_provider(&merged_name)
-            .await
-            .expect("merged provider lookup should succeed");
-        assert_eq!(
-            merged_provider.table_type(),
-            datafusion::datasource::TableType::Base
-        );
-
-        reloaded
-            .deregister_table(&merged_name)
-            .expect("merged table cleanup should succeed");
-        reloaded
-            .deregister_table(&base_a_name)
-            .expect("base table A cleanup should succeed");
-        reloaded
-            .deregister_table(&base_b_name)
-            .expect("base table B cleanup should succeed");
     }
 }

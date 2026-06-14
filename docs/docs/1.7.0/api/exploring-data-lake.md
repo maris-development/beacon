@@ -112,9 +112,7 @@ GET /api/table-functions
 
 See the [Function Reference](../sql/function-reference.md) for descriptions and signatures.
 
-## Admin (file management)
-
-File upload, download, and deletion endpoints are available under `/api/admin/*` and are protected by HTTP Basic Auth.
+## Table lifecycle
 
 **Table lifecycle is SQL-only.** Create, replace, or remove tables by sending SQL DDL to the query endpoint:
 
@@ -132,4 +130,4 @@ Content-Type: application/json
 { "sql": "DROP TABLE argo" }
 ```
 
-Browse `/swagger` for the full admin request and response shapes.
+Browse `/swagger` for the full request and response shapes.
