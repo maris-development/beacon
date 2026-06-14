@@ -39,6 +39,12 @@ pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Route
     let swagger_url = format!("{base_path}/swagger");
     let openapi_url = format!("{base_path}/openapi.json");
 
+    // Redirect targets must be absolute and include the base path. Relative
+    // targets (e.g. "./swagger") resolve against the incoming request URI, which
+    // breaks once the router is nested under a non-empty base path.
+    let swagger_redirect: &'static str = format!("{base_path}/swagger").leak();
+    let scalar_redirect: &'static str = format!("{base_path}/scalar/").leak();
+
     let docs = if base_path.is_empty() {
         api_docs_client
     } else {
@@ -48,12 +54,18 @@ pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Route
     let router = client_router
         .merge(admin_router)
         .merge(Scalar::with_url("/scalar/", docs.clone()))
-        .route("/scalar", get(|| async { Redirect::to("./scalar/") }))
+        .route(
+            "/scalar",
+            get(move || async move { Redirect::to(scalar_redirect) }),
+        )
         .route(
             "/api/health",
             get(|| async { Response::new("Ok".to_string()) }),
         )
-        .route("/", get(|| async { Redirect::to("./swagger") }))
+        .route(
+            "/",
+            get(move || async move { Redirect::to(swagger_redirect) }),
+        )
         .layer(build_cors_layer()?)
         .with_state::<_>(beacon_runtime);
 
