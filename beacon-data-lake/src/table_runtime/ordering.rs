@@ -1,17 +1,17 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
+use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::datasource::TableType as DefinitionTableType;
-
-use crate::table::{_type::TableType as LegacyTableType, TableFormat};
 
 #[derive(Clone)]
 struct ViewOrderEntry {
     name: String,
-    table: TableFormat,
+    table: Arc<dyn TableDefinition>,
     dependencies: Vec<String>,
 }
 
-fn sort_named_tables(tables: &mut [(String, TableFormat)]) {
+fn sort_named_tables(tables: &mut [(String, Arc<dyn TableDefinition>)]) {
     tables.sort_by(|a, b| a.0.cmp(&b.0));
 }
 
@@ -69,7 +69,7 @@ fn is_temporary_definition(definition: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-async fn order_view_tables(view_tables: Vec<ViewOrderEntry>) -> Vec<TableFormat> {
+async fn order_view_tables(view_tables: Vec<ViewOrderEntry>) -> Vec<Arc<dyn TableDefinition>> {
     let mut by_name = HashMap::new();
     let mut persisted_dependencies = HashMap::new();
 
@@ -85,9 +85,9 @@ async fn order_view_tables(view_tables: Vec<ViewOrderEntry>) -> Vec<TableFormat>
     for view_name in &view_names {
         let mut deps = normalize_dependency_set(
             persisted_dependencies
-            .get(view_name)
-            .cloned()
-            .unwrap_or_default(),
+                .get(view_name)
+                .cloned()
+                .unwrap_or_default(),
         );
 
         deps.retain(|dep| dep != view_name && view_names.contains(dep));
@@ -149,54 +149,40 @@ async fn order_view_tables(view_tables: Vec<ViewOrderEntry>) -> Vec<TableFormat>
     ordered_tables
 }
 
-pub async fn order_tables(tables: &HashMap<String, TableFormat>) -> Vec<TableFormat> {
-    let mut legacy_base = Vec::new();
-    let mut legacy_merged = Vec::new();
+/// Orders table definitions so that providers are registered after the tables
+/// they depend on: base tables first, then temporary definitions, then views in
+/// dependency order.
+pub async fn order_tables(
+    tables: &HashMap<String, Arc<dyn TableDefinition>>,
+) -> Vec<Arc<dyn TableDefinition>> {
     let mut definition_base = Vec::new();
     let mut definition_temp = Vec::new();
     let mut definition_views = Vec::new();
-    for (name, table) in tables {
-        match table {
-            TableFormat::Legacy(legacy) => {
-                let entry = (name.clone(), TableFormat::Legacy(legacy.clone()));
-                if matches!(legacy.table_type, LegacyTableType::Merged(_)) {
-                    legacy_merged.push(entry);
-                } else {
-                    legacy_base.push(entry);
-                }
-            }
-            TableFormat::DefinitionBased(definition) => {
-                let serialized = serde_json::to_value(definition.as_ref()).unwrap_or_default();
 
-                if definition.table_type() == DefinitionTableType::View {
-                    let dependencies = definition.depends_on();
-                    definition_views.push(ViewOrderEntry {
-                        name: name.clone(),
-                        table: TableFormat::DefinitionBased(definition.clone()),
-                        dependencies,
-                    });
-                } else if is_temporary_definition(&serialized) {
-                    definition_temp
-                        .push((name.clone(), TableFormat::DefinitionBased(definition.clone())));
-                } else {
-                    definition_base
-                        .push((name.clone(), TableFormat::DefinitionBased(definition.clone())));
-                }
-            }
+    for (name, definition) in tables {
+        let serialized = serde_json::to_value(definition.as_ref()).unwrap_or_default();
+
+        if definition.table_type() == DefinitionTableType::View {
+            let dependencies = definition.depends_on();
+            definition_views.push(ViewOrderEntry {
+                name: name.clone(),
+                table: definition.clone(),
+                dependencies,
+            });
+        } else if is_temporary_definition(&serialized) {
+            definition_temp.push((name.clone(), definition.clone()));
+        } else {
+            definition_base.push((name.clone(), definition.clone()));
         }
     }
 
-    sort_named_tables(&mut legacy_base);
     sort_named_tables(&mut definition_base);
     sort_named_tables(&mut definition_temp);
-    sort_named_tables(&mut legacy_merged);
 
     let mut ordered = Vec::with_capacity(tables.len());
-    ordered.extend(legacy_base.into_iter().map(|(_, table)| table));
     ordered.extend(definition_base.into_iter().map(|(_, table)| table));
     ordered.extend(definition_temp.into_iter().map(|(_, table)| table));
     ordered.extend(order_view_tables(definition_views).await);
-    ordered.extend(legacy_merged.into_iter().map(|(_, table)| table));
 
     ordered
 }
@@ -204,10 +190,6 @@ pub async fn order_tables(tables: &HashMap<String, TableFormat>) -> Vec<TableFor
 #[cfg(test)]
 mod tests {
     use super::order_tables;
-    use crate::table::{
-        Table, TableFormat, _type::TableType as LegacyTableType, empty::EmptyTable,
-        merged::MergedTable,
-    };
     use beacon_datafusion_ext::table_ext::TableDefinition;
     use datafusion::arrow::datatypes::Schema;
     use datafusion::catalog::TableProvider;
@@ -269,16 +251,7 @@ mod tests {
         }
     }
 
-    fn legacy_table_format(name: &str, table_type: LegacyTableType) -> TableFormat {
-        TableFormat::Legacy(Table {
-            table_directory: vec![],
-            table_name: name.to_string(),
-            table_type,
-            description: Some("ordering test".to_string()),
-        })
-    }
-
-    fn position(order: &[TableFormat], name: &str) -> usize {
+    fn position(order: &[Arc<dyn TableDefinition>], name: &str) -> usize {
         order
             .iter()
             .position(|table| table.table_name() == name)
@@ -287,83 +260,68 @@ mod tests {
 
     #[tokio::test]
     async fn order_tables_keeps_category_boundaries_and_view_dependencies() {
-        let mut tables = HashMap::new();
+        let mut tables: HashMap<String, Arc<dyn TableDefinition>> = HashMap::new();
 
         tables.insert(
-            "legacy_base".to_string(),
-            legacy_table_format("legacy_base", LegacyTableType::Empty(EmptyTable::new())),
-        );
-        tables.insert(
-            "legacy_merged".to_string(),
-            legacy_table_format(
-                "legacy_merged",
-                LegacyTableType::Merged(MergedTable {
-                    table_names: vec!["legacy_base".to_string()],
-                }),
-            ),
-        );
-        tables.insert(
             "definition_base".to_string(),
-            TableFormat::DefinitionBased(Arc::new(TestBaseDefinition {
+            Arc::new(TestBaseDefinition {
                 name: "definition_base".to_string(),
                 temporary: false,
-            })),
+            }),
         );
         tables.insert(
             "definition_temp".to_string(),
-            TableFormat::DefinitionBased(Arc::new(TestBaseDefinition {
+            Arc::new(TestBaseDefinition {
                 name: "definition_temp".to_string(),
                 temporary: true,
-            })),
+            }),
         );
         tables.insert(
             "view_parent".to_string(),
-            TableFormat::DefinitionBased(Arc::new(TestViewDefinition {
+            Arc::new(TestViewDefinition {
                 name: "view_parent".to_string(),
                 dependencies: vec![],
-            })),
+            }),
         );
         tables.insert(
             "view_child".to_string(),
-            TableFormat::DefinitionBased(Arc::new(TestViewDefinition {
+            Arc::new(TestViewDefinition {
                 name: "view_child".to_string(),
                 dependencies: vec!["view_parent".to_string()],
-            })),
+            }),
         );
 
         let order = order_tables(&tables).await;
 
-        assert!(position(&order, "legacy_base") < position(&order, "definition_base"));
         assert!(position(&order, "definition_base") < position(&order, "definition_temp"));
         assert!(position(&order, "definition_temp") < position(&order, "view_parent"));
         assert!(position(&order, "view_parent") < position(&order, "view_child"));
-        assert!(position(&order, "view_child") < position(&order, "legacy_merged"));
     }
 
     #[tokio::test]
     async fn order_tables_uses_table_type_for_view_classification() {
-        let mut tables = HashMap::new();
+        let mut tables: HashMap<String, Arc<dyn TableDefinition>> = HashMap::new();
 
         tables.insert(
             "def_temp".to_string(),
-            TableFormat::DefinitionBased(Arc::new(TestBaseDefinition {
+            Arc::new(TestBaseDefinition {
                 name: "def_temp".to_string(),
                 temporary: true,
-            })),
+            }),
         );
         tables.insert(
             "z_parent".to_string(),
-            TableFormat::DefinitionBased(Arc::new(TestViewDefinition {
+            Arc::new(TestViewDefinition {
                 name: "z_parent".to_string(),
                 dependencies: vec![],
-            })),
+            }),
         );
         tables.insert(
             "a_child".to_string(),
-            TableFormat::DefinitionBased(Arc::new(TestViewDefinition {
+            Arc::new(TestViewDefinition {
                 name: "a_child".to_string(),
                 dependencies: vec!["z_parent".to_string()],
-            })),
+            }),
         );
 
         let order = order_tables(&tables).await;

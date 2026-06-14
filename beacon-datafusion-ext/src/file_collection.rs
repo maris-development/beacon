@@ -1,6 +1,10 @@
+//! A [`TableProvider`] that fronts a [`ListingTable`] over one or more glob
+//! paths, merging their schemas into a single super-type schema.
+
 use std::{any::Any, borrow::Cow, collections::HashSet, sync::Arc};
 
 use arrow::datatypes::{Schema, SchemaRef};
+use beacon_common::super_typing::super_type_schema;
 use datafusion::{
     catalog::{Session, TableProvider},
     common::{Constraints, Statistics},
@@ -15,8 +19,6 @@ use datafusion::{
     physical_plan::ExecutionPlan,
     prelude::Expr,
 };
-
-use crate::util::super_type_schema;
 
 #[derive(Debug)]
 pub struct FileCollection {
@@ -121,7 +123,7 @@ impl TableProvider for FileCollection {
         self.inner_table.get_table_definition()
     }
 
-    fn get_logical_plan(&self) -> Option<Cow<LogicalPlan>> {
+    fn get_logical_plan(&self) -> Option<Cow<'_, LogicalPlan>> {
         self.inner_table.get_logical_plan()
     }
 

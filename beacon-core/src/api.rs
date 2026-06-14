@@ -1,10 +1,11 @@
 //! Beacon-core-owned contracts for outer layers such as beacon-api.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema};
-use beacon_data_lake::table::TableFormat;
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
+use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_functions::function_doc::FunctionDoc;
 use crate::metrics::ConsolidatedMetrics;
 use serde_json::{Map, Value};
@@ -147,10 +148,10 @@ pub struct TableConfigView {
     pub config: BTreeMap<String, Value>,
 }
 
-impl TryFrom<TableFormat> for TableConfigView {
+impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
     type Error = anyhow::Error;
 
-    fn try_from(value: TableFormat) -> Result<Self, Self::Error> {
+    fn try_from(value: Arc<dyn TableDefinition>) -> Result<Self, Self::Error> {
         match serde_json::to_value(value)? {
             Value::Object(config) => Ok(Self {
                 config: config.into_iter().collect(),

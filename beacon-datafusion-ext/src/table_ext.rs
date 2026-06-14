@@ -11,6 +11,8 @@ use std::sync::{Arc, Weak};
 
 use beacon_common::listing_url::parse_listing_table_url;
 use beacon_object_storage::event::ObjectEvent;
+
+use crate::file_collection::FileCollection;
 use datafusion::catalog::Session;
 use datafusion::common::{Constraints, DataFusionError, Statistics, not_impl_err};
 use datafusion::datasource::listing::ListingTableUrl;
@@ -627,6 +629,60 @@ impl TableDefinition for ExternalTableDefinition {
     }
 }
 
+/// A glob-backed table definition: one or more glob paths read with a single
+/// file format, merged into a super-type schema via [`FileCollection`].
+///
+/// This is the successor to the legacy `LogicalTable`. The file format is
+/// resolved from the session's registered format factories by `file_type`, so
+/// every format Beacon registers (parquet, csv, zarr, bbf, ...) is supported
+/// without this crate depending on `beacon-formats`.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LogicalTableDefinition {
+    /// Logical table name.
+    pub name: String,
+    /// Glob paths, relative to the data store URL, that back this table.
+    #[serde(alias = "paths")]
+    pub glob_paths: Vec<String>,
+    /// File format identifier (extension), such as `parquet`, `csv`, or `zarr.json`.
+    pub file_type: String,
+    /// Additional file-format specific options (e.g. CSV delimiter).
+    #[serde(default)]
+    pub options: std::collections::HashMap<String, String>,
+}
+
+#[async_trait::async_trait]
+#[typetag::serde(name = "logical")]
+impl TableDefinition for LogicalTableDefinition {
+    async fn build_provider(
+        &self,
+        context: Arc<SessionContext>,
+        data_store_url: &ObjectStoreUrl,
+    ) -> anyhow::Result<Arc<dyn TableProvider>> {
+        let session_state = context.state();
+
+        let file_format_factory = session_state
+            .get_file_format_factory(self.file_type.as_str())
+            .ok_or(config_datafusion_err!(
+                "Unable to create table with format {}! Could not find FileFormat.",
+                self.file_type
+            ))?;
+        let file_format = file_format_factory.create(&session_state, &self.options)?;
+
+        let mut table_urls = Vec::with_capacity(self.glob_paths.len());
+        for glob_path in &self.glob_paths {
+            table_urls.push(parse_listing_table_url(data_store_url, glob_path)?);
+        }
+
+        let source = FileCollection::new(&session_state, file_format, table_urls).await?;
+
+        Ok(Arc::new(source))
+    }
+
+    fn table_name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 /// Persisted configuration for a SQL-defined [`ViewTable`].
 pub struct ViewTableDefinition {
@@ -1036,7 +1092,8 @@ mod self_refresh_tests {
 /// Unit tests covering listing-table and view-table definition behavior.
 mod tests {
     use super::{
-        ExternalTableDefinition, MaterializedViewDefinition, TableDefinition, ViewTableDefinition,
+        ExternalTableDefinition, LogicalTableDefinition, MaterializedViewDefinition,
+        TableDefinition, ViewTableDefinition,
     };
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datafusion::arrow::record_batch::RecordBatch;
@@ -1412,6 +1469,85 @@ mod tests {
             .expect("scan should execute");
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 1);
+
+        fs::remove_dir_all(&root).expect("temporary directory should be cleaned up");
+    }
+
+    #[test]
+    /// Verifies a logical table definition serializes/deserializes through the
+    /// typetag `TableDefinition` trait, preserving its `logical` tag, paths,
+    /// file type, and format options (e.g. a CSV delimiter).
+    fn logical_table_definition_serde_round_trip() {
+        let mut options = HashMap::new();
+        options.insert("format.delimiter".to_string(), ";".to_string());
+
+        let definition: Arc<dyn TableDefinition> = Arc::new(LogicalTableDefinition {
+            name: "argo".to_string(),
+            glob_paths: vec!["argo/*.csv".to_string()],
+            file_type: "csv".to_string(),
+            options,
+        });
+
+        let json = serde_json::to_value(&definition).expect("definition should serialize");
+        assert_eq!(json["definition_type"], "logical");
+        assert_eq!(json["glob_paths"][0], "argo/*.csv");
+        assert_eq!(json["file_type"], "csv");
+        assert_eq!(json["options"]["format.delimiter"], ";");
+
+        let restored: Arc<dyn TableDefinition> =
+            serde_json::from_value(json).expect("definition should deserialize");
+        assert_eq!(restored.table_name(), "argo");
+        assert_eq!(restored.table_type(), TableType::Base);
+    }
+
+    #[test]
+    /// Verifies the legacy `paths` key still deserializes into `glob_paths`.
+    fn logical_table_definition_accepts_paths_alias() {
+        let json = serde_json::json!({
+            "definition_type": "logical",
+            "name": "legacy",
+            "paths": ["a/*.parquet", "b/*.parquet"],
+            "file_type": "parquet"
+        });
+
+        let restored: Arc<dyn TableDefinition> =
+            serde_json::from_value(json).expect("definition with `paths` alias should deserialize");
+        assert_eq!(restored.table_name(), "legacy");
+    }
+
+    #[tokio::test]
+    /// Verifies a logical table builds a provider that merges schemas across
+    /// multiple glob paths into one super-type schema.
+    async fn logical_table_definition_build_provider_merges_glob_paths() {
+        let root = create_temp_dir("table_ext_logical_build");
+        let dir_a = root.join("a");
+        let dir_b = root.join("b");
+        fs::create_dir_all(&dir_a).expect("dir a should be created");
+        fs::create_dir_all(&dir_b).expect("dir b should be created");
+        fs::write(dir_a.join("part-0.csv"), "value\n1\n2\n").expect("csv a should be written");
+        fs::write(dir_b.join("part-0.csv"), "value\n3\n4\n").expect("csv b should be written");
+
+        let definition = LogicalTableDefinition {
+            name: "merged".to_string(),
+            glob_paths: vec![
+                format!("{}/a/*.csv", to_store_relative_location(&root)),
+                format!("{}/b/*.csv", to_store_relative_location(&root)),
+            ],
+            file_type: "csv".to_string(),
+            options: HashMap::new(),
+        };
+
+        let context = Arc::new(SessionContext::new());
+        let store_url = ObjectStoreUrl::parse("file://").unwrap();
+
+        let provider = definition
+            .build_provider(context, &store_url)
+            .await
+            .expect("logical provider should be built from glob paths");
+
+        let schema = provider.schema();
+        assert_eq!(schema.fields().len(), 1);
+        assert_eq!(schema.field(0).name(), "value");
 
         fs::remove_dir_all(&root).expect("temporary directory should be cleaned up");
     }

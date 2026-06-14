@@ -21,7 +21,7 @@ use datafusion::{
     },
     prelude::{SessionConfig, SessionContext},
 };
-use futures::{stream::BoxStream, TryStreamExt};
+use futures::TryStreamExt;
 use parking_lot::Mutex;
 
 use crate::{
@@ -516,35 +516,6 @@ impl Runtime {
     pub async fn list_dataset_schema_view(&self, file: String) -> anyhow::Result<SchemaView> {
         let schema = self.list_dataset_schema(file).await?;
         Ok(SchemaView::from(schema.as_ref()))
-    }
-
-    pub async fn upload_file<S>(
-        &self,
-        file_path: &str,
-        stream: S,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-    where
-        S: futures::Stream<Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>
-            + Unpin,
-    {
-        self.file_manager.upload_file(file_path, stream).await
-    }
-
-    pub async fn download_file(
-        &self,
-        file_path: &str,
-    ) -> Result<
-        BoxStream<'static, Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
-        self.file_manager.download_file(file_path).await
-    }
-
-    pub async fn delete_file(
-        &self,
-        file_path: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.file_manager.delete_file(file_path).await
     }
 
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
