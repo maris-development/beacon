@@ -1,4 +1,4 @@
-//! Metrics tracking for query execution in Beacon Planner.
+//! Metrics tracking for query execution.
 //!
 //! This module provides structures and utilities to track and consolidate
 //! metrics during query planning and execution, including input/output statistics,

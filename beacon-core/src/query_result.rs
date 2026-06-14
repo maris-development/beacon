@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
-use beacon_planner::{metrics::ConsolidatedMetrics, prelude::MetricsTracker};
+use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use datafusion::execution::SendableRecordBatchStream;
 use futures::Stream;
 use parking_lot::Mutex;

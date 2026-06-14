@@ -6,7 +6,7 @@ use arrow::datatypes::{Field, Schema};
 use beacon_data_lake::table::TableFormat;
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_planner::metrics::ConsolidatedMetrics;
+use crate::metrics::ConsolidatedMetrics;
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
 

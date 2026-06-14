@@ -1,17 +1,15 @@
-//! Beacon's custom physical-planner path.
+//! Beacon's custom physical-planner path: a single execution pipeline for
+//! everything beacon runs.
 //!
-//! The long-term goal is a single execution pipeline for everything beacon
-//! runs: statements are lowered to DataFusion [`LogicalPlan::Extension`] nodes
-//! and executed through `create_physical_plan` -> `execute_stream`, exactly like
-//! ordinary `SELECT` queries (see `beacon-planner`), instead of being dispatched
-//! to hand-written handlers that imperatively perform their side effects.
-//!
-//! `CREATE MATERIALIZED VIEW` and `REFRESH` are lowered here (see [`logical`] /
-//! [`physical`]); other statements still run through the legacy handlers until
-//! they are migrated in later phases.
+//! Statements and queries alike are lowered to a DataFusion `LogicalPlan` —
+//! standard DDL/DML nodes for what DataFusion can represent, and
+//! [`LogicalPlan::Extension`] nodes (see [`logical`] / [`physical`]) for what it
+//! cannot (materialized views, `REFRESH`, `ALTER TABLE`, copy-on-write
+//! `DELETE`/`UPDATE`) — then validated ([`validate_query_plan`]) and executed
+//! through `create_physical_plan` -> `execute_stream` ([`execute_statement_plan`]),
+//! with the [`BeaconQueryPlanner`] turning beacon's nodes into execution plans.
 //!
 //! [`LogicalPlan::Extension`]: datafusion::logical_expr::LogicalPlan::Extension
-//! [`QueryPlanner`]: datafusion::execution::context::QueryPlanner
 
 mod actions;
 mod logical;

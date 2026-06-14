@@ -12,7 +12,7 @@ use beacon_datafusion_ext::{
     stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
-use beacon_planner::metrics::{ConsolidatedMetrics, MetricsTracker};
+use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use datafusion::{
     catalog::TableFunctionImpl,
     execution::{
