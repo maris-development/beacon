@@ -1,6 +1,7 @@
 use crate::array::backend::{ArrayBackend, BackendSubsetResult};
 use crate::array::compat_typings::ArrowTypeConversion;
 use crate::array::subset::ArraySubset;
+use crate::error::{NdArrowError, Result};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryArrayBackend<T: ArrowTypeConversion> {
@@ -12,37 +13,56 @@ pub struct InMemoryArrayBackend<T: ArrowTypeConversion> {
 }
 
 impl<T: ArrowTypeConversion> InMemoryArrayBackend<T> {
+    /// Construct a backend without a validity mask. Infallible — there is no
+    /// validity mask whose shape could disagree with the array.
     pub fn new(
         array: ndarray::ArrayD<T>,
         shape: Vec<usize>,
         dimensions: Vec<String>,
         fill_value: Option<T>,
     ) -> Self {
-        Self::new_with_validity(array, shape, dimensions, fill_value, None)
+        Self {
+            array,
+            validity: None,
+            shape,
+            dimensions,
+            fill_value,
+        }
     }
 
+    /// Construct a backend with an optional validity mask.
+    ///
+    /// Returns [`NdArrowError::ValidityShapeMismatch`] if the mask's shape does
+    /// not match the array shape (previously this panicked via `assert_eq!`).
     pub fn new_with_validity(
         array: ndarray::ArrayD<T>,
         shape: Vec<usize>,
         dimensions: Vec<String>,
         fill_value: Option<T>,
         validity: Option<ndarray::ArrayD<bool>>,
-    ) -> Self {
-        if let Some(validity_array) = &validity {
-            assert_eq!(
-                validity_array.shape(),
-                shape.as_slice(),
-                "validity shape must match array shape"
+    ) -> Result<Self> {
+        if let Some(validity_array) = &validity
+            && validity_array.shape() != shape.as_slice()
+        {
+            let validity_shape = validity_array.shape().to_vec();
+            tracing::error!(
+                ?validity_shape,
+                array_shape = ?shape,
+                "validity shape does not match array shape"
             );
+            return Err(NdArrowError::ValidityShapeMismatch {
+                validity_shape,
+                array_shape: shape,
+            });
         }
 
-        Self {
+        Ok(Self {
             array,
             validity,
             shape,
             dimensions,
             fill_value,
-        }
+        })
     }
 }
 
