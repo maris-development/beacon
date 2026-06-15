@@ -225,7 +225,7 @@ impl DataSink for NetCDFNdSink {
 
         let unique_values_collection: Arc<ColumnValueMap> = self
             .unique_values
-            .unique_values()
+            .unique_values()?
             .ok_or_else(|| {
                 DataFusionError::Execution(
                     "No dimensions values collected for NetCDFNdSink".to_string(),
