@@ -11,8 +11,10 @@
 
 pub mod array;
 pub mod batch;
+pub mod error;
 pub mod stream;
 
 pub use array::NdArrowArrayDispatch;
+pub use error::NdArrowError;
 pub use batch::NdRecordBatch;
 pub use stream::{NdToArrowPipeOptions, pipe_nd_record_batch_stream};

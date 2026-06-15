@@ -14,6 +14,7 @@ arrow-schema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 chrono = { workspace = true, optional = true }
 ndarray = { version = "0.17", optional = true }
 anyhow = { workspace=true }
