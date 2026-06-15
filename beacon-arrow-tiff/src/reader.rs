@@ -54,6 +54,7 @@ pub async fn open_dataset(
     path: Path,
 ) -> anyhow::Result<AnyDataset> {
     let dataset_name = path.to_string();
+    tracing::debug!(path = %dataset_name, "opening TIFF dataset");
     let reader = ObjectStoreAsyncReader {
         store: object_store,
         path,
@@ -90,16 +91,14 @@ pub async fn open_dataset(
     }
 
     if let Some((tiles_x, tiles_y)) = first_ifd.tile_count() {
-        insert_scalar(
-            &mut arrays,
-            "image.tile_width",
-            first_ifd.tile_width().unwrap(),
-        )?;
-        insert_scalar(
-            &mut arrays,
-            "image.tile_height",
-            first_ifd.tile_height().unwrap(),
-        )?;
+        let tile_width = first_ifd
+            .tile_width()
+            .ok_or_else(|| anyhow::anyhow!("tiled TIFF reports a tile count but is missing TileWidth"))?;
+        let tile_height = first_ifd
+            .tile_height()
+            .ok_or_else(|| anyhow::anyhow!("tiled TIFF reports a tile count but is missing TileLength"))?;
+        insert_scalar(&mut arrays, "image.tile_width", tile_width)?;
+        insert_scalar(&mut arrays, "image.tile_height", tile_height)?;
         insert_scalar(&mut arrays, "image.tile_count_x", tiles_x as u64)?;
         insert_scalar(&mut arrays, "image.tile_count_y", tiles_y as u64)?;
     }
@@ -135,7 +134,13 @@ pub async fn open_dataset(
         )?;
     }
 
-    let nodata_value: Option<f64> = first_ifd.gdal_nodata().and_then(|s| s.parse::<f64>().ok());
+    let nodata_value: Option<f64> = first_ifd.gdal_nodata().and_then(|s| match s.parse::<f64>() {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::warn!(value = %s, error = %e, "ignoring unparseable GDAL_NODATA tag");
+            None
+        }
+    });
 
     if let Some(nodata) = first_ifd.gdal_nodata() {
         insert_scalar(&mut arrays, "geo.nodata", nodata.to_string())?;
@@ -291,8 +296,14 @@ fn read_pixel_bands(
 ) -> anyhow::Result<Vec<Arc<dyn NdArrayD>>> {
     let image_width = ifd.image_width() as usize;
     let image_height = ifd.image_height() as usize;
-    let tile_width = ifd.tile_width().unwrap() as usize;
-    let tile_height = ifd.tile_height().unwrap() as usize;
+    let tile_width = ifd
+        .tile_width()
+        .ok_or_else(|| anyhow::anyhow!("tiled TIFF IFD is missing TileWidth"))?
+        as usize;
+    let tile_height = ifd
+        .tile_height()
+        .ok_or_else(|| anyhow::anyhow!("tiled TIFF IFD is missing TileLength"))?
+        as usize;
 
     let n_bands = ifd.samples_per_pixel() as usize;
     let is_planar = ifd.planar_configuration() == PlanarConfiguration::Planar;
@@ -429,7 +440,11 @@ async fn read_pixel_bands_stripped(
             let values: Vec<$T> = raw
                 .chunks_exact($N)
                 .map(|chunk| {
-                    let arr: [u8; $N] = chunk.try_into().unwrap();
+                    // `chunks_exact($N)` yields slices of exactly `$N` bytes, so
+                    // the array conversion is infallible.
+                    let arr: [u8; $N] = chunk
+                        .try_into()
+                        .expect("chunks_exact yields slices of exactly $N bytes");
                     <$T>::from_le_bytes(arr)
                 })
                 .collect();

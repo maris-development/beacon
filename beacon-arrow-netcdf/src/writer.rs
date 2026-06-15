@@ -117,18 +117,27 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
 
         for batch in reader {
             let batch = batch.map_err(|e| anyhow::anyhow!(e))?;
-            let updated_batch = Self::map_record_batch(batch, updated_schema.clone());
+            let updated_batch = Self::map_record_batch(batch, updated_schema.clone())?;
             nc_writer.write_record_batch(updated_batch)?;
         }
 
         Ok(())
     }
 
-    fn map_record_batch(record_batch: RecordBatch, schema: SchemaRef) -> RecordBatch {
+    fn map_record_batch(
+        record_batch: RecordBatch,
+        schema: SchemaRef,
+    ) -> anyhow::Result<RecordBatch> {
         let mut arrays = vec![];
         for (idx, column) in record_batch.columns().iter().enumerate() {
             if let DataType::FixedSizeBinary(size) = schema.field(idx).data_type() {
-                let string_array = column.as_any().downcast_ref::<StringArray>().unwrap();
+                let string_array = column.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "column {} expected Utf8/StringArray for FixedSizeBinary conversion, got {:?}",
+                        schema.field(idx).name(),
+                        column.data_type()
+                    )
+                })?;
                 let casted_array = string_array_to_fixed_binary(string_array, *size as usize);
                 arrays.push(Arc::new(casted_array) as ArrayRef);
             } else {
@@ -136,7 +145,7 @@ impl<E: Encoder> ArrowRecordBatchWriter<E> {
             }
         }
 
-        RecordBatch::try_new(schema, arrays).unwrap()
+        Ok(RecordBatch::try_new(schema, arrays)?)
     }
 }
 
@@ -149,10 +158,21 @@ fn string_array_to_fixed_binary(
     string_array.iter().for_each(|str| {
         if let Some(str) = str {
             let mut fixed_buffer = vec![b'\0'; fixed_size];
-            fixed_buffer[..str.len()].copy_from_slice(str.as_bytes());
+            // Copy at most `fixed_size` bytes; a longer string is truncated to fit
+            // the fixed width rather than panicking on the slice copy.
+            let n = str.len().min(fixed_size);
+            if str.len() > fixed_size {
+                tracing::warn!(
+                    string_len = str.len(),
+                    fixed_size,
+                    "string longer than fixed NetCDF width; truncating"
+                );
+            }
+            fixed_buffer[..n].copy_from_slice(&str.as_bytes()[..n]);
+            // `fixed_buffer` is always exactly `fixed_size` bytes, so this never fails.
             builder
                 .append_value(fixed_buffer)
-                .expect("append_value binary failed");
+                .expect("append_value with fixed-size buffer is infallible");
         } else {
             builder
                 .append_value(vec![b'\0'; fixed_size])
