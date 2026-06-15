@@ -793,3 +793,79 @@ mod client_query_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod restart_tests {
+    use super::Runtime;
+    use futures::TryStreamExt;
+
+    async fn run_sql(runtime: &Runtime, sql: &str) {
+        runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), true)
+            .await
+            .expect("sql should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("sql should drain");
+    }
+
+    async fn count_rows(runtime: &Runtime, sql: &str) -> usize {
+        runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), true)
+            .await
+            .expect("sql should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("sql should drain")
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum()
+    }
+
+    /// Tables persisted by one runtime are rebuilt by a fresh runtime via
+    /// `init_tables`: the base table's data survives, and the dependent view is
+    /// rebuilt in dependency order so it resolves the base table registered ahead
+    /// of it. This exercises the persist-on-register + startup-recovery round trip
+    /// that replaces the old `TableManager` registry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persisted_tables_survive_a_restart() {
+        let suffix = uuid::Uuid::new_v4().simple();
+        let base = format!("restart_base_{suffix}");
+        let view = format!("restart_view_{suffix}");
+
+        // First runtime: create a base table with data and a view over it.
+        let runtime = Runtime::new().await.expect("runtime should start");
+        run_sql(&runtime, &format!("CREATE TABLE {base} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {base} VALUES (1), (2)")).await;
+        run_sql(&runtime, &format!("CREATE VIEW {view} AS SELECT a FROM {base}")).await;
+        drop(runtime);
+
+        // A fresh runtime rebuilds the catalog purely from the persisted
+        // `tables://<name>/table.json` definitions.
+        let restarted = Runtime::new().await.expect("runtime should restart");
+
+        assert_eq!(
+            count_rows(&restarted, &format!("SELECT * FROM {base}")).await,
+            2,
+            "base table data should persist across a restart"
+        );
+        assert_eq!(
+            count_rows(&restarted, &format!("SELECT * FROM {view}")).await,
+            2,
+            "the view should be rebuilt and resolve its dependency after a restart"
+        );
+
+        // Cleanup so the shared on-disk tables store does not leak into other
+        // tests (best-effort; `DROP TABLE` deregisters either provider type).
+        let _ = restarted
+            .run_query(crate::query::Query::sql(format!("DROP TABLE {view}")), true)
+            .await;
+        let _ = restarted
+            .run_query(crate::query::Query::sql(format!("DROP TABLE {base}")), true)
+            .await;
+    }
+}

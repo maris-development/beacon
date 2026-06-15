@@ -140,3 +140,122 @@ impl SchemaProvider for PersistentSchemaProvider {
         self.inner.deregister_table(name)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::datasource::ViewTable;
+    use futures::StreamExt;
+    use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt};
+    use url::Url;
+
+    // The persistence side effect runs the async store I/O via `block_in_place`,
+    // which requires a multi-threaded runtime.
+    fn fixture() -> (PersistentSchemaProvider, Arc<SessionContext>, Arc<InMemory>) {
+        let session_context = Arc::new(SessionContext::new());
+        let tables_store = Arc::new(InMemory::new());
+        let tables_url = ObjectStoreUrl::parse("tables://").expect("tables url should parse");
+        session_context.register_object_store(
+            &Url::parse(tables_url.as_str()).expect("tables url should be valid"),
+            tables_store.clone(),
+        );
+        let provider = PersistentSchemaProvider::new(
+            tokio::runtime::Handle::current(),
+            session_context.clone(),
+            tables_url,
+        );
+        (provider, session_context, tables_store)
+    }
+
+    async fn view(session_context: &SessionContext, sql: &str) -> Arc<dyn TableProvider> {
+        let plan = session_context
+            .state()
+            .create_logical_plan(sql)
+            .await
+            .expect("logical plan should be created");
+        Arc::new(ViewTable::new(plan, Some(sql.to_string())))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_persists_definition_and_registers_in_catalog() {
+        let (provider, ctx, store) = fixture();
+
+        let previous = provider
+            .register_table("v".to_string(), view(&ctx, "SELECT 1 AS x").await)
+            .expect("registration should succeed");
+
+        assert!(previous.is_none(), "first registration has no previous table");
+        assert!(provider.table_exist("v"));
+        assert!(
+            store.get(&Path::from("v/table.json")).await.is_ok(),
+            "the definition should be persisted to the tables store"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_overwrites_existing_name() {
+        // DataFusion's `MemorySchemaProvider` errors when a name already exists;
+        // the wrapper must overwrite instead so materialized-view refresh and
+        // Iceberg replace/alter can swap a fresh provider under the same name.
+        let (provider, ctx, _store) = fixture();
+        provider
+            .register_table("v".to_string(), view(&ctx, "SELECT 1 AS x").await)
+            .expect("first registration should succeed");
+
+        let previous = provider
+            .register_table("v".to_string(), view(&ctx, "SELECT 2 AS y").await)
+            .expect("re-registering an existing name should overwrite, not error");
+
+        assert!(previous.is_some(), "overwrite returns the replaced provider");
+        let table = provider
+            .table("v")
+            .await
+            .expect("lookup should succeed")
+            .expect("table should be present");
+        assert_eq!(
+            table.schema().field(0).name(),
+            "y",
+            "the catalog should resolve the newly registered provider"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deregister_removes_from_catalog_and_store() {
+        let (provider, ctx, store) = fixture();
+        provider
+            .register_table("v".to_string(), view(&ctx, "SELECT 1 AS x").await)
+            .expect("registration should succeed");
+
+        let removed = provider
+            .deregister_table("v")
+            .expect("deregistration should succeed");
+
+        assert!(removed.is_some(), "deregister returns the removed provider");
+        assert!(!provider.table_exist("v"));
+        let mut listing = store.list(Some(&Path::from("v")));
+        assert!(
+            listing.next().await.is_none(),
+            "the persisted definition should be removed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_default_table_is_idempotent() {
+        let (provider, _ctx, _store) = fixture();
+        assert!(!provider.table_exist("default"));
+
+        provider.ensure_default_table();
+        provider.ensure_default_table();
+
+        assert!(provider.table_exist("default"));
+        assert_eq!(
+            provider
+                .table_names()
+                .iter()
+                .filter(|name| name.as_str() == "default")
+                .count(),
+            1,
+            "the default table should be registered exactly once"
+        );
+    }
+}
