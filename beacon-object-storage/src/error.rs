@@ -24,6 +24,11 @@ pub enum StorageError {
         #[source]
         source: VarError,
     },
+
+    /// An error returned by the underlying `object_store` backend (S3 or local
+    /// filesystem), e.g. while building a store or canonicalizing its root.
+    #[error("Object store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
 }
 
 /// Result alias for fallible object storage operations.
