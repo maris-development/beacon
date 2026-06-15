@@ -93,7 +93,13 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
         let top_level_datasets = top_level_zarr_meta_v3(&datasets);
         let zarr_paths: Vec<ZarrPath> = top_level_datasets
             .into_iter()
-            .filter_map(|path| ZarrPath::new_from_object_meta(path).ok())
+            .filter_map(|path| match ZarrPath::new_from_object_meta(path) {
+                Ok(zarr_path) => Some(zarr_path),
+                Err(e) => {
+                    tracing::trace!(error = %e, "skipping non-Zarr object during dataset discovery");
+                    None
+                }
+            })
             .collect();
 
         let datasets: Vec<DatasetMetadata> = zarr_paths

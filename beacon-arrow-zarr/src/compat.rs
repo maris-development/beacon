@@ -46,13 +46,14 @@ fn array_metadata(array: &ZarrArray) -> (Vec<usize>, Vec<String>, Vec<usize>) {
 
     // Chunk 0's shape is the (regular) chunk shape; boundary chunks are handled
     // by the engine's chunk iterator. Fall back to the full shape if unavailable.
-    let chunk_shape: Vec<usize> = array
-        .chunk_grid()
-        .subset(&vec![0u64; ndim])
-        .ok()
-        .flatten()
-        .map(|s| s.shape().iter().map(|&x| x as usize).collect())
-        .unwrap_or_else(|| shape.clone());
+    let chunk_shape: Vec<usize> = match array.chunk_grid().subset(&vec![0u64; ndim]) {
+        Ok(Some(s)) => s.shape().iter().map(|&x| x as usize).collect(),
+        Ok(None) => shape.clone(),
+        Err(e) => {
+            tracing::debug!(error = %e, "failed to query Zarr chunk grid; falling back to full array shape");
+            shape.clone()
+        }
+    };
 
     (shape, dimensions, chunk_shape)
 }
