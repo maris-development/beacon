@@ -26,20 +26,25 @@ pub fn parse_listing_table_url(
         if !full_path.ends_with('/') {
             full_path.push('/');
         }
-        Some(
-            glob::Pattern::new(&pattern)
-                .map_err(|e| exec_datafusion_err!("Failed to parse glob pattern: {}", e))?,
-        )
+        Some(glob::Pattern::new(&pattern).map_err(|e| {
+            tracing::warn!(pattern = %pattern, error = %e, "failed to parse glob pattern");
+            exec_datafusion_err!("Failed to parse glob pattern: {}", e)
+        })?)
     } else {
         None
     };
 
-    let url =
-        Url::parse(&full_path).map_err(|e| exec_datafusion_err!("Failed to parse URL: {}", e))?;
+    let url = Url::parse(&full_path).map_err(|e| {
+        tracing::warn!(url = %full_path, error = %e, "failed to parse listing URL");
+        exec_datafusion_err!("Failed to parse URL: {}", e)
+    })?;
 
-    let table_url = ListingTableUrl::try_new(url, glob_pattern_parsed)
-        .map_err(|e| exec_datafusion_err!("Failed to create table URL: {}", e))?;
+    let table_url = ListingTableUrl::try_new(url, glob_pattern_parsed).map_err(|e| {
+        tracing::warn!(path = %full_path, error = %e, "failed to create listing table URL");
+        exec_datafusion_err!("Failed to create table URL: {}", e)
+    })?;
 
+    tracing::debug!(table_url = %table_url, "resolved listing table URL");
     Ok(table_url)
 }
 
@@ -151,7 +156,6 @@ mod tests {
         let store_url: ObjectStoreUrl = ObjectStoreUrl::parse("file://").unwrap();
         let url = parse_listing_table_url(&store_url, "subdir/*.json").unwrap();
         let dbg = format!("{:?}", url);
-        println!("dbg={}", dbg);
         assert!(dbg.contains("/subdir/"), "dbg={}", dbg);
         // pattern should be present in debug output
         assert!(dbg.contains("*.json"), "dbg={}", dbg);
@@ -184,6 +188,6 @@ mod tests {
     fn test_object_store_urls() {
         let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
         let url = Url::parse(store_url.as_str()).unwrap();
-        println!("Parsed URL: {}", url);
+        assert_eq!(url.scheme(), "datasets");
     }
 }
