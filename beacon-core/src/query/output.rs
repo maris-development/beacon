@@ -8,7 +8,6 @@ use std::sync::Arc;
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
-use beacon_data_lake::FileManager;
 use beacon_formats::{
     arrow::ArrowFormatFactory,
     csv::CsvFormatFactory,
@@ -36,7 +35,6 @@ impl Output {
     ///
     /// # Arguments
     /// * `_session_context` - DataFusion session context (unused).
-    /// * `file_manager` - FileManager instance for temporary file creation.
     /// * `input_plan` - The logical plan to export.
     ///
     /// # Returns
@@ -44,11 +42,10 @@ impl Output {
     pub async fn parse(
         &self,
         _session_context: &SessionContext,
-        file_manager: &FileManager,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
         let file_type = self.format.file_type().await;
-        let temp_output = file_manager.try_create_temp_output_file(".tmp");
+        let temp_output = beacon_data_lake::create_temp_output_file(".tmp");
         let plan = LogicalPlanBuilder::copy_to(
             input_plan,
             temp_output.output_url(),

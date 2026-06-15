@@ -4,7 +4,6 @@
 //! straight to DataFusion's SQL parser in `Runtime::plan_client_query`; only the
 //! JSON form is "compiled".
 
-use beacon_data_lake::{FileManager, TableManager};
 use datafusion::{logical_expr::LogicalPlan, prelude::SessionContext};
 
 use crate::query::QueryBody;
@@ -13,8 +12,6 @@ use crate::query::QueryBody;
 pub async fn compile_json_query(
     query_body: QueryBody,
     session: &SessionContext,
-    table_manager: &TableManager,
-    file_manager: &FileManager,
 ) -> anyhow::Result<LogicalPlan> {
     let mut builder = if beacon_config::CONFIG.sql.enable_pushdown_projection {
         let mut all_columns = vec![];
@@ -27,13 +24,13 @@ pub async fn compile_json_query(
         query_body
             .from
             .unwrap_or_default()
-            .init_builder(session, table_manager, file_manager, Some(&all_columns))
+            .init_builder(session, Some(&all_columns))
             .await?
     } else {
         query_body
             .from
             .unwrap_or_default()
-            .init_builder(session, table_manager, file_manager, None)
+            .init_builder(session, None)
             .await?
     };
 

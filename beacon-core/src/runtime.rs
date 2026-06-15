@@ -6,9 +6,12 @@ use arrow::{
     array::AsArray,
     datatypes::{SchemaRef, UInt64Type},
 };
-use beacon_data_lake::{DataLake, FileManager, TableManager};
+use beacon_data_lake::{
+    PersistentSchemaProvider, DATASETS_OBJECT_STORE_URL, TABLES_OBJECT_STORE_URL,
+};
 use beacon_datafusion_ext::{
-    format_ext::DatasetMetadata, listing_table_factory_ext::ListingTableFactoryExt,
+    format_ext::{DatasetMetadata, FileFormatFactoryExt},
+    listing_table_factory_ext::ListingTableFactoryExt,
     stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
@@ -34,8 +37,7 @@ use crate::{
 /// Beacon's single execution layer: startup, catalog access, queries, SQL, and files.
 pub struct Runtime {
     session_ctx: Arc<SessionContext>,
-    table_manager: Arc<TableManager>,
-    file_manager: Arc<FileManager>,
+    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
     listing_table_factory: Arc<ListingTableFactoryExt>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
 }
@@ -48,18 +50,20 @@ impl Runtime {
         ));
 
         let session_ctx = Self::init_ctx(memory_pool)?;
-        let data_lake = Arc::new(DataLake::new(session_ctx.clone()).await);
+        beacon_data_lake::register_object_stores(&session_ctx).await?;
 
-        let table_manager = data_lake.table_manager();
-        let file_manager = data_lake.file_manager();
+        let file_formats = beacon_formats::file_formats(
+            session_ctx.clone(),
+            beacon_object_storage::get_datasets_object_store().await,
+        )?;
 
         let mut table_functions = vec![];
         table_functions.extend(beacon_functions::file_formats::register_table_functions(
             tokio::runtime::Handle::current(),
             session_ctx.clone(),
-            file_manager.data_object_store_url(),
+            DATASETS_OBJECT_STORE_URL.clone(),
             beacon_object_storage::get_datasets_object_store().await,
-            file_manager.file_formats().to_vec(),
+            file_formats.clone(),
         ));
         table_functions.extend(beacon_functions::metadata::register_metadata_functions(
             session_ctx.clone(),
@@ -73,10 +77,15 @@ impl Runtime {
             );
         }
 
+        let schema_provider = Arc::new(PersistentSchemaProvider::new(
+            tokio::runtime::Handle::current(),
+            session_ctx.clone(),
+            TABLES_OBJECT_STORE_URL.clone(),
+        ));
         session_ctx
             .catalog("beacon")
             .unwrap()
-            .register_schema("public", table_manager.clone())?;
+            .register_schema("public", schema_provider.clone())?;
 
         // Build the shared Iceberg catalog before discovering tables: startup
         // table discovery rebuilds Iceberg providers via the catalog, and the
@@ -99,18 +108,17 @@ impl Runtime {
             session_ctx.register_udf(udf);
         }
 
-        table_manager.init_tables().await?;
+        beacon_data_lake::init_tables(&session_ctx, &schema_provider).await?;
 
         let listing_table_factory = Arc::new(ListingTableFactoryExt::new(
-            file_manager.data_object_store_url(),
+            DATASETS_OBJECT_STORE_URL.clone(),
             Arc::downgrade(&session_ctx),
         ));
 
         Ok(Self {
             session_ctx,
-            table_manager,
+            file_formats,
             listing_table_factory,
-            file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -228,9 +236,7 @@ impl Runtime {
     ) -> anyhow::Result<QueryResult> {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
-        let (copy_plan, output_file) = output
-            .parse(self.session_ctx.as_ref(), self.file_manager.as_ref(), plan)
-            .await?;
+        let (copy_plan, output_file) = output.parse(self.session_ctx.as_ref(), plan).await?;
         let output_file = QueryOutputFile::from(output_file);
 
         let metrics = MetricsTracker::new(query_json, query_id);
@@ -264,13 +270,7 @@ impl Runtime {
         match inner {
             crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql).await,
             crate::query::InnerQuery::Json(body) => {
-                crate::query::compile_json_query(
-                    body,
-                    self.session_ctx.as_ref(),
-                    self.table_manager.as_ref(),
-                    self.file_manager.as_ref(),
-                )
-                .await
+                crate::query::compile_json_query(body, self.session_ctx.as_ref()).await
             }
         }
     }
@@ -369,7 +369,11 @@ impl Runtime {
     }
 
     pub fn list_tables(&self) -> Vec<String> {
-        self.table_manager.table_names()
+        self.session_ctx
+            .catalog("beacon")
+            .and_then(|catalog| catalog.schema("public"))
+            .map(|schema| schema.table_names())
+            .unwrap_or_default()
     }
 
     /// Lists SQL catalogs visible to Flight SQL and other SQL-based clients.
@@ -438,15 +442,15 @@ impl Runtime {
     }
 
     pub async fn list_table_config(&self, table_name: String) -> Option<TableConfigView> {
-        self.table_manager.list_table(&table_name).and_then(
-            |config| match TableConfigView::try_from(config) {
-                Ok(config) => Some(config),
-                Err(error) => {
-                    tracing::error!(?error, "failed to map table config into API contract");
-                    None
-                }
-            },
-        )
+        let provider = self.session_ctx.table_provider(table_name.as_str()).await.ok()?;
+        let config = beacon_data_lake::definition_from_provider(&table_name, provider.as_ref()).ok()?;
+        match TableConfigView::try_from(config) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                tracing::error!(?error, "failed to map table config into API contract");
+                None
+            }
+        }
     }
 
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
@@ -497,10 +501,10 @@ impl Runtime {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<DatasetMetadata>> {
-        Ok(self
-            .file_manager
-            .list_datasets(offset, limit, pattern)
-            .await?)
+        Ok(
+            beacon_data_lake::list_datasets(&self.session_ctx, &self.file_formats, offset, limit, pattern)
+                .await?,
+        )
     }
 
     pub async fn total_datasets(&self) -> anyhow::Result<usize> {
@@ -510,7 +514,7 @@ impl Runtime {
     }
 
     pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {
-        Ok(self.file_manager.list_dataset_schema(&file).await?)
+        Ok(beacon_data_lake::list_dataset_schema(&self.session_ctx, &file).await?)
     }
 
     pub async fn list_dataset_schema_view(&self, file: String) -> anyhow::Result<SchemaView> {

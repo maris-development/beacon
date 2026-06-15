@@ -7,7 +7,6 @@ use std::sync::Arc;
 use beacon_arrow_netcdf::datafusion::options::NetcdfOptions;
 use beacon_arrow_netcdf::datafusion::NetcdfFormat;
 use beacon_arrow_tiff::datafusion::TiffFormat;
-use beacon_data_lake::{FileManager, TableManager};
 use beacon_datafusion_ext::file_collection::FileCollection;
 use beacon_arrow_odv::datafusion::OdvFormat;
 use beacon_formats::{arrow::ArrowFormat, csv::CsvFormat, parquet::ParquetFormat};
@@ -48,22 +47,18 @@ impl From {
     ///
     /// # Arguments
     /// * `session_context` - The DataFusion session context.
-    /// * `table_manager` - Table manager used to resolve table providers.
-    /// * `file_manager` - File manager used to resolve listing paths.
     ///
     /// # Returns
     /// * `LogicalPlanBuilder` for the specified source.
     pub async fn init_builder(
         &self,
         session_context: &SessionContext,
-        table_manager: &TableManager,
-        file_manager: &FileManager,
         projection: Option<&Vec<String>>,
     ) -> datafusion::error::Result<LogicalPlanBuilder> {
         match self {
             From::Table(name) => {
-                // Use a registered table.
-                if let Some(mut table) = table_manager.table_provider(name) {
+                // Use a registered table from the catalog.
+                if let Ok(mut table) = session_context.table_provider(name.as_str()).await {
                     if let (Some(projection), Some(file_collection)) =
                         (projection, table.as_any().downcast_ref::<FileCollection>())
                     {
@@ -81,9 +76,7 @@ impl From {
             }
             From::Format { format } => {
                 // Use a file format as a table source.
-                let table_source = format
-                    .as_table_source(session_context, file_manager)
-                    .await?;
+                let table_source = format.as_table_source(session_context).await?;
                 Ok(LogicalPlanBuilder::scan("tmp", table_source, None)?)
             }
         }
@@ -127,17 +120,15 @@ impl FromFormat {
     ///
     /// # Arguments
     /// * `session_context` - The DataFusion session context.
-    /// * `file_manager` - File manager used for file path resolution.
     ///
     /// # Returns
     /// * `Arc<dyn TableSource>` for the specified format.
     pub async fn as_table_source(
         &self,
         session_context: &SessionContext,
-        file_manager: &FileManager,
     ) -> datafusion::error::Result<Arc<dyn TableSource>> {
         let file_format = self.file_format(session_context).await?;
-        let urls = self.listing_table_urls(file_manager)?;
+        let urls = self.listing_table_urls()?;
 
         // Create a FileCollection as the table provider.
         let table =
@@ -175,11 +166,8 @@ impl FromFormat {
         }
     }
 
-    /// Resolves file paths to [`ListingTableUrl`]s using the data lake.
-    fn listing_table_urls(
-        &self,
-        file_manager: &FileManager,
-    ) -> datafusion::error::Result<Vec<ListingTableUrl>> {
+    /// Resolves file paths to [`ListingTableUrl`]s under the datasets store.
+    fn listing_table_urls(&self) -> datafusion::error::Result<Vec<ListingTableUrl>> {
         let paths = match self {
             FromFormat::Csv { paths, .. }
             | FromFormat::Parquet { paths }
@@ -193,7 +181,7 @@ impl FromFormat {
 
         let mut listing_table_urls = Vec::with_capacity(paths.len());
         for path in paths {
-            let url = file_manager.try_create_listing_url(path.to_string())?;
+            let url = beacon_data_lake::create_listing_url(path.to_string())?;
             listing_table_urls.push(url);
         }
         Ok(listing_table_urls)
