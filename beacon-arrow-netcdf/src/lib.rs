@@ -66,8 +66,20 @@ unsafe impl NcTypeDescriptor for NcString {
 
 impl NcString {
     /// Create a NetCDF string from a Rust `&str`.
+    ///
+    /// A C string cannot contain an interior NUL byte. If `s` has one (which a C
+    /// consumer would treat as the string terminator anyway), the value is
+    /// truncated at the first NUL and a warning is logged, rather than panicking.
     pub fn new(s: &str) -> Self {
-        let c_str = CString::new(s).unwrap();
+        let c_str = CString::new(s).unwrap_or_else(|e| {
+            let nul = e.nul_position();
+            tracing::warn!(
+                nul_position = nul,
+                "NetCDF string contains an interior NUL byte; truncating at the first NUL"
+            );
+            // The prefix before the first NUL is by definition NUL-free.
+            CString::new(&s.as_bytes()[..nul]).expect("prefix before first NUL has no NUL byte")
+        });
         let ptr = c_str.into_raw();
         Self(ptr.cast())
     }

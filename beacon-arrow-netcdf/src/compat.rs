@@ -363,7 +363,10 @@ pub fn variable_to_nd_array(
                         None
                     };
 
-                let fixed_string_size = last_dim.unwrap().len();
+                // Safe: `is_fixed_string_array` is only true when `last_dim` is `Some`.
+                let fixed_string_size = last_dim
+                    .expect("is_fixed_string_array implies a trailing dimension exists")
+                    .len();
 
                 // The trailing dimension stores fixed string length and is consumed
                 // by StringVariableDecoder; exclude it from the ND logical shape.
