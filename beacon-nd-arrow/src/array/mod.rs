@@ -10,6 +10,7 @@ use crate::array::{
     compat_typings::attach_validity_mask,
     subset::ArraySubset,
 };
+use crate::error::{NdArrowError, Result};
 
 pub mod backend;
 pub mod compat_typings;
@@ -55,7 +56,7 @@ impl<T: ArrowTypeConversion> NdArrowArrayDispatch<T> {
         shape: Vec<usize>,
         dimensions: Vec<String>,
         fill_value: Option<T>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self> {
         Self::new_in_mem_with_validity(array, shape, dimensions, fill_value, None)
     }
 
@@ -65,18 +66,20 @@ impl<T: ArrowTypeConversion> NdArrowArrayDispatch<T> {
         dimensions: Vec<String>,
         fill_value: Option<T>,
         validity: Option<Vec<bool>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self> {
         let validity = validity
             .map(|values| ndarray::ArrayD::from_shape_vec(shape.clone(), values))
-            .transpose()?;
-        let nd_array = ndarray::ArrayD::from_shape_vec(shape.clone(), array)?;
+            .transpose()
+            .map_err(|e| NdArrowError::InvalidShape(e.to_string()))?;
+        let nd_array = ndarray::ArrayD::from_shape_vec(shape.clone(), array)
+            .map_err(|e| NdArrowError::InvalidShape(e.to_string()))?;
         let backend = InMemoryArrayBackend::new_with_validity(
             nd_array,
             shape.clone(),
             dimensions.clone(),
             fill_value,
             validity,
-        );
+        )?;
         Self::new(backend)
     }
 }
@@ -90,25 +93,23 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArrayDispatch<T, B> {
     ///
     /// # Errors
     /// Returns an error if validation fails.
-    pub fn new(backend: B) -> anyhow::Result<Self> {
+    pub fn new(backend: B) -> Result<Self> {
         let shape = backend.shape();
         let dimensions = backend.dimensions();
         if shape.len() != dimensions.len() {
-            return Err(anyhow::anyhow!(
-                "Shape length {} does not match dimensions length {}",
-                shape.len(),
-                dimensions.len()
-            ));
+            return Err(NdArrowError::ShapeDimensionMismatch {
+                shape_len: shape.len(),
+                dims_len: dimensions.len(),
+            });
         }
 
         // Validate that the total size implied by the shape matches the backend length
         let total_size: usize = shape.iter().product();
         if total_size != backend.len() {
-            return Err(anyhow::anyhow!(
-                "Total size implied by shape {} does not match backend length {}",
-                total_size,
-                backend.len()
-            ));
+            return Err(NdArrowError::SizeMismatch {
+                expected: total_size,
+                actual: backend.len(),
+            });
         }
 
         Self::from_parts(Arc::new(backend), shape, dimensions)
@@ -118,13 +119,12 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArrayDispatch<T, B> {
         backend: Arc<B>,
         shape: Vec<usize>,
         dimensions: Vec<String>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self> {
         if shape.len() != dimensions.len() {
-            return Err(anyhow::anyhow!(
-                "Shape length {} does not match dimensions length {}",
-                shape.len(),
-                dimensions.len()
-            ));
+            return Err(NdArrowError::ShapeDimensionMismatch {
+                shape_len: shape.len(),
+                dims_len: dimensions.len(),
+            });
         }
 
         Ok(Self {
@@ -258,9 +258,11 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
         }
 
         let broadcasted = aligned.broadcast(target_shape).ok_or_else(|| {
+            let source_shape = self.shape();
+            tracing::warn!(?source_shape, ?target_shape, "cannot broadcast array to target shape");
             anyhow::anyhow!(
                 "Cannot broadcast array of shape {:?} to target shape {:?}",
-                self.shape(),
+                source_shape,
                 target_shape
             )
         })?;
