@@ -35,6 +35,7 @@ pub async fn pushdown_with_statistics(
     let mut views = Vec::with_capacity(dataset_names.len());
     for name in &dataset_names {
         let view = store.open_dataset(name).await.map_err(|e| {
+            tracing::debug!(dataset = %name, error = %e, "failed to open atlas dataset for predicate pruning");
             datafusion::error::DataFusionError::Execution(format!(
                 "Failed to open atlas dataset '{name}' for pruning: {e}"
             ))
