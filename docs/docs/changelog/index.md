@@ -6,6 +6,22 @@ All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
 
+## v1.7.1 — 2026-06-15
+
+### Changed
+
+- **Unified query execution.** JSON DSL and SQL queries now run through a single
+  physical execution pipeline in `beacon-core`, driven by one custom physical
+  planner for all statements. The standalone `beacon-query` and `beacon-planner`
+  crates were removed.
+- **Simplified data lake.** All table types are now described by a single
+  `LogicalTableDefinition` model, replacing the previous separate file-CRUD path.
+
+### Fixed
+
+- **Swagger UI / Scalar redirects** now resolve correctly when Beacon is served
+  under a non-empty base path (`BEACON_BASE_PATH`).
+
 ## v1.7.0 — 2026-06-10
 
 ### Added
@@ -16,7 +32,7 @@ changes), and **Fixed** (bug fixes).
 - **Schema evolution with `ALTER TABLE`** on managed tables — `ADD COLUMN`,
   `DROP COLUMN`, `RENAME COLUMN`, and `ALTER COLUMN ... TYPE` (safe widening
   promotions). Existing rows keep reading correctly: added columns read `NULL`
-  and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.7.0/sql/managed-tables).
+  and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.7.1/sql/managed-tables).
 - **CF `calendar` support.** CF time-unit parsing now honours the optional CF
   `calendar` attribute, so non-Gregorian calendars are interpreted correctly.
 - **SeaDataNet L05 mappings.** New UDFs map SeaDataNet instrument L05 codes for

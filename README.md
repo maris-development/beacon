@@ -74,7 +74,7 @@ Start it with `docker compose up -d`, then open the interactive API docs at <htt
 
 Add data by placing files (e.g. `.nc`, `.zarr`, `.parquet`, `.csv`) into `./datasets` — the container discovers them through the mounted volume.
 
-> Prefer a native build or a non-Docker install? See the [installation guide](https://maris-development.github.io/beacon/docs/1.7.0/getting-started.html#local).
+> Prefer a native build or a non-Docker install? See the [installation guide](https://maris-development.github.io/beacon/docs/1.7.1/getting-started.html#local).
 
 ## Query examples
 
@@ -127,7 +127,7 @@ Content-Type: application/json
 }
 ```
 
-The response is a streamed file in the chosen `output.format` (here, CSV). See the [query reference](https://maris-development.github.io/beacon/docs/1.7.0/api/querying/) for the full schema, all source types, and every output format.
+The response is a streamed file in the chosen `output.format` (here, CSV). See the [query reference](https://maris-development.github.io/beacon/docs/1.7.1/api/querying/) for the full schema, all source types, and every output format.
 
 ## Configuration
 
@@ -152,8 +152,8 @@ S3-compatible storage, CORS, NetCDF caching, and Flight SQL authentication have 
 ## Documentation
 
 - Docs home: <https://maris-development.github.io/beacon/>
-- Getting started: <https://maris-development.github.io/beacon/docs/1.7.0/getting-started.html#local>
-- Query reference: <https://maris-development.github.io/beacon/docs/1.7.0/api/querying/>
+- Getting started: <https://maris-development.github.io/beacon/docs/1.7.1/getting-started.html#local>
+- Query reference: <https://maris-development.github.io/beacon/docs/1.7.1/api/querying/>
 - Community Slack: [join here](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg)
 
 ## Contributing

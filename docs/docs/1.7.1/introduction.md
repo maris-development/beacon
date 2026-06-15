@@ -51,7 +51,7 @@ df = client.sql_query(
 
 :::
 
-SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`) or Arrow Flight SQL. Prefer querying by name? Register the files as an [external table](/docs/1.7.0/data-lake/external-tables) first.
+SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`) or Arrow Flight SQL. Prefer querying by name? Register the files as an [external table](/docs/1.7.1/data-lake/external-tables) first.
 
 ## Supported formats
 
@@ -71,14 +71,14 @@ SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`)
 
 A few terms used throughout the docs:
 
-- **[Dataset](/docs/1.7.0/data-lake/datasets)** — an individual file Beacon reads in place (NetCDF, Zarr, Parquet, …).
-- **[External table](/docs/1.7.0/data-lake/external-tables)** — a registered name over one or more files (a folder or glob pattern), with a merged schema across them.
-- **[View](/docs/1.7.0/data-lake/view)** — a saved query exposed as a table.
-- **[Managed table](/docs/1.7.0/sql/managed-tables)** — an Iceberg-backed table Beacon owns and can mutate (`INSERT` / `UPDATE` / `DELETE`).
+- **[Dataset](/docs/1.7.1/data-lake/datasets)** — an individual file Beacon reads in place (NetCDF, Zarr, Parquet, …).
+- **[External table](/docs/1.7.1/data-lake/external-tables)** — a registered name over one or more files (a folder or glob pattern), with a merged schema across them.
+- **[View](/docs/1.7.1/data-lake/view)** — a saved query exposed as a table.
+- **[Managed table](/docs/1.7.1/sql/managed-tables)** — an Iceberg-backed table Beacon owns and can mutate (`INSERT` / `UPDATE` / `DELETE`).
 
 ## Next steps
 
-- **[Get started](/docs/1.7.0/getting-started)** — run Beacon with Docker, locally or against S3.
-- **[Connect a client](/docs/1.7.0/connect/jetbrains-datagrip)** — JetBrains DataGrip, Python ADBC/SDK, or the CLI.
-- **[Write queries](/docs/1.7.0/sql/)** — the SQL guide.
-- **[Register your data](/docs/1.7.0/data-lake/)** — external tables and views.
+- **[Get started](/docs/1.7.1/getting-started)** — run Beacon with Docker, locally or against S3.
+- **[Connect a client](/docs/1.7.1/connect/jetbrains-datagrip)** — JetBrains DataGrip, Python ADBC/SDK, or the CLI.
+- **[Write queries](/docs/1.7.1/sql/)** — the SQL guide.
+- **[Register your data](/docs/1.7.1/data-lake/)** — external tables and views.

@@ -103,7 +103,7 @@ ALTER TABLE observations ALTER COLUMN temperature TYPE DOUBLE;  -- safe widening
 Existing rows keep reading correctly: newly added columns read as `NULL` for
 older rows, and renames preserve the underlying values. `ALTER COLUMN ... TYPE`
 is limited to safe widening promotions so existing data is never corrupted. See
-the [CREATE TABLE (Managed)](/docs/1.7.0/sql/managed-tables) docs for the full
+the [CREATE TABLE (Managed)](/docs/1.7.1/sql/managed-tables) docs for the full
 reference.
 
 ## Query engine upgrade

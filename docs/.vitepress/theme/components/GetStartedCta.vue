@@ -1,6 +1,6 @@
 <script setup>
 import { withBase } from 'vitepress'
-const start = withBase('/docs/1.7.0/getting-started')
+const start = withBase('/docs/1.7.1/getting-started')
 </script>
 
 <template>
