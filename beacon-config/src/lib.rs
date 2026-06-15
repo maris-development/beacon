@@ -1,8 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use envconfig::Envconfig;
 use lazy_static::lazy_static;
+
+pub mod error;
+
+pub use error::ConfigError;
+use error::Result;
 
 #[derive(Debug)]
 pub struct Config {
@@ -360,7 +365,7 @@ impl From<RawConfig> for Config {
 /// Errors (with a descriptive message) if the path contains characters outside the
 /// URL "unreserved" set or has an empty internal segment, instead of letting an
 /// invalid value reach axum/utoipa, which panic on malformed paths.
-fn normalize_base_path(raw: &str) -> Result<String, String> {
+fn normalize_base_path(raw: &str) -> std::result::Result<String, String> {
     let trimmed = raw.trim().trim_matches('/');
     if trimmed.is_empty() {
         return Ok(String::new());
@@ -386,12 +391,18 @@ impl Config {
     /// Loads the configuration from the environment, normalizing and validating
     /// fields. Returns a descriptive error instead of panicking, so callers can
     /// report the problem cleanly and exit.
-    pub fn load() -> anyhow::Result<Config> {
+    pub fn load() -> Result<Config> {
         let mut config: Config = RawConfig::init_from_env()
-            .map_err(|e| anyhow::anyhow!("failed to load configuration from environment: {e}"))?
+            .map_err(|e| ConfigError::EnvLoad(e.to_string()))?
             .into();
-        config.server.base_path = normalize_base_path(&config.server.base_path)
-            .map_err(|e| anyhow::anyhow!("invalid BEACON_BASE_PATH: {e}"))?;
+        config.server.base_path =
+            normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
+        tracing::debug!(
+            host = %config.server.host,
+            port = config.server.port,
+            base_path = %config.server.base_path,
+            "loaded Beacon configuration from environment"
+        );
         Ok(config)
     }
 }
@@ -404,7 +415,7 @@ static CONFIG_CELL: OnceLock<Config> = OnceLock::new();
 ///
 /// Call this once early in `main`. It is idempotent: subsequent calls return the
 /// already-initialized [`Config`].
-pub fn init() -> anyhow::Result<&'static Config> {
+pub fn init() -> Result<&'static Config> {
     if let Some(config) = CONFIG_CELL.get() {
         return Ok(config);
     }
@@ -435,55 +446,50 @@ impl std::ops::Deref for ConfigHandle {
 /// Process-global configuration handle. Dereferences to [`Config`].
 pub static CONFIG: ConfigHandle = ConfigHandle;
 
+/// Creates `path` (and any missing parents), returning a structured
+/// [`ConfigError::CreateDir`] and logging the failure on error.
+fn create_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).map_err(|source| {
+        tracing::error!(path = %path.display(), error = %source, "failed to create data directory");
+        ConfigError::CreateDir {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+/// [`create_dir`] for the `lazy_static` data-directory accessors below, which
+/// cannot return a `Result`. On failure it panics with the structured
+/// [`ConfigError`] message (path + underlying I/O error) after logging it.
+fn ensure_dir(path: PathBuf) -> PathBuf {
+    if let Err(e) = create_dir(&path) {
+        panic!("{e}");
+    }
+    path
+}
+
 lazy_static! {
-    pub static ref DATA_DIR: PathBuf = {
-        std::fs::create_dir_all("./data").expect("Failed to create data dir");
-        PathBuf::from("./data")
-    };
+    pub static ref DATA_DIR: PathBuf = ensure_dir(PathBuf::from("./data"));
     /// The path to the datasets directory
-    pub static ref DATASETS_DIR_PATH: PathBuf = {
-        //Create the dir if it doesn't exist
-        let dir = DATA_DIR.join("datasets");
-        std::fs::create_dir_all(&dir).expect("Failed to create datasets dir");
-        dir
-    };
+    pub static ref DATASETS_DIR_PATH: PathBuf = ensure_dir(DATA_DIR.join("datasets"));
     /// The prefix for the datasets directory for object store paths
     pub static ref DATASETS_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("datasets");
 
     pub static ref TABLES_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("tables");
-    pub static ref TABLES_DIR: PathBuf = {
-        let dir = DATA_DIR.join("tables");
-        std::fs::create_dir_all(&dir).expect("Failed to create tables dir");
-        dir
-    };
+    pub static ref TABLES_DIR: PathBuf = ensure_dir(DATA_DIR.join("tables"));
 
-    pub static ref TMP_DIR: PathBuf = {
-        let dir = DATA_DIR.join("tmp");
-        std::fs::create_dir_all(&dir).expect("Failed to create tmp dir");
-        dir
-    };
-
+    pub static ref TMP_DIR: PathBuf = ensure_dir(DATA_DIR.join("tmp"));
 
     /// The path to the indexes directory
-    pub static ref INDEX_DIR_PATH: PathBuf = {
-        //Create the dir if it doesn't exist
-        let dir = DATA_DIR.join("indexes");
-        std::fs::create_dir_all(&dir).expect("Failed to create indexes dir");
-        dir
-    };
+    pub static ref INDEX_DIR_PATH: PathBuf = ensure_dir(DATA_DIR.join("indexes"));
     /// The prefix for the indexes directory for object store paths
     pub static ref INDEX_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("indexes");
 
     /// The path to the cache directory
-    pub static ref CACHE_DIR_PATH: PathBuf = {
-        //Create the dir if it doesn't exist
-        let dir = DATA_DIR.join("cache");
-        std::fs::create_dir_all(&dir).expect("Failed to create cache dir");
-        dir
-    };
+    pub static ref CACHE_DIR_PATH: PathBuf = ensure_dir(DATA_DIR.join("cache"));
     /// The prefix for the cache directory for object store paths
     pub static ref CACHE_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("cache");

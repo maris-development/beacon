@@ -93,10 +93,20 @@ impl RaggedDataset {
         }
 
         if row_size_vars.is_empty() {
+            tracing::debug!(
+                dataset = %dataset.name,
+                "no sample_dimension attributes found — not a ragged dataset"
+            );
             anyhow::bail!("no sample_dimension attributes found — not a ragged dataset");
         }
+        tracing::debug!(
+            dataset = %dataset.name,
+            row_size_vars = row_size_vars.len(),
+            "detected CF ragged-array dataset"
+        );
 
         // ── 2. Determine the instance dimension ─────────────────────────
+        // Safe: `row_size_vars` is non-empty (checked above).
         let first_rs_var = row_size_vars.values().next().unwrap();
         let instance_dim = dataset
             .get_array(first_rs_var)
@@ -304,11 +314,9 @@ impl RaggedDataset {
                     arrays.insert(name.clone(), sub);
                 }
                 RaggedArray::ObservationVariable(array) => {
-                    let obs_dim = array
-                        .dimensions()
-                        .first()
-                        .cloned()
-                        .expect("observation variable must have dimensions");
+                    let obs_dim = array.dimensions().first().cloned().ok_or_else(|| {
+                        anyhow::anyhow!("observation variable {name} must have at least one dimension")
+                    })?;
                     let cum = &offsets[&obs_dim];
                     let obs_start = cum[index];
                     let obs_len = cum[index + 1] - obs_start;
@@ -387,11 +395,9 @@ impl RaggedDataset {
                     arrays.insert(name.clone(), sub);
                 }
                 RaggedArray::ObservationVariable(array) => {
-                    let obs_dim = array
-                        .dimensions()
-                        .first()
-                        .cloned()
-                        .expect("observation variable must have dimensions");
+                    let obs_dim = array.dimensions().first().cloned().ok_or_else(|| {
+                        anyhow::anyhow!("observation variable {name} must have at least one dimension")
+                    })?;
                     let cum = &offsets[&obs_dim];
                     let obs_start = cum[start];
                     let obs_len = cum[end] - obs_start;

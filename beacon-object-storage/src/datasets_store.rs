@@ -28,7 +28,7 @@ use crate::{
 ///   virtual-hosted-style the bucket is encoded in the endpoint host.
 /// - Otherwise a local filesystem store rooted at [`beacon_config::DATASETS_DIR_PATH`]
 ///   is used.
-pub(crate) async fn create_datasets_store() -> Result<DatasetsStore, String> {
+pub(crate) async fn create_datasets_store() -> StorageResult<DatasetsStore> {
     let storage = &beacon_config::CONFIG.storage;
 
     let (inner, event_listener): (
@@ -44,15 +44,14 @@ pub(crate) async fn create_datasets_store() -> Result<DatasetsStore, String> {
 
         if !s3.enable_virtual_hosting {
             // Path-style requests need an explicit bucket name.
-            let bucket = s3.bucket.as_ref().ok_or_else(|| {
-                "S3 bucket name not configured (set BEACON_S3_BUCKET)".to_string()
+            let bucket = s3.bucket.as_ref().ok_or(error::StorageError::MissingConfig {
+                key: "BEACON_S3_BUCKET",
             })?;
             builder = builder.with_bucket_name(bucket);
         }
 
-        let store = builder
-            .build()
-            .map_err(|e| format!("Failed to build S3 object store: {e}"))?;
+        // `object_store::Error` converts into `StorageError::ObjectStore` via `?`.
+        let store = builder.build()?;
 
         // TODO: wire S3 change notifications into an `EventListener` so the
         // cache-backed fast path can be enabled for the S3 backend too.
@@ -61,9 +60,7 @@ pub(crate) async fn create_datasets_store() -> Result<DatasetsStore, String> {
         tracing::info!("Using local filesystem object store for datasets");
 
         let root = beacon_config::DATASETS_DIR_PATH.clone();
-        let store = LocalFileSystem::new_with_prefix(&root)
-            .map_err(|e| format!("Failed to build local filesystem object store: {e}"))?
-            .with_automatic_cleanup(true);
+        let store = LocalFileSystem::new_with_prefix(&root)?.with_automatic_cleanup(true);
         let inner = Arc::new(store) as Arc<dyn ObjectStore + Send + Sync>;
 
         // Watch the datasets directory for changes (on by default; see
@@ -231,8 +228,11 @@ impl DatasetsStore {
             }
             let path = location.as_ref();
             for (prefix, tx) in subs.iter() {
-                if path.starts_with(prefix.as_str()) {
-                    let _ = tx.send(event.clone());
+                if path.starts_with(prefix.as_str()) && tx.send(event.clone()).is_err() {
+                    // No live receivers for this prefix; the sender is pruned
+                    // lazily by `subscribe_events`. Logged at TRACE since a
+                    // subscriber dropping is normal.
+                    tracing::trace!(prefix = %prefix, "no live subscribers; event dropped");
                 }
             }
         }

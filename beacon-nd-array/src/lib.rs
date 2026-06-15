@@ -61,9 +61,14 @@ pub mod array;
 pub mod arrow;
 pub mod dataset;
 pub mod datatypes;
+pub mod error;
 pub mod projection;
 
+pub use error::NdArrayError;
+
 use std::sync::Arc;
+
+use crate::error::Result;
 
 use crate::{
     array::{
@@ -152,38 +157,32 @@ impl<T: NdArrayType> NdArray<T> {
         dim_sizes: Vec<usize>,
         dim_names: Vec<String>,
         fill_value: Option<T>,
-    ) -> anyhow::Result<Self> {
-        let array = ArrayD::from_shape_vec(dim_sizes.clone(), values.clone()).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create ArrayD from provided values and dimensions: {}",
-                e
-            )
-        })?;
+    ) -> Result<Self> {
+        let array = ArrayD::from_shape_vec(dim_sizes.clone(), values.clone())
+            .map_err(|e| NdArrayError::InvalidShape(e.to_string()))?;
         let backend = InMemoryArrayBackend::new(array, dim_sizes, dim_names, fill_value);
         Ok(Self(Arc::new(backend)))
     }
 }
 
 impl<T: NdArrayType> NdArray<T> {
-    pub fn new_with_backend<B: ArrayBackend<T>>(backend: B) -> anyhow::Result<Self> {
+    pub fn new_with_backend<B: ArrayBackend<T>>(backend: B) -> Result<Self> {
         let shape = backend.shape();
         let dimensions = backend.dimensions();
 
         if shape.len() != dimensions.len() {
-            return Err(anyhow::anyhow!(
-                "Shape length {} does not match dimensions length {}",
-                shape.len(),
-                dimensions.len()
-            ));
+            return Err(NdArrayError::ShapeDimensionMismatch {
+                shape_len: shape.len(),
+                dims_len: dimensions.len(),
+            });
         }
 
         let total_size: usize = shape.iter().product();
         if total_size != backend.len() {
-            return Err(anyhow::anyhow!(
-                "Total size implied by shape {} does not match backend length {}",
-                total_size,
-                backend.len()
-            ));
+            return Err(NdArrayError::SizeMismatch {
+                expected: total_size,
+                actual: backend.len(),
+            });
         }
 
         Ok(Self(Arc::new(backend)))
@@ -206,32 +205,40 @@ impl<T: NdArrayType> NdArray<T> {
     }
 
     pub async fn into_raw_vec(self) -> Vec<T> {
+        let shape = self.shape();
         let array = self
             .0
             .read_subset(ArraySubset {
-                start: vec![0; self.shape().len()],
-                shape: self.shape(),
+                start: vec![0; shape.len()],
+                shape: shape.clone(),
             })
             .await
-            .unwrap();
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, ?shape, "failed to read full array into raw vec");
+                panic!("failed to read full array into raw vec: {e}");
+            });
 
         array.into_raw_vec_and_offset().0
     }
 
     pub async fn clone_into_raw_vec(&self) -> Vec<T> {
+        let shape = self.shape();
         let array = self
             .0
             .read_subset(ArraySubset {
-                start: vec![0; self.shape().len()],
-                shape: self.shape(),
+                start: vec![0; shape.len()],
+                shape: shape.clone(),
             })
             .await
-            .unwrap();
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, ?shape, "failed to read full array into raw vec");
+                panic!("failed to read full array into raw vec: {e}");
+            });
 
         array.into_raw_vec_and_offset().0
     }
 
-    pub async fn subset(&self, subset: ArraySubset) -> anyhow::Result<NdArray<T>> {
+    pub async fn subset(&self, subset: ArraySubset) -> Result<NdArray<T>> {
         let nd_array = self.0.read_subset(subset.clone()).await?;
         let backend = InMemoryArrayBackend::new(
             nd_array,
@@ -246,7 +253,7 @@ impl<T: NdArrayType> NdArray<T> {
         &self,
         target_shape: &[usize],
         dimensions: &[String],
-    ) -> anyhow::Result<NdArray<T>> {
+    ) -> Result<NdArray<T>> {
         // This will always materialize the array. In the future, we may want to return a lazy broadcast view instead.
         let nd_array = self
             .0
@@ -265,11 +272,10 @@ impl<T: NdArrayType> NdArray<T> {
             .collect();
 
         if source_axis_order.len() != source_dims.len() {
-            return Err(anyhow::anyhow!(
-                "Source dimensions {:?} are not a subset of target dimensions {:?}",
+            return Err(NdArrayError::BroadcastDimensions {
                 source_dims,
-                dimensions
-            ));
+                target_dims: dimensions.to_vec(),
+            });
         }
 
         let mut aligned = nd_array

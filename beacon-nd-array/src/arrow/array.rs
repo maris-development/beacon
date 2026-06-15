@@ -23,6 +23,7 @@ macro_rules! convert_ndarray {
             .as_any()
             .downcast_ref::<NdArray<$rust_ty>>()
             .ok_or_else(|| {
+                tracing::error!(target_type = $label, "failed to downcast NdArray for Arrow conversion");
                 anyhow::anyhow!(
                     "Failed to downcast NdArray to NdArray<{}> for Arrow conversion.",
                     $label
@@ -73,6 +74,7 @@ pub async fn ndarray_to_arrow_array(ndarray: &dyn NdArrayD) -> anyhow::Result<Ar
                 .as_any()
                 .downcast_ref::<NdArray<TimestampNanosecond>>()
                 .ok_or_else(|| {
+                    tracing::error!(target_type = "TimestampNanosecond", "failed to downcast NdArray for Arrow conversion");
                     anyhow::anyhow!(
                         "Failed to downcast NdArray to NdArray<TimestampNanosecond> for Arrow conversion."
                     )
