@@ -207,10 +207,10 @@ impl UniqueValuesHandleCollection {
 
     /// Merges the unique values collected across all registered handles into a
     /// single map grouped by column (field).
-    pub fn unique_values(&self) -> Option<ColumnValueMap> {
+    pub fn unique_values(&self) -> Result<Option<ColumnValueMap>> {
         let handles = self.handles();
         if handles.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let mut merged: ColumnValueMap = ColumnValueMap::new();
@@ -221,16 +221,15 @@ impl UniqueValuesHandleCollection {
                 let field_ref = field.clone();
                 let target = match merged.entry(field_ref.clone()) {
                     indexmap::map::Entry::Occupied(entry) => entry.into_mut(),
-                    indexmap::map::Entry::Vacant(entry) => entry.insert(
-                        UniqueValuesHandle::init_column_values(field_ref.clone())
-                            .expect("unsupported data type for unique value tracking"),
-                    ),
+                    indexmap::map::Entry::Vacant(entry) => {
+                        entry.insert(UniqueValuesHandle::init_column_values(field_ref.clone())?)
+                    }
                 };
-                merge_column_value_sets(&field_ref, target, source_values);
+                merge_column_value_sets(&field_ref, target, source_values)?;
             }
         }
 
-        Some(merged)
+        Ok(Some(merged))
     }
 }
 
@@ -238,20 +237,31 @@ fn merge_column_value_sets(
     field: &FieldRef,
     target: &mut ErasedColumnValues,
     source: &ErasedColumnValues,
-) {
+) -> Result<()> {
     let field_name = field.name().clone();
 
     macro_rules! merge_values {
         ($ty:ty) => {{
+            // A type mismatch here means the per-column collectors created by
+            // `init_column_values` got out of sync with this merge dispatch —
+            // an internal invariant violation rather than bad user input.
             let target_column = target
                 .as_mut()
                 .as_mut()
                 .downcast_mut::<UniqueColumnValues<$ty>>()
-                .unwrap_or_else(|| panic!("Unexpected unique value type for column {field_name}"));
+                .ok_or_else(|| {
+                    DataFusionError::Internal(format!(
+                        "Unexpected unique value type for column {field_name}"
+                    ))
+                })?;
             let source_column = source
                 .as_any()
                 .downcast_ref::<UniqueColumnValues<$ty>>()
-                .unwrap_or_else(|| panic!("Unexpected unique value type for column {field_name}"));
+                .ok_or_else(|| {
+                    DataFusionError::Internal(format!(
+                        "Unexpected unique value type for column {field_name}"
+                    ))
+                })?;
             target_column.compare_and_add(source_column.values.iter().cloned());
         }};
     }
@@ -278,8 +288,14 @@ fn merge_column_value_sets(
         DataType::Float32 => merge_values!(OrderedFloat<f32>),
         DataType::Float64 => merge_values!(OrderedFloat<f64>),
         DataType::Decimal128(_, _) => merge_values!(i128),
-        other => panic!("Unsupported data type for unique value merge: {:?}", other),
+        other => {
+            return Err(DataFusionError::NotImplemented(format!(
+                "Unsupported data type for unique value merge: {other:?}"
+            )));
+        }
     }
+
+    Ok(())
 }
 
 pub type ErasedColumnValues = Box<dyn UniqueVec + Send + Sync>;
@@ -937,6 +953,7 @@ mod tests {
 
         let merged_map = collection
             .unique_values()
+            .expect("merge should succeed")
             .expect("expected single merged map");
 
         let station_values = merged_map
@@ -973,6 +990,6 @@ mod tests {
     #[test]
     fn unique_value_handles_return_empty_when_no_handles_registered() {
         let collection = UniqueValuesHandleCollection::new();
-        assert!(collection.unique_values().is_none());
+        assert!(collection.unique_values().unwrap().is_none());
     }
 }
