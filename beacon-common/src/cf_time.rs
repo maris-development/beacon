@@ -54,6 +54,8 @@ use std::str::FromStr;
 use hifitime::{Epoch, Unit};
 use regex::Regex;
 
+use crate::error::{CommonError, Result};
+
 /// Parse a CF time `units` string into a reference epoch and unit.
 ///
 /// This is the entry point of the module: it dispatches on the optional CF
@@ -78,7 +80,7 @@ use regex::Regex;
 ///
 /// Returns `Err` if the `calendar` is unsupported, the reference date cannot be
 /// parsed, or the time unit is missing or unrecognised.
-pub fn parse_cf_time(units: &str, calendar: Option<&str>) -> Result<(Epoch, Unit), String> {
+pub fn parse_cf_time(units: &str, calendar: Option<&str>) -> Result<(Epoch, Unit)> {
     // CF calendar names are case-insensitive.
     match calendar.map(str::to_ascii_lowercase).as_deref() {
         // The Gregorian calendar is the default when no calendar is specified.
@@ -88,8 +90,16 @@ pub fn parse_cf_time(units: &str, calendar: Option<&str>) -> Result<(Epoch, Unit
             parse_cf_time_epoch_gregorian(units)
         }
         Some("julian") => parse_cf_time_epoch_julian(units),
-        // Report the original (un-lowercased) spelling in the error.
-        Some(_) => Err(format!("Unsupported calendar: {}", calendar.unwrap())),
+        // Report the original (un-lowercased) spelling in the error. The
+        // `expect` is infallible: this arm is only reached when `calendar` is
+        // `Some(_)`.
+        Some(_) => {
+            let calendar = calendar.expect("calendar matched Some(_)");
+            tracing::warn!(calendar, units, "unsupported CF calendar");
+            Err(CommonError::CfTime(format!(
+                "Unsupported calendar: {calendar}"
+            )))
+        }
     }
 }
 
@@ -113,22 +123,37 @@ pub fn parse_cf_time(units: &str, calendar: Option<&str>) -> Result<(Epoch, Unit
 ///
 /// Returns `Err` if the reference date cannot be parsed, or if the leading
 /// time unit is missing or unrecognised (see [`extract_units`]).
-fn parse_cf_time_epoch_gregorian(units: &str) -> Result<(Epoch, Unit), String> {
-    let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})").unwrap();
-    let epoch_opt = re.captures(units).and_then(|caps| {
-        let epoch_str = caps["epoch"].to_string();
+fn parse_cf_time_epoch_gregorian(units: &str) -> Result<(Epoch, Unit)> {
+    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
+    let re = Regex::new(r"since (?P<epoch>-?\d{1,4}-\d{1,2}-\d{1,2})")
+        .expect("static CF-time epoch regex must compile");
 
-        Epoch::from_str(&epoch_str).ok()
-    });
+    let epoch = match re.captures(units) {
+        Some(caps) => {
+            let epoch_str = caps["epoch"].to_string();
+            // Previously the parse error was discarded with `.ok()`, hiding *why*
+            // an otherwise well-formed date failed; surface it instead.
+            Epoch::from_str(&epoch_str).map_err(|e| {
+                tracing::warn!(units, epoch = %epoch_str, error = %e, "failed to parse CF Gregorian epoch");
+                CommonError::CfTime(format!(
+                    "Failed to parse epoch '{epoch_str}' from units string: {units}: {e}"
+                ))
+            })?
+        }
+        None => {
+            return Err(CommonError::CfTime(format!(
+                "Failed to parse epoch from units string: {units}"
+            )));
+        }
+    };
 
-    let units_opt = extract_units(units);
-    match (epoch_opt, units_opt) {
-        (Some(epoch), Some(unit)) => Ok((epoch, unit)),
-        (None, _) => Err(format!("Failed to parse epoch from units string: {units}")),
-        (_, None) => Err(format!(
+    let unit = extract_units(units).ok_or_else(|| {
+        CommonError::CfTime(format!(
             "Failed to extract time unit from units string: {units}"
-        )),
-    }
+        ))
+    })?;
+
+    Ok((epoch, unit))
 }
 
 /// Parse a CF time `units` string against the (proleptic) Julian calendar.
@@ -161,34 +186,40 @@ fn parse_cf_time_epoch_gregorian(units: &str) -> Result<(Epoch, Unit), String> {
 ///
 /// [Julian Date]: https://en.wikipedia.org/wiki/Julian_day
 /// [Julian Day Number]: https://en.wikipedia.org/wiki/Julian_day
-fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit), String> {
+fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit)> {
     // Match `... since <date>[ T]<time>` where `<date>` is `[-]Y-M-D` and the
     // optional `<time>` is `H:M:S`. Any trailing timezone marker (e.g. `Z`) is
     // ignored. Examples:
     //   `days since 1950-01-01`
     //   `days since 1950-01-01T00:00:00`
     //   `days since -4713-01-01T00:00:00Z`
+    //
+    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
     let re = Regex::new(
         r"since\s+(?P<year>-?\d{1,4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})(?:[ T](?P<hour>\d{1,2}):(?P<minute>\d{1,2}):(?P<second>\d{1,2}))?",
     )
-    .unwrap();
+    .expect("static CF-time Julian regex must compile");
 
-    let caps = re
-        .captures(units)
-        .ok_or_else(|| format!("Failed to parse Julian epoch from units string: {units}"))?;
+    let caps = re.captures(units).ok_or_else(|| {
+        tracing::warn!(units, "failed to match CF Julian epoch date");
+        CommonError::CfTime(format!(
+            "Failed to parse Julian epoch from units string: {units}"
+        ))
+    })?;
 
     // Parse the date into year, month, day
     let mut year: i32 = caps["year"]
         .parse()
-        .map_err(|e| format!("Invalid year in units string: {units}. Error: {e}"))?;
+        .map_err(|e| CommonError::CfTime(format!("Invalid year in units string: {units}. Error: {e}")))?;
     let month_num: u32 = caps["month"]
         .parse()
-        .map_err(|e| format!("Invalid month in units string: {units}. Error: {e}"))?;
-    let month = julian::Month::try_from(month_num)
-        .map_err(|e| format!("Invalid month in units string: {units}. Error: {e:?}"))?;
+        .map_err(|e| CommonError::CfTime(format!("Invalid month in units string: {units}. Error: {e}")))?;
+    let month = julian::Month::try_from(month_num).map_err(|e| {
+        CommonError::CfTime(format!("Invalid month in units string: {units}. Error: {e:?}"))
+    })?;
     let day: u32 = caps["day"]
         .parse()
-        .map_err(|e| format!("Invalid day in units string: {units}. Error: {e}"))?;
+        .map_err(|e| CommonError::CfTime(format!("Invalid day in units string: {units}. Error: {e}")))?;
 
     let jul_cal = julian::Calendar::JULIAN;
 
@@ -200,15 +231,20 @@ fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit), String> {
     }
 
     let epoch_date = jul_cal.at_ymd(year, month, day).map_err(|e| {
-        format!("Failed to parse Julian epoch date from units string: {units}. Error: {e}")
+        tracing::warn!(units, year, error = %e, "invalid Julian epoch date");
+        CommonError::CfTime(format!(
+            "Failed to parse Julian epoch date from units string: {units}. Error: {e}"
+        ))
     })?;
 
     // Parse the time into seconds for that day (defaults to midnight).
-    let time_part = |name: &str| -> Result<i64, String> {
+    let time_part = |name: &str| -> Result<i64> {
         caps.name(name)
             .map(|m| m.as_str().parse::<i64>())
             .transpose()
-            .map_err(|e| format!("Invalid time in units string: {units}. Error: {e}"))
+            .map_err(|e| {
+                CommonError::CfTime(format!("Invalid time in units string: {units}. Error: {e}"))
+            })
             .map(|v| v.unwrap_or(0))
     };
     let time_seconds: i64 =
@@ -221,21 +257,21 @@ fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit), String> {
     let offset_juld = epoch_date.julian_day_number() as f64 - 0.5 + time_seconds as f64 / 86400.0;
     let base_epoch = Epoch::from_jde_utc(offset_juld);
 
-    let units_opt = extract_units(units);
-
-    match units_opt {
-        Some(unit) => Ok((base_epoch, unit)),
-        None => Err(format!(
+    let unit = extract_units(units).ok_or_else(|| {
+        CommonError::CfTime(format!(
             "Failed to extract time unit from units string: {units}"
-        )),
-    }
+        ))
+    })?;
+
+    Ok((base_epoch, unit))
 }
 
 /// Extract the time unit from a CF units string.
 ///
 /// Example accepted prefixes: `seconds since`, `days since`, `weeks since`.
 fn extract_units(input: &str) -> Option<hifitime::Unit> {
-    let re = Regex::new(r"^(?P<units>\w+) since").unwrap();
+    // Static pattern: compiles unconditionally, so an `expect` here is infallible.
+    let re = Regex::new(r"^(?P<units>\w+) since").expect("static CF-time unit regex must compile");
     re.captures(input)
         .and_then(|caps| match caps["units"].to_string().as_str() {
             "seconds" => Some(hifitime::Unit::Second),
@@ -364,7 +400,9 @@ mod tests {
 
     #[test]
     fn unsupported_calendar_errors() {
-        let err = parse_cf_time("days since 1950-01-01", Some("noleap")).unwrap_err();
+        let err = parse_cf_time("days since 1950-01-01", Some("noleap"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Unsupported calendar"));
         // The original spelling is preserved in the message.
         assert!(err.contains("noleap"));
@@ -459,14 +497,29 @@ mod tests {
 
     #[test]
     fn gregorian_missing_date_errors() {
-        let err = parse_cf_time_epoch_gregorian("days since yesterday").unwrap_err();
+        let err = parse_cf_time_epoch_gregorian("days since yesterday")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Failed to parse epoch"), "got: {err}");
+    }
+
+    #[test]
+    fn gregorian_malformed_date_surfaces_underlying_error() {
+        // The date matches the regex shape but is not a real calendar date, so
+        // `Epoch::from_str` rejects it. The error must name the offending epoch
+        // (previously this failure was silently swallowed with `.ok()`).
+        let err = parse_cf_time_epoch_gregorian("days since 1970-13-45")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("1970-13-45"), "got: {err}");
     }
 
     #[test]
     fn gregorian_unrecognised_unit_errors() {
         // The date parses, but `fortnights` is not a known unit.
-        let err = parse_cf_time_epoch_gregorian("fortnights since 1970-01-01").unwrap_err();
+        let err = parse_cf_time_epoch_gregorian("fortnights since 1970-01-01")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Failed to extract time unit"), "got: {err}");
     }
 }
