@@ -84,8 +84,13 @@ For supported types (bool, numeric, timestamp, string, binary):
 
 `arrow::batch` provides:
 
-- `dataset_as_record_batch_stream(...)` for regular datasets
-- `any_dataset_as_record_batch_stream(...)` for regular + ragged datasets
+- `dataset_as_record_batch_stream(dataset, batch_size, concurrency, predicate, metrics)` for regular datasets
+- `any_dataset_as_record_batch_stream(dataset, batch_size, concurrency, predicate, metrics)` for regular + ragged datasets
+
+`concurrency` is how many chunks (or casts, for ragged) are read concurrently. Each
+chunk read is spawned onto the tokio runtime so I/O and Arrow conversion spread across
+worker threads, while emission order is preserved. Pass `default_chunk_concurrency()`
+for a core-count default, or `1` for fully serial reads.
 
 For regular datasets:
 
@@ -129,7 +134,7 @@ The crate also includes type promotion logic (`super_type`) for schema harmoniza
 use std::sync::Arc;
 use futures::TryStreamExt;
 use beacon_nd_array::{NdArray, NdArrayD, dataset::Dataset};
-use beacon_nd_array::arrow::batch::dataset_as_record_batch_stream;
+use beacon_nd_array::arrow::batch::{dataset_as_record_batch_stream, default_chunk_concurrency};
 use indexmap::IndexMap;
 
 async fn demo() -> anyhow::Result<()> {
@@ -145,7 +150,7 @@ async fn demo() -> anyhow::Result<()> {
 
     let ds = Dataset::new("example".to_string(), arrays).await;
 
-    let batches = dataset_as_record_batch_stream(ds, None)
+    let batches = dataset_as_record_batch_stream(ds, usize::MAX, default_chunk_concurrency(), None, None)
             .try_collect::<Vec<_>>()
             .await?;
 

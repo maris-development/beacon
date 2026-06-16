@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream,
+        batch::{any_dataset_as_record_batch_stream, default_chunk_concurrency},
         metrics::DatasetReadMetrics,
         pushdown_filter::PushdownFilter,
     },
@@ -114,6 +114,12 @@ impl FileSource for NetCDFSource {
         })
     }
 
+    // Single-file repartitioning is intentionally not implemented: a NetCDF
+    // file is read atomically per opener and has no per-file work queue to
+    // split across DataFusion partitions (unlike atlas, which work-steals
+    // datasets). Intra-file parallelism is provided by the concurrent chunk
+    // reads in `any_dataset_as_record_batch_stream`; cross-file parallelism
+    // comes from the ListingTable assigning multiple files to partitions.
     fn repartitioned(
         &self,
         _target_partitions: usize,
@@ -298,12 +304,18 @@ impl NetCDFOpener {
         };
 
         let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading NetCDF as Arrow stream: {e}"
-                ))
-            })
+        let stream = any_dataset_as_record_batch_stream(
+            dataset,
+            batch_size,
+            default_chunk_concurrency(),
+            pushdown_filter,
+            metrics,
+        )
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Error reading NetCDF as Arrow stream: {e}"
+            ))
+        })
             .and_then(move |batch| {
                 let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(

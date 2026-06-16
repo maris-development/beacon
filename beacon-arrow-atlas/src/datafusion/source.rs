@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::arrow::{
-    batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
+    batch::{any_dataset_as_record_batch_stream, default_chunk_concurrency},
+    metrics::DatasetReadMetrics,
     pushdown_filter::PushdownFilter,
 };
 use beacon_object_storage::DatasetsStore;
@@ -13,7 +14,10 @@ use datafusion::{
     config::ConfigOptions,
     datasource::{
         listing::PartitionedFile,
-        physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSource},
+        physical_plan::{
+            FileGroup, FileOpenFuture, FileOpener, FileScanConfig, FileScanConfigBuilder,
+            FileSource,
+        },
         schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
@@ -128,6 +132,49 @@ impl FileSource for AtlasSource {
             batch_size,
             ..self.clone()
         })
+    }
+
+    /// Spread a single atlas store across `target_partitions` DataFusion
+    /// partitions. Each partition receives a replica of the same marker
+    /// file(s); the openers built from this source share its
+    /// `stream_cache`/`SegQueue` (keyed by marker path), so the store's
+    /// datasets are drained exactly once and work-stolen across partitions.
+    /// This is the dataset-level analogue of BBF's multi-task file reads,
+    /// stacked on top of the per-dataset chunk concurrency in
+    /// `any_dataset_as_record_batch_stream`.
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        _repartition_file_min_size: usize,
+        _output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &FileScanConfig,
+    ) -> datafusion::error::Result<Option<FileScanConfig>> {
+        if target_partitions <= 1 || config.file_groups.len() >= target_partitions {
+            return Ok(None);
+        }
+
+        // Flatten every marker file currently scheduled for this scan.
+        let files: Vec<PartitionedFile> = config
+            .file_groups
+            .iter()
+            .flat_map(|group| group.files().iter().cloned())
+            .collect();
+        if files.is_empty() {
+            return Ok(None);
+        }
+
+        // One replica group per partition. Rebuilding `from(config)` keeps
+        // this same `AtlasSource` (and its shared `stream_cache`) as the
+        // source, which is what makes the drain-once / work-steal behavior
+        // hold across the new partitions.
+        let groups: Vec<FileGroup> = (0..target_partitions)
+            .map(|_| FileGroup::new(files.clone()))
+            .collect();
+
+        let conf = FileScanConfigBuilder::from(config.clone())
+            .with_file_groups(groups)
+            .build();
+        Ok(Some(conf))
     }
 
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
@@ -313,6 +360,7 @@ impl AtlasOpener {
                         let dataset_stream = any_dataset_as_record_batch_stream(
                             dataset,
                             batch_size,
+                            default_chunk_concurrency(),
                             pushdown_filter,
                             metrics,
                         )
@@ -556,6 +604,49 @@ mod tests {
         for batch in &batches {
             assert_eq!(batch.schema().fields().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn repartitioned_replicates_marker_across_partitions() {
+        use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder};
+
+        ensure_fixture().await;
+        let store = test_store().await;
+        let format = AtlasFormat::new(store.clone(), AtlasOptions::default());
+        let ctx = SessionContext::new();
+        let object = fixture_marker_object_meta();
+        let dummy_store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new());
+        let table_schema = format
+            .infer_schema(&ctx.state(), &dummy_store, &[object.clone()])
+            .await
+            .expect("infer schema");
+
+        let source = AtlasSource::new(store, None, TableSchema::from_file_schema(table_schema));
+        let conf = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .with_file_groups(vec![FileGroup::new(vec![pf_for(object)])])
+        .build();
+
+        // A single marker store fans out to `target_partitions` groups.
+        let repart = source
+            .repartitioned(4, 0, None, &conf)
+            .expect("repartition ok")
+            .expect("a single atlas store should repartition");
+        assert_eq!(repart.file_groups.len(), 4);
+        for group in &repart.file_groups {
+            assert_eq!(group.len(), 1, "each partition gets one marker replica");
+        }
+
+        // No repartition requested → leave the plan untouched.
+        assert!(
+            source
+                .repartitioned(1, 0, None, &conf)
+                .expect("repartition ok")
+                .is_none()
+        );
     }
 
     #[tokio::test]

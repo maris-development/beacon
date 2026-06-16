@@ -10,8 +10,10 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
-        pushdown_filter::PushdownFilter, schema::any_dataset_to_arrow_schema,
+        batch::{any_dataset_as_record_batch_stream, default_chunk_concurrency},
+        metrics::DatasetReadMetrics,
+        pushdown_filter::PushdownFilter,
+        schema::any_dataset_to_arrow_schema,
     },
     projection::DatasetProjection,
 };
@@ -247,6 +249,7 @@ impl FileOpener for ZarrOpener {
             let stream = any_dataset_as_record_batch_stream(
                 projected,
                 batch_size,
+                default_chunk_concurrency(),
                 pushdown_filter,
                 metrics,
             )

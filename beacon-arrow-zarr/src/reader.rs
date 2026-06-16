@@ -168,7 +168,7 @@ mod tests {
 
         async fn row_count(predicate: Option<PushdownFilter>) -> usize {
             let any = open_example().await;
-            any_dataset_as_record_batch_stream(any, usize::MAX, predicate, None)
+            any_dataset_as_record_batch_stream(any, usize::MAX, 4, predicate, None)
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap()

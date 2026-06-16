@@ -3,7 +3,9 @@ use std::sync::Arc;
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::{
     arrow::{
-        batch::{any_dataset_as_record_batch_stream, any_dataset_as_row_size},
+        batch::{
+            any_dataset_as_record_batch_stream, any_dataset_as_row_size, default_chunk_concurrency,
+        },
         metrics::DatasetReadMetrics,
         pushdown_filter::PushdownFilter,
     },
@@ -100,6 +102,12 @@ impl FileSource for TiffSource {
         })
     }
 
+    // Not implemented for single files: a TIFF is read atomically per opener
+    // with no per-file work queue to split across partitions. Intra-file
+    // parallelism comes from concurrent chunk reads in
+    // `any_dataset_as_record_batch_stream`; cross-file parallelism from the
+    // ListingTable. See `AtlasSource::repartitioned` for the work-stealing
+    // approach that fits a multi-dataset store.
     fn repartitioned(
         &self,
         _target_partitions: usize,
@@ -266,12 +274,18 @@ impl TiffOpener {
         };
 
         let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading TIFF as Arrow stream: {e}"
-                ))
-            })
+        let stream = any_dataset_as_record_batch_stream(
+            dataset,
+            batch_size,
+            default_chunk_concurrency(),
+            pushdown_filter,
+            metrics,
+        )
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Error reading TIFF as Arrow stream: {e}"
+            ))
+        })
             .and_then(move |batch| {
                 let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
