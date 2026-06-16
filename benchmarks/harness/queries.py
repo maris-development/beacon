@@ -1,11 +1,12 @@
 """Canonical benchmark query suite.
 
-Each query is defined once as ANSI-ish SQL with a ``{table}`` placeholder. The four
+Each query is defined once as ANSI-ish SQL with a ``{table}`` placeholder. The five
 engines accept nearly identical SQL, so per-engine differences are limited to how the
 data source is named (``{table}``) and a couple of dialect quirks handled in clients.py:
 
     Postgres        -> table ``obs``
     Trino / Presto  -> ``hive.bench.obs``
+    DuckDB          -> ``read_parquet('/benchdata/parquet/*.parquet')``
     Beacon (fair)   -> ``read_parquet(['parquet/*.parquet'])``
     Beacon (netcdf) -> ``read_netcdf(['netcdf/*.nc'])``     (native, no ETL)
 

@@ -77,7 +77,7 @@ class ResourceSampler:
         self.cpu_samples: list[float] = []
 
     def _sample_once(self) -> None:
-        if not self.container:  # in-process engine (e.g. DuckDB) — no container to sample
+        if not self.container:  # engine without a container to sample (every engine here has one)
             return
         try:
             out = subprocess.run(

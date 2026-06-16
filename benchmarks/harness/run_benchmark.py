@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark orchestrator: Beacon vs PostgreSQL vs Trino vs Presto.
+"""Benchmark orchestrator: Beacon vs PostgreSQL vs Trino vs Presto vs DuckDB.
 
 Phases per engine:
   1. Ingestion  — time to make the data query-ready (Postgres COPY, Trino/Presto
-                  external-table registration, Beacon = 0 / queries files in place).
+                  external-table registration, Beacon/DuckDB = 0 / query files in place).
   2. Latency    — each query in queries.py run 1 cold + N warm; record cold + warm p50/p95.
   3. Resources  — docker-stats sampled (peak memory, mean CPU) during the latency phase.
 
@@ -145,7 +145,7 @@ def measure_etl_conversion() -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engines", default="all",
-                    help="comma list of: beacon,beacon-netcdf,postgres,trino,presto (or 'all')")
+                    help="comma list of: beacon,beacon-netcdf,postgres,trino,presto,duckdb (or 'all')")
     ap.add_argument("--warm", type=int, default=3, help="warm repetitions per query")
     ap.add_argument("--scale", default=os.environ.get("BENCH_SCALE", "small"), help="label only")
     ap.add_argument("--no-etl", action="store_true", help="skip the NetCDF->Parquet conversion measurement")
@@ -166,7 +166,7 @@ def main() -> None:
     ap.add_argument("--duckdb-port", type=int, default=int(os.environ.get("DUCKDB_HOST_PORT", 8500)))
     args = ap.parse_args()
 
-    # `all` = the four engines reading the same Parquet (fair comparison + correctness).
+    # `all` = the five engines reading the same Parquet (fair comparison + correctness).
     # beacon-netcdf is opt-in (--engines ...,beacon-netcdf): it reads the native NetCDF,
     # but the published beacon image's NetCDF reader can miscount rows, so it is kept out
     # of the default correctness-checked suite.
