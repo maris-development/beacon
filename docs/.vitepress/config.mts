@@ -82,7 +82,6 @@ export default defineConfig({
     // https://vitepress.dev/reference/default-theme-config
     logo: '/beacon-logo-small.png',
     nav: [
-      { text: 'Beacon', link: 'https://beacon.maris.nl/', target: '_blank', rel: 'noopener' },
       {
         text: 'Docs', items: [
           {
@@ -96,6 +95,11 @@ export default defineConfig({
         text: 'Changelog',
         link: '/docs/changelog',
         activeMatch: '/changelog'
+      },
+      {
+        text: 'Benchmarks',
+        link: '/docs/benchmarks/beacon-vs-sql-engines-250m',
+        activeMatch: '/benchmarks'
       },
       {
         text: 'Available nodes',
@@ -482,6 +486,17 @@ export default defineConfig({
             }
           ]
         }
+      ],
+      '/docs/benchmarks/': [
+        {
+          text: 'Benchmarks',
+          items: [
+            {
+              text: 'vs PostgreSQL, Trino, Presto & DuckDB (250M rows)',
+              link: '/docs/benchmarks/beacon-vs-sql-engines-250m',
+            },
+          ],
+        },
       ],
       '/available-nodes/': [
         {
