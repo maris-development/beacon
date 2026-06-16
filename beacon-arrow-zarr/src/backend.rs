@@ -395,5 +395,16 @@ impl<T: NdArrayType> ArrayBackend<T> for AttributeBackend<T> {
 /// `calendar` is the CF `calendar` attribute (`None` defaults to Gregorian).
 /// Thin wrapper over [`beacon_common::cf_time::parse_cf_time`].
 pub fn parse_cf_time_units(units: &str, calendar: Option<&str>) -> Option<(Epoch, hifitime::Unit)> {
-    beacon_common::cf_time::parse_cf_time(units, calendar).ok()
+    match beacon_common::cf_time::parse_cf_time(units, calendar) {
+        Ok(parsed) => Some(parsed),
+        Err(e) => {
+            tracing::warn!(
+                units,
+                calendar = ?calendar,
+                error = %e,
+                "failed to parse CF time units; treating column as a non-time variable"
+            );
+            None
+        }
+    }
 }

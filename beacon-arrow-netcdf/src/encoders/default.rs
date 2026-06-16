@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use arrow::{
-    array::{self, ArrayRef},
+    array::{self, Array, ArrayRef},
     datatypes::{DataType, Field, SchemaRef},
 };
 use ndarray::ArrayView;
@@ -148,21 +148,36 @@ impl DefaultEncoder {
         let mut extents = vec![offset..offset + array.len()];
 
         let nc_file = &mut self.nc_file;
-        let mut variable = nc_file.variable_mut(var_name).expect("Variable not found");
+        let mut variable = nc_file
+            .variable_mut(var_name)
+            .ok_or_else(|| anyhow::anyhow!("NetCDF variable not found: {var_name}"))?;
 
         match array.data_type() {
             DataType::FixedSizeBinary(size) => {
                 let array = array
                     .as_any()
                     .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-                    .expect("Failed to downcast to FixedSizeBinaryArray");
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("failed to downcast column {var_name} to FixedSizeBinaryArray")
+                    })?;
                 extents.push(0..*size as usize);
 
                 let byte_slice = array.value_data();
 
-                let view = ArrayView::from_shape((1_000_000, 5), byte_slice).unwrap();
+                // Shape is (rows, fixed-size width); previously this was a hardcoded
+                // (1_000_000, 5), which panicked for any other array dimensions.
+                let view = ArrayView::from_shape((array.len(), *size as usize), byte_slice)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to view FixedSizeBinary column {var_name} as ({}, {}): {e}",
+                            array.len(),
+                            size
+                        )
+                    })?;
 
-                variable.put(view, extents).unwrap();
+                variable.put(view, extents).map_err(|e| {
+                    anyhow::anyhow!("failed to write FixedSizeBinary column {var_name} to NetCDF: {e}")
+                })?;
             }
             DataType::Utf8 => {
                 let string_array = array
