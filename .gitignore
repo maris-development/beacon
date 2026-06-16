@@ -26,7 +26,10 @@ node_modules/
 /docs/.vitepress/cache/
 /docs/.vitepress/dist/
 test-datasets/GL_TS_MO_ooi-gs-gs01sumo_1.nc
-benchmarks/
+# benchmarks/ is tracked; generated artifacts (data/, results/, .env, .venv) are excluded
+# by benchmarks/.gitignore.
+benchmarks/data/
+benchmarks/results/
 test.ipynb
 .pytest_cache/
 __pycache__/
