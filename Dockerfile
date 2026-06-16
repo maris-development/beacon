@@ -41,8 +41,6 @@ COPY beacon-iceberg/ /beacon-iceberg/
 COPY beacon-nd-array/ /beacon-nd-array/
 COPY beacon-nd-arrow/ /beacon-nd-arrow/
 COPY beacon-object-storage/ /beacon-object-storage/
-COPY beacon-planner/ /beacon-planner/
-COPY beacon-query/ /beacon-query/
 COPY Cargo.toml /
 COPY Cargo.lock /
 COPY rust-toolchain /
