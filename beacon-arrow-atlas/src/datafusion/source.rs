@@ -245,6 +245,7 @@ impl AtlasOpener {
                     let predicate_cloned = predicate.clone();
                     async move {
                         let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
+                        tracing::warn!(dataset = %dataset_name, path = %object_path, error = %e, "failed to open atlas dataset");
                         datafusion::error::DataFusionError::Execution(format!(
                             "Failed to open atlas dataset '{dataset_name}' at {object_path}: {e}"
                         ))
