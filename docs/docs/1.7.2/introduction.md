@@ -14,37 +14,55 @@ Beacon is a data lakehouse query engine built for scientific datasets. Point it 
 
 Clients query Beacon using **SQL** or **JSON** and receive results as a file (Parquet, NetCDF, Arrow IPC, …) or a streaming Arrow IPC response. Beacon handles filtering, aggregation, and joins across files entirely server-side.
 
+## Quick setup
+
+Start Beacon with Docker, mounting a local `datasets` folder that holds your files:
+
+```bash
+docker run -d \
+  --name beacon \
+  -p 5001:5001 \
+  -v ./datasets:/beacon/data/datasets \
+  ghcr.io/maris-development/beacon:latest
+```
+
+Drop your `.nc` (or Parquet, Zarr, CSV, …) files into `./datasets` and they are queryable immediately at `http://localhost:5001`. For Compose, S3-backed storage, and more, see the [getting started guide](/docs/1.7.2/getting-started).
+
 ## Your first query
 
-The same query three ways — as raw SQL, over the HTTP API, or from the Python SDK. No setup required: `read_netcdf()` reads the files in place.
+The same query several ways — sent over the HTTP API against Parquet or NetCDF files, or from the Python SDK. No table registration required: the `read_*()` functions read the files in place. The paths are always relative to the `datasets` directory you mounted.
 
 ::: code-group
 
-```sql [SQL]
-SELECT time, latitude, longitude, temperature
-FROM read_netcdf(['argo/**/*.nc'])
-WHERE temperature > 20
-LIMIT 100
-```
-
-```http [HTTP]
+```http [HTTP · Parquet]
 POST /api/query
 Content-Type: application/json
 
 {
-  "sql": "SELECT time, latitude, longitude, temperature FROM read_netcdf(['argo/**/*.nc']) WHERE temperature > 20 LIMIT 100",
+  "sql": "SELECT time, latitude, longitude, temperature FROM read_parquet(['example.parquet']) WHERE temperature > 20 LIMIT 100",
+  "output": { "format": "csv" }
+}
+```
+
+```http [HTTP · NetCDF]
+POST /api/query
+Content-Type: application/json
+
+{
+  "sql": "SELECT time, latitude, longitude, temperature FROM read_netcdf(['example.nc']) WHERE temperature > 20 LIMIT 100",
   "output": { "format": "csv" }
 }
 ```
 
 ```python [Python]
+%pip install beacon-api --upgrade
 from beacon_api import Client
 
 client = Client("https://your-beacon-node")
 
 df = client.sql_query(
     "SELECT time, latitude, longitude, temperature "
-    "FROM read_netcdf(['argo/**/*.nc']) "
+    "FROM read_netcdf(['example.nc']) "
     "WHERE temperature > 20 LIMIT 100"
 ).to_pandas_dataframe()
 ```
@@ -65,7 +83,6 @@ SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`)
 | ODV ASCII | Ocean Data View spreadsheet format |
 | CSV | Header row required, delimiter configurable |
 | Arrow IPC | `.arrow`, `.ipc` stream files |
-| Beacon Binary Format | Beacon's native ingest format |
 
 ## Key concepts
 
