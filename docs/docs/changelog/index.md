@@ -6,6 +6,21 @@ All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
 
+## v1.7.2 — 2026-06-16
+
+### Changed
+
+- **Error handling & logging overhaul.** The storage and format crates — NetCDF,
+  Zarr, GeoTIFF, Atlas, object storage, configuration, the DataFusion extensions,
+  and the n-dimensional array layers — now surface structured, contextual errors
+  and clearer log output on read and configuration failures.
+
+### Fixed
+
+- **Docker image build.** Corrected the `Dockerfile` so the image builds again
+  after the query-engine crate consolidation (it referenced crates that no
+  longer exist).
+
 ## v1.7.1 — 2026-06-15
 
 ### Changed
@@ -32,7 +47,7 @@ changes), and **Fixed** (bug fixes).
 - **Schema evolution with `ALTER TABLE`** on managed tables — `ADD COLUMN`,
   `DROP COLUMN`, `RENAME COLUMN`, and `ALTER COLUMN ... TYPE` (safe widening
   promotions). Existing rows keep reading correctly: added columns read `NULL`
-  and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.7.1/sql/managed-tables).
+  and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.7.2/sql/managed-tables).
 - **CF `calendar` support.** CF time-unit parsing now honours the optional CF
   `calendar` attribute, so non-Gregorian calendars are interpreted correctly.
 - **SeaDataNet L05 mappings.** New UDFs map SeaDataNet instrument L05 codes for
