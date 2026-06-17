@@ -7,7 +7,6 @@ use std::{
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_datafusion_ext::table_ext::TableDefinition;
-use beacon_formats::file_formats;
 use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
@@ -25,9 +24,12 @@ use object_store::path::PathPart;
 #[cfg(test)]
 use std::collections::HashMap;
 
+pub mod file_formats;
 pub mod files;
 pub mod table;
 mod table_runtime;
+
+pub use file_formats::file_formats;
 
 pub use files::manager::FileManager;
 pub use table_runtime::table_manager::TableManager;

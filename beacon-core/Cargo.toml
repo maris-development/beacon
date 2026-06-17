@@ -39,7 +39,12 @@ beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
 beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-data-lake = { path = "../beacon-data-lake" }
-beacon-formats = { path = "../beacon-file-formats/beacon-formats" }
+beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
+beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
+beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
+beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
+beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-common = { path = "../beacon-common" }

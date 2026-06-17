@@ -1,43 +1,21 @@
+//! Registration of the file formats Beacon can read.
+//!
+//! This pulls together the individual `beacon-arrow-*` format crates and
+//! registers their factories with a DataFusion session.
+
 use std::sync::Arc;
 
 use beacon_arrow_atlas::datafusion::{AtlasFormatFactory, options::AtlasOptions};
+use beacon_arrow_bbf::datafusion::BBFFormatFactory;
+use beacon_arrow_csv::datafusion::CsvFormatFactory;
+use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
 use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, options::NetcdfOptions};
+use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
+use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::DatasetsStore;
 use datafusion::prelude::SessionContext;
-
-use crate::{
-    arrow::ArrowFormatFactory, csv::CsvFormatFactory, parquet::ParquetFormatFactory,
-    zarr::ZarrFormatFactory,
-};
-
-pub mod arrow;
-pub mod csv;
-pub mod parquet;
-
-/// Re-export of the BBF DataFusion integration, which now lives in the
-/// `beacon-arrow-bbf` crate. Kept here so existing `beacon_formats::bbf::*`
-/// references keep resolving.
-pub mod bbf {
-    pub use beacon_arrow_bbf::datafusion::{BBFFormat, BBFFormatFactory};
-}
-
-/// Re-export of the GeoParquet DataFusion integration, which now lives in the
-/// `beacon-arrow-geoparquet` crate. Kept here so existing
-/// `beacon_formats::geo_parquet::*` references keep resolving.
-pub mod geo_parquet {
-    pub use beacon_arrow_geoparquet::datafusion::{
-        GeoParquetFormat, GeoParquetFormatFactory, GeoParquetOptions,
-    };
-}
-
-/// Re-export of the Zarr DataFusion integration, which now lives in the
-/// `beacon-arrow-zarr` crate alongside the other N-D formats. Kept here so
-/// existing `beacon_formats::zarr::ZarrFormat` references keep resolving.
-pub mod zarr {
-    pub use beacon_arrow_zarr::datafusion::{ZarrFormat, ZarrFormatFactory};
-}
 
 /// Register file formats with the session state that can be used for reading
 pub fn file_formats(
@@ -61,7 +39,7 @@ pub fn file_formats(
         )),
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory),
-        Arc::new(bbf::BBFFormatFactory),
+        Arc::new(BBFFormatFactory),
     ];
 
     for format in formats.iter() {

@@ -10,7 +10,9 @@ use beacon_arrow_tiff::datafusion::TiffFormat;
 use beacon_data_lake::{FileManager, TableManager};
 use beacon_datafusion_ext::file_collection::FileCollection;
 use beacon_arrow_odv::datafusion::OdvFormat;
-use beacon_formats::{arrow::ArrowFormat, csv::CsvFormat, parquet::ParquetFormat};
+use beacon_arrow_csv::datafusion::CsvFormat;
+use beacon_arrow_ipc::datafusion::ArrowFormat;
+use beacon_arrow_parquet::datafusion::ParquetFormat;
 use datafusion::{
     datasource::{file_format::FileFormat, listing::ListingTableUrl, provider_as_source},
     logical_expr::{LogicalPlanBuilder, TableSource},
@@ -167,10 +169,12 @@ impl FromFormat {
             }
             FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>),
             FromFormat::Zarr { .. } => {
-                Ok(Arc::new(beacon_formats::zarr::ZarrFormat::default()) as Arc<dyn FileFormat>)
+                Ok(Arc::new(beacon_arrow_zarr::datafusion::ZarrFormat::default())
+                    as Arc<dyn FileFormat>)
             }
             FromFormat::Bbf { .. } => {
-                Ok(Arc::new(beacon_formats::bbf::BBFFormat::default()) as Arc<dyn FileFormat>)
+                Ok(Arc::new(beacon_arrow_bbf::datafusion::BBFFormat::default())
+                    as Arc<dyn FileFormat>)
             }
         }
     }

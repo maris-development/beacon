@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_formats::csv::CsvFormat;
+use beacon_arrow_csv::datafusion::CsvFormat;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
