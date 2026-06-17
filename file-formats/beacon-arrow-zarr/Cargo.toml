@@ -24,8 +24,8 @@ parking_lot = { workspace = true }
 crossbeam = { workspace = true }
 
 beacon-nd-array = { path = "../beacon-nd-array" }
-beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-beacon-common = { path = "../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-common = { path = "../../beacon-common" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
