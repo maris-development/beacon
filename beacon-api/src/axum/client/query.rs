@@ -3,7 +3,7 @@
 use ::axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderName, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -15,12 +15,37 @@ use beacon_core::{
 use futures::TryStreamExt;
 use std::sync::Arc;
 
+/// Resolves the HTTP super-user flag from the request's `Authorization` header.
+///
+/// Only HTTP basic auth elevates a request: this transport has no bearer concept
+/// (bearer tokens are Flight-SQL-only), so non-`Basic` schemes are left untouched
+/// rather than rejected.
+///
+/// - No `Authorization` header, or a non-`Basic` scheme (e.g. `Bearer …`) →
+///   anonymous, read-only (`Ok(false)`).
+/// - Valid admin basic credentials → super-user, DDL/DML allowed (`Ok(true)`).
+/// - A `Basic` header that fails validation → `Err(UNAUTHORIZED)` so bad
+///   credentials surface as an error instead of silently degrading to read-only.
+fn resolve_super_user(headers: &HeaderMap) -> Result<bool, StatusCode> {
+    let is_basic = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Basic "));
+
+    if is_basic {
+        crate::axum::auth::verify_basic_auth_header(headers)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Executes a query against the runtime and streams the result to the client.
 ///
 /// The response is either an Arrow IPC stream (zstd-compressed) for in-memory
 /// results or a file download when the query produced a materialized output
 /// file (CSV, Parquet, Arrow, JSON, ODV, NetCDF, GeoParquet).
-#[tracing::instrument(level = "info", skip(state))]
+#[tracing::instrument(level = "info", skip(state, headers))]
 #[utoipa::path(
     tag = "query",
     post,
@@ -36,6 +61,7 @@ use std::sync::Arc;
 )]
 pub(crate) async fn query(
     State(state): State<Arc<Runtime>>,
+    headers: HeaderMap,
     Json(query_obj): Json<QueryRequest>,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
     let query = query_obj.into_query().map_err(|err| {
@@ -54,8 +80,15 @@ pub(crate) async fn query(
         ));
     }
 
-    // HTTP client queries are read-only.
-    let query_result = state.run_query(query, false).await.map_err(|err| {
+    // HTTP client queries are read-only by default; supplying valid admin basic
+    // credentials elevates the request to super-user, allowing DDL/DML (e.g.
+    // CREATE EXTERNAL TABLE, CREATE/INSERT on managed tables) over HTTP. This
+    // mirrors the Flight SQL transport, where basic auth resolves to an admin
+    // `AuthContext`.
+    let is_super_user = resolve_super_user(&headers).map_err(|status| {
+        (status, Json("invalid admin credentials".to_string()))
+    })?;
+    let query_result = state.run_query(query, is_super_user).await.map_err(|err| {
         tracing::error!("Error running beacon query: {}", err);
         (StatusCode::BAD_REQUEST, Json(err.to_string()))
     })?;
@@ -303,4 +336,59 @@ pub(crate) async fn available_columns(State(state): State<Arc<Runtime>>) -> Json
             .map(|f| f.name.clone())
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use ::axum::http::{HeaderMap, StatusCode};
+    use base64::{engine::general_purpose, Engine as _};
+
+    use super::resolve_super_user;
+
+    /// Builds an `Authorization: Basic ...` header map for the given credentials.
+    fn basic_auth_headers(username: &str, password: &str) -> HeaderMap {
+        let value = format!(
+            "Basic {}",
+            general_purpose::STANDARD.encode(format!("{username}:{password}"))
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", value.parse().unwrap());
+        headers
+    }
+
+    /// Valid admin credentials elevate the HTTP request to super-user so DDL/DML
+    /// is allowed over HTTP.
+    #[test]
+    fn valid_admin_credentials_resolve_to_super_user() {
+        let headers = basic_auth_headers(
+            &beacon_config::CONFIG.admin.username,
+            &beacon_config::CONFIG.admin.password,
+        );
+        assert_eq!(resolve_super_user(&headers), Ok(true));
+    }
+
+    /// No credentials at all stays anonymous (read-only), not an error.
+    #[test]
+    fn missing_authorization_header_is_anonymous() {
+        let headers = HeaderMap::new();
+        assert_eq!(resolve_super_user(&headers), Ok(false));
+    }
+
+    /// Credentials that are present but wrong are rejected rather than silently
+    /// degrading to read-only.
+    #[test]
+    fn wrong_credentials_are_rejected() {
+        let headers = basic_auth_headers("not-the-admin", "wrong-password");
+        assert_eq!(resolve_super_user(&headers), Err(StatusCode::UNAUTHORIZED));
+    }
+
+    /// A non-Basic scheme (e.g. a bearer token, which the endpoint's OpenAPI
+    /// advertises) must not be treated as failed basic auth: it falls through to
+    /// anonymous/read-only rather than being rejected with 401.
+    #[test]
+    fn bearer_token_is_anonymous_not_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer some-token".parse().unwrap());
+        assert_eq!(resolve_super_user(&headers), Ok(false));
+    }
 }
