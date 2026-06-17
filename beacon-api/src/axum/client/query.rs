@@ -17,13 +17,22 @@ use std::sync::Arc;
 
 /// Resolves the HTTP super-user flag from the request's `Authorization` header.
 ///
-/// - No `Authorization` header → anonymous, read-only (`Ok(false)`).
+/// Only HTTP basic auth elevates a request: this transport has no bearer concept
+/// (bearer tokens are Flight-SQL-only), so non-`Basic` schemes are left untouched
+/// rather than rejected.
+///
+/// - No `Authorization` header, or a non-`Basic` scheme (e.g. `Bearer …`) →
+///   anonymous, read-only (`Ok(false)`).
 /// - Valid admin basic credentials → super-user, DDL/DML allowed (`Ok(true)`).
-/// - An `Authorization` header that fails validation → `Err(UNAUTHORIZED)` so
-///   bad credentials surface as an error instead of silently degrading to
-///   read-only.
+/// - A `Basic` header that fails validation → `Err(UNAUTHORIZED)` so bad
+///   credentials surface as an error instead of silently degrading to read-only.
 fn resolve_super_user(headers: &HeaderMap) -> Result<bool, StatusCode> {
-    if headers.contains_key(header::AUTHORIZATION) {
+    let is_basic = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Basic "));
+
+    if is_basic {
         crate::axum::auth::verify_basic_auth_header(headers)?;
         Ok(true)
     } else {
@@ -371,5 +380,15 @@ mod tests {
     fn wrong_credentials_are_rejected() {
         let headers = basic_auth_headers("not-the-admin", "wrong-password");
         assert_eq!(resolve_super_user(&headers), Err(StatusCode::UNAUTHORIZED));
+    }
+
+    /// A non-Basic scheme (e.g. a bearer token, which the endpoint's OpenAPI
+    /// advertises) must not be treated as failed basic auth: it falls through to
+    /// anonymous/read-only rather than being rejected with 401.
+    #[test]
+    fn bearer_token_is_anonymous_not_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer some-token".parse().unwrap());
+        assert_eq!(resolve_super_user(&headers), Ok(false));
     }
 }
