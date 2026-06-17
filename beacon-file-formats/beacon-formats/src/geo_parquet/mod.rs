@@ -198,7 +198,7 @@ impl FileFormat for GeoParquetFormat {
             object_store,
             &longitude,
             &latitude,
-        )) as Arc<dyn DataSink>;
+        )?) as Arc<dyn DataSink>;
 
         Ok(Arc::new(DataSinkExec::new(input, sink, order_requirements)))
     }
