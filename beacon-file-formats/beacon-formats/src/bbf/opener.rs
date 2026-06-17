@@ -228,7 +228,7 @@ impl BBFOpener {
                 &Arc::new(async_reader.arrow_schema()),
                 table_schema,
             )
-            .await;
+            .await?;
 
             let prune_result = predicate.prune(&statistics)?;
 
@@ -252,8 +252,7 @@ impl BBFPruningStatistics {
         pruning_index_reader: AsyncPruningIndexReader,
         file_schema: &Schema,
         table_schema: &Schema,
-    ) -> Self {
-        // println!("Predicate: {:?}", predicate);
+    ) -> datafusion::error::Result<Self> {
         let file_columns = file_schema
             .fields()
             .iter()
@@ -274,18 +273,24 @@ impl BBFPruningStatistics {
 
         for column in approx_expected_columns {
             let column_name = column.name().to_string();
-            let statistics = pruning_index_reader.column(&column_name).await.unwrap();
+            let statistics = pruning_index_reader
+                .column(&column_name)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(column = %column_name, error = %e, "failed to read BBF pruning index column");
+                    datafusion::error::DataFusionError::External(Box::new(e))
+                })?;
             if let Some(statistics) = statistics {
                 column_statistics.insert(column_name, statistics);
             }
         }
 
-        Self {
+        Ok(Self {
             file_columns,
             num_containers,
             column_statistics,
             table_schema,
-        }
+        })
     }
 }
 
@@ -293,22 +298,21 @@ impl PruningStatistics for BBFPruningStatistics {
     fn min_values(&self, column: &Column) -> Option<arrow::array::ArrayRef> {
         // Check if the column exists in the file
         if !self.file_columns.contains(&column.name) {
-            // Return Null Array as all the values are null
-            let null_array = new_null_array(
-                self.table_schema.get(&column.name).unwrap(),
-                self.num_containers,
-            );
+            // Return Null Array as all the values are null. If the column is not
+            // in the table schema, there are no usable stats: return None so the
+            // container is conservatively kept.
+            let null_array = new_null_array(self.table_schema.get(&column.name)?, self.num_containers);
             return Some(null_array);
         }
 
         if let Some(stats) = self.column_statistics.get(&column.name) {
             let min_values = stats.as_ref().min_value();
-            let table_dtype = self.table_schema.get(&column.name).unwrap();
+            let table_dtype = self.table_schema.get(&column.name)?;
             if min_values.data_type() != table_dtype {
-                // Cast if the data types are both numeric. This we can safely upcast
+                // Cast if the data types are both numeric. This we can safely upcast.
                 if min_values.data_type().is_numeric() && table_dtype.is_numeric() {
-                    let casted = arrow::compute::cast(&min_values, table_dtype).unwrap();
-                    return Some(casted);
+                    // A failed cast means no usable stats; return None rather than panicking.
+                    return arrow::compute::cast(&min_values, table_dtype).ok();
                 } else {
                     return None;
                 }
@@ -322,22 +326,21 @@ impl PruningStatistics for BBFPruningStatistics {
     fn max_values(&self, column: &Column) -> Option<arrow::array::ArrayRef> {
         // Check if the column exists in the file
         if !self.file_columns.contains(&column.name) {
-            // Return Null Array as all the values are null
-            let null_array = new_null_array(
-                self.table_schema.get(&column.name).unwrap(),
-                self.num_containers,
-            );
+            // Return Null Array as all the values are null. If the column is not
+            // in the table schema, there are no usable stats: return None so the
+            // container is conservatively kept.
+            let null_array = new_null_array(self.table_schema.get(&column.name)?, self.num_containers);
             return Some(null_array);
         }
 
         if let Some(stats) = self.column_statistics.get(&column.name) {
             let max_values = stats.as_ref().max_value();
-            let table_dtype = self.table_schema.get(&column.name).unwrap();
+            let table_dtype = self.table_schema.get(&column.name)?;
             if max_values.data_type() != table_dtype {
-                // Cast if the data types are both numeric. This we can safely upcast
+                // Cast if the data types are both numeric. This we can safely upcast.
                 if max_values.data_type().is_numeric() && table_dtype.is_numeric() {
-                    let casted = arrow::compute::cast(&max_values, table_dtype).unwrap();
-                    return Some(casted);
+                    // A failed cast means no usable stats; return None rather than panicking.
+                    return arrow::compute::cast(&max_values, table_dtype).ok();
                 } else {
                     return None;
                 }

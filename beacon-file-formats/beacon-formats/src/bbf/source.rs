@@ -85,11 +85,14 @@ impl FileSource for BBFSource {
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
         let table_schema = self.table_schema.file_schema().clone();
         let projected_schema = base_config.projected_schema()?;
+        let pruning_predicate = self
+            .predicate
+            .clone()
+            .map(|p| PruningPredicate::try_new(p, table_schema.clone()))
+            .transpose()?;
         Ok(Arc::new(BBFOpener::new(
             projected_schema,
-            self.predicate
-                .clone()
-                .map(|p| PruningPredicate::try_new(p, table_schema.clone()).unwrap()),
+            pruning_predicate,
             object_store,
             table_schema,
             self.file_tracer.lock().clone(),
