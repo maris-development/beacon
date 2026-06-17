@@ -53,7 +53,7 @@ impl ScalarUDFImpl for WithinPointUdf {
         &self,
         args: datafusion::logical_expr::ScalarFunctionArgs,
     ) -> datafusion::error::Result<datafusion::logical_expr::ColumnarValue> {
-        let resized_lon_array = args.args[1].to_array(args.number_rows).unwrap();
+        let resized_lon_array = args.args[1].to_array(args.number_rows)?;
         let mut lon_iter = resized_lon_array
             .as_primitive_opt::<Float64Type>()
             .map(|array| array.iter())
@@ -61,7 +61,7 @@ impl ScalarUDFImpl for WithinPointUdf {
                 "st_within_point expects a float64 array as its second argument".to_string(),
             ))?;
 
-        let resized_lat_array = args.args[2].to_array(args.number_rows).unwrap();
+        let resized_lat_array = args.args[2].to_array(args.number_rows)?;
         let mut lat_iter = resized_lat_array
             .as_primitive_opt::<Float64Type>()
             .map(|array| array.iter())
@@ -88,7 +88,11 @@ impl ScalarUDFImpl for WithinPointUdf {
                                 .map_err(|e| {
                                     datafusion::error::DataFusionError::Execution(e.to_string())
                                 })?;
-                        let geometry: Geometry = wkt.try_into().unwrap();
+                        let geometry: Geometry = wkt.try_into().map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "st_within_point: invalid WKT geometry: {e:?}"
+                            ))
+                        })?;
                         let result = st_within_point_fast(geometry, &mut lon_iter, &mut lat_iter)
                             .map_err(|e| {
                             datafusion::error::DataFusionError::Execution(e.to_string())
@@ -135,7 +139,8 @@ fn st_within_point_impl(
         (Some(geom), Some(lon), Some(lat)) => {
             // ST_WithinPoint implementation
             let wkt = Wkt::from_str(geom).map_err(|e| anyhow::anyhow!(e))?;
-            let geometry: Geometry = wkt.try_into().unwrap();
+            let geometry: Geometry =
+                wkt.try_into().map_err(|e| anyhow::anyhow!("invalid WKT geometry: {e:?}"))?;
 
             let point = geo::Point::new(lon, lat);
             Ok(geometry.contains(&point))

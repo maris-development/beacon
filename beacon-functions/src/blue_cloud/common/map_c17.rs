@@ -31,10 +31,8 @@ pub fn map_c17() -> ScalarUDF {
 fn map_c17_impl(parameters: &[ColumnarValue]) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(value) => {
-            let string_array = value
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let string_array =
+                crate::util::downcast_arg::<arrow::array::StringArray>(value, "map_c17")?;
 
             let c17 = string_array
                 .iter()

@@ -88,14 +88,14 @@ fn map_p35_contributor_codes_p01_impl(
 ) -> datafusion::error::Result<ColumnarValue> {
     match (&parameters[0], &parameters[1]) {
         (ColumnarValue::Array(line_array), ColumnarValue::Array(p35_array)) => {
-            let line_array = line_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
-            let p35_array = p35_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let line_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                line_array,
+                "map_p35_contributor_codes_p01",
+            )?;
+            let p35_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                p35_array,
+                "map_p35_contributor_codes_p01",
+            )?;
 
             let array =
                 line_array
@@ -111,10 +111,10 @@ fn map_p35_contributor_codes_p01_impl(
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
         (ColumnarValue::Array(line_array), ColumnarValue::Scalar(ScalarValue::Utf8(p35))) => {
-            let line_array = line_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let line_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                line_array,
+                "map_p35_contributor_codes_p01",
+            )?;
 
             let array = line_array.iter().map(|line| match (line, p35.as_ref()) {
                 (Some(line), Some(p35)) => get_p01_for_p35(line, p35),
@@ -126,10 +126,10 @@ fn map_p35_contributor_codes_p01_impl(
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
         (ColumnarValue::Scalar(ScalarValue::Utf8(line)), ColumnarValue::Array(p35_array)) => {
-            let p35_array = p35_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let p35_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                p35_array,
+                "map_p35_contributor_codes_p01",
+            )?;
 
             let array = p35_array.iter().map(|p35| match (line.as_ref(), p35) {
                 (Some(line), Some(p35)) => get_p01_for_p35(line, p35),
