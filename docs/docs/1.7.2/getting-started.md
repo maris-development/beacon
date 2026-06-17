@@ -13,9 +13,24 @@ This guide gets a Beacon instance running with Docker Compose. For ready-made ex
 
 ## Local
 
-Create a `docker-compose.yml` file and adjust the volume path to point at your datasets:
+Start Beacon with a single `docker run`, or define a `docker-compose.yml` for a reproducible setup. Either way, adjust the volume paths to point at your datasets:
 
-```yaml
+::: code-group
+
+```bash [docker run]
+docker run -d \
+    --name beacon \
+    --restart unless-stopped \
+    -p 5001:5001 \
+    -p 32011:32011 \
+    -e BEACON_ADMIN_USERNAME=admin \
+    -e BEACON_ADMIN_PASSWORD=securepassword \
+    -v ./datasets:/beacon/data/datasets \
+    -v ./tables:/beacon/data/tables \
+    ghcr.io/maris-development/beacon:latest
+```
+
+```yaml [docker-compose.yml]
 services:
     beacon:
         image: ghcr.io/maris-development/beacon:latest
@@ -27,27 +42,39 @@ services:
         environment:
             - BEACON_ADMIN_USERNAME=admin
             - BEACON_ADMIN_PASSWORD=securepassword
-            - BEACON_VM_MEMORY_SIZE=4096
-            - BEACON_HOST=0.0.0.0
-            - BEACON_PORT=5001
         volumes:
             - ./datasets:/beacon/data/datasets
             - ./tables:/beacon/data/tables
 ```
 
-Start Beacon:
+:::
 
-```bash
-docker compose up -d
-```
-
-Beacon is now running. Open `http://localhost:5001/swagger` to verify and explore the API. Any files placed in `./datasets` are immediately available for querying.
+If you used Compose, start it with `docker compose up -d`. Beacon is now running. Open `http://localhost:5001/swagger` to verify and explore the API. Any files placed in `./datasets` are immediately available for querying.
 
 ## S3-Compatible Object Storage
 
-Add the S3 environment variables to your compose file and remove the datasets volume:
+Add the S3 environment variables and remove the datasets volume:
 
-```yaml
+::: code-group
+
+```bash [docker run]
+docker run -d \
+    --name beacon \
+    --restart unless-stopped \
+    -p 5001:5001 \
+    -p 32011:32011 \
+    -e BEACON_ADMIN_USERNAME=admin \
+    -e BEACON_ADMIN_PASSWORD=securepassword \
+    -e AWS_ENDPOINT=https://s3.amazonaws.com \
+    -e AWS_ACCESS_KEY_ID=your-access-key \
+    -e AWS_SECRET_ACCESS_KEY=your-secret-key \
+    -e BEACON_S3_BUCKET=your-bucket-name \
+    -e BEACON_S3_DATA_LAKE=true \
+    -v ./tables:/beacon/data/tables \
+    ghcr.io/maris-development/beacon:latest
+```
+
+```yaml [docker-compose.yml]
 services:
     beacon:
         image: ghcr.io/maris-development/beacon:latest
@@ -59,9 +86,6 @@ services:
         environment:
             - BEACON_ADMIN_USERNAME=admin
             - BEACON_ADMIN_PASSWORD=securepassword
-            - BEACON_VM_MEMORY_SIZE=4096
-            - BEACON_HOST=0.0.0.0
-            - BEACON_PORT=5001
             - AWS_ENDPOINT=https://s3.amazonaws.com
             - AWS_ACCESS_KEY_ID=your-access-key
             - AWS_SECRET_ACCESS_KEY=your-secret-key
@@ -71,17 +95,13 @@ services:
             - ./tables:/beacon/data/tables
 ```
 
+:::
+
 :::tip Anonymous / public buckets
 For publicly accessible buckets, omit `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` and add `AWS_SKIP_SIGNATURE=true` instead.
 :::
 
-Start Beacon the same way:
-
-```bash
-docker compose up -d
-```
-
-Files already in the S3 bucket are available for querying immediately. The `./tables` volume persists any external tables or views you create.
+If you used Compose, start it with `docker compose up -d`. Files already in the S3 bucket are available for querying immediately. The `./tables` volume persists any external tables or views you create.
 
 ## Next steps
 
