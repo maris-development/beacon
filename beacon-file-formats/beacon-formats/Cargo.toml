@@ -41,15 +41,15 @@ once_cell = "1.21.3"
 rlimit = "0.11.0"
 chrono = { workspace = true }
 
-beacon-common = { path = "../beacon-common" }
+beacon-common = { path = "../../beacon-common" }
 beacon-arrow-atlas = { path = "../beacon-arrow-atlas" }
 beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-arrow-odv" }
 beacon-arrow-tiff = { path = "../beacon-arrow-tiff" }
 beacon-arrow-zarr = { path = "../beacon-arrow-zarr" }
-beacon-config = { path = "../beacon-config" }
-beacon-object-storage = { path = "../beacon-object-storage" }
-beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-config = { path = "../../beacon-config" }
+beacon-object-storage = { path = "../../beacon-object-storage" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main", version = "2.0.0", default-features = false, features = ["arrow-58"] }
 
 # Add beacon binary format

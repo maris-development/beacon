@@ -483,7 +483,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beacon-arrow-netcdf"
-version = "1.6.0"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "1.6.0"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -591,16 +591,18 @@ dependencies = [
 
 [[package]]
 name = "beacon-config"
-version = "1.6.0"
+version = "1.7.2"
 dependencies = [
  "envconfig",
  "lazy_static",
  "object_store",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
 name = "beacon-datafusion-ext"
-version = "1.6.0"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -647,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-object-storage"
-version = "1.6.0"
+version = "1.7.2"
 dependencies = [
  "async-trait",
  "beacon-config",
@@ -4051,13 +4053,15 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.120"
+version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e0d21c9a8cae1235ad58a00c11cb40d4b1e5c784f1ef2c537876ed6ffd8b7c5"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "itoa",
- "ryu",
+ "memchr",
  "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -5460,6 +5464,12 @@ name = "zlib-rs"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3be3d40e40a133f9c916ee3f9f4fa2d9d63435b5fbe1bfc6d9dae0aa0ada1513"
+
+[[package]]
+name = "zmij"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zstd"
