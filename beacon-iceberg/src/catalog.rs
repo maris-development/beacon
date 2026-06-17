@@ -52,6 +52,10 @@ pub fn beacon_namespace() -> Vec<String> {
 /// for `DROP TABLE` cleanup ([`get_warehouse_store`]).
 pub async fn init_datasets_warehouse() -> anyhow::Result<()> {
     let storage = &beacon_config::CONFIG.storage;
+    tracing::info!(
+        backend = if storage.s3.data_lake { "s3" } else { "local" },
+        "initializing Iceberg datasets warehouse"
+    );
     // Full warehouse prefix within the backing store, e.g. `__beacon__/iceberg`.
     let warehouse_prefix = format!("{DATASETS_WRITEABLE_PREFIX}/{WAREHOUSE_SUBDIR}");
 
@@ -88,7 +92,10 @@ pub async fn init_datasets_warehouse() -> anyhow::Result<()> {
     let catalog: Arc<dyn Catalog> = Arc::new(
         FileCatalog::new(&catalog_path, object_store_builder)
             .await
-            .map_err(|error| anyhow::anyhow!("Failed to create Iceberg file catalog: {error}"))?,
+            .map_err(|error| {
+                tracing::error!(catalog_path = %catalog_path, error = %error, "failed to create Iceberg file catalog");
+                anyhow::anyhow!("Failed to create Iceberg file catalog: {error}")
+            })?,
     );
 
     // DROP cleanup deletes files via the datasets internal store (which already
@@ -102,6 +109,7 @@ pub async fn init_datasets_warehouse() -> anyhow::Result<()> {
     init_catalog(catalog);
     let _ = WAREHOUSE_STORE.set(drop_store);
 
+    tracing::info!(catalog_path = %catalog_path, "Iceberg datasets warehouse initialized");
     Ok(())
 }
 

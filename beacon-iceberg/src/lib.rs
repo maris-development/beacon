@@ -46,6 +46,7 @@ pub async fn create_iceberg_table(
     name: &str,
     arrow_schema: &ArrowSchema,
 ) -> anyhow::Result<IcebergTable> {
+    tracing::info!(namespace = ?namespace, table = name, "creating Iceberg table");
     let iceberg_schema = schema_convert::arrow_schema_to_iceberg(arrow_schema)?;
 
     let mut builder = Table::builder();
@@ -70,6 +71,7 @@ pub async fn drop_iceberg_table(
     namespace: &[String],
     name: &str,
 ) -> anyhow::Result<()> {
+    tracing::info!(namespace = ?namespace, table = name, "dropping Iceberg table");
     let prefix = object_store::path::Path::from(format!("{}/{}", namespace.join("/"), name));
 
     let mut listing = store.list(Some(&prefix));
@@ -82,6 +84,7 @@ pub async fn drop_iceberg_table(
         );
     }
 
+    tracing::debug!(table = name, files = locations.len(), "deleting Iceberg table files");
     for location in locations {
         store
             .delete(&location)
@@ -107,6 +110,7 @@ pub async fn replace_table_contents(
     new_rows: SendableRecordBatchStream,
     task_ctx: &Arc<TaskContext>,
 ) -> anyhow::Result<()> {
+    tracing::info!(namespace = ?namespace, table = name, "replacing Iceberg table contents");
     let identifier = Identifier::new(namespace, name);
     let mut table = match catalog
         .clone()
@@ -122,6 +126,7 @@ pub async fn replace_table_contents(
         .await
         .map_err(|error| anyhow::anyhow!("Failed to write Iceberg data files: {error}"))?;
 
+    let data_file_count = data_files.len();
     table
         .new_transaction(None)
         .replace(data_files)
@@ -129,6 +134,11 @@ pub async fn replace_table_contents(
         .await
         .map_err(|error| anyhow::anyhow!("Failed to commit Iceberg replace: {error}"))?;
 
+    tracing::debug!(
+        table = name,
+        data_files = data_file_count,
+        "committed Iceberg replace transaction"
+    );
     Ok(())
 }
 
