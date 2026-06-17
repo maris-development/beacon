@@ -28,7 +28,8 @@ fn map_cmems_bigram_l05_impl(
 
     match &parameters[0] {
         ColumnarValue::Array(array) => {
-            let bigram_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+            let bigram_array =
+                crate::util::downcast_arg::<StringArray>(array, "map_cmems_bigram_l05")?;
 
             Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(
                 bigram_array.iter().map(|bigram| map_bigram_l05(bigram)),

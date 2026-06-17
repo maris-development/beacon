@@ -31,10 +31,10 @@ fn map_argo_platform_edmo_impl(
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
-            let flag_array = flag
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let flag_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                flag,
+                "map_argo_platform_edmo",
+            )?;
 
             let array = flag_array.iter().map(|flag| {
                 flag.map(|value| ARGO_PLATFORM_EDMO_MAP.get(value).map(|s| s).cloned())

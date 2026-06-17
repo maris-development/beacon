@@ -32,10 +32,10 @@ fn map_emodnet_chemistry_originator_edmo_impl(
 
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
-            let flag_array = flag
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let flag_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                flag,
+                "map_emodnet_chemistry_originator_edmo",
+            )?;
 
             let array = flag_array
                 .iter()

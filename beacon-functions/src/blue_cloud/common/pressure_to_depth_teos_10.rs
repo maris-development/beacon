@@ -26,14 +26,14 @@ fn pressure_to_depth_teos_10_impl(
     //Should accept 1 parameter that is a float
     match (&parameters[0], &parameters[1]) {
         (ColumnarValue::Array(pressure), ColumnarValue::Array(latitude)) => {
-            let float_array = pressure
-                .as_any()
-                .downcast_ref::<arrow::array::Float64Array>()
-                .unwrap();
-            let lat = latitude
-                .as_any()
-                .downcast_ref::<arrow::array::Float64Array>()
-                .unwrap();
+            let float_array = crate::util::downcast_arg::<arrow::array::Float64Array>(
+                pressure,
+                "pressure_to_depth_teos_10",
+            )?;
+            let lat = crate::util::downcast_arg::<arrow::array::Float64Array>(
+                latitude,
+                "pressure_to_depth_teos_10",
+            )?;
 
             let array = PrimitiveArray::<Float64Type>::from_iter(
                 float_array
@@ -45,10 +45,10 @@ fn pressure_to_depth_teos_10_impl(
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
         (ColumnarValue::Scalar(ScalarValue::Float64(pressure)), ColumnarValue::Array(latitude)) => {
-            let lat = latitude
-                .as_any()
-                .downcast_ref::<arrow::array::Float64Array>()
-                .unwrap();
+            let lat = crate::util::downcast_arg::<arrow::array::Float64Array>(
+                latitude,
+                "pressure_to_depth_teos_10",
+            )?;
 
             let array = PrimitiveArray::<Float64Type>::from_iter(lat.iter().map(|l| {
                 l.zip(pressure.clone())
@@ -58,10 +58,10 @@ fn pressure_to_depth_teos_10_impl(
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
         (ColumnarValue::Array(pressure), ColumnarValue::Scalar(ScalarValue::Float64(latitude))) => {
-            let float_array = pressure
-                .as_any()
-                .downcast_ref::<arrow::array::Float64Array>()
-                .unwrap();
+            let float_array = crate::util::downcast_arg::<arrow::array::Float64Array>(
+                pressure,
+                "pressure_to_depth_teos_10",
+            )?;
 
             let array = PrimitiveArray::<Float64Type>::from_iter(float_array.iter().map(|p| {
                 p.zip(latitude.clone())
