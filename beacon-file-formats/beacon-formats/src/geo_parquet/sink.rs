@@ -38,13 +38,21 @@ impl GeoMapper {
     /// Creates a new `GeoMapper` given an input schema and the names of longitude and latitude columns.
     ///
     /// Adds a new geometry field to the output schema.
-    pub fn new(input_schema: &Schema, longitude_column: &str, latitude_column: &str) -> Self {
-        let longitude_idx = input_schema
-            .index_of(longitude_column)
-            .expect("Longitude column not found in schema");
-        let latitude_idx = input_schema
-            .index_of(latitude_column)
-            .expect("Latitude column not found in schema");
+    pub fn new(
+        input_schema: &Schema,
+        longitude_column: &str,
+        latitude_column: &str,
+    ) -> datafusion::error::Result<Self> {
+        let longitude_idx = input_schema.index_of(longitude_column).map_err(|_| {
+            datafusion::error::DataFusionError::Plan(format!(
+                "Longitude column '{longitude_column}' not found in schema"
+            ))
+        })?;
+        let latitude_idx = input_schema.index_of(latitude_column).map_err(|_| {
+            datafusion::error::DataFusionError::Plan(format!(
+                "Latitude column '{latitude_column}' not found in schema"
+            ))
+        })?;
 
         // Clone fields and add geometry field
         let mut fields = input_schema.fields().clone().to_vec();
@@ -54,17 +62,17 @@ impl GeoMapper {
 
         let output_schema = Arc::new(Schema::new(fields));
 
-        Self {
+        Ok(Self {
             longitude_idx,
             latitude_idx,
             output_schema,
-        }
+        })
     }
 
     /// Maps a RecordBatch by adding a geometry column constructed from longitude and latitude columns.
     ///
     /// Returns a new RecordBatch with the geometry column appended.
-    pub fn map(&self, batch: &RecordBatch) -> RecordBatch {
+    pub fn map(&self, batch: &RecordBatch) -> datafusion::error::Result<RecordBatch> {
         let longitude_array = batch.column(self.longitude_idx);
         let latitude_array = batch.column(self.latitude_idx);
 
@@ -74,10 +82,10 @@ impl GeoMapper {
             format_options: Default::default(),
         };
         let binding = cast_with_options(longitude_array, &DataType::Float64, &cast_opts)
-            .expect("Failed to cast longitude column");
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         let longitude_f64 = binding.as_primitive::<Float64Type>();
         let binding = cast_with_options(latitude_array, &DataType::Float64, &cast_opts)
-            .expect("Failed to cast latitude column");
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         let latitude_f64 = binding.as_primitive::<Float64Type>();
 
         // Build geometry points
@@ -96,8 +104,7 @@ impl GeoMapper {
         let mut columns = batch.columns().to_vec();
         columns.push(geometry_array);
 
-        RecordBatch::try_new(self.output_schema.clone(), columns)
-            .expect("Failed to create output RecordBatch with geometry")
+        Ok(RecordBatch::try_new(self.output_schema.clone(), columns)?)
     }
 }
 /// A DataFusion sink for writing RecordBatches to GeoParquet format.
@@ -130,15 +137,15 @@ impl GeoParquetSink {
         object_store: Arc<dyn ObjectStore>,
         longitude_column: &str,
         latitude_column: &str,
-    ) -> Self {
-        let mapper = GeoMapper::new(input.schema().as_ref(), longitude_column, latitude_column);
+    ) -> datafusion::error::Result<Self> {
+        let mapper = GeoMapper::new(input.schema().as_ref(), longitude_column, latitude_column)?;
 
-        Self {
+        Ok(Self {
             input,
             file_sink_config,
             object_store,
             mapper,
-        }
+        })
     }
 }
 
@@ -207,7 +214,7 @@ impl DataSink for GeoParquetSink {
 
         while let Some(batch) = data.next().await {
             let batch = batch?;
-            let mapped_batch = self.mapper.map(&batch);
+            let mapped_batch = self.mapper.map(&batch)?;
             let encoded_batch = encoder
                 .encode_record_batch(&mapped_batch)
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;

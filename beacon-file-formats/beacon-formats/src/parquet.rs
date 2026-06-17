@@ -186,7 +186,7 @@ fn cast_ts_seconds_to_ms(
     session: &dyn Session,
 ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
     let schema = input.schema();
-    let df_schema: DFSchema = DFSchema::try_from(schema.clone()).unwrap();
+    let df_schema: DFSchema = DFSchema::try_from(schema.clone())?;
 
     // Build a projection: cast SECOND -> MILLISECOND; keep everything else as-is
     let exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = schema
@@ -199,15 +199,14 @@ fn cast_ts_seconds_to_ms(
                     // keep timezone if present
                     let target = DataType::Timestamp(TimeUnit::Millisecond, tz.clone());
                     let expr = cast(Expr::Column(Column::new_unqualified(&name)), target);
-                    session.create_physical_expr(expr, &df_schema).unwrap()
+                    session.create_physical_expr(expr, &df_schema)?
                 }
                 _ => session
-                    .create_physical_expr(Expr::Column(Column::new_unqualified(&name)), &df_schema)
-                    .unwrap(),
+                    .create_physical_expr(Expr::Column(Column::new_unqualified(&name)), &df_schema)?,
             };
-            (expr, name)
+            Ok((expr, name))
         })
-        .collect();
+        .collect::<datafusion::error::Result<Vec<_>>>()?;
 
     // Wrap the input with the projection so downstream sees the casted schema
     let projected = Arc::new(ProjectionExec::try_new(exprs, input)?);
