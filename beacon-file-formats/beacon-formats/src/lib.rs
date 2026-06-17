@@ -13,10 +13,24 @@ use crate::{
 };
 
 pub mod arrow;
-pub mod bbf;
 pub mod csv;
-pub mod geo_parquet;
 pub mod parquet;
+
+/// Re-export of the BBF DataFusion integration, which now lives in the
+/// `beacon-arrow-bbf` crate. Kept here so existing `beacon_formats::bbf::*`
+/// references keep resolving.
+pub mod bbf {
+    pub use beacon_arrow_bbf::datafusion::{BBFFormat, BBFFormatFactory};
+}
+
+/// Re-export of the GeoParquet DataFusion integration, which now lives in the
+/// `beacon-arrow-geoparquet` crate. Kept here so existing
+/// `beacon_formats::geo_parquet::*` references keep resolving.
+pub mod geo_parquet {
+    pub use beacon_arrow_geoparquet::datafusion::{
+        GeoParquetFormat, GeoParquetFormatFactory, GeoParquetOptions,
+    };
+}
 
 /// Re-export of the Zarr DataFusion integration, which now lives in the
 /// `beacon-arrow-zarr` crate alongside the other N-D formats. Kept here so
@@ -55,31 +69,4 @@ pub fn file_formats(
     }
 
     Ok(formats)
-}
-
-/// Get the maximum number of open file descriptors allowed by the system.
-/// On Unix systems, this is determined by the NOFILE rlimit. On other systems, it defaults to u64::MAX (running through docker should default to unix though).
-pub fn max_open_fd() -> u64 {
-    #[cfg(unix)]
-    {
-        use rlimit::{Resource, getrlimit};
-        if let Ok((soft_limit, _)) = getrlimit(Resource::NOFILE) {
-            tracing::debug!(
-                "Max open file descriptors (NOFILE soft limit): {}",
-                soft_limit
-            );
-            soft_limit
-        } else {
-            tracing::warn!("Failed to get NOFILE rlimit, defaulting to 1024");
-            1024
-        }
-    }
-    #[cfg(not(unix))]
-    u64::MAX
-}
-
-pub fn file_open_parallelism() -> usize {
-    let max = max_open_fd() as usize / 2; // use half of the available file descriptors for parallelism to be safe
-    //Make sure max is at least 1 to avoid zero parallelism
-    std::cmp::max(max, 1)
 }

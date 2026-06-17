@@ -20,7 +20,7 @@ use datafusion::{
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 
-use crate::bbf::{metrics::BBFGlobalMetrics, opener::BBFOpener, stream_share::StreamShare};
+use crate::datafusion::{metrics::BBFGlobalMetrics, opener::BBFOpener, stream_share::StreamShare};
 
 #[derive(Clone, Debug)]
 pub struct BBFSource {

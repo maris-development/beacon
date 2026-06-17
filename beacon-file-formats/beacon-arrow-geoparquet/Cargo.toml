@@ -1,0 +1,19 @@
+[package]
+name = "beacon-arrow-geoparquet"
+version = "1.7.2"
+edition = "2024"
+
+[dependencies]
+arrow = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+parquet = { workspace = true }
+geoarrow = { workspace = true }
+geoarrow-array = { workspace = true }
+geoparquet = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

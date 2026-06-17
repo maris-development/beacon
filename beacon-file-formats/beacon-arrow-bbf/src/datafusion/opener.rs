@@ -28,7 +28,7 @@ use futures::{FutureExt, StreamExt};
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 
-use crate::bbf::{metrics::BBFGlobalMetrics, stream_share::StreamShare};
+use crate::datafusion::{metrics::BBFGlobalMetrics, stream_share::StreamShare};
 
 pub struct BBFOpener {
     projected_schema: SchemaRef,

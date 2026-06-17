@@ -1229,6 +1229,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-arrow-bbf"
+version = "1.7.2"
+dependencies = [
+ "arrow 58.3.0",
+ "async-trait",
+ "beacon-binary-format",
+ "beacon-common",
+ "beacon-config",
+ "beacon-datafusion-ext",
+ "datafusion",
+ "futures",
+ "nd-arrow-array",
+ "object_store 0.13.2",
+ "parking_lot",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "beacon-arrow-geoparquet"
+version = "1.7.2"
+dependencies = [
+ "arrow 58.3.0",
+ "async-trait",
+ "datafusion",
+ "futures",
+ "geoarrow",
+ "geoarrow-array",
+ "geoparquet",
+ "object_store 0.13.2",
+ "parquet",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "beacon-arrow-netcdf"
 version = "1.7.2"
 dependencies = [
@@ -1403,6 +1440,7 @@ dependencies = [
  "julian",
  "object_store 0.13.2",
  "regex",
+ "rlimit",
  "thiserror 2.0.18",
  "tracing",
  "url",
@@ -1523,11 +1561,12 @@ dependencies = [
  "async-trait",
  "async_zip",
  "beacon-arrow-atlas",
+ "beacon-arrow-bbf",
+ "beacon-arrow-geoparquet",
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
  "beacon-arrow-tiff",
  "beacon-arrow-zarr",
- "beacon-binary-format",
  "beacon-common",
  "beacon-config",
  "beacon-datafusion-ext",
@@ -1535,15 +1574,11 @@ dependencies = [
  "chrono",
  "datafusion",
  "futures",
- "geoarrow",
- "geoarrow-array",
- "geoparquet",
  "glob",
  "indexmap 2.14.0",
  "lazy_static",
  "lru 0.16.4",
  "moka",
- "nd-arrow-array",
  "ndarray",
  "num-traits",
  "num_cpus",
@@ -1553,7 +1588,6 @@ dependencies = [
  "parking_lot",
  "parquet",
  "prost",
- "rlimit",
  "serde",
  "serde_json",
  "tempfile",
