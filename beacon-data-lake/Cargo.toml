@@ -24,6 +24,6 @@ tokio = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 beacon-object-storage = { path = "../beacon-object-storage" }
-beacon-formats = { path = "../file-formats/beacon-formats" }
+beacon-formats = { path = "../beacon-file-formats/beacon-formats" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-iceberg = { path = "../beacon-iceberg" }

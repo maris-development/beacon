@@ -29,10 +29,10 @@ chrono = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
-beacon-formats = { path = "../file-formats/beacon-formats" }
+beacon-formats = { path = "../beacon-file-formats/beacon-formats" }
 beacon-object-storage = { path = "../beacon-object-storage" }
-beacon-arrow-atlas = { path = "../file-formats/beacon-arrow-atlas" }
-beacon-arrow-odv = { path = "../file-formats/beacon-arrow-odv" }
-beacon-arrow-netcdf = { path = "../file-formats/beacon-arrow-netcdf" }
-beacon-arrow-tiff = { path = "../file-formats/beacon-arrow-tiff" }
+beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
+beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
+beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
+beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }

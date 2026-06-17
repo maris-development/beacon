@@ -1,6 +1,6 @@
 [workspace]
-members = ["beacon-api", "file-formats/beacon-arrow-netcdf", "file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "file-formats/beacon-formats", "file-formats/beacon-arrow-zarr", "file-formats/beacon-binary-format", "beacon-object-storage", "file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "file-formats/beacon-nd-array", "file-formats/beacon-arrow-tiff", "file-formats/beacon-arrow-atlas"]
-exclude = ["file-formats/beacon-binary-format-toolbox"]
+members = ["beacon-api", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-file-formats/beacon-formats", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas"]
+exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
 tokio = { version = "1.47.1", features = ["full"] }
@@ -59,4 +59,4 @@ geoarrow-array = "^0.8"
 geoarrow-schema = "^0.8"
 geoparquet = "^0.8"
 
-beacon-nd-arrow = { path = "file-formats/beacon-nd-arrow" }
+beacon-nd-arrow = { path = "beacon-file-formats/beacon-nd-arrow" }
