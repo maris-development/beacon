@@ -1,0 +1,7 @@
+# Generated benchmark artifacts — not committed.
+data/
+results/
+.env
+.venv/
+__pycache__/
+*.pyc

@@ -19,11 +19,11 @@ Some of the configuration options can be set using environment variables. The fo
 - `BEACON_BASE_PATH` - Optional URL path prefix to serve the HTTP API, OpenAPI document, and Swagger UI under (default is empty, i.e. served at the root). Useful when running Beacon behind a reverse proxy or on a shared subpath, e.g. `/beacon`. The value is normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character (e.g. spaces, `?`, `#`, `%`) causes Beacon to exit at startup with a descriptive error.
 - `BEACON_ADMIN_USERNAME` - The admin username for the beacon admin panel.
 - `BEACON_ADMIN_PASSWORD` - The admin password for the beacon admin panel.
-- `BEACON_VM_MEMORY_SIZE` - The amount of memory to allocate to the Beacon Virtual Machine in MB (default is 4096MB). More is better for performance, especially when working with larger datasets and performing actions such as spatial joins and group by.
-- `BEACON_ENABLE_SQL` - Whether to enable the SQL query engine. Set to `true` to enable. Default is `false`.
+- `BEACON_VM_MEMORY_SIZE` - The amount of memory to allocate to the Beacon Virtual Machine in MB (default is 8192MB). More is better for performance, especially when working with larger datasets and performing actions such as spatial joins and group by.
+- `BEACON_ENABLE_SQL` - Whether to enable the SQL query engine. Default is `true`.
 - `BEACON_WORKER_THREADS` - Number of worker threads to use (default is 8).
 - `BEACON_ST_WITHIN_POINT_CACHE_SIZE` - Size of the cache for ST_WithinPoint queries (default is 10000).
-- `BEACON_DEFAULT_TABLE` - The default table to use when no table is specified in the `from` clause of a query.
+- `BEACON_DEFAULT_TABLE` - The default table to use when no table is specified in the `from` clause of a query. Only applicable to the JSON query API, as SQL queries must specify a source. Default is `default`.
 - `BEACON_LOG_LEVEL` - Log level [`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`]. Default is `INFO`.
 
 - `BEACON_S3_DATA_LAKE` - Whether to enable S3 data lake support. Set to `true` to enable. Default is `false` and uses local system file storage. To connect to S3-compatible object storage, the following environment variables should also be set:
@@ -34,7 +34,7 @@ Some of the configuration options can be set using environment variables. The fo
   - `AWS_SKIP_SIGNATURE` - Set to `true` to skip request signing. Useful for local S3-compatible object storage that does not require signed requests.
 - `BEACON_S3_BUCKET` - The bucket name for the S3-compatible object storage. If the env variable `BEACON_S3_DATA_LAKE` is enabled, and the `AWS_ENDPOINT` doesn't contain the bucket name, the bucket name should be specified here.
 
-- `BEACON_ENABLE_FS_EVENTS` - Whether to enable file system events monitoring, so new files in watched datasets are picked up automatically. Uses inotify on Linux systems. Default is `true`; set to `false` to disable. This is not supported when using S3 data lake.
+- `BEACON_ENABLE_FS_EVENTS` - Whether to enable file system events monitoring, so new files in watched datasets are picked up automatically. Uses inotify on Linux systems. Default is `true`; set to `false` to disable. This is not supported when using S3 data lake. (Be aware that using mounted volumes with Docker may interfere with filesystem events, so test this setting in your deployment environment.)
 
 - `BEACON_ENABLE_SYS_INFO` - Whether to expose system information. Set to `true` to enable.
 
