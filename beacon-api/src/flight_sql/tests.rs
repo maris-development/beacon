@@ -40,6 +40,62 @@ async fn spawn_server(allow_anonymous: bool) -> (SocketAddr, tokio::task::JoinHa
     (addr, handle)
 }
 
+/// Like [`spawn_server`] but returns the shared `Runtime` so the test can also
+/// issue queries directly against the same instance (used by the federation
+/// loopback test, where one Runtime is both the remote and the originator).
+async fn spawn_server_with_runtime(
+    allow_anonymous: bool,
+) -> (
+    SocketAddr,
+    Arc<beacon_core::runtime::Runtime>,
+    tokio::task::JoinHandle<()>,
+) {
+    let tmp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tmp.local_addr().unwrap().port();
+    drop(tmp);
+
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let runtime = Arc::new(beacon_core::runtime::Runtime::new().await.unwrap());
+    let service =
+        BeaconFlightSqlService::new_with_options(runtime.clone(), allow_anonymous).unwrap();
+
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(FlightServiceServer::new(service))
+            .serve(addr)
+            .await
+            .unwrap();
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::net::TcpStream::connect(addr).is_ok() {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("Flight SQL test server did not become ready within 5 seconds");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    (addr, runtime, handle)
+}
+
+async fn run_sql_rows(
+    runtime: &beacon_core::runtime::Runtime,
+    sql: &str,
+) -> Vec<arrow::array::RecordBatch> {
+    runtime
+        .run_query(beacon_core::query::Query::sql(sql.to_string()), true)
+        .await
+        .expect("query should run")
+        .into_record_stream()
+        .expect("streamed result")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("stream should drain")
+}
+
 async fn client(addr: SocketAddr) -> FlightSqlServiceClient<Channel> {
     let channel = Endpoint::new(format!("http://{addr}"))
         .unwrap()
@@ -47,6 +103,87 @@ async fn client(addr: SocketAddr) -> FlightSqlServiceClient<Channel> {
         .await
         .unwrap();
     FlightSqlServiceClient::new(channel)
+}
+
+/// End-to-end federation over a loopback: one Runtime serves `obs` over Flight
+/// SQL, and a `remote_obs` table in the same Runtime points back at that port.
+/// Querying `remote_obs` pushes a filtered aggregate to the (loopback) remote and
+/// streams the reduced result back.
+#[tokio::test(flavor = "multi_thread")]
+async fn federated_remote_table_pushes_down_and_streams() {
+    // Anonymous access on the remote: remote tables connect without credentials.
+    let (addr, runtime, handle) = spawn_server_with_runtime(true).await;
+    let port = addr.port();
+
+    // Unique names: `Runtime::new` shares an on-disk catalog across tests.
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+    let remote_obs = format!("remote_obs_{suffix}");
+
+    // Seed the "remote" table.
+    run_sql_rows(&runtime, &format!("CREATE TABLE {obs} (id BIGINT, val DOUBLE)")).await;
+    run_sql_rows(
+        &runtime,
+        &format!("INSERT INTO {obs} VALUES (1, 10.0), (2, 20.0), (3, 30.0)"),
+    )
+    .await;
+
+    // Register a federated remote table pointing at the loopback Flight SQL port.
+    // No credentials — the remote allows anonymous access.
+    run_sql_rows(
+        &runtime,
+        &format!(
+            "CREATE EXTERNAL TABLE {remote_obs} STORED AS REMOTE \
+             LOCATION 'beacon://127.0.0.1:{port}/{obs}'"
+        ),
+    )
+    .await;
+
+    // Schema was fetched from the remote at registration.
+    let schema = runtime
+        .list_table_schema(remote_obs.clone())
+        .await
+        .expect("remote table schema should be available");
+    assert_eq!(schema.fields().len(), 2);
+
+    // A filtered aggregate over the remote table returns the correct result.
+    let batches = run_sql_rows(
+        &runtime,
+        &format!("SELECT count(*) AS c, sum(val) AS s FROM {remote_obs} WHERE id > 1"),
+    )
+    .await;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 1);
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count column is Int64")
+        .value(0);
+    assert_eq!(count, 2, "id > 1 should match two rows");
+
+    // The plan federates the scan (pushed to the remote), rather than scanning
+    // locally — confirm a federated/virtual node appears in the physical plan.
+    let explain = run_sql_rows(
+        &runtime,
+        &format!("EXPLAIN SELECT count(*) FROM {remote_obs} WHERE id > 1"),
+    )
+    .await;
+    let explain_text = arrow::util::pretty::pretty_format_batches(&explain)
+        .expect("explain should format")
+        .to_string();
+    assert!(
+        explain_text.contains("Virtual")
+            || explain_text.to_lowercase().contains("federat")
+            || explain_text.contains("SchemaCast"),
+        "expected a federated scan node in the plan, got:\n{explain_text}"
+    );
+
+    // Clean up the shared on-disk catalog.
+    run_sql_rows(&runtime, &format!("DROP TABLE {remote_obs}")).await;
+    run_sql_rows(&runtime, &format!("DROP TABLE {obs}")).await;
+
+    handle.abort();
 }
 
 #[tokio::test]
