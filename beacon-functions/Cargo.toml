@@ -38,5 +38,6 @@ beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
 beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
 beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }

@@ -48,6 +48,16 @@ STORED AS PARQUET
 LOCATION 'profiles/**/*.parquet'
 ```
 
+### GeoParquet
+
+```sql
+CREATE EXTERNAL TABLE stations
+STORED AS GEOPARQUET
+LOCATION 'spatial/stations/*.geoparquet'
+```
+
+Geometry columns are decoded to their native [GeoArrow](https://geoarrow.org/) representation on read. See [GeoParquet in Supported Formats](./datasets.md#geoparquet) for details.
+
 ### NetCDF
 
 ```sql

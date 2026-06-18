@@ -8,6 +8,7 @@ use std::sync::Arc;
 use beacon_arrow_atlas::datafusion::{AtlasFormatFactory, options::AtlasOptions};
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
+use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
 use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
 use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, options::NetcdfOptions};
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
@@ -40,6 +41,7 @@ pub fn file_formats(
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory),
         Arc::new(BBFFormatFactory),
+        Arc::new(GeoParquetFormatFactory::default()),
     ];
 
     for format in formats.iter() {

@@ -12,6 +12,38 @@ Native support via DataFusion. Recommended for analytical workloads due to colum
 - Hive-style directory partitioning is supported via `PARTITIONED BY` on [External Tables](./external-tables.md).
 - Compatible with files produced by DuckDB, Spark, pandas, and similar tools.
 
+## GeoParquet
+
+[GeoParquet](https://geoparquet.org/) files (`.geoparquet`) are Parquet files that carry geospatial geometry columns and a `geo` metadata key. Beacon reads them in addition to writing them.
+
+- Geometry columns described in the file's `geo` metadata are decoded to their native [GeoArrow](https://geoarrow.org/) representation on read (a non-geospatial Parquet file is read like ordinary Parquet).
+- Column projection is applied — only the columns a query selects are materialized.
+- Works over local disk and S3-compatible object stores.
+
+Query a GeoParquet file with the [`read_geoparquet()`](../sql/table-functions.md#read_geoparquet) table function:
+
+```sql
+SELECT * FROM read_geoparquet(['spatial/**/*.geoparquet']) LIMIT 100
+```
+
+Or register a stable table name with an [External Table](./external-tables.md):
+
+```sql
+CREATE EXTERNAL TABLE stations
+STORED AS GEOPARQUET
+LOCATION 'spatial/stations/*.geoparquet';
+
+SELECT * FROM stations LIMIT 10;
+```
+
+:::tip
+Beacon can also *write* GeoParquet: a query result with longitude/latitude columns is mapped into a geometry column on output. See [querying output formats](../api/querying/index.md).
+:::
+
+:::warning
+Spatial bounding-box pruning (row-group skipping via the GeoParquet `bbox` covering) is not yet applied on read — queries perform a full scan with column projection. Geometry-aware predicate pushdown is planned.
+:::
+
 ## NetCDF
 
 Streaming reads with chunk-level access — large files are read incrementally rather than loaded entirely into memory.
