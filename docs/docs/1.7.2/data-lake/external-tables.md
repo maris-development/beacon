@@ -130,6 +130,10 @@ LOCATION 'rasters/elevation.tif'
 
 If your files are laid out in Hive-style partition directories (`year=2024/month=01/...`), declare the partition columns so Beacon can prune them at query time. The columns are encoded in the directory names and become queryable columns. See [`PARTITIONED BY`](../sql/create-table.md#partitioned-by) for the syntax.
 
+## Remote tables
+
+`STORED AS REMOTE` registers a table that points at a table on **another Beacon instance** instead of at local files. Queries push filters, projection, limits, and whole joins/aggregates down to the remote over Arrow Flight SQL. See [Remote Tables (Federation)](./remote-tables.md) for the full reference.
+
 ## Views
 
 Views let you define a persistent SQL query over any external table or table function. See the [Views](./view.md) page for the full reference, including `UNION ALL BY NAME` for harmonizing datasets with different schemas.

@@ -89,6 +89,10 @@ impl SchemaPersistenceService {
             } else if let Some(table) = table.as_any().downcast_ref::<MaterializedView>() {
                 let definition = table.definition();
                 Arc::new(definition.clone())
+            } else if let Some(definition) =
+                beacon_datafusion_ext::remote::remote_table_definition(table)
+            {
+                Arc::new(definition)
             } else if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
                 let definition =
                     ViewTableDefinition::try_from_view(table_name, table).map_err(|error| {
