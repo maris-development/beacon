@@ -155,6 +155,11 @@ impl Runtime {
             .with_config(config)
             .with_runtime_env(runtime_env)
             .with_default_features()
+            // Enable `datafusion-federation`: this is the default DataFusion
+            // optimizer rule set with the `FederationOptimizerRule` inserted, so
+            // sub-plans rooted at remote tables get pushed down. The matching
+            // `FederatedPlanner` lives in `BeaconQueryPlanner`'s extension planners.
+            .with_optimizer_rules(datafusion_federation::default_optimizer_rules())
             .with_query_planner(Arc::new(crate::statement_plan::BeaconQueryPlanner::new(
                 session_cell.clone(),
             )))

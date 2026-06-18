@@ -42,8 +42,13 @@ bloomfilter = { version = "1", features = ["serde"] }
 bincode = "1"
 
 datafusion = "^53"
+# Pinned exactly: 0.5.3 is the release whose `datafusion` dep resolves to ^53
+# (matching our 53.1.0). Its `sql` feature gates the SQLExecutor/SQLTableSource
+# types used by the federated remote-table provider.
+datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 geodatafusion = "0.4.0"
 object_store = { version = "0.13.1", features = ["aws"] }
+tonic = "0.14.1"
 
 iceberg-rust = "0.10"
 datafusion_iceberg = "0.10"

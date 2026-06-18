@@ -1525,6 +1525,7 @@ dependencies = [
  "cast",
  "chrono",
  "datafusion",
+ "datafusion-federation",
  "futures",
  "futures-util",
  "geodatafusion",
@@ -1584,11 +1585,13 @@ version = "1.7.2"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
+ "arrow-flight",
  "arrow-schema 58.3.0",
  "async-trait",
  "beacon-common",
  "beacon-object-storage",
  "datafusion",
+ "datafusion-federation",
  "futures",
  "indexmap 2.14.0",
  "moka",
@@ -1599,6 +1602,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tonic",
  "tracing",
  "typetag",
 ]
@@ -2836,6 +2840,19 @@ dependencies = [
  "indexmap 2.14.0",
  "itertools 0.14.0",
  "paste",
+]
+
+[[package]]
+name = "datafusion-federation"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f88162c5f8650eab86bbe23cac990bdca261c95cf52c05b9a0848ad5b8b2b7f8"
+dependencies = [
+ "arrow-json 58.3.0",
+ "async-stream",
+ "async-trait",
+ "datafusion",
+ "futures",
 ]
 
 [[package]]
