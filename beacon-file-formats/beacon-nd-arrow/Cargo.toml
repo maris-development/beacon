@@ -45,3 +45,7 @@ harness = false
 [[bench]]
 name = "subset"
 harness = false
+
+[[bench]]
+name = "encode"
+harness = false

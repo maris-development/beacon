@@ -11,12 +11,16 @@
 
 pub mod array;
 pub mod batch;
+pub mod encoded_array;
 pub mod encoding;
 pub mod error;
 pub mod stream;
 
 pub use array::NdArrowArrayDispatch;
-pub use encoding::{ColumnEncoding, EncodingPolicy, classify_column_encoding};
+pub use encoded_array::{broadcast_encoded_data_type, build_broadcast_array};
+pub use encoding::{
+    BroadcastGeometry, ColumnEncoding, EncodingPolicy, broadcast_geometry, classify_column_encoding,
+};
 pub use error::NdArrowError;
 pub use batch::NdRecordBatch;
 pub use stream::{NdToArrowPipeOptions, pipe_nd_record_batch_stream};

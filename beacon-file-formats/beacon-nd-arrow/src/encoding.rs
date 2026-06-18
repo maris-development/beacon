@@ -47,39 +47,46 @@ impl Default for EncodingPolicy {
     }
 }
 
-/// Classify how a flattened column should be encoded, from broadcast geometry alone.
+/// The row-major run/cardinality structure of a broadcast column, derived purely from
+/// its dimension geometry. Shared by the classifier and the array constructor (#278) so
+/// both reason from a single source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BroadcastGeometry {
+    /// Total number of output rows = product of `target_shape`.
+    pub total_rows: usize,
+    /// Length of each contiguous run = product of target dim sizes strictly inner to
+    /// the innermost source dim (1 if the column spans the innermost dim).
+    pub run_length: usize,
+    /// Number of runs = `total_rows / run_length` (0 when `total_rows` is 0).
+    pub num_runs: usize,
+    /// Number of distinct values = product of the source dim sizes (1 for a scalar).
+    pub cardinality: usize,
+}
+
+/// Compute the [`BroadcastGeometry`] of a flattened column.
 ///
 /// `target_dims` is the batch's dimension list in **row-major outer→inner order**
 /// (index `0` varies slowest, the last index fastest) and `target_shape` must align
 /// with it element-for-element. `source_dims` are the dimensions the column actually
 /// spans and must be a subset of `target_dims`.
 ///
-/// Precondition violations (mismatched `target_dims`/`target_shape` lengths, or a
-/// `source_dims` entry not present in `target_dims`) are handled defensively by falling
-/// back to [`ColumnEncoding::Flat`] rather than panicking.
-pub fn classify_column_encoding(
+/// Returns `None` on precondition violations (mismatched `target_dims`/`target_shape`
+/// lengths, or a `source_dims` entry absent from `target_dims`) rather than panicking.
+pub fn broadcast_geometry(
     source_dims: &[String],
     target_dims: &[String],
     target_shape: &[usize],
-    policy: &EncodingPolicy,
-) -> ColumnEncoding {
-    // Defensive: the target dim list and shape must describe the same axes.
+) -> Option<BroadcastGeometry> {
+    // The target dim list and shape must describe the same axes.
     if target_dims.len() != target_shape.len() {
-        return ColumnEncoding::Flat;
+        return None;
     }
-
-    // Defensive: every source dim must exist in the target. If not, we cannot reason
-    // about the geometry, so fall back to flat.
+    // Every source dim must exist in the target, otherwise the geometry is undefined.
     if source_dims.iter().any(|d| !target_dims.contains(d)) {
-        return ColumnEncoding::Flat;
+        return None;
     }
 
-    // A column that spans every target dimension is a plain data column — there is no
-    // broadcasting to exploit. (This is also the natural fallthrough of the formula
-    // below, but is clearer as an explicit guard.)
-    if target_dims.iter().all(|d| source_dims.contains(d)) {
-        return ColumnEncoding::Flat;
-    }
+    let total_rows: usize = target_shape.iter().product();
 
     // Index of the innermost (fastest-varying) target dim that the column spans.
     // `None` means the column spans no target dim at all (a scalar/attribute broadcast
@@ -105,11 +112,45 @@ pub fn classify_column_encoding(
         .map(|(i, _)| target_shape[i])
         .product();
 
-    let total_rows: usize = target_shape.iter().product();
+    let num_runs = if run_length == 0 {
+        0
+    } else {
+        total_rows / run_length
+    };
 
-    if run_length >= policy.min_run_length {
+    Some(BroadcastGeometry {
+        total_rows,
+        run_length,
+        num_runs,
+        cardinality,
+    })
+}
+
+/// Classify how a flattened column should be encoded, from broadcast geometry alone.
+///
+/// See [`broadcast_geometry`] for the meaning of the arguments. Precondition
+/// violations fall back to [`ColumnEncoding::Flat`] rather than panicking.
+pub fn classify_column_encoding(
+    source_dims: &[String],
+    target_dims: &[String],
+    target_shape: &[usize],
+    policy: &EncodingPolicy,
+) -> ColumnEncoding {
+    let geo = match broadcast_geometry(source_dims, target_dims, target_shape) {
+        Some(geo) => geo,
+        None => return ColumnEncoding::Flat,
+    };
+
+    // A column that spans every target dimension is a plain data column — there is no
+    // broadcasting to exploit. (Subsumed by the thresholds below for the default policy,
+    // but kept explicit so a degenerate `min_run_length <= 1` can't misclassify it.)
+    if target_dims.iter().all(|d| source_dims.contains(d)) {
+        return ColumnEncoding::Flat;
+    }
+
+    if geo.run_length >= policy.min_run_length {
         ColumnEncoding::RunEndEncoded
-    } else if cardinality <= policy.max_dict_cardinality && cardinality < total_rows {
+    } else if geo.cardinality <= policy.max_dict_cardinality && geo.cardinality < geo.total_rows {
         ColumnEncoding::Dictionary
     } else {
         ColumnEncoding::Flat
@@ -279,5 +320,36 @@ mod tests {
                 ColumnEncoding::Flat,
             ]
         );
+    }
+
+    #[test]
+    fn geometry_outer_broadcast() {
+        let geo = broadcast_geometry(&dims(&["time"]), &dims(&T), &SHAPE).unwrap();
+        assert_eq!(geo.total_rows, 6000);
+        assert_eq!(geo.run_length, 600); // lat*lon
+        assert_eq!(geo.num_runs, 10); // time
+        assert_eq!(geo.cardinality, 10);
+    }
+
+    #[test]
+    fn geometry_scalar_is_single_run() {
+        let geo = broadcast_geometry(&[], &dims(&T), &SHAPE).unwrap();
+        assert_eq!(geo.run_length, 6000);
+        assert_eq!(geo.num_runs, 1);
+        assert_eq!(geo.cardinality, 1);
+    }
+
+    #[test]
+    fn geometry_invalid_inputs_are_none() {
+        assert!(broadcast_geometry(&dims(&["time"]), &dims(&["time", "lat"]), &[10]).is_none());
+        assert!(broadcast_geometry(&dims(&["depth"]), &dims(&T), &SHAPE).is_none());
+    }
+
+    #[test]
+    fn geometry_zero_sized_dim() {
+        let geo = broadcast_geometry(&dims(&["a"]), &dims(&["a", "b"]), &[3, 0]).unwrap();
+        assert_eq!(geo.total_rows, 0);
+        assert_eq!(geo.run_length, 0);
+        assert_eq!(geo.num_runs, 0); // no division by zero
     }
 }
