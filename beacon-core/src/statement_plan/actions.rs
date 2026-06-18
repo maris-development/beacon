@@ -117,12 +117,12 @@ async fn create_remote_table(
         Arc::clone(cmd.schema.inner())
     };
 
+    // No credentials: remote tables connect anonymously (the remote must allow
+    // anonymous Flight SQL access).
     let definition = RemoteTableDefinition {
         name: cmd.name.to_string(),
         url,
         remote_table,
-        username: option("username"),
-        password: option("password"),
         schema,
     };
 

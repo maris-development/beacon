@@ -6,31 +6,24 @@ use tonic::transport::{Channel, Endpoint};
 
 /// Connection details for a remote Beacon instance's Flight SQL server.
 ///
-/// Credentials are stored inline (and persisted in `table.json`) by design — see
-/// the federated-remote-table plan. Creation is admin-gated DDL.
+/// Remote tables connect **anonymously** — no credentials are stored. The remote
+/// instance must allow anonymous Flight SQL access for federation to work.
 #[derive(Clone, Debug)]
 pub struct RemoteConnection {
     /// gRPC endpoint of the remote Flight SQL server, e.g. `http://host:50051`.
     pub url: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
 }
 
 impl RemoteConnection {
-    pub fn new(url: String, username: Option<String>, password: Option<String>) -> Self {
-        Self {
-            url,
-            username,
-            password,
-        }
+    pub fn new(url: String) -> Self {
+        Self { url }
     }
 
-    /// Open a Flight SQL client to the remote, performing a Basic-auth handshake
-    /// when credentials are configured.
+    /// Open an anonymous Flight SQL client to the remote.
     ///
-    /// The handshake mirrors the server side in `beacon-api`'s `do_handshake`: the
-    /// client captures the returned Bearer token and reuses it for subsequent
-    /// `execute`/`do_get` RPCs.
+    /// No handshake is performed: the client sends no authorization metadata, so
+    /// the remote serves it as an anonymous session (and rejects it outright if
+    /// anonymous access is disabled there).
     pub async fn connect(&self) -> anyhow::Result<FlightSqlServiceClient<Channel>> {
         let channel = Endpoint::from_shared(self.url.clone())
             .with_context(|| format!("invalid remote beacon endpoint '{}'", self.url))?
@@ -38,16 +31,6 @@ impl RemoteConnection {
             .await
             .with_context(|| format!("failed to connect to remote beacon at '{}'", self.url))?;
 
-        let mut client = FlightSqlServiceClient::new(channel);
-
-        if let Some(username) = &self.username {
-            let password = self.password.as_deref().unwrap_or_default();
-            client
-                .handshake(username, password)
-                .await
-                .with_context(|| format!("Flight SQL handshake with '{}' failed", self.url))?;
-        }
-
-        Ok(client)
+        Ok(FlightSqlServiceClient::new(channel))
     }
 }

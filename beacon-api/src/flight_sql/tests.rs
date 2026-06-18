@@ -111,7 +111,8 @@ async fn client(addr: SocketAddr) -> FlightSqlServiceClient<Channel> {
 /// streams the reduced result back.
 #[tokio::test(flavor = "multi_thread")]
 async fn federated_remote_table_pushes_down_and_streams() {
-    let (addr, runtime, handle) = spawn_server_with_runtime(false).await;
+    // Anonymous access on the remote: remote tables connect without credentials.
+    let (addr, runtime, handle) = spawn_server_with_runtime(true).await;
     let port = addr.port();
 
     // Unique names: `Runtime::new` shares an on-disk catalog across tests.
@@ -128,14 +129,12 @@ async fn federated_remote_table_pushes_down_and_streams() {
     .await;
 
     // Register a federated remote table pointing at the loopback Flight SQL port.
-    let user = &beacon_config::CONFIG.admin.username;
-    let pass = &beacon_config::CONFIG.admin.password;
+    // No credentials — the remote allows anonymous access.
     run_sql_rows(
         &runtime,
         &format!(
             "CREATE EXTERNAL TABLE {remote_obs} STORED AS REMOTE \
-             LOCATION 'beacon://127.0.0.1:{port}/{obs}' \
-             OPTIONS ('username' '{user}', 'password' '{pass}')"
+             LOCATION 'beacon://127.0.0.1:{port}/{obs}'"
         ),
     )
     .await;

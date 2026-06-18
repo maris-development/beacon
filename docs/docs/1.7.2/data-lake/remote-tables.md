@@ -4,12 +4,15 @@
 CREATE EXTERNAL TABLE remote_profiles
 STORED AS REMOTE
 LOCATION 'beacon://other-beacon:50051/ocean_profiles'
-OPTIONS ('username' 'beacon-admin', 'password' 'beacon-password')
 ```
 
 A **remote table** points at a table living on **another Beacon instance**. Once created, you can `SELECT`, `JOIN`, aggregate, and `DROP` it like any other table — but the data stays on the remote. When you query it, Beacon pushes as much of the work as possible (filters, projected columns, `LIMIT`, and whole joins/aggregates between remote tables) **down to the remote instance**, so only the reduced result set travels over the network.
 
 This is built on Arrow Flight SQL: the remote Beacon already exposes a Flight SQL server, and your local instance acts as a client to it.
+
+:::warning Anonymous access required
+Remote tables connect to the remote **anonymously** — no credentials are stored anywhere. The remote Beacon instance must therefore **allow anonymous Flight SQL access** (`BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS=true` on the remote). If anonymous access is disabled there, queries against the remote table fail with an authentication error. Anonymous Flight SQL access is read-only, which is exactly what federation needs.
+:::
 
 :::tip External vs managed vs remote
 - An [**external table**](./external-tables.md) reads files in Beacon's own storage in place.
@@ -32,11 +35,7 @@ Creating a remote table is admin-only DDL. SQL must be enabled (`BEACON_ENABLE_S
 CREATE EXTERNAL TABLE <local_name>
 STORED AS REMOTE
 LOCATION 'beacon://<host>:<port>/<remote_table>'
-OPTIONS (
-  'username' '<user>',
-  'password' '<password>',
-  'tls'      'false'
-)
+OPTIONS ('tls' 'false')
 ```
 
 ### `LOCATION`
@@ -52,15 +51,11 @@ beacon://<host>:<port>/<remote_table>
 
 ### `OPTIONS`
 
-| Option     | Required | Description                                                                 |
-| ---------- | -------- | --------------------------------------------------------------------------- |
-| `username` | If the remote requires auth | Username for the Basic-auth handshake against the remote Flight SQL server. |
-| `password` | If the remote requires auth | Password for that user.                                                     |
-| `tls`      | No (default `false`)        | Set to `'true'` to connect over `https` instead of `http`.                  |
+| Option | Required | Description                                                |
+| ------ | -------- | ---------------------------------------------------------- |
+| `tls`  | No (default `false`) | Set to `'true'` to connect over `https` instead of `http`. |
 
-:::warning Credentials are stored in the table definition
-The username and password are persisted with the table definition (`table.json`) so the table can reconnect after a restart. They are **redacted** wherever the definition is exposed — the `GET /api/table-config` response shows `"***"` instead of the real values, and they never appear in logs — but they are stored in plaintext on disk. Because creating a remote table is admin-gated DDL, prefer a least-privilege, read-only account on the remote.
-:::
+No credentials are configured: remote tables connect anonymously, so the table definition (`table.json`) never contains secrets. The remote must allow anonymous Flight SQL access — see the note above.
 
 ## How pushdown works
 

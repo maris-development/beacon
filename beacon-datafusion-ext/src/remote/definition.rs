@@ -19,10 +19,9 @@ use super::executor::BeaconFlightSqlExecutor;
 /// Persisted configuration for a federated remote-Beacon table.
 ///
 /// Stored as `table.json` and reloaded at startup like every other
-/// [`TableDefinition`]. Credentials are inline by design (admin-gated DDL); they
-/// are redacted anywhere the definition is exposed (the `table-config` API and
-/// the `Debug` impl below).
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// [`TableDefinition`]. No credentials are stored: remote tables connect
+/// anonymously, so the remote instance must allow anonymous Flight SQL access.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RemoteTableDefinition {
     /// Local logical table name.
     pub name: String,
@@ -30,10 +29,6 @@ pub struct RemoteTableDefinition {
     pub url: String,
     /// Table name on the remote instance.
     pub remote_table: String,
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub password: Option<String>,
     /// Pinned output schema. An empty schema means "fetch from the remote when
     /// building the provider" (and the resolved schema is then pinned).
     pub schema: SchemaRef,
@@ -41,26 +36,7 @@ pub struct RemoteTableDefinition {
 
 impl RemoteTableDefinition {
     fn connection(&self) -> RemoteConnection {
-        RemoteConnection::new(self.url.clone(), self.username.clone(), self.password.clone())
-    }
-}
-
-/// Mask a credential so its presence is visible but its value is not.
-fn redact(value: &Option<String>) -> &'static str {
-    if value.is_some() { "***" } else { "<none>" }
-}
-
-// Hand-written so credentials never reach logs via `{:?}`.
-impl std::fmt::Debug for RemoteTableDefinition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RemoteTableDefinition")
-            .field("name", &self.name)
-            .field("url", &self.url)
-            .field("remote_table", &self.remote_table)
-            .field("username", &redact(&self.username))
-            .field("password", &redact(&self.password))
-            .field("schema", &self.schema)
-            .finish()
+        RemoteConnection::new(self.url.clone())
     }
 }
 
@@ -100,10 +76,6 @@ impl TableDefinition for RemoteTableDefinition {
 
     fn table_name(&self) -> &str {
         &self.name
-    }
-
-    fn sensitive_keys(&self) -> &'static [&'static str] {
-        &["username", "password"]
     }
 }
 
@@ -171,8 +143,6 @@ mod tests {
             name: "remote_obs".to_string(),
             url: "http://127.0.0.1:50051".to_string(),
             remote_table: "obs".to_string(),
-            username: Some("admin".to_string()),
-            password: Some("secret".to_string()),
             schema: schema.clone(),
         });
 
@@ -180,24 +150,12 @@ mod tests {
         assert_eq!(json["definition_type"], "remote_table");
         assert_eq!(json["url"], "http://127.0.0.1:50051");
         assert_eq!(json["remote_table"], "obs");
+        // No credentials are ever persisted for a remote table.
+        assert!(json.get("username").is_none());
+        assert!(json.get("password").is_none());
 
         let restored: Arc<dyn TableDefinition> =
             serde_json::from_value(json).expect("definition should deserialize");
         assert_eq!(restored.table_name(), "remote_obs");
-    }
-
-    #[test]
-    /// Legacy/minimal JSON without credentials still deserializes (they default to None).
-    fn remote_table_definition_deserializes_without_credentials() {
-        let json = serde_json::json!({
-            "definition_type": "remote_table",
-            "name": "r",
-            "url": "http://host:1",
-            "remote_table": "t",
-            "schema": Schema::empty(),
-        });
-        let restored: Arc<dyn TableDefinition> =
-            serde_json::from_value(json).expect("minimal remote JSON should deserialize");
-        assert_eq!(restored.table_name(), "r");
     }
 }
