@@ -15,6 +15,7 @@ pub mod read_arrow;
 pub mod read_atlas;
 pub mod read_bbf;
 pub mod read_csv;
+pub mod read_geoparquet;
 pub mod read_netcdf;
 pub mod read_odv_ascii;
 pub mod read_parquet;
@@ -31,6 +32,11 @@ pub fn register_table_functions(
 ) -> Vec<Arc<dyn BeaconTableFunctionImpl>> {
     vec![
         Arc::new(read_parquet::ReadParquetFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
+        )),
+        Arc::new(read_geoparquet::ReadGeoParquetFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),

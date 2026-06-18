@@ -36,3 +36,4 @@ beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
+beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }

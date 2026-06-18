@@ -116,6 +116,18 @@ read_parquet(glob_paths)
 SELECT * FROM read_parquet(['obs/**/*.parquet']) LIMIT 100
 ```
 
+## `read_geoparquet`
+
+```text
+read_geoparquet(glob_paths)
+```
+
+Reads [GeoParquet](https://geoparquet.org/) files. Geometry columns described in the file's `geo` metadata are decoded to their native [GeoArrow](https://geoarrow.org/) representation; files without geometry are read like ordinary Parquet.
+
+```sql
+SELECT * FROM read_geoparquet(['spatial/**/*.geoparquet']) LIMIT 100
+```
+
 ## `read_arrow`
 
 ```text

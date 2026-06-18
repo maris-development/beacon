@@ -1,8 +1,13 @@
-//! `beacon-arrow-geoparquet` provides the DataFusion GeoParquet write integration.
+//! `beacon-arrow-geoparquet` provides the DataFusion GeoParquet integration.
 //!
 //! It exposes a [`datafusion::GeoParquetFormat`] / [`datafusion::GeoParquetFormatFactory`]
-//! that map longitude/latitude columns into a geometry column and write GeoParquet output.
-//! The read path is not yet implemented.
+//! supporting both directions:
+//!
+//! * **Write** — maps longitude/latitude columns into a geometry column and
+//!   writes GeoParquet output.
+//! * **Read** — infers the GeoArrow schema and scans GeoParquet files, decoding
+//!   geometry columns described in the file's `geo` metadata to their native
+//!   GeoArrow representation.
 
-/// DataFusion integration for GeoParquet output.
+/// DataFusion integration for reading and writing GeoParquet.
 pub mod datafusion;
