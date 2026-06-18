@@ -75,14 +75,14 @@ fn map_instrument_info_l22_impl(
 ) -> datafusion::error::Result<ColumnarValue> {
     match (&parameters[0], &parameters[1]) {
         (ColumnarValue::Array(line_array), ColumnarValue::Array(p01_array)) => {
-            let line_array = line_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
-            let p01_array = p01_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let line_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                line_array,
+                "map_instrument_info_l22",
+            )?;
+            let p01_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                p01_array,
+                "map_instrument_info_l22",
+            )?;
 
             let array =
                 line_array
@@ -98,10 +98,10 @@ fn map_instrument_info_l22_impl(
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
         (ColumnarValue::Array(line_array), ColumnarValue::Scalar(ScalarValue::Utf8(p01))) => {
-            let line_array = line_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let line_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                line_array,
+                "map_instrument_info_l22",
+            )?;
 
             let array = line_array.iter().map(|line| match (line, p01.as_ref()) {
                 (Some(line), Some(p01)) => get_l22_for_p01_token(line, p01),
@@ -113,10 +113,10 @@ fn map_instrument_info_l22_impl(
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
         (ColumnarValue::Scalar(ScalarValue::Utf8(line)), ColumnarValue::Array(p01_array)) => {
-            let p01_array = p01_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let p01_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                p01_array,
+                "map_instrument_info_l22",
+            )?;
 
             let array = p01_array.iter().map(|p01| match (line.as_ref(), p01) {
                 (Some(line), Some(p01)) => get_l22_for_p01_token(line, p01),

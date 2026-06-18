@@ -22,10 +22,10 @@ fn map_measuring_area_type_feature_type_impl(
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
-            let flag_array = flag
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let flag_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                flag,
+                "map_measuring_area_type_feature_type",
+            )?;
 
             let array = flag_array
                 .iter()

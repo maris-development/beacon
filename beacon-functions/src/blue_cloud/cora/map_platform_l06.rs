@@ -32,11 +32,10 @@ fn map_cora_platform_l06_impl(
 
     match (&parameters[0], &parameters[1]) {
         (ColumnarValue::Array(array), ColumnarValue::Array(wmo_inst_type)) => {
-            let bigram_array = array.as_any().downcast_ref::<StringArray>().unwrap();
-            let wmo_inst_type_array = wmo_inst_type
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
+            let bigram_array =
+                crate::util::downcast_arg::<StringArray>(array, "map_cora_platform_l06")?;
+            let wmo_inst_type_array =
+                crate::util::downcast_arg::<StringArray>(wmo_inst_type, "map_cora_platform_l06")?;
 
             Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(
                 bigram_array.iter().zip(wmo_inst_type_array.iter()).map(
@@ -48,7 +47,8 @@ fn map_cora_platform_l06_impl(
             ColumnarValue::Array(bigram_arr),
             ColumnarValue::Scalar(ScalarValue::Utf8(wmo_inst_type)),
         ) => {
-            let bigram_array = bigram_arr.as_any().downcast_ref::<StringArray>().unwrap();
+            let bigram_array =
+                crate::util::downcast_arg::<StringArray>(bigram_arr, "map_cora_platform_l06")?;
 
             Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(
                 bigram_array
@@ -60,10 +60,8 @@ fn map_cora_platform_l06_impl(
             ColumnarValue::Scalar(ScalarValue::Utf8(bigram)),
             ColumnarValue::Array(wmo_inst_type_arr),
         ) => {
-            let wmo_inst_type_array = wmo_inst_type_arr
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
+            let wmo_inst_type_array =
+                crate::util::downcast_arg::<StringArray>(wmo_inst_type_arr, "map_cora_platform_l06")?;
 
             Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(
                 wmo_inst_type_array.iter().map(|wmo_inst_type| {

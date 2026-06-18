@@ -31,10 +31,10 @@ fn map_cora_instrument_l05_impl(
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
-            let flag_array = flag
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let flag_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                flag,
+                "map_cora_instrument_l05",
+            )?;
 
             let array = flag_array.iter().map(|flag| {
                 flag.map(|wmo_code| L05_MAP.get(wmo_code).map(|s| s).cloned())
