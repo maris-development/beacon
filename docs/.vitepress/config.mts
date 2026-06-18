@@ -203,6 +203,17 @@ export default defineConfig({
                 {
                   text: 'Views',
                   link: '/docs/1.7.2/data-lake/view',
+                },
+                {
+                  text: 'Remote Tables (Federation)',
+                  link: '/docs/1.7.2/data-lake/remote-tables',
+                  collapsed: true,
+                  items: [
+                    { text: 'Defining a remote table', link: '/docs/1.7.2/data-lake/remote-tables#defining-a-remote-table' },
+                    { text: 'How pushdown works', link: '/docs/1.7.2/data-lake/remote-tables#how-pushdown-works' },
+                    { text: 'Schema handling', link: '/docs/1.7.2/data-lake/remote-tables#schema-handling' },
+                    { text: 'Limitations', link: '/docs/1.7.2/data-lake/remote-tables#limitations' },
+                  ]
                 }
               ]
             },
