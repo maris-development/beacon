@@ -152,13 +152,60 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
     type Error = anyhow::Error;
 
     fn try_from(value: Arc<dyn TableDefinition>) -> Result<Self, Self::Error> {
+        // Capture the definition's own list of secret fields before serializing,
+        // then mask them — the persisted `table.json` keeps the real values, but
+        // this view (served by the optionally-authenticated `table-config` API)
+        // must never leak credentials.
+        let sensitive_keys = value.sensitive_keys();
         match serde_json::to_value(value)? {
-            Value::Object(config) => Ok(Self {
-                config: config.into_iter().collect(),
-            }),
+            Value::Object(mut config) => {
+                for key in sensitive_keys {
+                    if let Some(existing) = config.get_mut(*key) {
+                        if !existing.is_null() {
+                            *existing = Value::String("***".to_string());
+                        }
+                    }
+                }
+                Ok(Self {
+                    config: config.into_iter().collect(),
+                })
+            }
             other => Err(anyhow::anyhow!(
                 "expected table config object, got {other:?}"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod table_config_view_tests {
+    use super::TableConfigView;
+    use beacon_datafusion_ext::remote::RemoteTableDefinition;
+    use beacon_datafusion_ext::table_ext::TableDefinition;
+    use std::sync::Arc;
+
+    #[test]
+    /// The table-config view masks a remote table's credentials but keeps the
+    /// non-secret fields intact.
+    fn remote_table_config_redacts_credentials() {
+        let definition: Arc<dyn TableDefinition> = Arc::new(RemoteTableDefinition {
+            name: "remote_obs".to_string(),
+            url: "http://other:50051".to_string(),
+            remote_table: "obs".to_string(),
+            username: Some("admin".to_string()),
+            password: Some("super-secret".to_string()),
+            schema: Arc::new(arrow::datatypes::Schema::empty()),
+        });
+
+        let view = TableConfigView::try_from(definition).expect("config view should build");
+
+        assert_eq!(view.config["username"], serde_json::json!("***"));
+        assert_eq!(view.config["password"], serde_json::json!("***"));
+        assert_eq!(view.config["url"], serde_json::json!("http://other:50051"));
+        assert_eq!(view.config["remote_table"], serde_json::json!("obs"));
+
+        // No raw secret survives anywhere in the serialized view.
+        let serialized = serde_json::to_string(&view).expect("view should serialize");
+        assert!(!serialized.contains("super-secret"), "got: {serialized}");
     }
 }

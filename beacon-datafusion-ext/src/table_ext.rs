@@ -59,6 +59,15 @@ pub trait TableDefinition: Debug + Send + Sync {
     fn table_type(&self) -> TableType {
         TableType::Base
     }
+
+    /// Names of top-level config fields that hold secrets (credentials, tokens).
+    ///
+    /// These are persisted verbatim in `table.json` so the table can reconnect,
+    /// but must be redacted anywhere the definition is exposed to clients (e.g.
+    /// the `table-config` API). Defaults to none.
+    fn sensitive_keys(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// Inputs needed to rebuild the inner [`ListingTable`] for an external table.

@@ -59,7 +59,7 @@ beacon://<host>:<port>/<remote_table>
 | `tls`      | No (default `false`)        | Set to `'true'` to connect over `https` instead of `http`.                  |
 
 :::warning Credentials are stored in the table definition
-The username and password are persisted with the table definition (`table.json`) so the table can reconnect after a restart. Because creating a remote table is admin-gated DDL, treat the credentials you supply as visible to anyone with admin access to this instance. Prefer a least-privilege, read-only account on the remote.
+The username and password are persisted with the table definition (`table.json`) so the table can reconnect after a restart. They are **redacted** wherever the definition is exposed — the `GET /api/table-config` response shows `"***"` instead of the real values, and they never appear in logs — but they are stored in plaintext on disk. Because creating a remote table is admin-gated DDL, prefer a least-privilege, read-only account on the remote.
 :::
 
 ## How pushdown works

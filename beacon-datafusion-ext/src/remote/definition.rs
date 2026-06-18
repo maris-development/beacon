@@ -19,8 +19,10 @@ use super::executor::BeaconFlightSqlExecutor;
 /// Persisted configuration for a federated remote-Beacon table.
 ///
 /// Stored as `table.json` and reloaded at startup like every other
-/// [`TableDefinition`]. Credentials are inline by design (admin-gated DDL).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// [`TableDefinition`]. Credentials are inline by design (admin-gated DDL); they
+/// are redacted anywhere the definition is exposed (the `table-config` API and
+/// the `Debug` impl below).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteTableDefinition {
     /// Local logical table name.
     pub name: String,
@@ -40,6 +42,25 @@ pub struct RemoteTableDefinition {
 impl RemoteTableDefinition {
     fn connection(&self) -> RemoteConnection {
         RemoteConnection::new(self.url.clone(), self.username.clone(), self.password.clone())
+    }
+}
+
+/// Mask a credential so its presence is visible but its value is not.
+fn redact(value: &Option<String>) -> &'static str {
+    if value.is_some() { "***" } else { "<none>" }
+}
+
+// Hand-written so credentials never reach logs via `{:?}`.
+impl std::fmt::Debug for RemoteTableDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteTableDefinition")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("remote_table", &self.remote_table)
+            .field("username", &redact(&self.username))
+            .field("password", &redact(&self.password))
+            .field("schema", &self.schema)
+            .finish()
     }
 }
 
@@ -79,6 +100,10 @@ impl TableDefinition for RemoteTableDefinition {
 
     fn table_name(&self) -> &str {
         &self.name
+    }
+
+    fn sensitive_keys(&self) -> &'static [&'static str] {
+        &["username", "password"]
     }
 }
 
