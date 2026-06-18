@@ -4,8 +4,9 @@ use arrow::datatypes::SchemaRef;
 use beacon_binary_format::{
     object_store::ArrowBBFObjectReader, reader::async_reader::AsyncBBFReader,
 };
+use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_common::super_typing::super_type_schema;
-use beacon_datafusion_ext::format_ext::DatasetMetadata;
+use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -18,7 +19,7 @@ use datafusion::{
 use futures::{StreamExt, TryStreamExt, stream};
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::{FileFormatFactoryExt, bbf::source::BBFSource, file_open_parallelism};
+use crate::datafusion::source::BBFSource;
 
 pub mod metrics;
 pub mod opener;

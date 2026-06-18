@@ -7,9 +7,11 @@ use beacon_common::{
     listing_url::parse_listing_table_url, schema_table_provider::SchemaTableProvider,
     super_table::SuperListingTable,
 };
-use beacon_formats::{
-    arrow::ArrowFormat, bbf::BBFFormat, csv::CsvFormat, parquet::ParquetFormat, zarr::ZarrFormat,
-};
+use beacon_arrow_bbf::datafusion::BBFFormat;
+use beacon_arrow_csv::datafusion::CsvFormat;
+use beacon_arrow_ipc::datafusion::ArrowFormat;
+use beacon_arrow_parquet::datafusion::ParquetFormat;
+use beacon_arrow_zarr::datafusion::ZarrFormat;
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,

@@ -1,0 +1,14 @@
+[package]
+name = "beacon-arrow-csv"
+version = "1.7.2"
+edition = "2024"
+
+[dependencies]
+arrow = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+beacon-common = { path = "../../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

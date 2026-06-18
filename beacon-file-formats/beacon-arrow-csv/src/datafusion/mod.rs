@@ -17,22 +17,29 @@ use object_store::{ObjectMeta, ObjectStore};
 use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
-use crate::{FileFormatFactoryExt, file_open_parallelism};
+use beacon_common::file_descriptors::file_open_parallelism;
+use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 
-#[derive(Debug)]
-pub struct ArrowFormatFactory;
+#[derive(Debug, Default)]
+pub struct CsvFormatFactory;
 
-impl FileFormatFactory for ArrowFormatFactory {
+impl GetExt for CsvFormatFactory {
+    fn get_ext(&self) -> String {
+        "csv".to_string()
+    }
+}
+
+impl FileFormatFactory for CsvFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
         _format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(ArrowFormat::new()))
+        Ok(Arc::new(CsvFormat::new(b',', 1000)))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(ArrowFormat::new())
+        Arc::new(CsvFormat::new(b',', 1000))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -40,13 +47,7 @@ impl FileFormatFactory for ArrowFormatFactory {
     }
 }
 
-impl GetExt for ArrowFormatFactory {
-    fn get_ext(&self) -> String {
-        "arrow".to_string()
-    }
-}
-
-impl FileFormatFactoryExt for ArrowFormatFactory {
+impl FileFormatFactoryExt for CsvFormatFactory {
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
@@ -56,7 +57,7 @@ impl FileFormatFactoryExt for ArrowFormatFactory {
             .filter(|obj| {
                 obj.location
                     .extension()
-                    .map(|ext| ext == "arrow" || ext == "feather")
+                    .map(|ext| ext == "csv" || ext == "tsv")
                     .unwrap_or(false)
             })
             .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
@@ -70,28 +71,24 @@ impl FileFormatFactoryExt for ArrowFormatFactory {
 }
 
 #[derive(Debug)]
-pub struct ArrowFormat {
-    inner_format: datafusion::datasource::file_format::arrow::ArrowFormat,
+pub struct CsvFormat {
+    inner_format: datafusion::datasource::file_format::csv::CsvFormat,
 }
 
-impl ArrowFormat {
-    pub fn new() -> Self {
+impl CsvFormat {
+    pub fn new(delimiter: u8, infer_records: usize) -> Self {
         Self {
-            inner_format: datafusion::datasource::file_format::arrow::ArrowFormat,
+            inner_format: datafusion::datasource::file_format::csv::CsvFormat::default()
+                .with_delimiter(delimiter)
+                .with_schema_infer_max_rec(infer_records),
         }
     }
 }
 
-impl Default for ArrowFormat {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait::async_trait]
-impl FileFormat for ArrowFormat {
+impl FileFormat for CsvFormat {
     fn as_any(&self) -> &dyn Any {
-        self.inner_format.as_any()
+        self
     }
 
     fn compression_type(&self) -> Option<FileCompressionType> {
@@ -116,7 +113,6 @@ impl FileFormat for ArrowFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        //Retrieve the schema for each object
         let schemas = stream::iter(objects.iter().cloned())
             .map(|object| {
                 let store = Arc::clone(store);
@@ -130,6 +126,7 @@ impl FileFormat for ArrowFormat {
             .try_collect::<Vec<_>>()
             .await?;
 
+        //Supertype the schema
         let super_schema = super_type_schema(&schemas).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
         })?;

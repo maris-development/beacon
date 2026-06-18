@@ -18,7 +18,8 @@ use object_store::{ObjectMeta, ObjectStore};
 use beacon_common::super_typing::super_type_schema;
 use futures::{StreamExt, TryStreamExt, stream};
 
-use crate::{FileFormatFactoryExt, file_open_parallelism};
+use beacon_common::file_descriptors::file_open_parallelism;
+use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 
 #[derive(Debug)]
 pub struct ParquetFormatFactory;

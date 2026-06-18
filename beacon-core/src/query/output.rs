@@ -9,12 +9,10 @@ use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactor
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_data_lake::FileManager;
-use beacon_formats::{
-    arrow::ArrowFormatFactory,
-    csv::CsvFormatFactory,
-    geo_parquet::{GeoParquetFormatFactory, GeoParquetOptions},
-    parquet::ParquetFormatFactory,
-};
+use beacon_arrow_csv::datafusion::CsvFormatFactory;
+use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
+use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
+use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use datafusion::{
     common::file_options::file_type::FileType,
     datasource::file_format::format_as_file_type,

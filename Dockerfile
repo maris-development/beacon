@@ -35,7 +35,11 @@ COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
 COPY beacon-data-lake/ /beacon-data-lake/
 COPY beacon-datafusion-ext/ /beacon-datafusion-ext/
-COPY beacon-file-formats/beacon-formats/ /beacon-file-formats/beacon-formats/
+COPY beacon-file-formats/beacon-arrow-ipc/ /beacon-file-formats/beacon-arrow-ipc/
+COPY beacon-file-formats/beacon-arrow-csv/ /beacon-file-formats/beacon-arrow-csv/
+COPY beacon-file-formats/beacon-arrow-parquet/ /beacon-file-formats/beacon-arrow-parquet/
+COPY beacon-file-formats/beacon-arrow-geoparquet/ /beacon-file-formats/beacon-arrow-geoparquet/
+COPY beacon-file-formats/beacon-arrow-bbf/ /beacon-file-formats/beacon-arrow-bbf/
 COPY beacon-functions/ /beacon-functions/
 COPY beacon-iceberg/ /beacon-iceberg/
 COPY beacon-file-formats/beacon-nd-array/ /beacon-file-formats/beacon-nd-array/

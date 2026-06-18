@@ -5,7 +5,7 @@ use arrow::{
     datatypes::{DataType, Field},
 };
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_formats::zarr::ZarrFormat;
+use beacon_arrow_zarr::datafusion::ZarrFormat;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,

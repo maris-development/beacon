@@ -635,7 +635,7 @@ impl TableDefinition for ExternalTableDefinition {
 /// This is the successor to the legacy `LogicalTable`. The file format is
 /// resolved from the session's registered format factories by `file_type`, so
 /// every format Beacon registers (parquet, csv, zarr, bbf, ...) is supported
-/// without this crate depending on `beacon-formats`.
+/// without this crate depending on the individual format crates.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LogicalTableDefinition {
     /// Logical table name.
