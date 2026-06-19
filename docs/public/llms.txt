@@ -3,11 +3,11 @@
 > Beacon is a high-performance, open-source (AGPL-3.0) data lakehouse query engine for scientific and climate data. Point it at existing files — NetCDF, Zarr, Parquet, GeoTIFF/COG, CSV, ODV ASCII, Arrow IPC, Atlas and BBF — on local storage or S3, and query them in place over SQL or a JSON API, with no data migration. Built in Rust on Apache Arrow and DataFusion.
 
 ## Documentation
-- [Introduction](https://maris-development.github.io/beacon/docs/1.7.2/introduction.html): What Beacon is and how a query flows through it.
-- [Getting started](https://maris-development.github.io/beacon/docs/1.7.2/getting-started.html): Run Beacon with Docker, locally or against S3.
-- [SQL guide](https://maris-development.github.io/beacon/docs/1.7.2/sql/): SELECT/WHERE/GROUP BY/JOIN, table functions, DDL, and the function reference.
-- [Data lakehouse setup](https://maris-development.github.io/beacon/docs/1.7.2/data-lake/): Supported formats, external tables, managed (Iceberg) tables, views, configuration, performance tuning.
-- [REST API](https://maris-development.github.io/beacon/docs/1.7.2/api/): HTTP query API (SQL and JSON DSL) and output formats.
+- [Introduction](https://maris-development.github.io/beacon/docs/1.7.3/introduction.html): What Beacon is and how a query flows through it.
+- [Getting started](https://maris-development.github.io/beacon/docs/1.7.3/getting-started.html): Run Beacon with Docker, locally or against S3.
+- [SQL guide](https://maris-development.github.io/beacon/docs/1.7.3/sql/): SELECT/WHERE/GROUP BY/JOIN, table functions, DDL, and the function reference.
+- [Data lakehouse setup](https://maris-development.github.io/beacon/docs/1.7.3/data-lake/): Supported formats, external tables, managed (Iceberg) tables, views, configuration, performance tuning.
+- [REST API](https://maris-development.github.io/beacon/docs/1.7.3/api/): HTTP query API (SQL and JSON DSL) and output formats.
 - [Changelog](https://maris-development.github.io/beacon/docs/changelog): Release history.
 
 ## Key facts

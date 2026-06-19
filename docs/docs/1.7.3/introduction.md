@@ -26,7 +26,7 @@ docker run -d \
   ghcr.io/maris-development/beacon:latest
 ```
 
-Drop your `.nc` (or Parquet, Zarr, CSV, …) files into `./datasets` and they are queryable immediately at `http://localhost:5001`. For Compose, S3-backed storage, and more, see the [getting started guide](/docs/1.7.2/getting-started).
+Drop your `.nc` (or Parquet, Zarr, CSV, …) files into `./datasets` and they are queryable immediately at `http://localhost:5001`. For Compose, S3-backed storage, and more, see the [getting started guide](/docs/1.7.3/getting-started).
 
 ## Your first query
 
@@ -69,7 +69,7 @@ df = client.sql_query(
 
 :::
 
-SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`) or Arrow Flight SQL. Prefer querying by name? Register the files as an [external table](/docs/1.7.2/data-lake/external-tables) first.
+SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`) or Arrow Flight SQL. Prefer querying by name? Register the files as an [external table](/docs/1.7.3/data-lake/external-tables) first.
 
 ## Supported formats
 
@@ -88,14 +88,14 @@ SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`)
 
 A few terms used throughout the docs:
 
-- **[Dataset](/docs/1.7.2/data-lake/datasets)** — an individual file Beacon reads in place (NetCDF, Zarr, Parquet, …).
-- **[External table](/docs/1.7.2/data-lake/external-tables)** — a registered name over one or more files (a folder or glob pattern), with a merged schema across them.
-- **[View](/docs/1.7.2/data-lake/view)** — a saved query exposed as a table.
-- **[Managed table](/docs/1.7.2/sql/managed-tables)** — an Iceberg-backed table Beacon owns and can mutate (`INSERT` / `UPDATE` / `DELETE`).
+- **[Dataset](/docs/1.7.3/data-lake/datasets)** — an individual file Beacon reads in place (NetCDF, Zarr, Parquet, …).
+- **[External table](/docs/1.7.3/data-lake/external-tables)** — a registered name over one or more files (a folder or glob pattern), with a merged schema across them.
+- **[View](/docs/1.7.3/data-lake/view)** — a saved query exposed as a table.
+- **[Managed table](/docs/1.7.3/sql/managed-tables)** — an Iceberg-backed table Beacon owns and can mutate (`INSERT` / `UPDATE` / `DELETE`).
 
 ## Next steps
 
-- **[Get started](/docs/1.7.2/getting-started)** — run Beacon with Docker, locally or against S3.
-- **[Connect a client](/docs/1.7.2/connect/jetbrains-datagrip)** — JetBrains DataGrip, Python ADBC/SDK, or the CLI.
-- **[Write queries](/docs/1.7.2/sql/)** — the SQL guide.
-- **[Register your data](/docs/1.7.2/data-lake/)** — external tables and views.
+- **[Get started](/docs/1.7.3/getting-started)** — run Beacon with Docker, locally or against S3.
+- **[Connect a client](/docs/1.7.3/connect/jetbrains-datagrip)** — JetBrains DataGrip, Python ADBC/SDK, or the CLI.
+- **[Write queries](/docs/1.7.3/sql/)** — the SQL guide.
+- **[Register your data](/docs/1.7.3/data-lake/)** — external tables and views.

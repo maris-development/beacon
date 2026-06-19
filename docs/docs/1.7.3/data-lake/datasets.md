@@ -14,7 +14,7 @@ Native support via DataFusion. Recommended for analytical workloads due to colum
 
 ## GeoParquet
 
-[GeoParquet](https://geoparquet.org/) files (`.geoparquet`) are Parquet files that carry geospatial geometry columns and a `geo` metadata key. Beacon reads them in addition to writing them.
+[GeoParquet](https://geoparquet.org/) files (`.geoparquet`) are Parquet files that carry geospatial geometry columns and a `geo` metadata key. Beacon reads them in addition to writing them. See the dedicated [GeoParquet chapter](./geoparquet.md) for setup details and the [GeoParquet SQL chapter](../sql/geoparquet.md) for querying geometry.
 
 - Geometry columns described in the file's `geo` metadata are decoded to their native [GeoArrow](https://geoarrow.org/) representation on read (a non-geospatial Parquet file is read like ordinary Parquet).
 - Column projection is applied — only the columns a query selects are materialized.

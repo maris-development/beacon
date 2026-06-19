@@ -6,6 +6,22 @@ All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
 
+## v1.7.3 — 2026-06-19
+
+### Added
+
+- **GeoParquet read support.** `.geoparquet` files are read with their geometry
+  columns decoded to native [GeoArrow](https://geoarrow.org/); query them with
+  the `read_geoparquet()` table function or register a `STORED AS GEOPARQUET`
+  external table. See the [GeoParquet SQL chapter](/docs/1.7.3/sql/geoparquet)
+  and the [data-lake GeoParquet chapter](/docs/1.7.3/data-lake/geoparquet).
+- **Federated remote tables.** `CREATE EXTERNAL TABLE … STORED AS REMOTE` points
+  at a table on another Beacon instance over Arrow Flight SQL, pushing filters,
+  projected columns, `LIMIT`, and whole joins/aggregates down to the remote so
+  only the reduced result set crosses the network. See the
+  [remote-tables SQL chapter](/docs/1.7.3/sql/remote-tables) and the
+  [federation setup chapter](/docs/1.7.3/data-lake/remote-tables).
+
 ## v1.7.2 — 2026-06-16
 
 ### Changed
@@ -47,7 +63,7 @@ changes), and **Fixed** (bug fixes).
 - **Schema evolution with `ALTER TABLE`** on managed tables — `ADD COLUMN`,
   `DROP COLUMN`, `RENAME COLUMN`, and `ALTER COLUMN ... TYPE` (safe widening
   promotions). Existing rows keep reading correctly: added columns read `NULL`
-  and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.7.2/sql/managed-tables).
+  and renames preserve values. See [CREATE TABLE (Managed)](/docs/1.7.3/sql/managed-tables).
 - **CF `calendar` support.** CF time-unit parsing now honours the optional CF
   `calendar` attribute, so non-Gregorian calendars are interpreted correctly.
 - **SeaDataNet L05 mappings.** New UDFs map SeaDataNet instrument L05 codes for

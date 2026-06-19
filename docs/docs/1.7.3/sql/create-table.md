@@ -32,6 +32,7 @@ CREATE EXTERNAL TABLE argo STORED AS NETCDF LOCATION 'argo/**/*.nc'
 | `STORED AS` | File types |
 | ----------- | ---------- |
 | `PARQUET`   | `.parquet` |
+| `GEOPARQUET` | `.geoparquet` |
 | `NETCDF`    | `.nc`, `.nc4`, `.cdf` |
 | `ZARR`      | Zarr v2/v3 (`zarr.json`) |
 | `ATLAS`     | Atlas array store (`atlas.json`) |
@@ -48,6 +49,8 @@ CREATE EXTERNAL TABLE sst STORED AS ZARR LOCATION 'sst/*/zarr.json'
 
 CREATE EXTERNAL TABLE sensor STORED AS ATLAS LOCATION 'sensor/atlas.json'
 ```
+
+`GEOPARQUET` reads Parquet files whose geometry columns are decoded to native GeoArrow — see the [GeoParquet chapter](./geoparquet.md) for querying geometry and the [data-lake setup](../data-lake/geoparquet.md) for details.
 
 ## `IF NOT EXISTS`
 
