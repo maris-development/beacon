@@ -1163,7 +1163,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beacon-api"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1230,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-bbf"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-csv"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-geoparquet"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-ipc"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-netcdf"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-odv"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-parquet"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-zarr"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-config"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "envconfig",
  "lazy_static",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-data-lake"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-datafusion-ext"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-functions"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-iceberg"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1736,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-object-storage"
-version = "1.7.2"
+version = "1.7.3"
 dependencies = [
  "async-trait",
  "beacon-config",
