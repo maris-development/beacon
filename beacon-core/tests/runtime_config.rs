@@ -14,17 +14,17 @@ fn config_with(default_table: &str, tag: &str) -> Arc<beacon_config::Config> {
     config.sql.default_table = default_table.to_string();
 
     let root = std::env::temp_dir().join(format!("beacon-runtime-config-test-{tag}"));
-    config.data.datasets = root.join("datasets");
-    config.data.tables = root.join("tables");
-    config.data.tmp = root.join("tmp");
+    config.storage.datasets_dir = root.join("datasets");
+    config.storage.tables_dir = root.join("tables");
+    config.storage.tmp_dir = root.join("tmp");
     config.data.indexes = root.join("indexes");
     config.data.cache = root.join("cache");
-    config.data.root = root;
+    config.storage.data_dir = root;
     for dir in [
-        &config.data.root,
-        &config.data.datasets,
-        &config.data.tables,
-        &config.data.tmp,
+        &config.storage.data_dir,
+        &config.storage.datasets_dir,
+        &config.storage.tables_dir,
+        &config.storage.tmp_dir,
         &config.data.indexes,
         &config.data.cache,
     ] {

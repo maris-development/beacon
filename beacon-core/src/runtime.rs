@@ -54,13 +54,8 @@ impl Runtime {
             config.runtime.vm_memory_size * 1024 * 1024,
         ));
 
-        let object_stores = beacon_object_storage::ObjectStores::new(
-            &config.storage,
-            config.data.datasets.clone(),
-            config.data.tables.clone(),
-            config.data.tmp.clone(),
-        )
-        .await?;
+        let object_stores =
+            beacon_object_storage::ObjectStores::new(&config.storage).await?;
 
         let session_ctx =
             Self::init_ctx(memory_pool, object_stores.datasets.clone(), config.clone())?;
@@ -104,7 +99,6 @@ impl Runtime {
         beacon_iceberg::catalog::init_datasets_warehouse(
             object_stores.datasets.clone(),
             &config.storage,
-            &config.data.datasets,
         )
         .await?;
 

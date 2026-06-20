@@ -53,10 +53,9 @@ pub fn beacon_namespace() -> Vec<String> {
 pub async fn init_datasets_warehouse(
     datasets: std::sync::Arc<beacon_object_storage::DatasetsStore>,
     storage: &beacon_config::StorageConfig,
-    datasets_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
     tracing::info!(
-        backend = if storage.s3.data_lake { "s3" } else { "local" },
+        backend = if storage.s3.is_some() { "s3" } else { "local" },
         "initializing Iceberg datasets warehouse"
     );
     // Full warehouse prefix within the backing store, e.g. `__beacon__/iceberg`.
@@ -65,15 +64,11 @@ pub async fn init_datasets_warehouse(
     // The file catalog needs an `ObjectStoreBuilder` (it cannot accept an
     // arbitrary `ObjectStore`), so mirror the datasets store's backend choice.
     // `catalog_path` is the warehouse root the catalog roots every table under.
-    let (object_store_builder, catalog_path) = if storage.s3.data_lake {
-        let bucket = storage.s3.bucket.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("Iceberg warehouse on S3 requires a bucket name (set BEACON_S3_BUCKET)")
-        })?;
+    let (object_store_builder, catalog_path) = if let Some(s3) = &storage.s3 {
         // Mirror the datasets store's backend by consuming the same `S3Config`
         // values (credentials still come from the AWS env chain). Setting the
         // endpoint/region explicitly keeps the Iceberg warehouse on the same
         // backend as the datasets without re-reading the environment.
-        let s3 = &storage.s3;
         let mut builder = ObjectStoreBuilder::s3()
             .with_config("aws_allow_http", if s3.allow_http { "true" } else { "false" })
             .and_then(|builder| {
@@ -97,11 +92,11 @@ pub async fn init_datasets_warehouse(
                 .with_config("aws_region", region)
                 .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
         }
-        (builder, format!("s3://{bucket}/{warehouse_prefix}"))
+        (builder, format!("s3://{}/{warehouse_prefix}", s3.bucket))
     } else {
         // Local: root the builder at the datasets directory so warehouse paths
         // resolve to `<datasets_dir>/__beacon__/iceberg/...`.
-        let builder = ObjectStoreBuilder::filesystem(datasets_dir.to_path_buf());
+        let builder = ObjectStoreBuilder::filesystem(storage.datasets_dir.to_path_buf());
         (builder, warehouse_prefix.clone())
     };
 

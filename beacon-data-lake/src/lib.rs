@@ -165,7 +165,7 @@ impl DataLake {
             session_context,
             datasets_object_store_url.clone(),
             file_formats,
-            config.data.tmp.clone(),
+            config.storage.tmp_dir.clone(),
         ));
 
         Self {
