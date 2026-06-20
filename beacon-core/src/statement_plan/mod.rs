@@ -126,7 +126,7 @@ pub(crate) async fn execute_statement_plan(
 
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
     let stream = datafusion::physical_plan::execute_stream(physical_plan, session_ctx.task_ctx())?;
-    let stream = stream_coalescer::coalesce_sql_stream(stream);
+    let stream = stream_coalescer::coalesce_sql_stream(session_ctx, stream);
 
     if stream.schema().fields().is_empty() {
         let schema = stream.schema();

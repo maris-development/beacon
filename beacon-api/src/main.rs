@@ -28,9 +28,10 @@ const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Builds the Tokio runtime and hands control to the async entrypoint.
 fn main() -> anyhow::Result<()> {
     // Load and validate configuration up front so problems (e.g. a malformed
-    // `BEACON_BASE_PATH`) surface as a clean error here rather than panicking
-    // later when the global config is first accessed.
-    let config = beacon_config::init().context("failed to load configuration")?;
+    // `BEACON_BASE_PATH`) surface as a clean error here. The config is owned and
+    // passed explicitly into the runtime and the transports — it is not stored in
+    // a process-global.
+    let config = Arc::new(beacon_config::Config::load().context("failed to load configuration")?);
 
     let rt = Builder::new_multi_thread()
         .worker_threads(config.server.worker_threads)
@@ -38,20 +39,20 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("failed to build Tokio runtime")?;
 
-    rt.block_on(async_main())
+    rt.block_on(async_main(config))
 }
 
 /// Initializes shared services and starts all configured API transports.
-async fn async_main() -> anyhow::Result<()> {
+async fn async_main(config: Arc<beacon_config::Config>) -> anyhow::Result<()> {
     setup_tracing();
     install_panic_hook();
 
     tracing::info!("Beacon v{}", BEACON_VERSION);
-    let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new().await?);
+    let beacon_runtime = Arc::new(beacon_core::runtime::Runtime::new(config.clone()).await?);
     // Keep both transports on the same runtime so metadata and access rules stay aligned.
-    let router = setup_router(beacon_runtime.clone())?;
+    let router = setup_router(beacon_runtime.clone(), config.clone())?;
 
-    let server = &beacon_config::CONFIG.server;
+    let server = &config.server;
     let addr = std::net::SocketAddr::new(
         IpAddr::from_str(&server.host)
             .with_context(|| format!("invalid `host` in config: {}", server.host))?,
@@ -60,7 +61,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     let http_server = serve_http(router, addr);
 
-    if beacon_config::CONFIG.flight_sql.enable {
+    if config.flight_sql.enable {
         tokio::try_join!(http_server, flight_sql::serve(beacon_runtime.clone()))?;
     } else {
         http_server.await?;

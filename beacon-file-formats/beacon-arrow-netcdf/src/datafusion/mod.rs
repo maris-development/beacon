@@ -449,7 +449,13 @@ mod tests {
 
     async fn test_store() -> Arc<DatasetsStore> {
         ensure_test_fixtures();
-        beacon_object_storage::get_datasets_object_store().await
+        Arc::new(
+            beacon_object_storage::local_datasets_store(
+                beacon_config::DATASETS_DIR_PATH.to_path_buf(),
+            )
+            .await
+            .expect("local datasets store"),
+        )
     }
 
     fn test_format(store: Arc<DatasetsStore>) -> NetcdfFormat {

@@ -3,7 +3,7 @@ use std::time::Duration;
 use arrow::{compute::concat_batches, datatypes::SchemaRef, record_batch::RecordBatch};
 use datafusion::{
     error::DataFusionError, execution::SendableRecordBatchStream,
-    physical_plan::stream::RecordBatchStreamAdapter,
+    physical_plan::stream::RecordBatchStreamAdapter, prelude::SessionContext,
 };
 use futures::StreamExt;
 
@@ -16,14 +16,29 @@ struct SqlStreamCoalesceOptions {
 }
 
 impl SqlStreamCoalesceOptions {
-    fn from_config() -> Self {
-        let coalesce = &beacon_config::CONFIG.sql.stream_coalesce;
-
-        Self {
-            enabled: coalesce.enabled,
-            target_rows: coalesce.target_rows,
-            flush_timeout_ms: coalesce.flush_timeout_ms,
-            max_rows: coalesce.max_rows,
+    /// Read the coalesce options from the runtime config published on the
+    /// session, falling back to defaults if the extension is absent.
+    fn from_session(session_ctx: &SessionContext) -> Self {
+        match session_ctx
+            .state()
+            .config()
+            .get_extension::<beacon_config::Config>()
+        {
+            Some(config) => {
+                let coalesce = &config.sql.stream_coalesce;
+                Self {
+                    enabled: coalesce.enabled,
+                    target_rows: coalesce.target_rows,
+                    flush_timeout_ms: coalesce.flush_timeout_ms,
+                    max_rows: coalesce.max_rows,
+                }
+            }
+            None => Self {
+                enabled: true,
+                target_rows: 65536,
+                flush_timeout_ms: 25,
+                max_rows: 262144,
+            },
         }
     }
 
@@ -36,8 +51,11 @@ impl SqlStreamCoalesceOptions {
     }
 }
 
-pub(crate) fn coalesce_sql_stream(stream: SendableRecordBatchStream) -> SendableRecordBatchStream {
-    coalesce_sql_stream_with_options(stream, SqlStreamCoalesceOptions::from_config())
+pub(crate) fn coalesce_sql_stream(
+    session_ctx: &SessionContext,
+    stream: SendableRecordBatchStream,
+) -> SendableRecordBatchStream {
+    coalesce_sql_stream_with_options(stream, SqlStreamCoalesceOptions::from_session(session_ctx))
 }
 
 fn coalesce_sql_stream_with_options(

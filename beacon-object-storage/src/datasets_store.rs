@@ -1,7 +1,10 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    path::PathBuf,
     sync::Arc,
 };
+
+use crate::config::StorageConfig;
 
 use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
 use object_store::{
@@ -19,18 +22,31 @@ use crate::{
     object_cache::ObjectCache,
 };
 
-/// Build the datasets [`DatasetsStore`] from the process-wide Beacon configuration.
+/// Build the datasets [`DatasetsStore`] from the given storage configuration.
 ///
-/// The backing object store is selected from [`beacon_config::CONFIG`]:
+/// The backing object store is selected from `storage`:
 /// - When `storage.s3.data_lake` is set, an S3-compatible store is configured
 ///   from the standard AWS environment variables (see [`AmazonS3Builder::from_env`]).
 ///   For path-style requests a bucket name (`BEACON_S3_BUCKET`) is required; for
 ///   virtual-hosted-style the bucket is encoded in the endpoint host.
-/// - Otherwise a local filesystem store rooted at [`beacon_config::DATASETS_DIR_PATH`]
-///   is used.
-pub(crate) async fn create_datasets_store() -> StorageResult<DatasetsStore> {
-    let storage = &beacon_config::CONFIG.storage;
+/// - Otherwise a local filesystem store rooted at `datasets_dir` is used.
+///
+/// The resolved `storage`/`datasets_dir` are retained on the returned store so
+/// [`DatasetsStore::translate_netcdf_url_path`] uses the same backend selection
+/// without consulting any process-global config.
+/// Build a [`DatasetsStore`] backed by the local filesystem rooted at
+/// `datasets_dir`, using default storage settings (no S3, no filesystem events).
+///
+/// Intended for tests and embedders that only need a plain local datasets store
+/// without composing a full [`crate::ObjectStores`].
+pub async fn local_datasets_store(datasets_dir: PathBuf) -> StorageResult<DatasetsStore> {
+    create_datasets_store(&StorageConfig::default(), datasets_dir).await
+}
 
+pub(crate) async fn create_datasets_store(
+    storage: &StorageConfig,
+    datasets_dir: PathBuf,
+) -> StorageResult<DatasetsStore> {
     let (inner, event_listener): (
         Arc<dyn ObjectStore + Send + Sync>,
         Option<Arc<dyn EventListener>>,
@@ -59,7 +75,7 @@ pub(crate) async fn create_datasets_store() -> StorageResult<DatasetsStore> {
     } else {
         tracing::info!("Using local filesystem object store for datasets");
 
-        let root = beacon_config::DATASETS_DIR_PATH.clone();
+        let root = datasets_dir.clone();
         let store = LocalFileSystem::new_with_prefix(&root)?.with_automatic_cleanup(true);
         let inner = Arc::new(store) as Arc<dyn ObjectStore + Send + Sync>;
 
@@ -85,7 +101,9 @@ pub(crate) async fn create_datasets_store() -> StorageResult<DatasetsStore> {
         (inner, event_listener)
     };
 
-    Ok(DatasetsStore::new(inner, event_listener).await)
+    Ok(DatasetsStore::new(inner, event_listener)
+        .await
+        .with_storage(storage.clone(), datasets_dir))
 }
 
 pub trait EventListener: Send + Sync {
@@ -114,6 +132,12 @@ pub struct DatasetsStore {
     /// Background task that drains [`EventListener::poll`] into `object_cache`
     /// and fans events out to `subscribers`. Aborted when the store is dropped.
     poll_task: Option<JoinHandle<()>>,
+    /// Storage configuration this store was built from, retained for NetCDF URL
+    /// translation. Defaults to a local configuration.
+    storage: StorageConfig,
+    /// Root directory for the local datasets store (used by NetCDF URL
+    /// translation in local mode).
+    datasets_dir: PathBuf,
 }
 
 impl DatasetsStore {
@@ -166,7 +190,17 @@ impl DatasetsStore {
             event_listener,
             subscribers,
             poll_task,
+            storage: StorageConfig::default(),
+            datasets_dir: PathBuf::new(),
         }
+    }
+
+    /// Attach the storage config + datasets directory used to build this store so
+    /// [`Self::translate_netcdf_url_path`] resolves URLs without a global config.
+    pub fn with_storage(mut self, storage: StorageConfig, datasets_dir: PathBuf) -> Self {
+        self.storage = storage;
+        self.datasets_dir = datasets_dir;
+        self
     }
 
     /// Continuously drain events from `listener`, apply them to `cache`, and fan
@@ -288,18 +322,18 @@ impl DatasetsStore {
 
     /// Translate an object path into a NetCDF-friendly location string.
     ///
-    /// The backend is determined from [`beacon_config::CONFIG`] (the same source
-    /// [`create_datasets_store`] uses to build the store):
-    /// - **Local datasets**: a plain filesystem path rooted at
-    ///   [`beacon_config::DATASETS_DIR_PATH`] (no `file://` scheme — NetCDF
-    ///   libraries open local paths directly).
+    /// The backend is determined from the storage config this store was built
+    /// with (retained via [`Self::with_storage`]):
+    /// - **Local datasets**: a plain filesystem path rooted at the configured
+    ///   datasets directory (no `file://` scheme — NetCDF libraries open local
+    ///   paths directly).
     /// - **S3 datasets**: an `http://`/`https://` URL built from `AWS_ENDPOINT`
     ///   and the configured bucket, with `#mode=bytes` appended (required by some
     ///   NetCDF libraries for byte-range access).
     ///
     /// This function intentionally never returns an `s3://...` URL.
     pub fn translate_netcdf_url_path(&self, object: &Path) -> StorageResult<String> {
-        let storage = &beacon_config::CONFIG.storage;
+        let storage = &self.storage;
         if storage.s3.data_lake {
             let endpoint = s3_endpoint()?;
             let url = s3_object_url(
@@ -310,7 +344,7 @@ impl DatasetsStore {
             )?;
             Ok(append_mode_bytes(url))
         } else {
-            local_object_path(&beacon_config::DATASETS_DIR_PATH, object)
+            local_object_path(&self.datasets_dir, object)
         }
     }
 }

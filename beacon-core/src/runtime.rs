@@ -38,17 +38,34 @@ pub struct Runtime {
     file_manager: Arc<FileManager>,
     listing_table_factory: Arc<ListingTableFactoryExt>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
+    /// The configuration this runtime was built with. Owned, not process-global.
+    config: Arc<beacon_config::Config>,
 }
 
 impl Runtime {
-    /// Boots the Beacon execution environment and initializes runtime-local state.
-    pub async fn new() -> anyhow::Result<Self> {
+    /// Boots the Beacon execution environment with the given configuration.
+    ///
+    /// The config is owned by the runtime (not read from a process-global) and is
+    /// threaded into every component below — including, via a `SessionConfig`
+    /// extension, the deep session-scoped code (query planning, table refresh,
+    /// metadata UDFs) that cannot otherwise reach it.
+    pub async fn new(config: Arc<beacon_config::Config>) -> anyhow::Result<Self> {
         let memory_pool = Arc::new(FairSpillPool::new(
-            beacon_config::CONFIG.runtime.vm_memory_size * 1024 * 1024,
+            config.runtime.vm_memory_size * 1024 * 1024,
         ));
 
-        let session_ctx = Self::init_ctx(memory_pool)?;
-        let data_lake = Arc::new(DataLake::new(session_ctx.clone()).await);
+        let object_stores = beacon_object_storage::ObjectStores::new(
+            &config.storage,
+            config.data.datasets.clone(),
+            config.data.tables.clone(),
+        )
+        .await?;
+
+        let session_ctx =
+            Self::init_ctx(memory_pool, object_stores.datasets.clone(), config.clone())?;
+        let data_lake = Arc::new(
+            DataLake::new(session_ctx.clone(), object_stores.clone(), config.clone()).await,
+        );
 
         let table_manager = data_lake.table_manager();
         let file_manager = data_lake.file_manager();
@@ -58,7 +75,7 @@ impl Runtime {
             tokio::runtime::Handle::current(),
             session_ctx.clone(),
             file_manager.data_object_store_url(),
-            beacon_object_storage::get_datasets_object_store().await,
+            object_stores.datasets.clone(),
             file_manager.file_formats().to_vec(),
         ));
         table_functions.extend(beacon_functions::metadata::register_metadata_functions(
@@ -83,11 +100,16 @@ impl Runtime {
         // CREATE/DROP handlers need it too. The warehouse lives in the datasets
         // store's internal area (`__beacon__/iceberg`), so it follows the same
         // local/S3 backend as the datasets.
-        beacon_iceberg::catalog::init_datasets_warehouse().await?;
+        beacon_iceberg::catalog::init_datasets_warehouse(
+            object_stores.datasets.clone(),
+            &config.storage,
+            &config.data.datasets,
+        )
+        .await?;
 
         geodatafusion::register(&session_ctx);
 
-        for udf in beacon_functions::geo::geo_udfs() {
+        for udf in beacon_functions::geo::geo_udfs(config.runtime.st_within_point_cache_size) {
             session_ctx.register_udf(udf);
         }
 
@@ -112,16 +134,26 @@ impl Runtime {
             listing_table_factory,
             file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
+            config,
         })
     }
 
-    fn init_ctx(memory_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
+    fn init_ctx(
+        memory_pool: Arc<FairSpillPool>,
+        datasets_store: Arc<beacon_object_storage::DatasetsStore>,
+        app_config: Arc<beacon_config::Config>,
+    ) -> anyhow::Result<Arc<SessionContext>> {
         let mut config = SessionConfig::new()
-            .with_batch_size(beacon_config::CONFIG.runtime.batch_size)
+            .with_batch_size(app_config.runtime.batch_size)
             .with_coalesce_batches(true)
             .with_information_schema(true)
             .with_default_catalog_and_schema("beacon", "public")
-            .with_collect_statistics(true);
+            .with_collect_statistics(true)
+            // Make the runtime's datasets store and config reachable from deep,
+            // session-scoped code (query planning, table refresh, metadata UDFs)
+            // without a process-global accessor.
+            .with_extension(datasets_store)
+            .with_extension(app_config);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
         config
@@ -300,7 +332,7 @@ impl Runtime {
     }
 
     pub fn system_info(&self) -> SystemInfo {
-        sys::SystemInfo::new()
+        sys::SystemInfo::new(self.config.runtime.enable_sys_info)
     }
 
     pub fn get_query_metrics(&self, query_id: uuid::Uuid) -> Option<QueryMetricsView> {
@@ -438,8 +470,13 @@ impl Runtime {
         tables
     }
 
+    /// The configuration this runtime was built with.
+    pub fn config(&self) -> &Arc<beacon_config::Config> {
+        &self.config
+    }
+
     pub fn default_table(&self) -> String {
-        beacon_config::CONFIG.sql.default_table.clone()
+        self.config.sql.default_table.clone()
     }
 
     pub async fn list_table_config(&self, table_name: String) -> Option<TableConfigView> {
@@ -471,7 +508,7 @@ impl Runtime {
     pub async fn list_default_table_schema(&self) -> SchemaRef {
         let table = self
             .session_ctx
-            .table(beacon_config::CONFIG.sql.default_table.as_str())
+            .table(self.config.sql.default_table.as_str())
             .await
             .expect("Default table not found");
         Arc::new(table.schema().as_arrow().to_owned())
@@ -549,7 +586,7 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_create_query_refresh_and_drop() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
 
         let suffix = uuid::Uuid::new_v4().simple();
         let mv = format!("mv_test_{suffix}");
@@ -621,7 +658,7 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_handles_zero_row_result() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
         let mv = format!("mv_empty_{}", uuid::Uuid::new_v4().simple());
 
         // A query with no rows must still create a queryable, Parquet-backed view.
@@ -685,7 +722,7 @@ mod client_query_tests {
     /// same pipeline as `run_sql`, returning a streamed result.
     #[tokio::test(flavor = "multi_thread")]
     async fn json_query_runs_through_unified_path() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("json_q_{suffix}");
 
@@ -714,7 +751,7 @@ mod client_query_tests {
     /// file download.
     #[tokio::test(flavor = "multi_thread")]
     async fn query_with_output_format_produces_file() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("out_{suffix}");
 
@@ -749,7 +786,7 @@ mod client_query_tests {
     /// operation (super-user-only).
     #[tokio::test(flavor = "multi_thread")]
     async fn non_super_user_is_gated_by_validation() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("val_{suffix}");
 

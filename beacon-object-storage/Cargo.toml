@@ -24,7 +24,5 @@ flume = { workspace = true }
 thiserror = { workspace = true }
 object_store = { workspace = true }
 
-beacon-config = { path = "../beacon-config" }
-
 [dev-dependencies]
 tempfile = { workspace = true }

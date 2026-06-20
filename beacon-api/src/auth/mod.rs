@@ -6,22 +6,28 @@ use base64::{engine::general_purpose, Engine as _};
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AuthError;
 
-/// Validates a complete HTTP basic authorization value against configured admin credentials
-pub(crate) fn verify_basic_auth_value(auth_str: &str) -> Result<(), AuthError> {
+/// Validates a complete HTTP basic authorization value against the given admin credentials
+pub(crate) fn verify_basic_auth_value(
+    auth_str: &str,
+    admin: &beacon_config::AdminConfig,
+) -> Result<(), AuthError> {
     let (username, password) = parse_basic_auth_credentials(auth_str)?;
 
-    if validate_basic_auth_credentials(&username, &password) {
+    if validate_basic_auth_credentials(&username, &password, admin) {
         Ok(())
     } else {
         Err(AuthError)
     }
 }
 
-/// Compares username and password pairs against the configured admin credentials
-pub(crate) fn validate_basic_auth_credentials(username: &str, password: &str) -> bool {
+/// Compares username and password pairs against the given admin credentials
+pub(crate) fn validate_basic_auth_credentials(
+    username: &str,
+    password: &str,
+    admin: &beacon_config::AdminConfig,
+) -> bool {
     tracing::debug!("Validating basic auth credentials for user '{}'", username);
-    username == beacon_config::CONFIG.admin.username
-        && password == beacon_config::CONFIG.admin.password
+    username == admin.username && password == admin.password
 }
 
 /// Parses a `Basic ...` authorization header into username and password components

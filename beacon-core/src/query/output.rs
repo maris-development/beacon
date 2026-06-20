@@ -41,11 +41,20 @@ impl Output {
     /// Tuple of the new logical plan and the output file wrapper.
     pub async fn parse(
         &self,
-        _session_context: &SessionContext,
+        session_context: &SessionContext,
         file_manager: &FileManager,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
-        let file_type = self.format.file_type().await;
+        let datasets_store = session_context
+            .state()
+            .config()
+            .get_extension::<beacon_object_storage::DatasetsStore>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(
+                    "datasets object store missing from session config".to_string(),
+                )
+            })?;
+        let file_type = self.format.file_type(datasets_store).await;
         let temp_output = file_manager.try_create_temp_output_file(".tmp");
         let plan = LogicalPlanBuilder::copy_to(
             input_plan,
@@ -106,7 +115,13 @@ impl OutputFormat {
     }
 
     /// Returns the DataFusion file type for this output format.
-    pub async fn file_type(&self) -> Arc<dyn FileType> {
+    ///
+    /// `datasets_store` is the runtime's datasets store, used by the NetCDF
+    /// writers; it is ignored by the other formats.
+    pub async fn file_type(
+        &self,
+        datasets_store: Arc<beacon_object_storage::DatasetsStore>,
+    ) -> Arc<dyn FileType> {
         match self {
             OutputFormat::Csv => format_as_file_type(Arc::new(CsvFormatFactory)),
             OutputFormat::Ipc => format_as_file_type(Arc::new(ArrowFormatFactory)),
@@ -121,8 +136,10 @@ impl OutputFormat {
             OutputFormat::NetCDF => {
                 let options = NetcdfOptions::default();
 
+                // Writing NetCDF: the reader cache / statistics config is
+                // irrelevant here, so the defaults suffice.
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
-                    beacon_object_storage::get_datasets_object_store().await,
+                    datasets_store.clone(),
                     options,
                     NetcdfConfig::default(),
                 )))
@@ -133,7 +150,7 @@ impl OutputFormat {
                 options.write_dimensions = Some(dimension_columns.clone());
 
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
-                    beacon_object_storage::get_datasets_object_store().await,
+                    datasets_store.clone(),
                     options,
                     NetcdfConfig::default(),
                 )))

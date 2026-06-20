@@ -1236,7 +1236,6 @@ dependencies = [
  "async-trait",
  "beacon-binary-format",
  "beacon-common",
- "beacon-config",
  "beacon-datafusion-ext",
  "datafusion",
  "futures",
@@ -1501,6 +1500,10 @@ dependencies = [
 name = "beacon-config"
 version = "1.7.3"
 dependencies = [
+ "beacon-arrow-atlas",
+ "beacon-arrow-bbf",
+ "beacon-arrow-netcdf",
+ "beacon-object-storage",
  "envconfig",
  "lazy_static",
  "object_store 0.13.2",
@@ -1746,7 +1749,6 @@ name = "beacon-object-storage"
 version = "1.7.3"
 dependencies = [
  "async-trait",
- "beacon-config",
  "bumpalo",
  "chrono",
  "flume",

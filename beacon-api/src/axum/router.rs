@@ -15,7 +15,7 @@ use beacon_core::runtime::Runtime;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{info_span, Span};
-use utoipa::openapi::{OpenApi, Server};
+use utoipa::openapi::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use utoipa_swagger_ui::{SwaggerUi, Url};
 
@@ -25,17 +25,20 @@ const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Builds the complete HTTP router, OpenAPI docs, CORS policy, and tracing layers.
 ///
-/// Returns an error when CORS configuration in [`static@beacon_config::CONFIG`]
+/// Returns an error when the CORS configuration in the passed-in `config`
 /// contains invalid origins, methods, or headers — validated once at startup
 /// rather than on every request.
-pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Router> {
+pub(crate) fn setup_router(
+    beacon_runtime: Arc<Runtime>,
+    config: Arc<beacon_config::Config>,
+) -> anyhow::Result<Router> {
     let (client_router, mut api_docs_client) = setup_client_router();
     let (admin_router, api_docs_admin) = setup_admin_router();
 
     api_docs_client.merge(api_docs_admin);
-    api_docs_client = set_api_docs_info(api_docs_client);
+    api_docs_client = set_api_docs_info(api_docs_client, &config.api_docs);
 
-    let base_path = &beacon_config::CONFIG.server.base_path;
+    let base_path = &config.server.base_path;
     let swagger_url = format!("{base_path}/swagger");
     let openapi_url = format!("{base_path}/openapi.json");
 
@@ -66,7 +69,9 @@ pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Route
             "/",
             get(move || async move { Redirect::to(swagger_redirect) }),
         )
-        .layer(build_cors_layer()?)
+        .layer(build_cors_layer(&config.cors)?)
+        // Publish the config so middleware/handlers can read transport settings.
+        .layer(::axum::Extension(config.clone()))
         .with_state::<_>(beacon_runtime);
 
     // SwaggerUi is merged outside the base_path nest to avoid doubling the prefix
@@ -88,14 +93,15 @@ pub(crate) fn setup_router(beacon_runtime: Arc<Runtime>) -> anyhow::Result<Route
 
 /// Fills in the top-level OpenAPI metadata exposed by the HTTP documentation endpoints.
 ///
-/// Title, description, contact, and license are sourced from
-/// [`static@beacon_config::CONFIG`] so deployments can brand the docs via
-/// `BEACON_API_*` environment variables without recompiling. The version is
-/// always the compiled crate version.
-fn set_api_docs_info(mut openapi: utoipa::openapi::OpenApi) -> utoipa::openapi::OpenApi {
+/// Title, description, contact, and license are sourced from the passed-in
+/// `ApiDocsConfig` so deployments can brand the docs via `BEACON_API_*`
+/// environment variables without recompiling. The version is always the
+/// compiled crate version.
+fn set_api_docs_info(
+    mut openapi: utoipa::openapi::OpenApi,
+    cfg: &beacon_config::ApiDocsConfig,
+) -> utoipa::openapi::OpenApi {
     use utoipa::openapi::{Contact, License};
-
-    let cfg = &beacon_config::CONFIG.api_docs;
 
     openapi.info.title = cfg.title.clone();
     openapi.info.version = BEACON_VERSION.to_string();
@@ -210,8 +216,7 @@ where
 ///
 /// Configuration values are validated at startup so invalid origins, methods, or
 /// header names surface as a contextual error rather than a runtime panic.
-fn build_cors_layer() -> anyhow::Result<CorsLayer> {
-    let cors = &beacon_config::CONFIG.cors;
+fn build_cors_layer(cors: &beacon_config::CorsConfig) -> anyhow::Result<CorsLayer> {
     let mut layer = CorsLayer::new();
 
     if cors.allowed_origins.trim() == "*" {

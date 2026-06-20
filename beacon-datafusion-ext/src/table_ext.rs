@@ -148,20 +148,18 @@ pub fn internal_object_store_url() -> ObjectStoreUrl {
 ///
 /// Only the datasets store emits events, so tables on any other store (e.g. the
 /// `file://` store used in tests) get `None` and rely on manual `REFRESH`.
-/// Returns `None` as well when the datasets store does not support events.
-pub(crate) async fn datasets_store_events(
+/// Returns `None` as well when no datasets store was provided (the caller could
+/// not resolve it from the session).
+pub(crate) fn datasets_store_events(
     data_store_url: &ObjectStoreUrl,
+    datasets_store: Option<Arc<beacon_object_storage::DatasetsStore>>,
 ) -> Option<Receiver<ObjectEvent>> {
     if data_store_url.as_str() != DATASETS_STORE_URL {
         return None;
     }
     // Subscribe at the store root; events are filtered per-table by
     // `path_under_prefix` below, since a table may span multiple prefixes.
-    Some(
-        beacon_object_storage::get_datasets_object_store()
-            .await
-            .subscribe_events(""),
-    )
+    datasets_store.map(|store| store.subscribe_events(""))
 }
 
 /// Returns the object path an event refers to.
@@ -613,7 +611,11 @@ impl TableDefinition for ExternalTableDefinition {
 
         let initial = build_listing_table(&session_state, &rebuild).await?;
 
-        let events = datasets_store_events(data_store_url).await;
+        let datasets_store = context
+            .state()
+            .config()
+            .get_extension::<beacon_object_storage::DatasetsStore>();
+        let events = datasets_store_events(data_store_url, datasets_store);
 
         Ok(Arc::new(ExternalTable::new_self_refreshing(
             self.clone(),

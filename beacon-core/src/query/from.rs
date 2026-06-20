@@ -10,7 +10,7 @@ use beacon_arrow_odv::datafusion::OdvFormat;
 use beacon_arrow_csv::datafusion::CsvFormat;
 use datafusion::{
     datasource::{
-        file_format::{FileFormat, FileFormatFactory},
+        file_format::FileFormat,
         listing::ListingTableUrl,
         provider_as_source,
     },
@@ -35,13 +35,6 @@ pub enum From {
         #[serde(flatten)]
         format: FromFormat,
     },
-}
-
-impl Default for From {
-    /// Returns the default table as specified in the configuration.
-    fn default() -> Self {
-        From::Table(beacon_config::CONFIG.sql.default_table.clone())
-    }
 }
 
 impl From {
@@ -219,13 +212,18 @@ fn file_format_from_session(
 mod tests {
     use super::*;
     use datafusion::datasource::file_format::FileFormatFactory;
-    use std::any::Any;
     use std::collections::HashMap;
 
     /// (variant, the factory it should resolve) for every store/listing format
     /// that `file_format` builds via a session-registered factory.
     async fn factory_cases() -> Vec<(FromFormat, Arc<dyn FileFormatFactory>)> {
-        let store = beacon_object_storage::get_datasets_object_store().await;
+        let store = Arc::new(
+            beacon_object_storage::local_datasets_store(
+                beacon_config::DATASETS_DIR_PATH.to_path_buf(),
+            )
+            .await
+            .expect("local datasets store"),
+        );
         vec![
             (
                 FromFormat::Parquet { paths: vec![] },

@@ -32,7 +32,7 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, Ticket,
 };
 use bytes::Bytes;
-use futures::{StreamExt, TryStream, TryStreamExt};
+use futures::{StreamExt, TryStreamExt};
 use tonic::{metadata::MetadataValue, transport::Server, Request, Response, Status, Streaming};
 use tracing::info;
 
@@ -47,9 +47,10 @@ pub(crate) struct BeaconFlightSqlService {
 }
 
 impl BeaconFlightSqlService {
-    /// Creates a service using the configured anonymous-access policy.
+    /// Creates a service using the runtime's configured anonymous-access policy.
     pub(crate) fn new(runtime: Arc<beacon_core::runtime::Runtime>) -> anyhow::Result<Self> {
-        Self::new_with_options(runtime, beacon_config::CONFIG.flight_sql.allow_anonymous)
+        let allow_anonymous = runtime.config().flight_sql.allow_anonymous;
+        Self::new_with_options(runtime, allow_anonymous)
     }
 
     /// Creates a service with an explicit anonymous-access setting, used primarily by tests.
@@ -57,13 +58,15 @@ impl BeaconFlightSqlService {
         runtime: Arc<beacon_core::runtime::Runtime>,
         allow_anonymous: bool,
     ) -> anyhow::Result<Self> {
-        let flight_sql = &beacon_config::CONFIG.flight_sql;
+        let flight_sql = runtime.config().flight_sql.clone();
+        let admin = runtime.config().admin.clone();
 
         Ok(Self {
             metadata: FlightSqlMetadata::new(runtime.clone())?,
             runtime,
             authenticator: Authenticator::new(
                 allow_anonymous,
+                admin,
                 Duration::from_secs(flight_sql.token_ttl_secs),
             ),
             statements: SqlHandleStore::new(Duration::from_secs(flight_sql.statement_ttl_secs)),
@@ -442,8 +445,8 @@ fn is_ddl(sql: &str) -> bool {
 
 /// Starts the Flight SQL gRPC server on the configured host and port.
 pub(crate) async fn serve(runtime: Arc<beacon_core::runtime::Runtime>) -> anyhow::Result<()> {
+    let flight_sql = runtime.config().flight_sql.clone();
     let service = BeaconFlightSqlService::new(runtime)?;
-    let flight_sql = &beacon_config::CONFIG.flight_sql;
     let addr = SocketAddr::new(
         IpAddr::from_str(&flight_sql.host)
             .map_err(|error| anyhow::anyhow!("failed to parse Flight SQL host: {error}"))?,

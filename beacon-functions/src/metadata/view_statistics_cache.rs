@@ -27,7 +27,6 @@ use arrow::{
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
 use beacon_datafusion_ext::stats_cache::BeaconFileStatisticsCache;
-use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_datafusion_err,
@@ -61,7 +60,7 @@ fn output_schema() -> SchemaRef {
 pub struct ViewStatisticsCacheFunc {
     cache: Arc<BeaconFileStatisticsCache>,
     runtime_handle: Handle,
-    _session_ctx: Arc<SessionContext>,
+    session_ctx: Arc<SessionContext>,
 }
 
 impl ViewStatisticsCacheFunc {
@@ -73,7 +72,7 @@ impl ViewStatisticsCacheFunc {
         Self {
             cache,
             runtime_handle,
-            _session_ctx: session_ctx,
+            session_ctx,
         }
     }
 }
@@ -121,13 +120,22 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
         let entries = self.cache.list_entries();
         let schema = output_schema();
+        let store = self
+            .session_ctx
+            .state()
+            .config()
+            .get_extension::<beacon_object_storage::DatasetsStore>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(
+                    "datasets object store missing from session config".to_string(),
+                )
+            })?;
 
         // Validate each cached entry against the live object store by calling head().
         // call() is sync, so we bridge into async via block_in_place.
         let validations: Vec<bool> =
             tokio::task::block_in_place(|| {
                 self.runtime_handle.block_on(async {
-                    let store = get_datasets_object_store().await;
                     let mut results = Vec::with_capacity(entries.len());
                     for (path, cached_meta, _) in &entries {
                         let is_valid = match store.head(path).await {
