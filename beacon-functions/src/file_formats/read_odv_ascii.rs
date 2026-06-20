@@ -5,10 +5,8 @@ use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperList
 use beacon_arrow_odv::datafusion::OdvFormat;
 use datafusion::{
     catalog::TableFunctionImpl,
-    common::plan_err,
     execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
-    scalar::ScalarValue,
 };
 
 use crate::file_formats::BeaconTableFunctionImpl;
@@ -66,40 +64,7 @@ impl TableFunctionImpl for ReadOdvAsciiFunc {
         &self,
         args: &[Expr],
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        let mut glob_paths: Vec<String> = vec![];
-        if let Some(glob_path_arg) = args.first() {
-            match glob_path_arg {
-                Expr::Literal(ScalarValue::List(values), _) => {
-                    let string_array = values.as_ref().values();
-                    match string_array
-                        .as_any()
-                        .downcast_ref::<arrow::array::StringArray>()
-                    {
-                        Some(str_arr) => {
-                            str_arr.iter().for_each(|opt_str| {
-                                if let Some(s) = opt_str {
-                                    glob_paths.push(s.to_string());
-                                }
-                            });
-                        }
-                        None => {
-                            return plan_err!(
-                                "read_odv_ascii first argument must be a List<Utf8> of glob paths"
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    return plan_err!(
-                        "read_odv_ascii first argument must be a List<Utf8> of glob paths"
-                    );
-                }
-            }
-        } else {
-            return plan_err!(
-                "read_odv_ascii requires at least 1 argument: glob_paths : List<Utf8>"
-            );
-        }
+        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_odv_ascii")?;
 
         tracing::debug!("read_odv_ascii glob paths: {:?}", glob_paths);
 

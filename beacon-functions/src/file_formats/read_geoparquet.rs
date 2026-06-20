@@ -4,11 +4,7 @@ use arrow::datatypes::{DataType, Field};
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormat, GeoParquetOptions};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use datafusion::{
-    catalog::TableFunctionImpl,
-    common::plan_err,
-    execution::object_store::ObjectStoreUrl,
-    prelude::{Expr, SessionContext},
-    scalar::ScalarValue,
+    catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 
 use crate::file_formats::BeaconTableFunctionImpl;
@@ -70,40 +66,7 @@ impl TableFunctionImpl for ReadGeoParquetFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let mut glob_paths: Vec<String> = vec![];
-        if let Some(glob_path_arg) = args.first() {
-            match glob_path_arg {
-                Expr::Literal(ScalarValue::List(values), _) => {
-                    let string_array = values.as_ref().values();
-                    match string_array
-                        .as_any()
-                        .downcast_ref::<arrow::array::StringArray>()
-                    {
-                        Some(str_arr) => {
-                            str_arr.iter().for_each(|opt_str| {
-                                if let Some(s) = opt_str {
-                                    glob_paths.push(s.to_string());
-                                }
-                            });
-                        }
-                        None => {
-                            return plan_err!(
-                                "read_geoparquet first argument must be a List<Utf8> of glob paths"
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    return plan_err!(
-                        "read_geoparquet first argument must be a List<Utf8> of glob paths"
-                    );
-                }
-            }
-        } else {
-            return plan_err!(
-                "read_geoparquet requires at least 1 argument: glob_paths : List<Utf8>"
-            );
-        }
+        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_geoparquet")?;
 
         tracing::debug!("read_geoparquet glob paths: {:?}", glob_paths);
 
