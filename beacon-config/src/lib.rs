@@ -9,7 +9,14 @@ pub mod error;
 pub use error::ConfigError;
 use error::Result;
 
-#[derive(Debug)]
+// Per-format and storage config types are owned by their crates; beacon-config
+// composes them here and fills them from the environment.
+pub use beacon_arrow_atlas::datafusion::AtlasConfig;
+pub use beacon_arrow_bbf::datafusion::BbfConfig;
+pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
+pub use beacon_object_storage::{S3Config, StorageConfig};
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub admin: AdminConfig,
     pub server: ServerConfig,
@@ -20,16 +27,19 @@ pub struct Config {
     pub cors: CorsConfig,
     pub netcdf: NetcdfConfig,
     pub atlas: AtlasConfig,
+    pub bbf: BbfConfig,
     pub api_docs: ApiDocsConfig,
+    /// Resolved data-directory paths (root + sub-directories).
+    pub data: DataDirsConfig,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AdminConfig {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
@@ -39,17 +49,16 @@ pub struct ServerConfig {
     pub base_path: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub vm_memory_size: usize,
     pub sanitize_schema: bool,
     pub st_within_point_cache_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
-    pub bbf_split_streams_slice: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqlConfig {
     pub enable: bool,
     pub default_table: String,
@@ -57,7 +66,7 @@ pub struct SqlConfig {
     pub stream_coalesce: SqlStreamCoalesceConfig,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqlStreamCoalesceConfig {
     pub enabled: bool,
     pub target_rows: usize,
@@ -65,7 +74,7 @@ pub struct SqlStreamCoalesceConfig {
     pub max_rows: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FlightSqlConfig {
     pub enable: bool,
     pub allow_anonymous: bool,
@@ -76,21 +85,7 @@ pub struct FlightSqlConfig {
     pub prepared_statement_ttl_secs: u64,
 }
 
-#[derive(Debug)]
-pub struct StorageConfig {
-    pub enable_fs_events: bool,
-    pub enable_s3_events: bool,
-    pub s3: S3Config,
-}
-
-#[derive(Debug)]
-pub struct S3Config {
-    pub bucket: Option<String>,
-    pub enable_virtual_hosting: bool,
-    pub data_lake: bool,
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CorsConfig {
     pub allowed_methods: String,
     pub allowed_origins: String,
@@ -99,25 +94,10 @@ pub struct CorsConfig {
     pub max_age: u64,
 }
 
-#[derive(Debug)]
-pub struct NetcdfConfig {
-    pub use_schema_cache: bool,
-    pub schema_cache_size: u64,
-    pub use_reader_cache: bool,
-    pub reader_cache_size: usize,
-    pub enable_statistics: bool,
-}
-
-#[derive(Debug)]
-pub struct AtlasConfig {
-    pub use_reader_cache: bool,
-    pub reader_cache_size: u64,
-}
-
 /// Metadata exposed at the top level of the OpenAPI document (and the Swagger /
 /// Scalar UIs). All fields are configurable so deployments can brand their own
 /// API docs without recompiling.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApiDocsConfig {
     pub title: String,
     pub description: String,
@@ -130,10 +110,16 @@ pub struct ApiDocsConfig {
     pub license_identifier: Option<String>,
 }
 
-#[derive(Debug)]
-pub struct NetcdfMultiplexerConfig {
-    pub enabled: bool,
-    pub processes: Option<usize>,
+/// Resolved data-directory paths, derived from `BEACON_DATA_DIR` (default
+/// `./data`). The directories are created when the config is loaded.
+#[derive(Debug, Clone)]
+pub struct DataDirsConfig {
+    pub root: PathBuf,
+    pub datasets: PathBuf,
+    pub tables: PathBuf,
+    pub tmp: PathBuf,
+    pub indexes: PathBuf,
+    pub cache: PathBuf,
 }
 
 #[derive(Debug, Envconfig)]
@@ -226,10 +212,9 @@ struct RawConfig {
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "true")]
     enable_pushdown_projection: bool,
 
-    #[envconfig(from = "BEACON_NETCDF_USE_SCHEMA_CACHE", default = "true")]
-    netcdf_use_schema_cache: bool,
-    #[envconfig(from = "BEACON_NETCDF_SCHEMA_CACHE_SIZE", default = "1024")]
-    netcdf_schema_cache_size: u64,
+    /// Root directory for Beacon's local data (datasets, tables, tmp, etc.).
+    #[envconfig(from = "BEACON_DATA_DIR", default = "./data")]
+    data_dir: String,
 
     #[envconfig(from = "BEACON_NETCDF_ENABLE_STATISTICS", default = "true")]
     netcdf_enable_statistics: bool,
@@ -296,7 +281,6 @@ impl From<RawConfig> for Config {
                 st_within_point_cache_size: raw.st_within_point_cache_size,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
-                bbf_split_streams_slice: raw.bbf_split_streams_slice,
             },
             sql: SqlConfig {
                 enable: raw.enable_sql,
@@ -335,8 +319,6 @@ impl From<RawConfig> for Config {
                 max_age: raw.max_age,
             },
             netcdf: NetcdfConfig {
-                use_schema_cache: raw.netcdf_use_schema_cache,
-                schema_cache_size: raw.netcdf_schema_cache_size,
                 use_reader_cache: raw.netcdf_use_reader_cache,
                 reader_cache_size: raw.netcdf_reader_cache_size,
                 enable_statistics: raw.netcdf_enable_statistics,
@@ -344,6 +326,9 @@ impl From<RawConfig> for Config {
             atlas: AtlasConfig {
                 use_reader_cache: raw.atlas_use_reader_cache,
                 reader_cache_size: raw.atlas_reader_cache_size,
+            },
+            bbf: BbfConfig {
+                split_streams_slice: raw.bbf_split_streams_slice,
             },
             api_docs: ApiDocsConfig {
                 title: raw.api_title,
@@ -355,6 +340,17 @@ impl From<RawConfig> for Config {
                 license_name: raw.api_license_name,
                 license_url: raw.api_license_url,
                 license_identifier: raw.api_license_identifier,
+            },
+            data: {
+                let root = PathBuf::from(&raw.data_dir);
+                DataDirsConfig {
+                    datasets: root.join("datasets"),
+                    tables: root.join("tables"),
+                    tmp: root.join("tmp"),
+                    indexes: root.join("indexes"),
+                    cache: root.join("cache"),
+                    root,
+                }
             },
         }
     }
@@ -397,6 +393,17 @@ impl Config {
             .into();
         config.server.base_path =
             normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
+        // Create the configured data directories (idempotent).
+        for dir in [
+            &config.data.root,
+            &config.data.datasets,
+            &config.data.tables,
+            &config.data.tmp,
+            &config.data.indexes,
+            &config.data.cache,
+        ] {
+            create_dir(dir)?;
+        }
         tracing::debug!(
             host = %config.server.host,
             port = config.server.port,
@@ -415,6 +422,10 @@ static CONFIG_CELL: OnceLock<Config> = OnceLock::new();
 ///
 /// Call this once early in `main`. It is idempotent: subsequent calls return the
 /// already-initialized [`Config`].
+#[deprecated(
+    note = "Config is no longer process-global; load it with `Config::load()` and pass \
+            `Arc<Config>` to `Runtime::new`. This remains only for legacy unit tests."
+)]
 pub fn init() -> Result<&'static Config> {
     if let Some(config) = CONFIG_CELL.get() {
         return Ok(config);
@@ -444,6 +455,14 @@ impl std::ops::Deref for ConfigHandle {
 }
 
 /// Process-global configuration handle. Dereferences to [`Config`].
+///
+/// Deprecated: configuration is no longer process-global. Load it with
+/// [`Config::load`] and pass an `Arc<Config>` into `Runtime::new`. This handle
+/// remains only as a fallback for legacy unit tests.
+#[deprecated(
+    note = "Config is no longer process-global; load it with `Config::load()` and pass \
+            `Arc<Config>` to `Runtime::new`. This remains only for legacy unit tests."
+)]
 pub static CONFIG: ConfigHandle = ConfigHandle;
 
 /// Creates `path` (and any missing parents), returning a structured

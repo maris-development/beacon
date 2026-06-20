@@ -549,7 +549,13 @@ pub(crate) mod test_support {
 
     pub async fn test_store() -> Arc<DatasetsStore> {
         ensure_fixture().await;
-        beacon_object_storage::get_datasets_object_store().await
+        Arc::new(
+            beacon_object_storage::local_datasets_store(
+                beacon_config::DATASETS_DIR_PATH.to_path_buf(),
+            )
+            .await
+            .expect("local datasets store"),
+        )
     }
 
     /// `ObjectMeta` for the fixture's `atlas.json` marker.

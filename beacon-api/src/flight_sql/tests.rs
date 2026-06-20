@@ -15,7 +15,7 @@ async fn spawn_server(allow_anonymous: bool) -> (SocketAddr, tokio::task::JoinHa
     drop(tmp);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let runtime = Arc::new(beacon_core::runtime::Runtime::new().await.unwrap());
+    let runtime = Arc::new(beacon_core::runtime::Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.unwrap());
     let service = BeaconFlightSqlService::new_with_options(runtime, allow_anonymous).unwrap();
 
     let handle = tokio::spawn(async move {
@@ -55,7 +55,7 @@ async fn spawn_server_with_runtime(
     drop(tmp);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let runtime = Arc::new(beacon_core::runtime::Runtime::new().await.unwrap());
+    let runtime = Arc::new(beacon_core::runtime::Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.unwrap());
     let service =
         BeaconFlightSqlService::new_with_options(runtime.clone(), allow_anonymous).unwrap();
 
@@ -191,11 +191,9 @@ async fn handshake_execute_and_metadata_work() {
     let (addr, handle) = spawn_server(false).await;
     let mut client = client(addr).await;
 
+    let admin = beacon_config::Config::load().unwrap().admin;
     client
-        .handshake(
-            &beacon_config::CONFIG.admin.username,
-            &beacon_config::CONFIG.admin.password,
-        )
+        .handshake(&admin.username, &admin.password)
         .await
         .unwrap();
     assert!(client.token().is_some());
@@ -268,11 +266,9 @@ async fn prepared_statement_flow_works() {
     let (addr, handle) = spawn_server(false).await;
     let mut client = client(addr).await;
 
+    let admin = beacon_config::Config::load().unwrap().admin;
     client
-        .handshake(
-            &beacon_config::CONFIG.admin.username,
-            &beacon_config::CONFIG.admin.password,
-        )
+        .handshake(&admin.username, &admin.password)
         .await
         .unwrap();
 

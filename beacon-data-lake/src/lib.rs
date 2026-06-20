@@ -7,7 +7,7 @@ use std::{
 use arrow::datatypes::SchemaRef;
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_datafusion_ext::table_ext::TableDefinition;
-use beacon_object_storage::get_datasets_object_store;
+use beacon_object_storage::ObjectStores;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     datasource::listing::ListingTableUrl,
@@ -121,13 +121,14 @@ impl DataLake {
         self.file_manager.clone()
     }
 
-    pub async fn new(session_context: Arc<SessionContext>) -> Self {
-        // Register object stores
-        // Init them if they have not been initialized yet.
-        beacon_object_storage::init_datastores()
-            .await
-            .expect("Failed to initialize Data Lake Engine...");
-        let datasets_object_store = get_datasets_object_store().await;
+    pub async fn new(
+        session_context: Arc<SessionContext>,
+        object_stores: ObjectStores,
+        config: Arc<beacon_config::Config>,
+    ) -> Self {
+        // The runtime owns the object stores and passes them in; register each
+        // with the session context so DataFusion can resolve their URLs.
+        let datasets_object_store = object_stores.datasets.clone();
         let datasets_object_store_url = DATASETS_OBJECT_STORE_URL.clone();
         // Register the Beacon-internal store (rooted at the `__beacon__` prefix)
         // used by materialized views to persist and read their data directly,
@@ -139,25 +140,23 @@ impl DataLake {
         // Register datasets object store
         session_context.register_object_store(
             &Url::parse(datasets_object_store_url.as_str()).unwrap(),
-            datasets_object_store,
+            datasets_object_store.clone(),
         );
         // Register tables object store
-        let tables_object_store = beacon_object_storage::get_tables_object_store().await;
         let tables_object_store_url = TABLES_OBJECT_STORE_URL.clone();
         session_context.register_object_store(
             &Url::parse(tables_object_store_url.as_str()).unwrap(),
-            tables_object_store,
+            object_stores.tables.clone(),
         );
         // Register tmp object store
-        let tmp_object_store = beacon_object_storage::get_tmp_object_store().await;
         let tmp_object_store_url = TMP_OBJECT_STORE_URL.clone();
         session_context.register_object_store(
             &Url::parse(tmp_object_store_url.as_str()).unwrap(),
-            tmp_object_store,
+            object_stores.tmp.clone(),
         );
 
         let file_formats =
-            file_formats(session_context.clone(), get_datasets_object_store().await).unwrap();
+            file_formats(session_context.clone(), datasets_object_store.clone(), &config).unwrap();
         let runtime_handle = tokio::runtime::Handle::current();
 
         let table_manager = Arc::new(TableManager::new(

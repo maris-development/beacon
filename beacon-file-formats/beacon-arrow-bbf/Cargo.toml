@@ -14,7 +14,6 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 
 beacon-common = { path = "../../beacon-common" }
-beacon-config = { path = "../../beacon-config" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 
 # Beacon binary format (git submodule, consumed by path)

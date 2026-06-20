@@ -121,7 +121,17 @@ impl TableProviderFactory for ListingTableFactoryExt {
             },
         };
 
-        let events = crate::table_ext::datasets_store_events(&self.store_url).await;
+        // Resolve the runtime's datasets store from the session config extension
+        // so self-refreshing tables can subscribe to its change events.
+        let datasets_store = self
+            .session_ctx
+            .upgrade()
+            .and_then(|ctx| {
+                ctx.state()
+                    .config()
+                    .get_extension::<beacon_object_storage::DatasetsStore>()
+            });
+        let events = crate::table_ext::datasets_store_events(&self.store_url, datasets_store);
 
         let external_table = ExternalTable::new_self_refreshing(
             definition,

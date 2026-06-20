@@ -27,7 +27,6 @@ use arrow::{
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
 use beacon_datafusion_ext::{stats_cache::BeaconFileStatisticsCache, table_ext::ExternalTable};
-use beacon_object_storage::get_datasets_object_store;
 use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
     common::{plan_datafusion_err, plan_err},
@@ -148,7 +147,13 @@ impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
 
                 let listing_table = external.inner();
                 let schema = listing_table.schema();
-                let store = get_datasets_object_store().await;
+                let store = session_ctx
+                    .state()
+                    .config()
+                    .get_extension::<beacon_object_storage::DatasetsStore>()
+                    .ok_or_else(|| {
+                        plan_datafusion_err!("datasets object store missing from session config")
+                    })?;
 
                 // List every file that belongs to this listing table.
                 // `table_paths()` carries the prefix and optional glob; `contains()`

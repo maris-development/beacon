@@ -50,8 +50,11 @@ pub fn beacon_namespace() -> Vec<String> {
 ///
 /// Sets both the shared catalog ([`get_catalog`]) and the warehouse store used
 /// for `DROP TABLE` cleanup ([`get_warehouse_store`]).
-pub async fn init_datasets_warehouse() -> anyhow::Result<()> {
-    let storage = &beacon_config::CONFIG.storage;
+pub async fn init_datasets_warehouse(
+    datasets: std::sync::Arc<beacon_object_storage::DatasetsStore>,
+    storage: &beacon_config::StorageConfig,
+    datasets_dir: &std::path::Path,
+) -> anyhow::Result<()> {
     tracing::info!(
         backend = if storage.s3.data_lake { "s3" } else { "local" },
         "initializing Iceberg datasets warehouse"
@@ -85,7 +88,7 @@ pub async fn init_datasets_warehouse() -> anyhow::Result<()> {
     } else {
         // Local: root the builder at the datasets directory so warehouse paths
         // resolve to `<datasets_dir>/__beacon__/iceberg/...`.
-        let builder = ObjectStoreBuilder::filesystem(beacon_config::DATASETS_DIR_PATH.clone());
+        let builder = ObjectStoreBuilder::filesystem(datasets_dir.to_path_buf());
         (builder, warehouse_prefix.clone())
     };
 
@@ -102,7 +105,6 @@ pub async fn init_datasets_warehouse() -> anyhow::Result<()> {
     // maps paths under `__beacon__`), nested one level into the `iceberg`
     // sub-directory so a table's `<namespace>/<table>` prefix resolves to
     // `__beacon__/iceberg/<namespace>/<table>`.
-    let datasets = beacon_object_storage::get_datasets_object_store().await;
     let drop_store: Arc<dyn ObjectStore> =
         Arc::new(PrefixStore::new(datasets.internal_store(), WAREHOUSE_SUBDIR));
 

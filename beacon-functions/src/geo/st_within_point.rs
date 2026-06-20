@@ -12,10 +12,12 @@ use wkt::Wkt;
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct WithinPointUdf {
     signature: Signature,
+    /// LRU cache capacity for point-in-geometry results (per invocation).
+    cache_size: usize,
 }
 
 impl WithinPointUdf {
-    pub fn new() -> Self {
+    pub fn new(cache_size: usize) -> Self {
         Self {
             signature: Signature::exact(
                 vec![
@@ -25,6 +27,7 @@ impl WithinPointUdf {
                 ],
                 datafusion::logical_expr::Volatility::Immutable,
             ),
+            cache_size,
         }
     }
 }
@@ -93,8 +96,13 @@ impl ScalarUDFImpl for WithinPointUdf {
                                 "st_within_point: invalid WKT geometry: {e:?}"
                             ))
                         })?;
-                        let result = st_within_point_fast(geometry, &mut lon_iter, &mut lat_iter)
-                            .map_err(|e| {
+                        let result = st_within_point_fast(
+                            geometry,
+                            &mut lon_iter,
+                            &mut lat_iter,
+                            self.cache_size,
+                        )
+                        .map_err(|e| {
                             datafusion::error::DataFusionError::Execution(e.to_string())
                         })?;
                         return Ok(ColumnarValue::Array(Arc::new(
@@ -153,10 +161,10 @@ fn st_within_point_fast(
     geom: Geometry,
     lon: &mut dyn Iterator<Item = Option<f64>>,
     lat: &mut dyn Iterator<Item = Option<f64>>,
+    cache_size: usize,
 ) -> anyhow::Result<Vec<bool>> {
     let mut cache: lru::LruCache<Point<OrderedFloat<f64>>, bool> = lru::LruCache::new(
-        NonZero::new(beacon_config::CONFIG.runtime.st_within_point_cache_size)
-            .expect("Cache size must be non-zero"),
+        NonZero::new(cache_size).expect("Cache size must be non-zero"),
     );
     let bounding_rect = geom.bounding_rect();
     lon.zip(lat)
@@ -204,6 +212,7 @@ fn st_within_point_fast_impl(
 
 impl Default for WithinPointUdf {
     fn default() -> Self {
-        Self::new()
+        // Historical default cache size (formerly the env default).
+        Self::new(10_000)
     }
 }
