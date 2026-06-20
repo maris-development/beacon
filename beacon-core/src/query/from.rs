@@ -214,3 +214,129 @@ fn file_format_from_session(
     })?;
     factory.create(&state, &std::collections::HashMap::new())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::datasource::file_format::FileFormatFactory;
+    use std::any::Any;
+    use std::collections::HashMap;
+
+    /// (variant, the factory it should resolve) for every store/listing format
+    /// that `file_format` builds via a session-registered factory.
+    async fn factory_cases() -> Vec<(FromFormat, Arc<dyn FileFormatFactory>)> {
+        let store = beacon_object_storage::get_datasets_object_store().await;
+        vec![
+            (
+                FromFormat::Parquet { paths: vec![] },
+                Arc::new(beacon_arrow_parquet::datafusion::ParquetFormatFactory),
+            ),
+            (
+                FromFormat::Arrow { paths: vec![] },
+                Arc::new(beacon_arrow_ipc::datafusion::ArrowFormatFactory),
+            ),
+            (
+                FromFormat::NetCDF { paths: vec![] },
+                Arc::new(beacon_arrow_netcdf::datafusion::NetCDFFormatFactory::new(
+                    store.clone(),
+                    Default::default(),
+                    Default::default(),
+                )),
+            ),
+            (
+                FromFormat::Tiff { paths: vec![] },
+                Arc::new(beacon_arrow_tiff::datafusion::TiffFormatFactory::new(
+                    Default::default(),
+                )),
+            ),
+            (
+                FromFormat::Zarr { paths: vec![] },
+                Arc::new(beacon_arrow_zarr::datafusion::ZarrFormatFactory),
+            ),
+            (
+                FromFormat::Bbf { paths: vec![] },
+                Arc::new(beacon_arrow_bbf::datafusion::BBFFormatFactory::new(
+                    Default::default(),
+                )),
+            ),
+        ]
+    }
+
+    fn register(ctx: &SessionContext, factory: Arc<dyn FileFormatFactory>) {
+        let state_ref = ctx.state_ref();
+        let mut state = state_ref.write();
+        state
+            .register_file_format(factory, true)
+            .expect("register file format");
+    }
+
+    /// Each factory-backed `FromFormat` resolves the factory registered on the
+    /// session and builds *that* factory's format (same concrete type), rather
+    /// than constructing a default of its own.
+    #[tokio::test]
+    async fn from_formats_resolve_the_registered_factory() {
+        let ctx = SessionContext::new();
+        let cases = factory_cases().await;
+        for (_, factory) in &cases {
+            register(&ctx, factory.clone());
+        }
+
+        for (variant, factory) in &cases {
+            let expected = factory
+                .create(&ctx.state(), &HashMap::new())
+                .expect("factory create");
+            let actual = variant
+                .file_format(&ctx)
+                .await
+                .expect("file_format should resolve from the session");
+            assert_eq!(
+                actual.as_any().type_id(),
+                expected.as_any().type_id(),
+                "{variant:?} resolved an unexpected file format",
+            );
+        }
+    }
+
+    /// A beacon-specific factory-backed format errors when its factory is not
+    /// registered on the session — proving `file_format` resolves from the
+    /// session rather than constructing a default. (Parquet/Arrow/CSV are
+    /// DataFusion built-ins registered on every `SessionContext`, so they are
+    /// excluded here.)
+    #[tokio::test]
+    async fn factory_backed_format_errors_when_not_registered() {
+        let ctx = SessionContext::new();
+        for variant in [
+            FromFormat::NetCDF { paths: vec![] },
+            FromFormat::Tiff { paths: vec![] },
+            FromFormat::Zarr { paths: vec![] },
+            FromFormat::Bbf { paths: vec![] },
+        ] {
+            assert!(
+                variant.file_format(&ctx).await.is_err(),
+                "{variant:?} should fail without a registered factory",
+            );
+        }
+    }
+
+    /// CSV (per-query delimiter) and ODV (no registered factory) are built
+    /// directly, so they resolve even on a bare session.
+    #[tokio::test]
+    async fn csv_and_odv_build_directly() {
+        let ctx = SessionContext::new();
+        assert!(
+            FromFormat::Csv {
+                delimiter: Some(';'),
+                paths: vec![],
+            }
+            .file_format(&ctx)
+            .await
+            .is_ok()
+        );
+        assert!(
+            FromFormat::Odv { paths: vec![] }
+                .file_format(&ctx)
+                .await
+                .is_ok()
+        );
+    }
+}
