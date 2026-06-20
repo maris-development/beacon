@@ -4,6 +4,7 @@ version = "1.7.3"
 edition = "2024"
 
 [dependencies]
+tokio = { workspace = true }
 arrow = { workspace = true }
 datafusion = { workspace = true }
 object_store = { workspace = true }

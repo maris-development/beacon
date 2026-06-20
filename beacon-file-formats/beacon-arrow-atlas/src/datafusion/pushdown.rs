@@ -244,7 +244,9 @@ mod tests {
     async fn fixture_atlas() -> (Arc<Atlas>, SchemaRef) {
         let store = test_store().await;
         let marker = fixture_marker_object_meta();
-        let atlas = get_or_open_atlas(store, &marker).await.expect("open atlas");
+        let atlas = get_or_open_atlas(None, store, &marker)
+            .await
+            .expect("open atlas");
 
         let names = atlas.list_datasets();
         let mut schemas = Vec::with_capacity(names.len());

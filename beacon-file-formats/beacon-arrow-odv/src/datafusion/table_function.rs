@@ -1,22 +1,23 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
-use beacon_arrow_geoparquet::datafusion::{GeoParquetFormat, GeoParquetOptions};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
+use crate::datafusion::OdvFormat;
 use datafusion::{
-    catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
+    catalog::TableFunctionImpl,
+    execution::object_store::ObjectStoreUrl,
+    prelude::{Expr, SessionContext},
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
-pub struct ReadGeoParquetFunc {
-    // Session Reference
+pub struct ReadOdvAsciiFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
 }
 
-impl ReadGeoParquetFunc {
+impl ReadOdvAsciiFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Arc<SessionContext>,
@@ -30,29 +31,26 @@ impl ReadGeoParquetFunc {
     }
 }
 
-impl std::fmt::Debug for ReadGeoParquetFunc {
+impl std::fmt::Debug for ReadOdvAsciiFunc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ReadGeoParquetFunc")
+        write!(f, "ReadOdvAsciiFunc")
     }
 }
 
-impl BeaconTableFunctionImpl for ReadGeoParquetFunc {
+impl BeaconTableFunctionImpl for ReadOdvAsciiFunc {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
-    fn description(&self) -> Option<String> {
-        Some(
-            "Reads GeoParquet files from specified glob paths, decoding geometry columns to native GeoArrow."
-                .to_string(),
-        )
-    }
-
     fn name(&self) -> String {
-        "read_geoparquet".to_string()
+        "read_odv_ascii".to_string()
     }
 
-    fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
+    fn description(&self) -> Option<String> {
+        Some("Reads ODV ASCII files from specified glob paths.".to_string())
+    }
+
+    fn arguments(&self) -> Option<Vec<Field>> {
         Some(vec![Field::new(
             "glob_paths",
             DataType::List(Arc::new(Field::new("glob_path", DataType::Utf8, false))),
@@ -61,26 +59,22 @@ impl BeaconTableFunctionImpl for ReadGeoParquetFunc {
     }
 }
 
-impl TableFunctionImpl for ReadGeoParquetFunc {
+impl TableFunctionImpl for ReadOdvAsciiFunc {
     fn call(
         &self,
-        args: &[datafusion::prelude::Expr],
-    ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_geoparquet")?;
+        args: &[Expr],
+    ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_odv_ascii")?;
 
-        tracing::debug!("read_geoparquet glob paths: {:?}", glob_paths);
+        tracing::debug!("read_odv_ascii glob paths: {:?}", glob_paths);
 
         let mut listing_urls = vec![];
         for path in &glob_paths {
-            tracing::debug!("read_geoparquet processing path: {}", path);
+            tracing::debug!("read_odv_ascii processing path: {}", path);
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
-        // Reading does not use the lon/lat write options; defaults are fine.
-        let file_format = GeoParquetFormat::new(GeoParquetOptions {
-            longitude_column: None,
-            latitude_column: None,
-        });
+        let file_format = OdvFormat::new();
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

@@ -31,6 +31,8 @@ pub mod pushdown;
 pub mod reader;
 pub mod source;
 
+pub use cache::AtlasReaderCache;
+
 /// Canonical marker filename used as the format identifier with
 /// DataFusion. Kept stable across atlas versions so the registered
 /// `FileFormat` lookup key doesn't churn even though the on-disk
@@ -87,18 +89,69 @@ fn atlas_marker_filename(p: &object_store::path::Path) -> Option<&'static str> {
         .find(|name| s == *name || s.ends_with(&format!("/{name}")))
 }
 
+/// Runtime configuration for the atlas format.
+///
+/// Plain data with sensible defaults; the caller populates it (no environment
+/// parsing here). The reader-cache capacity is a shared runtime resource, while
+/// `use_reader_cache` is a default that a table can override via
+/// `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+#[derive(Debug, Clone)]
+pub struct AtlasConfig {
+    /// Whether reads consult the shared reader cache by default.
+    pub use_reader_cache: bool,
+    /// Capacity (number of opened atlas stores) of the shared reader cache.
+    pub reader_cache_size: u64,
+}
+
+impl Default for AtlasConfig {
+    fn default() -> Self {
+        Self {
+            use_reader_cache: true,
+            reader_cache_size: 32,
+        }
+    }
+}
+
+/// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
+fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(exec_datafusion_err!(
+            "invalid boolean for atlas option '{key}': '{other}'"
+        )),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AtlasFormatFactory {
     pub datasets_object_store: Arc<DatasetsStore>,
     pub options: AtlasOptions,
+    pub config: AtlasConfig,
+    /// Shared reader cache for this runtime, sized from `config`.
+    cache: AtlasReaderCache,
 }
 
 impl AtlasFormatFactory {
-    pub fn new(datasets_object_store: Arc<DatasetsStore>, options: AtlasOptions) -> Self {
+    pub fn new(
+        datasets_object_store: Arc<DatasetsStore>,
+        options: AtlasOptions,
+        config: AtlasConfig,
+    ) -> Self {
+        let cache = AtlasReaderCache::new(config.reader_cache_size);
         Self {
             datasets_object_store,
             options,
+            config,
+            cache,
         }
+    }
+
+    /// Build an [`AtlasFormat`] with the given per-table effective settings,
+    /// wiring in the shared reader cache when caching is enabled.
+    fn build_format(&self, options: AtlasOptions, use_reader_cache: bool) -> AtlasFormat {
+        let cache = use_reader_cache.then(|| self.cache.clone());
+        AtlasFormat::new(self.datasets_object_store.clone(), options).with_cache(cache)
     }
 }
 
@@ -106,19 +159,31 @@ impl FileFormatFactory for AtlasFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(AtlasFormat::new(
-            self.datasets_object_store.clone(),
-            self.options.clone(),
-        )))
+        // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
+        // defaulting to the runtime config.
+        let mut options = self.options.clone();
+        let mut use_reader_cache = self.config.use_reader_cache;
+
+        if let Some(value) = format_options.get("read_dimensions") {
+            options.read_dimensions = Some(
+                value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            );
+        }
+        if let Some(value) = format_options.get("use_reader_cache") {
+            use_reader_cache = parse_bool_option("use_reader_cache", value)?;
+        }
+
+        Ok(Arc::new(self.build_format(options, use_reader_cache)))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(AtlasFormat::new(
-            self.datasets_object_store.clone(),
-            self.options.clone(),
-        ))
+        Arc::new(self.build_format(self.options.clone(), self.config.use_reader_cache))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -289,6 +354,8 @@ fn marker_parent(p: &object_store::path::Path) -> Option<String> {
 pub struct AtlasFormat {
     pub datasets_object_store: Arc<DatasetsStore>,
     pub options: AtlasOptions,
+    /// Reader cache to consult, or `None` to bypass caching for this format.
+    cache: Option<AtlasReaderCache>,
 }
 
 impl AtlasFormat {
@@ -296,7 +363,14 @@ impl AtlasFormat {
         Self {
             datasets_object_store,
             options,
+            cache: None,
         }
+    }
+
+    /// Wire in a reader cache (`Some`) or disable caching (`None`).
+    pub fn with_cache(mut self, cache: Option<AtlasReaderCache>) -> Self {
+        self.cache = cache;
+        self
     }
 }
 
@@ -334,8 +408,12 @@ impl FileFormat for AtlasFormat {
 
         let mut schemas = Vec::new();
         for marker in markers {
-            let atlas =
-                cache::get_or_open_atlas(self.datasets_object_store.clone(), &marker).await?;
+            let atlas = cache::get_or_open_atlas(
+                self.cache.as_ref(),
+                self.datasets_object_store.clone(),
+                &marker,
+            )
+            .await?;
             let read_dimensions = self.options.read_dimensions.as_deref();
             for dataset_name in atlas.list_datasets() {
                 let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
@@ -398,6 +476,7 @@ impl FileFormat for AtlasFormat {
             self.options.read_dimensions.clone(),
             table_schema,
         )
+        .with_cache(self.cache.clone())
         .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -421,11 +500,14 @@ impl FileFormat for AtlasFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(AtlasSource::new(
-            self.datasets_object_store.clone(),
-            self.options.read_dimensions.clone(),
-            table_schema,
-        ))
+        Arc::new(
+            AtlasSource::new(
+                self.datasets_object_store.clone(),
+                self.options.read_dimensions.clone(),
+                table_schema,
+            )
+            .with_cache(self.cache.clone()),
+        )
     }
 }
 
@@ -435,7 +517,7 @@ pub(crate) mod test_support {
 
     use super::ATLAS_MARKER;
     use crate::reader::test_support::build_two_dataset_store;
-    use beacon_object_storage::{DatasetsStore, get_datasets_object_store};
+    use beacon_object_storage::DatasetsStore;
     use object_store::{ObjectMeta, path::Path as OsPath};
     use std::sync::Arc;
 
@@ -467,7 +549,7 @@ pub(crate) mod test_support {
 
     pub async fn test_store() -> Arc<DatasetsStore> {
         ensure_fixture().await;
-        get_datasets_object_store().await
+        beacon_object_storage::get_datasets_object_store().await
     }
 
     /// `ObjectMeta` for the fixture's `atlas.json` marker.
@@ -486,7 +568,6 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{ensure_fixture, fixture_marker_object_meta, test_store};
     use super::*;
-    use beacon_object_storage::get_datasets_object_store;
     use datafusion::prelude::SessionContext;
     use object_store::local::LocalFileSystem;
     use object_store::path::Path as OsPath;
@@ -554,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn factory_get_ext_returns_atlas() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default());
+        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
         // `get_ext` is the format identity used to register and resolve
         // external tables (`STORED AS ATLAS`), not the marker filename
         // (`atlas.json`).
@@ -565,7 +646,7 @@ mod tests {
     #[tokio::test]
     async fn discover_datasets_emits_one_entry_per_atlas_dataset() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default());
+        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
 
         let objects = vec![fixture_marker_object_meta()];
         let datasets = factory.discover_datasets(&objects).expect("discover");
@@ -584,7 +665,7 @@ mod tests {
     #[tokio::test]
     async fn discover_datasets_ignores_non_marker_objects() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default());
+        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
         let objects = vec![ObjectMeta {
             location: object_store::path::Path::from("some/other.nc"),
             last_modified: chrono::Utc::now(),
@@ -912,8 +993,8 @@ mod tests {
     #[tokio::test]
     async fn discover_datasets_finds_msgpack_zst_store() {
         ensure_msgpack_zst_fixture().await;
-        let store = get_datasets_object_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default());
+        let store = test_store().await;
+        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
 
         let marker = ObjectMeta {
             location: OsPath::from(format!("{MSGPACK_ZST_FIXTURE_DIR}/atlas.msgpack.zst")),
@@ -1042,3 +1123,6 @@ mod tests {
         assert_eq!(temps, vec![20.0f32, 21.0, 22.0], "only summer's temperatures remain");
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadAtlasFunc;

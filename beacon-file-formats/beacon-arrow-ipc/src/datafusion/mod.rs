@@ -174,3 +174,6 @@ impl FileFormat for ArrowFormat {
         self.inner_format.file_source(table_schema)
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadArrowFunc;

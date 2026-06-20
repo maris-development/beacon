@@ -213,3 +213,6 @@ fn cast_ts_seconds_to_ms(
     let projected = Arc::new(ProjectionExec::try_new(exprs, input)?);
     Ok(projected)
 }
+
+pub mod table_function;
+pub use table_function::ReadParquetFunc;

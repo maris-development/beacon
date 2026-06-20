@@ -39,6 +39,11 @@ pub struct BBFOpener {
     metrics: BBFGlobalMetrics,
     /// Stream Partition Share
     stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<StreamShare>>>>,
+    /// Whether to split each record batch into `split_batch_size`-row slices.
+    split_streams_slice: bool,
+    /// Row count per slice when `split_streams_slice` is set (the session batch
+    /// size, propagated from the source).
+    split_batch_size: usize,
 }
 
 impl FileOpener for BBFOpener {
@@ -60,6 +65,8 @@ impl FileOpener for BBFOpener {
         };
         let metrics = self.metrics.clone();
         let fut_projected_schema = projected_schema.clone();
+        let split_streams_slice = self.split_streams_slice;
+        let split_batch_size = self.split_batch_size;
 
         let fut = async move {
             let (stream, schema_mapper, file_schema) = stream_partition_share
@@ -154,13 +161,14 @@ impl FileOpener for BBFOpener {
                 )
                 .boxed();
 
-            // If env variable BBF_SPLIT_STREAMS_SLICE is set, we will split the record batch into 16K rows batches to avoid OOM. This is especially helpful for large tables with wide rows.
-            let stream_proxy = if beacon_config::CONFIG.runtime.bbf_split_streams_slice {
+            // When configured (per-runtime default or per-table option), split
+            // each record batch into `split_batch_size`-row slices to avoid OOM.
+            // This is especially helpful for large tables with wide rows.
+            let stream_proxy = if split_streams_slice {
                 stream_proxy
-                    .flat_map(|batch| {
+                    .flat_map(move |batch| {
                         if let Ok(batch) = batch {
-                            let split_batches =
-                                split_record_batch(batch, beacon_config::CONFIG.runtime.batch_size);
+                            let split_batches = split_record_batch(batch, split_batch_size);
                             let split_batches_res =
                                 split_batches.into_iter().map(Ok).collect::<Vec<_>>();
                             futures::stream::iter(split_batches_res)
@@ -194,6 +202,7 @@ fn split_record_batch(batch: RecordBatch, chunk_size: usize) -> Vec<RecordBatch>
 }
 
 impl BBFOpener {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         projected_schema: SchemaRef,
         pruning_predicate: Option<PruningPredicate>,
@@ -202,6 +211,8 @@ impl BBFOpener {
         file_tracer: Arc<Mutex<Vec<String>>>,
         stream_partition_shares: Arc<Mutex<HashMap<object_store::path::Path, Arc<StreamShare>>>>,
         metrics: BBFGlobalMetrics,
+        split_streams_slice: bool,
+        split_batch_size: usize,
     ) -> Self {
         Self {
             projected_schema,
@@ -211,6 +222,8 @@ impl BBFOpener {
             file_tracer,
             stream_partition_shares,
             metrics,
+            split_streams_slice,
+            split_batch_size,
         }
     }
 

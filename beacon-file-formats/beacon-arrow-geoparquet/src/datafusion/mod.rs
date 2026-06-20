@@ -551,3 +551,6 @@ mod tests {
         }
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadGeoParquetFunc;

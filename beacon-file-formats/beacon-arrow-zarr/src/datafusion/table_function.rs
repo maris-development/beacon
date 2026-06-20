@@ -1,52 +1,52 @@
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_arrow_bbf::datafusion::BBFFormat;
+use crate::datafusion::ZarrFormat;
 use datafusion::{
     catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
-pub struct ReadBBFFunc {
+pub struct ReadZarrFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
 }
 
-impl ReadBBFFunc {
+impl ReadZarrFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
-        session_ctx: Arc<SessionContext>,
+        session: Arc<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
     ) -> Self {
         Self {
             runtime_handle,
-            session_ctx,
+            session_ctx: session,
             data_object_store_url,
         }
     }
 }
 
-impl std::fmt::Debug for ReadBBFFunc {
+impl Debug for ReadZarrFunc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ReadBBFFunc")
+        write!(f, "ReadZarrFunc")
     }
 }
 
-impl BeaconTableFunctionImpl for ReadBBFFunc {
+impl BeaconTableFunctionImpl for ReadZarrFunc {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
-    fn name(&self) -> String {
-        "read_bbf".to_string()
+    fn description(&self) -> Option<String> {
+        Some("Reads Zarr files from specified glob paths.".to_string())
     }
 
-    fn description(&self) -> Option<String> {
-        Some("Reads BBF files from specified glob paths.".to_string())
+    fn name(&self) -> String {
+        "read_zarr".to_string()
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
@@ -58,22 +58,24 @@ impl BeaconTableFunctionImpl for ReadBBFFunc {
     }
 }
 
-impl TableFunctionImpl for ReadBBFFunc {
+impl TableFunctionImpl for ReadZarrFunc {
     fn call(
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_bbf")?;
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_zarr")?;
 
-        tracing::debug!("read_bbf glob paths: {:?}", glob_paths);
+        tracing::debug!("read_zarr glob paths: {:?}", glob_paths);
 
         let mut listing_urls = vec![];
         for path in &glob_paths {
-            tracing::debug!("read_bbf processing path: {}", path);
+            tracing::debug!("read_zarr processing path: {}", path);
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
-        let file_format = BBFFormat::default();
+        // Predicate pushdown is handled automatically by the shared engine, so
+        // no manual statistics/column selection is needed.
+        let file_format = ZarrFormat::default();
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

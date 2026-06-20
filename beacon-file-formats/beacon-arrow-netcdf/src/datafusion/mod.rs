@@ -35,19 +35,84 @@ pub mod reader;
 pub mod sink;
 pub mod source;
 pub mod statistics;
+pub mod table_function;
+
+pub use reader::NetcdfReaderCache;
+pub use table_function::ReadNetCDFFunc;
+
+/// Runtime configuration for the NetCDF format.
+///
+/// Plain data with sensible defaults; the caller populates it (there is no
+/// environment parsing here, so the crate stays reusable and the host decides
+/// where the values come from). These are the *defaults* for a runtime — some
+/// can be overridden per table via `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+#[derive(Debug, Clone)]
+pub struct NetcdfConfig {
+    /// Whether reads consult the shared reader cache by default.
+    pub use_reader_cache: bool,
+    /// Capacity (number of opened datasets) of the shared reader cache.
+    pub reader_cache_size: usize,
+    /// Whether to generate per-file statistics during planning.
+    pub enable_statistics: bool,
+}
+
+impl Default for NetcdfConfig {
+    fn default() -> Self {
+        Self {
+            use_reader_cache: true,
+            reader_cache_size: 128,
+            enable_statistics: true,
+        }
+    }
+}
+
+/// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
+fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(exec_datafusion_err!(
+            "invalid boolean for NetCDF option '{key}': '{other}'"
+        )),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NetCDFFormatFactory {
     pub datasets_object_store: Arc<DatasetsStore>,
     pub options: NetcdfOptions,
+    pub config: NetcdfConfig,
+    /// Shared reader cache for this runtime, sized from `config`.
+    cache: NetcdfReaderCache,
 }
 
 impl NetCDFFormatFactory {
-    pub fn new(datasets_object_store: Arc<DatasetsStore>, options: NetcdfOptions) -> Self {
+    pub fn new(
+        datasets_object_store: Arc<DatasetsStore>,
+        options: NetcdfOptions,
+        config: NetcdfConfig,
+    ) -> Self {
+        let cache = NetcdfReaderCache::new(config.reader_cache_size);
         Self {
             datasets_object_store,
             options,
+            config,
+            cache,
         }
+    }
+
+    /// Build a [`NetcdfFormat`] with the given per-table effective settings,
+    /// wiring in the shared reader cache when caching is enabled.
+    fn build_format(
+        &self,
+        options: NetcdfOptions,
+        use_reader_cache: bool,
+        enable_statistics: bool,
+    ) -> NetcdfFormat {
+        let cache = use_reader_cache.then(|| self.cache.clone());
+        NetcdfFormat::new(self.datasets_object_store.clone(), options)
+            .with_cache(cache)
+            .with_enable_statistics(enable_statistics)
     }
 }
 
@@ -55,18 +120,42 @@ impl FileFormatFactory for NetCDFFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(NetcdfFormat::new(
-            self.datasets_object_store.clone(),
-            self.options.clone(),
+        // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
+        // defaulting to the runtime config.
+        let mut options = self.options.clone();
+        let mut use_reader_cache = self.config.use_reader_cache;
+        let mut enable_statistics = self.config.enable_statistics;
+
+        if let Some(value) = format_options.get("read_dimensions") {
+            options.read_dimensions = Some(
+                value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            );
+        }
+        if let Some(value) = format_options.get("use_reader_cache") {
+            use_reader_cache = parse_bool_option("use_reader_cache", value)?;
+        }
+        if let Some(value) = format_options.get("enable_statistics") {
+            enable_statistics = parse_bool_option("enable_statistics", value)?;
+        }
+
+        Ok(Arc::new(self.build_format(
+            options,
+            use_reader_cache,
+            enable_statistics,
         )))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(NetcdfFormat::new(
-            self.datasets_object_store.clone(),
+        Arc::new(self.build_format(
             self.options.clone(),
+            self.config.use_reader_cache,
+            self.config.enable_statistics,
         ))
     }
 
@@ -108,6 +197,10 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 pub struct NetcdfFormat {
     pub datasets_object_store: Arc<DatasetsStore>,
     pub options: NetcdfOptions,
+    /// Reader cache to consult, or `None` to bypass caching for this format.
+    cache: Option<NetcdfReaderCache>,
+    /// Whether to generate per-file statistics during planning.
+    enable_statistics: bool,
 }
 
 impl NetcdfFormat {
@@ -115,7 +208,21 @@ impl NetcdfFormat {
         Self {
             datasets_object_store,
             options,
+            cache: None,
+            enable_statistics: false,
         }
+    }
+
+    /// Wire in a reader cache (`Some`) or disable caching (`None`).
+    pub fn with_cache(mut self, cache: Option<NetcdfReaderCache>) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    /// Set whether per-file statistics are generated during planning.
+    pub fn with_enable_statistics(mut self, enable_statistics: bool) -> Self {
+        self.enable_statistics = enable_statistics;
+        self
     }
 }
 
@@ -176,7 +283,7 @@ impl FileFormat for NetcdfFormat {
         table_schema: SchemaRef,
         object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
-        if beacon_config::CONFIG.netcdf.enable_statistics {
+        if self.enable_statistics {
             Ok(statistics::generate_statistics(
                 self.datasets_object_store.clone(),
                 object,
@@ -213,6 +320,7 @@ impl FileFormat for NetcdfFormat {
             self.options.read_dimensions.clone(),
             table_schema,
         )
+        .with_cache(self.cache.clone())
         .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -277,18 +385,20 @@ impl FileFormat for NetcdfFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(NetCDFSource::new(
-            self.datasets_object_store.clone(),
-            self.options.read_dimensions.clone(),
-            table_schema,
-        ))
+        Arc::new(
+            NetCDFSource::new(
+                self.datasets_object_store.clone(),
+                self.options.read_dimensions.clone(),
+                table_schema,
+            )
+            .with_cache(self.cache.clone()),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beacon_object_storage::get_datasets_object_store;
     use datafusion::datasource::listing::PartitionedFile;
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures::StreamExt;
@@ -339,7 +449,7 @@ mod tests {
 
     async fn test_store() -> Arc<DatasetsStore> {
         ensure_test_fixtures();
-        get_datasets_object_store().await
+        beacon_object_storage::get_datasets_object_store().await
     }
 
     fn test_format(store: Arc<DatasetsStore>) -> NetcdfFormat {
@@ -462,6 +572,39 @@ mod tests {
             )),
         );
         assert_eq!(source.file_type(), "netcdf");
+    }
+
+    /// `CREATE EXTERNAL TABLE ... OPTIONS (...)` per-table overrides are parsed by
+    /// the factory: known keys are accepted (defaulting to the runtime config) and
+    /// a malformed boolean is rejected.
+    #[tokio::test]
+    async fn create_parses_per_table_options() {
+        use datafusion::datasource::file_format::FileFormatFactory;
+        use std::collections::HashMap;
+
+        let store = test_store().await;
+        let factory =
+            NetCDFFormatFactory::new(store, NetcdfOptions::default(), NetcdfConfig::default());
+        let ctx = datafusion::prelude::SessionContext::new();
+
+        let mut options = HashMap::new();
+        options.insert("use_reader_cache".to_string(), "false".to_string());
+        options.insert("enable_statistics".to_string(), "false".to_string());
+        options.insert("read_dimensions".to_string(), "time, lat".to_string());
+        let format = factory.create(&ctx.state(), &options).expect("valid options");
+        let netcdf = format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .expect("netcdf format");
+        assert_eq!(
+            netcdf.options.read_dimensions.as_deref(),
+            Some(["time".to_string(), "lat".to_string()].as_slice())
+        );
+
+        // A malformed boolean for a known option is a hard error.
+        let mut bad = HashMap::new();
+        bad.insert("use_reader_cache".to_string(), "notabool".to_string());
+        assert!(factory.create(&ctx.state(), &bad).is_err());
     }
 
     // ── FileOpener produces batches ────────────────────────────────────

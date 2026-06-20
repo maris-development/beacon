@@ -518,3 +518,6 @@ mod tests {
         assert!(kept < total, "midpoint predicate should drop some rows");
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadZarrFunc;

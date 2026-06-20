@@ -494,3 +494,6 @@ mod tests {
         assert!(total < 380 * 1287, "predicate should drop some rows");
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadTiffFunc;

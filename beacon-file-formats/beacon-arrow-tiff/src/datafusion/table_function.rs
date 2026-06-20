@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
-use beacon_arrow_tiff::datafusion::TiffFormat;
+use crate::datafusion::TiffFormat;
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
 pub struct ReadTiffFunc {
     runtime_handle: tokio::runtime::Handle,
@@ -64,7 +64,7 @@ impl TableFunctionImpl for ReadTiffFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_tiff")?;
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_tiff")?;
 
         let mut listing_urls = vec![];
         for path in &glob_paths {

@@ -26,8 +26,39 @@ pub mod opener;
 pub mod source;
 pub mod stream_share;
 
-#[derive(Clone, Debug)]
-pub struct BBFFormatFactory;
+/// Runtime configuration for the BBF format.
+///
+/// Plain data with sensible defaults; the caller populates it (no environment
+/// parsing here). `split_streams_slice` is a default that a table can override
+/// via `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+#[derive(Clone, Debug, Default)]
+pub struct BbfConfig {
+    /// Whether to split each record batch into `batch_size`-row slices to bound
+    /// peak memory for wide tables.
+    pub split_streams_slice: bool,
+}
+
+/// Parse a boolean value supplied through a `CREATE EXTERNAL TABLE` option.
+fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(datafusion::error::DataFusionError::Execution(format!(
+            "invalid boolean for BBF option '{key}': '{other}'"
+        ))),
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BBFFormatFactory {
+    pub config: BbfConfig,
+}
+
+impl BBFFormatFactory {
+    pub fn new(config: BbfConfig) -> Self {
+        Self { config }
+    }
+}
 
 impl GetExt for BBFFormatFactory {
     fn get_ext(&self) -> String {
@@ -39,9 +70,15 @@ impl FileFormatFactory for BBFFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &HashMap<String, String>,
+        format_options: &HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(BBFFormat {}))
+        // Per-table override from `CREATE EXTERNAL TABLE ... OPTIONS (...)`,
+        // defaulting to the runtime config.
+        let mut split_streams_slice = self.config.split_streams_slice;
+        if let Some(value) = format_options.get("split_streams_slice") {
+            split_streams_slice = parse_bool_option("split_streams_slice", value)?;
+        }
+        Ok(Arc::new(BBFFormat { split_streams_slice }))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -49,7 +86,9 @@ impl FileFormatFactory for BBFFormatFactory {
     }
 
     fn default(&self) -> std::sync::Arc<dyn FileFormat> {
-        std::sync::Arc::new(BBFFormat {})
+        std::sync::Arc::new(BBFFormat {
+            split_streams_slice: self.config.split_streams_slice,
+        })
     }
 }
 
@@ -77,7 +116,10 @@ impl FileFormatFactoryExt for BBFFormatFactory {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct BBFFormat {}
+pub struct BBFFormat {
+    /// Whether to split each record batch into `batch_size`-row slices.
+    pub split_streams_slice: bool,
+}
 
 #[async_trait::async_trait]
 impl FileFormat for BBFFormat {
@@ -167,7 +209,9 @@ impl FileFormat for BBFFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = BBFSource::new(table_schema).with_projection(projection);
+        let source = BBFSource::new(table_schema)
+            .with_split_streams_slice(self.split_streams_slice)
+            .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
@@ -178,6 +222,9 @@ impl FileFormat for BBFFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(BBFSource::new(table_schema))
+        Arc::new(BBFSource::new(table_schema).with_split_streams_slice(self.split_streams_slice))
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadBBFFunc;

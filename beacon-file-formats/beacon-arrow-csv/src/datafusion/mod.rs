@@ -170,3 +170,6 @@ impl FileFormat for CsvFormat {
         self.inner_format.file_source(table_schema)
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadCsvFunc;
