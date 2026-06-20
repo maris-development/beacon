@@ -10,12 +10,16 @@ read_schema(glob_paths, file_format)
 
 Returns the inferred schema (column names and types) for a set of files without reading any data.
 
-`file_format` must be one of: `netcdf`, `zarr`, `parquet`, `arrow`, `csv`, `odv_ascii`, `bbf`, `tiff`.
+`glob_paths` accepts either a single glob/path string or a list of strings. `file_format` must be one of: `parquet`, `netcdf` (or `nc`), `zarr`, `arrow`, `csv`, `bbf`, `tiff` (or `tif`).
 
 ```sql
-SELECT * FROM read_schema(['argo/**/*.nc'], 'netcdf')
+-- Single path or glob
+SELECT * FROM read_schema('argo/**/*.nc', 'netcdf')
 
-SELECT * FROM read_schema(['obs/*.parquet'], 'parquet')
+SELECT * FROM read_schema('obs/*.parquet', 'parquet')
+
+-- A list, to inspect the combined schema across multiple sources
+SELECT * FROM read_schema(['obs/2023/*.parquet', 'obs/2024/*.parquet'], 'parquet')
 ```
 
 ## `list_datasets`
