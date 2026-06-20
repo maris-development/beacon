@@ -9,8 +9,8 @@ use crate::config::StorageConfig;
 use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, aws::AmazonS3Builder,
-    local::LocalFileSystem, path::Path, prefix::PrefixStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, local::LocalFileSystem, path::Path,
+    prefix::PrefixStore,
 };
 use parking_lot::RwLock;
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -53,21 +53,8 @@ pub(crate) async fn create_datasets_store(
     ) = if storage.s3.data_lake {
         tracing::info!("Using S3 object store for datasets");
 
-        let s3 = &storage.s3;
-        let mut builder = AmazonS3Builder::from_env()
-            .with_allow_http(true)
-            .with_virtual_hosted_style_request(s3.enable_virtual_hosting);
-
-        if !s3.enable_virtual_hosting {
-            // Path-style requests need an explicit bucket name.
-            let bucket = s3.bucket.as_ref().ok_or(error::StorageError::MissingConfig {
-                key: "BEACON_S3_BUCKET",
-            })?;
-            builder = builder.with_bucket_name(bucket);
-        }
-
         // `object_store::Error` converts into `StorageError::ObjectStore` via `?`.
-        let store = builder.build()?;
+        let store = storage.s3.amazon_s3_builder()?.build()?;
 
         // TODO: wire S3 change notifications into an `EventListener` so the
         // cache-backed fast path can be enabled for the S3 backend too.
@@ -327,17 +314,26 @@ impl DatasetsStore {
     /// - **Local datasets**: a plain filesystem path rooted at the configured
     ///   datasets directory (no `file://` scheme — NetCDF libraries open local
     ///   paths directly).
-    /// - **S3 datasets**: an `http://`/`https://` URL built from `AWS_ENDPOINT`
-    ///   and the configured bucket, with `#mode=bytes` appended (required by some
-    ///   NetCDF libraries for byte-range access).
+    /// - **S3 datasets**: an `http://`/`https://` URL built from the configured
+    ///   S3 endpoint ([`crate::config::S3Config::endpoint`]) and bucket, with
+    ///   `#mode=bytes` appended (required by some NetCDF libraries for byte-range
+    ///   access). This is the same endpoint used to build the store, so the two
+    ///   never diverge.
     ///
     /// This function intentionally never returns an `s3://...` URL.
     pub fn translate_netcdf_url_path(&self, object: &Path) -> StorageResult<String> {
         let storage = &self.storage;
         if storage.s3.data_lake {
-            let endpoint = s3_endpoint()?;
+            let endpoint =
+                storage
+                    .s3
+                    .endpoint
+                    .as_deref()
+                    .ok_or(error::StorageError::MissingConfig {
+                        key: "AWS_ENDPOINT",
+                    })?;
             let url = s3_object_url(
-                &endpoint,
+                endpoint,
                 storage.s3.bucket.as_deref(),
                 storage.s3.enable_virtual_hosting,
                 object,
@@ -347,22 +343,6 @@ impl DatasetsStore {
             local_object_path(&self.datasets_dir, object)
         }
     }
-}
-
-/// Reads and validates the S3 endpoint used to build NetCDF URLs.
-fn s3_endpoint() -> StorageResult<String> {
-    let endpoint =
-        std::env::var("AWS_ENDPOINT").map_err(|source| error::StorageError::MissingEnvVar {
-            var: "AWS_ENDPOINT",
-            source,
-        })?;
-    if endpoint.trim().is_empty() {
-        return Err(error::StorageError::InvalidConfig {
-            key: "AWS_ENDPOINT",
-            message: "must not be empty".to_string(),
-        });
-    }
-    Ok(endpoint)
 }
 
 /// Builds the `http(s)` URL for an object served from an S3-compatible backend.

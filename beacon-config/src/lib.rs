@@ -182,6 +182,15 @@ struct RawConfig {
     s3_enable_virtual_hosting: bool,
     #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
     s3_data_lake: bool,
+    // S3-compatible endpoint and region. Read from the standard AWS env vars so
+    // they can be captured into `S3Config` (the single source of truth) instead
+    // of being re-read from the environment at use time.
+    #[envconfig(from = "AWS_ENDPOINT")]
+    aws_endpoint: Option<String>,
+    #[envconfig(from = "AWS_REGION")]
+    aws_region: Option<String>,
+    #[envconfig(from = "BEACON_S3_ALLOW_HTTP", default = "true")]
+    s3_allow_http: bool,
     // Filesystem change events are on by default for the local datasets store;
     // set BEACON_ENABLE_FS_EVENTS=false to disable the watcher.
     #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "true")]
@@ -309,6 +318,9 @@ impl From<RawConfig> for Config {
                     bucket: raw.s3_bucket,
                     enable_virtual_hosting: raw.s3_enable_virtual_hosting,
                     data_lake: raw.s3_data_lake,
+                    endpoint: raw.aws_endpoint,
+                    region: raw.aws_region,
+                    allow_http: raw.s3_allow_http,
                 },
             },
             cors: CorsConfig {

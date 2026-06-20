@@ -1,7 +1,5 @@
 //! Error types for the Beacon object storage layer.
 
-use std::env::VarError;
-
 /// Errors produced while building or operating Beacon's object stores.
 #[derive(thiserror::Error, Debug)]
 pub enum StorageError {
@@ -16,14 +14,6 @@ pub enum StorageError {
     /// A configuration value is present but invalid.
     #[error("Invalid configuration for {key}: {message}")]
     InvalidConfig { key: &'static str, message: String },
-
-    /// A required environment variable is missing or unreadable.
-    #[error("Missing environment variable {var}: {source}")]
-    MissingEnvVar {
-        var: &'static str,
-        #[source]
-        source: VarError,
-    },
 
     /// An error returned by the underlying `object_store` backend (S3 or local
     /// filesystem), e.g. while building a store or canonicalizing its root.
