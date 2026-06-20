@@ -4,17 +4,16 @@
 
 use std::sync::Arc;
 
-use beacon_arrow_netcdf::datafusion::options::NetcdfOptions;
-use beacon_arrow_netcdf::datafusion::NetcdfFormat;
-use beacon_arrow_tiff::datafusion::TiffFormat;
 use beacon_data_lake::{FileManager, TableManager};
 use beacon_datafusion_ext::file_collection::FileCollection;
 use beacon_arrow_odv::datafusion::OdvFormat;
 use beacon_arrow_csv::datafusion::CsvFormat;
-use beacon_arrow_ipc::datafusion::ArrowFormat;
-use beacon_arrow_parquet::datafusion::ParquetFormat;
 use datafusion::{
-    datasource::{file_format::FileFormat, listing::ListingTableUrl, provider_as_source},
+    datasource::{
+        file_format::{FileFormat, FileFormatFactory},
+        listing::ListingTableUrl,
+        provider_as_source,
+    },
     logical_expr::{LogicalPlanBuilder, TableSource},
     prelude::SessionContext,
 };
@@ -149,35 +148,29 @@ impl FromFormat {
     }
 
     /// Returns the corresponding [`FileFormat`] for the variant.
+    ///
+    /// Formats that have a factory registered on the session are built through
+    /// that factory, so the JSON `FROM` path shares the runtime's configured
+    /// format (and, for store-backed formats, its reader cache) instead of
+    /// constructing a default of its own. CSV (carries a per-query delimiter the
+    /// factory does not accept) and ODV (no registered factory) are built
+    /// directly.
     async fn file_format(
         &self,
-        _session_context: &SessionContext,
+        session_context: &SessionContext,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         match self {
             FromFormat::Csv { delimiter, .. } => Ok(Arc::new(CsvFormat::new(
                 delimiter.unwrap_or(',') as u8,
                 10_000,
             )) as Arc<dyn FileFormat>),
-            FromFormat::Parquet { .. } => Ok(Arc::new(ParquetFormat::new()) as Arc<dyn FileFormat>),
-            FromFormat::Arrow { .. } => Ok(Arc::new(ArrowFormat::new()) as Arc<dyn FileFormat>),
-            FromFormat::NetCDF { .. } => Ok(Arc::new(
-                NetcdfFormat::new(
-                    beacon_object_storage::get_datasets_object_store().await,
-                    NetcdfOptions::default(),
-                )
-                .with_enable_statistics(beacon_config::CONFIG.netcdf.enable_statistics),
-            ) as Arc<dyn FileFormat>),
-            FromFormat::Tiff { .. } => {
-                Ok(Arc::new(TiffFormat::new(Default::default())) as Arc<dyn FileFormat>)
-            }
             FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>),
-            FromFormat::Zarr { .. } => {
-                Ok(Arc::new(beacon_arrow_zarr::datafusion::ZarrFormat::default())
-                    as Arc<dyn FileFormat>)
-            }
-            FromFormat::Bbf { .. } => Ok(Arc::new(beacon_arrow_bbf::datafusion::BBFFormat {
-                split_streams_slice: beacon_config::CONFIG.runtime.bbf_split_streams_slice,
-            }) as Arc<dyn FileFormat>),
+            FromFormat::Parquet { .. } => file_format_from_session(session_context, "parquet"),
+            FromFormat::Arrow { .. } => file_format_from_session(session_context, "arrow"),
+            FromFormat::NetCDF { .. } => file_format_from_session(session_context, "nc"),
+            FromFormat::Tiff { .. } => file_format_from_session(session_context, "tiff"),
+            FromFormat::Zarr { .. } => file_format_from_session(session_context, "zarr"),
+            FromFormat::Bbf { .. } => file_format_from_session(session_context, "bbf"),
         }
     }
 
@@ -204,4 +197,20 @@ impl FromFormat {
         }
         Ok(listing_table_urls)
     }
+}
+
+/// Build a [`FileFormat`] from the factory registered on the session under
+/// `format` (its `get_ext` identity), with default options. This shares the
+/// runtime's configured factory rather than constructing a default format.
+fn file_format_from_session(
+    session_context: &SessionContext,
+    format: &str,
+) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+    let state = session_context.state();
+    let factory = state.get_file_format_factory(format).ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "file format '{format}' is not registered on the session"
+        ))
+    })?;
+    factory.create(&state, &std::collections::HashMap::new())
 }
