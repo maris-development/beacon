@@ -58,6 +58,7 @@ impl Runtime {
             &config.storage,
             config.data.datasets.clone(),
             config.data.tables.clone(),
+            config.data.tmp.clone(),
         )
         .await?;
 

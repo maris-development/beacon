@@ -69,14 +69,17 @@ pub async fn init_datasets_warehouse(
         let bucket = storage.s3.bucket.as_deref().ok_or_else(|| {
             anyhow::anyhow!("Iceberg warehouse on S3 requires a bucket name (set BEACON_S3_BUCKET)")
         })?;
-        // `AmazonS3Builder::from_env()` picks up the AWS_* env; mirror the two
-        // settings beacon configures explicitly for the datasets store.
-        let builder = ObjectStoreBuilder::s3()
-            .with_config("aws_allow_http", "true")
+        // Mirror the datasets store's backend by consuming the same `S3Config`
+        // values (credentials still come from the AWS env chain). Setting the
+        // endpoint/region explicitly keeps the Iceberg warehouse on the same
+        // backend as the datasets without re-reading the environment.
+        let s3 = &storage.s3;
+        let mut builder = ObjectStoreBuilder::s3()
+            .with_config("aws_allow_http", if s3.allow_http { "true" } else { "false" })
             .and_then(|builder| {
                 builder.with_config(
                     "aws_virtual_hosted_style_request",
-                    if storage.s3.enable_virtual_hosting {
+                    if s3.enable_virtual_hosting {
                         "true"
                     } else {
                         "false"
@@ -84,6 +87,16 @@ pub async fn init_datasets_warehouse(
                 )
             })
             .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+        if let Some(endpoint) = &s3.endpoint {
+            builder = builder
+                .with_config("aws_endpoint", endpoint)
+                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+        }
+        if let Some(region) = &s3.region {
+            builder = builder
+                .with_config("aws_region", region)
+                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+        }
         (builder, format!("s3://{bucket}/{warehouse_prefix}"))
     } else {
         // Local: root the builder at the datasets directory so warehouse paths
