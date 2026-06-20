@@ -1,14 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
-use beacon_arrow_atlas::datafusion::{
-    options::AtlasOptions, AtlasConfig, AtlasFormat, AtlasReaderCache,
-};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
+    datasource::file_format::FileFormatFactory,
     execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
@@ -16,15 +14,14 @@ use datafusion::{
 
 use crate::file_formats::BeaconTableFunctionImpl;
 
+/// Format identity the atlas factory is registered under (its `get_ext`).
+const ATLAS_FORMAT: &str = "atlas";
+
 pub struct ReadAtlasFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
-    datasets_object_store: Arc<DatasetsStore>,
-    config: AtlasConfig,
-    /// Reader cache shared across calls of this table function (per runtime).
-    cache: AtlasReaderCache,
 }
 
 impl ReadAtlasFunc {
@@ -32,17 +29,11 @@ impl ReadAtlasFunc {
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Arc<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
-        datasets_object_store: Arc<DatasetsStore>,
-        config: AtlasConfig,
     ) -> Self {
-        let cache = AtlasReaderCache::new(config.reader_cache_size);
         Self {
             runtime_handle,
             session_ctx,
             data_object_store_url,
-            datasets_object_store,
-            config,
-            cache,
         }
     }
 }
@@ -125,7 +116,7 @@ impl TableFunctionImpl for ReadAtlasFunc {
             return plan_err!("read_atlas requires at least 1 argument: glob_paths : List<Utf8>");
         }
 
-        let mut dimensions: Option<Vec<String>> = None;
+        let mut dimensions: Vec<String> = vec![];
         if let Some(dimensions_arg) = args.get(1) {
             if let Expr::Literal(ScalarValue::List(values), _) = dimensions_arg {
                 let string_array = values.as_ref().values();
@@ -134,11 +125,10 @@ impl TableFunctionImpl for ReadAtlasFunc {
                     .downcast_ref::<arrow::array::StringArray>()
                 {
                     Some(str_arr) => {
-                        let dims: Vec<String> = str_arr
+                        dimensions = str_arr
                             .iter()
                             .filter_map(|opt_str| opt_str.map(|s| s.to_string()))
                             .collect();
-                        dimensions = Some(dims);
                     }
                     None => {
                         return plan_err!(
@@ -157,20 +147,25 @@ impl TableFunctionImpl for ReadAtlasFunc {
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
-        let atlas_options = AtlasOptions {
-            read_dimensions: dimensions,
-        };
-        let cache = self.config.use_reader_cache.then(|| self.cache.clone());
-        let file_format = AtlasFormat::new(self.datasets_object_store.clone(), atlas_options)
-            .with_cache(cache);
+        // Build the file format from the factory registered on the session, so the
+        // table function shares the runtime's configured format + reader cache.
+        // Per-call settings (read dimensions) are passed as table options.
+        let mut format_options: HashMap<String, String> = HashMap::new();
+        if !dimensions.is_empty() {
+            format_options.insert("read_dimensions".to_string(), dimensions.join(","));
+        }
+
+        let state = self.session_ctx.state();
+        let factory = state.get_file_format_factory(ATLAS_FORMAT).ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "read_atlas: the atlas file format is not registered on the session".to_string(),
+            )
+        })?;
+        let file_format = factory.create(&state, &format_options)?;
+
         let super_listing_table = tokio::task::block_in_place(|| {
-            self.runtime_handle.block_on(async move {
-                SuperListingTable::new(
-                    &self.session_ctx.state(),
-                    Arc::new(file_format),
-                    listing_urls,
-                )
-                .await
+            self.runtime_handle.block_on(async {
+                SuperListingTable::new(&self.session_ctx.state(), file_format, listing_urls).await
             })
         })?;
 
