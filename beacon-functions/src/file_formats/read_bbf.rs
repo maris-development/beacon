@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_arrow_bbf::datafusion::BBFFormat;
+use beacon_arrow_bbf::datafusion::{BbfConfig, BBFFormat};
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
@@ -18,6 +18,7 @@ pub struct ReadBBFFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
+    config: BbfConfig,
 }
 
 impl ReadBBFFunc {
@@ -25,11 +26,13 @@ impl ReadBBFFunc {
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Arc<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
+        config: BbfConfig,
     ) -> Self {
         Self {
             runtime_handle,
             session_ctx,
             data_object_store_url,
+            config,
         }
     }
 }
@@ -106,7 +109,9 @@ impl TableFunctionImpl for ReadBBFFunc {
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
-        let file_format = BBFFormat::default();
+        let file_format = BBFFormat {
+            split_streams_slice: self.config.split_streams_slice,
+        };
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
-use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetcdfFormat};
+use beacon_arrow_netcdf::datafusion::{
+    options::NetcdfOptions, NetcdfConfig, NetcdfFormat, NetcdfReaderCache,
+};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
@@ -20,6 +22,9 @@ pub struct ReadNetCDFFunc {
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
     datasets_object_store: Arc<DatasetsStore>,
+    config: NetcdfConfig,
+    /// Reader cache shared across calls of this table function (per runtime).
+    cache: NetcdfReaderCache,
 }
 
 impl ReadNetCDFFunc {
@@ -28,12 +33,16 @@ impl ReadNetCDFFunc {
         session_ctx: Arc<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
         datasets_object_store: Arc<DatasetsStore>,
+        config: NetcdfConfig,
     ) -> Self {
+        let cache = NetcdfReaderCache::new(config.reader_cache_size);
         Self {
             runtime_handle,
             session_ctx,
             data_object_store_url,
             datasets_object_store,
+            config,
+            cache,
         }
     }
 }
@@ -140,7 +149,10 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         let mut netcdf_options = NetcdfOptions::default();
         netcdf_options.read_dimensions = dimensions;
 
-        let file_format = NetcdfFormat::new(self.datasets_object_store.clone(), netcdf_options);
+        let cache = self.config.use_reader_cache.then(|| self.cache.clone());
+        let file_format = NetcdfFormat::new(self.datasets_object_store.clone(), netcdf_options)
+            .with_cache(cache)
+            .with_enable_statistics(self.config.enable_statistics);
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

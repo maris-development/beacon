@@ -160,10 +160,13 @@ impl FromFormat {
             )) as Arc<dyn FileFormat>),
             FromFormat::Parquet { .. } => Ok(Arc::new(ParquetFormat::new()) as Arc<dyn FileFormat>),
             FromFormat::Arrow { .. } => Ok(Arc::new(ArrowFormat::new()) as Arc<dyn FileFormat>),
-            FromFormat::NetCDF { .. } => Ok(Arc::new(NetcdfFormat::new(
-                beacon_object_storage::get_datasets_object_store().await,
-                NetcdfOptions::default(),
-            )) as Arc<dyn FileFormat>),
+            FromFormat::NetCDF { .. } => Ok(Arc::new(
+                NetcdfFormat::new(
+                    beacon_object_storage::get_datasets_object_store().await,
+                    NetcdfOptions::default(),
+                )
+                .with_enable_statistics(beacon_config::CONFIG.netcdf.enable_statistics),
+            ) as Arc<dyn FileFormat>),
             FromFormat::Tiff { .. } => {
                 Ok(Arc::new(TiffFormat::new(Default::default())) as Arc<dyn FileFormat>)
             }
@@ -172,10 +175,9 @@ impl FromFormat {
                 Ok(Arc::new(beacon_arrow_zarr::datafusion::ZarrFormat::default())
                     as Arc<dyn FileFormat>)
             }
-            FromFormat::Bbf { .. } => {
-                Ok(Arc::new(beacon_arrow_bbf::datafusion::BBFFormat::default())
-                    as Arc<dyn FileFormat>)
-            }
+            FromFormat::Bbf { .. } => Ok(Arc::new(beacon_arrow_bbf::datafusion::BBFFormat {
+                split_streams_slice: beacon_config::CONFIG.runtime.bbf_split_streams_slice,
+            }) as Arc<dyn FileFormat>),
         }
     }
 

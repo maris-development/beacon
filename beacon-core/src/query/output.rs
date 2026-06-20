@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory};
+use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_data_lake::FileManager;
@@ -124,6 +124,7 @@ impl OutputFormat {
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
                     beacon_object_storage::get_datasets_object_store().await,
                     options,
+                    NetcdfConfig::default(),
                 )))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {
@@ -134,6 +135,7 @@ impl OutputFormat {
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
                     beacon_object_storage::get_datasets_object_store().await,
                     options,
+                    NetcdfConfig::default(),
                 )))
             }
             OutputFormat::Odv(options) => {

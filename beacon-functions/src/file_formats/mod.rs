@@ -30,6 +30,21 @@ pub fn register_table_functions(
     datasets_object_store: Arc<DatasetsStore>,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 ) -> Vec<Arc<dyn BeaconTableFunctionImpl>> {
+    // Bridge: build the per-format config (owned by each format crate) from the
+    // process-global config. A later change threads an owned config in instead.
+    let netcdf_config = beacon_arrow_netcdf::datafusion::NetcdfConfig {
+        use_reader_cache: beacon_config::CONFIG.netcdf.use_reader_cache,
+        reader_cache_size: beacon_config::CONFIG.netcdf.reader_cache_size,
+        enable_statistics: beacon_config::CONFIG.netcdf.enable_statistics,
+    };
+    let atlas_config = beacon_arrow_atlas::datafusion::AtlasConfig {
+        use_reader_cache: beacon_config::CONFIG.atlas.use_reader_cache,
+        reader_cache_size: beacon_config::CONFIG.atlas.reader_cache_size,
+    };
+    let bbf_config = beacon_arrow_bbf::datafusion::BbfConfig {
+        split_streams_slice: beacon_config::CONFIG.runtime.bbf_split_streams_slice,
+    };
+
     vec![
         Arc::new(read_parquet::ReadParquetFunc::new(
             runtime_handle.clone(),
@@ -61,6 +76,7 @@ pub fn register_table_functions(
             session_ctx.clone(),
             data_object_store_url.clone(),
             datasets_object_store.clone(),
+            netcdf_config.clone(),
         )),
         Arc::new(read_tiff::ReadTiffFunc::new(
             runtime_handle.clone(),
@@ -72,6 +88,7 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
+            bbf_config.clone(),
         )),
         Arc::new(read_schema::ReadSchemaFunc::new(
             runtime_handle.clone(),
@@ -89,6 +106,7 @@ pub fn register_table_functions(
             session_ctx.clone(),
             data_object_store_url.clone(),
             datasets_object_store,
+            atlas_config,
         )),
         Arc::new(list_datasets::ListDatasetsFunc::new(
             runtime_handle,

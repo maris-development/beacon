@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
-use beacon_arrow_atlas::datafusion::{options::AtlasOptions, AtlasFormat};
+use beacon_arrow_atlas::datafusion::{
+    options::AtlasOptions, AtlasConfig, AtlasFormat, AtlasReaderCache,
+};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
@@ -20,6 +22,9 @@ pub struct ReadAtlasFunc {
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
     datasets_object_store: Arc<DatasetsStore>,
+    config: AtlasConfig,
+    /// Reader cache shared across calls of this table function (per runtime).
+    cache: AtlasReaderCache,
 }
 
 impl ReadAtlasFunc {
@@ -28,12 +33,16 @@ impl ReadAtlasFunc {
         session_ctx: Arc<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
         datasets_object_store: Arc<DatasetsStore>,
+        config: AtlasConfig,
     ) -> Self {
+        let cache = AtlasReaderCache::new(config.reader_cache_size);
         Self {
             runtime_handle,
             session_ctx,
             data_object_store_url,
             datasets_object_store,
+            config,
+            cache,
         }
     }
 }
@@ -151,7 +160,9 @@ impl TableFunctionImpl for ReadAtlasFunc {
         let atlas_options = AtlasOptions {
             read_dimensions: dimensions,
         };
-        let file_format = AtlasFormat::new(self.datasets_object_store.clone(), atlas_options);
+        let cache = self.config.use_reader_cache.then(|| self.cache.clone());
+        let file_format = AtlasFormat::new(self.datasets_object_store.clone(), atlas_options)
+            .with_cache(cache);
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

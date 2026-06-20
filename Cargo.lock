@@ -1570,6 +1570,7 @@ dependencies = [
  "beacon-arrow-tiff",
  "beacon-arrow-zarr",
  "beacon-common",
+ "beacon-config",
  "beacon-datafusion-ext",
  "beacon-iceberg",
  "beacon-object-storage",

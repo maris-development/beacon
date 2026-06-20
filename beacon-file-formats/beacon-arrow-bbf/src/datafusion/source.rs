@@ -32,6 +32,8 @@ pub struct BBFSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     /// Batch Size.
     batch_size: usize,
+    /// Whether to split each record batch into `batch_size`-row slices.
+    split_streams_slice: bool,
     /// Pruning Predicate
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// File Tracer
@@ -53,12 +55,20 @@ impl BBFSource {
             table_schema,
             execution_plan_metrics: base_metrics,
             batch_size: 32 * 1024,
+            split_streams_slice: false,
             predicate: None,
             file_tracer: Arc::new(Mutex::new(Arc::new(Mutex::new(vec![])))),
             stream_partition_shares: Arc::new(Mutex::new(HashMap::new())),
             global_metrics,
             projection: None,
         }
+    }
+
+    /// Returns a copy of this source that splits each record batch into
+    /// `batch_size`-row slices when `split` is set.
+    pub fn with_split_streams_slice(mut self, split: bool) -> Self {
+        self.split_streams_slice = split;
+        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -98,6 +108,8 @@ impl FileSource for BBFSource {
             self.file_tracer.lock().clone(),
             self.stream_partition_shares.clone(),
             self.global_metrics.clone(),
+            self.split_streams_slice,
+            self.batch_size,
         )))
     }
 

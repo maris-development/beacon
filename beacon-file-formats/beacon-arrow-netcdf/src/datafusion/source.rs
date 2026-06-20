@@ -31,7 +31,7 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
 
-use super::reader;
+use super::reader::{self, NetcdfReaderCache};
 
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
 ///
@@ -46,6 +46,8 @@ pub struct NetCDFSource {
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// Reader cache to consult for this scan. `None` disables caching.
+    cache: Option<NetcdfReaderCache>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
 }
@@ -64,8 +66,16 @@ impl NetCDFSource {
             read_dimensions,
             batch_size: usize::MAX,
             predicate: None,
+            cache: None,
             projection: None,
         }
+    }
+
+    /// Returns a copy of this source that consults `cache` (when `Some`) for
+    /// opened datasets. The format wires in the runtime's shared cache here.
+    pub fn with_cache(mut self, cache: Option<NetcdfReaderCache>) -> Self {
+        self.cache = cache;
+        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -94,6 +104,7 @@ impl FileSource for NetCDFSource {
             self.batch_size,
             self.predicate.clone(),
             file_schema,
+            self.cache.clone(),
             self.execution_plan_metrics.clone(),
             partition,
         )))
@@ -190,11 +201,13 @@ struct NetCDFOpener {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     pruning_predicate: Option<PruningPredicate>,
     table_schema: SchemaRef,
+    cache: Option<NetcdfReaderCache>,
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
 }
 
 impl NetCDFOpener {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         datasets_object_store: Arc<DatasetsStore>,
         projected_schema: SchemaRef,
@@ -202,6 +215,7 @@ impl NetCDFOpener {
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
         table_schema: SchemaRef,
+        cache: Option<NetcdfReaderCache>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Self {
@@ -217,11 +231,13 @@ impl NetCDFOpener {
             predicate,
             pruning_predicate,
             table_schema,
+            cache,
             metrics,
             partition,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn read_task(
         object: ObjectMeta,
         datasets_object_store: Arc<DatasetsStore>,
@@ -229,9 +245,10 @@ impl NetCDFOpener {
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        cache: Option<NetcdfReaderCache>,
         metrics: Option<DatasetReadMetrics>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let dataset = reader::open_dataset(datasets_object_store, object.clone())
+        let dataset = reader::open_dataset(cache.as_ref(), datasets_object_store, object.clone())
             .await
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -345,6 +362,7 @@ impl FileOpener for NetCDFOpener {
             self.read_dimensions.clone(),
             self.batch_size,
             self.predicate.clone(),
+            self.cache.clone(),
             metrics,
         )
         .boxed();

@@ -7,6 +7,7 @@ use beacon_nd_array::arrow::{
     pushdown_filter::PushdownFilter,
 };
 use beacon_object_storage::DatasetsStore;
+use crate::datafusion::cache::AtlasReaderCache;
 use datafusion::physical_expr_adapter::BatchAdapterFactory;
 use datafusion::{
     common::Statistics,
@@ -60,6 +61,8 @@ pub struct AtlasSource {
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     read_dimensions: Option<Vec<String>>,
+    /// Reader cache to consult for this scan. `None` disables caching.
+    cache: Option<AtlasReaderCache>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
 
@@ -80,9 +83,17 @@ impl AtlasSource {
             batch_size: usize::MAX,
             predicate: None,
             read_dimensions,
+            cache: None,
             projection: None,
             stream_cache: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Returns a copy of this source that consults `cache` (when `Some`) for
+    /// opened atlas stores. The format wires in the runtime's shared cache here.
+    pub fn with_cache(mut self, cache: Option<AtlasReaderCache>) -> Self {
+        self.cache = cache;
+        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -111,6 +122,7 @@ impl FileSource for AtlasSource {
             partition,
             read_dimensions: self.read_dimensions.clone(),
             predicate: self.predicate.clone(),
+            cache: self.cache.clone(),
             stream_cache: self.stream_cache.clone(),
         }))
     }
@@ -200,11 +212,13 @@ struct AtlasOpener {
     partition: usize,
     read_dimensions: Option<Vec<String>>,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    cache: Option<AtlasReaderCache>,
 
     stream_cache: Arc<Mutex<HashMap<String, AtlasStreamDatasets>>>,
 }
 
 impl AtlasOpener {
+    #[allow(clippy::too_many_arguments)]
     async fn read_task(
         datasets_object_store: Arc<DatasetsStore>,
         object_meta: ObjectMeta,
@@ -214,10 +228,14 @@ impl AtlasOpener {
         metrics: Option<DatasetReadMetrics>,
         read_dimensions: Option<Vec<String>>,
         predicate: Option<Arc<dyn PhysicalExpr>>,
+        cache: Option<AtlasReaderCache>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let atlas =
-            crate::datafusion::cache::get_or_open_atlas(datasets_object_store, &object_meta)
-                .await?;
+        let atlas = crate::datafusion::cache::get_or_open_atlas(
+            cache.as_ref(),
+            datasets_object_store,
+            &object_meta,
+        )
+        .await?;
         let object_path = object_meta.location.clone();
 
         let stream_datasets_handle = {
@@ -355,6 +373,7 @@ impl FileOpener for AtlasOpener {
             metrics,
             self.read_dimensions.clone(),
             self.predicate.clone(),
+            self.cache.clone(),
         );
         Ok(Box::pin(fut))
     }
