@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_arrow_csv::datafusion::CsvFormat;
+use crate::datafusion::CsvFormat;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
@@ -11,7 +11,7 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
 pub struct ReadCsvFunc {
     // Session Reference
@@ -71,7 +71,7 @@ impl TableFunctionImpl for ReadCsvFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_csv")?;
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_csv")?;
 
         let delimeter = if let Some(delimiter_arg) = args.get(1) {
             match delimiter_arg {

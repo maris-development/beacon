@@ -35,8 +35,10 @@ pub mod reader;
 pub mod sink;
 pub mod source;
 pub mod statistics;
+pub mod table_function;
 
 pub use reader::NetcdfReaderCache;
+pub use table_function::ReadNetCDFFunc;
 
 /// Runtime configuration for the NetCDF format.
 ///

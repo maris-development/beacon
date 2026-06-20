@@ -1,26 +1,27 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
+use crate::datafusion::TiffFormat;
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use beacon_arrow_parquet::datafusion::ParquetFormat;
+use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
-pub struct ReadParquetFunc {
-    // Session Reference
+pub struct ReadTiffFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
 }
 
-impl ReadParquetFunc {
+impl ReadTiffFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Arc<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
+        _datasets_object_store: Arc<DatasetsStore>,
     ) -> Self {
         Self {
             runtime_handle,
@@ -30,23 +31,23 @@ impl ReadParquetFunc {
     }
 }
 
-impl std::fmt::Debug for ReadParquetFunc {
+impl std::fmt::Debug for ReadTiffFunc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ReadParquetFunc")
+        write!(f, "ReadTiffFunc")
     }
 }
 
-impl BeaconTableFunctionImpl for ReadParquetFunc {
+impl BeaconTableFunctionImpl for ReadTiffFunc {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
     fn description(&self) -> Option<String> {
-        Some("Reads Parquet files from specified glob paths.".to_string())
+        Some("Reads TIFF files from specified glob paths.".to_string())
     }
 
     fn name(&self) -> String {
-        "read_parquet".to_string()
+        "read_tiff".to_string()
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
@@ -58,22 +59,19 @@ impl BeaconTableFunctionImpl for ReadParquetFunc {
     }
 }
 
-impl TableFunctionImpl for ReadParquetFunc {
+impl TableFunctionImpl for ReadTiffFunc {
     fn call(
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_parquet")?;
-
-        tracing::debug!("read_parquet glob paths: {:?}", glob_paths);
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_tiff")?;
 
         let mut listing_urls = vec![];
         for path in &glob_paths {
-            tracing::debug!("read_parquet processing path: {}", path);
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
 
-        let file_format = ParquetFormat::default();
+        let file_format = TiffFormat::new(Default::default());
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

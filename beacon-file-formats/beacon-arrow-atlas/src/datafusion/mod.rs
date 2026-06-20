@@ -1123,3 +1123,6 @@ mod tests {
         assert_eq!(temps, vec![20.0f32, 21.0, 22.0], "only summer's temperatures remain");
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadAtlasFunc;

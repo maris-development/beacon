@@ -262,3 +262,6 @@ impl FileFormat for OdvFormat {
         Arc::new(OdvSource::new(table_schema))
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadOdvAsciiFunc;

@@ -12,7 +12,7 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
 /// Format identity the atlas factory is registered under (its `get_ext`).
 const ATLAS_FORMAT: &str = "atlas";
@@ -83,7 +83,7 @@ impl TableFunctionImpl for ReadAtlasFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_atlas")?;
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_atlas")?;
 
         let mut dimensions: Vec<String> = vec![];
         if let Some(dimensions_arg) = args.get(1) {

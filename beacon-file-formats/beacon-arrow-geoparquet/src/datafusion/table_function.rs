@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field};
-use beacon_arrow_geoparquet::datafusion::{GeoParquetFormat, GeoParquetOptions};
+use crate::datafusion::{GeoParquetFormat, GeoParquetOptions};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use datafusion::{
     catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
 pub struct ReadGeoParquetFunc {
     // Session Reference
@@ -66,7 +66,7 @@ impl TableFunctionImpl for ReadGeoParquetFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_geoparquet")?;
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_geoparquet")?;
 
         tracing::debug!("read_geoparquet glob paths: {:?}", glob_paths);
 

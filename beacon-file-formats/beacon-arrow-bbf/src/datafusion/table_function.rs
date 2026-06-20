@@ -10,7 +10,7 @@ use datafusion::{
     prelude::SessionContext,
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
 /// Format identity the BBF factory is registered under (its `get_ext`).
 const BBF_FORMAT: &str = "bbf";
@@ -69,7 +69,7 @@ impl TableFunctionImpl for ReadBBFFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_bbf")?;
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_bbf")?;
 
         tracing::debug!("read_bbf glob paths: {:?}", glob_paths);
 

@@ -12,7 +12,7 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use crate::file_formats::BeaconTableFunctionImpl;
+use beacon_common::table_function::BeaconTableFunctionImpl;
 
 /// Format identity the NetCDF factory is registered under (its `get_ext`).
 const NETCDF_FORMAT: &str = "nc";
@@ -71,7 +71,7 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_netcdf")?;
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_netcdf")?;
         let mut dimensions: Vec<String> = vec![];
         if let Some(dimensions_arg) = args.get(1) {
             if let Expr::Literal(ScalarValue::List(values), _) = dimensions_arg {

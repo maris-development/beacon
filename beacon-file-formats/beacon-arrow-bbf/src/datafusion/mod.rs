@@ -225,3 +225,6 @@ impl FileFormat for BBFFormat {
         Arc::new(BBFSource::new(table_schema).with_split_streams_slice(self.split_streams_slice))
     }
 }
+
+pub mod table_function;
+pub use table_function::ReadBBFFunc;

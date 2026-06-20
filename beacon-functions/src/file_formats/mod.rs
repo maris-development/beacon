@@ -1,65 +1,22 @@
 use std::sync::Arc;
 
-use arrow::datatypes::Field;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::DatasetsStore;
-use datafusion::{
-    catalog::TableFunctionImpl,
-    common::plan_err,
-    execution::object_store::ObjectStoreUrl,
-    logical_expr::{Documentation, Signature},
-    prelude::{Expr, SessionContext},
-    scalar::ScalarValue,
-};
+use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 
-/// Parse the first table-function argument into a list of glob/path strings.
-///
-/// Accepts either a single string scalar (`Utf8`/`LargeUtf8`/`Utf8View`) or a
-/// `List<Utf8>` of strings. `fn_name` is used only to build clear error messages.
-pub(crate) fn parse_glob_paths_arg(
-    args: &[Expr],
-    fn_name: &str,
-) -> datafusion::error::Result<Vec<String>> {
-    let Some(first) = args.first() else {
-        return plan_err!("{fn_name} requires at least 1 argument: glob_paths : Utf8 | List<Utf8>");
-    };
+// The shared table-function trait and the glob-arg parser now live in
+// `beacon-common` so each `beacon-arrow-*` format crate can host its own
+// `read_*` table function. Re-exported here for the cross-format functions
+// (`read_schema`, `list_datasets`) and existing consumers.
+pub use beacon_common::table_function::{parse_glob_paths_arg, BeaconTableFunctionImpl};
 
-    match first {
-        // Single string -> one-element list
-        Expr::Literal(ScalarValue::Utf8(Some(s)), _)
-        | Expr::Literal(ScalarValue::LargeUtf8(Some(s)), _)
-        | Expr::Literal(ScalarValue::Utf8View(Some(s)), _) => Ok(vec![s.clone()]),
-
-        // List of strings
-        Expr::Literal(ScalarValue::List(values), _) => {
-            let string_array = values.as_ref().values();
-            match string_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-            {
-                Some(str_arr) => Ok(str_arr.iter().flatten().map(|s| s.to_string()).collect()),
-                None => plan_err!(
-                    "{fn_name} first argument must be a string or a List<Utf8> of glob paths"
-                ),
-            }
-        }
-        _ => plan_err!("{fn_name} first argument must be a string or a List<Utf8> of glob paths"),
-    }
-}
-
+// Cross-format table functions that don't belong to a single format crate.
 pub mod list_datasets;
-pub mod read_arrow;
-pub mod read_atlas;
-pub mod read_bbf;
-pub mod read_csv;
-pub mod read_geoparquet;
-pub mod read_netcdf;
-pub mod read_odv_ascii;
-pub mod read_parquet;
 pub mod read_schema;
-pub mod read_tiff;
-pub mod read_zarr;
 
+/// Build the `read_*` table functions. The per-format functions are constructed
+/// from their respective `beacon-arrow-*` crate; the cross-format ones
+/// (`read_schema`, `list_datasets`) live here.
 pub fn register_table_functions(
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
@@ -67,48 +24,44 @@ pub fn register_table_functions(
     datasets_object_store: Arc<DatasetsStore>,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 ) -> Vec<Arc<dyn BeaconTableFunctionImpl>> {
-    // The `read_*` table functions for store-backed formats (netcdf, atlas, bbf)
-    // build their `FileFormat` from the factory registered on the session, so
-    // they share the runtime's configured format and reader cache rather than
-    // constructing one of their own.
     vec![
-        Arc::new(read_parquet::ReadParquetFunc::new(
+        Arc::new(beacon_arrow_parquet::datafusion::ReadParquetFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_geoparquet::ReadGeoParquetFunc::new(
+        Arc::new(beacon_arrow_geoparquet::datafusion::ReadGeoParquetFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_arrow::ReadArrowFunc::new(
+        Arc::new(beacon_arrow_ipc::datafusion::ReadArrowFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_csv::ReadCsvFunc::new(
+        Arc::new(beacon_arrow_csv::datafusion::ReadCsvFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_zarr::ReadZarrFunc::new(
+        Arc::new(beacon_arrow_zarr::datafusion::ReadZarrFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_netcdf::ReadNetCDFFunc::new(
+        Arc::new(beacon_arrow_netcdf::datafusion::ReadNetCDFFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_tiff::ReadTiffFunc::new(
+        Arc::new(beacon_arrow_tiff::datafusion::ReadTiffFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
             datasets_object_store.clone(),
         )),
-        Arc::new(read_bbf::ReadBBFFunc::new(
+        Arc::new(beacon_arrow_bbf::datafusion::ReadBBFFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
@@ -119,12 +72,12 @@ pub fn register_table_functions(
             data_object_store_url.clone(),
             datasets_object_store.clone(),
         )),
-        Arc::new(read_odv_ascii::ReadOdvAsciiFunc::new(
+        Arc::new(beacon_arrow_odv::datafusion::ReadOdvAsciiFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_atlas::ReadAtlasFunc::new(
+        Arc::new(beacon_arrow_atlas::datafusion::ReadAtlasFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
@@ -136,90 +89,4 @@ pub fn register_table_functions(
             file_formats,
         )),
     ]
-}
-
-pub trait BeaconTableFunctionImpl: TableFunctionImpl + Send + Sync {
-    fn name(&self) -> String;
-    fn as_any(&self) -> &dyn std::any::Any;
-    fn arguments(&self) -> Option<Vec<Field>> {
-        None
-    }
-    fn description(&self) -> Option<String> {
-        None
-    }
-    fn signature(&self) -> Signature {
-        // Default field that accepts glob paths
-        let mut all_datatypes = vec![];
-        let options = self.arguments().unwrap_or_default();
-        for option in options {
-            all_datatypes.push(option.data_type().clone());
-        }
-        Signature::exact(
-            all_datatypes,
-            datafusion::logical_expr::Volatility::Immutable,
-        )
-    }
-    fn documentation(&self) -> Option<Documentation> {
-        None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_glob_paths_arg;
-    use datafusion::prelude::Expr;
-    use datafusion::scalar::ScalarValue;
-
-    fn list_expr(items: &[&str]) -> Expr {
-        let scalars: Vec<ScalarValue> = items
-            .iter()
-            .map(|s| ScalarValue::Utf8(Some(s.to_string())))
-            .collect();
-        Expr::Literal(
-            ScalarValue::List(ScalarValue::new_list_nullable(
-                &scalars,
-                &arrow::datatypes::DataType::Utf8,
-            )),
-            None,
-        )
-    }
-
-    #[test]
-    fn single_utf8_becomes_one_element_list() {
-        let expr = Expr::Literal(ScalarValue::Utf8(Some("data/*.parquet".to_string())), None);
-        let paths = parse_glob_paths_arg(&[expr], "read_parquet").unwrap();
-        assert_eq!(paths, vec!["data/*.parquet".to_string()]);
-    }
-
-    #[test]
-    fn single_large_utf8_is_accepted() {
-        let expr = Expr::Literal(ScalarValue::LargeUtf8(Some("a.csv".to_string())), None);
-        let paths = parse_glob_paths_arg(&[expr], "read_csv").unwrap();
-        assert_eq!(paths, vec!["a.csv".to_string()]);
-    }
-
-    #[test]
-    fn single_utf8_view_is_accepted() {
-        let expr = Expr::Literal(ScalarValue::Utf8View(Some("a.nc".to_string())), None);
-        let paths = parse_glob_paths_arg(&[expr], "read_netcdf").unwrap();
-        assert_eq!(paths, vec!["a.nc".to_string()]);
-    }
-
-    #[test]
-    fn list_of_strings_is_accepted() {
-        let expr = list_expr(&["a.parquet", "b.parquet"]);
-        let paths = parse_glob_paths_arg(&[expr], "read_parquet").unwrap();
-        assert_eq!(paths, vec!["a.parquet".to_string(), "b.parquet".to_string()]);
-    }
-
-    #[test]
-    fn missing_argument_errors() {
-        assert!(parse_glob_paths_arg(&[], "read_parquet").is_err());
-    }
-
-    #[test]
-    fn wrong_type_errors() {
-        let expr = Expr::Literal(ScalarValue::Int64(Some(42)), None);
-        assert!(parse_glob_paths_arg(&[expr], "read_parquet").is_err());
-    }
 }

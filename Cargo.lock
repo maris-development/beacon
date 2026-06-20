@@ -1259,6 +1259,8 @@ dependencies = [
  "datafusion",
  "futures",
  "object_store 0.13.2",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1295,6 +1297,8 @@ dependencies = [
  "datafusion",
  "futures",
  "object_store 0.13.2",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1377,6 +1381,8 @@ dependencies = [
  "datafusion",
  "futures",
  "object_store 0.13.2",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
