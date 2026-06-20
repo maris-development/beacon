@@ -83,38 +83,7 @@ impl TableFunctionImpl for ReadAtlasFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let mut glob_paths: Vec<String> = vec![];
-        if let Some(glob_path_arg) = args.first() {
-            match glob_path_arg {
-                Expr::Literal(ScalarValue::List(values), _) => {
-                    let string_array = values.as_ref().values();
-                    match string_array
-                        .as_any()
-                        .downcast_ref::<arrow::array::StringArray>()
-                    {
-                        Some(str_arr) => {
-                            str_arr.iter().for_each(|opt_str| {
-                                if let Some(s) = opt_str {
-                                    glob_paths.push(s.to_string());
-                                }
-                            });
-                        }
-                        None => {
-                            return plan_err!(
-                                "read_atlas first argument must be a List<Utf8> of glob paths"
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    return plan_err!(
-                        "read_atlas first argument must be a List<Utf8> of glob paths"
-                    );
-                }
-            }
-        } else {
-            return plan_err!("read_atlas requires at least 1 argument: glob_paths : List<Utf8>");
-        }
+        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_atlas")?;
 
         let mut dimensions: Vec<String> = vec![];
         if let Some(dimensions_arg) = args.get(1) {
