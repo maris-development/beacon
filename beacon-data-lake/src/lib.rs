@@ -109,10 +109,6 @@ impl DataLake {
         self.file_manager.try_create_temp_output_file(extension)
     }
 
-    pub fn create_temp_output_file(extension: &str) -> TempOutputFile {
-        FileManager::create_temp_output_file(extension)
-    }
-
     pub fn table_manager(&self) -> Arc<TableManager> {
         self.table_manager.clone()
     }
@@ -169,6 +165,7 @@ impl DataLake {
             session_context,
             datasets_object_store_url.clone(),
             file_formats,
+            config.data.tmp.clone(),
         ));
 
         Self {

@@ -1,4 +1,4 @@
-use std::env::temp_dir;
+use std::path::Path;
 
 pub struct TempOutputFile {
     temp_file: tempfile::NamedTempFile,
@@ -7,11 +7,19 @@ pub struct TempOutputFile {
 }
 
 impl TempOutputFile {
-    pub fn new(extension: &str) -> Self {
+    /// Create a temporary output file inside `dir`.
+    ///
+    /// `dir` MUST be the same directory the tmp object store
+    /// ([`crate::TMP_OBJECT_STORE_URL`]) is rooted at: the COPY plan writes to
+    /// `tmp://<file_name>` (see [`Self::output_url`]) which resolves under the
+    /// tmp store's root, while the returned [`tempfile::NamedTempFile`] is read
+    /// back from this filesystem path. If the two diverge the written bytes are
+    /// invisible to the caller.
+    pub fn new(dir: &Path, extension: &str) -> Self {
         let temp_file = tempfile::Builder::new()
             .prefix("beacon_temp_")
             .suffix(extension)
-            .tempfile_in(temp_dir())
+            .tempfile_in(dir)
             .unwrap();
 
         let file_name = temp_file.path().file_name().unwrap().to_string_lossy();

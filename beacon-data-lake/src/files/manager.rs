@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::listing_url::parse_listing_table_url;
@@ -16,6 +20,10 @@ pub struct FileManager {
     session_context: Arc<SessionContext>,
     data_directory_store_url: ObjectStoreUrl,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
+    /// Directory temporary output files are created in. Must match the root of
+    /// the tmp object store (`tmp://`) so COPY-written bytes are visible when the
+    /// file is read back. See [`TempOutputFile::new`].
+    tmp_dir: PathBuf,
 }
 
 impl FileManager {
@@ -23,11 +31,13 @@ impl FileManager {
         session_context: Arc<SessionContext>,
         data_directory_store_url: ObjectStoreUrl,
         file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
+        tmp_dir: PathBuf,
     ) -> Self {
         Self {
             session_context,
             data_directory_store_url,
             file_formats,
+            tmp_dir,
         }
     }
 
@@ -48,11 +58,7 @@ impl FileManager {
     }
 
     pub fn try_create_temp_output_file(&self, extension: &str) -> TempOutputFile {
-        Self::create_temp_output_file(extension)
-    }
-
-    pub fn create_temp_output_file(extension: &str) -> TempOutputFile {
-        TempOutputFile::new(extension)
+        TempOutputFile::new(&self.tmp_dir, extension)
     }
 
     pub async fn list_datasets(
