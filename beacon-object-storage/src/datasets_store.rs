@@ -186,6 +186,13 @@ impl DatasetsStore {
         self
     }
 
+    /// The storage configuration this store was built from (backend selection +
+    /// local directory layout). Writers that need the configured paths read it
+    /// here, e.g. the NetCDF output sink's temporary directory.
+    pub fn storage(&self) -> &StorageConfig {
+        &self.storage
+    }
+
     /// Continuously drain events from `listener`, apply them to `cache`, and fan
     /// them out to matching `subscribers`.
     ///

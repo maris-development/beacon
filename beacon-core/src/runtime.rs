@@ -776,6 +776,54 @@ mod client_query_tests {
         }
     }
 
+    /// NetCDF output goes through a custom `DataSink` that writes a real local
+    /// file (the netcdf-c writer cannot stream to an object store). This asserts
+    /// the file lands under the configured tmp store root — not the OS temp dir —
+    /// and is non-empty: the regression fixed by threading `StorageConfig` into
+    /// the NetCDF factory/sink.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn query_with_netcdf_output_writes_under_configured_tmp() {
+        let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
+        let tmp_dir = config.storage.tmp_dir.clone();
+        let runtime = Runtime::new(config).await.expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("ncout_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2)")).await;
+
+        let result = runtime
+            .run_query(
+                query(serde_json::json!({
+                    "from": table,
+                    "select": ["a"],
+                    "output": { "format": "netcdf" },
+                })),
+                false,
+            )
+            .await
+            .expect("netcdf query with output should run");
+
+        match result.query_output {
+            QueryOutput::File(file) => {
+                // tempfile resolves to an absolute path; canonicalize both
+                // sides so the comparison is independent of cwd-relative form.
+                let got = std::fs::canonicalize(file.path().parent().unwrap())
+                    .expect("canonicalize output parent");
+                let want = std::fs::canonicalize(&tmp_dir).expect("canonicalize tmp dir");
+                assert_eq!(
+                    got, want,
+                    "netcdf output should be written under the configured tmp dir"
+                );
+                assert!(
+                    file.size().expect("file size") > 0,
+                    "netcdf output file should contain data"
+                );
+            }
+            QueryOutput::Stream(_) => panic!("expected a file output"),
+        }
+    }
+
     /// `validate_query_plan` is the single permission gate: non-super-users may run
     /// read-only SELECTs but not DDL/DML (standard nodes) nor any beacon extension
     /// operation (super-user-only).
