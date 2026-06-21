@@ -83,6 +83,13 @@ pub(crate) async fn create_external_table(
         return create_remote_table(session, cmd).await;
     }
 
+    // `STORED AS DELTA` registers a Delta Lake table. A Delta table is a
+    // directory with a `_delta_log` transaction log, not a file glob, so it
+    // bypasses the listing-table factory and uses its own provider.
+    if cmd.file_type.eq_ignore_ascii_case("DELTA") {
+        return create_delta_table(session, cmd).await;
+    }
+
     let factory =
         ListingTableFactoryExt::new(DATASETS_OBJECT_STORE_URL.clone(), Arc::downgrade(session));
     let state = session.state();
@@ -164,6 +171,30 @@ fn parse_remote_location(
     let scheme = if tls { "https" } else { "http" };
 
     Ok((format!("{scheme}://{authority}"), table.to_string()))
+}
+
+/// Build and register a Delta Lake table from
+/// `CREATE EXTERNAL TABLE … STORED AS DELTA LOCATION 'datasets://path/to/table'
+/// OPTIONS ('version' '12')`. The Delta table must already exist at the location;
+/// its schema is read from the transaction log.
+async fn create_delta_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    let definition = beacon_delta::DeltaTableDefinition {
+        name: cmd.name.to_string(),
+        location: cmd.location.clone(),
+        options: cmd.options.clone(),
+        definition: None,
+    };
+
+    // `build_provider` resolves the schema from the Delta log; registration
+    // persists `table.json` via the TableManager.
+    let provider = definition
+        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+        .await?;
+    session.register_table(cmd.name.clone(), provider)?;
+    Ok(())
 }
 
 /// Register a `CREATE VIEW` as a `ViewTable` (re-plans its query on each scan).
