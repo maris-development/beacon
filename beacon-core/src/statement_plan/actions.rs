@@ -204,7 +204,7 @@ pub(crate) async fn create_table(
         beacon_iceberg::create_iceberg_table(&catalog, &namespace, &table_name, &arrow_schema)
             .await?;
 
-    // Registration persists the table's `table.json` pointer via the TableManager.
+    // Registration persists the table's `table.json` pointer via the PersistentSchemaProvider.
     session.register_table(name.clone(), Arc::new(table))?;
 
     if is_ctas {
