@@ -299,6 +299,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordered_definition_views_follow_table_scan_dependencies() {
+        use beacon_datafusion_ext::table_ext::{ExternalTableDefinition, ViewTableDefinition};
+
+        let mut tables: HashMap<String, Arc<dyn TableDefinition>> = HashMap::new();
+
+        let base = ExternalTableDefinition {
+            name: "base_table".to_string(),
+            location: "dataset/base_table/*.parquet".to_string(),
+            file_type: "parquet".to_string(),
+            schema: Arc::new(Schema::empty()),
+            definition: None,
+            partition_cols: vec![],
+            options: HashMap::new(),
+            if_not_exists: false,
+        };
+
+        let view_a = ViewTableDefinition {
+            name: "view_a".to_string(),
+            definition: "SELECT * FROM base_table".to_string(),
+            dependencies: vec!["base_table".to_string()],
+        };
+
+        let view_b = ViewTableDefinition {
+            name: "view_b".to_string(),
+            definition: "SELECT * FROM view_a".to_string(),
+            dependencies: vec!["view_a".to_string()],
+        };
+
+        tables.insert(base.name.clone(), Arc::new(base));
+        tables.insert(view_a.name.clone(), Arc::new(view_a));
+        tables.insert(view_b.name.clone(), Arc::new(view_b));
+
+        let order = order_tables(&tables).await;
+
+        assert!(position(&order, "base_table") < position(&order, "view_a"));
+        assert!(position(&order, "view_a") < position(&order, "view_b"));
+    }
+
+    #[tokio::test]
     async fn order_tables_uses_table_type_for_view_classification() {
         let mut tables: HashMap<String, Arc<dyn TableDefinition>> = HashMap::new();
 
