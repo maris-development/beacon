@@ -180,6 +180,180 @@ impl UserDefinedLogicalNodeCore for RefreshNode {
     }
 }
 
+/// Arrow schema produced by `SHOW CRAWLERS`.
+pub(crate) fn show_crawlers_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("target_prefix", DataType::Utf8, false),
+                Field::new("format_filter", DataType::Utf8, true),
+                Field::new("detect_partitions", DataType::Boolean, false),
+                Field::new("schedule_secs", DataType::UInt64, true),
+                Field::new("event_driven", DataType::Boolean, false),
+                Field::new("table_naming", DataType::Utf8, false),
+            ]))
+        })
+        .clone()
+}
+
+fn show_crawlers_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(show_crawlers_arrow_schema().as_ref().clone())
+                .expect("SHOW CRAWLERS schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `CREATE CRAWLER <name> [ON '<prefix>'] [WITH (...)]`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct CreateCrawlerNode {
+    pub(crate) name: String,
+    pub(crate) target_prefix: Option<String>,
+    /// Options as a sorted `(key, value)` list (the node trait needs `Ord`/`Hash`,
+    /// which `HashMap` is not).
+    pub(crate) options: Vec<(String, String)>,
+}
+
+impl CreateCrawlerNode {
+    pub(crate) fn new(
+        name: String,
+        target_prefix: Option<String>,
+        mut options: Vec<(String, String)>,
+    ) -> Self {
+        options.sort();
+        Self {
+            name,
+            target_prefix,
+            options,
+        }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for CreateCrawlerNode {
+    fn name(&self) -> &str {
+        "CreateCrawler"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "CreateCrawler: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            target_prefix: self.target_prefix.clone(),
+            options: self.options.clone(),
+        })
+    }
+}
+
+/// Logical node for `RUN CRAWLER <name>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct RunCrawlerNode {
+    pub(crate) name: String,
+}
+
+impl RunCrawlerNode {
+    pub(crate) fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for RunCrawlerNode {
+    fn name(&self) -> &str {
+        "RunCrawler"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "RunCrawler: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+        })
+    }
+}
+
+/// Logical node for `DROP CRAWLER <name>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct DropCrawlerNode {
+    pub(crate) name: String,
+}
+
+impl DropCrawlerNode {
+    pub(crate) fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for DropCrawlerNode {
+    fn name(&self) -> &str {
+        "DropCrawler"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "DropCrawler: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+        })
+    }
+}
+
+/// Logical node for `SHOW CRAWLERS`. Unlike the other crawler nodes it produces
+/// rows, so it carries the listing schema.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct ShowCrawlersNode;
+
+impl UserDefinedLogicalNodeCore for ShowCrawlersNode {
+    fn name(&self) -> &str {
+        "ShowCrawlers"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        show_crawlers_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ShowCrawlers")
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
 /// Logical node for the copy-on-write replacement that backs `DELETE` and
 /// `UPDATE`: `input` computes the table's full post-mutation contents, which
 /// atomically replace the Iceberg table's data files. Produces no rows.

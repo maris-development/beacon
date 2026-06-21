@@ -12,6 +12,7 @@
 //! [`LogicalPlan::Extension`]: datafusion::logical_expr::LogicalPlan::Extension
 
 mod actions;
+pub(crate) mod crawler;
 mod logical;
 mod lower;
 pub(crate) mod materialized_view;
@@ -28,7 +29,10 @@ use datafusion::{
     prelude::{SQLOptions, SessionContext},
 };
 
-use crate::parser::statement::{CreateMaterializedViewStatement, RefreshStatement};
+use crate::parser::statement::{
+    CreateCrawlerStatement, CreateMaterializedViewStatement, DropCrawlerStatement, RefreshStatement,
+    RunCrawlerStatement,
+};
 
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
@@ -105,6 +109,39 @@ pub(crate) fn create_materialized_view_plan(
 pub(crate) fn refresh_plan(statement: RefreshStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::RefreshNode::new(statement.name.to_string())),
+    })
+}
+
+/// Build the logical plan for `CREATE CRAWLER ...`.
+pub(crate) fn create_crawler_plan(statement: CreateCrawlerStatement) -> LogicalPlan {
+    let options: Vec<(String, String)> = statement.options.into_iter().collect();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::CreateCrawlerNode::new(
+            statement.name.to_string(),
+            statement.target_prefix,
+            options,
+        )),
+    })
+}
+
+/// Build the logical plan for `RUN CRAWLER <name>`.
+pub(crate) fn run_crawler_plan(statement: RunCrawlerStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::RunCrawlerNode::new(statement.name.to_string())),
+    })
+}
+
+/// Build the logical plan for `DROP CRAWLER <name>`.
+pub(crate) fn drop_crawler_plan(statement: DropCrawlerStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::DropCrawlerNode::new(statement.name.to_string())),
+    })
+}
+
+/// Build the logical plan for `SHOW CRAWLERS`.
+pub(crate) fn show_crawlers_plan() -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::ShowCrawlersNode),
     })
 }
 

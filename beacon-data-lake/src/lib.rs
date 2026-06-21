@@ -4,6 +4,7 @@ use beacon_object_storage::ObjectStores;
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 use url::Url;
 
+pub mod crawler;
 pub mod file_formats;
 pub mod files;
 pub mod table;

@@ -203,6 +203,19 @@ export default defineConfig({
                   ]
                 },
                 {
+                  text: 'Crawlers',
+                  link: '/docs/1.7.3/data-lake/crawlers',
+                  collapsed: true,
+                  items: [
+                    { text: 'CREATE CRAWLER', link: '/docs/1.7.3/data-lake/crawlers#create-crawler' },
+                    { text: 'RUN / SHOW / DROP', link: '/docs/1.7.3/data-lake/crawlers#run-crawler' },
+                    { text: 'Partition detection', link: '/docs/1.7.3/data-lake/crawlers#partition-detection' },
+                    { text: 'Triggers', link: '/docs/1.7.3/data-lake/crawlers#triggers' },
+                    { text: 'Configuration', link: '/docs/1.7.3/data-lake/crawlers#configuration' },
+                    { text: 'Limitations', link: '/docs/1.7.3/data-lake/crawlers#supported-formats-and-limitations' },
+                  ]
+                },
+                {
                   text: 'Managed Tables',
                   link: '/docs/1.7.3/sql/managed-tables',
                 },
@@ -377,6 +390,17 @@ export default defineConfig({
                     { text: 'Querying', link: '/docs/1.7.3/sql/create-materialized-view#querying' },
                     { text: 'REFRESH', link: '/docs/1.7.3/sql/create-materialized-view#refresh' },
                     { text: 'DROP', link: '/docs/1.7.3/sql/create-materialized-view#drop' },
+                  ]
+                },
+                {
+                  text: 'CREATE CRAWLER',
+                  link: '/docs/1.7.3/data-lake/crawlers',
+                  collapsed: true,
+                  items: [
+                    { text: 'Options', link: '/docs/1.7.3/data-lake/crawlers#options' },
+                    { text: 'RUN CRAWLER', link: '/docs/1.7.3/data-lake/crawlers#run-crawler' },
+                    { text: 'SHOW CRAWLERS', link: '/docs/1.7.3/data-lake/crawlers#show-crawlers' },
+                    { text: 'DROP CRAWLER', link: '/docs/1.7.3/data-lake/crawlers#drop-crawler' },
                   ]
                 },
               ]

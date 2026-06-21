@@ -28,6 +28,7 @@ pub struct Config {
     pub netcdf: NetcdfConfig,
     pub atlas: AtlasConfig,
     pub bbf: BbfConfig,
+    pub crawler: CrawlerConfig,
     pub api_docs: ApiDocsConfig,
     /// Resolved data-directory paths (root + sub-directories).
     pub data: DataDirsConfig,
@@ -108,6 +109,17 @@ pub struct ApiDocsConfig {
     pub license_name: Option<String>,
     pub license_url: Option<String>,
     pub license_identifier: Option<String>,
+}
+
+/// Settings for the Glue-style crawler subsystem.
+#[derive(Debug, Clone)]
+pub struct CrawlerConfig {
+    /// Master switch for crawler scheduling/event triggers. When false, crawlers
+    /// can still be defined and run on demand, but no background tasks are spawned.
+    pub enable: bool,
+    /// Fallback poll interval (seconds) applied to a crawler that requests
+    /// event-driven crawling on a deployment where storage events are unavailable.
+    pub default_interval_secs: u64,
 }
 
 /// Resolved data-directory paths, derived from `BEACON_DATA_DIR` (default
@@ -242,6 +254,12 @@ struct RawConfig {
     #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
     bbf_split_streams_slice: bool,
 
+    // Crawler subsystem
+    #[envconfig(from = "BEACON_CRAWLER_ENABLE", default = "true")]
+    crawler_enable: bool,
+    #[envconfig(from = "BEACON_CRAWLER_DEFAULT_INTERVAL_SECS", default = "900")]
+    crawler_default_interval_secs: u64,
+
     // OpenAPI documentation metadata
     #[envconfig(from = "BEACON_API_TITLE", default = "Beacon Rest API")]
     api_title: String,
@@ -349,6 +367,10 @@ impl From<RawConfig> for Config {
             },
             bbf: BbfConfig {
                 split_streams_slice: raw.bbf_split_streams_slice,
+            },
+            crawler: CrawlerConfig {
+                enable: raw.crawler_enable,
+                default_interval_secs: raw.crawler_default_interval_secs,
             },
             api_docs: ApiDocsConfig {
                 title: raw.api_title,

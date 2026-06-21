@@ -153,9 +153,17 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
 
     fn try_from(value: Arc<dyn TableDefinition>) -> Result<Self, Self::Error> {
         match serde_json::to_value(value)? {
-            Value::Object(config) => Ok(Self {
-                config: config.into_iter().collect(),
-            }),
+            Value::Object(mut config) => {
+                // Hide internal (double-underscore) option keys — e.g. the crawler
+                // ownership marker — from the user-facing config. They are an
+                // implementation detail of the definition, not user-set options.
+                if let Some(Value::Object(options)) = config.get_mut("options") {
+                    options.retain(|key, _| !key.starts_with("__"));
+                }
+                Ok(Self {
+                    config: config.into_iter().collect(),
+                })
+            }
             other => Err(anyhow::anyhow!(
                 "expected table config object, got {other:?}"
             )),
