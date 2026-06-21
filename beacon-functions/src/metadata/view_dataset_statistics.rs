@@ -29,7 +29,7 @@ use arrow::{
 };
 use beacon_arrow_netcdf::datafusion::{reader, statistics};
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
-use beacon_object_storage::{get_datasets_object_store, DatasetsStore};
+use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::{plan_datafusion_err, plan_err, Statistics},
@@ -115,7 +115,13 @@ impl TableFunctionImpl for ViewDatasetStatisticsFunc {
             self.runtime_handle.block_on(async move {
                 let path = object_store::path::Path::parse(&path_str)
                     .map_err(|e| plan_datafusion_err!("Invalid path '{path_str}': {e}"))?;
-                let store = get_datasets_object_store().await;
+                let store = session_ctx
+                    .state()
+                    .config()
+                    .get_extension::<DatasetsStore>()
+                    .ok_or_else(|| {
+                        plan_datafusion_err!("datasets object store missing from session config")
+                    })?;
 
                 // Head the object to get size + last_modified for cache validation.
                 let meta = store

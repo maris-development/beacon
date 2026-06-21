@@ -9,6 +9,7 @@ use std::sync::Arc;
 use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
 use beacon_datafusion_ext::{
     listing_table_factory_ext::ListingTableFactoryExt,
+    remote::{RemoteTableDefinition, unresolved_schema},
     table_ext::{MaterializedView, TableDefinition},
 };
 use datafusion::{
@@ -76,12 +77,93 @@ pub(crate) async fn create_external_table(
     session: &Arc<SessionContext>,
     cmd: &CreateExternalTable,
 ) -> anyhow::Result<()> {
+    // `STORED AS REMOTE` registers a federated table pointing at another Beacon
+    // instance, rather than a listing table over the datasets store.
+    if cmd.file_type.eq_ignore_ascii_case("REMOTE") {
+        return create_remote_table(session, cmd).await;
+    }
+
     let factory =
         ListingTableFactoryExt::new(DATASETS_OBJECT_STORE_URL.clone(), Arc::downgrade(session));
     let state = session.state();
     let created = factory.create(&state, cmd).await?;
     session.register_table(cmd.name.clone(), created)?;
     Ok(())
+}
+
+/// Build and register a federated remote-Beacon table from
+/// `CREATE EXTERNAL TABLE … STORED AS REMOTE LOCATION 'beacon://host:port/table'
+/// OPTIONS ('username' '…', 'password' '…', 'tls' 'true')`.
+async fn create_remote_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    // DataFusion prefixes `OPTIONS` keys without a `.` with `format.`, so look up
+    // both the raw and prefixed forms.
+    let option = |key: &str| {
+        cmd.options
+            .get(key)
+            .or_else(|| cmd.options.get(&format!("format.{key}")))
+            .cloned()
+    };
+
+    let (url, remote_table) = parse_remote_location(&cmd.location, option("tls"))?;
+
+    // Honor an explicit column list if given; otherwise fetch the schema from the
+    // remote when the provider is built.
+    let schema = if cmd.schema.fields().is_empty() {
+        unresolved_schema()
+    } else {
+        Arc::clone(cmd.schema.inner())
+    };
+
+    // No credentials: remote tables connect anonymously (the remote must allow
+    // anonymous Flight SQL access).
+    let definition = RemoteTableDefinition {
+        name: cmd.name.to_string(),
+        url,
+        remote_table,
+        schema,
+    };
+
+    // `build_provider` pins the resolved schema; registration persists table.json.
+    let provider = definition
+        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+        .await?;
+    session.register_table(cmd.name.clone(), provider)?;
+    Ok(())
+}
+
+/// Parse `beacon://host:port/table` into the tonic endpoint URL and the remote
+/// table name. `OPTIONS ('tls' 'true')` selects `https` over the default `http`.
+fn parse_remote_location(
+    location: &str,
+    tls_option: Option<String>,
+) -> anyhow::Result<(String, String)> {
+    let rest = location
+        .strip_prefix("beacon://")
+        .or_else(|| location.strip_prefix("grpc://"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "remote table LOCATION must be 'beacon://host:port/table', got '{location}'"
+            )
+        })?;
+
+    let (authority, table) = rest.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!(
+            "remote table LOCATION must include a table name: 'beacon://host:port/table', got '{location}'"
+        )
+    })?;
+
+    anyhow::ensure!(!authority.is_empty(), "remote table LOCATION missing host:port");
+    anyhow::ensure!(!table.is_empty(), "remote table LOCATION missing table name");
+
+    let tls = tls_option
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let scheme = if tls { "https" } else { "http" };
+
+    Ok((format!("{scheme}://{authority}"), table.to_string()))
 }
 
 /// Register a `CREATE VIEW` as a `ViewTable` (re-plans its query on each scan).
@@ -122,7 +204,7 @@ pub(crate) async fn create_table(
         beacon_iceberg::create_iceberg_table(&catalog, &namespace, &table_name, &arrow_schema)
             .await?;
 
-    // Registration persists the table's `table.json` pointer via the TableManager.
+    // Registration persists the table's `table.json` pointer via the PersistentSchemaProvider.
     session.register_table(name.clone(), Arc::new(table))?;
 
     if is_ctas {
@@ -339,5 +421,30 @@ impl datafusion::sql::planner::ContextProvider for AlterTypeContextProvider {
 
     fn udwf_names(&self) -> Vec<String> {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod remote_location_tests {
+    use super::parse_remote_location;
+
+    #[test]
+    fn parses_beacon_scheme_into_http_endpoint_and_table() {
+        let (url, table) = parse_remote_location("beacon://host:50051/obs", None).unwrap();
+        assert_eq!(url, "http://host:50051");
+        assert_eq!(table, "obs");
+    }
+
+    #[test]
+    fn tls_option_selects_https() {
+        let (url, _) =
+            parse_remote_location("beacon://host:50051/obs", Some("true".to_string())).unwrap();
+        assert_eq!(url, "https://host:50051");
+    }
+
+    #[test]
+    fn rejects_missing_scheme_or_table() {
+        assert!(parse_remote_location("host:50051/obs", None).is_err());
+        assert!(parse_remote_location("beacon://host:50051", None).is_err());
     }
 }

@@ -42,7 +42,7 @@ fn scalar_string(batches: &[RecordBatch]) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn iceberg_create_insert_select_ctas_drop() {
-    let runtime = Runtime::new().await.expect("runtime should boot");
+    let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should boot");
 
     // Unique names so reruns/parallel suites do not collide in the shared
     // warehouse, and clean any leftovers from a previous aborted run.

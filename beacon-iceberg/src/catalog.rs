@@ -50,26 +50,31 @@ pub fn beacon_namespace() -> Vec<String> {
 ///
 /// Sets both the shared catalog ([`get_catalog`]) and the warehouse store used
 /// for `DROP TABLE` cleanup ([`get_warehouse_store`]).
-pub async fn init_datasets_warehouse() -> anyhow::Result<()> {
-    let storage = &beacon_config::CONFIG.storage;
+pub async fn init_datasets_warehouse(
+    datasets: std::sync::Arc<beacon_object_storage::DatasetsStore>,
+    storage: &beacon_config::StorageConfig,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        backend = if storage.s3.is_some() { "s3" } else { "local" },
+        "initializing Iceberg datasets warehouse"
+    );
     // Full warehouse prefix within the backing store, e.g. `__beacon__/iceberg`.
     let warehouse_prefix = format!("{DATASETS_WRITEABLE_PREFIX}/{WAREHOUSE_SUBDIR}");
 
     // The file catalog needs an `ObjectStoreBuilder` (it cannot accept an
     // arbitrary `ObjectStore`), so mirror the datasets store's backend choice.
     // `catalog_path` is the warehouse root the catalog roots every table under.
-    let (object_store_builder, catalog_path) = if storage.s3.data_lake {
-        let bucket = storage.s3.bucket.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("Iceberg warehouse on S3 requires a bucket name (set BEACON_S3_BUCKET)")
-        })?;
-        // `AmazonS3Builder::from_env()` picks up the AWS_* env; mirror the two
-        // settings beacon configures explicitly for the datasets store.
-        let builder = ObjectStoreBuilder::s3()
-            .with_config("aws_allow_http", "true")
+    let (object_store_builder, catalog_path) = if let Some(s3) = &storage.s3 {
+        // Mirror the datasets store's backend by consuming the same `S3Config`
+        // values (credentials still come from the AWS env chain). Setting the
+        // endpoint/region explicitly keeps the Iceberg warehouse on the same
+        // backend as the datasets without re-reading the environment.
+        let mut builder = ObjectStoreBuilder::s3()
+            .with_config("aws_allow_http", if s3.allow_http { "true" } else { "false" })
             .and_then(|builder| {
                 builder.with_config(
                     "aws_virtual_hosted_style_request",
-                    if storage.s3.enable_virtual_hosting {
+                    if s3.enable_virtual_hosting {
                         "true"
                     } else {
                         "false"
@@ -77,31 +82,44 @@ pub async fn init_datasets_warehouse() -> anyhow::Result<()> {
                 )
             })
             .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
-        (builder, format!("s3://{bucket}/{warehouse_prefix}"))
+        if let Some(endpoint) = &s3.endpoint {
+            builder = builder
+                .with_config("aws_endpoint", endpoint)
+                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+        }
+        if let Some(region) = &s3.region {
+            builder = builder
+                .with_config("aws_region", region)
+                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+        }
+        (builder, format!("s3://{}/{warehouse_prefix}", s3.bucket))
     } else {
         // Local: root the builder at the datasets directory so warehouse paths
         // resolve to `<datasets_dir>/__beacon__/iceberg/...`.
-        let builder = ObjectStoreBuilder::filesystem(beacon_config::DATASETS_DIR_PATH.clone());
+        let builder = ObjectStoreBuilder::filesystem(storage.datasets_dir.to_path_buf());
         (builder, warehouse_prefix.clone())
     };
 
     let catalog: Arc<dyn Catalog> = Arc::new(
         FileCatalog::new(&catalog_path, object_store_builder)
             .await
-            .map_err(|error| anyhow::anyhow!("Failed to create Iceberg file catalog: {error}"))?,
+            .map_err(|error| {
+                tracing::error!(catalog_path = %catalog_path, error = %error, "failed to create Iceberg file catalog");
+                anyhow::anyhow!("Failed to create Iceberg file catalog: {error}")
+            })?,
     );
 
     // DROP cleanup deletes files via the datasets internal store (which already
     // maps paths under `__beacon__`), nested one level into the `iceberg`
     // sub-directory so a table's `<namespace>/<table>` prefix resolves to
     // `__beacon__/iceberg/<namespace>/<table>`.
-    let datasets = beacon_object_storage::get_datasets_object_store().await;
     let drop_store: Arc<dyn ObjectStore> =
         Arc::new(PrefixStore::new(datasets.internal_store(), WAREHOUSE_SUBDIR));
 
     init_catalog(catalog);
     let _ = WAREHOUSE_STORE.set(drop_store);
 
+    tracing::info!(catalog_path = %catalog_path, "Iceberg datasets warehouse initialized");
     Ok(())
 }
 

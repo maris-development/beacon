@@ -40,21 +40,32 @@ pub struct Runtime {
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
     listing_table_factory: Arc<ListingTableFactoryExt>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
+    /// The configuration this runtime was built with. Owned, not process-global.
+    config: Arc<beacon_config::Config>,
 }
 
 impl Runtime {
-    /// Boots the Beacon execution environment and initializes runtime-local state.
-    pub async fn new() -> anyhow::Result<Self> {
+    /// Boots the Beacon execution environment with the given configuration.
+    ///
+    /// The config is owned by the runtime (not read from a process-global) and is
+    /// threaded into every component below — including, via a `SessionConfig`
+    /// extension, the deep session-scoped code (query planning, table refresh,
+    /// metadata UDFs) that cannot otherwise reach it.
+    pub async fn new(config: Arc<beacon_config::Config>) -> anyhow::Result<Self> {
         let memory_pool = Arc::new(FairSpillPool::new(
-            beacon_config::CONFIG.runtime.vm_memory_size * 1024 * 1024,
+            config.runtime.vm_memory_size * 1024 * 1024,
         ));
 
-        let session_ctx = Self::init_ctx(memory_pool)?;
-        beacon_data_lake::register_object_stores(&session_ctx).await?;
+        let object_stores = beacon_object_storage::ObjectStores::new(&config.storage).await?;
 
-        let file_formats = beacon_formats::file_formats(
+        let session_ctx =
+            Self::init_ctx(memory_pool, object_stores.datasets.clone(), config.clone())?;
+        beacon_data_lake::register_object_stores(&session_ctx, &object_stores)?;
+
+        let file_formats = beacon_data_lake::file_formats(
             session_ctx.clone(),
-            beacon_object_storage::get_datasets_object_store().await,
+            object_stores.datasets.clone(),
+            &config,
         )?;
 
         let mut table_functions = vec![];
@@ -62,7 +73,7 @@ impl Runtime {
             tokio::runtime::Handle::current(),
             session_ctx.clone(),
             DATASETS_OBJECT_STORE_URL.clone(),
-            beacon_object_storage::get_datasets_object_store().await,
+            object_stores.datasets.clone(),
             file_formats.clone(),
         ));
         table_functions.extend(beacon_functions::metadata::register_metadata_functions(
@@ -92,11 +103,15 @@ impl Runtime {
         // CREATE/DROP handlers need it too. The warehouse lives in the datasets
         // store's internal area (`__beacon__/iceberg`), so it follows the same
         // local/S3 backend as the datasets.
-        beacon_iceberg::catalog::init_datasets_warehouse().await?;
+        beacon_iceberg::catalog::init_datasets_warehouse(
+            object_stores.datasets.clone(),
+            &config.storage,
+        )
+        .await?;
 
         geodatafusion::register(&session_ctx);
 
-        for udf in beacon_functions::geo::geo_udfs() {
+        for udf in beacon_functions::geo::geo_udfs(config.runtime.st_within_point_cache_size) {
             session_ctx.register_udf(udf);
         }
 
@@ -120,16 +135,26 @@ impl Runtime {
             file_formats,
             listing_table_factory,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
+            config,
         })
     }
 
-    fn init_ctx(memory_pool: Arc<FairSpillPool>) -> anyhow::Result<Arc<SessionContext>> {
+    fn init_ctx(
+        memory_pool: Arc<FairSpillPool>,
+        datasets_store: Arc<beacon_object_storage::DatasetsStore>,
+        app_config: Arc<beacon_config::Config>,
+    ) -> anyhow::Result<Arc<SessionContext>> {
         let mut config = SessionConfig::new()
-            .with_batch_size(beacon_config::CONFIG.runtime.batch_size)
+            .with_batch_size(app_config.runtime.batch_size)
             .with_coalesce_batches(true)
             .with_information_schema(true)
             .with_default_catalog_and_schema("beacon", "public")
-            .with_collect_statistics(true);
+            .with_collect_statistics(true)
+            // Make the runtime's datasets store and config reachable from deep,
+            // session-scoped code (query planning, table refresh, metadata UDFs)
+            // without a process-global accessor.
+            .with_extension(datasets_store)
+            .with_extension(app_config);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
         config
@@ -163,6 +188,11 @@ impl Runtime {
             .with_config(config)
             .with_runtime_env(runtime_env)
             .with_default_features()
+            // Enable `datafusion-federation`: this is the default DataFusion
+            // optimizer rule set with the `FederationOptimizerRule` inserted, so
+            // sub-plans rooted at remote tables get pushed down. The matching
+            // `FederatedPlanner` lives in `BeaconQueryPlanner`'s extension planners.
+            .with_optimizer_rules(datafusion_federation::default_optimizer_rules())
             .with_query_planner(Arc::new(crate::statement_plan::BeaconQueryPlanner::new(
                 session_cell.clone(),
             )))
@@ -236,7 +266,9 @@ impl Runtime {
     ) -> anyhow::Result<QueryResult> {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
-        let (copy_plan, output_file) = output.parse(self.session_ctx.as_ref(), plan).await?;
+        let (copy_plan, output_file) = output
+            .parse(self.session_ctx.as_ref(), &self.config.storage.tmp_dir, plan)
+            .await?;
         let output_file = QueryOutputFile::from(output_file);
 
         let metrics = MetricsTracker::new(query_json, query_id);
@@ -295,7 +327,7 @@ impl Runtime {
     }
 
     pub fn system_info(&self) -> SystemInfo {
-        sys::SystemInfo::new()
+        sys::SystemInfo::new(self.config.runtime.enable_sys_info)
     }
 
     pub fn get_query_metrics(&self, query_id: uuid::Uuid) -> Option<QueryMetricsView> {
@@ -437,8 +469,13 @@ impl Runtime {
         tables
     }
 
+    /// The configuration this runtime was built with.
+    pub fn config(&self) -> &Arc<beacon_config::Config> {
+        &self.config
+    }
+
     pub fn default_table(&self) -> String {
-        beacon_config::CONFIG.sql.default_table.clone()
+        self.config.sql.default_table.clone()
     }
 
     pub async fn list_table_config(&self, table_name: String) -> Option<TableConfigView> {
@@ -470,7 +507,7 @@ impl Runtime {
     pub async fn list_default_table_schema(&self) -> SchemaRef {
         let table = self
             .session_ctx
-            .table(beacon_config::CONFIG.sql.default_table.as_str())
+            .table(self.config.sql.default_table.as_str())
             .await
             .expect("Default table not found");
         Arc::new(table.schema().as_arrow().to_owned())
@@ -548,7 +585,7 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_create_query_refresh_and_drop() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
 
         let suffix = uuid::Uuid::new_v4().simple();
         let mv = format!("mv_test_{suffix}");
@@ -620,7 +657,7 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_handles_zero_row_result() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
         let mv = format!("mv_empty_{}", uuid::Uuid::new_v4().simple());
 
         // A query with no rows must still create a queryable, Parquet-backed view.
@@ -684,7 +721,7 @@ mod client_query_tests {
     /// same pipeline as `run_sql`, returning a streamed result.
     #[tokio::test(flavor = "multi_thread")]
     async fn json_query_runs_through_unified_path() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("json_q_{suffix}");
 
@@ -713,7 +750,7 @@ mod client_query_tests {
     /// file download.
     #[tokio::test(flavor = "multi_thread")]
     async fn query_with_output_format_produces_file() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("out_{suffix}");
 
@@ -743,12 +780,60 @@ mod client_query_tests {
         }
     }
 
+    /// NetCDF output goes through a custom `DataSink` that writes a real local
+    /// file (the netcdf-c writer cannot stream to an object store). This asserts
+    /// the file lands under the configured tmp store root — not the OS temp dir —
+    /// and is non-empty: the regression fixed by threading `StorageConfig` into
+    /// the NetCDF factory/sink.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn query_with_netcdf_output_writes_under_configured_tmp() {
+        let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
+        let tmp_dir = config.storage.tmp_dir.clone();
+        let runtime = Runtime::new(config).await.expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("ncout_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2)")).await;
+
+        let result = runtime
+            .run_query(
+                query(serde_json::json!({
+                    "from": table,
+                    "select": ["a"],
+                    "output": { "format": "netcdf" },
+                })),
+                false,
+            )
+            .await
+            .expect("netcdf query with output should run");
+
+        match result.query_output {
+            QueryOutput::File(file) => {
+                // tempfile resolves to an absolute path; canonicalize both
+                // sides so the comparison is independent of cwd-relative form.
+                let got = std::fs::canonicalize(file.path().parent().unwrap())
+                    .expect("canonicalize output parent");
+                let want = std::fs::canonicalize(&tmp_dir).expect("canonicalize tmp dir");
+                assert_eq!(
+                    got, want,
+                    "netcdf output should be written under the configured tmp dir"
+                );
+                assert!(
+                    file.size().expect("file size") > 0,
+                    "netcdf output file should contain data"
+                );
+            }
+            QueryOutput::Stream(_) => panic!("expected a file output"),
+        }
+    }
+
     /// `validate_query_plan` is the single permission gate: non-super-users may run
     /// read-only SELECTs but not DDL/DML (standard nodes) nor any beacon extension
     /// operation (super-user-only).
     #[tokio::test(flavor = "multi_thread")]
     async fn non_super_user_is_gated_by_validation() {
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("val_{suffix}");
 
@@ -837,8 +922,12 @@ mod restart_tests {
         let base = format!("restart_base_{suffix}");
         let view = format!("restart_view_{suffix}");
 
+        // Both runtimes share one config so they resolve the same on-disk tables
+        // store; the restart must rebuild from what the first runtime persisted.
+        let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
+
         // First runtime: create a base table with data and a view over it.
-        let runtime = Runtime::new().await.expect("runtime should start");
+        let runtime = Runtime::new(config.clone()).await.expect("runtime should start");
         run_sql(&runtime, &format!("CREATE TABLE {base} (a BIGINT)")).await;
         run_sql(&runtime, &format!("INSERT INTO {base} VALUES (1), (2)")).await;
         run_sql(&runtime, &format!("CREATE VIEW {view} AS SELECT a FROM {base}")).await;
@@ -846,7 +935,7 @@ mod restart_tests {
 
         // A fresh runtime rebuilds the catalog purely from the persisted
         // `tables://<name>/table.json` definitions.
-        let restarted = Runtime::new().await.expect("runtime should restart");
+        let restarted = Runtime::new(config).await.expect("runtime should restart");
 
         assert_eq!(
             count_rows(&restarted, &format!("SELECT * FROM {base}")).await,

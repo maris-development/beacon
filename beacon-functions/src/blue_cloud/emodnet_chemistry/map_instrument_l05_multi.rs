@@ -48,10 +48,10 @@ fn map_emodnet_chemistry_instrument_l05_multi_impl(
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
-            let flag_array = flag
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let flag_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                flag,
+                "map_emodnet_chemistry_instrument_l05_multi",
+            )?;
 
             let array = flag_array.iter().map(|flag| {
                 flag.map(|value| {

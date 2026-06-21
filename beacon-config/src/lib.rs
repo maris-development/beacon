@@ -1,10 +1,22 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use envconfig::Envconfig;
 use lazy_static::lazy_static;
 
-#[derive(Debug)]
+pub mod error;
+
+pub use error::ConfigError;
+use error::Result;
+
+// Per-format and storage config types are owned by their crates; beacon-config
+// composes them here and fills them from the environment.
+pub use beacon_arrow_atlas::datafusion::AtlasConfig;
+pub use beacon_arrow_bbf::datafusion::BbfConfig;
+pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
+pub use beacon_object_storage::{S3Config, StorageConfig};
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub admin: AdminConfig,
     pub server: ServerConfig,
@@ -15,16 +27,19 @@ pub struct Config {
     pub cors: CorsConfig,
     pub netcdf: NetcdfConfig,
     pub atlas: AtlasConfig,
+    pub bbf: BbfConfig,
     pub api_docs: ApiDocsConfig,
+    /// Resolved data-directory paths (root + sub-directories).
+    pub data: DataDirsConfig,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AdminConfig {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
@@ -34,17 +49,16 @@ pub struct ServerConfig {
     pub base_path: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub vm_memory_size: usize,
     pub sanitize_schema: bool,
     pub st_within_point_cache_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
-    pub bbf_split_streams_slice: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqlConfig {
     pub enable: bool,
     pub default_table: String,
@@ -52,7 +66,7 @@ pub struct SqlConfig {
     pub stream_coalesce: SqlStreamCoalesceConfig,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqlStreamCoalesceConfig {
     pub enabled: bool,
     pub target_rows: usize,
@@ -60,7 +74,7 @@ pub struct SqlStreamCoalesceConfig {
     pub max_rows: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FlightSqlConfig {
     pub enable: bool,
     pub allow_anonymous: bool,
@@ -71,21 +85,7 @@ pub struct FlightSqlConfig {
     pub prepared_statement_ttl_secs: u64,
 }
 
-#[derive(Debug)]
-pub struct StorageConfig {
-    pub enable_fs_events: bool,
-    pub enable_s3_events: bool,
-    pub s3: S3Config,
-}
-
-#[derive(Debug)]
-pub struct S3Config {
-    pub bucket: Option<String>,
-    pub enable_virtual_hosting: bool,
-    pub data_lake: bool,
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CorsConfig {
     pub allowed_methods: String,
     pub allowed_origins: String,
@@ -94,25 +94,10 @@ pub struct CorsConfig {
     pub max_age: u64,
 }
 
-#[derive(Debug)]
-pub struct NetcdfConfig {
-    pub use_schema_cache: bool,
-    pub schema_cache_size: u64,
-    pub use_reader_cache: bool,
-    pub reader_cache_size: usize,
-    pub enable_statistics: bool,
-}
-
-#[derive(Debug)]
-pub struct AtlasConfig {
-    pub use_reader_cache: bool,
-    pub reader_cache_size: u64,
-}
-
 /// Metadata exposed at the top level of the OpenAPI document (and the Swagger /
 /// Scalar UIs). All fields are configurable so deployments can brand their own
 /// API docs without recompiling.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApiDocsConfig {
     pub title: String,
     pub description: String,
@@ -125,10 +110,12 @@ pub struct ApiDocsConfig {
     pub license_identifier: Option<String>,
 }
 
-#[derive(Debug)]
-pub struct NetcdfMultiplexerConfig {
-    pub enabled: bool,
-    pub processes: Option<usize>,
+/// Resolved data-directory paths, derived from `BEACON_DATA_DIR` (default
+/// `./data`). The directories are created when the config is loaded.
+#[derive(Debug, Clone)]
+pub struct DataDirsConfig {
+    pub indexes: PathBuf,
+    pub cache: PathBuf,
 }
 
 #[derive(Debug, Envconfig)]
@@ -191,6 +178,15 @@ struct RawConfig {
     s3_enable_virtual_hosting: bool,
     #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
     s3_data_lake: bool,
+    // S3-compatible endpoint and region. Read from the standard AWS env vars so
+    // they can be captured into `S3Config` (the single source of truth) instead
+    // of being re-read from the environment at use time.
+    #[envconfig(from = "AWS_ENDPOINT")]
+    aws_endpoint: Option<String>,
+    #[envconfig(from = "AWS_REGION")]
+    aws_region: Option<String>,
+    #[envconfig(from = "BEACON_S3_ALLOW_HTTP", default = "true")]
+    s3_allow_http: bool,
     // Filesystem change events are on by default for the local datasets store;
     // set BEACON_ENABLE_FS_EVENTS=false to disable the watcher.
     #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "true")]
@@ -221,10 +217,9 @@ struct RawConfig {
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "true")]
     enable_pushdown_projection: bool,
 
-    #[envconfig(from = "BEACON_NETCDF_USE_SCHEMA_CACHE", default = "true")]
-    netcdf_use_schema_cache: bool,
-    #[envconfig(from = "BEACON_NETCDF_SCHEMA_CACHE_SIZE", default = "1024")]
-    netcdf_schema_cache_size: u64,
+    /// Root directory for Beacon's local data (datasets, tables, tmp, etc.).
+    #[envconfig(from = "BEACON_DATA_DIR", default = "./data")]
+    data_dir: String,
 
     #[envconfig(from = "BEACON_NETCDF_ENABLE_STATISTICS", default = "true")]
     netcdf_enable_statistics: bool,
@@ -291,7 +286,6 @@ impl From<RawConfig> for Config {
                 st_within_point_cache_size: raw.st_within_point_cache_size,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
-                bbf_split_streams_slice: raw.bbf_split_streams_slice,
             },
             sql: SqlConfig {
                 enable: raw.enable_sql,
@@ -313,14 +307,29 @@ impl From<RawConfig> for Config {
                 statement_ttl_secs: raw.flight_sql_statement_ttl_secs,
                 prepared_statement_ttl_secs: raw.flight_sql_prepared_statement_ttl_secs,
             },
-            storage: StorageConfig {
-                enable_fs_events: raw.enable_fs_events,
-                enable_s3_events: raw.enable_s3_events,
-                s3: S3Config {
-                    bucket: raw.s3_bucket,
-                    enable_virtual_hosting: raw.s3_enable_virtual_hosting,
-                    data_lake: raw.s3_data_lake,
-                },
+            storage: {
+                let root = PathBuf::from(&raw.data_dir);
+                // S3 presence *is* the backend switch: `Some` => datasets on S3.
+                let s3 = if raw.s3_data_lake {
+                    Some(S3Config {
+                        bucket: raw.s3_bucket.unwrap_or_default(),
+                        endpoint: raw.aws_endpoint,
+                        region: raw.aws_region,
+                        enable_virtual_hosting: raw.s3_enable_virtual_hosting,
+                        allow_http: raw.s3_allow_http,
+                    })
+                } else {
+                    None
+                };
+                StorageConfig {
+                    datasets_dir: root.join("datasets"),
+                    tables_dir: root.join("tables"),
+                    tmp_dir: root.join("tmp"),
+                    data_dir: root,
+                    enable_fs_events: raw.enable_fs_events,
+                    enable_s3_events: raw.enable_s3_events,
+                    s3,
+                }
             },
             cors: CorsConfig {
                 allowed_methods: raw.allowed_methods,
@@ -330,8 +339,6 @@ impl From<RawConfig> for Config {
                 max_age: raw.max_age,
             },
             netcdf: NetcdfConfig {
-                use_schema_cache: raw.netcdf_use_schema_cache,
-                schema_cache_size: raw.netcdf_schema_cache_size,
                 use_reader_cache: raw.netcdf_use_reader_cache,
                 reader_cache_size: raw.netcdf_reader_cache_size,
                 enable_statistics: raw.netcdf_enable_statistics,
@@ -339,6 +346,9 @@ impl From<RawConfig> for Config {
             atlas: AtlasConfig {
                 use_reader_cache: raw.atlas_use_reader_cache,
                 reader_cache_size: raw.atlas_reader_cache_size,
+            },
+            bbf: BbfConfig {
+                split_streams_slice: raw.bbf_split_streams_slice,
             },
             api_docs: ApiDocsConfig {
                 title: raw.api_title,
@@ -351,6 +361,13 @@ impl From<RawConfig> for Config {
                 license_url: raw.api_license_url,
                 license_identifier: raw.api_license_identifier,
             },
+            data: {
+                let root = PathBuf::from(&raw.data_dir);
+                DataDirsConfig {
+                    indexes: root.join("indexes"),
+                    cache: root.join("cache"),
+                }
+            },
         }
     }
 }
@@ -360,7 +377,7 @@ impl From<RawConfig> for Config {
 /// Errors (with a descriptive message) if the path contains characters outside the
 /// URL "unreserved" set or has an empty internal segment, instead of letting an
 /// invalid value reach axum/utoipa, which panic on malformed paths.
-fn normalize_base_path(raw: &str) -> Result<String, String> {
+fn normalize_base_path(raw: &str) -> std::result::Result<String, String> {
     let trimmed = raw.trim().trim_matches('/');
     if trimmed.is_empty() {
         return Ok(String::new());
@@ -386,12 +403,38 @@ impl Config {
     /// Loads the configuration from the environment, normalizing and validating
     /// fields. Returns a descriptive error instead of panicking, so callers can
     /// report the problem cleanly and exit.
-    pub fn load() -> anyhow::Result<Config> {
+    pub fn load() -> Result<Config> {
         let mut config: Config = RawConfig::init_from_env()
-            .map_err(|e| anyhow::anyhow!("failed to load configuration from environment: {e}"))?
+            .map_err(|e| ConfigError::EnvLoad(e.to_string()))?
             .into();
-        config.server.base_path = normalize_base_path(&config.server.base_path)
-            .map_err(|e| anyhow::anyhow!("invalid BEACON_BASE_PATH: {e}"))?;
+        config.server.base_path =
+            normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
+        // S3 always needs a bucket (object_store requires it; it is never inferred
+        // from the endpoint).
+        if let Some(s3) = &config.storage.s3 {
+            if s3.bucket.trim().is_empty() {
+                return Err(ConfigError::InvalidStorage(
+                    "BEACON_S3_BUCKET is required when BEACON_S3_DATA_LAKE=true".to_string(),
+                ));
+            }
+        }
+        // Create the configured data directories (idempotent).
+        for dir in [
+            &config.storage.data_dir,
+            &config.storage.datasets_dir,
+            &config.storage.tables_dir,
+            &config.storage.tmp_dir,
+            &config.data.indexes,
+            &config.data.cache,
+        ] {
+            create_dir(dir)?;
+        }
+        tracing::debug!(
+            host = %config.server.host,
+            port = config.server.port,
+            base_path = %config.server.base_path,
+            "loaded Beacon configuration from environment"
+        );
         Ok(config)
     }
 }
@@ -404,7 +447,11 @@ static CONFIG_CELL: OnceLock<Config> = OnceLock::new();
 ///
 /// Call this once early in `main`. It is idempotent: subsequent calls return the
 /// already-initialized [`Config`].
-pub fn init() -> anyhow::Result<&'static Config> {
+#[deprecated(
+    note = "Config is no longer process-global; load it with `Config::load()` and pass \
+            `Arc<Config>` to `Runtime::new`. This remains only for legacy unit tests."
+)]
+pub fn init() -> Result<&'static Config> {
     if let Some(config) = CONFIG_CELL.get() {
         return Ok(config);
     }
@@ -433,57 +480,60 @@ impl std::ops::Deref for ConfigHandle {
 }
 
 /// Process-global configuration handle. Dereferences to [`Config`].
+///
+/// Deprecated: configuration is no longer process-global. Load it with
+/// [`Config::load`] and pass an `Arc<Config>` into `Runtime::new`. This handle
+/// remains only as a fallback for legacy unit tests.
+#[deprecated(
+    note = "Config is no longer process-global; load it with `Config::load()` and pass \
+            `Arc<Config>` to `Runtime::new`. This remains only for legacy unit tests."
+)]
 pub static CONFIG: ConfigHandle = ConfigHandle;
 
+/// Creates `path` (and any missing parents), returning a structured
+/// [`ConfigError::CreateDir`] and logging the failure on error.
+fn create_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).map_err(|source| {
+        tracing::error!(path = %path.display(), error = %source, "failed to create data directory");
+        ConfigError::CreateDir {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+/// [`create_dir`] for the `lazy_static` data-directory accessors below, which
+/// cannot return a `Result`. On failure it panics with the structured
+/// [`ConfigError`] message (path + underlying I/O error) after logging it.
+fn ensure_dir(path: PathBuf) -> PathBuf {
+    if let Err(e) = create_dir(&path) {
+        panic!("{e}");
+    }
+    path
+}
+
 lazy_static! {
-    pub static ref DATA_DIR: PathBuf = {
-        std::fs::create_dir_all("./data").expect("Failed to create data dir");
-        PathBuf::from("./data")
-    };
+    pub static ref DATA_DIR: PathBuf = ensure_dir(PathBuf::from("./data"));
     /// The path to the datasets directory
-    pub static ref DATASETS_DIR_PATH: PathBuf = {
-        //Create the dir if it doesn't exist
-        let dir = DATA_DIR.join("datasets");
-        std::fs::create_dir_all(&dir).expect("Failed to create datasets dir");
-        dir
-    };
+    pub static ref DATASETS_DIR_PATH: PathBuf = ensure_dir(DATA_DIR.join("datasets"));
     /// The prefix for the datasets directory for object store paths
     pub static ref DATASETS_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("datasets");
 
     pub static ref TABLES_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("tables");
-    pub static ref TABLES_DIR: PathBuf = {
-        let dir = DATA_DIR.join("tables");
-        std::fs::create_dir_all(&dir).expect("Failed to create tables dir");
-        dir
-    };
+    pub static ref TABLES_DIR: PathBuf = ensure_dir(DATA_DIR.join("tables"));
 
-    pub static ref TMP_DIR: PathBuf = {
-        let dir = DATA_DIR.join("tmp");
-        std::fs::create_dir_all(&dir).expect("Failed to create tmp dir");
-        dir
-    };
-
+    pub static ref TMP_DIR: PathBuf = ensure_dir(DATA_DIR.join("tmp"));
 
     /// The path to the indexes directory
-    pub static ref INDEX_DIR_PATH: PathBuf = {
-        //Create the dir if it doesn't exist
-        let dir = DATA_DIR.join("indexes");
-        std::fs::create_dir_all(&dir).expect("Failed to create indexes dir");
-        dir
-    };
+    pub static ref INDEX_DIR_PATH: PathBuf = ensure_dir(DATA_DIR.join("indexes"));
     /// The prefix for the indexes directory for object store paths
     pub static ref INDEX_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("indexes");
 
     /// The path to the cache directory
-    pub static ref CACHE_DIR_PATH: PathBuf = {
-        //Create the dir if it doesn't exist
-        let dir = DATA_DIR.join("cache");
-        std::fs::create_dir_all(&dir).expect("Failed to create cache dir");
-        dir
-    };
+    pub static ref CACHE_DIR_PATH: PathBuf = ensure_dir(DATA_DIR.join("cache"));
     /// The prefix for the cache directory for object store paths
     pub static ref CACHE_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("cache");

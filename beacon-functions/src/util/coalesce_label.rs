@@ -57,7 +57,7 @@ impl ScalarUDFImpl for CoalesceLabel {
             let label = &args.args[idx * 2 + 1];
 
             // Convert the column to an ArrayRef
-            arrays.push(col.to_array(args.number_rows).unwrap());
+            arrays.push(col.to_array(args.number_rows)?);
 
             // Convert the label to a StringBuilder
             if let PhysicalColumnarValue::Scalar(ScalarValue::Utf8(Some(label_str))) = label {

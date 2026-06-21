@@ -5,8 +5,8 @@ pub struct SystemInfo {
 }
 
 impl SystemInfo {
-    pub fn new() -> Self {
-        let sys_info = if beacon_config::CONFIG.runtime.enable_sys_info {
+    pub fn new(enable_sys_info: bool) -> Self {
+        let sys_info = if enable_sys_info {
             Some(sysinfo::System::new_all())
         } else {
             None
@@ -21,6 +21,6 @@ impl SystemInfo {
 
 impl Default for SystemInfo {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }

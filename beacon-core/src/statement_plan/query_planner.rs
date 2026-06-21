@@ -35,9 +35,12 @@ impl BeaconQueryPlanner {
     }
 
     fn default_planner(&self) -> DefaultPhysicalPlanner {
-        DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
-            BeaconExtensionPlanner::new(self.session.clone()),
-        )])
+        DefaultPhysicalPlanner::with_extension_planners(vec![
+            Arc::new(BeaconExtensionPlanner::new(self.session.clone())),
+            // Lowers `datafusion-federation`'s `Federated` extension node (the
+            // pushed-down remote sub-plan) into its virtual Flight SQL scan.
+            Arc::new(datafusion_federation::FederatedPlanner::new()),
+        ])
     }
 }
 

@@ -1,27 +1,22 @@
 use std::sync::Arc;
 
-use arrow::datatypes::Field;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::DatasetsStore;
-use datafusion::{
-    catalog::TableFunctionImpl,
-    execution::object_store::ObjectStoreUrl,
-    logical_expr::{Documentation, Signature},
-    prelude::SessionContext,
-};
+use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 
+// The shared table-function trait and the glob-arg parser now live in
+// `beacon-common` so each `beacon-arrow-*` format crate can host its own
+// `read_*` table function. Re-exported here for the cross-format functions
+// (`read_schema`, `list_datasets`) and existing consumers.
+pub use beacon_common::table_function::{parse_glob_paths_arg, BeaconTableFunctionImpl};
+
+// Cross-format table functions that don't belong to a single format crate.
 pub mod list_datasets;
-pub mod read_arrow;
-pub mod read_atlas;
-pub mod read_bbf;
-pub mod read_csv;
-pub mod read_netcdf;
-pub mod read_odv_ascii;
-pub mod read_parquet;
 pub mod read_schema;
-pub mod read_tiff;
-pub mod read_zarr;
 
+/// Build the `read_*` table functions. The per-format functions are constructed
+/// from their respective `beacon-arrow-*` crate; the cross-format ones
+/// (`read_schema`, `list_datasets`) live here.
 pub fn register_table_functions(
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
@@ -30,39 +25,43 @@ pub fn register_table_functions(
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 ) -> Vec<Arc<dyn BeaconTableFunctionImpl>> {
     vec![
-        Arc::new(read_parquet::ReadParquetFunc::new(
+        Arc::new(beacon_arrow_parquet::datafusion::ReadParquetFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_arrow::ReadArrowFunc::new(
+        Arc::new(beacon_arrow_geoparquet::datafusion::ReadGeoParquetFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_csv::ReadCsvFunc::new(
+        Arc::new(beacon_arrow_ipc::datafusion::ReadArrowFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_zarr::ReadZarrFunc::new(
+        Arc::new(beacon_arrow_csv::datafusion::ReadCsvFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_netcdf::ReadNetCDFFunc::new(
+        Arc::new(beacon_arrow_zarr::datafusion::ReadZarrFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
+        )),
+        Arc::new(beacon_arrow_netcdf::datafusion::ReadNetCDFFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
+        )),
+        Arc::new(beacon_arrow_tiff::datafusion::ReadTiffFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
             datasets_object_store.clone(),
         )),
-        Arc::new(read_tiff::ReadTiffFunc::new(
-            runtime_handle.clone(),
-            session_ctx.clone(),
-            data_object_store_url.clone(),
-            datasets_object_store.clone(),
-        )),
-        Arc::new(read_bbf::ReadBBFFunc::new(
+        Arc::new(beacon_arrow_bbf::datafusion::ReadBBFFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
@@ -73,16 +72,15 @@ pub fn register_table_functions(
             data_object_store_url.clone(),
             datasets_object_store.clone(),
         )),
-        Arc::new(read_odv_ascii::ReadOdvAsciiFunc::new(
+        Arc::new(beacon_arrow_odv::datafusion::ReadOdvAsciiFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
-        Arc::new(read_atlas::ReadAtlasFunc::new(
+        Arc::new(beacon_arrow_atlas::datafusion::ReadAtlasFunc::new(
             runtime_handle.clone(),
             session_ctx.clone(),
             data_object_store_url.clone(),
-            datasets_object_store,
         )),
         Arc::new(list_datasets::ListDatasetsFunc::new(
             runtime_handle,
@@ -91,30 +89,4 @@ pub fn register_table_functions(
             file_formats,
         )),
     ]
-}
-
-pub trait BeaconTableFunctionImpl: TableFunctionImpl + Send + Sync {
-    fn name(&self) -> String;
-    fn as_any(&self) -> &dyn std::any::Any;
-    fn arguments(&self) -> Option<Vec<Field>> {
-        None
-    }
-    fn description(&self) -> Option<String> {
-        None
-    }
-    fn signature(&self) -> Signature {
-        // Default field that accepts glob paths
-        let mut all_datatypes = vec![];
-        let options = self.arguments().unwrap_or_default();
-        for option in options {
-            all_datatypes.push(option.data_type().clone());
-        }
-        Signature::exact(
-            all_datatypes,
-            datafusion::logical_expr::Volatility::Immutable,
-        )
-    }
-    fn documentation(&self) -> Option<Documentation> {
-        None
-    }
 }

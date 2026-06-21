@@ -1,0 +1,24 @@
+[package]
+name = "beacon-arrow-bbf"
+version = "1.7.3"
+edition = "2024"
+
+[dependencies]
+arrow = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+beacon-common = { path = "../../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+
+# Beacon binary format (git submodule, consumed by path)
+beacon-binary-format = { path = "../beacon-binary-format", default-features = false, features = ["arrow-58", "object-store-13"] }
+nd-arrow-array = { git = "https://github.com/maris-development/nd-arrow-array.git", branch = "main", version = "2.0.0", default-features = false, features = ["arrow-58"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

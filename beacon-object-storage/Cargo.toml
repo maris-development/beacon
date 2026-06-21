@@ -1,6 +1,6 @@
 [package]
 name = "beacon-object-storage"
-version = "1.7.1"
+version = "1.7.3"
 edition = "2024"
 
 [dependencies]
@@ -23,8 +23,6 @@ chrono = { workspace = true }
 flume = { workspace = true }
 thiserror = { workspace = true }
 object_store = { workspace = true }
-
-beacon-config = { path = "../beacon-config" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

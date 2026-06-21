@@ -12,10 +12,12 @@ use wkt::Wkt;
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct WithinPointUdf {
     signature: Signature,
+    /// LRU cache capacity for point-in-geometry results (per invocation).
+    cache_size: usize,
 }
 
 impl WithinPointUdf {
-    pub fn new() -> Self {
+    pub fn new(cache_size: usize) -> Self {
         Self {
             signature: Signature::exact(
                 vec![
@@ -25,6 +27,7 @@ impl WithinPointUdf {
                 ],
                 datafusion::logical_expr::Volatility::Immutable,
             ),
+            cache_size,
         }
     }
 }
@@ -53,7 +56,7 @@ impl ScalarUDFImpl for WithinPointUdf {
         &self,
         args: datafusion::logical_expr::ScalarFunctionArgs,
     ) -> datafusion::error::Result<datafusion::logical_expr::ColumnarValue> {
-        let resized_lon_array = args.args[1].to_array(args.number_rows).unwrap();
+        let resized_lon_array = args.args[1].to_array(args.number_rows)?;
         let mut lon_iter = resized_lon_array
             .as_primitive_opt::<Float64Type>()
             .map(|array| array.iter())
@@ -61,7 +64,7 @@ impl ScalarUDFImpl for WithinPointUdf {
                 "st_within_point expects a float64 array as its second argument".to_string(),
             ))?;
 
-        let resized_lat_array = args.args[2].to_array(args.number_rows).unwrap();
+        let resized_lat_array = args.args[2].to_array(args.number_rows)?;
         let mut lat_iter = resized_lat_array
             .as_primitive_opt::<Float64Type>()
             .map(|array| array.iter())
@@ -88,9 +91,18 @@ impl ScalarUDFImpl for WithinPointUdf {
                                 .map_err(|e| {
                                     datafusion::error::DataFusionError::Execution(e.to_string())
                                 })?;
-                        let geometry: Geometry = wkt.try_into().unwrap();
-                        let result = st_within_point_fast(geometry, &mut lon_iter, &mut lat_iter)
-                            .map_err(|e| {
+                        let geometry: Geometry = wkt.try_into().map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "st_within_point: invalid WKT geometry: {e:?}"
+                            ))
+                        })?;
+                        let result = st_within_point_fast(
+                            geometry,
+                            &mut lon_iter,
+                            &mut lat_iter,
+                            self.cache_size,
+                        )
+                        .map_err(|e| {
                             datafusion::error::DataFusionError::Execution(e.to_string())
                         })?;
                         return Ok(ColumnarValue::Array(Arc::new(
@@ -135,7 +147,8 @@ fn st_within_point_impl(
         (Some(geom), Some(lon), Some(lat)) => {
             // ST_WithinPoint implementation
             let wkt = Wkt::from_str(geom).map_err(|e| anyhow::anyhow!(e))?;
-            let geometry: Geometry = wkt.try_into().unwrap();
+            let geometry: Geometry =
+                wkt.try_into().map_err(|e| anyhow::anyhow!("invalid WKT geometry: {e:?}"))?;
 
             let point = geo::Point::new(lon, lat);
             Ok(geometry.contains(&point))
@@ -148,10 +161,10 @@ fn st_within_point_fast(
     geom: Geometry,
     lon: &mut dyn Iterator<Item = Option<f64>>,
     lat: &mut dyn Iterator<Item = Option<f64>>,
+    cache_size: usize,
 ) -> anyhow::Result<Vec<bool>> {
     let mut cache: lru::LruCache<Point<OrderedFloat<f64>>, bool> = lru::LruCache::new(
-        NonZero::new(beacon_config::CONFIG.runtime.st_within_point_cache_size)
-            .expect("Cache size must be non-zero"),
+        NonZero::new(cache_size).expect("Cache size must be non-zero"),
     );
     let bounding_rect = geom.bounding_rect();
     lon.zip(lat)
@@ -199,6 +212,7 @@ fn st_within_point_fast_impl(
 
 impl Default for WithinPointUdf {
     fn default() -> Self {
-        Self::new()
+        // Historical default cache size (formerly the env default).
+        Self::new(10_000)
     }
 }

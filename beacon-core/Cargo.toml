@@ -1,6 +1,6 @@
 [package]
 name = "beacon-core"
-version = "1.7.1"
+version = "1.7.3"
 edition = "2021"
 
 [dependencies]
@@ -15,6 +15,7 @@ utoipa = { workspace=true}
 typetag =  { workspace=true}
 async-trait = { workspace=true }
 datafusion = { workspace=true }
+datafusion-federation = { workspace=true }
 geodatafusion = { workspace=true }
 arrow = { workspace=true}
 glob = { workspace = true}
@@ -34,14 +35,19 @@ geojson = "0.24.2"
 tracing = { workspace=true}
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
-beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
-beacon-arrow-odv = { path = "../beacon-arrow-odv" }
-beacon-arrow-tiff = { path = "../beacon-arrow-tiff" }
+beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
+beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
+beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
 beacon-functions = { path = "../beacon-functions" }
 beacon-data-lake = { path = "../beacon-data-lake" }
-beacon-formats = { path = "../beacon-formats" }
+beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
+beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
+beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
+beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
+beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-common = { path = "../beacon-common" }
 beacon-iceberg = { path = "../beacon-iceberg" }
-beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-nd-array = { path = "../beacon-file-formats/beacon-nd-array" }

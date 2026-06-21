@@ -1,13 +1,16 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    path::PathBuf,
     sync::Arc,
 };
+
+use crate::config::StorageConfig;
 
 use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, aws::AmazonS3Builder,
-    local::LocalFileSystem, path::Path, prefix::PrefixStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, local::LocalFileSystem, path::Path,
+    prefix::PrefixStore,
 };
 use parking_lot::RwLock;
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -19,40 +22,26 @@ use crate::{
     object_cache::ObjectCache,
 };
 
-/// Build the datasets [`DatasetsStore`] from the process-wide Beacon configuration.
+/// Build the datasets [`DatasetsStore`] from the given storage configuration.
 ///
-/// The backing object store is selected from [`beacon_config::CONFIG`]:
-/// - When `storage.s3.data_lake` is set, an S3-compatible store is configured
-///   from the standard AWS environment variables (see [`AmazonS3Builder::from_env`]).
-///   For path-style requests a bucket name (`BEACON_S3_BUCKET`) is required; for
-///   virtual-hosted-style the bucket is encoded in the endpoint host.
-/// - Otherwise a local filesystem store rooted at [`beacon_config::DATASETS_DIR_PATH`]
-///   is used.
-pub(crate) async fn create_datasets_store() -> Result<DatasetsStore, String> {
-    let storage = &beacon_config::CONFIG.storage;
-
+/// The backing object store is selected from `storage`:
+/// - When `storage.s3` is `Some`, an S3-compatible store is configured from those
+///   settings (credentials still come from the standard AWS chain; see
+///   [`AmazonS3Builder::from_env`]).
+/// - Otherwise a local filesystem store rooted at `storage.datasets_dir` is used.
+///
+/// The `storage` config is retained on the returned store so
+/// [`DatasetsStore::translate_netcdf_url_path`] uses the same backend selection
+/// without consulting any process-global config.
+pub(crate) async fn create_datasets_store(storage: &StorageConfig) -> StorageResult<DatasetsStore> {
     let (inner, event_listener): (
         Arc<dyn ObjectStore + Send + Sync>,
         Option<Arc<dyn EventListener>>,
-    ) = if storage.s3.data_lake {
+    ) = if let Some(s3) = &storage.s3 {
         tracing::info!("Using S3 object store for datasets");
 
-        let s3 = &storage.s3;
-        let mut builder = AmazonS3Builder::from_env()
-            .with_allow_http(true)
-            .with_virtual_hosted_style_request(s3.enable_virtual_hosting);
-
-        if !s3.enable_virtual_hosting {
-            // Path-style requests need an explicit bucket name.
-            let bucket = s3.bucket.as_ref().ok_or_else(|| {
-                "S3 bucket name not configured (set BEACON_S3_BUCKET)".to_string()
-            })?;
-            builder = builder.with_bucket_name(bucket);
-        }
-
-        let store = builder
-            .build()
-            .map_err(|e| format!("Failed to build S3 object store: {e}"))?;
+        // `object_store::Error` converts into `StorageError::ObjectStore` via `?`.
+        let store = s3.amazon_s3_builder().build()?;
 
         // TODO: wire S3 change notifications into an `EventListener` so the
         // cache-backed fast path can be enabled for the S3 backend too.
@@ -60,10 +49,8 @@ pub(crate) async fn create_datasets_store() -> Result<DatasetsStore, String> {
     } else {
         tracing::info!("Using local filesystem object store for datasets");
 
-        let root = beacon_config::DATASETS_DIR_PATH.clone();
-        let store = LocalFileSystem::new_with_prefix(&root)
-            .map_err(|e| format!("Failed to build local filesystem object store: {e}"))?
-            .with_automatic_cleanup(true);
+        let root = storage.datasets_dir.clone();
+        let store = LocalFileSystem::new_with_prefix(&root)?.with_automatic_cleanup(true);
         let inner = Arc::new(store) as Arc<dyn ObjectStore + Send + Sync>;
 
         // Watch the datasets directory for changes (on by default; see
@@ -88,7 +75,22 @@ pub(crate) async fn create_datasets_store() -> Result<DatasetsStore, String> {
         (inner, event_listener)
     };
 
-    Ok(DatasetsStore::new(inner, event_listener).await)
+    Ok(DatasetsStore::new(inner, event_listener)
+        .await
+        .with_storage(storage.clone()))
+}
+
+/// Build a [`DatasetsStore`] backed by the local filesystem rooted at
+/// `datasets_dir`, using default storage settings (no S3, no filesystem events).
+///
+/// Intended for tests and embedders that only need a plain local datasets store
+/// without composing a full [`crate::ObjectStores`].
+pub async fn local_datasets_store(datasets_dir: PathBuf) -> StorageResult<DatasetsStore> {
+    let storage = StorageConfig {
+        datasets_dir,
+        ..StorageConfig::default()
+    };
+    create_datasets_store(&storage).await
 }
 
 pub trait EventListener: Send + Sync {
@@ -117,6 +119,10 @@ pub struct DatasetsStore {
     /// Background task that drains [`EventListener::poll`] into `object_cache`
     /// and fans events out to `subscribers`. Aborted when the store is dropped.
     poll_task: Option<JoinHandle<()>>,
+    /// Storage configuration this store was built from, retained for NetCDF URL
+    /// translation (backend selection + local datasets directory). Defaults to a
+    /// local configuration.
+    storage: StorageConfig,
 }
 
 impl DatasetsStore {
@@ -169,7 +175,22 @@ impl DatasetsStore {
             event_listener,
             subscribers,
             poll_task,
+            storage: StorageConfig::default(),
         }
+    }
+
+    /// Attach the storage config used to build this store so
+    /// [`Self::translate_netcdf_url_path`] resolves URLs without a global config.
+    pub fn with_storage(mut self, storage: StorageConfig) -> Self {
+        self.storage = storage;
+        self
+    }
+
+    /// The storage configuration this store was built from (backend selection +
+    /// local directory layout). Writers that need the configured paths read it
+    /// here, e.g. the NetCDF output sink's temporary directory.
+    pub fn storage(&self) -> &StorageConfig {
+        &self.storage
     }
 
     /// Continuously drain events from `listener`, apply them to `cache`, and fan
@@ -231,8 +252,11 @@ impl DatasetsStore {
             }
             let path = location.as_ref();
             for (prefix, tx) in subs.iter() {
-                if path.starts_with(prefix.as_str()) {
-                    let _ = tx.send(event.clone());
+                if path.starts_with(prefix.as_str()) && tx.send(event.clone()).is_err() {
+                    // No live receivers for this prefix; the sender is pruned
+                    // lazily by `subscribe_events`. Logged at TRACE since a
+                    // subscriber dropping is normal.
+                    tracing::trace!(prefix = %prefix, "no live subscribers; event dropped");
                 }
             }
         }
@@ -288,47 +312,32 @@ impl DatasetsStore {
 
     /// Translate an object path into a NetCDF-friendly location string.
     ///
-    /// The backend is determined from [`beacon_config::CONFIG`] (the same source
-    /// [`create_datasets_store`] uses to build the store):
-    /// - **Local datasets**: a plain filesystem path rooted at
-    ///   [`beacon_config::DATASETS_DIR_PATH`] (no `file://` scheme — NetCDF
-    ///   libraries open local paths directly).
-    /// - **S3 datasets**: an `http://`/`https://` URL built from `AWS_ENDPOINT`
-    ///   and the configured bucket, with `#mode=bytes` appended (required by some
-    ///   NetCDF libraries for byte-range access).
+    /// The backend is determined from the storage config this store was built
+    /// with (retained via [`Self::with_storage`]):
+    /// - **Local datasets**: a plain filesystem path rooted at the configured
+    ///   datasets directory (no `file://` scheme — NetCDF libraries open local
+    ///   paths directly).
+    /// - **S3 datasets**: an `http://`/`https://` URL built from the configured
+    ///   S3 endpoint ([`crate::config::S3Config::endpoint`]) and bucket, with
+    ///   `#mode=bytes` appended (required by some NetCDF libraries for byte-range
+    ///   access). This is the same endpoint used to build the store, so the two
+    ///   never diverge.
     ///
     /// This function intentionally never returns an `s3://...` URL.
     pub fn translate_netcdf_url_path(&self, object: &Path) -> StorageResult<String> {
-        let storage = &beacon_config::CONFIG.storage;
-        if storage.s3.data_lake {
-            let endpoint = s3_endpoint()?;
-            let url = s3_object_url(
-                &endpoint,
-                storage.s3.bucket.as_deref(),
-                storage.s3.enable_virtual_hosting,
-                object,
-            )?;
+        if let Some(s3) = &self.storage.s3 {
+            let endpoint = s3
+                .endpoint
+                .as_deref()
+                .ok_or(error::StorageError::MissingConfig {
+                    key: "AWS_ENDPOINT",
+                })?;
+            let url = s3_object_url(endpoint, &s3.bucket, s3.enable_virtual_hosting, object)?;
             Ok(append_mode_bytes(url))
         } else {
-            local_object_path(&beacon_config::DATASETS_DIR_PATH, object)
+            local_object_path(&self.storage.datasets_dir, object)
         }
     }
-}
-
-/// Reads and validates the S3 endpoint used to build NetCDF URLs.
-fn s3_endpoint() -> StorageResult<String> {
-    let endpoint =
-        std::env::var("AWS_ENDPOINT").map_err(|source| error::StorageError::MissingEnvVar {
-            var: "AWS_ENDPOINT",
-            source,
-        })?;
-    if endpoint.trim().is_empty() {
-        return Err(error::StorageError::InvalidConfig {
-            key: "AWS_ENDPOINT",
-            message: "must not be empty".to_string(),
-        });
-    }
-    Ok(endpoint)
 }
 
 /// Builds the `http(s)` URL for an object served from an S3-compatible backend.
@@ -338,7 +347,7 @@ fn s3_endpoint() -> StorageResult<String> {
 ///   endpoint host, so no bucket segment is added).
 fn s3_object_url(
     endpoint: &str,
-    bucket: Option<&str>,
+    bucket: &str,
     is_virtual_hosted_style: bool,
     object: &Path,
 ) -> StorageResult<String> {
@@ -356,20 +365,16 @@ fn s3_object_url(
     let key = object.as_ref().trim_start_matches('/');
 
     let url = if is_virtual_hosted_style {
+        // Bucket is encoded in the endpoint host, so no bucket segment is added.
         if key.is_empty() {
             endpoint.to_string()
         } else {
             format!("{endpoint}/{key}")
         }
+    } else if key.is_empty() {
+        format!("{endpoint}/{bucket}")
     } else {
-        let bucket = bucket.ok_or(error::StorageError::MissingConfig {
-            key: "BEACON_S3_BUCKET",
-        })?;
-        if key.is_empty() {
-            format!("{endpoint}/{bucket}")
-        } else {
-            format!("{endpoint}/{bucket}/{key}")
-        }
+        format!("{endpoint}/{bucket}/{key}")
     };
 
     Ok(url)
@@ -873,12 +878,7 @@ mod tests {
 
     #[test]
     fn s3_object_url_path_style_includes_bucket() {
-        let url = s3_object_url(
-            "https://example.test",
-            Some("my-bucket"),
-            false,
-            &Path::from("a/b.nc"),
-        )
+        let url = s3_object_url("https://example.test", "my-bucket", false, &Path::from("a/b.nc"))
         .unwrap();
         assert_eq!(url, "https://example.test/my-bucket/a/b.nc");
     }
@@ -889,7 +889,7 @@ mod tests {
         // trailing slash on the endpoint is trimmed.
         let url = s3_object_url(
             "https://my-bucket.example.test/",
-            None,
+            "my-bucket",
             true,
             &Path::from("a/b.nc"),
         )
@@ -899,30 +899,13 @@ mod tests {
 
     #[test]
     fn s3_object_url_requires_http_endpoint() {
-        let err = s3_object_url(
-            "s3://my-bucket",
-            Some("my-bucket"),
-            false,
-            &Path::from("a.nc"),
-        )
-        .expect_err("non-http endpoint must be rejected");
+        let err = s3_object_url("s3://my-bucket", "my-bucket", false, &Path::from("a.nc"))
+            .expect_err("non-http endpoint must be rejected");
         assert!(matches!(
             err,
             error::StorageError::InvalidConfig {
                 key: "AWS_ENDPOINT",
                 ..
-            }
-        ));
-    }
-
-    #[test]
-    fn s3_object_url_path_style_requires_bucket() {
-        let err = s3_object_url("https://example.test", None, false, &Path::from("a.nc"))
-            .expect_err("path-style without bucket must be rejected");
-        assert!(matches!(
-            err,
-            error::StorageError::MissingConfig {
-                key: "BEACON_S3_BUCKET"
             }
         ));
     }

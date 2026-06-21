@@ -30,8 +30,12 @@ pub fn create_listing_url(path: String) -> datafusion::error::Result<ListingTabl
 
 /// Create a temporary output file with the given extension, used to stage query
 /// results before they are streamed back to the client.
-pub fn create_temp_output_file(extension: &str) -> TempOutputFile {
-    TempOutputFile::new(extension)
+///
+/// `tmp_dir` MUST be the directory the tmp object store
+/// ([`crate::TMP_OBJECT_STORE_URL`]) is rooted at, so the COPY-written bytes are
+/// visible when the file is read back. See [`TempOutputFile::new`].
+pub fn create_temp_output_file(tmp_dir: &Path, extension: &str) -> TempOutputFile {
+    TempOutputFile::new(tmp_dir, extension)
 }
 
 /// Discover the datasets matching `pattern` (default `*`) under the datasets

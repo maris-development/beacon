@@ -46,7 +46,10 @@ impl FileCollection {
             schemas.push(schema.clone());
         }
 
-        let super_schema = super_type_schema(&schemas).unwrap();
+        let super_schema = super_type_schema(&schemas).map_err(|e| {
+            tracing::error!(error = %e, "failed to compute union schema for file collection");
+            DataFusionError::Plan(format!("failed to compute union schema: {e}"))
+        })?;
 
         let config = ListingTableConfig::new_with_multi_paths(table_urls)
             .with_listing_options(listing_options)

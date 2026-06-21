@@ -10,73 +10,56 @@
 //!   prefix-scoped event subscription, and provides NetCDF URL translation.
 //! - **Tables** / **tmp**: local filesystem.
 
-use std::{env::temp_dir, sync::Arc};
+use std::sync::Arc;
 
 use object_store::{ObjectStore, local::LocalFileSystem};
 
+pub mod config;
 pub mod datasets_store;
 pub mod error;
 pub mod event;
 pub mod fs_event_listener;
 pub mod object_cache;
 
-pub use datasets_store::{DATASETS_WRITEABLE_PREFIX, DatasetsStore};
+pub use config::{S3Config, StorageConfig};
+pub use datasets_store::{DATASETS_WRITEABLE_PREFIX, DatasetsStore, local_datasets_store};
 
 use crate::error::StorageResult;
 
-/// Global datasets store.
+/// The set of object stores owned by a single Beacon runtime.
 ///
-/// Using a `OnceCell` ensures we build the store exactly once (important so any
-/// background event-polling task and its caches live for the process lifetime).
-static DATASETS_OBJECT_STORE: tokio::sync::OnceCell<Arc<DatasetsStore>> =
-    tokio::sync::OnceCell::const_new();
-static TABLES_OBJECT_STORE: tokio::sync::OnceCell<Arc<dyn ObjectStore>> =
-    tokio::sync::OnceCell::const_new();
-static TMP_OBJECT_STORE: tokio::sync::OnceCell<Arc<dyn ObjectStore>> =
-    tokio::sync::OnceCell::const_new();
-
-pub async fn init_datastores() -> StorageResult<()> {
-    let _ = get_datasets_object_store().await;
-    let _ = get_tables_object_store().await;
-    let _ = get_tmp_object_store().await;
-    Ok(())
+/// Built once from a [`StorageConfig`] and the resolved data directories, then
+/// owned by the runtime and handed to the components that need it. There is no
+/// process-global store, so independent runtimes can use different backends.
+#[derive(Clone)]
+pub struct ObjectStores {
+    /// Datasets store (local filesystem or S3, per `storage`).
+    pub datasets: Arc<DatasetsStore>,
+    /// Local filesystem store backing Beacon's tables.
+    pub tables: Arc<dyn ObjectStore>,
+    /// Local filesystem store backing Beacon's temporary files.
+    pub tmp: Arc<dyn ObjectStore>,
 }
 
-pub async fn get_datasets_object_store() -> Arc<DatasetsStore> {
-    DATASETS_OBJECT_STORE
-        .get_or_init(|| async {
-            Arc::new(
-                datasets_store::create_datasets_store()
-                    .await
-                    .expect("Failed to initialize datasets object store"),
-            )
-        })
-        .await
-        .clone()
-}
+impl ObjectStores {
+    /// Build all three object stores, returning a structured error if any fails.
+    ///
+    /// The local roots and S3 backend selection all come from `storage`.
+    pub async fn new(storage: &StorageConfig) -> StorageResult<Self> {
+        let datasets = Arc::new(datasets_store::create_datasets_store(storage).await?);
 
-pub async fn get_tables_object_store() -> Arc<dyn ObjectStore> {
-    TABLES_OBJECT_STORE
-        .get_or_init(|| async {
-            // For tables, we always use the local filesystem
-            Arc::new(
-                LocalFileSystem::new_with_prefix(beacon_config::TABLES_DIR.clone())
-                    .expect("Failed to initialize tables object store")
-                    .with_automatic_cleanup(true),
-            ) as Arc<dyn ObjectStore>
-        })
-        .await
-        .clone()
-}
+        let tables = Arc::new(
+            LocalFileSystem::new_with_prefix(&storage.tables_dir)?.with_automatic_cleanup(true),
+        ) as Arc<dyn ObjectStore>;
 
-pub async fn get_tmp_object_store() -> Arc<dyn ObjectStore> {
-    TMP_OBJECT_STORE
-        .get_or_init(|| async {
-            Arc::new(
-                LocalFileSystem::new_with_prefix(temp_dir())
-                    .expect("Failed to initialize tmp object store"),
-            ) as Arc<dyn ObjectStore>
+        let tmp =
+            Arc::new(LocalFileSystem::new_with_prefix(&storage.tmp_dir)?) as Arc<dyn ObjectStore>;
+
+        tracing::info!("object stores initialized");
+        Ok(Self {
+            datasets,
+            tables,
+            tmp,
         })
-        .await
-        .clone()
+    }
 }

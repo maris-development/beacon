@@ -1,6 +1,6 @@
 [workspace]
-members = ["beacon-api", "beacon-arrow-netcdf", "beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-formats", "beacon-arrow-zarr", "beacon-binary-format", "beacon-object-storage", "beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "beacon-nd-array", "beacon-arrow-tiff", "beacon-arrow-atlas"]
-exclude = ["beacon-binary-format-toolbox"]
+members = ["beacon-api", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
+exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
 tokio = { version = "1.47.1", features = ["full"] }
@@ -42,8 +42,13 @@ bloomfilter = { version = "1", features = ["serde"] }
 bincode = "1"
 
 datafusion = "^53"
+# Pinned exactly: 0.5.3 is the release whose `datafusion` dep resolves to ^53
+# (matching our 53.1.0). Its `sql` feature gates the SQLExecutor/SQLTableSource
+# types used by the federated remote-table provider.
+datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 geodatafusion = "0.4.0"
 object_store = { version = "0.13.1", features = ["aws"] }
+tonic = "0.14.1"
 
 iceberg-rust = "0.10"
 datafusion_iceberg = "0.10"
@@ -59,4 +64,4 @@ geoarrow-array = "^0.8"
 geoarrow-schema = "^0.8"
 geoparquet = "^0.8"
 
-beacon-nd-arrow = { path = "beacon-nd-arrow" }
+beacon-nd-arrow = { path = "beacon-file-formats/beacon-nd-arrow" }

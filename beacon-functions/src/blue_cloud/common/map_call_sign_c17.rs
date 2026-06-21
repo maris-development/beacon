@@ -81,15 +81,14 @@ fn map_call_sign_c17_impl(
 
     match (&parameters[0], &parameters[1]) {
         (ColumnarValue::Array(string_array), ColumnarValue::Array(ts_array)) => {
-            let call_sign_array = string_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let call_sign_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                string_array,
+                "map_call_sign_c17",
+            )?;
 
-            let timestamp_array = ts_array
-                .as_any()
-                .downcast_ref::<arrow::array::TimestampNanosecondArray>()
-                .unwrap();
+            let timestamp_array = crate::util::downcast_arg::<
+                arrow::array::TimestampNanosecondArray,
+            >(ts_array, "map_call_sign_c17")?;
 
             let c17 =
                 call_sign_array
@@ -97,7 +96,7 @@ fn map_call_sign_c17_impl(
                     .zip(timestamp_array.iter())
                     .map(|(call_sign, timestamp)| match (call_sign, timestamp) {
                         (Some(cs), Some(ts)) => {
-                            let naive_dt = NaiveDateTime::from_timestamp_nanos(ts).unwrap();
+                            let naive_dt = NaiveDateTime::from_timestamp_nanos(ts)?;
                             find_c17(&CALL_SIGN_MAP, cs, naive_dt)
                         }
                         _ => None,
@@ -108,17 +107,16 @@ fn map_call_sign_c17_impl(
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
         (ColumnarValue::Scalar(ScalarValue::Utf8(call_sign)), ColumnarValue::Array(time_array)) => {
-            let timestamp_array = time_array
-                .as_any()
-                .downcast_ref::<arrow::array::TimestampNanosecondArray>()
-                .unwrap();
+            let timestamp_array = crate::util::downcast_arg::<
+                arrow::array::TimestampNanosecondArray,
+            >(time_array, "map_call_sign_c17")?;
 
             let c17 =
                 timestamp_array
                     .iter()
                     .map(|timestamp| match (call_sign.as_ref(), timestamp) {
                         (Some(cs), Some(ts)) => {
-                            let naive_dt = NaiveDateTime::from_timestamp_nanos(ts).unwrap();
+                            let naive_dt = NaiveDateTime::from_timestamp_nanos(ts)?;
                             find_c17(&CALL_SIGN_MAP, cs, naive_dt)
                         }
                         _ => None,
@@ -132,16 +130,16 @@ fn map_call_sign_c17_impl(
             ColumnarValue::Array(call_sign_array),
             ColumnarValue::Scalar(ScalarValue::TimestampNanosecond(timestamp, _)),
         ) => {
-            let call_signs = call_sign_array
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let call_signs = crate::util::downcast_arg::<arrow::array::StringArray>(
+                call_sign_array,
+                "map_call_sign_c17",
+            )?;
 
             let c17 = call_signs
                 .iter()
                 .map(|call_sign| match (call_sign, timestamp) {
                     (Some(cs), Some(ts)) => {
-                        let naive_dt = NaiveDateTime::from_timestamp_nanos(*ts).unwrap();
+                        let naive_dt = NaiveDateTime::from_timestamp_nanos(*ts)?;
                         find_c17(&CALL_SIGN_MAP, cs, naive_dt)
                     }
                     _ => None,

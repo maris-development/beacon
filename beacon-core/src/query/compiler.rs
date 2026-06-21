@@ -13,7 +13,22 @@ pub async fn compile_json_query(
     query_body: QueryBody,
     session: &SessionContext,
 ) -> anyhow::Result<LogicalPlan> {
-    let mut builder = if beacon_config::CONFIG.sql.enable_pushdown_projection {
+    // The runtime config is published as a SessionConfig extension; fall back to
+    // defaults if absent (e.g. a bare session in a unit test).
+    let config = session.state().config().get_extension::<beacon_config::Config>();
+    let enable_pushdown_projection = config
+        .as_ref()
+        .map(|c| c.sql.enable_pushdown_projection)
+        .unwrap_or(true);
+    let default_table = config
+        .as_ref()
+        .map(|c| c.sql.default_table.clone())
+        .unwrap_or_else(|| "default".to_string());
+    let from = query_body
+        .from
+        .unwrap_or_else(|| crate::query::from::From::Table(default_table));
+
+    let mut builder = if enable_pushdown_projection {
         let mut all_columns = vec![];
         for select in &query_body.select {
             let mut select_cols = vec![];
@@ -21,16 +36,10 @@ pub async fn compile_json_query(
             all_columns.extend(select_cols);
         }
 
-        query_body
-            .from
-            .unwrap_or_default()
-            .init_builder(session, Some(&all_columns))
+        from.init_builder(session, Some(&all_columns))
             .await?
     } else {
-        query_body
-            .from
-            .unwrap_or_default()
-            .init_builder(session, None)
+        from.init_builder(session, None)
             .await?
     };
 

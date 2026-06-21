@@ -1163,7 +1163,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beacon-api"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1229,8 +1229,80 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-arrow-bbf"
+version = "1.7.3"
+dependencies = [
+ "arrow 58.3.0",
+ "async-trait",
+ "beacon-binary-format",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "datafusion",
+ "futures",
+ "nd-arrow-array",
+ "object_store 0.13.2",
+ "parking_lot",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "beacon-arrow-csv"
+version = "1.7.3"
+dependencies = [
+ "arrow 58.3.0",
+ "async-trait",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "datafusion",
+ "futures",
+ "object_store 0.13.2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "beacon-arrow-geoparquet"
+version = "1.7.3"
+dependencies = [
+ "arrow 58.3.0",
+ "async-trait",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "bytes",
+ "datafusion",
+ "futures",
+ "geoarrow",
+ "geoarrow-array",
+ "geoarrow-schema",
+ "geoparquet",
+ "object_store 0.13.2",
+ "parquet",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "beacon-arrow-ipc"
+version = "1.7.3"
+dependencies = [
+ "arrow 58.3.0",
+ "async-trait",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "datafusion",
+ "futures",
+ "object_store 0.13.2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "beacon-arrow-netcdf"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1266,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-odv"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1298,6 +1370,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon-arrow-parquet"
+version = "1.7.3"
+dependencies = [
+ "arrow 58.3.0",
+ "async-trait",
+ "beacon-common",
+ "beacon-datafusion-ext",
+ "datafusion",
+ "futures",
+ "object_store 0.13.2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "beacon-arrow-tiff"
 version = "0.1.0"
 dependencies = [
@@ -1323,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-zarr"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1387,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1403,6 +1490,7 @@ dependencies = [
  "julian",
  "object_store 0.13.2",
  "regex",
+ "rlimit",
  "thiserror 2.0.18",
  "tracing",
  "url",
@@ -1410,30 +1498,40 @@ dependencies = [
 
 [[package]]
 name = "beacon-config"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
- "anyhow",
+ "beacon-arrow-atlas",
+ "beacon-arrow-bbf",
+ "beacon-arrow-netcdf",
+ "beacon-object-storage",
  "envconfig",
  "lazy_static",
  "object_store 0.13.2",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
 name = "beacon-core"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
  "async-stream",
  "async-trait",
+ "beacon-arrow-bbf",
+ "beacon-arrow-csv",
+ "beacon-arrow-geoparquet",
+ "beacon-arrow-ipc",
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
+ "beacon-arrow-parquet",
  "beacon-arrow-tiff",
+ "beacon-arrow-zarr",
  "beacon-common",
  "beacon-config",
  "beacon-data-lake",
  "beacon-datafusion-ext",
- "beacon-formats",
  "beacon-functions",
  "beacon-iceberg",
  "beacon-nd-array",
@@ -1442,6 +1540,7 @@ dependencies = [
  "cast",
  "chrono",
  "datafusion",
+ "datafusion-federation",
  "futures",
  "futures-util",
  "geodatafusion",
@@ -1465,14 +1564,23 @@ dependencies = [
 
 [[package]]
 name = "beacon-data-lake"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
  "async-trait",
+ "beacon-arrow-atlas",
+ "beacon-arrow-bbf",
+ "beacon-arrow-csv",
+ "beacon-arrow-geoparquet",
+ "beacon-arrow-ipc",
+ "beacon-arrow-netcdf",
+ "beacon-arrow-parquet",
+ "beacon-arrow-tiff",
+ "beacon-arrow-zarr",
  "beacon-common",
+ "beacon-config",
  "beacon-datafusion-ext",
- "beacon-formats",
  "beacon-iceberg",
  "beacon-object-storage",
  "datafusion",
@@ -1490,15 +1598,17 @@ dependencies = [
 
 [[package]]
 name = "beacon-datafusion-ext"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
+ "arrow-flight",
  "arrow-schema 58.3.0",
  "async-trait",
  "beacon-common",
  "beacon-object-storage",
  "datafusion",
+ "datafusion-federation",
  "futures",
  "indexmap 2.14.0",
  "moka",
@@ -1509,77 +1619,30 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tracing",
- "typetag",
-]
-
-[[package]]
-name = "beacon-formats"
-version = "1.7.1"
-dependencies = [
- "arrow 58.3.0",
- "arrow-flight",
- "async-trait",
- "async_zip",
- "beacon-arrow-atlas",
- "beacon-arrow-netcdf",
- "beacon-arrow-odv",
- "beacon-arrow-tiff",
- "beacon-arrow-zarr",
- "beacon-binary-format",
- "beacon-common",
- "beacon-config",
- "beacon-datafusion-ext",
- "beacon-object-storage",
- "chrono",
- "datafusion",
- "futures",
- "geoarrow",
- "geoarrow-array",
- "geoparquet",
- "glob",
- "indexmap 2.14.0",
- "lazy_static",
- "lru 0.16.4",
- "moka",
- "nd-arrow-array",
- "ndarray",
- "num-traits",
- "num_cpus",
- "object_store 0.13.2",
- "once_cell",
- "ordered-float 5.3.0",
- "parking_lot",
- "parquet",
- "prost",
- "rlimit",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
  "tonic",
  "tracing",
  "typetag",
- "url",
- "which",
 ]
 
 [[package]]
 name = "beacon-functions"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
  "beacon-arrow-atlas",
+ "beacon-arrow-bbf",
+ "beacon-arrow-csv",
+ "beacon-arrow-geoparquet",
+ "beacon-arrow-ipc",
  "beacon-arrow-netcdf",
  "beacon-arrow-odv",
+ "beacon-arrow-parquet",
  "beacon-arrow-tiff",
+ "beacon-arrow-zarr",
  "beacon-common",
  "beacon-config",
  "beacon-datafusion-ext",
- "beacon-formats",
  "beacon-object-storage",
  "chrono",
  "csv",
@@ -1604,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-iceberg"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1678,14 +1741,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "beacon-object-storage"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "async-trait",
- "beacon-config",
  "bumpalo",
  "chrono",
  "flume",
@@ -2797,6 +2860,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-federation"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f88162c5f8650eab86bbe23cac990bdca261c95cf52c05b9a0848ad5b8b2b7f8"
+dependencies = [
+ "arrow-json 58.3.0",
+ "async-stream",
+ "async-trait",
+ "datafusion",
+ "futures",
+]
+
+[[package]]
 name = "datafusion-functions"
 version = "53.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3802,6 +3878,7 @@ dependencies = [
  "arrow-buffer 58.3.0",
  "arrow-ord 58.3.0",
  "arrow-schema 58.3.0",
+ "futures",
  "geo-traits 0.3.0",
  "geo-types",
  "geoarrow-array",
@@ -7956,15 +8033,6 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
-
-[[package]]
-name = "which"
-version = "8.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81995fafaaaf6ae47a7d0cc83c67caf92aeb7e5331650ae6ff856f7c0c60c459"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "winapi"

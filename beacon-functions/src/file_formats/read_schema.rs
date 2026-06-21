@@ -7,9 +7,11 @@ use beacon_common::{
     listing_url::parse_listing_table_url, schema_table_provider::SchemaTableProvider,
     super_table::SuperListingTable,
 };
-use beacon_formats::{
-    arrow::ArrowFormat, bbf::BBFFormat, csv::CsvFormat, parquet::ParquetFormat, zarr::ZarrFormat,
-};
+use beacon_arrow_bbf::datafusion::BBFFormat;
+use beacon_arrow_csv::datafusion::CsvFormat;
+use beacon_arrow_ipc::datafusion::ArrowFormat;
+use beacon_arrow_parquet::datafusion::ParquetFormat;
+use beacon_arrow_zarr::datafusion::ZarrFormat;
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
@@ -85,38 +87,7 @@ impl TableFunctionImpl for ReadSchemaFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        let mut glob_paths: Vec<String> = vec![];
-        if let Some(glob_path_arg) = args.first() {
-            match glob_path_arg {
-                Expr::Literal(ScalarValue::List(values), _) => {
-                    let string_array = values.as_ref().values();
-                    match string_array
-                        .as_any()
-                        .downcast_ref::<arrow::array::StringArray>()
-                    {
-                        Some(str_arr) => {
-                            str_arr.iter().for_each(|opt_str| {
-                                if let Some(s) = opt_str {
-                                    glob_paths.push(s.to_string());
-                                }
-                            });
-                        }
-                        None => {
-                            return plan_err!(
-                                "read_schema first argument must be a List<Utf8> of glob paths"
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    return plan_err!(
-                        "read_schema first argument must be a List<Utf8> of glob paths"
-                    );
-                }
-            }
-        } else {
-            return plan_err!("read_schema requires at least 1 argument: glob_paths : List<Utf8>");
-        }
+        let glob_paths = crate::file_formats::parse_glob_paths_arg(args, "read_schema")?;
 
         tracing::debug!("read_schema glob paths: {:?}", glob_paths);
 

@@ -1,0 +1,6 @@
+requests>=2.31
+psycopg[binary]>=3.1
+trino>=0.330
+presto-python-client>=0.8
+pyarrow>=16.0
+duckdb>=1.0

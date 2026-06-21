@@ -1,6 +1,6 @@
 [package]
 name = "beacon-data-lake"
-version = "1.7.1"
+version = "1.7.3"
 edition = "2024"
 
 [dependencies]
@@ -23,7 +23,18 @@ futures = { workspace = true }
 tokio = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
+beacon-config = { path = "../beacon-config" }
 beacon-object-storage = { path = "../beacon-object-storage" }
-beacon-formats = { path = "../beacon-formats" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-iceberg = { path = "../beacon-iceberg" }
+
+# File-format crates registered by `file_formats()`
+beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
+beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
+beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
+beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
+beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
+beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
+beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
+beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }

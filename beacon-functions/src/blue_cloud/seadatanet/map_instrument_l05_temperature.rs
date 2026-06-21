@@ -51,10 +51,10 @@ fn map_seadatanet_instrument_l05_temperature_impl(
 
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
-            let flag_array = flag
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let flag_array = crate::util::downcast_arg::<arrow::array::StringArray>(
+                flag,
+                "map_seadatanet_instrument_l05_temperature",
+            )?;
 
             let array = flag_array
                 .iter()

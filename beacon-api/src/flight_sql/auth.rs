@@ -43,15 +43,22 @@ struct AuthToken {
 pub(super) struct Authenticator {
     allow_anonymous: bool,
     token_ttl: Duration,
+    admin: beacon_config::AdminConfig,
     auth_tokens: Arc<tokio::sync::RwLock<HashMap<String, AuthToken>>>,
 }
 
 impl Authenticator {
-    /// Creates a new authenticator with the configured anonymous-access policy and token TTL.
-    pub(super) fn new(allow_anonymous: bool, token_ttl: Duration) -> Self {
+    /// Creates a new authenticator with the given anonymous-access policy, admin
+    /// credentials, and token TTL.
+    pub(super) fn new(
+        allow_anonymous: bool,
+        admin: beacon_config::AdminConfig,
+        token_ttl: Duration,
+    ) -> Self {
         Self {
             allow_anonymous,
             token_ttl,
+            admin,
             auth_tokens: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -100,7 +107,7 @@ impl Authenticator {
         handshake: Option<&HandshakeRequest>,
     ) -> Result<AuthContext, Status> {
         if let Some(auth_value) = auth_value {
-            verify_basic_auth_value(auth_value)
+            verify_basic_auth_value(auth_value, &self.admin)
                 .map_err(|_| Status::unauthenticated("invalid credentials"))?;
             return Ok(AuthContext::admin());
         }
@@ -110,7 +117,11 @@ impl Authenticator {
             if !request.payload.is_empty() {
                 let credentials = BasicAuth::decode(request.payload.clone())
                     .map_err(|_| Status::unauthenticated("invalid credentials"))?;
-                if validate_basic_auth_credentials(&credentials.username, &credentials.password) {
+                if validate_basic_auth_credentials(
+                    &credentials.username,
+                    &credentials.password,
+                    &self.admin,
+                ) {
                     return Ok(AuthContext::admin());
                 }
 
@@ -144,7 +155,7 @@ impl Authenticator {
             return self.authorize_bearer(token).await;
         }
 
-        verify_basic_auth_value(&auth_value)
+        verify_basic_auth_value(&auth_value, &self.admin)
             .map_err(|_| Status::unauthenticated("invalid credentials"))?;
 
         Ok(AuthContext::admin())

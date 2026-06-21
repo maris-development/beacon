@@ -1,0 +1,27 @@
+[package]
+name = "beacon-arrow-geoparquet"
+version = "1.7.3"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+parquet = { workspace = true }
+geoarrow = { workspace = true }
+geoarrow-array = { workspace = true }
+geoarrow-schema = { workspace = true }
+geoparquet = { workspace = true, features = ["async"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+
+beacon-common = { path = "../../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }

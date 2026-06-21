@@ -1,0 +1,16 @@
+[package]
+name = "beacon-arrow-ipc"
+version = "1.7.3"
+edition = "2024"
+
+[dependencies]
+tracing = { workspace = true }
+tokio = { workspace = true }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+beacon-common = { path = "../../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

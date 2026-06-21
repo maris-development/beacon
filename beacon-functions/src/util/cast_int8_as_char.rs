@@ -17,10 +17,8 @@ fn cast_int8_as_char_impl(
 ) -> datafusion::error::Result<datafusion::logical_expr::ColumnarValue> {
     match &parameters[0] {
         datafusion::logical_expr::ColumnarValue::Array(array) => {
-            let int8_array = array
-                .as_any()
-                .downcast_ref::<arrow::array::Int8Array>()
-                .unwrap();
+            let int8_array =
+                crate::util::downcast_arg::<arrow::array::Int8Array>(array, "cast_int8_as_char")?;
 
             let array = arrow::array::StringArray::from_iter(
                 int8_array
