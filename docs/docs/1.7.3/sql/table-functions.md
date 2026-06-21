@@ -211,3 +211,30 @@ SELECT ".crs", band_1
 FROM read_tiff('rasters/elevation.tif')
 LIMIT 1
 ```
+
+## `read_delta`
+
+```text
+read_delta(location)
+read_delta(location, version_or_timestamp)
+```
+
+Reads a [Delta Lake](../data-lake/delta-lake.md) table. Unlike the other functions, `location` is a **single path to the Delta table directory** (the folder containing `_delta_log/`) — not a glob or a list. The schema is read from the transaction log.
+
+The optional second argument selects a snapshot for **time travel**:
+
+- an integer is a Delta **version** number, e.g. `12`
+- any other string is an RFC-3339 **timestamp** — the latest version at or before it
+
+```sql
+-- Latest version
+SELECT * FROM read_delta('delta/ocean_profiles') LIMIT 100
+
+-- Time travel to a specific version
+SELECT count(*) FROM read_delta('delta/ocean_profiles', 12)
+
+-- Time travel as of a timestamp
+SELECT * FROM read_delta('delta/ocean_profiles', '2026-01-01T00:00:00Z')
+```
+
+To register a Delta table persistently (and to `INSERT INTO` it), use [`CREATE EXTERNAL TABLE … STORED AS DELTA`](../data-lake/delta-lake.md).

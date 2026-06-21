@@ -310,6 +310,18 @@ impl DatasetsStore {
         )) as Arc<dyn ObjectStore>
     }
 
+    /// The raw backing object store, bypassing this store's metadata cache and
+    /// `__beacon__` hiding.
+    ///
+    /// The event-driven cache used by [`Self::list`] is updated asynchronously, so
+    /// a listing right after a write can be stale. Engines that require
+    /// read-after-write listing consistency (e.g. Delta Lake's transaction-log
+    /// replay, which fails if a freshly committed commit file is not yet visible)
+    /// should read and write through this direct view instead.
+    pub fn backing_store(&self) -> Arc<dyn ObjectStore> {
+        self.inner.clone()
+    }
+
     /// Translate an object path into a NetCDF-friendly location string.
     ///
     /// The backend is determined from the storage config this store was built

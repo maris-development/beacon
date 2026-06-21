@@ -199,6 +199,7 @@ export default defineConfig({
                     { text: 'Arrow IPC', link: '/docs/1.7.3/data-lake/external-tables#arrow-ipc' },
                     { text: 'ODV ASCII', link: '/docs/1.7.3/data-lake/external-tables#odv-ascii' },
                     { text: 'GeoTIFF / COG', link: '/docs/1.7.3/data-lake/external-tables#geotiff-cog' },
+                    { text: 'Delta Lake', link: '/docs/1.7.3/data-lake/external-tables#delta-lake' },
                   ]
                 },
                 {
@@ -208,6 +209,17 @@ export default defineConfig({
                 {
                   text: 'Views',
                   link: '/docs/1.7.3/data-lake/view',
+                },
+                {
+                  text: 'Delta Lake',
+                  link: '/docs/1.7.3/data-lake/delta-lake',
+                  collapsed: true,
+                  items: [
+                    { text: 'Defining a Delta table', link: '/docs/1.7.3/data-lake/delta-lake#defining-a-delta-external-table' },
+                    { text: 'Time travel', link: '/docs/1.7.3/data-lake/delta-lake#options-time-travel' },
+                    { text: 'Writing (INSERT INTO)', link: '/docs/1.7.3/data-lake/delta-lake#writing-insert-into' },
+                    { text: 'Limitations', link: '/docs/1.7.3/data-lake/delta-lake#limitations' },
+                  ]
                 },
                 {
                   text: 'Remote Tables (Federation)',
@@ -309,6 +321,7 @@ export default defineConfig({
                     { text: 'read_odv_ascii', link: '/docs/1.7.3/sql/table-functions#read_odv_ascii' },
                     { text: 'read_bbf', link: '/docs/1.7.3/sql/table-functions#read_bbf' },
                     { text: 'read_tiff', link: '/docs/1.7.3/sql/table-functions#read_tiff' },
+                    { text: 'read_delta', link: '/docs/1.7.3/sql/table-functions#read_delta' },
                   ]
                 },
                 {

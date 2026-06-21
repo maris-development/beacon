@@ -142,6 +142,8 @@ pub fn definition_from_provider(
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(definition) = beacon_datafusion_ext::remote::remote_table_definition(table) {
         Ok(Arc::new(definition))
+    } else if let Some(table) = table.as_any().downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+        Ok(Arc::new(table.definition().clone()))
     } else if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
         let definition =
             ViewTableDefinition::try_from_view(table_name, table).map_err(|error| {

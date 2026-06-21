@@ -136,6 +136,18 @@ STORED AS TIFF
 LOCATION 'rasters/elevation.tif'
 ```
 
+### Delta Lake
+
+`STORED AS DELTA` registers an existing [Delta Lake](./delta-lake.md) table. The `LOCATION` points at the Delta **table directory** (the folder containing `_delta_log/`), not a glob of files:
+
+```sql
+CREATE EXTERNAL TABLE ocean_profiles
+STORED AS DELTA
+LOCATION 'delta/ocean_profiles'
+```
+
+Delta tables support snapshot-consistent reads, **time travel** (via `OPTIONS ('version' '12')` or `('timestamp' '…')`), and `INSERT INTO`, which commits a new Delta version. See [Delta Lake](./delta-lake.md) for the full reference.
+
 ## Partitioned data
 
 If your files are laid out in Hive-style partition directories (`year=2024/month=01/...`), declare the partition columns so Beacon can prune them at query time. The columns are encoded in the directory names and become queryable columns. See [`PARTITIONED BY`](../sql/create-table.md#partitioned-by) for the syntax.
