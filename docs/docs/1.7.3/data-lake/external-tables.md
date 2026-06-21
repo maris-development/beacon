@@ -12,6 +12,10 @@ An external table is a standard SQL table backed by files in Beacon's storage. O
 An **external table** only points at existing files — Beacon reads them in place and never writes to them. If you want a table Beacon **owns** and can mutate with `INSERT` / `UPDATE` / `DELETE`, use a [managed table](../sql/managed-tables.md) instead.
 :::
 
+:::tip Registering many datasets at once
+To auto-discover and register many datasets under a prefix — including partitioned layouts — without writing DDL for each one, use a [crawler](./crawlers.md).
+:::
+
 This page is a **setup guide** with per-format examples. For the full statement grammar and every clause (`OR REPLACE`, `IF NOT EXISTS`, `PARTITIONED BY`, `DROP TABLE`), see the [`CREATE EXTERNAL TABLE`](../sql/create-table.md) reference.
 
 DDL can be submitted through any of Beacon's SQL surfaces:
