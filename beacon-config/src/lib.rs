@@ -114,10 +114,6 @@ pub struct ApiDocsConfig {
 /// `./data`). The directories are created when the config is loaded.
 #[derive(Debug, Clone)]
 pub struct DataDirsConfig {
-    pub root: PathBuf,
-    pub datasets: PathBuf,
-    pub tables: PathBuf,
-    pub tmp: PathBuf,
     pub indexes: PathBuf,
     pub cache: PathBuf,
 }
@@ -311,17 +307,29 @@ impl From<RawConfig> for Config {
                 statement_ttl_secs: raw.flight_sql_statement_ttl_secs,
                 prepared_statement_ttl_secs: raw.flight_sql_prepared_statement_ttl_secs,
             },
-            storage: StorageConfig {
-                enable_fs_events: raw.enable_fs_events,
-                enable_s3_events: raw.enable_s3_events,
-                s3: S3Config {
-                    bucket: raw.s3_bucket,
-                    enable_virtual_hosting: raw.s3_enable_virtual_hosting,
-                    data_lake: raw.s3_data_lake,
-                    endpoint: raw.aws_endpoint,
-                    region: raw.aws_region,
-                    allow_http: raw.s3_allow_http,
-                },
+            storage: {
+                let root = PathBuf::from(&raw.data_dir);
+                // S3 presence *is* the backend switch: `Some` => datasets on S3.
+                let s3 = if raw.s3_data_lake {
+                    Some(S3Config {
+                        bucket: raw.s3_bucket.unwrap_or_default(),
+                        endpoint: raw.aws_endpoint,
+                        region: raw.aws_region,
+                        enable_virtual_hosting: raw.s3_enable_virtual_hosting,
+                        allow_http: raw.s3_allow_http,
+                    })
+                } else {
+                    None
+                };
+                StorageConfig {
+                    datasets_dir: root.join("datasets"),
+                    tables_dir: root.join("tables"),
+                    tmp_dir: root.join("tmp"),
+                    data_dir: root,
+                    enable_fs_events: raw.enable_fs_events,
+                    enable_s3_events: raw.enable_s3_events,
+                    s3,
+                }
             },
             cors: CorsConfig {
                 allowed_methods: raw.allowed_methods,
@@ -356,12 +364,8 @@ impl From<RawConfig> for Config {
             data: {
                 let root = PathBuf::from(&raw.data_dir);
                 DataDirsConfig {
-                    datasets: root.join("datasets"),
-                    tables: root.join("tables"),
-                    tmp: root.join("tmp"),
                     indexes: root.join("indexes"),
                     cache: root.join("cache"),
-                    root,
                 }
             },
         }
@@ -405,12 +409,21 @@ impl Config {
             .into();
         config.server.base_path =
             normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
+        // S3 always needs a bucket (object_store requires it; it is never inferred
+        // from the endpoint).
+        if let Some(s3) = &config.storage.s3 {
+            if s3.bucket.trim().is_empty() {
+                return Err(ConfigError::InvalidStorage(
+                    "BEACON_S3_BUCKET is required when BEACON_S3_DATA_LAKE=true".to_string(),
+                ));
+            }
+        }
         // Create the configured data directories (idempotent).
         for dir in [
-            &config.data.root,
-            &config.data.datasets,
-            &config.data.tables,
-            &config.data.tmp,
+            &config.storage.data_dir,
+            &config.storage.datasets_dir,
+            &config.storage.tables_dir,
+            &config.storage.tmp_dir,
             &config.data.indexes,
             &config.data.cache,
         ] {
