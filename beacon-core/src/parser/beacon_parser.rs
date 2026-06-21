@@ -1,10 +1,15 @@
+use std::collections::HashMap;
+
 use datafusion::error::{DataFusionError, Result};
 use datafusion::sql::{
     parser::{DFParser, DFParserBuilder},
     sqlparser::{keywords::Keyword, tokenizer::Token},
 };
 
-use super::statement::{BeaconStatement, CreateMaterializedViewStatement, RefreshStatement};
+use super::statement::{
+    BeaconStatement, CreateCrawlerStatement, CreateMaterializedViewStatement, DropCrawlerStatement,
+    RefreshStatement, RunCrawlerStatement,
+};
 
 /// A parser that extends `DFParser` with custom Beacon SQL syntax.
 pub struct BeaconParser<'a> {
@@ -28,9 +33,165 @@ impl<'a> BeaconParser<'a> {
             return self.parse_create_materialized_view();
         }
 
+        if self.is_create_crawler() {
+            return self.parse_create_crawler();
+        }
+
+        if self.is_run_crawler() {
+            return self.parse_run_crawler();
+        }
+
+        if self.is_drop_crawler() {
+            return self.parse_drop_crawler();
+        }
+
+        if self.is_show_crawlers() {
+            return self.parse_show_crawlers();
+        }
+
         let df_statement = Box::new(self.df_parser.parse_statement()?);
 
         Ok(BeaconStatement::DFStatement(df_statement))
+    }
+
+    /// Whether the next two tokens are `<KW1> CRAWLER`, where `KW1` matches `first`.
+    fn is_keyword_then_crawler(&self, first: impl Fn(&Token) -> bool) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        first(t1) && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "CRAWLER")
+    }
+
+    fn is_create_crawler(&self) -> bool {
+        self.is_keyword_then_crawler(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::CREATE))
+    }
+
+    fn is_run_crawler(&self) -> bool {
+        self.is_keyword_then_crawler(|t| matches!(t, Token::Word(w) if w.value.to_uppercase() == "RUN"))
+    }
+
+    fn is_drop_crawler(&self) -> bool {
+        self.is_keyword_then_crawler(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::DROP))
+    }
+
+    fn is_show_crawlers(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "SHOW")
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "CRAWLERS")
+    }
+
+    /// Parse: CREATE CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
+    fn parse_create_crawler(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // CREATE
+        self.df_parser.parser.next_token(); // CRAWLER
+
+        let name = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let target_prefix = if matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.keyword == Keyword::ON
+        ) {
+            self.df_parser.parser.next_token(); // ON
+            Some(self.parse_string_value()?)
+        } else {
+            None
+        };
+
+        let options = if matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.keyword == Keyword::WITH
+        ) {
+            self.df_parser.parser.next_token(); // WITH
+            self.parse_with_options()?
+        } else {
+            HashMap::new()
+        };
+
+        Ok(BeaconStatement::CreateCrawler(CreateCrawlerStatement {
+            name,
+            target_prefix,
+            options,
+        }))
+    }
+
+    /// Parse: RUN CRAWLER <name>
+    fn parse_run_crawler(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // RUN
+        self.df_parser.parser.next_token(); // CRAWLER
+        let name = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(BeaconStatement::RunCrawler(RunCrawlerStatement { name }))
+    }
+
+    /// Parse: DROP CRAWLER <name>
+    fn parse_drop_crawler(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // DROP
+        self.df_parser.parser.next_token(); // CRAWLER
+        let name = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(BeaconStatement::DropCrawler(DropCrawlerStatement { name }))
+    }
+
+    /// Parse: SHOW CRAWLERS
+    fn parse_show_crawlers(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // SHOW
+        self.df_parser.parser.next_token(); // CRAWLERS
+        Ok(BeaconStatement::ShowCrawlers)
+    }
+
+    /// Read a single string value (single-quoted string, identifier, or number).
+    fn parse_string_value(&mut self) -> Result<String> {
+        let token = self.df_parser.parser.next_token();
+        match token.token {
+            Token::SingleQuotedString(s) => Ok(s),
+            Token::DoubleQuotedString(s) => Ok(s),
+            Token::Word(w) => Ok(w.value),
+            Token::Number(n, _) => Ok(n),
+            other => Err(DataFusionError::Plan(format!(
+                "expected a string value, found {other}"
+            ))),
+        }
+    }
+
+    /// Parse `( key value, key value, ... )` into a map. Keys and values are
+    /// string literals or bare words — the same shape as `CREATE EXTERNAL TABLE`'s
+    /// `OPTIONS`.
+    fn parse_with_options(&mut self) -> Result<HashMap<String, String>> {
+        self.df_parser
+            .parser
+            .expect_token(&Token::LParen)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let mut options = HashMap::new();
+        if self.df_parser.parser.consume_token(&Token::RParen) {
+            return Ok(options);
+        }
+
+        loop {
+            let key = self.parse_string_value()?;
+            let value = self.parse_string_value()?;
+            options.insert(key, value);
+
+            if self.df_parser.parser.consume_token(&Token::Comma) {
+                continue;
+            }
+            self.df_parser
+                .parser
+                .expect_token(&Token::RParen)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            break;
+        }
+        Ok(options)
     }
 
     /// Check if the next tokens form a CREATE MATERIALIZED VIEW statement.
@@ -186,5 +347,81 @@ mod tests {
         let sql = "REFRESH";
         let mut parser = BeaconParser::new(sql).unwrap();
         assert!(parser.parse_statement().is_err());
+    }
+
+    #[test]
+    fn test_parse_create_crawler_full() {
+        let sql = "CREATE CRAWLER argo ON 'argo/' WITH ('format' 'parquet', 'schedule' '15m')";
+        let mut parser = BeaconParser::new(sql).unwrap();
+        match parser.parse_statement().unwrap() {
+            BeaconStatement::CreateCrawler(s) => {
+                assert_eq!(s.name.to_string(), "argo");
+                assert_eq!(s.target_prefix.as_deref(), Some("argo/"));
+                assert_eq!(s.options.get("format").map(String::as_str), Some("parquet"));
+                assert_eq!(s.options.get("schedule").map(String::as_str), Some("15m"));
+            }
+            other => panic!("expected CreateCrawler, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_crawler_minimal() {
+        let sql = "CREATE CRAWLER c";
+        let mut parser = BeaconParser::new(sql).unwrap();
+        match parser.parse_statement().unwrap() {
+            BeaconStatement::CreateCrawler(s) => {
+                assert_eq!(s.name.to_string(), "c");
+                assert!(s.target_prefix.is_none());
+                assert!(s.options.is_empty());
+            }
+            other => panic!("expected CreateCrawler, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_run_and_drop_crawler() {
+        let mut p = BeaconParser::new("RUN CRAWLER argo").unwrap();
+        match p.parse_statement().unwrap() {
+            BeaconStatement::RunCrawler(s) => assert_eq!(s.name.to_string(), "argo"),
+            other => panic!("expected RunCrawler, got {other:?}"),
+        }
+
+        let mut p = BeaconParser::new("DROP CRAWLER argo").unwrap();
+        match p.parse_statement().unwrap() {
+            BeaconStatement::DropCrawler(s) => assert_eq!(s.name.to_string(), "argo"),
+            other => panic!("expected DropCrawler, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_show_crawlers() {
+        let mut p = BeaconParser::new("SHOW CRAWLERS").unwrap();
+        assert!(matches!(
+            p.parse_statement().unwrap(),
+            BeaconStatement::ShowCrawlers
+        ));
+    }
+
+    #[test]
+    fn test_crawler_ddl_does_not_shadow_standard_sql() {
+        // DROP TABLE / SHOW TABLES must still flow to the DataFusion parser.
+        for sql in ["DROP TABLE t", "SHOW TABLES"] {
+            let mut p = BeaconParser::new(sql).unwrap();
+            assert!(matches!(
+                p.parse_statement().unwrap(),
+                BeaconStatement::DFStatement(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_create_crawler_display_roundtrip() {
+        let sql = "CREATE CRAWLER argo ON 'argo/' WITH ('format' 'parquet')";
+        let mut p = BeaconParser::new(sql).unwrap();
+        let stmt = p.parse_statement().unwrap();
+        assert_eq!(
+            stmt.to_string(),
+            "CREATE CRAWLER argo ON 'argo/' WITH ('format' 'parquet')"
+        );
     }
 }

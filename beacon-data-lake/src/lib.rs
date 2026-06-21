@@ -24,6 +24,7 @@ use object_store::path::PathPart;
 #[cfg(test)]
 use std::collections::HashMap;
 
+pub mod crawler;
 pub mod file_formats;
 pub mod files;
 pub mod table;

@@ -26,8 +26,8 @@ use datafusion::{
 use futures::{StreamExt, TryStreamExt};
 
 use super::{
-    actions,
-    logical::{count_arrow_schema, AlterTableSpec},
+    actions, crawler,
+    logical::{count_arrow_schema, show_crawlers_arrow_schema, AlterTableSpec},
     materialized_view, SessionCell,
 };
 
@@ -681,5 +681,174 @@ impl ExecutionPlan for CreateTableExec {
                 .await
                 .map_err(to_df_err)
         }))
+    }
+}
+
+/// Physical node for `CREATE CRAWLER`.
+#[derive(Debug)]
+pub(crate) struct CreateCrawlerExec {
+    name: String,
+    target_prefix: Option<String>,
+    options: Vec<(String, String)>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl CreateCrawlerExec {
+    pub(crate) fn new(
+        name: String,
+        target_prefix: Option<String>,
+        options: Vec<(String, String)>,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            name,
+            target_prefix,
+            options,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CreateCrawlerExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(
+    CreateCrawlerExec,
+    "CreateCrawlerExec",
+    |exec: &CreateCrawlerExec| {
+        let session = upgrade_session(&exec.session)?;
+        let name = exec.name.clone();
+        let target_prefix = exec.target_prefix.clone();
+        let options = exec.options.clone();
+        Ok(side_effect_stream(async move {
+            crawler::create_crawler(&session, &name, target_prefix, &options)
+                .await
+                .map_err(to_df_err)
+        }))
+    }
+);
+
+/// Physical node for `RUN CRAWLER <name>`.
+#[derive(Debug)]
+pub(crate) struct RunCrawlerExec {
+    name: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl RunCrawlerExec {
+    pub(crate) fn new(name: String, session: SessionCell) -> Self {
+        Self {
+            name,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RunCrawlerExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(RunCrawlerExec, "RunCrawlerExec", |exec: &RunCrawlerExec| {
+    let session = upgrade_session(&exec.session)?;
+    let name = exec.name.clone();
+    Ok(side_effect_stream(async move {
+        crawler::run_crawler(&session, &name).await.map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `DROP CRAWLER <name>`.
+#[derive(Debug)]
+pub(crate) struct DropCrawlerExec {
+    name: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl DropCrawlerExec {
+    pub(crate) fn new(name: String, session: SessionCell) -> Self {
+        Self {
+            name,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DropCrawlerExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(
+    DropCrawlerExec,
+    "DropCrawlerExec",
+    |exec: &DropCrawlerExec| {
+        let session = upgrade_session(&exec.session)?;
+        let name = exec.name.clone();
+        Ok(side_effect_stream(async move {
+            crawler::drop_crawler(&session, &name)
+                .await
+                .map_err(to_df_err)
+        }))
+    }
+);
+
+/// Physical node for `SHOW CRAWLERS`. Unlike the other crawler nodes it produces
+/// rows (one per crawler).
+#[derive(Debug)]
+pub(crate) struct ShowCrawlersExec {
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl ShowCrawlersExec {
+    pub(crate) fn new(session: SessionCell) -> Self {
+        Self {
+            session,
+            cache: Arc::new(plan_properties(show_crawlers_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for ShowCrawlersExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => write!(f, "ShowCrawlersExec"),
+            DisplayFormatType::TreeRender => write!(f, "ShowCrawlersExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for ShowCrawlersExec {
+    fn name(&self) -> &str {
+        "ShowCrawlersExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let schema = show_crawlers_arrow_schema();
+        let stream = futures::stream::once(async move {
+            crawler::show_crawlers(&session).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }

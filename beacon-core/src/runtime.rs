@@ -37,6 +37,7 @@ pub struct Runtime {
     table_manager: Arc<TableManager>,
     file_manager: Arc<FileManager>,
     listing_table_factory: Arc<ListingTableFactoryExt>,
+    crawler_manager: Arc<beacon_data_lake::crawler::CrawlerManager>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
     /// The configuration this runtime was built with. Owned, not process-global.
     config: Arc<beacon_config::Config>,
@@ -62,8 +63,16 @@ impl Runtime {
         )
         .await?;
 
-        let session_ctx =
-            Self::init_ctx(memory_pool, object_stores.datasets.clone(), config.clone())?;
+        // The crawler manager is built after the session context (it needs the data
+        // lake's managers), so register an empty handle now and fill it below — the
+        // same late-fill pattern as the query planner's session cell.
+        let crawler_handle = beacon_data_lake::crawler::new_crawler_manager_handle();
+        let session_ctx = Self::init_ctx(
+            memory_pool,
+            object_stores.datasets.clone(),
+            config.clone(),
+            crawler_handle.clone(),
+        )?;
         let data_lake = Arc::new(
             DataLake::new(session_ctx.clone(), object_stores.clone(), config.clone()).await,
         );
@@ -129,10 +138,26 @@ impl Runtime {
             Arc::downgrade(&session_ctx),
         ));
 
+        // Build the crawler manager once the data lake and tables exist, then publish
+        // it through the handle so `CREATE/RUN/DROP CRAWLER` actions can reach it.
+        let events_available =
+            config.storage.enable_fs_events || config.storage.enable_s3_events;
+        let crawler_manager = beacon_data_lake::crawler::CrawlerManager::new(
+            session_ctx.clone(),
+            file_manager.clone(),
+            table_manager.clone(),
+            object_stores.datasets.clone(),
+            config.crawler.clone(),
+            events_available,
+        );
+        crawler_manager.init().await?;
+        let _ = crawler_handle.set(crawler_manager.clone());
+
         Ok(Self {
             session_ctx,
             table_manager,
             listing_table_factory,
+            crawler_manager,
             file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
             config,
@@ -143,6 +168,7 @@ impl Runtime {
         memory_pool: Arc<FairSpillPool>,
         datasets_store: Arc<beacon_object_storage::DatasetsStore>,
         app_config: Arc<beacon_config::Config>,
+        crawler_handle: beacon_data_lake::crawler::CrawlerManagerHandle,
     ) -> anyhow::Result<Arc<SessionContext>> {
         let mut config = SessionConfig::new()
             .with_batch_size(app_config.runtime.batch_size)
@@ -154,7 +180,10 @@ impl Runtime {
             // session-scoped code (query planning, table refresh, metadata UDFs)
             // without a process-global accessor.
             .with_extension(datasets_store)
-            .with_extension(app_config);
+            .with_extension(app_config)
+            // The (late-filled) crawler manager handle, so DDL crawler actions can
+            // reach it from session-scoped execution.
+            .with_extension(crawler_handle);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
         config
@@ -326,6 +355,16 @@ impl Runtime {
             BeaconStatement::Refresh(statement) => {
                 Ok(crate::statement_plan::refresh_plan(statement))
             }
+            BeaconStatement::CreateCrawler(statement) => {
+                Ok(crate::statement_plan::create_crawler_plan(statement))
+            }
+            BeaconStatement::RunCrawler(statement) => {
+                Ok(crate::statement_plan::run_crawler_plan(statement))
+            }
+            BeaconStatement::DropCrawler(statement) => {
+                Ok(crate::statement_plan::drop_crawler_plan(statement))
+            }
+            BeaconStatement::ShowCrawlers => Ok(crate::statement_plan::show_crawlers_plan()),
             BeaconStatement::DFStatement(statement) => {
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
             }

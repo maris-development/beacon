@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Display;
 
 use datafusion::sql::{parser::Statement, sqlparser::ast::ObjectName};
@@ -7,6 +8,64 @@ pub enum BeaconStatement {
     DFStatement(Box<Statement>),
     CreateMaterializedView(CreateMaterializedViewStatement),
     Refresh(RefreshStatement),
+    CreateCrawler(CreateCrawlerStatement),
+    RunCrawler(RunCrawlerStatement),
+    DropCrawler(DropCrawlerStatement),
+    ShowCrawlers,
+}
+
+/// CREATE CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
+#[derive(Debug, Clone)]
+pub struct CreateCrawlerStatement {
+    pub name: ObjectName,
+    /// The `ON '<prefix>'` target prefix, if given.
+    pub target_prefix: Option<String>,
+    /// The `WITH (...)` options.
+    pub options: HashMap<String, String>,
+}
+
+impl Display for CreateCrawlerStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CREATE CRAWLER {}", self.name)?;
+        if let Some(prefix) = &self.target_prefix {
+            write!(f, " ON '{prefix}'")?;
+        }
+        if !self.options.is_empty() {
+            let mut opts: Vec<_> = self.options.iter().collect();
+            opts.sort_by(|a, b| a.0.cmp(b.0));
+            let rendered = opts
+                .iter()
+                .map(|(k, v)| format!("'{k}' '{v}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(f, " WITH ({rendered})")?;
+        }
+        Ok(())
+    }
+}
+
+/// RUN CRAWLER <name>
+#[derive(Debug, Clone)]
+pub struct RunCrawlerStatement {
+    pub name: ObjectName,
+}
+
+impl Display for RunCrawlerStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RUN CRAWLER {}", self.name)
+    }
+}
+
+/// DROP CRAWLER <name>
+#[derive(Debug, Clone)]
+pub struct DropCrawlerStatement {
+    pub name: ObjectName,
+}
+
+impl Display for DropCrawlerStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DROP CRAWLER {}", self.name)
+    }
 }
 
 /// CREATE MATERIALIZED VIEW <view_name> AS <query>
@@ -45,6 +104,10 @@ impl Display for BeaconStatement {
             Self::DFStatement(s) => write!(f, "{s}"),
             Self::CreateMaterializedView(s) => write!(f, "{s}"),
             Self::Refresh(s) => write!(f, "{s}"),
+            Self::CreateCrawler(s) => write!(f, "{s}"),
+            Self::RunCrawler(s) => write!(f, "{s}"),
+            Self::DropCrawler(s) => write!(f, "{s}"),
+            Self::ShowCrawlers => write!(f, "SHOW CRAWLERS"),
         }
     }
 }

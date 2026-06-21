@@ -176,6 +176,33 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if let Some(create) = any.downcast_ref::<logical::CreateCrawlerNode>() {
+            return Ok(Some(Arc::new(physical::CreateCrawlerExec::new(
+                create.name.clone(),
+                create.target_prefix.clone(),
+                create.options.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(run) = any.downcast_ref::<logical::RunCrawlerNode>() {
+            return Ok(Some(Arc::new(physical::RunCrawlerExec::new(
+                run.name.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(drop) = any.downcast_ref::<logical::DropCrawlerNode>() {
+            return Ok(Some(Arc::new(physical::DropCrawlerExec::new(
+                drop.name.clone(),
+                session,
+            ))));
+        }
+
+        if any.downcast_ref::<logical::ShowCrawlersNode>().is_some() {
+            return Ok(Some(Arc::new(physical::ShowCrawlersExec::new(session))));
+        }
+
         // Unrecognized node: let the default planner handle it.
         Ok(None)
     }
