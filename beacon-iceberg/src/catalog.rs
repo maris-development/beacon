@@ -64,40 +64,13 @@ pub async fn init_datasets_warehouse(
     // The file catalog needs an `ObjectStoreBuilder` (it cannot accept an
     // arbitrary `ObjectStore`), so mirror the datasets store's backend choice.
     // `catalog_path` is the warehouse root the catalog roots every table under.
-    let (object_store_builder, catalog_path) = if let Some(s3) = &storage.s3 {
-        // Mirror the datasets store's backend by consuming the same `S3Config`
-        // values (credentials still come from the AWS env chain). Setting the
-        // endpoint/region explicitly keeps the Iceberg warehouse on the same
-        // backend as the datasets without re-reading the environment.
-        let mut builder = ObjectStoreBuilder::s3()
-            .with_config("aws_allow_http", if s3.allow_http { "true" } else { "false" })
-            .and_then(|builder| {
-                builder.with_config(
-                    "aws_virtual_hosted_style_request",
-                    if s3.enable_virtual_hosting {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )
-            })
-            .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
-        if let Some(endpoint) = &s3.endpoint {
-            builder = builder
-                .with_config("aws_endpoint", endpoint)
-                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
-        }
-        if let Some(region) = &s3.region {
-            builder = builder
-                .with_config("aws_region", region)
-                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
-        }
-        (builder, format!("s3://{}/{warehouse_prefix}", s3.bucket))
+    let object_store_builder = builder_from_storage(storage)?;
+    let catalog_path = if let Some(s3) = &storage.s3 {
+        format!("s3://{}/{warehouse_prefix}", s3.bucket)
     } else {
-        // Local: root the builder at the datasets directory so warehouse paths
-        // resolve to `<datasets_dir>/__beacon__/iceberg/...`.
-        let builder = ObjectStoreBuilder::filesystem(storage.datasets_dir.to_path_buf());
-        (builder, warehouse_prefix.clone())
+        // Local: the builder is rooted at the datasets directory, so the warehouse
+        // resolves to `<datasets_dir>/__beacon__/iceberg/...`.
+        warehouse_prefix.clone()
     };
 
     let catalog: Arc<dyn Catalog> = Arc::new(
@@ -121,6 +94,54 @@ pub async fn init_datasets_warehouse(
 
     tracing::info!(catalog_path = %catalog_path, "Iceberg datasets warehouse initialized");
     Ok(())
+}
+
+/// Build an iceberg-rust [`ObjectStoreBuilder`] mirroring beacon's
+/// [`StorageConfig`](beacon_config::StorageConfig) backend.
+///
+/// The file catalog needs a *builder* (it cannot take an arbitrary `ObjectStore`),
+/// so this is the single place the Iceberg backend is configured — shared by the
+/// managed warehouse ([`init_datasets_warehouse`]) and external tables
+/// ([`crate::external`]). The caller supplies the `catalog_path` that roots the
+/// catalog: for S3 a `s3://<bucket>/<prefix>` URL, for local the builder is rooted
+/// at `datasets_dir` so a relative prefix resolves under it.
+pub(crate) fn builder_from_storage(
+    storage: &beacon_config::StorageConfig,
+) -> anyhow::Result<ObjectStoreBuilder> {
+    if let Some(s3) = &storage.s3 {
+        // Mirror the datasets store's backend by consuming the same `S3Config`
+        // values (credentials still come from the AWS env chain). Setting the
+        // endpoint/region explicitly keeps Iceberg on the same backend as the
+        // datasets without re-reading the environment.
+        let mut builder = ObjectStoreBuilder::s3()
+            .with_config("aws_allow_http", if s3.allow_http { "true" } else { "false" })
+            .and_then(|builder| {
+                builder.with_config(
+                    "aws_virtual_hosted_style_request",
+                    if s3.enable_virtual_hosting {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                )
+            })
+            .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+        if let Some(endpoint) = &s3.endpoint {
+            builder = builder
+                .with_config("aws_endpoint", endpoint)
+                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+        }
+        if let Some(region) = &s3.region {
+            builder = builder
+                .with_config("aws_region", region)
+                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+        }
+        Ok(builder)
+    } else {
+        // Local: root the builder at the datasets directory so relative warehouse
+        // paths resolve to `<datasets_dir>/...`.
+        Ok(ObjectStoreBuilder::filesystem(storage.datasets_dir.to_path_buf()))
+    }
 }
 
 /// Build an Iceberg catalog whose warehouse lives on the local filesystem under

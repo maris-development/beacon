@@ -13,6 +13,7 @@
 pub mod alter;
 pub mod catalog;
 pub mod definition;
+pub mod external;
 pub mod provider;
 pub mod schema_convert;
 
@@ -34,6 +35,10 @@ pub use catalog::{
     beacon_namespace, get_catalog, get_warehouse_store, init_catalog, BEACON_NAMESPACE,
 };
 pub use definition::IcebergTableDefinition;
+pub use external::{
+    load_external_iceberg_table, ExternalIcebergTable, ExternalIcebergTableDefinition,
+    ReadIcebergFunc,
+};
 pub use provider::IcebergTable;
 
 /// Create a new Iceberg table in `catalog` under `namespace` and return a ready

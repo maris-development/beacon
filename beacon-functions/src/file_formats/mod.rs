@@ -88,6 +88,12 @@ pub fn register_table_functions(
             data_object_store_url.clone(),
             datasets_object_store.clone(),
         )),
+        Arc::new(beacon_iceberg::ReadIcebergFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
+            datasets_object_store.clone(),
+        )),
         Arc::new(list_datasets::ListDatasetsFunc::new(
             runtime_handle,
             session_ctx,

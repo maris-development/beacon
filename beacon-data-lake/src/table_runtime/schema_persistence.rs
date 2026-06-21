@@ -136,6 +136,11 @@ pub fn definition_from_provider(
 ) -> datafusion::error::Result<Arc<dyn TableDefinition>> {
     if let Some(table) = table.as_any().downcast_ref::<beacon_iceberg::IcebergTable>() {
         Ok(Arc::new(table.definition().clone()))
+    } else if let Some(table) = table
+        .as_any()
+        .downcast_ref::<beacon_iceberg::ExternalIcebergTable>()
+    {
+        Ok(Arc::new(table.definition().clone()))
     } else if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(table) = table.as_any().downcast_ref::<MaterializedView>() {

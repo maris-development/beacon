@@ -35,6 +35,7 @@ beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
 beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
+beacon-iceberg = { path = "../beacon-iceberg" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
 beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }

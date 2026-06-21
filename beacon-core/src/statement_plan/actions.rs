@@ -90,6 +90,13 @@ pub(crate) async fn create_external_table(
         return create_delta_table(session, cmd).await;
     }
 
+    // `STORED AS ICEBERG` registers an existing (external) Iceberg table at the
+    // given `datasets://` location. Like Delta, it has its own metadata layout
+    // and provider rather than a file glob.
+    if cmd.file_type.eq_ignore_ascii_case("ICEBERG") {
+        return create_iceberg_external_table(session, cmd).await;
+    }
+
     let factory =
         ListingTableFactoryExt::new(DATASETS_OBJECT_STORE_URL.clone(), Arc::downgrade(session));
     let state = session.state();
@@ -189,6 +196,29 @@ async fn create_delta_table(
     };
 
     // `build_provider` resolves the schema from the Delta log; registration
+    // persists `table.json` via the TableManager.
+    let provider = definition
+        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+        .await?;
+    session.register_table(cmd.name.clone(), provider)?;
+    Ok(())
+}
+
+/// Build and register an external Iceberg table from
+/// `CREATE EXTERNAL TABLE … STORED AS ICEBERG LOCATION 'datasets://db/table'`.
+/// The Iceberg table must already exist at the location (file-catalog layout);
+/// its schema is read from the table metadata. Reads and `INSERT` are supported;
+/// beacon does not own the files, so `DROP` only deregisters the table.
+async fn create_iceberg_external_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+) -> anyhow::Result<()> {
+    let definition = beacon_iceberg::ExternalIcebergTableDefinition::new(
+        cmd.name.to_string(),
+        cmd.location.clone(),
+    );
+
+    // `build_provider` resolves the schema from the table metadata; registration
     // persists `table.json` via the TableManager.
     let provider = definition
         .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
