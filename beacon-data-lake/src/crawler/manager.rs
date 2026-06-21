@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
+use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::event::ObjectEvent;
 use beacon_object_storage::DatasetsStore;
 use datafusion::prelude::SessionContext;
@@ -15,7 +16,7 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
-use crate::{FileManager, TableManager, TABLES_OBJECT_STORE_URL};
+use crate::TABLES_OBJECT_STORE_URL;
 
 use super::definition::CrawlerDefinition;
 use super::engine::{CrawlEngine, CrawlReport};
@@ -56,13 +57,12 @@ pub struct CrawlerManager {
 impl CrawlerManager {
     pub fn new(
         session_ctx: Arc<SessionContext>,
-        file_manager: Arc<FileManager>,
-        table_manager: Arc<TableManager>,
+        file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
         datasets_store: Arc<DatasetsStore>,
         config: beacon_config::CrawlerConfig,
         events_available: bool,
     ) -> Arc<Self> {
-        let engine = CrawlEngine::new(session_ctx.clone(), file_manager, table_manager);
+        let engine = CrawlEngine::new(session_ctx.clone(), file_formats);
         let persistence = CrawlerPersistence::new(session_ctx, TABLES_OBJECT_STORE_URL.clone());
         Arc::new(Self {
             engine,

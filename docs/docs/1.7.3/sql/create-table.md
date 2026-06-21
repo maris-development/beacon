@@ -41,6 +41,9 @@ CREATE EXTERNAL TABLE argo STORED AS NETCDF LOCATION 'argo/**/*.nc'
 | `ODV`       | ODV ASCII spreadsheet |
 | `TIFF`      | GeoTIFF / Cloud-Optimized GeoTIFF |
 | `BBF`       | Beacon Binary Format |
+| `DELTA`     | Delta Lake table directory (`_delta_log/`) |
+
+`DELTA` points at an existing [Delta Lake](../data-lake/delta-lake.md) table directory and additionally supports time travel and `INSERT INTO`. `REMOTE` federates a table on another Beacon instance — see [Remote Tables](../data-lake/remote-tables.md).
 
 Zarr tables should point at `zarr.json` entry files, and Atlas tables at `atlas.json` markers:
 

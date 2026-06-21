@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
+members = ["beacon-api", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
 exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
@@ -41,6 +41,12 @@ lazy_static = "1.5.0"
 bloomfilter = { version = "1", features = ["serde"] }
 bincode = "1"
 
+# Delta Lake support. 0.32.x pins datafusion 53 / arrow 58 / object_store 0.13,
+# matching our versions. We keep default features (`rustls`, required by the
+# delta-kernel default engine) and add `datafusion`, but do NOT enable the cloud
+# backends (`s3`/`azure`/`gcs`): Beacon injects its own object store
+# (DatasetsStore) so S3/local both reach Delta through that.
+deltalake = { version = "=0.32.4", features = ["datafusion"] }
 datafusion = "^53"
 # Pinned exactly: 0.5.3 is the release whose `datafusion` dep resolves to ^53
 # (matching our 53.1.0). Its `sql` feature gates the SQLExecutor/SQLTableSource

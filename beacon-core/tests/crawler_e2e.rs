@@ -71,7 +71,7 @@ async fn crawler_discovers_partitioned_parquet() {
         .expect("runtime should boot");
 
     // Lay down a Hive-partitioned Parquet tree under the datasets store.
-    let datasets = runtime.config().data.datasets.clone();
+    let datasets = runtime.config().storage.datasets_dir.clone();
     let schema = Arc::new(Schema::new(vec![
         Field::new("v", DataType::Int64, false),
         Field::new("name", DataType::Utf8, false),

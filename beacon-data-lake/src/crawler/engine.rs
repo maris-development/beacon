@@ -1,10 +1,11 @@
 //! The crawl engine: turn a [`CrawlerDefinition`] into registered external tables.
 //!
 //! Reuses Beacon's existing primitives end-to-end:
-//! - [`FileManager::list_datasets`] for scan + per-format classification,
+//! - [`crate::list_datasets`] for scan + per-format classification,
 //! - [`ExternalTableDefinition::build_provider`] for schema inference + partition
 //!   validation (the same code path used when loading persisted tables),
-//! - [`TableManager::register_table`] for registration + `table.json` persistence.
+//! - `SessionContext::register_table` (backed by `PersistentSchemaProvider`) for
+//!   registration + `table.json` persistence.
 //!
 //! The only crawler-specific behaviour is grouping (`super::discovery`) and an
 //! ownership guard so a crawl never overwrites a hand-created table.
@@ -13,11 +14,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema;
+use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, TableDefinition};
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
-use crate::{FileManager, TableManager, DATASETS_OBJECT_STORE_URL};
+use crate::{list_datasets, DATASETS_OBJECT_STORE_URL};
 
 use super::definition::{CrawlerDefinition, CRAWLER_OWNER_OPTION};
 use super::discovery::{assign_table_names, group_into_tables};
@@ -44,20 +46,17 @@ pub struct CrawlReport {
 /// Builds external tables from discovered datasets.
 pub struct CrawlEngine {
     session_ctx: Arc<SessionContext>,
-    file_manager: Arc<FileManager>,
-    table_manager: Arc<TableManager>,
+    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 }
 
 impl CrawlEngine {
     pub fn new(
         session_ctx: Arc<SessionContext>,
-        file_manager: Arc<FileManager>,
-        table_manager: Arc<TableManager>,
+        file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
     ) -> Self {
         Self {
             session_ctx,
-            file_manager,
-            table_manager,
+            file_formats,
         }
     }
 
@@ -68,13 +67,17 @@ impl CrawlEngine {
             ..Default::default()
         };
 
-        // 1. Scan + classify (reuses FileManager + per-format discover_datasets).
+        // 1. Scan + classify (reuses list_datasets + per-format discover_datasets).
         let pattern = scan_pattern(&def.target_prefix);
-        let datasets = self
-            .file_manager
-            .list_datasets(None, None, Some(pattern))
-            .await
-            .map_err(|e| anyhow::anyhow!("crawler '{}' scan failed: {e}", def.name))?;
+        let datasets = list_datasets(
+            &self.session_ctx,
+            &self.file_formats,
+            None,
+            None,
+            Some(pattern),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("crawler '{}' scan failed: {e}", def.name))?;
 
         // 2. Group into candidate tables + detect partitions (pure logic).
         let (candidates, skipped_files) = group_into_tables(&datasets, def);
@@ -85,9 +88,9 @@ impl CrawlEngine {
         // 3. Build + register each candidate.
         for (cand, name) in candidates.iter().zip(names) {
             // Ownership guard: only (re)write tables this crawler owns.
-            let is_update = match self.table_manager.table_provider(&name) {
-                None => false,
-                Some(provider) => {
+            let is_update = match self.session_ctx.table_provider(name.as_str()).await {
+                Err(_) => false, // does not exist yet
+                Ok(provider) => {
                     let owned = provider
                         .as_any()
                         .downcast_ref::<ExternalTable>()
@@ -135,7 +138,8 @@ impl CrawlEngine {
                 }
             };
 
-            match self.table_manager.register_table(name.clone(), provider) {
+            // register_table (via PersistentSchemaProvider) persists table.json.
+            match self.session_ctx.register_table(name.as_str(), provider) {
                 Ok(_) if is_update => report.updated.push(name),
                 Ok(_) => report.created.push(name),
                 Err(error) => report.failed.push((name, error.to_string())),

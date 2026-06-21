@@ -80,34 +80,7 @@ impl SchemaPersistenceService {
         table_name: &str,
         table: &dyn TableProvider,
     ) -> datafusion::error::Result<String> {
-        let definition: Arc<dyn TableDefinition> =
-            if let Some(table) = table.as_any().downcast_ref::<beacon_iceberg::IcebergTable>() {
-                Arc::new(table.definition().clone())
-            } else if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {
-                let definition = table.definition();
-                Arc::new(definition.clone())
-            } else if let Some(table) = table.as_any().downcast_ref::<MaterializedView>() {
-                let definition = table.definition();
-                Arc::new(definition.clone())
-            } else if let Some(definition) =
-                beacon_datafusion_ext::remote::remote_table_definition(table)
-            {
-                Arc::new(definition)
-            } else if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
-                let definition =
-                    ViewTableDefinition::try_from_view(table_name, table).map_err(|error| {
-                        DataFusionError::Plan(format!(
-                            "Failed to create ViewTableDefinition for table {}: {}",
-                            table_name, error
-                        ))
-                    })?;
-                Arc::new(definition)
-            } else {
-                return Err(DataFusionError::Plan(format!(
-                    "Unsupported table provider type for table {}",
-                    table_name
-                )));
-            };
+        let definition = definition_from_provider(table_name, table)?;
 
         let json = serde_json::to_string_pretty(&definition).map_err(|error| {
             DataFusionError::Plan(format!(
@@ -147,6 +120,44 @@ impl SchemaPersistenceService {
             })?;
 
         Ok(())
+    }
+}
+
+/// Reconstruct a serializable [`TableDefinition`] from a live table provider by
+/// downcasting it to one of beacon's managed provider types.
+///
+/// This is the inverse of building a provider from a definition: it lets the
+/// catalog recover a table's persisted spec (used both to persist the table and
+/// to surface its configuration) without keeping a parallel registry of
+/// definitions alongside the providers.
+pub fn definition_from_provider(
+    table_name: &str,
+    table: &dyn TableProvider,
+) -> datafusion::error::Result<Arc<dyn TableDefinition>> {
+    if let Some(table) = table.as_any().downcast_ref::<beacon_iceberg::IcebergTable>() {
+        Ok(Arc::new(table.definition().clone()))
+    } else if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {
+        Ok(Arc::new(table.definition().clone()))
+    } else if let Some(table) = table.as_any().downcast_ref::<MaterializedView>() {
+        Ok(Arc::new(table.definition().clone()))
+    } else if let Some(definition) = beacon_datafusion_ext::remote::remote_table_definition(table) {
+        Ok(Arc::new(definition))
+    } else if let Some(table) = table.as_any().downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+        Ok(Arc::new(table.definition().clone()))
+    } else if let Some(table) = table.as_any().downcast_ref::<ViewTable>() {
+        let definition =
+            ViewTableDefinition::try_from_view(table_name, table).map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "Failed to create ViewTableDefinition for table {}: {}",
+                    table_name, error
+                ))
+            })?;
+        Ok(Arc::new(definition))
+    } else {
+        Err(DataFusionError::Plan(format!(
+            "Unsupported table provider type for table {}",
+            table_name
+        )))
     }
 }
 

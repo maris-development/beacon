@@ -20,6 +20,11 @@ pub enum ConfigError {
     #[error("invalid BEACON_BASE_PATH: {0}")]
     InvalidBasePath(String),
 
+    /// Storage settings are internally inconsistent (e.g. S3 enabled without a
+    /// bucket name).
+    #[error("invalid storage configuration: {0}")]
+    InvalidStorage(String),
+
     /// A required data directory could not be created.
     #[error("failed to create directory {}: {source}", .path.display())]
     CreateDir {

@@ -1,0 +1,28 @@
+[package]
+name = "beacon-delta"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beacon-common = { path = "../../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-object-storage = { path = "../../beacon-object-storage" }
+beacon-config = { path = "../../beacon-config" }
+
+deltalake = { workspace = true }
+datafusion = { workspace = true }
+arrow = { workspace = true }
+object_store = { workspace = true }
+
+async-trait = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+typetag = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }

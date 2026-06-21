@@ -10,7 +10,7 @@
 //!   prefix-scoped event subscription, and provides NetCDF URL translation.
 //! - **Tables** / **tmp**: local filesystem.
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use object_store::{ObjectStore, local::LocalFileSystem};
 
@@ -44,22 +44,16 @@ pub struct ObjectStores {
 impl ObjectStores {
     /// Build all three object stores, returning a structured error if any fails.
     ///
-    /// `datasets_dir`/`tables_dir`/`tmp_dir` are the resolved local roots (from
-    /// the runtime's configured data directories).
-    pub async fn new(
-        storage: &StorageConfig,
-        datasets_dir: PathBuf,
-        tables_dir: PathBuf,
-        tmp_dir: PathBuf,
-    ) -> StorageResult<Self> {
-        let datasets =
-            Arc::new(datasets_store::create_datasets_store(storage, datasets_dir).await?);
+    /// The local roots and S3 backend selection all come from `storage`.
+    pub async fn new(storage: &StorageConfig) -> StorageResult<Self> {
+        let datasets = Arc::new(datasets_store::create_datasets_store(storage).await?);
 
         let tables = Arc::new(
-            LocalFileSystem::new_with_prefix(tables_dir)?.with_automatic_cleanup(true),
+            LocalFileSystem::new_with_prefix(&storage.tables_dir)?.with_automatic_cleanup(true),
         ) as Arc<dyn ObjectStore>;
 
-        let tmp = Arc::new(LocalFileSystem::new_with_prefix(tmp_dir)?) as Arc<dyn ObjectStore>;
+        let tmp =
+            Arc::new(LocalFileSystem::new_with_prefix(&storage.tmp_dir)?) as Arc<dyn ObjectStore>;
 
         tracing::info!("object stores initialized");
         Ok(Self {

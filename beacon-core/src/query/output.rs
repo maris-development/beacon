@@ -8,7 +8,6 @@ use std::sync::Arc;
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
-use beacon_data_lake::FileManager;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
 use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
@@ -33,8 +32,8 @@ impl Output {
     /// Parses the logical plan and prepares an output file in the specified format.
     ///
     /// # Arguments
-    /// * `_session_context` - DataFusion session context (unused).
-    /// * `file_manager` - FileManager instance for temporary file creation.
+    /// * `session_context` - DataFusion session context (provides the datasets store).
+    /// * `tmp_dir` - Directory the temporary output file is created in (the tmp store root).
     /// * `input_plan` - The logical plan to export.
     ///
     /// # Returns
@@ -42,7 +41,7 @@ impl Output {
     pub async fn parse(
         &self,
         session_context: &SessionContext,
-        file_manager: &FileManager,
+        tmp_dir: &std::path::Path,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
         let datasets_store = session_context
@@ -55,7 +54,7 @@ impl Output {
                 )
             })?;
         let file_type = self.format.file_type(datasets_store).await;
-        let temp_output = file_manager.try_create_temp_output_file(".tmp");
+        let temp_output = beacon_data_lake::create_temp_output_file(tmp_dir, ".tmp");
         let plan = LogicalPlanBuilder::copy_to(
             input_plan,
             temp_output.output_url(),

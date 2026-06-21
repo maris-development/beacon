@@ -20,7 +20,7 @@
 //! | `None` / empty               | [`NetCDFSink`]  | flat, unlimited `obs`   |
 //! | `Some(["lat", "lon", …])`  | [`NetCDFNdSink`]| gridded, named dims     |
 
-use std::{any::Any, env::temp_dir, fmt::Formatter, sync::Arc};
+use std::{any::Any, fmt::Formatter, path::PathBuf, sync::Arc};
 
 use crate::{encoders::default::DefaultEncoder, writer::ArrowRecordBatchWriter};
 use arrow::{
@@ -49,17 +49,23 @@ use ordered_float::OrderedFloat;
 /// [`ArrowRecordBatchWriter<DefaultEncoder>`] which serializes columns into
 /// NetCDF variables along a single unlimited `obs` dimension.
 ///
-/// The output file is written to `std::env::temp_dir()` joined with the path
-/// from [`FileSinkConfig::table_paths`].
+/// The output file is written to `output_dir` (the configured tmp store root)
+/// joined with the path from [`FileSinkConfig::table_paths`].
 #[derive(Debug, Clone)]
 pub struct NetCDFSink {
     sink_config: FileSinkConfig,
+    /// Directory the NetCDF file is written to — the configured tmp store root.
+    output_dir: PathBuf,
 }
 
 impl NetCDFSink {
-    /// Create a new flat sink bound to the given [`FileSinkConfig`].
-    pub fn new(sink_config: FileSinkConfig) -> Self {
-        Self { sink_config }
+    /// Create a new flat sink bound to the given [`FileSinkConfig`], writing into
+    /// `output_dir`.
+    pub fn new(sink_config: FileSinkConfig, output_dir: PathBuf) -> Self {
+        Self {
+            sink_config,
+            output_dir,
+        }
     }
 }
 
@@ -90,7 +96,7 @@ impl DataSink for NetCDFSink {
     ) -> datafusion::error::Result<u64> {
         let arrow_schema = self.sink_config.output_schema().clone();
         let file_path = self.sink_config.table_paths[0].prefix();
-        let full_path = temp_dir().join(file_path.as_ref());
+        let full_path = self.output_dir.join(file_path.as_ref());
         tracing::info!("Writing NetCDF to path: {:?}", full_path);
 
         let mut rows_written: u64 = 0;
@@ -141,6 +147,8 @@ pub struct NetCDFNdSink {
     sink_config: FileSinkConfig,
     ndims: usize,
     unique_values: UniqueValuesHandleCollection,
+    /// Directory the NetCDF file is written to — the configured tmp store root.
+    output_dir: PathBuf,
 }
 
 impl NetCDFNdSink {
@@ -152,6 +160,7 @@ impl NetCDFNdSink {
         sink_config: FileSinkConfig,
         ndims: usize,
         unique_values: UniqueValuesHandleCollection,
+        output_dir: PathBuf,
     ) -> Result<Self, DataFusionError> {
         tracing::info!("Creating NetCDFNdSink with {} dimensions", ndims);
         for field in sink_config.output_schema().fields() {
@@ -168,6 +177,7 @@ impl NetCDFNdSink {
             sink_config,
             ndims,
             unique_values,
+            output_dir,
         })
     }
 }
@@ -197,7 +207,9 @@ impl DataSink for NetCDFNdSink {
         data: SendableRecordBatchStream,
         _context: &Arc<TaskContext>,
     ) -> datafusion::error::Result<u64> {
-        let output_path = temp_dir().join(self.sink_config.table_paths[0].prefix().as_ref());
+        let output_path = self
+            .output_dir
+            .join(self.sink_config.table_paths[0].prefix().as_ref());
         tracing::info!("Writing ND NetCDF to path: {:?}", output_path);
 
         let mut rows_written: u64 = 0;
@@ -1439,7 +1451,7 @@ mod tests {
         let sink_config = test_sink_config(schema);
 
         let collection = UniqueValuesHandleCollection::new();
-        let err = NetCDFNdSink::new(sink_config, 1, collection).unwrap_err();
+        let err = NetCDFNdSink::new(sink_config, 1, collection, std::env::temp_dir()).unwrap_err();
         assert!(err.to_string().contains("only supports primitive"));
         assert!(err.to_string().contains("name"));
     }
@@ -1458,7 +1470,7 @@ mod tests {
     fn test_display_as_flat() {
         let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, false)]));
         let sink_config = test_sink_config(schema);
-        let sink = NetCDFSink::new(sink_config);
+        let sink = NetCDFSink::new(sink_config, std::env::temp_dir());
         let display = format!("{}", DisplayAsWrapper(&sink));
         assert!(display.contains("NetCDFSink"));
     }
@@ -1468,7 +1480,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, false)]));
         let sink_config = test_sink_config(schema);
         let collection = UniqueValuesHandleCollection::new();
-        let sink = NetCDFNdSink::new(sink_config, 0, collection).unwrap();
+        let sink = NetCDFNdSink::new(sink_config, 0, collection, std::env::temp_dir()).unwrap();
         let display = format!("{}", DisplayAsWrapper(&sink));
         assert!(display.contains("NetCDFNdSink"));
     }

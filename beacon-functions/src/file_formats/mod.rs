@@ -82,6 +82,12 @@ pub fn register_table_functions(
             session_ctx.clone(),
             data_object_store_url.clone(),
         )),
+        Arc::new(beacon_delta::ReadDeltaFunc::new(
+            runtime_handle.clone(),
+            session_ctx.clone(),
+            data_object_store_url.clone(),
+            datasets_object_store.clone(),
+        )),
         Arc::new(list_datasets::ListDatasetsFunc::new(
             runtime_handle,
             session_ctx,
