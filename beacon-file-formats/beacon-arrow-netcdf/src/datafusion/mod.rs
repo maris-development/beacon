@@ -335,6 +335,10 @@ impl FileFormat for NetcdfFormat {
         conf: FileSinkConfig,
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // NetCDF needs a real local path (the netcdf-c writer cannot stream to an
+        // object store). Write into the configured tmp store root, threaded in via
+        // the datasets store's `StorageConfig`, rather than the OS temp dir.
+        let output_dir = self.datasets_object_store.storage().tmp_dir.clone();
         match &self.options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
                 let unique_columns = dim_columns.clone();
@@ -362,6 +366,7 @@ impl FileFormat for NetcdfFormat {
                     conf,
                     unique_columns.len(),
                     collection_handle,
+                    output_dir.clone(),
                 )?);
 
                 Ok(Arc::new(DataSinkExec::new(
@@ -371,7 +376,7 @@ impl FileFormat for NetcdfFormat {
                 )))
             }
             _ => {
-                let netcdf_sink = Arc::new(NetCDFSink::new(conf));
+                let netcdf_sink = Arc::new(NetCDFSink::new(conf, output_dir));
                 Ok(Arc::new(DataSinkExec::new(
                     input,
                     netcdf_sink,
