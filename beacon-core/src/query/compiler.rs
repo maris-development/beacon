@@ -4,7 +4,6 @@
 //! straight to DataFusion's SQL parser in `Runtime::plan_client_query`; only the
 //! JSON form is "compiled".
 
-use beacon_data_lake::{FileManager, TableManager};
 use datafusion::{logical_expr::LogicalPlan, prelude::SessionContext};
 
 use crate::query::QueryBody;
@@ -13,8 +12,6 @@ use crate::query::QueryBody;
 pub async fn compile_json_query(
     query_body: QueryBody,
     session: &SessionContext,
-    table_manager: &TableManager,
-    file_manager: &FileManager,
 ) -> anyhow::Result<LogicalPlan> {
     // The runtime config is published as a SessionConfig extension; fall back to
     // defaults if absent (e.g. a bare session in a unit test).
@@ -39,10 +36,10 @@ pub async fn compile_json_query(
             all_columns.extend(select_cols);
         }
 
-        from.init_builder(session, table_manager, file_manager, Some(&all_columns))
+        from.init_builder(session, Some(&all_columns))
             .await?
     } else {
-        from.init_builder(session, table_manager, file_manager, None)
+        from.init_builder(session, None)
             .await?
     };
 

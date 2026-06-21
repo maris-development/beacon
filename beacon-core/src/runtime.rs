@@ -6,9 +6,12 @@ use arrow::{
     array::AsArray,
     datatypes::{SchemaRef, UInt64Type},
 };
-use beacon_data_lake::{DataLake, FileManager, TableManager};
+use beacon_data_lake::{
+    PersistentSchemaProvider, DATASETS_OBJECT_STORE_URL, TABLES_OBJECT_STORE_URL,
+};
 use beacon_datafusion_ext::{
-    format_ext::DatasetMetadata, listing_table_factory_ext::ListingTableFactoryExt,
+    format_ext::{DatasetMetadata, FileFormatFactoryExt},
+    listing_table_factory_ext::ListingTableFactoryExt,
     stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
@@ -34,8 +37,7 @@ use crate::{
 /// Beacon's single execution layer: startup, catalog access, queries, SQL, and files.
 pub struct Runtime {
     session_ctx: Arc<SessionContext>,
-    table_manager: Arc<TableManager>,
-    file_manager: Arc<FileManager>,
+    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
     listing_table_factory: Arc<ListingTableFactoryExt>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
     /// The configuration this runtime was built with. Owned, not process-global.
@@ -54,25 +56,25 @@ impl Runtime {
             config.runtime.vm_memory_size * 1024 * 1024,
         ));
 
-        let object_stores =
-            beacon_object_storage::ObjectStores::new(&config.storage).await?;
+        let object_stores = beacon_object_storage::ObjectStores::new(&config.storage).await?;
 
         let session_ctx =
             Self::init_ctx(memory_pool, object_stores.datasets.clone(), config.clone())?;
-        let data_lake = Arc::new(
-            DataLake::new(session_ctx.clone(), object_stores.clone(), config.clone()).await,
-        );
+        beacon_data_lake::register_object_stores(&session_ctx, &object_stores)?;
 
-        let table_manager = data_lake.table_manager();
-        let file_manager = data_lake.file_manager();
+        let file_formats = beacon_data_lake::file_formats(
+            session_ctx.clone(),
+            object_stores.datasets.clone(),
+            &config,
+        )?;
 
         let mut table_functions = vec![];
         table_functions.extend(beacon_functions::file_formats::register_table_functions(
             tokio::runtime::Handle::current(),
             session_ctx.clone(),
-            file_manager.data_object_store_url(),
+            DATASETS_OBJECT_STORE_URL.clone(),
             object_stores.datasets.clone(),
-            file_manager.file_formats().to_vec(),
+            file_formats.clone(),
         ));
         table_functions.extend(beacon_functions::metadata::register_metadata_functions(
             session_ctx.clone(),
@@ -86,10 +88,15 @@ impl Runtime {
             );
         }
 
+        let schema_provider = Arc::new(PersistentSchemaProvider::new(
+            tokio::runtime::Handle::current(),
+            session_ctx.clone(),
+            TABLES_OBJECT_STORE_URL.clone(),
+        ));
         session_ctx
             .catalog("beacon")
             .unwrap()
-            .register_schema("public", table_manager.clone())?;
+            .register_schema("public", schema_provider.clone())?;
 
         // Build the shared Iceberg catalog before discovering tables: startup
         // table discovery rebuilds Iceberg providers via the catalog, and the
@@ -116,18 +123,17 @@ impl Runtime {
             session_ctx.register_udf(udf);
         }
 
-        table_manager.init_tables().await?;
+        beacon_data_lake::init_tables(&session_ctx, &schema_provider).await?;
 
         let listing_table_factory = Arc::new(ListingTableFactoryExt::new(
-            file_manager.data_object_store_url(),
+            DATASETS_OBJECT_STORE_URL.clone(),
             Arc::downgrade(&session_ctx),
         ));
 
         Ok(Self {
             session_ctx,
-            table_manager,
+            file_formats,
             listing_table_factory,
-            file_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
             config,
         })
@@ -261,7 +267,7 @@ impl Runtime {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         let (copy_plan, output_file) = output
-            .parse(self.session_ctx.as_ref(), self.file_manager.as_ref(), plan)
+            .parse(self.session_ctx.as_ref(), &self.config.storage.tmp_dir, plan)
             .await?;
         let output_file = QueryOutputFile::from(output_file);
 
@@ -296,13 +302,7 @@ impl Runtime {
         match inner {
             crate::query::InnerQuery::Sql(sql) => self.lower_sql(&sql).await,
             crate::query::InnerQuery::Json(body) => {
-                crate::query::compile_json_query(
-                    body,
-                    self.session_ctx.as_ref(),
-                    self.table_manager.as_ref(),
-                    self.file_manager.as_ref(),
-                )
-                .await
+                crate::query::compile_json_query(body, self.session_ctx.as_ref()).await
             }
         }
     }
@@ -401,7 +401,11 @@ impl Runtime {
     }
 
     pub fn list_tables(&self) -> Vec<String> {
-        self.table_manager.table_names()
+        self.session_ctx
+            .catalog("beacon")
+            .and_then(|catalog| catalog.schema("public"))
+            .map(|schema| schema.table_names())
+            .unwrap_or_default()
     }
 
     /// Lists SQL catalogs visible to Flight SQL and other SQL-based clients.
@@ -475,15 +479,15 @@ impl Runtime {
     }
 
     pub async fn list_table_config(&self, table_name: String) -> Option<TableConfigView> {
-        self.table_manager.list_table(&table_name).and_then(
-            |config| match TableConfigView::try_from(config) {
-                Ok(config) => Some(config),
-                Err(error) => {
-                    tracing::error!(?error, "failed to map table config into API contract");
-                    None
-                }
-            },
-        )
+        let provider = self.session_ctx.table_provider(table_name.as_str()).await.ok()?;
+        let config = beacon_data_lake::definition_from_provider(&table_name, provider.as_ref()).ok()?;
+        match TableConfigView::try_from(config) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                tracing::error!(?error, "failed to map table config into API contract");
+                None
+            }
+        }
     }
 
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
@@ -534,10 +538,10 @@ impl Runtime {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<DatasetMetadata>> {
-        Ok(self
-            .file_manager
-            .list_datasets(offset, limit, pattern)
-            .await?)
+        Ok(
+            beacon_data_lake::list_datasets(&self.session_ctx, &self.file_formats, offset, limit, pattern)
+                .await?,
+        )
     }
 
     pub async fn total_datasets(&self) -> anyhow::Result<usize> {
@@ -547,7 +551,7 @@ impl Runtime {
     }
 
     pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {
-        Ok(self.file_manager.list_dataset_schema(&file).await?)
+        Ok(beacon_data_lake::list_dataset_schema(&self.session_ctx, &file).await?)
     }
 
     pub async fn list_dataset_schema_view(&self, file: String) -> anyhow::Result<SchemaView> {
@@ -872,5 +876,85 @@ mod client_query_tests {
             err.to_string().contains("super-user"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::Runtime;
+    use futures::TryStreamExt;
+
+    async fn run_sql(runtime: &Runtime, sql: &str) {
+        runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), true)
+            .await
+            .expect("sql should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("sql should drain");
+    }
+
+    async fn count_rows(runtime: &Runtime, sql: &str) -> usize {
+        runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), true)
+            .await
+            .expect("sql should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("sql should drain")
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum()
+    }
+
+    /// Tables persisted by one runtime are rebuilt by a fresh runtime via
+    /// `init_tables`: the base table's data survives, and the dependent view is
+    /// rebuilt in dependency order so it resolves the base table registered ahead
+    /// of it. This exercises the persist-on-register + startup-recovery round trip
+    /// that replaces the old `TableManager` registry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persisted_tables_survive_a_restart() {
+        let suffix = uuid::Uuid::new_v4().simple();
+        let base = format!("restart_base_{suffix}");
+        let view = format!("restart_view_{suffix}");
+
+        // Both runtimes share one config so they resolve the same on-disk tables
+        // store; the restart must rebuild from what the first runtime persisted.
+        let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
+
+        // First runtime: create a base table with data and a view over it.
+        let runtime = Runtime::new(config.clone()).await.expect("runtime should start");
+        run_sql(&runtime, &format!("CREATE TABLE {base} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {base} VALUES (1), (2)")).await;
+        run_sql(&runtime, &format!("CREATE VIEW {view} AS SELECT a FROM {base}")).await;
+        drop(runtime);
+
+        // A fresh runtime rebuilds the catalog purely from the persisted
+        // `tables://<name>/table.json` definitions.
+        let restarted = Runtime::new(config).await.expect("runtime should restart");
+
+        assert_eq!(
+            count_rows(&restarted, &format!("SELECT * FROM {base}")).await,
+            2,
+            "base table data should persist across a restart"
+        );
+        assert_eq!(
+            count_rows(&restarted, &format!("SELECT * FROM {view}")).await,
+            2,
+            "the view should be rebuilt and resolve its dependency after a restart"
+        );
+
+        // Cleanup so the shared on-disk tables store does not leak into other
+        // tests (best-effort; `DROP TABLE` deregisters either provider type).
+        let _ = restarted
+            .run_query(crate::query::Query::sql(format!("DROP TABLE {view}")), true)
+            .await;
+        let _ = restarted
+            .run_query(crate::query::Query::sql(format!("DROP TABLE {base}")), true)
+            .await;
     }
 }
