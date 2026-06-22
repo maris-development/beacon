@@ -121,7 +121,7 @@ environment values.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `AWS_ENDPOINT` | _(none)_ | S3-compatible endpoint URL, e.g. `https://s3.amazonaws.com` or `http://minio:9000`. If the endpoint does not embed the bucket, set `BEACON_S3_BUCKET`. |
+| `AWS_ENDPOINT` | _(none)_ | S3-compatible endpoint URL, e.g. `https://s3.amazonaws.com` or `http://minio:9000`. The bucket is always taken from `BEACON_S3_BUCKET`, never parsed from this URL. |
 | `AWS_REGION` | _(none)_ | S3 region. (Note: `AWS_DEFAULT_REGION` is **not** used — set `AWS_REGION`.) |
 | `AWS_ACCESS_KEY_ID` | _(none)_ | Access key. Only required when the object store needs authentication. |
 | `AWS_SECRET_ACCESS_KEY` | _(none)_ | Secret key. Only required when the object store needs authentication. |
