@@ -5,6 +5,9 @@ use datafusion::{
 };
 
 #[derive(Debug, Clone, utoipa::ToSchema, serde::Serialize, serde::Deserialize)]
+// `Filter` -> `And` -> `Filter` is a recursive cycle; break it so utoipa's schema
+// generation does not inline forever and overflow the stack.
+#[schema(no_recursion)]
 pub struct And(pub Vec<super::Filter>);
 
 impl And {

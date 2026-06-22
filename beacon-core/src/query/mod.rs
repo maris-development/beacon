@@ -17,11 +17,24 @@ pub mod output;
 
 pub use compiler::compile_json_query;
 
+/// A Beacon query request body.
+///
+/// The query is either a raw SQL string (`{"sql": "SELECT ..."}`) or a structured
+/// JSON query (the fields of [`QueryBody`]: `select`, `filter`, `from`, ...). The
+/// `inner` query is flattened, so its fields appear at the top level of the body.
+/// An optional [`Output`] selects the result format (the default is an Arrow IPC
+/// stream).
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[schema(example = json!({
+    "select": [{ "column": "temperature" }, { "column": "depth" }],
+    "filter": { "column": "depth", "gt_eq": 0, "lt_eq": 100 },
+    "output": { "format": "csv" }
+}))]
 pub struct Query {
+    /// The query itself: either SQL or a structured JSON query.
     #[serde(flatten)]
     pub inner: InnerQuery,
-    #[schema(value_type = Object)]
+    /// Result output format. Omit for the default zstd-compressed Arrow IPC stream.
     pub output: Option<Output>,
 }
 
@@ -35,28 +48,39 @@ impl Query {
     }
 }
 
+/// The query itself: a SQL string or a structured JSON query.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub enum InnerQuery {
+    /// A raw SQL query: `{ "sql": "SELECT ..." }`.
     #[serde(rename = "sql")]
     Sql(String),
+    /// A structured JSON query (the fields of [`QueryBody`] at the top level).
     #[serde(untagged)]
     Json(QueryBody),
 }
 
+/// A structured (non-SQL) query.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueryBody {
+    /// Columns, functions, or literals to project.
     #[serde(alias = "query_parameters")]
     select: Vec<Select>,
+    /// Row filter to apply (a single, possibly nested, filter expression).
     filter: Option<Filter>,
     // To Support legacy queries
     #[schema(ignore)]
     filters: Option<Vec<Filter>>,
+    /// Data source to read from. Defaults to the runtime's default table.
     #[serde(default)]
     from: Option<crate::query::from::From>,
+    /// Ordering to apply to the result.
     sort_by: Option<Vec<Sort>>,
+    /// Distinct-on specification.
     distinct: Option<Distinct>,
+    /// Number of rows to skip.
     offset: Option<usize>,
+    /// Maximum number of rows to return.
     limit: Option<usize>,
 }
 
@@ -66,20 +90,29 @@ pub struct Distinct {
     pub select: Vec<Select>,
 }
 
+/// A single projected item in a query's `select`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum Select {
+    /// A bare column name (`"temperature"`).
     ColumnName(String),
+    /// A column with an optional alias (`{ "column": "temp", "alias": "t" }`).
     Column {
         #[serde(alias = "column_name")]
         column: String,
         alias: Option<String>,
     },
+    /// A function call over other select items
+    /// (`{ "function": "avg", "args": ["temp"] }`).
     Function {
         function: String,
+        // `Select` -> `Function` -> `Select` is recursive; break it so utoipa's
+        // schema generation terminates instead of overflowing the stack.
+        #[schema(no_recursion)]
         args: Vec<Select>,
         alias: Option<String>,
     },
+    /// A literal value (`{ "value": 0, "alias": "zero" }`).
     Literal {
         value: Literal,
         alias: Option<String>,

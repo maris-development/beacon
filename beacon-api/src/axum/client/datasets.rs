@@ -14,8 +14,11 @@ use utoipa::{IntoParams, ToSchema};
 /// Pagination and filter parameters shared by the dataset listing endpoints.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct ListDatasetsQuery {
+    /// Optional glob pattern to filter dataset paths (e.g. `argo/**/*.parquet`).
     pub pattern: Option<String>,
+    /// Maximum number of entries to return.
     pub limit: Option<usize>,
+    /// Number of entries to skip before returning results.
     pub offset: Option<usize>,
 }
 
@@ -29,7 +32,10 @@ pub struct ListDatasetsQuery {
     get, 
     path = "/api/datasets", 
     params(ListDatasetsQuery),
-    responses((status = 200, description = "List of datasets")),
+    responses(
+        (status = 200, description = "List of dataset file paths", body = Vec<String>),
+        (status = 500, description = "Failed to list datasets"),
+    ),
     security(
         (),
         ("basic-auth" = []),
@@ -64,7 +70,10 @@ pub(crate) async fn datasets(
     get,
     path = "/api/list-datasets",
     params(ListDatasetsQuery),
-    responses((status = 200, description = "List of datasets including interpreted file format")),
+    responses(
+        (status = 200, description = "List of datasets including interpreted file format", body = Vec<DatasetInfo>),
+        (status = 500, description = "Failed to list datasets"),
+    ),
     security(
         (),
         ("basic-auth" = []),
@@ -94,6 +103,7 @@ pub(crate) async fn list_datasets(
 /// Query parameters for [`list_dataset_schema`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct ListDatasetSchemaQuery {
+    /// Datasets-store-relative path of the file to inspect.
     pub file: String,
 }
 
@@ -102,9 +112,12 @@ pub struct ListDatasetSchemaQuery {
 #[utoipa::path(
     tag = "datasets",
     get, 
-    path = "/api/dataset-schema", 
+    path = "/api/dataset-schema",
     params(ListDatasetSchemaQuery),
-    responses((status = 200, description = "List the schema/available columns")),
+    responses(
+        (status = 200, description = "The Arrow schema produced when reading the dataset", body = SchemaView),
+        (status = 500, description = "Failed to read the dataset schema"),
+    ),
     security(
         (),
         ("basic-auth" = []),
@@ -135,7 +148,10 @@ pub(crate) async fn list_dataset_schema(
     tag = "datasets",
     get,
     path = "/api/total-datasets",
-    responses((status = 200, description = "List the total amount of datasets available")),
+    responses(
+        (status = 200, description = "Total number of datasets available", body = usize),
+        (status = 500, description = "Failed to count datasets"),
+    ),
     security(
         (),
         ("basic-auth" = []),

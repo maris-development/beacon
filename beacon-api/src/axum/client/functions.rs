@@ -11,8 +11,8 @@ use beacon_core::runtime::Runtime;
 #[utoipa::path(
     tag = "functions",
     get, 
-    path = "/api/functions", 
-    responses((status = 200, description = "List of available functions with documentation")),
+    path = "/api/functions",
+    responses((status = 200, description = "Available scalar/aggregate functions with documentation", body = Vec<FunctionInfo>)),
     security(
         (),
         ("basic-auth" = []),
@@ -30,7 +30,7 @@ pub(crate) async fn list_functions(State(state): State<Arc<Runtime>>) -> Json<Ve
     tag = "functions",
     get,
     path = "/api/table-functions",
-    responses((status = 200, description = "List of available table functions with documentation")),
+    responses((status = 200, description = "Available table-valued functions with documentation", body = Vec<FunctionInfo>)),
     security(
         (),
         ("basic-auth" = []),

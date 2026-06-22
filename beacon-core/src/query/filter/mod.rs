@@ -25,11 +25,19 @@ pub mod lte;
 pub mod neq;
 pub mod or;
 
+/// A row filter expression for a structured query.
+///
+/// Boolean combinators (`and`, `or`) nest other filters; the remaining variants
+/// are leaf predicates over a single column. Comparison predicates (`eq`, `neq`,
+/// `gt`, `gt_eq`, `lt`, `lt_eq`, `between`) and the GeoJSON predicate are matched
+/// by their fields rather than a wrapping tag.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Filter {
+    /// All of the contained filters must match.
     #[serde(alias = "and")]
     And(And),
+    /// Any of the contained filters must match.
     #[serde(alias = "or")]
     Or(Or),
     #[serde(

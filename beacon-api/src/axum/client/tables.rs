@@ -16,8 +16,8 @@ use utoipa::{IntoParams, ToSchema};
 #[utoipa::path(
     tag = "tables",
     get, 
-    path = "/api/tables", 
-    responses((status = 200, description = "List of tables")),
+    path = "/api/tables",
+    responses((status = 200, description = "List of registered table names", body = Vec<String>)),
     security(
         (),
         ("basic-auth" = []),
@@ -30,9 +30,11 @@ pub(crate) async fn list_tables(State(state): State<Arc<Runtime>>) -> Json<Vec<S
 }
 
 /// Response entry pairing a table name with its Arrow schema.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub(crate) struct TableWithSchema {
+    /// Registered table name.
     table_name: String,
+    /// Arrow schema fields (name, data type, nullability, metadata) of the table.
     columns: Vec<SchemaFieldView>,
 }
 
@@ -41,8 +43,8 @@ pub(crate) struct TableWithSchema {
 #[utoipa::path(
     tag = "tables",
     get, 
-    path = "/api/tables-with-schema", 
-    responses((status = 200, description = "List of tables with schema")),
+    path = "/api/tables-with-schema",
+    responses((status = 200, description = "Registered tables with their Arrow schemas", body = Vec<TableWithSchema>)),
     security(
         (),
         ("basic-auth" = []),
@@ -69,6 +71,7 @@ pub(crate) async fn list_tables_with_schema(
 /// Query parameters for [`list_table_schema`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct ListTableSchemaQuery {
+    /// Name of the registered table to inspect.
     pub table_name: String,
 }
 
@@ -77,9 +80,12 @@ pub struct ListTableSchemaQuery {
 #[utoipa::path(
     tag = "tables",
     get, 
-    path = "/api/table-schema", 
-    params(ListTableSchemaQuery) ,
-    responses((status = 200, description = "List of schema of a table")),
+    path = "/api/table-schema",
+    params(ListTableSchemaQuery),
+    responses(
+        (status = 200, description = "The Arrow schema of the table", body = SchemaView),
+        (status = 404, description = "Table not found"),
+    ),
     security(
         (),
         ("basic-auth" = []),
@@ -107,6 +113,7 @@ pub(crate) async fn list_table_schema(
 /// Query parameters for [`list_table_config`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
 pub struct ListTableConfigQuery {
+    /// Name of the registered table whose configuration to return.
     pub table_name: String,
 }
 
@@ -115,9 +122,12 @@ pub struct ListTableConfigQuery {
 #[utoipa::path(
     tag = "tables",
     get, 
-    path = "/api/table-config", 
-    params(ListTableConfigQuery) ,
-    responses((status = 200, description = "List of schema of a table")),
+    path = "/api/table-config",
+    params(ListTableConfigQuery),
+    responses(
+        (status = 200, description = "The storage format and configuration of the table", body = TableConfigView),
+        (status = 404, description = "Table not found"),
+    ),
     security(
         (),
         ("basic-auth" = []),
@@ -148,7 +158,7 @@ pub(crate) async fn list_table_config(
     tag = "tables",
     get,
     path = "/api/default-table-schema",
-    responses((status = 200, description = "List of schema of the default table")),
+    responses((status = 200, description = "The Arrow schema of the default table", body = SchemaView)),
     security(
         (),
         ("basic-auth" = []),
@@ -168,7 +178,7 @@ pub(crate) async fn default_table_schema(
     tag = "tables",
     get,
     path = "/api/default-table",
-    responses((status = 200, description = "Name of the default table")),
+    responses((status = 200, description = "Name of the default table", body = String)),
     security(
         (),
         ("basic-auth" = []),

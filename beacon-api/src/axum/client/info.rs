@@ -10,8 +10,8 @@ use beacon_core::{runtime::Runtime, sys::SystemInfo};
 #[utoipa::path(
     tag = "system",
     get, 
-    path = "/api/info", 
-    responses((status = 200, description = "Returns Beacon system information")),
+    path = "/api/info",
+    responses((status = 200, description = "Beacon runtime system information", body = SystemInfo)),
     security(
         (),
         ("basic-auth" = []),
