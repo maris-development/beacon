@@ -21,7 +21,14 @@ impl DatasetReadMetrics {
     pub fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
         Self {
             output_rows: MetricBuilder::new(metrics).output_rows(partition),
-            output_batches: MetricBuilder::new(metrics).counter("output_batches", partition),
+            // Use the dedicated typed builder (matching `output_rows` above) rather
+            // than a generic `counter("output_batches", ..)`. `output_batches` is a
+            // reserved DataFusion metric name: `FileStream`'s `BaselineMetrics`
+            // already registers a typed `MetricValue::OutputBatches` under it. A
+            // generic `Count` under the same name produces two metrics that share a
+            // name but differ in variant, which panics when DataFusion aggregates
+            // metrics by name for display (e.g. `EXPLAIN ANALYZE`).
+            output_batches: MetricBuilder::new(metrics).output_batches(partition),
             rows_pruned: MetricBuilder::new(metrics).counter("rows_pruned", partition),
             batches_pruned: MetricBuilder::new(metrics).counter("batches_pruned", partition),
         }
