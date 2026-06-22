@@ -86,4 +86,23 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].table_name(), "ok_table");
     }
+
+    #[tokio::test]
+    async fn load_tables_reads_legacy_logical_envelope() {
+        let store = InMemory::new();
+
+        let legacy = br#"{
+            "table_name": "default",
+            "table_type": { "logical": { "paths": ["**/*.bbf"], "file_format": "bbf" } }
+        }"#;
+        store
+            .put(&Path::from("default/table.json"), legacy.to_vec().into())
+            .await
+            .expect("legacy table.json should be written");
+
+        let loaded = load_tables_from_object_store(Arc::new(store)).await;
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].table_name(), "default");
+    }
 }
