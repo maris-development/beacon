@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use ::axum::Router;
+use ::axum::{http::StatusCode, Router};
 use beacon_core::runtime::Runtime;
 use utoipa::{
     openapi::security::{Http, HttpAuthScheme, SecurityScheme},
@@ -13,6 +13,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::axum::auth::basic_auth;
 
 mod check;
+mod crawlers;
+mod external_tables;
 
 /// OpenAPI document marker for the admin surface.
 #[derive(OpenApi)]
@@ -23,13 +25,30 @@ pub struct AdminApiDoc;
 pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
         .routes(routes!(check::check))
+        .routes(routes!(crawlers::create_crawler, crawlers::list_crawlers))
+        .routes(routes!(
+            crawlers::get_crawler,
+            crawlers::drop_crawler
+        ))
+        .routes(routes!(crawlers::run_crawler))
+        .routes(routes!(external_tables::create_external_table))
         .layer(::axum::middleware::from_fn(basic_auth))
         .split_for_parts();
 
     (admin_router, admin_api)
 }
 
-/// Injects the auth schemes used by admin endpoints into the OpenAPI document.
+/// Map a runtime error to a `400 Bad Request` carrying the error text, the shared
+/// failure shape for the admin write endpoints.
+pub(super) fn bad_request(error: anyhow::Error) -> (StatusCode, String) {
+    tracing::error!(?error, "admin request failed");
+    (StatusCode::BAD_REQUEST, error.to_string())
+}
+
+/// Injects the auth scheme used by admin endpoints into the OpenAPI document.
+///
+/// The admin surface is gated solely by the `basic_auth` middleware, which only
+/// accepts HTTP Basic credentials — so only the `basic-auth` scheme is advertised.
 struct SecurityAddon;
 
 impl Modify for SecurityAddon {
@@ -37,11 +56,7 @@ impl Modify for SecurityAddon {
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
                 "basic-auth",
-                SecurityScheme::Http(Http::new(utoipa::openapi::security::HttpAuthScheme::Basic)),
-            );
-            components.add_security_scheme(
-                "bearer",
-                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Basic)),
             );
         }
     }
