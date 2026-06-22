@@ -51,6 +51,10 @@ services:
 
 If you used Compose, start it with `docker compose up -d`. Beacon is now running. Open `http://localhost:5001/swagger` to verify and explore the API. Any files placed in `./datasets` are immediately available for querying.
 
+::: tip Two ways to connect
+Beacon exposes two endpoints. The **HTTP API** on port `5001` serves SQL/JSON queries and the OpenAPI docs. The **Arrow Flight SQL** server on port `32011` is a high-throughput, columnar protocol used by clients such as [JetBrains DataGrip](./connect/jetbrains-datagrip.md) and the [Python ADBC driver](./connect/python-adbc.md). Flight SQL uses bearer-token authentication and can be tuned or disabled via the `BEACON_FLIGHT_SQL_*` [settings](./data-lake/configuration.md#arrow-flight-sql).
+:::
+
 ## S3-Compatible Object Storage
 
 Add the S3 environment variables and remove the datasets volume:

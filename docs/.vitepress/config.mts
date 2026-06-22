@@ -487,7 +487,7 @@ export default defineConfig({
                 { text: 'Datasets', link: '/docs/1.7.3/api/exploring-data-lake#datasets' },
                 { text: 'Tables', link: '/docs/1.7.3/api/exploring-data-lake#tables' },
                 { text: 'Functions', link: '/docs/1.7.3/api/exploring-data-lake#functions' },
-                { text: 'Admin', link: '/docs/1.7.3/api/exploring-data-lake#admin-file-management' },
+                { text: 'Admin', link: '/docs/1.7.3/api/exploring-data-lake#admin' },
               ]
             },
             {

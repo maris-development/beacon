@@ -1,61 +1,199 @@
+---
+description: Complete reference of Beacon's BEACON_* environment variables — server, query engine, storage, S3, Arrow Flight SQL, crawler, file formats, and API docs metadata — with their defaults.
+---
+
 # Configuration
 
-Beacon's data lake can be configured using environment variables. Below is a list of the available configuration options along with their descriptions and default values.
+Beacon is configured entirely through **environment variables**. There is no
+configuration file: every option below is read from the environment at startup.
+Unset variables fall back to the defaults listed here.
 
 ::: info
-The configuration options can be specified using Environment Variables.
+All settings use `BEACON_*` names, except the S3 credential variables, which use
+the standard `AWS_*` names so they interoperate with existing AWS tooling (see
+[S3 object storage](#s3-object-storage)).
 :::
 
-## Configuration Options in Beacon
+## Server
 
-Beacon provides several configuration options that allow users to customize the behavior of the tool to their needs.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_HOST` | `0.0.0.0` | IP address the HTTP API listens on. |
+| `BEACON_PORT` | `5001` | Port the HTTP API listens on. |
+| `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |
+| `BEACON_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` (case-insensitive). |
+| `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the HTTP API, OpenAPI document, and Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
 
-## ENVIRONMENT VARIABLES
+## Admin
 
-Some of the configuration options can be set using environment variables. The following environment variables can be used to set the configuration options:
+The admin credentials gate the authenticated write/management surface (DDL/DML
+over HTTP and the admin endpoints).
 
-- `BEACON_HOST` - IP address to listen on. (Default is `0.0.0.0`)
-- `BEACON_PORT` - Port number to listen on. (Default is `5001`)
-- `BEACON_BASE_PATH` - Optional URL path prefix to serve the HTTP API, OpenAPI document, and Swagger UI under (default is empty, i.e. served at the root). Useful when running Beacon behind a reverse proxy or on a shared subpath, e.g. `/beacon`. The value is normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character (e.g. spaces, `?`, `#`, `%`) causes Beacon to exit at startup with a descriptive error.
-- `BEACON_ADMIN_USERNAME` - The admin username for the beacon admin panel.
-- `BEACON_ADMIN_PASSWORD` - The admin password for the beacon admin panel.
-- `BEACON_VM_MEMORY_SIZE` - The amount of memory to allocate to the Beacon Virtual Machine in MB (default is 8192MB). More is better for performance, especially when working with larger datasets and performing actions such as spatial joins and group by.
-- `BEACON_ENABLE_SQL` - Whether to enable the SQL query engine. Default is `true`.
-- `BEACON_WORKER_THREADS` - Number of worker threads to use (default is 8).
-- `BEACON_ST_WITHIN_POINT_CACHE_SIZE` - Size of the cache for ST_WithinPoint queries (default is 10000).
-- `BEACON_DEFAULT_TABLE` - The default table to use when no table is specified in the `from` clause of a query. Only applicable to the JSON query API, as SQL queries must specify a source. Default is `default`.
-- `BEACON_LOG_LEVEL` - Log level [`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`]. Default is `INFO`.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_ADMIN_USERNAME` | `beacon-admin` | Admin username for management endpoints. |
+| `BEACON_ADMIN_PASSWORD` | `beacon-password` | Admin password — **change this in production**. |
 
-- `BEACON_S3_DATA_LAKE` - Whether to enable S3 data lake support. Set to `true` to enable. Default is `false` and uses local system file storage. To connect to S3-compatible object storage, the following environment variables should also be set:
-  - `AWS_ACCESS_KEY_ID` -  S3 access_key_id. Only required when the S3-compatible object storage requires authentication.
-  - `AWS_SECRET_ACCESS_KEY` - S3 secret_access_key. Only required when the S3-compatible object storage requires authentication.
-  - `AWS_DEFAULT_REGION` -  S3 optional region
-  - `AWS_ENDPOINT` -  S3 endpoint. This should include the full URL to the S3-compatible object storage service. If the endpoint URL does not contain the bucket name, the bucket name should be specified using the `BEACON_S3_BUCKET` environment variable.
-  - `AWS_SKIP_SIGNATURE` - Set to `true` to skip request signing. Useful for local S3-compatible object storage that does not require signed requests.
-- `BEACON_S3_BUCKET` - The bucket name for the S3-compatible object storage. If the env variable `BEACON_S3_DATA_LAKE` is enabled, and the `AWS_ENDPOINT` doesn't contain the bucket name, the bucket name should be specified here.
+## Query engine
 
-- `BEACON_ENABLE_FS_EVENTS` - Whether to enable file system events monitoring, so new files in watched datasets are picked up automatically. Uses inotify on Linux systems. Default is `true`; set to `false` to disable. This is not supported when using S3 data lake. (Be aware that using mounted volumes with Docker may interfere with filesystem events, so test this setting in your deployment environment.)
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_ENABLE_SQL` | `true` | Enable the raw SQL query interface. Set to `false` to disable it (the JSON query API stays available). |
+| `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. More is better for larger datasets and memory-heavy operations such as spatial joins and `GROUP BY`. |
+| `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request omits the source. Only applies to the JSON query API — SQL queries must always specify a source. |
+| `BEACON_ENABLE_PUSHDOWN_PROJECTION` | `true` | Push column projection down into file readers so only requested columns are decoded. |
+| `BEACON_SANITIZE_SCHEMA` | `false` | Sanitize dataset schemas (normalize column names/types) during discovery. |
+| `BEACON_ST_WITHIN_POINT_CACHE_SIZE` | `10000` | Cache size for `st_within_point` geometry lookups. |
+| `BEACON_BATCH_SIZE` | `64000` | Batch size, in rows, for NetCDF reads (local and MPIO). |
 
-- `BEACON_ENABLE_SYS_INFO` - Whether to expose system information. Set to `true` to enable.
+### SQL result-stream coalescing
 
-- `BEACON_CORS_ALLOWED_METHODS` - Comma-separated list of allowed HTTP methods for CORS (default is `GET,POST,PUT,DELETE,OPTIONS`).
-- `BEACON_CORS_ALLOWED_ORIGINS` - Comma-separated list of allowed origins for CORS (default is `*`).
-- `BEACON_CORS_ALLOWED_HEADERS` - Comma-separated list of allowed headers for CORS (default is `Content-Type,Authorization`).
-- `BEACON_CORS_ALLOWED_CREDENTIALS` - Whether to allow credentials for CORS (default is `false`).
-- `BEACON_CORS_MAX_AGE` - The maximum age for CORS preflight requests (default is 3600).
+Small record batches produced by a query are merged into larger ones before being
+streamed to the client, which improves throughput for fine-grained results.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_SQL_STREAM_COALESCE_ENABLED` | `true` | Enable coalescing of the SQL result stream. |
+| `BEACON_SQL_STREAM_COALESCE_TARGET_ROWS` | `65536` | Target rows per coalesced batch. |
+| `BEACON_SQL_STREAM_COALESCE_FLUSH_TIMEOUT_MS` | `25` | Max time (ms) to wait while accumulating rows before flushing a partial batch. |
+| `BEACON_SQL_STREAM_COALESCE_MAX_ROWS` | `262144` | Hard upper bound on rows per coalesced batch. |
+
+## Arrow Flight SQL
+
+Beacon also exposes an [Arrow Flight SQL](https://arrow.apache.org/docs/format/FlightSql.html)
+endpoint on its own port, used by clients such as JetBrains DataGrip and the
+Python ADBC driver (see [Connect](../connect/jetbrains-datagrip.md)). Unlike the
+HTTP API, Flight SQL uses bearer-token authentication.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable the Arrow Flight SQL server. |
+| `BEACON_FLIGHT_SQL_HOST` | `0.0.0.0` | Address the Flight SQL server binds to. |
+| `BEACON_FLIGHT_SQL_PORT` | `32011` | Port the Flight SQL server listens on. |
+| `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS` | `false` | Allow unauthenticated Flight SQL sessions. |
+| `BEACON_FLIGHT_SQL_TOKEN_TTL_SECS` | `3600` | Lifetime (seconds) of an issued session token. |
+| `BEACON_FLIGHT_SQL_STATEMENT_TTL_SECS` | `300` | Lifetime (seconds) of a server-side statement handle. |
+| `BEACON_FLIGHT_SQL_PREPARED_STATEMENT_TTL_SECS` | `900` | Lifetime (seconds) of a prepared-statement handle. |
+
+## Storage and data directories
+
+Beacon keeps all local state under a single root directory.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_DATA_DIR` | `./data` | Root directory for all local data. |
+| `BEACON_ENABLE_FS_EVENTS` | `true` | Watch the local datasets directory so new files are picked up automatically (uses inotify on Linux). Set to `false` to disable. Not used with the S3 data lake. Mounted Docker volumes can interfere with filesystem events — test this in your deployment environment. |
+
+The following sub-directories are created under `BEACON_DATA_DIR` and used by
+Beacon:
+
+| Sub-directory | Purpose |
+| --- | --- |
+| `datasets/` | Local datasets store (the files you query in place). |
+| `tables/` | Persisted external tables, views, and managed-table definitions. |
+| `tmp/` | Temporary files (e.g. materialized query output). |
+| `indexes/` | Dataset path/index data. |
+| `cache/` | Internal caches. |
+
+When mounting volumes with Docker, mount the sub-directories you want to persist
+(e.g. `-v ./datasets:/beacon/data/datasets`, `-v ./tables:/beacon/data/tables`).
+
+## S3 object storage
+
+Set `BEACON_S3_DATA_LAKE=true` to back the **datasets** store with S3-compatible
+object storage instead of the local filesystem. The `tables/`, `tmp/`, `indexes/`,
+and `cache/` directories remain on local disk.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_S3_DATA_LAKE` | `false` | Use S3-compatible object storage as the datasets store. When `false`, the local filesystem is used. |
+| `BEACON_S3_BUCKET` | _(none)_ | Bucket name. **Required** when `BEACON_S3_DATA_LAKE=true` — Beacon exits at startup if it is missing. Never inferred from the endpoint. |
+| `BEACON_S3_ENABLE_VIRTUAL_HOSTING` | `false` | Use virtual-hosted-style addressing (bucket in the host) instead of path-style (`{endpoint}/{bucket}/{key}`). |
+| `BEACON_S3_ALLOW_HTTP` | `true` | Allow plain `http://` endpoints (useful for local MinIO; disable for production). |
+| `BEACON_ENABLE_S3_EVENTS` | `false` | Reserved: wire S3 change notifications into the event listener. |
+
+### S3 credentials and endpoint (`AWS_*`)
+
+Credentials and the endpoint are resolved through the standard AWS environment
+chain (object-store's `from_env`), so the usual `AWS_*` variables apply. The
+endpoint and region Beacon captures here always override the corresponding
+environment values.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `AWS_ENDPOINT` | _(none)_ | S3-compatible endpoint URL, e.g. `https://s3.amazonaws.com` or `http://minio:9000`. If the endpoint does not embed the bucket, set `BEACON_S3_BUCKET`. |
+| `AWS_REGION` | _(none)_ | S3 region. (Note: `AWS_DEFAULT_REGION` is **not** used — set `AWS_REGION`.) |
+| `AWS_ACCESS_KEY_ID` | _(none)_ | Access key. Only required when the object store needs authentication. |
+| `AWS_SECRET_ACCESS_KEY` | _(none)_ | Secret key. Only required when the object store needs authentication. |
+| `AWS_SKIP_SIGNATURE` | _(none)_ | Set to `true` to send unsigned requests — useful for public/anonymous buckets. |
+
+## Crawler
+
+The [crawler](./crawlers.md) discovers files under a prefix and registers them as
+external tables.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_CRAWLER_ENABLE` | `true` | Master switch for crawler scheduling and event triggers. When `false`, crawlers can still be defined and run on demand, but no background tasks are spawned. |
+| `BEACON_CRAWLER_DEFAULT_INTERVAL_SECS` | `900` | Fallback poll interval (seconds) for an event-driven crawler on a deployment where storage events are unavailable. |
+
+## CORS
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_CORS_ALLOWED_METHODS` | `GET,POST,PUT,DELETE,OPTIONS` | Allowed HTTP methods. |
+| `BEACON_CORS_ALLOWED_ORIGINS` | `*` | Allowed origins. |
+| `BEACON_CORS_ALLOWED_HEADERS` | `Content-Type,Authorization` | Allowed request headers. |
+| `BEACON_CORS_ALLOWED_CREDENTIALS` | `false` | Allow credentials. |
+| `BEACON_CORS_MAX_AGE` | `3600` | Preflight cache duration (seconds). |
+
+## File formats
+
+Per-format tuning. See [Performance Tuning](./performance-tuning.md) for guidance
+on when to change these.
 
 ### NetCDF
 
-- `BEACON_NETCDF_USE_SCHEMA_CACHE` - Whether to cache discovered NetCDF Arrow schemas in-memory (default is `true`).
-- `BEACON_NETCDF_SCHEMA_CACHE_SIZE` - Max number of schema entries to keep in the in-memory schema cache (default is `1024`).
-- `BEACON_NETCDF_USE_READER_CACHE` - Whether to cache opened NetCDF readers in-memory (default is `true`).
-- `BEACON_NETCDF_READER_CACHE_SIZE` - Max number of reader entries to keep in the in-memory reader cache (default is `128`).
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_NETCDF_ENABLE_STATISTICS` | `true` | Compute and cache per-file statistics used for query pruning. |
+| `BEACON_NETCDF_USE_READER_CACHE` | `true` | Cache opened NetCDF readers in memory. |
+| `BEACON_NETCDF_READER_CACHE_SIZE` | `128` | Max NetCDF reader entries to keep cached. |
 
 ### Atlas
 
-- `BEACON_ATLAS_USE_READER_CACHE` - Whether to cache opened Atlas store readers in-memory (default is `true`). This avoids re-opening the same `atlas.json` store across queries.
-- `BEACON_ATLAS_READER_CACHE_SIZE` - Max number of Atlas reader entries to keep in the in-memory reader cache (default is `32`).
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_ATLAS_USE_READER_CACHE` | `true` | Cache opened Atlas store readers in memory, avoiding re-opening the same `atlas.json` across queries. |
+| `BEACON_ATLAS_READER_CACHE_SIZE` | `32` | Max Atlas reader entries to keep cached. |
 
-### Beacon Binary Format
+### Beacon Binary Format (BBF)
 
-- `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` - Whether to enable splitting large batches into smaller batches to better manage memory and parallelism for queries in the Beacon Binary Format (BBF). Set to `true` to enable. Default is `false`. When enabled, this allows for more efficient handling of large queries by splitting the data into multiple streams.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE` | `false` | Split large batches into smaller slices for better memory use and parallelism on BBF queries. |
+
+## API documentation metadata
+
+These customize the top-level metadata of the generated OpenAPI document and the
+Swagger / Scalar UIs, so a deployment can brand its own API docs without
+recompiling. All are optional except the title and description, which have
+defaults.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_API_TITLE` | `Beacon Rest API` | API document title. |
+| `BEACON_API_DESCRIPTION` | _(built-in summary)_ | API document description. |
+| `BEACON_API_TERMS_OF_SERVICE` | _(none)_ | Terms-of-service URL. |
+| `BEACON_API_CONTACT_NAME` | _(none)_ | Contact name. |
+| `BEACON_API_CONTACT_URL` | _(none)_ | Contact URL. |
+| `BEACON_API_CONTACT_EMAIL` | _(none)_ | Contact email. |
+| `BEACON_API_LICENSE_NAME` | _(none)_ | License name. |
+| `BEACON_API_LICENSE_URL` | _(none)_ | License URL. |
+| `BEACON_API_LICENSE_IDENTIFIER` | _(none)_ | SPDX license identifier. |
+
+## Miscellaneous
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_ENABLE_SYS_INFO` | `false` | Expose host system information (CPU, memory) via the API. |
