@@ -9,21 +9,35 @@ use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_functions::function_doc::FunctionDoc;
 use crate::metrics::ConsolidatedMetrics;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use utoipa::ToSchema;
 
+/// A single parameter of a registered function.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct FunctionParameterInfo {
+    /// Parameter name as used in the function signature.
+    #[schema(example = "input")]
     pub name: String,
+    /// Human-readable description of the parameter's purpose.
     pub description: String,
+    /// SQL/Arrow data type accepted by the parameter (e.g. `Float64`, `Utf8`).
+    #[schema(example = "Float64")]
     pub data_type: String,
 }
 
+/// Documentation for a single function registered with the runtime
+/// (scalar, aggregate, or table-valued).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct FunctionInfo {
+    /// The name the function is invoked by in queries.
+    #[schema(example = "abs")]
     pub function_name: String,
+    /// Human-readable description of what the function does.
     pub description: String,
+    /// The data type the function returns (e.g. `Float64`).
+    #[schema(example = "Float64")]
     pub return_type: String,
+    /// Ordered list of the function's parameters.
     pub params: Vec<FunctionParameterInfo>,
 }
 
@@ -35,11 +49,18 @@ impl TryFrom<FunctionDoc> for FunctionInfo {
     }
 }
 
+/// Metadata about a single dataset file discovered in the datasets store.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct DatasetInfo {
+    /// Datasets-store-relative path of the file.
+    #[schema(example = "argo/floats.parquet")]
     pub file_path: String,
+    /// Detected file format identifier (e.g. `parquet`, `nc`, `csv`).
+    #[schema(example = "parquet")]
     pub format: String,
+    /// Whether the runtime can read this file's schema for inspection.
     pub can_inspect: bool,
+    /// Whether the file supports partial (predicate/column-pushdown) exploration.
     pub can_partial_explore: bool,
 }
 
@@ -54,11 +75,18 @@ impl From<DatasetMetadata> for DatasetInfo {
     }
 }
 
+/// A single field (column) of an Arrow schema, projected for the API.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct SchemaFieldView {
+    /// Column name.
+    #[schema(example = "temperature")]
     pub name: String,
+    /// Arrow data type rendered as a string (e.g. `Float64`, `Utf8`, `Timestamp(...)`).
+    #[schema(example = "Float64")]
     pub data_type: String,
+    /// Whether the column may contain null values.
     pub nullable: bool,
+    /// Arbitrary field-level metadata carried on the Arrow field.
     pub metadata: BTreeMap<String, String>,
 }
 
@@ -73,9 +101,12 @@ impl From<&Field> for SchemaFieldView {
     }
 }
 
+/// An Arrow schema (the ordered fields plus schema-level metadata), projected for the API.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct SchemaView {
+    /// The schema's fields (columns), in order.
     pub fields: Vec<SchemaFieldView>,
+    /// Arbitrary schema-level metadata key/value pairs.
     pub metadata: BTreeMap<String, String>,
 }
 
@@ -92,8 +123,14 @@ impl From<&Schema> for SchemaView {
     }
 }
 
+/// A Beacon query request body. The payload is a free-form JSON object describing
+/// either a structured JSON query or a SQL query (`{"sql": "SELECT ..."}`), along
+/// with the desired output format. The object is flattened, so its keys appear at
+/// the top level of the request body rather than under a `query` field.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+#[schema(example = json!({ "sql": "SELECT 1", "output": { "format": "csv" } }))]
 pub struct QueryRequest {
+    /// The flattened query object (JSON or SQL query plus output options).
     #[schema(value_type = Object)]
     #[serde(flatten)]
     pub query: BTreeMap<String, Value>,
@@ -107,18 +144,35 @@ impl QueryRequest {
     }
 }
 
+/// Planner and execution metrics recorded for a previously executed query,
+/// retrievable by query id via `GET /api/query/metrics/{query_id}`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct QueryMetricsView {
+    /// Total rows scanned from the input sources.
     pub input_rows: u64,
+    /// Total bytes scanned from the input sources.
     pub input_bytes: u64,
+    /// Number of rows in the query result.
     pub result_num_rows: u64,
+    /// Size of the query result in bytes.
     pub result_size_in_bytes: u64,
+    /// Source file paths touched while executing the query.
     pub file_paths: Vec<String>,
+    /// Wall-clock execution time in milliseconds.
     pub execution_time_ms: u64,
+    /// The original query payload that produced these metrics.
+    #[schema(value_type = Object)]
     pub query: Value,
+    /// The query's unique identifier (UUID).
     pub query_id: String,
+    /// The logical plan as parsed, before optimization (JSON).
+    #[schema(value_type = Object)]
     pub parsed_logical_plan: Value,
+    /// The logical plan after the optimizer ran (JSON).
+    #[schema(value_type = Object)]
     pub optimized_logical_plan: Value,
+    /// Per-node execution metrics from the physical plan (JSON).
+    #[schema(value_type = Object)]
     pub node_metrics: Value,
 }
 
@@ -142,8 +196,11 @@ impl TryFrom<ConsolidatedMetrics> for QueryMetricsView {
     }
 }
 
+/// The storage format and options of a registered table, as a flattened
+/// configuration object. Internal (double-underscore) option keys are stripped.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct TableConfigView {
+    /// The flattened table configuration (type, location, options, ...).
     #[schema(value_type = Object)]
     #[serde(flatten)]
     pub config: BTreeMap<String, Value>,
@@ -276,13 +333,22 @@ impl From<CreateCrawlerRequest> for CrawlerDefinition {
 /// A crawler definition as returned to API clients. Mirrors [`CrawlerDefinition`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct CrawlerView {
+    /// Unique crawler name.
     pub name: String,
+    /// Datasets-store prefix the crawler scans, e.g. `argo/`.
     pub target_prefix: String,
+    /// Format identifiers discovery is restricted to, or `null` to crawl every
+    /// registered format.
     pub format_filter: Option<Vec<String>>,
+    /// How discovered groups are turned into table names.
     pub table_naming: TableNamingView,
+    /// Whether Hive-style `key=value/` partitions are detected.
     pub detect_partitions: bool,
+    /// Periodic crawl interval in seconds, or `null` for no timer.
     pub schedule_secs: Option<u64>,
+    /// Whether the crawler subscribes to datasets-store events for incremental crawls.
     pub event_driven: bool,
+    /// Extra format options forwarded into every discovered table's `OPTIONS`.
     pub options: HashMap<String, String>,
 }
 

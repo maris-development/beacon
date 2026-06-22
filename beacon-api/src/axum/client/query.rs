@@ -10,6 +10,7 @@ use ::axum::{
 use beacon_core::runtime::Runtime;
 use beacon_core::{
     api::{QueryMetricsView, QueryRequest},
+    query::Query,
     query_result::QueryOutputFile,
 };
 use futures::TryStreamExt;
@@ -53,8 +54,19 @@ fn resolve_super_user(
     tag = "query",
     post,
     path = "/api/query",
+    request_body = Query,
     responses(
-        (status=200, description="Response containing the query results in the format specified by the query"),
+        (
+            status = 200,
+            description = "Query results in the format requested by the query. The \
+                default is a zstd-compressed Arrow IPC stream; file output formats \
+                (CSV, Parquet, Arrow, ODV, NetCDF, GeoParquet) are returned as \
+                a file download. The result's query id is returned in the \
+                `x-beacon-query-id` response header.",
+            content_type = "application/vnd.apache.arrow.stream"
+        ),
+        (status = 400, description = "Invalid, unsupported, or disabled query"),
+        (status = 401, description = "Basic credentials were supplied but are invalid"),
     ),
     security(
         (),
@@ -227,8 +239,10 @@ async fn file_stream_response(
     tag = "query",
     post,
     path = "/api/parse-query",
+    request_body = Query,
     responses(
-        (status=200, description="Valid Query"),
+        (status = 200, description = "The query body is valid (it was not executed)"),
+        (status = 400, description = "Malformed query body"),
     ),
     security(
         (),
@@ -246,8 +260,13 @@ pub(crate) async fn parse_query(Json(_query_obj): Json<QueryRequest>) -> StatusC
     tag = "query",
     get,
     path = "/api/query/metrics/{query_id}",
+    params(
+        ("query_id" = String, Path, description = "UUID of a previously executed query")
+    ),
     responses(
-        (status=200, description="Response containing the query metrics"),
+        (status = 200, description = "Recorded metrics for the query", body = QueryMetricsView),
+        (status = 400, description = "The query id is not a valid UUID"),
+        (status = 404, description = "No metrics recorded for the given query id"),
     ),
     security(
         (),
@@ -283,8 +302,15 @@ pub(crate) async fn query_metrics(
     tag = "query",
     post,
     path = "/api/explain-query",
+    request_body = Query,
     responses(
-        (status=200, description="Explains the produced plan of a given query"),
+        (
+            status = 200,
+            description = "JSON explanation of the plan the runtime would produce \
+                for the query (the query is not executed)",
+            content_type = "application/json"
+        ),
+        (status = 400, description = "Invalid or unsupported query"),
     ),
     security(
         (),
@@ -320,7 +346,7 @@ pub(crate) async fn explain_query(
     get,
     path = "/api/query/available-columns",
     responses(
-        (status=200, description="Response containing the available columns in the default table schema"),
+        (status = 200, description = "Column names of the default table schema", body = Vec<String>),
     ),
     security(
         (),

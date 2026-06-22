@@ -83,7 +83,10 @@ pub enum OutputFormat {
     Parquet,
     // Json,
     // Odv(OdvOptions),
+    /// Flat (record-oriented) NetCDF format.
     NetCDF,
+    /// Multi-dimensional (nd-array) NetCDF format. The named columns become the
+    /// output dimensions; must not be empty.
     #[serde(alias = "nd_netcdf")]
     NdNetCDF {
         /// Columns to use as dimensions for the ND NetCDF output.
@@ -96,6 +99,7 @@ pub enum OutputFormat {
         /// Name of the latitude column, if any.
         latitude_column: Option<String>,
     },
+    /// Ocean Data View (ODV) archive, configured by [`OdvOptions`].
     Odv(OdvOptions),
 }
 

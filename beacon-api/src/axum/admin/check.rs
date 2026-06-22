@@ -8,7 +8,7 @@ use ::axum::Json;
     tag = "admin",
     get,
     path = "/api/admin/check",
-    responses((status = 200, description = "Admin API is reachable")),
+    responses((status = 200, description = "Admin API is reachable", body = CheckResponse)),
     security(("basic-auth" = []))
 )]
 pub async fn check() -> Json<CheckResponse> {
@@ -19,5 +19,6 @@ pub async fn check() -> Json<CheckResponse> {
 /// Minimal response payload for the admin connectivity check.
 #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct CheckResponse {
+    /// Always `true`: reaching this endpoint means the caller passed admin auth.
     is_admin: bool,
 }
