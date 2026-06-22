@@ -1,0 +1,46 @@
+{
+  "name": "@beacon/client",
+  "version": "0.1.0",
+  "description": "Isomorphic TypeScript SDK for managing and querying a Beacon instance.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "dependencies": {
+    "apache-arrow": "21.1.0",
+    "fzstd": "0.1.1"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "codegen": "tsx scripts/fetch-openapi.ts && openapi-typescript ./openapi.json -o ./src/generated/schema.d.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "openapi-typescript": "7.4.4",
+    "tsup": "8.3.5",
+    "tsx": "4.19.2",
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  }
+}
