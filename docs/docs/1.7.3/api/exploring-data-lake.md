@@ -24,6 +24,11 @@ Returns Beacon version, configuration summary, and registered table count.
 GET /api/list-datasets
 ```
 
+::: info Deprecated alias
+`GET /api/datasets` is a deprecated alias of `/api/list-datasets`. Use
+`/api/list-datasets` in new code.
+:::
+
 Optional query parameters:
 
 | Parameter | Description |
@@ -80,6 +85,15 @@ GET /api/default-table
 GET /api/table-schema?table_name=default
 ```
 
+### Default table schema
+
+The Arrow schema of the default table (the one queried when a request omits
+`from`):
+
+```http
+GET /api/default-table-schema
+```
+
 ### All tables with schemas
 
 Convenient for UI discovery, but can be slow on large installations:
@@ -130,4 +144,28 @@ Content-Type: application/json
 { "sql": "DROP TABLE argo" }
 ```
 
-Browse `/swagger` for the full request and response shapes.
+Write operations require the admin credentials (`BEACON_ADMIN_USERNAME` /
+`BEACON_ADMIN_PASSWORD`) via HTTP basic auth; anonymous requests are read-only.
+
+## Admin
+
+Beacon has no separate file-management API — creating, replacing, and removing
+tables is done through authenticated SQL DDL on `/api/query` (see
+[Table lifecycle](#table-lifecycle) above). The only dedicated admin endpoint is a
+connectivity check that verifies your admin credentials:
+
+```http
+GET /api/admin/check
+Authorization: Basic <base64(username:password)>
+```
+
+Returns `{ "is_admin": true }` when the credentials are valid, or `401` otherwise.
+
+## OpenAPI
+
+This page is a curated subset. The complete, always-current request and response
+shapes are generated from the server itself:
+
+- Swagger UI: `/swagger`
+- Scalar UI: `/scalar/`
+- OpenAPI document: `/openapi.json`
