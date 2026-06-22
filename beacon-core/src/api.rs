@@ -161,6 +161,12 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
                 if let Some(Value::Object(options)) = config.get_mut("options") {
                     options.retain(|key, _| !key.starts_with("__"));
                 }
+                // Never expose a persisted credential — even encrypted — through
+                // the public table-config endpoint (external SQL-database tables
+                // carry one in `secret`).
+                if config.contains_key("secret") {
+                    config.insert("secret".to_string(), Value::String("***".to_string()));
+                }
                 Ok(Self {
                     config: config.into_iter().collect(),
                 })
@@ -362,4 +368,36 @@ pub struct CreateExternalTableRequest {
     #[serde(default)]
     #[schema(default = false, example = false)]
     pub if_not_exists: bool,
+}
+
+#[cfg(test)]
+mod table_config_redaction_tests {
+    use super::*;
+    use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
+
+    /// The public table-config view must never expose a persisted credential,
+    /// even in its encrypted form — the `secret` field is replaced with `***`.
+    #[test]
+    fn sql_database_secret_is_redacted_in_config_view() {
+        let mut options = BTreeMap::new();
+        options.insert("host".to_string(), "db.internal".to_string());
+        let definition: Arc<dyn TableDefinition> = Arc::new(SqlDatabaseTableDefinition {
+            name: "orders".to_string(),
+            engine: SqlEngine::Postgres,
+            remote_table: "public.orders".to_string(),
+            schema: beacon_sql_databases::unresolved_schema(),
+            options,
+            secret: Some(EncryptedSecret::encrypt("super-secret-password", &[9u8; 32]).unwrap()),
+        });
+
+        let view = TableConfigView::try_from(definition).unwrap();
+        let json = serde_json::to_string(&view).unwrap();
+
+        assert!(!json.contains("super-secret-password"));
+        // The encrypted material (ciphertext/nonce) must not leak either.
+        assert!(!json.contains("ciphertext"));
+        assert_eq!(view.config.get("secret"), Some(&Value::String("***".to_string())));
+        // Non-secret connection options remain visible.
+        assert!(json.contains("db.internal"));
+    }
 }

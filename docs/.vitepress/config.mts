@@ -244,6 +244,17 @@ export default defineConfig({
                     { text: 'Schema handling', link: '/docs/1.7.3/data-lake/remote-tables#schema-handling' },
                     { text: 'Limitations', link: '/docs/1.7.3/data-lake/remote-tables#limitations' },
                   ]
+                },
+                {
+                  text: 'SQL Databases (Postgres / MySQL)',
+                  link: '/docs/1.7.3/data-lake/sql-databases',
+                  collapsed: true,
+                  items: [
+                    { text: 'Credentials', link: '/docs/1.7.3/data-lake/sql-databases#credentials' },
+                    { text: 'Defining a database table', link: '/docs/1.7.3/data-lake/sql-databases#defining-a-sql-database-table' },
+                    { text: 'How pushdown works', link: '/docs/1.7.3/data-lake/sql-databases#how-pushdown-works' },
+                    { text: 'Limitations', link: '/docs/1.7.3/data-lake/sql-databases#limitations' },
+                  ]
                 }
               ]
             },

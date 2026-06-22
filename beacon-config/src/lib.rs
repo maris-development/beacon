@@ -32,6 +32,7 @@ pub struct Config {
     pub api_docs: ApiDocsConfig,
     /// Resolved data-directory paths (root + sub-directories).
     pub data: DataDirsConfig,
+    pub secrets: SecretsConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +121,34 @@ pub struct CrawlerConfig {
     /// Fallback poll interval (seconds) applied to a crawler that requests
     /// event-driven crawling on a deployment where storage events are unavailable.
     pub default_interval_secs: u64,
+}
+
+/// Master key material for encrypting secrets (e.g. external-database
+/// credentials) at rest. Sourced from `BEACON_SECRETS_KEY` (base64 of 32
+/// bytes). When absent, features that persist credentials must fail closed
+/// rather than write plaintext.
+#[derive(Clone)]
+pub struct SecretsConfig {
+    master_key: Option<[u8; 32]>,
+}
+
+impl SecretsConfig {
+    /// The decoded 32-byte master key, or `None` if `BEACON_SECRETS_KEY` is unset.
+    pub fn master_key(&self) -> Option<&[u8; 32]> {
+        self.master_key.as_ref()
+    }
+}
+
+// Never print key material, even via `{:?}`.
+impl std::fmt::Debug for SecretsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretsConfig")
+            .field(
+                "master_key",
+                &self.master_key.map(|_| "<set>").unwrap_or("<unset>"),
+            )
+            .finish()
+    }
 }
 
 /// Resolved data-directory paths, derived from `BEACON_DATA_DIR` (default
@@ -253,6 +282,11 @@ struct RawConfig {
     /// Whether to split streams into 16k row slices for better memory management and parallelism.
     #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
     bbf_split_streams_slice: bool,
+
+    // Base64-encoded 32-byte master key for encrypting persisted secrets
+    // (external-database credentials). Optional; validated in `Config::load`.
+    #[envconfig(from = "BEACON_SECRETS_KEY")]
+    secrets_key: Option<String>,
 
     // Crawler subsystem
     #[envconfig(from = "BEACON_CRAWLER_ENABLE", default = "true")]
@@ -390,8 +424,21 @@ impl From<RawConfig> for Config {
                     cache: root.join("cache"),
                 }
             },
+            // Decoded and validated in `Config::load` (see `secrets_key`).
+            secrets: SecretsConfig { master_key: None },
         }
     }
+}
+
+/// Decode a base64-encoded 32-byte master key from `BEACON_SECRETS_KEY`.
+fn decode_master_key(b64: &str) -> std::result::Result<[u8; 32], String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("not valid base64: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| format!("expected 32 bytes, got {}", v.len()))
 }
 
 /// Normalizes and validates a configured base path. Returns the canonical form:
@@ -426,9 +473,14 @@ impl Config {
     /// fields. Returns a descriptive error instead of panicking, so callers can
     /// report the problem cleanly and exit.
     pub fn load() -> Result<Config> {
-        let mut config: Config = RawConfig::init_from_env()
-            .map_err(|e| ConfigError::EnvLoad(e.to_string()))?
-            .into();
+        let raw = RawConfig::init_from_env().map_err(|e| ConfigError::EnvLoad(e.to_string()))?;
+        // Capture the secrets key before `raw` is consumed; decode/validate below.
+        let secrets_key_b64 = raw.secrets_key.clone();
+        let mut config: Config = raw.into();
+        if let Some(b64) = secrets_key_b64 {
+            config.secrets.master_key =
+                Some(decode_master_key(&b64).map_err(ConfigError::InvalidSecretsKey)?);
+        }
         config.server.base_path =
             normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
         // S3 always needs a bucket (object_store requires it; it is never inferred
