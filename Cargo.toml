@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
+members = ["beacon-api", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-iceberg", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
 exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
@@ -38,6 +38,7 @@ moka = { version = "0.12.10", features = ["future", "sync"] }
 lru = "0.16.2"
 once_cell = "1.21.3"
 lazy_static = "1.5.0"
+base64 = "0.22"
 bloomfilter = { version = "1", features = ["serde"] }
 bincode = "1"
 
@@ -52,6 +53,11 @@ datafusion = "^53"
 # (matching our 53.1.0). Its `sql` feature gates the SQLExecutor/SQLTableSource
 # types used by the federated remote-table provider.
 datafusion-federation = { version = "=0.5.3", features = ["sql"] }
+# External SQL-database table providers (Postgres/MySQL). 0.11.0 is the release
+# whose `datafusion` dep resolves to ^53 and `datafusion-federation` to 0.5.3,
+# matching ours. No default features; each engine is opt-in via a beacon-side
+# feature that enables the matching `<engine>-federation` feature (pushdown).
+datafusion-table-providers = { version = "=0.11.0", default-features = false }
 geodatafusion = "0.4.0"
 object_store = { version = "0.13.1", features = ["aws"] }
 tonic = "0.14.1"

@@ -52,6 +52,7 @@ beacon-common = { path = "../beacon-common" }
 beacon-iceberg = { path = "../beacon-iceberg" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-nd-array = { path = "../beacon-file-formats/beacon-nd-array" }
+beacon-sql-databases = { path = "../beacon-sql-databases" }
 
 [dev-dependencies]
 deltalake = { workspace = true }
