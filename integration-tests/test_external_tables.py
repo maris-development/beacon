@@ -68,3 +68,29 @@ def test_invalid_credentials_are_rejected(beacon_container):
         timeout=30,
     )
     assert resp.status_code == 401
+
+
+def test_admin_external_table_endpoint_creates_queryable_table(client, sample_data):
+    """The structured admin endpoint registers a table equivalent to the SQL form."""
+    name = "obs_ext_admin"
+    client.execute(f"DROP TABLE IF EXISTS {name}", admin=True)
+    try:
+        resp = client.admin_post(
+            "/api/admin/external-tables",
+            {"name": name, "file_type": "PARQUET", "location": "obs/"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        assert name in client.tables().json()
+        assert client.count(f"SELECT * FROM {name}") == sample_data["total"]
+    finally:
+        client.execute(f"DROP TABLE IF EXISTS {name}", admin=True)
+
+
+def test_admin_external_table_endpoint_requires_auth(client):
+    resp = client.admin_post(
+        "/api/admin/external-tables",
+        {"name": "nope", "file_type": "PARQUET", "location": "obs/"},
+        admin=False,
+    )
+    assert resp.status_code == 401

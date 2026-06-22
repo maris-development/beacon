@@ -95,3 +95,27 @@ class BeaconHTTPClient:
 
     def tables(self) -> requests.Response:
         return self.get("/api/tables")
+
+    # -- admin endpoints (/api/admin/*) -----------------------------------------
+    # These require admin basic-auth; pass ``admin=False`` to assert the auth gate.
+    def admin_get(self, path: str, admin: bool = True) -> requests.Response:
+        return self._session.get(
+            f"{self.base_url}{path}",
+            auth=self._auth if admin else None,
+            timeout=self._timeout,
+        )
+
+    def admin_post(self, path: str, body: dict | None = None, admin: bool = True) -> requests.Response:
+        return self._session.post(
+            f"{self.base_url}{path}",
+            json=body,
+            auth=self._auth if admin else None,
+            timeout=self._timeout,
+        )
+
+    def admin_delete(self, path: str, admin: bool = True) -> requests.Response:
+        return self._session.delete(
+            f"{self.base_url}{path}",
+            auth=self._auth if admin else None,
+            timeout=self._timeout,
+        )
