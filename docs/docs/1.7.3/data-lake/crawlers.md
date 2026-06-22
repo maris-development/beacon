@@ -149,6 +149,8 @@ Directory/marker-based stores — **Zarr** (`*.zarr/zarr.json`) and **Atlas** (`
 
 GeoParquet files (`*.parquet`) are claimed by the Parquet crawler; create a GeoParquet external table explicitly if you need GeoArrow geometry decoding.
 
+**Delta Lake** tables — directories containing a `_delta_log/` — are also **not** auto-crawled. Register them explicitly with [`CREATE EXTERNAL TABLE ... STORED AS DELTA`](./delta-lake.md).
+
 ## See also
 
 - [External Tables](./external-tables.md) — the tables a crawler produces
