@@ -60,7 +60,7 @@ fn resolve_super_user(
             status = 200,
             description = "Query results in the format requested by the query. The \
                 default is a zstd-compressed Arrow IPC stream; file output formats \
-                (CSV, Parquet, Arrow, JSON, ODV, NetCDF, GeoParquet) are returned as \
+                (CSV, Parquet, Arrow, ODV, NetCDF, GeoParquet) are returned as \
                 a file download. The result's query id is returned in the \
                 `x-beacon-query-id` response header.",
             content_type = "application/vnd.apache.arrow.stream"

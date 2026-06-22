@@ -61,20 +61,31 @@ mod tests {
     fn client_openapi_includes_query_schema() {
         #[allow(deprecated)]
         let (_router, openapi) = setup_client_router();
-        let spec = openapi.to_json().expect("openapi serializes to JSON");
+        let spec: serde_json::Value =
+            serde_json::to_value(&openapi).expect("openapi serializes to JSON");
 
-        // The structured query body and its nested types are present as components.
-        for schema in ["QueryBody", "Filter", "Select", "OutputFormat"] {
+        // The structured query body and its nested types are registered as
+        // component schemas (not merely mentioned in a description or example).
+        let schemas = spec
+            .pointer("/components/schemas")
+            .and_then(|s| s.as_object())
+            .expect("components.schemas object");
+        for schema in ["Query", "QueryBody", "Filter", "Select", "OutputFormat"] {
             assert!(
-                spec.contains(schema),
-                "expected `{schema}` schema in client OpenAPI document"
+                schemas.contains_key(schema),
+                "expected `{schema}` in components.schemas"
             );
         }
 
-        // The query endpoint references the real Query type, not an opaque object.
-        assert!(
-            spec.contains("#/components/schemas/Query"),
-            "expected /api/query to reference the Query schema"
+        // The /api/query request body references the real Query schema rather
+        // than an opaque object.
+        let request_ref = spec.pointer(
+            "/paths/~1api~1query/post/requestBody/content/application~1json/schema/$ref",
+        );
+        assert_eq!(
+            request_ref.and_then(|r| r.as_str()),
+            Some("#/components/schemas/Query"),
+            "expected /api/query requestBody to $ref the Query schema"
         );
     }
 }

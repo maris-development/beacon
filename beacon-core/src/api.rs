@@ -128,7 +128,7 @@ impl From<&Schema> for SchemaView {
 /// with the desired output format. The object is flattened, so its keys appear at
 /// the top level of the request body rather than under a `query` field.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
-#[schema(example = json!({ "sql": "SELECT 1", "output": { "format": "json" } }))]
+#[schema(example = json!({ "sql": "SELECT 1", "output": { "format": "csv" } }))]
 pub struct QueryRequest {
     /// The flattened query object (JSON or SQL query plus output options).
     #[schema(value_type = Object)]
