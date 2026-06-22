@@ -52,7 +52,7 @@ export BEACON_SECRETS_KEY="$(openssl rand -base64 32)"
 
 :::warning Key management
 - The persisted credential can only be decrypted with the **same** key. If you lose or rotate `BEACON_SECRETS_KEY`, existing SQL database tables can no longer be queried — drop and recreate them with the new key.
-- The password is **never** returned by the API. `GET /api/table-config` shows the `secret` field as `***`, and the encrypted material never appears in logs.
+- The password is **never** returned by the API. `GET /api/admin/table-config` (admin basic-auth required) shows the `secret` field as `***`, and the encrypted material never appears in logs.
 :::
 
 ## Defining a SQL database table
@@ -123,7 +123,7 @@ A SQL database table behaves like any other table:
 ```http
 GET /api/tables
 GET /api/table-schema?table_name=orders
-GET /api/table-config?table_name=orders   # the `secret` field is shown as ***
+GET /api/admin/table-config?table_name=orders   # admin basic-auth; the `secret` field is shown as ***
 ```
 
 ## Removing a SQL database table
