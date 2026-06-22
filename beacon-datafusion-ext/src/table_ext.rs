@@ -631,13 +631,20 @@ impl TableDefinition for ExternalTableDefinition {
     }
 }
 
-/// A glob-backed table definition: one or more glob paths read with a single
-/// file format, merged into a super-type schema via [`FileCollection`].
+/// A glob-backed table definition retained as a compatibility fallback for
+/// catalogs that still hold `"definition_type": "logical"` entries from before
+/// logical tables were removed. Current code never creates these; they only
+/// arrive by deserializing an older `table.json`.
 ///
-/// This is the successor to the legacy `LogicalTable`. The file format is
-/// resolved from the session's registered format factories by `file_type`, so
-/// every format Beacon registers (parquet, csv, zarr, bbf, ...) is supported
-/// without this crate depending on the individual format crates.
+/// On load it builds an external-table-style provider so old logical tables keep
+/// working without an on-disk migration. A single glob path becomes a first-class,
+/// self-refreshing [`ExternalTable`] (by mapping onto [`ExternalTableDefinition`]);
+/// multiple glob paths — which a single external-table `location` cannot represent —
+/// fall back to a static [`FileCollection`] that merges their schemas into one
+/// super-type schema. In both cases the file format is resolved from the session's
+/// registered format factories by `file_type`, so every format Beacon registers
+/// (parquet, csv, zarr, bbf, ...) is supported without this crate depending on the
+/// individual format crates.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LogicalTableDefinition {
     /// Logical table name.
@@ -660,6 +667,26 @@ impl TableDefinition for LogicalTableDefinition {
         context: Arc<SessionContext>,
         data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
+        // A single glob path maps cleanly onto a first-class, self-refreshing
+        // external table (one `location`). Delegate so old logical tables gain
+        // refresh-on-events and re-persist as `listing_table` on the next write.
+        if let [glob_path] = self.glob_paths.as_slice() {
+            let external = ExternalTableDefinition {
+                name: self.name.clone(),
+                location: glob_path.clone(),
+                file_type: self.file_type.clone(),
+                // Empty schema => infer from files, matching legacy behavior.
+                schema: Arc::new(Schema::empty()),
+                definition: None,
+                partition_cols: Vec::new(),
+                options: self.options.clone(),
+                if_not_exists: false,
+            };
+            return external.build_provider(context, data_store_url).await;
+        }
+
+        // Multiple globs can't be represented by a single external-table
+        // `location`, so keep the legacy FileCollection that merges their schemas.
         let session_state = context.state();
 
         let file_format_factory = session_state
@@ -1094,7 +1121,7 @@ mod self_refresh_tests {
 /// Unit tests covering listing-table and view-table definition behavior.
 mod tests {
     use super::{
-        ExternalTableDefinition, LogicalTableDefinition, MaterializedViewDefinition,
+        ExternalTable, ExternalTableDefinition, LogicalTableDefinition, MaterializedViewDefinition,
         TableDefinition, ViewTableDefinition,
     };
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -1546,6 +1573,42 @@ mod tests {
             .build_provider(context, &store_url)
             .await
             .expect("logical provider should be built from glob paths");
+
+        let schema = provider.schema();
+        assert_eq!(schema.fields().len(), 1);
+        assert_eq!(schema.field(0).name(), "value");
+
+        fs::remove_dir_all(&root).expect("temporary directory should be cleaned up");
+    }
+
+    #[tokio::test]
+    /// Verifies a single-path logical table is read as a first-class
+    /// (self-refreshing) external table rather than a static file collection.
+    async fn logical_table_definition_single_path_builds_external_table() {
+        let root = create_temp_dir("table_ext_logical_single");
+        let dir = root.join("obs");
+        fs::create_dir_all(&dir).expect("dir should be created");
+        fs::write(dir.join("part-0.csv"), "value\n1\n2\n").expect("csv should be written");
+
+        let definition = LogicalTableDefinition {
+            name: "obs".to_string(),
+            glob_paths: vec![format!("{}/obs/*.csv", to_store_relative_location(&root))],
+            file_type: "csv".to_string(),
+            options: HashMap::new(),
+        };
+
+        let context = Arc::new(SessionContext::new());
+        let store_url = ObjectStoreUrl::parse("file://").unwrap();
+
+        let provider = definition
+            .build_provider(context, &store_url)
+            .await
+            .expect("single-path logical provider should be built");
+
+        assert!(
+            provider.as_any().downcast_ref::<ExternalTable>().is_some(),
+            "single-path logical table should map onto an ExternalTable"
+        );
 
         let schema = provider.schema();
         assert_eq!(schema.fields().len(), 1);
