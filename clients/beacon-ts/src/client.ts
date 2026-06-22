@@ -188,9 +188,14 @@ export class BeaconClient {
     return this.http.fetchJson<T>("GET", "/api/table-schema", { query: { table_name: tableName } });
   }
 
-  /** Gets a table's configuration (`GET /api/table-config`). */
+  /**
+   * Gets a table's configuration (`GET /api/admin/table-config`). This is an
+   * admin-only endpoint, so the client must be configured with credentials.
+   */
   tableConfig<T = unknown>(tableName: string): Promise<T> {
-    return this.http.fetchJson<T>("GET", "/api/table-config", { query: { table_name: tableName } });
+    return this.http.fetchJson<T>("GET", "/api/admin/table-config", {
+      query: { table_name: tableName },
+    });
   }
 
   /** Gets the default table (`GET /api/default-table`). */
