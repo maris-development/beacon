@@ -258,9 +258,21 @@ impl Runtime {
         let plan = self.lower_query(inner).await?;
         crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
 
+        // Execution limits apply to non-admin queries only; super-users are
+        // exempt (`None`).
+        let limits = (!is_super_user)
+            .then(|| crate::statement_plan::QueryLimits::from(&self.config.runtime))
+            .filter(crate::statement_plan::QueryLimits::is_active);
+
         match output {
-            Some(output) => self.run_query_to_file(plan, output, query_id, query_json).await,
-            None => self.run_query_to_stream(plan, query_id, query_json).await,
+            Some(output) => {
+                self.run_query_to_file(plan, output, query_id, query_json, limits)
+                    .await
+            }
+            None => {
+                self.run_query_to_stream(plan, query_id, query_json, limits)
+                    .await
+            }
         }
     }
 
@@ -271,8 +283,10 @@ impl Runtime {
         plan: datafusion::logical_expr::LogicalPlan,
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
+        limits: Option<crate::statement_plan::QueryLimits>,
     ) -> anyhow::Result<QueryResult> {
-        let stream = crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
+        let stream =
+            crate::statement_plan::execute_statement_plan(&self.session_ctx, plan, limits).await?;
         let metrics = MetricsTracker::new(query_json, query_id);
         let output_stream = ArrowOutputStream {
             stream,
@@ -294,6 +308,7 @@ impl Runtime {
         output: crate::query::output::Output,
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
+        limits: Option<crate::statement_plan::QueryLimits>,
     ) -> anyhow::Result<QueryResult> {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
@@ -304,7 +319,8 @@ impl Runtime {
 
         let metrics = MetricsTracker::new(query_json, query_id);
         let mut stream =
-            crate::statement_plan::execute_statement_plan(&self.session_ctx, copy_plan).await?;
+            crate::statement_plan::execute_statement_plan(&self.session_ctx, copy_plan, limits)
+                .await?;
         // The COPY emits a single `count` row; drain it to complete the write.
         while let Some(batch) = stream.try_next().await? {
             let counts = batch.column(0).as_primitive::<UInt64Type>();

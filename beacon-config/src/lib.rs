@@ -58,6 +58,17 @@ pub struct RuntimeConfig {
     pub st_within_point_cache_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
+    /// Per-query execution-time limit (seconds) for non-admin queries. `None`
+    /// disables the limit. Counts only active node-execution time. Under
+    /// parallelism this is accumulated across partitions, so it behaves closer
+    /// to CPU-time than wall-clock.
+    pub query_timeout_secs: Option<u64>,
+    /// Maximum number of result rows a non-admin query may produce before it is
+    /// aborted. `None` disables the limit.
+    pub max_output_rows: Option<u64>,
+    /// Maximum result size in bytes a non-admin query may produce before it is
+    /// aborted. `None` disables the limit.
+    pub max_output_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +219,12 @@ struct RawConfig {
     sql_stream_coalesce_max_rows: usize,
     #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
     st_within_point_cache_size: usize,
+    #[envconfig(from = "BEACON_QUERY_TIMEOUT_SECS")]
+    query_timeout_secs: Option<u64>,
+    #[envconfig(from = "BEACON_MAX_OUTPUT_ROWS")]
+    max_output_rows: Option<u64>,
+    #[envconfig(from = "BEACON_MAX_OUTPUT_BYTES")]
+    max_output_bytes: Option<u64>,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     worker_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
@@ -338,6 +355,9 @@ impl From<RawConfig> for Config {
                 st_within_point_cache_size: raw.st_within_point_cache_size,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
+                query_timeout_secs: raw.query_timeout_secs,
+                max_output_rows: raw.max_output_rows,
+                max_output_bytes: raw.max_output_bytes,
             },
             sql: SqlConfig {
                 enable: raw.enable_sql,

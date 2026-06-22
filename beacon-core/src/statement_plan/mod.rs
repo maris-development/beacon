@@ -16,9 +16,12 @@ pub(crate) mod crawler;
 mod logical;
 mod lower;
 pub(crate) mod materialized_view;
+mod metering;
 mod physical;
 mod query_planner;
 mod stream_coalescer;
+
+pub(crate) use metering::QueryLimits;
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -158,10 +161,17 @@ pub(crate) fn show_crawlers_plan() -> LogicalPlan {
 pub(crate) async fn execute_statement_plan(
     session_ctx: &Arc<SessionContext>,
     plan: LogicalPlan,
+    limits: Option<QueryLimits>,
 ) -> anyhow::Result<SendableRecordBatchStream> {
     use futures::TryStreamExt;
 
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
+    // Non-admin queries carry execution limits; insert a metering node that
+    // aborts the query when a limit is breached (admin/internal pass `None`).
+    let physical_plan = match limits {
+        Some(limits) if limits.is_active() => metering::insert_meter(physical_plan, limits),
+        _ => physical_plan,
+    };
     let stream = datafusion::physical_plan::execute_stream(physical_plan, session_ctx.task_ctx())?;
     let stream = stream_coalescer::coalesce_sql_stream(session_ctx, stream);
 
