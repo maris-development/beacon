@@ -79,10 +79,13 @@ SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`)
 | Zarr | v2 and v3 |
 | Atlas | Array store optimized for NetCDF/Zarr query performance |
 | Parquet | Native columnar, Hive partitioning supported |
+| [GeoParquet](/docs/1.7.3/data-lake/geoparquet) | Parquet with geometry columns (WKB) |
 | GeoTIFF / COG | Cloud-Optimized GeoTIFF supported |
 | ODV ASCII | Ocean Data View spreadsheet format |
 | CSV | Header row required, delimiter configurable |
 | Arrow IPC | `.arrow`, `.ipc` stream files |
+| [Delta Lake](/docs/1.7.3/data-lake/delta-lake) | Read & append, with time travel |
+| [Beacon Binary Format](/docs/1.7.3/data-lake/datasets#beacon-binary-format-bbf) | Beacon's native columnar format (BBF) |
 
 ## Key concepts
 

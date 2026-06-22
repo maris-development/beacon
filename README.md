@@ -26,12 +26,12 @@ It is built on [Apache Arrow](https://arrow.apache.org/) and [Apache DataFusion]
 
 - **Query files where they live.** Read NetCDF, Zarr, Parquet, ODV, CSV and more directly from a local volume or S3-compatible object store — no ingestion step.
 - **One API, many formats in and out.** Send a SQL or JSON query, choose your output format (Parquet, CSV, NetCDF, GeoParquet, Arrow IPC, ODV) and stream the result.
-- **Built for scale.** Columnar execution, predicate/projection pushdown, and schema caching on top of Arrow + DataFusion.
+- **Built for scale.** Columnar execution, predicate/projection pushdown, and statistics-based pruning on top of Arrow + DataFusion.
 - **Self-describing.** A built-in OpenAPI/Swagger UI documents every endpoint, and discovery endpoints expose available datasets, tables, columns, and functions.
 
 ## Features
 
-- **Input formats:** Parquet, NetCDF, Zarr, ODV, CSV, Arrow IPC, GeoTIFF, and the native Beacon Binary Format (BBF).
+- **Input formats:** Parquet, GeoParquet, NetCDF, Zarr, Atlas, ODV, CSV, Arrow IPC, GeoTIFF, Delta Lake, and the native Beacon Binary Format (BBF).
 - **Output formats:** Parquet, GeoParquet, NetCDF, ND-NetCDF, CSV, Arrow IPC, and ODV.
 - **Two query interfaces:** a structured **JSON query** API and read-only raw **SQL** (enabled by default; toggle with `BEACON_ENABLE_SQL`).
 - **Arrow Flight SQL** endpoint for high-throughput clients (enabled by default).
@@ -163,7 +163,7 @@ Beacon is configured entirely through `BEACON_*` environment variables. The most
 | `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable the Arrow Flight SQL endpoint. |
 | `BEACON_FLIGHT_SQL_PORT` | `32011` | Arrow Flight SQL port. |
 
-S3-compatible storage, CORS, NetCDF caching, and Flight SQL authentication have their own `BEACON_*` settings — see the [configuration reference](https://maris-development.github.io/beacon/) for the complete list.
+S3-compatible storage, CORS, NetCDF caching, the crawler, and Flight SQL authentication have their own `BEACON_*` settings — see the [configuration reference](https://maris-development.github.io/beacon/docs/1.7.3/data-lake/configuration.html) for the complete list.
 
 ## Documentation
 
