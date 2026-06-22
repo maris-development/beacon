@@ -11,7 +11,7 @@ import respx
 
 from beacon_cli.client import QUERY_ID_HEADER, BeaconClient
 from beacon_cli.config import ClientConfig
-from beacon_cli.errors import ConnectionFailedError, QueryError
+from beacon_cli.errors import ConnectionFailedError, QueryError, StreamInterruptedError
 
 BASE = "http://beacon.test"
 
@@ -173,3 +173,15 @@ def test_connection_error_is_friendly():
         with pytest.raises(ConnectionFailedError) as exc:
             client.query("SELECT 1")
     assert BASE in str(exc.value)
+
+
+@respx.mock
+def test_midstream_close_is_friendly():
+    # Server aborts the response mid-stream (e.g. EXPLAIN ANALYZE execution error).
+    respx.post(f"{BASE}/api/query").mock(
+        side_effect=httpx.RemoteProtocolError("peer closed connection")
+    )
+    with _client() as client:
+        with pytest.raises(StreamInterruptedError) as exc:
+            client.query("EXPLAIN ANALYZE SELECT * FROM wod")
+    assert "closed the connection" in str(exc.value)

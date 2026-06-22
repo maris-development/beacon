@@ -30,6 +30,22 @@ class ConnectionFailedError(BeaconCliError):
         super().__init__(f"could not connect to beacon at {url}: {detail}")
 
 
+class StreamInterruptedError(BeaconCliError):
+    """The server closed the response stream before it was complete.
+
+    Typically means the query failed server-side *after* the response started
+    (e.g. an execution error mid-stream), so no clean error body was returned.
+    """
+
+    def __init__(self, url: str, detail: str):
+        self.url = url
+        self.detail = detail
+        super().__init__(
+            f"the server at {url} closed the connection before the response "
+            f"completed; the query likely failed during execution ({detail})"
+        )
+
+
 def _trim(body: str, limit: int = 500) -> str:
     body = body.strip()
     # The server wraps error strings in JSON quotes; unwrap a plain quoted string.

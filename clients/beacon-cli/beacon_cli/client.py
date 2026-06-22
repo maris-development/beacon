@@ -22,7 +22,7 @@ import httpx
 
 from .arrow_io import QueryResult, collect_ipc_stream
 from .config import ClientConfig
-from .errors import ConnectionFailedError, QueryError
+from .errors import ConnectionFailedError, QueryError, StreamInterruptedError
 
 QUERY_ID_HEADER = "x-beacon-query-id"
 
@@ -79,6 +79,8 @@ class BeaconClient:
             raise ConnectionFailedError(self.config.url, str(exc)) from exc
         except httpx.TimeoutException as exc:
             raise ConnectionFailedError(self.config.url, f"request timed out: {exc}") from exc
+        except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            raise StreamInterruptedError(self.config.url, str(exc)) from exc
         elapsed = time.perf_counter() - start
         return QueryResult(table, query_id, elapsed, truncated)
 
@@ -104,6 +106,8 @@ class BeaconClient:
             raise ConnectionFailedError(self.config.url, str(exc)) from exc
         except httpx.TimeoutException as exc:
             raise ConnectionFailedError(self.config.url, f"request timed out: {exc}") from exc
+        except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            raise StreamInterruptedError(self.config.url, str(exc)) from exc
         return written
 
     # -- metadata (GET, JSON) ---------------------------------------------------
