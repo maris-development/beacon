@@ -27,9 +27,13 @@ async fn collect(runtime: &Runtime, sql: &str) -> anyhow::Result<Vec<RecordBatch
 
 #[tokio::test(flavor = "multi_thread")]
 async fn explain_analyze_over_external_netcdf_returns_metrics() {
-    let runtime = Runtime::new(Arc::new(beacon_config::Config::load().unwrap()))
-        .await
-        .expect("runtime should boot");
+    let config = Arc::new(beacon_config::Config::load().unwrap());
+    // Resolve the datasets dir from the same config the runtime uses: a
+    // datasets-relative `LOCATION` is resolved against `storage.datasets_dir`,
+    // which can differ from the global `DATASETS_DIR_PATH` (e.g. when
+    // `BEACON_DATA_DIR` is set), so the fixture must land where the runtime looks.
+    let datasets_dir = config.storage.datasets_dir.clone();
+    let runtime = Runtime::new(config).await.expect("runtime should boot");
 
     // Copy the WOD CTD fixture into the datasets dir so it can back an external
     // table addressed by a datasets-relative location.
@@ -38,7 +42,7 @@ async fn explain_analyze_over_external_netcdf_returns_metrics() {
         .unwrap()
         .join("beacon-file-formats/beacon-arrow-netcdf/test_files/wod_ctd_1964.nc");
     let rel = format!("explain_analyze_external_{}.nc", std::process::id());
-    let dst = beacon_config::DATASETS_DIR_PATH.join(&rel);
+    let dst = datasets_dir.join(&rel);
     std::fs::copy(&src, &dst).expect("copy NetCDF fixture into datasets dir");
 
     let table = format!("wod_explain_{}", std::process::id());
