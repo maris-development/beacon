@@ -8,7 +8,8 @@ use datafusion::sql::{
 
 use super::statement::{
     BeaconStatement, CreateCrawlerStatement, CreateMaterializedViewStatement, DropCrawlerStatement,
-    RefreshStatement, RunCrawlerStatement,
+    DropExtensionStatement, RefreshStatement, RunCrawlerStatement, SetExtensionStatement,
+    ShowExtensionsStatement,
 };
 
 /// A parser that extends `DFParser` with custom Beacon SQL syntax.
@@ -47,6 +48,18 @@ impl<'a> BeaconParser<'a> {
 
         if self.is_show_crawlers() {
             return self.parse_show_crawlers();
+        }
+
+        if self.is_set_extension() {
+            return self.parse_set_extension();
+        }
+
+        if self.is_drop_extension() {
+            return self.parse_drop_extension();
+        }
+
+        if self.is_show_extensions() {
+            return self.parse_show_extensions();
         }
 
         let df_statement = Box::new(self.df_parser.parse_statement()?);
@@ -147,6 +160,86 @@ impl<'a> BeaconParser<'a> {
         self.df_parser.parser.next_token(); // SHOW
         self.df_parser.parser.next_token(); // CRAWLERS
         Ok(BeaconStatement::ShowCrawlers)
+    }
+
+    /// Whether the next two tokens are `<KW1> EXTENSION`, where `KW1` matches
+    /// `first` (used for `SET EXTENSION` and `DROP EXTENSION`).
+    fn is_keyword_then_extension(&self, first: impl Fn(&Token) -> bool) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        first(t1) && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "EXTENSION")
+    }
+
+    fn is_set_extension(&self) -> bool {
+        self.is_keyword_then_extension(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::SET))
+    }
+
+    fn is_drop_extension(&self) -> bool {
+        self.is_keyword_then_extension(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::DROP))
+    }
+
+    fn is_show_extensions(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "SHOW")
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "EXTENSIONS")
+    }
+
+    /// Parse: SET EXTENSION '<kind>' FOR <table> TO '<json>'
+    fn parse_set_extension(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // SET
+        self.df_parser.parser.next_token(); // EXTENSION
+        let kind = self.parse_string_value()?;
+        self.expect_keyword(Keyword::FOR)?;
+        let table = self.parse_object_name()?;
+        self.expect_keyword(Keyword::TO)?;
+        let json = self.parse_string_value()?;
+        Ok(BeaconStatement::SetExtension(SetExtensionStatement {
+            kind,
+            table,
+            json,
+        }))
+    }
+
+    /// Parse: DROP EXTENSION '<kind>' FOR <table>
+    fn parse_drop_extension(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // DROP
+        self.df_parser.parser.next_token(); // EXTENSION
+        let kind = self.parse_string_value()?;
+        self.expect_keyword(Keyword::FOR)?;
+        let table = self.parse_object_name()?;
+        Ok(BeaconStatement::DropExtension(DropExtensionStatement {
+            kind,
+            table,
+        }))
+    }
+
+    /// Parse: SHOW EXTENSIONS FOR <table>
+    fn parse_show_extensions(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // SHOW
+        self.df_parser.parser.next_token(); // EXTENSIONS
+        self.expect_keyword(Keyword::FOR)?;
+        let table = self.parse_object_name()?;
+        Ok(BeaconStatement::ShowExtensions(ShowExtensionsStatement {
+            table,
+        }))
+    }
+
+    /// Consume the expected keyword or error.
+    fn expect_keyword(&mut self, keyword: Keyword) -> Result<()> {
+        self.df_parser
+            .parser
+            .expect_keyword(keyword)
+            .map(|_| ())
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+
+    /// Parse a (possibly schema-qualified) object name.
+    fn parse_object_name(&mut self) -> Result<datafusion::sql::sqlparser::ast::ObjectName> {
+        self.df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
     }
 
     /// Read a single string value (single-quoted string, identifier, or number).
@@ -412,6 +505,58 @@ mod tests {
                 BeaconStatement::DFStatement(_)
             ));
         }
+    }
+
+    #[test]
+    fn test_parse_set_extension() {
+        let sql = "SET EXTENSION 'preset' FOR obs TO '{\"presets\":[]}'";
+        let mut p = BeaconParser::new(sql).unwrap();
+        match p.parse_statement().unwrap() {
+            BeaconStatement::SetExtension(s) => {
+                assert_eq!(s.kind, "preset");
+                assert_eq!(s.table.to_string(), "obs");
+                assert_eq!(s.json, "{\"presets\":[]}");
+            }
+            other => panic!("expected SetExtension, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_and_show_extensions() {
+        let mut p = BeaconParser::new("DROP EXTENSION 'mcp' FOR obs").unwrap();
+        match p.parse_statement().unwrap() {
+            BeaconStatement::DropExtension(s) => {
+                assert_eq!(s.kind, "mcp");
+                assert_eq!(s.table.to_string(), "obs");
+            }
+            other => panic!("expected DropExtension, got {other:?}"),
+        }
+
+        let mut p = BeaconParser::new("SHOW EXTENSIONS FOR schema.obs").unwrap();
+        match p.parse_statement().unwrap() {
+            BeaconStatement::ShowExtensions(s) => assert_eq!(s.table.to_string(), "schema.obs"),
+            other => panic!("expected ShowExtensions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extension_ddl_does_not_shadow_standard_sql() {
+        // SET <var>, DROP TABLE, and SHOW TABLES must still reach DataFusion.
+        for sql in ["SET timezone = 'UTC'", "DROP TABLE t", "SHOW TABLES"] {
+            let mut p = BeaconParser::new(sql).unwrap();
+            assert!(
+                matches!(p.parse_statement().unwrap(), BeaconStatement::DFStatement(_)),
+                "`{sql}` should be a DataFusion statement"
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_extension_display_roundtrip() {
+        let sql = "SET EXTENSION 'preset' FOR obs TO '{\"presets\":[]}'";
+        let mut p = BeaconParser::new(sql).unwrap();
+        let stmt = p.parse_statement().unwrap();
+        assert_eq!(stmt.to_string(), sql);
     }
 
     #[test]

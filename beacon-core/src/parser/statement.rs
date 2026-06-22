@@ -12,6 +12,72 @@ pub enum BeaconStatement {
     RunCrawler(RunCrawlerStatement),
     DropCrawler(DropCrawlerStatement),
     ShowCrawlers,
+    SetExtension(SetExtensionStatement),
+    DropExtension(DropExtensionStatement),
+    ShowExtensions(ShowExtensionsStatement),
+}
+
+/// SET EXTENSION '<kind>' FOR <table> TO '<json>'
+#[derive(Debug, Clone)]
+pub struct SetExtensionStatement {
+    /// Extension kind (e.g. `mcp`, `preset`).
+    pub kind: String,
+    /// Target table.
+    pub table: ObjectName,
+    /// The extension payload as a JSON string literal.
+    pub json: String,
+}
+
+impl Display for SetExtensionStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SET EXTENSION '{}' FOR {} TO '{}'",
+            escape_sql_literal(&self.kind),
+            self.table,
+            escape_sql_literal(&self.json)
+        )
+    }
+}
+
+/// DROP EXTENSION '<kind>' FOR <table>
+#[derive(Debug, Clone)]
+pub struct DropExtensionStatement {
+    /// Extension kind to remove.
+    pub kind: String,
+    /// Target table.
+    pub table: ObjectName,
+}
+
+impl Display for DropExtensionStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DROP EXTENSION '{}' FOR {}",
+            escape_sql_literal(&self.kind),
+            self.table
+        )
+    }
+}
+
+/// SHOW EXTENSIONS FOR <table>
+#[derive(Debug, Clone)]
+pub struct ShowExtensionsStatement {
+    /// Target table.
+    pub table: ObjectName,
+}
+
+impl Display for ShowExtensionsStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SHOW EXTENSIONS FOR {}", self.table)
+    }
+}
+
+/// Escape a value for embedding in a single-quoted SQL string literal so the
+/// `Display` form re-parses to the same value (the tokenizer turns `''` back into
+/// `'`).
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 /// CREATE CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
@@ -108,6 +174,9 @@ impl Display for BeaconStatement {
             Self::RunCrawler(s) => write!(f, "{s}"),
             Self::DropCrawler(s) => write!(f, "{s}"),
             Self::ShowCrawlers => write!(f, "SHOW CRAWLERS"),
+            Self::SetExtension(s) => write!(f, "{s}"),
+            Self::DropExtension(s) => write!(f, "{s}"),
+            Self::ShowExtensions(s) => write!(f, "{s}"),
         }
     }
 }

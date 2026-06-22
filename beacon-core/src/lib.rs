@@ -1,4 +1,5 @@
 pub mod api;
+pub mod extensions;
 pub mod metrics;
 pub mod parser;
 pub mod query;

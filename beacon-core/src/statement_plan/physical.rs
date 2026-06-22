@@ -30,6 +30,10 @@ use super::{
     logical::{count_arrow_schema, show_crawlers_arrow_schema, AlterTableSpec},
     materialized_view, SessionCell,
 };
+use crate::extensions::{
+    drop_table_extension, set_table_extension, show_extensions_arrow_schema,
+    show_table_extensions_batch,
+};
 
 /// `PlanProperties` for a single-partition node producing `schema`.
 fn plan_properties(schema: SchemaRef) -> PlanProperties {
@@ -848,6 +852,150 @@ impl ExecutionPlan for ShowCrawlersExec {
         let schema = show_crawlers_arrow_schema();
         let stream = futures::stream::once(async move {
             crawler::show_crawlers(&session).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+/// Physical node for `SET EXTENSION '<kind>' FOR <table> TO '<json>'`.
+#[derive(Debug)]
+pub(crate) struct SetExtensionExec {
+    kind: String,
+    table: String,
+    json: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl SetExtensionExec {
+    pub(crate) fn new(kind: String, table: String, json: String, session: SessionCell) -> Self {
+        Self {
+            kind,
+            table,
+            json,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SetExtensionExec: table={} kind={}", self.table, self.kind)
+    }
+}
+
+side_effect_exec!(
+    SetExtensionExec,
+    "SetExtensionExec",
+    |exec: &SetExtensionExec| {
+        let session = upgrade_session(&exec.session)?;
+        let kind = exec.kind.clone();
+        let table = exec.table.clone();
+        let json = exec.json.clone();
+        Ok(side_effect_stream(async move {
+            set_table_extension(&session, &table, &kind, &json)
+                .await
+                .map_err(to_df_err)
+        }))
+    }
+);
+
+/// Physical node for `DROP EXTENSION '<kind>' FOR <table>`.
+#[derive(Debug)]
+pub(crate) struct DropExtensionExec {
+    kind: String,
+    table: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl DropExtensionExec {
+    pub(crate) fn new(kind: String, table: String, session: SessionCell) -> Self {
+        Self {
+            kind,
+            table,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DropExtensionExec: table={} kind={}", self.table, self.kind)
+    }
+}
+
+side_effect_exec!(
+    DropExtensionExec,
+    "DropExtensionExec",
+    |exec: &DropExtensionExec| {
+        let session = upgrade_session(&exec.session)?;
+        let kind = exec.kind.clone();
+        let table = exec.table.clone();
+        Ok(side_effect_stream(async move {
+            drop_table_extension(&session, &table, &kind)
+                .await
+                .map_err(to_df_err)
+        }))
+    }
+);
+
+/// Physical node for `SHOW EXTENSIONS FOR <table>`. Produces one JSON row.
+#[derive(Debug)]
+pub(crate) struct ShowExtensionsExec {
+    table: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl ShowExtensionsExec {
+    pub(crate) fn new(table: String, session: SessionCell) -> Self {
+        Self {
+            table,
+            session,
+            cache: Arc::new(plan_properties(show_extensions_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for ShowExtensionsExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "ShowExtensionsExec: table={}", self.table)
+            }
+            DisplayFormatType::TreeRender => write!(f, "ShowExtensionsExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for ShowExtensionsExec {
+    fn name(&self) -> &str {
+        "ShowExtensionsExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let table = self.table.clone();
+        let schema = show_extensions_arrow_schema();
+        let stream = futures::stream::once(async move {
+            show_table_extensions_batch(&session, &table)
+                .await
+                .map_err(to_df_err)
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
