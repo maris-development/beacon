@@ -7,6 +7,9 @@ use datafusion::{
 use super::Filter;
 
 #[derive(Debug, Clone, utoipa::ToSchema, serde::Serialize, serde::Deserialize)]
+// `Filter` -> `Or` -> `Filter` is a recursive cycle; break it so utoipa's schema
+// generation does not inline forever and overflow the stack.
+#[schema(no_recursion)]
 pub struct Or(pub Vec<Filter>);
 
 impl Or {

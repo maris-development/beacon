@@ -18,7 +18,12 @@ mod external_tables;
 
 /// OpenAPI document marker for the admin surface.
 #[derive(OpenApi)]
-#[openapi(modifiers(&SecurityAddon))]
+#[openapi(
+    modifiers(&SecurityAddon),
+    tags(
+        (name = "admin", description = "Authenticated administrative endpoints (HTTP Basic auth) for managing crawlers and external tables.")
+    )
+)]
 pub struct AdminApiDoc;
 
 /// Builds the admin router and attaches basic-auth middleware.
