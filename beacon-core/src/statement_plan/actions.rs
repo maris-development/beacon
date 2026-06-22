@@ -4,6 +4,7 @@
 //! match arms; the exec nodes in [`super::physical`] recover the
 //! [`SessionContext`] from the planner's weak cell and call these.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
@@ -12,6 +13,7 @@ use beacon_datafusion_ext::{
     remote::{RemoteTableDefinition, unresolved_schema},
     table_ext::{MaterializedView, TableDefinition},
 };
+use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
 use datafusion::{
     catalog::TableProviderFactory,
     datasource::ViewTable,
@@ -88,6 +90,12 @@ pub(crate) async fn create_external_table(
     // bypasses the listing-table factory and uses its own provider.
     if cmd.file_type.eq_ignore_ascii_case("DELTA") {
         return create_delta_table(session, cmd).await;
+    }
+
+    // `STORED AS POSTGRES|MYSQL` registers an external database table backed by a
+    // federated connection to the source database, rather than a listing table.
+    if let Some(engine) = SqlEngine::from_stored_as(&cmd.file_type) {
+        return create_sql_db_table(session, cmd, engine).await;
     }
 
     let factory =
@@ -190,6 +198,86 @@ async fn create_delta_table(
 
     // `build_provider` resolves the schema from the Delta log; registration
     // persists `table.json` via the TableManager.
+    let provider = definition
+        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+        .await?;
+    session.register_table(cmd.name.clone(), provider)?;
+    Ok(())
+}
+
+/// Build and register an external PostgreSQL/MySQL table from
+/// `CREATE EXTERNAL TABLE … STORED AS POSTGRES LOCATION 'public.orders'
+/// OPTIONS ('host' '…', 'port' '5432', 'user' '…', 'password' '…',
+/// 'database' '…', 'sslmode' 'require')`.
+///
+/// `LOCATION` is the table name on the remote database. The password is
+/// encrypted at rest with the deployment master key (`BEACON_SECRETS_KEY`);
+/// creation fails closed if a password is supplied without a configured key.
+async fn create_sql_db_table(
+    session: &Arc<SessionContext>,
+    cmd: &CreateExternalTable,
+    engine: SqlEngine,
+) -> anyhow::Result<()> {
+    // DataFusion prefixes `OPTIONS` keys without a `.` with `format.`; strip it
+    // so users write plain option names. The password is pulled out separately
+    // so it is never persisted in the plaintext `options` map.
+    let mut options: BTreeMap<String, String> = BTreeMap::new();
+    let mut password: Option<String> = None;
+    for (key, value) in &cmd.options {
+        let key = key.strip_prefix("format.").unwrap_or(key);
+        match key {
+            "password" | "pass" => password = Some(value.clone()),
+            other => {
+                options.insert(other.to_string(), value.clone());
+            }
+        }
+    }
+
+    let remote_table = cmd.location.clone();
+    anyhow::ensure!(
+        !remote_table.is_empty(),
+        "{} table LOCATION must be the remote table name, e.g. 'public.orders'",
+        engine.as_str()
+    );
+
+    // Encrypt the password eagerly so the persisted definition holds ciphertext.
+    let secret = match password {
+        Some(password) => {
+            let config = session
+                .state()
+                .config()
+                .get_extension::<beacon_config::Config>()
+                .ok_or_else(|| anyhow::anyhow!("Beacon configuration is unavailable"))?;
+            let key = config.secrets.master_key().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot store credentials for '{}': set BEACON_SECRETS_KEY (base64 32-byte \
+                     key) to enable encrypted external-database credentials",
+                    cmd.name
+                )
+            })?;
+            Some(EncryptedSecret::encrypt(&password, key)?)
+        }
+        None => None,
+    };
+
+    // Honor an explicit column list if given; otherwise the schema is resolved
+    // from the database when the provider is built.
+    let schema = if cmd.schema.fields().is_empty() {
+        unresolved_schema()
+    } else {
+        Arc::clone(cmd.schema.inner())
+    };
+
+    let definition = SqlDatabaseTableDefinition {
+        name: cmd.name.to_string(),
+        engine,
+        remote_table,
+        schema,
+        options,
+        secret,
+    };
+
+    // `build_provider` resolves+pins the schema; registration persists table.json.
     let provider = definition
         .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
         .await?;

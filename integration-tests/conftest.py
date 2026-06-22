@@ -8,6 +8,7 @@ The whole suite is skipped when the ``docker`` CLI is unavailable. Set
 
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import subprocess
@@ -29,6 +30,10 @@ HTTP_PORT = 5001
 FLIGHT_PORT = 32011
 
 CONTAINER_NAME = "beacon-integration-test"
+NETWORK_NAME = "beacon-integration-net"
+# Base64 32-byte master key so the beacon container can encrypt external-database
+# credentials at rest (required by `STORED AS POSTGRES/MYSQL` with a password).
+SECRETS_KEY = base64.b64encode(bytes(range(32))).decode()
 HEALTH_TIMEOUT_S = 180
 BUILD_TIMEOUT_S = 3600
 
@@ -149,7 +154,19 @@ def tables_dir(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def beacon_container(request, beacon_image, datasets_dir, tables_dir):
+def docker_network():
+    """A user-defined bridge network so the beacon container can reach sidecar
+    containers (e.g. PostgreSQL) by name."""
+    _run(["docker", "network", "rm", NETWORK_NAME])
+    created = _run(["docker", "network", "create", NETWORK_NAME])
+    if created.returncode != 0:
+        pytest.fail(f"docker network create failed:\n{created.stdout}\n{created.stderr}")
+    yield NETWORK_NAME
+    _run(["docker", "network", "rm", NETWORK_NAME])
+
+
+@pytest.fixture(scope="session")
+def beacon_container(request, beacon_image, datasets_dir, tables_dir, docker_network):
     """Run Beacon in a container and yield its base HTTP URL."""
     # Remove any stale container from a previous interrupted run.
     _run(["docker", "rm", "-f", CONTAINER_NAME])
@@ -157,6 +174,7 @@ def beacon_container(request, beacon_image, datasets_dir, tables_dir):
     run_cmd = [
         "docker", "run", "-d",
         "--name", CONTAINER_NAME,
+        "--network", docker_network,
         "-p", f"{HTTP_PORT}",          # publish container HTTP port to a random host port
         "-p", f"{FLIGHT_PORT}",
         "-v", f"{datasets_dir}:/beacon/data/datasets",
@@ -164,6 +182,7 @@ def beacon_container(request, beacon_image, datasets_dir, tables_dir):
         "-e", "BEACON_ENABLE_SQL=true",
         "-e", f"BEACON_ADMIN_USERNAME={ADMIN_USERNAME}",
         "-e", f"BEACON_ADMIN_PASSWORD={ADMIN_PASSWORD}",
+        "-e", f"BEACON_SECRETS_KEY={SECRETS_KEY}",
         "-e", "BEACON_LOG_LEVEL=info",
         beacon_image,
     ]

@@ -28,6 +28,7 @@ beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-iceberg = { path = "../beacon-iceberg" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
+beacon-sql-databases = { path = "../beacon-sql-databases" }
 
 # File-format crates registered by `file_formats()`
 beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
