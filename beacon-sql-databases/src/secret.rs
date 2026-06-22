@@ -55,6 +55,13 @@ impl EncryptedSecret {
         let nonce = B64
             .decode(&self.nonce)
             .context("secret nonce is not valid base64")?;
+        // `XNonce::from_slice` panics on the wrong length, and the nonce comes
+        // from an on-disk (operator-editable) `table.json` — validate first.
+        anyhow::ensure!(
+            nonce.len() == 24,
+            "secret nonce must be 24 bytes, got {}",
+            nonce.len()
+        );
         let ciphertext = B64
             .decode(&self.ciphertext)
             .context("secret ciphertext is not valid base64")?;
@@ -82,6 +89,15 @@ mod tests {
     fn fails_under_a_different_key() {
         let enc = EncryptedSecret::encrypt("hunter2", &[1u8; 32]).unwrap();
         assert!(enc.decrypt(&[2u8; 32]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_malformed_nonce_without_panicking() {
+        // Simulate a hand-edited / corrupted table.json with a too-short nonce.
+        let enc: EncryptedSecret =
+            serde_json::from_str(r#"{"ciphertext":"AAAA","nonce":"AAAA"}"#).unwrap();
+        let err = enc.decrypt(&[0u8; 32]).unwrap_err();
+        assert!(err.to_string().contains("nonce"));
     }
 
     #[test]

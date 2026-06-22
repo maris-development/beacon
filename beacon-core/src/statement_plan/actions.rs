@@ -263,7 +263,7 @@ async fn create_sql_db_table(
     // Honor an explicit column list if given; otherwise the schema is resolved
     // from the database when the provider is built.
     let schema = if cmd.schema.fields().is_empty() {
-        unresolved_schema()
+        beacon_sql_databases::unresolved_schema()
     } else {
         Arc::clone(cmd.schema.inner())
     };

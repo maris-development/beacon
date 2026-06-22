@@ -17,6 +17,7 @@ beacon-config = { path = "../beacon-config" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 
 datafusion = { workspace = true }
+datafusion-federation = { workspace = true }
 datafusion-table-providers = { workspace = true }
 arrow = { workspace = true }
 

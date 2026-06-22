@@ -14,13 +14,14 @@ use datafusion::catalog::TableProvider;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::TableReference;
+use datafusion_federation::{FederatedTableProviderAdaptor, FederatedTableSource};
 use secrecy::SecretString;
 
 use beacon_datafusion_ext::table_ext::TableDefinition;
 
 use crate::options::build_pool_params;
 use crate::secret::EncryptedSecret;
-use crate::wrapper::BeaconSqlDatabaseTable;
+use crate::source::BeaconSqlFederatedSource;
 use crate::SqlEngine;
 
 /// Persisted configuration for an external PostgreSQL/MySQL table.
@@ -97,12 +98,37 @@ impl TableDefinition for SqlDatabaseTableDefinition {
                 )
             })?;
 
+        // `datafusion-table-providers` returns a `FederatedTableProviderAdaptor`
+        // (with the `*-federation` feature). The federation optimizer only
+        // recognizes a scan whose registered provider IS that adaptor, so we
+        // must keep it bare — wrapping it in another `TableProvider` would
+        // silently disable pushdown. Instead, rebuild the adaptor around our own
+        // `FederatedTableSource` that carries the definition, keeping the
+        // original provider as the non-federated scan fallback.
+        let adaptor = provider
+            .as_any()
+            .downcast_ref::<FederatedTableProviderAdaptor>()
+            .ok_or_else(|| {
+                anyhow!(
+                    "expected a federated provider from datafusion-table-providers for table \
+                     '{}'; is the engine's `*-federation` feature enabled?",
+                    self.name
+                )
+            })?;
+
         // Pin the resolved schema so a catalog round-trip persists the concrete
         // schema rather than whatever placeholder was supplied at creation.
         let mut pinned = self.clone();
-        pinned.schema = provider.schema();
+        pinned.schema = adaptor.source.schema();
 
-        Ok(Arc::new(BeaconSqlDatabaseTable::new(provider, pinned)))
+        let wrapped: Arc<dyn FederatedTableSource> = Arc::new(BeaconSqlFederatedSource::new(
+            Arc::clone(&adaptor.source),
+            pinned,
+        ));
+        Ok(Arc::new(FederatedTableProviderAdaptor::new_with_provider(
+            wrapped,
+            Arc::clone(&provider),
+        )))
     }
 
     fn table_name(&self) -> &str {

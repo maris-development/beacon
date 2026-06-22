@@ -8,8 +8,9 @@
 //!
 //! The shape mirrors the federated remote-Beacon table
 //! (`beacon_datafusion_ext::remote`): a serializable [`SqlEngine`]-tagged
-//! definition builds a DataFusion provider, which is wrapped
-//! ([`BeaconSqlDatabaseTable`]) so the catalog can recover the definition for
+//! definition builds a bare `FederatedTableProviderAdaptor` (so the federation
+//! optimizer still pushes work down), whose inner source is wrapped
+//! ([`BeaconSqlFederatedSource`]) so the catalog can recover the definition for
 //! persistence.
 //!
 //! Each engine is gated behind a cargo feature; [`SqlEngine`] is the single
@@ -19,18 +20,39 @@
 mod definition;
 mod options;
 mod secret;
-mod wrapper;
+mod source;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::catalog::TableProvider;
 use datafusion::sql::TableReference;
+use datafusion_federation::FederatedTableProviderAdaptor;
 use secrecy::SecretString;
 
 pub use definition::{unresolved_schema, SqlDatabaseTableDefinition};
 pub use secret::EncryptedSecret;
-pub use wrapper::BeaconSqlDatabaseTable;
+pub use source::BeaconSqlFederatedSource;
+
+/// Recover a [`SqlDatabaseTableDefinition`] from a registered provider, if it is
+/// an external SQL-database table.
+///
+/// Like the remote-Beacon table, the catalog registers a bare
+/// [`FederatedTableProviderAdaptor`] (so the federation optimizer recognizes
+/// it); this digs through its public `source` and our
+/// [`BeaconSqlFederatedSource`] to recover the definition for persistence.
+pub fn sql_database_table_definition(
+    provider: &dyn TableProvider,
+) -> Option<SqlDatabaseTableDefinition> {
+    let adaptor = provider
+        .as_any()
+        .downcast_ref::<FederatedTableProviderAdaptor>()?;
+    let source = adaptor
+        .source
+        .as_any()
+        .downcast_ref::<BeaconSqlFederatedSource>()?;
+    Some(source.definition().clone())
+}
 
 /// The external database engines Beacon can connect to. Each variant is gated
 /// by a cargo feature; this enum is the single per-engine dispatch point.

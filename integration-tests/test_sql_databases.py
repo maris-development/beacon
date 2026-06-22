@@ -112,6 +112,19 @@ def test_postgres_filter_pushdown_result(client, pg_table):
     assert int(n) == HIGH_REVENUE_ROWS
 
 
+def test_postgres_query_is_federated(client, pg_table):
+    """Guard the federation contract: the table must plan as a federated scan,
+    not a local DataFusion scan. datafusion-federation only recognizes a scan
+    whose registered provider is a bare FederatedTableProviderAdaptor, so this
+    fails if the provider is ever wrapped in a way that hides that type — which
+    would silently disable all pushdown to Postgres."""
+    rows = client.sql_rows(
+        f"EXPLAIN SELECT count(*) FROM {pg_table} WHERE revenue > 40", admin=True
+    )
+    plan = "\n".join(cell for row in rows for cell in row)
+    assert "Federated" in plan, f"expected a federated plan, got:\n{plan}"
+
+
 def test_postgres_join_with_parquet(client, pg_table, external_table_obs, sample_data):
     """Cross-source query: a Postgres table and a local Parquet table referenced
     together, proving Beacon can combine a federated DB source with file data."""
