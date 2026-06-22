@@ -219,7 +219,7 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
                     options.retain(|key, _| !key.starts_with("__"));
                 }
                 // Never expose a persisted credential — even encrypted — through
-                // the public table-config endpoint (external SQL-database tables
+                // the admin table-config endpoint (external SQL-database tables
                 // carry one in `secret`).
                 if config.contains_key("secret") {
                     config.insert("secret".to_string(), Value::String("***".to_string()));
@@ -441,7 +441,7 @@ mod table_config_redaction_tests {
     use super::*;
     use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
 
-    /// The public table-config view must never expose a persisted credential,
+    /// The admin table-config view must never expose a persisted credential,
     /// even in its encrypted form — the `secret` field is replaced with `***`.
     #[test]
     fn sql_database_secret_is_redacted_in_config_view() {

@@ -94,6 +94,12 @@ The Arrow schema of the default table (the one queried when a request omits
 GET /api/default-table-schema
 ```
 
+::: info Deprecated alias
+`GET /api/query/available-columns` is a deprecated endpoint that returns only the
+column names of the default table schema. Use `/api/default-table-schema` in new
+code.
+:::
+
 ### All tables with schemas
 
 Convenient for UI discovery, but can be slow on large installations:
@@ -104,10 +110,14 @@ GET /api/tables-with-schema
 
 ### Table configuration
 
-Shows how a table was constructed — paths, file format, statistics settings, etc.:
+Shows how a table was constructed — paths, file format, statistics settings, etc.
+This endpoint is **admin-only** (see [Admin](#admin)) and requires HTTP Basic
+auth; unauthenticated requests get `401`. Sensitive options such as SQL-database
+passwords are redacted (the `secret` field is returned as `***`).
 
 ```http
-GET /api/table-config?table_name=default
+GET /api/admin/table-config?table_name=default
+Authorization: Basic <base64(username:password)>
 ```
 
 ## Functions
@@ -160,12 +170,31 @@ addition, these dedicated, JSON-typed admin endpoints are available:
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | `GET` | `/api/admin/check` | Connectivity check; returns `{ "is_admin": true }` |
+| `GET` | `/api/admin/table-config` | Inspect a table's storage format and configuration |
 | `POST` | `/api/admin/crawlers` | Define (or replace) a crawler |
 | `GET` | `/api/admin/crawlers` | List defined crawlers |
 | `GET` | `/api/admin/crawlers/{name}` | Get one crawler (or `404`) |
 | `POST` | `/api/admin/crawlers/{name}/run` | Run a crawler once; returns its crawl report |
 | `DELETE` | `/api/admin/crawlers/{name}` | Drop a crawler (crawled tables are left in place) |
 | `POST` | `/api/admin/external-tables` | Create an external table from structured fields |
+
+Every example below sends the credentials via HTTP Basic auth
+(`Authorization: Basic <base64(username:password)>`); the header is omitted from
+the snippets after the first for brevity.
+
+Check that your credentials are accepted:
+
+```http
+GET /api/admin/check
+Authorization: Basic <base64(username:password)>
+```
+
+Inspect a table's storage format and configuration (sensitive options such as
+SQL-database passwords are returned as `***`):
+
+```http
+GET /api/admin/table-config?table_name=default
+```
 
 Create a crawler (the structured equivalent of [`CREATE CRAWLER`](../data-lake/crawlers.md)):
 
@@ -188,6 +217,28 @@ Content-Type: application/json
 
 { "name": "observations", "file_type": "PARQUET", "location": "obs/",
   "partition_cols": ["year", "month"] }
+```
+
+List the defined crawlers, or fetch a single one by name:
+
+```http
+GET /api/admin/crawlers
+```
+
+```http
+GET /api/admin/crawlers/argo
+```
+
+Run a crawler once on demand (returns its crawl report):
+
+```http
+POST /api/admin/crawlers/argo/run
+```
+
+Drop a crawler (its already-crawled tables are left in place):
+
+```http
+DELETE /api/admin/crawlers/argo
 ```
 
 ## OpenAPI

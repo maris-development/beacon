@@ -18,7 +18,7 @@ mod tables;
 #[openapi(tags(
     (name = "query", description = "Execute, validate, explain, and inspect metrics of queries."),
     (name = "datasets", description = "Discover dataset files in the datasets store and inspect their schemas."),
-    (name = "tables", description = "List registered tables and inspect their schemas and configuration."),
+    (name = "tables", description = "List registered tables and inspect their schemas."),
     (name = "functions", description = "Browse the scalar, aggregate, and table-valued functions available in queries."),
     (name = "system", description = "Beacon runtime version and host information.")
 ))]
@@ -41,7 +41,6 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(tables::list_tables_with_schema))
         .routes(routes!(tables::default_table))
         .routes(routes!(tables::list_table_schema))
-        .routes(routes!(tables::list_table_config))
         .routes(routes!(tables::default_table_schema))
         .routes(routes!(functions::list_functions))
         .routes(routes!(functions::list_table_functions))
