@@ -28,7 +28,10 @@ use futures::TryStreamExt;
 use parking_lot::Mutex;
 
 use crate::{
-    api::{DatasetInfo, FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView},
+    api::{
+        CrawlReportView, CrawlerView, CreateCrawlerRequest, CreateExternalTableRequest, DatasetInfo,
+        FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView,
+    },
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
     query_result::{ArrowOutputStream, QueryOutput, QueryOutputFile, QueryResult},
     sys::{self, SystemInfo},
@@ -597,10 +600,130 @@ impl Runtime {
         Ok(SchemaView::from(schema.as_ref()))
     }
 
+    /// Define (or replace) a crawler. Mirrors `CREATE CRAWLER` but takes a
+    /// structured request; delegates to the crawler manager, which persists the
+    /// definition and (re)starts its scheduled/event triggers.
+    pub async fn create_crawler(&self, req: CreateCrawlerRequest) -> anyhow::Result<()> {
+        self.crawler_manager.create(req.into()).await
+    }
+
+    /// List all defined crawlers. Mirrors `SHOW CRAWLERS`.
+    pub fn list_crawlers(&self) -> Vec<CrawlerView> {
+        self.crawler_manager
+            .list()
+            .into_iter()
+            .map(CrawlerView::from)
+            .collect()
+    }
+
+    /// Return a single crawler definition by name, or `None` if it is not defined.
+    pub fn get_crawler(&self, name: &str) -> Option<CrawlerView> {
+        self.crawler_manager
+            .list()
+            .into_iter()
+            .find(|crawler| crawler.name == name)
+            .map(CrawlerView::from)
+    }
+
+    /// Run a crawler once on demand and return its report. Mirrors `RUN CRAWLER`.
+    pub async fn run_crawler(&self, name: &str) -> anyhow::Result<CrawlReportView> {
+        Ok(self.crawler_manager.run(name).await?.into())
+    }
+
+    /// Remove a crawler definition and stop its triggers (crawled tables are left
+    /// in place). Mirrors `DROP CRAWLER`.
+    pub async fn drop_crawler(&self, name: &str) -> anyhow::Result<()> {
+        self.crawler_manager.drop_crawler(name).await
+    }
+
+    /// Create an external table from structured fields. Assembles the equivalent
+    /// `CREATE EXTERNAL TABLE` statement and runs it through the same super-user DDL
+    /// path as SQL, so all `STORED AS` variants (listing/Delta/Remote) and catalog
+    /// persistence are reused. The statement produces an empty result stream that is
+    /// drained here to drive the registration to completion.
+    pub async fn create_external_table(
+        &self,
+        req: CreateExternalTableRequest,
+    ) -> anyhow::Result<()> {
+        let sql = build_create_external_table_sql(&req)?;
+        self.run_query(crate::query::Query::sql(sql), true)
+            .await?
+            .into_record_stream()?
+            .try_collect::<Vec<_>>()
+            .await?;
+        Ok(())
+    }
+
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
         let mut parser = BeaconParser::new(sql)?;
         parser.parse_statement().map_err(Into::into)
     }
+}
+
+/// Assemble an injection-safe `CREATE EXTERNAL TABLE` statement from a structured
+/// request. Identifiers (table name, `STORED AS` type, partition columns) are
+/// validated as bare words; `LOCATION` and `OPTIONS` values are emitted as escaped
+/// string literals. Options are rendered in sorted key order so the output is stable.
+fn build_create_external_table_sql(req: &CreateExternalTableRequest) -> anyhow::Result<String> {
+    ensure_bare_ident("table name", &req.name)?;
+    ensure_bare_ident("file_type", &req.file_type)?;
+    for col in &req.partition_cols {
+        ensure_bare_ident("partition column", col)?;
+    }
+
+    let mut sql = String::from("CREATE EXTERNAL TABLE ");
+    if req.if_not_exists {
+        sql.push_str("IF NOT EXISTS ");
+    }
+    sql.push_str(&req.name);
+    sql.push_str(" STORED AS ");
+    sql.push_str(&req.file_type);
+    sql.push_str(" LOCATION ");
+    sql.push_str(&sql_string_literal(&req.location));
+
+    if !req.partition_cols.is_empty() {
+        sql.push_str(" PARTITIONED BY (");
+        sql.push_str(&req.partition_cols.join(", "));
+        sql.push(')');
+    }
+
+    if !req.options.is_empty() {
+        let mut opts: Vec<(&String, &String)> = req.options.iter().collect();
+        opts.sort_by(|a, b| a.0.cmp(b.0));
+        let rendered = opts
+            .iter()
+            .map(|(key, value)| {
+                format!("{} {}", sql_string_literal(key), sql_string_literal(value))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(" OPTIONS (");
+        sql.push_str(&rendered);
+        sql.push(')');
+    }
+
+    Ok(sql)
+}
+
+/// Validate that `value` is a safe bare SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`),
+/// so it can be interpolated into generated DDL without quoting or injection risk.
+fn ensure_bare_ident(kind: &str, value: &str) -> anyhow::Result<()> {
+    let mut chars = value.chars();
+    let valid = match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        _ => false,
+    };
+    if !valid {
+        anyhow::bail!("invalid {kind} '{value}': must match [A-Za-z_][A-Za-z0-9_]*");
+    }
+    Ok(())
+}
+
+/// Render a SQL single-quoted string literal, escaping embedded quotes by doubling.
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(test)]
@@ -994,5 +1117,131 @@ mod restart_tests {
         let _ = restarted
             .run_query(crate::query::Query::sql(format!("DROP TABLE {base}")), true)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod external_table_sql_tests {
+    use super::build_create_external_table_sql;
+    use crate::api::CreateExternalTableRequest;
+    use std::collections::HashMap;
+
+    fn req(name: &str, file_type: &str, location: &str) -> CreateExternalTableRequest {
+        CreateExternalTableRequest {
+            name: name.to_string(),
+            location: location.to_string(),
+            file_type: file_type.to_string(),
+            partition_cols: vec![],
+            options: HashMap::new(),
+            if_not_exists: false,
+        }
+    }
+
+    #[test]
+    fn builds_minimal_statement() {
+        let sql = build_create_external_table_sql(&req("obs_ext", "PARQUET", "obs/")).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE EXTERNAL TABLE obs_ext STORED AS PARQUET LOCATION 'obs/'"
+        );
+    }
+
+    #[test]
+    fn builds_with_if_not_exists_partitions_and_sorted_options() {
+        let mut r = req("argo", "NETCDF", "argo/**/*.nc");
+        r.if_not_exists = true;
+        r.partition_cols = vec!["year".to_string(), "month".to_string()];
+        r.options
+            .insert("read_dimensions".to_string(), "lat,lon".to_string());
+        r.options.insert("a_flag".to_string(), "true".to_string());
+
+        let sql = build_create_external_table_sql(&r).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE EXTERNAL TABLE IF NOT EXISTS argo STORED AS NETCDF LOCATION 'argo/**/*.nc' \
+             PARTITIONED BY (year, month) OPTIONS ('a_flag' 'true', 'read_dimensions' 'lat,lon')"
+        );
+    }
+
+    #[test]
+    fn escapes_quotes_in_location_and_option_values() {
+        let mut r = req("t", "CSV", "weird'/path");
+        r.options.insert("delimiter".to_string(), "'".to_string());
+
+        let sql = build_create_external_table_sql(&r).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE EXTERNAL TABLE t STORED AS CSV LOCATION 'weird''/path' OPTIONS ('delimiter' '''')"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_identifiers() {
+        assert!(build_create_external_table_sql(&req("bad name", "PARQUET", "x/")).is_err());
+        assert!(
+            build_create_external_table_sql(&req("t; DROP TABLE u", "PARQUET", "x/")).is_err()
+        );
+        assert!(build_create_external_table_sql(&req("t", "PARQUET'", "x/")).is_err());
+
+        let mut r = req("t", "PARQUET", "x/");
+        r.partition_cols = vec!["year)".to_string()];
+        assert!(build_create_external_table_sql(&r).is_err());
+    }
+}
+
+#[cfg(test)]
+mod crawler_admin_tests {
+    use super::Runtime;
+    use crate::api::{CreateCrawlerRequest, TableNamingView};
+    use std::collections::HashMap;
+
+    /// The admin crawler API round-trips through the manager: create -> list/get ->
+    /// run (zero discovery over an empty prefix) -> drop (idempotency error on the
+    /// second drop). Uses a unique name so the shared on-disk store does not leak.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn crawler_create_list_get_run_drop_round_trip() {
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+            .await
+            .expect("runtime should start");
+
+        let name = format!("crawler_test_{}", uuid::Uuid::new_v4().simple());
+
+        runtime
+            .create_crawler(CreateCrawlerRequest {
+                name: name.clone(),
+                target_prefix: format!("{name}/"),
+                format_filter: Some(vec!["parquet".to_string()]),
+                table_naming: TableNamingView::CrawlerPrefixed,
+                detect_partitions: true,
+                schedule_secs: None,
+                event_driven: false,
+                options: HashMap::new(),
+            })
+            .await
+            .expect("create_crawler should succeed");
+
+        // Listed and individually retrievable, with fields preserved.
+        assert!(runtime.list_crawlers().iter().any(|c| c.name == name));
+        let got = runtime
+            .get_crawler(&name)
+            .expect("crawler should be retrievable");
+        assert_eq!(got.target_prefix, format!("{name}/"));
+        assert_eq!(got.table_naming, TableNamingView::CrawlerPrefixed);
+
+        // Runs on demand: an empty prefix yields a zero-discovery report.
+        let report = runtime
+            .run_crawler(&name)
+            .await
+            .expect("run_crawler should succeed");
+        assert_eq!(report.crawler, name);
+        assert_eq!(report.discovered, 0);
+
+        // Dropped: gone from the catalog, and a second drop errors.
+        runtime
+            .drop_crawler(&name)
+            .await
+            .expect("drop_crawler should succeed");
+        assert!(runtime.get_crawler(&name).is_none());
+        assert!(runtime.drop_crawler(&name).await.is_err());
     }
 }

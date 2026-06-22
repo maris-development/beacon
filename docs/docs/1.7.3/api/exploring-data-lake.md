@@ -149,17 +149,46 @@ Write operations require the admin credentials (`BEACON_ADMIN_USERNAME` /
 
 ## Admin
 
-Beacon has no separate file-management API — creating, replacing, and removing
-tables is done through authenticated SQL DDL on `/api/query` (see
-[Table lifecycle](#table-lifecycle) above). The only dedicated admin endpoint is a
-connectivity check that verifies your admin credentials:
+All `/api/admin/*` endpoints require the admin credentials
+(`BEACON_ADMIN_USERNAME` / `BEACON_ADMIN_PASSWORD`) via HTTP basic auth;
+unauthenticated requests get `401`.
+
+Creating, replacing, and removing tables can still be done through authenticated
+SQL DDL on `/api/query` (see [Table lifecycle](#table-lifecycle) above). In
+addition, these dedicated, JSON-typed admin endpoints are available:
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/api/admin/check` | Connectivity check; returns `{ "is_admin": true }` |
+| `POST` | `/api/admin/crawlers` | Define (or replace) a crawler |
+| `GET` | `/api/admin/crawlers` | List defined crawlers |
+| `GET` | `/api/admin/crawlers/{name}` | Get one crawler (or `404`) |
+| `POST` | `/api/admin/crawlers/{name}/run` | Run a crawler once; returns its crawl report |
+| `DELETE` | `/api/admin/crawlers/{name}` | Drop a crawler (crawled tables are left in place) |
+| `POST` | `/api/admin/external-tables` | Create an external table from structured fields |
+
+Create a crawler (the structured equivalent of [`CREATE CRAWLER`](../data-lake/crawlers.md)):
 
 ```http
-GET /api/admin/check
+POST /api/admin/crawlers
 Authorization: Basic <base64(username:password)>
+Content-Type: application/json
+
+{ "name": "argo", "target_prefix": "argo/", "format_filter": ["parquet"],
+  "schedule_secs": 900, "table_naming": "crawler_prefixed" }
 ```
 
-Returns `{ "is_admin": true }` when the credentials are valid, or `401` otherwise.
+Create an external table (the structured equivalent of
+[`CREATE EXTERNAL TABLE`](../sql/create-table.md)):
+
+```http
+POST /api/admin/external-tables
+Authorization: Basic <base64(username:password)>
+Content-Type: application/json
+
+{ "name": "observations", "file_type": "PARQUET", "location": "obs/",
+  "partition_cols": ["year", "month"] }
+```
 
 ## OpenAPI
 
