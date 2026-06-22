@@ -45,7 +45,10 @@ pub(super) fn bad_request(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, error.to_string())
 }
 
-/// Injects the auth schemes used by admin endpoints into the OpenAPI document.
+/// Injects the auth scheme used by admin endpoints into the OpenAPI document.
+///
+/// The admin surface is gated solely by the `basic_auth` middleware, which only
+/// accepts HTTP Basic credentials — so only the `basic-auth` scheme is advertised.
 struct SecurityAddon;
 
 impl Modify for SecurityAddon {
@@ -53,11 +56,7 @@ impl Modify for SecurityAddon {
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
                 "basic-auth",
-                SecurityScheme::Http(Http::new(utoipa::openapi::security::HttpAuthScheme::Basic)),
-            );
-            components.add_security_scheme(
-                "bearer",
-                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Basic)),
             );
         }
     }

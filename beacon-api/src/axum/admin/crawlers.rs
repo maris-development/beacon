@@ -23,10 +23,7 @@ use super::bad_request;
         (status = 200, description = "Crawler created"),
         (status = 400, description = "Invalid crawler definition")
     ),
-    security(
-        ("basic-auth" = []),
-        ("bearer" = [])
-    )
+    security(("basic-auth" = []))
 )]
 pub(crate) async fn create_crawler(
     State(state): State<Arc<Runtime>>,
@@ -42,10 +39,7 @@ pub(crate) async fn create_crawler(
     get,
     path = "/api/admin/crawlers",
     responses((status = 200, description = "List of crawlers", body = [CrawlerView])),
-    security(
-        ("basic-auth" = []),
-        ("bearer" = [])
-    )
+    security(("basic-auth" = []))
 )]
 pub(crate) async fn list_crawlers(State(state): State<Arc<Runtime>>) -> Json<Vec<CrawlerView>> {
     Json(state.list_crawlers())
@@ -62,10 +56,7 @@ pub(crate) async fn list_crawlers(State(state): State<Arc<Runtime>>) -> Json<Vec
         (status = 200, description = "Crawler definition", body = CrawlerView),
         (status = 404, description = "Crawler not found")
     ),
-    security(
-        ("basic-auth" = []),
-        ("bearer" = [])
-    )
+    security(("basic-auth" = []))
 )]
 pub(crate) async fn get_crawler(
     State(state): State<Arc<Runtime>>,
@@ -88,10 +79,7 @@ pub(crate) async fn get_crawler(
         (status = 200, description = "Crawl report", body = CrawlReportView),
         (status = 400, description = "Crawler does not exist or failed to run")
     ),
-    security(
-        ("basic-auth" = []),
-        ("bearer" = [])
-    )
+    security(("basic-auth" = []))
 )]
 pub(crate) async fn run_crawler(
     State(state): State<Arc<Runtime>>,
@@ -115,10 +103,7 @@ pub(crate) async fn run_crawler(
         (status = 200, description = "Crawler dropped"),
         (status = 400, description = "Crawler does not exist")
     ),
-    security(
-        ("basic-auth" = []),
-        ("bearer" = [])
-    )
+    security(("basic-auth" = []))
 )]
 pub(crate) async fn drop_crawler(
     State(state): State<Arc<Runtime>>,

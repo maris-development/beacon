@@ -21,10 +21,7 @@ use super::bad_request;
         (status = 200, description = "External table created"),
         (status = 400, description = "Invalid request or registration failed")
     ),
-    security(
-        ("basic-auth" = []),
-        ("bearer" = [])
-    )
+    security(("basic-auth" = []))
 )]
 pub(crate) async fn create_external_table(
     State(state): State<Arc<Runtime>>,
