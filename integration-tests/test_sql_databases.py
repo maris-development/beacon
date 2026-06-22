@@ -142,8 +142,14 @@ def test_postgres_table_listed(client, pg_table):
 
 
 def test_postgres_credentials_redacted_in_config(client, pg_table):
-    """The unauthenticated table-config endpoint must not expose the password."""
-    resp = client.get(f"/api/table-config?table_name={pg_table}")
+    """The admin-only table-config endpoint must not expose the password, and
+    must reject unauthenticated callers."""
+    # Unauthenticated callers are rejected (the endpoint now lives behind the
+    # admin basic-auth gate).
+    unauth = client.admin_get(f"/api/admin/table-config?table_name={pg_table}", admin=False)
+    assert unauth.status_code == 401
+
+    resp = client.admin_get(f"/api/admin/table-config?table_name={pg_table}")
     assert resp.status_code == 200
     body = resp.text
     assert PG_PASSWORD not in body

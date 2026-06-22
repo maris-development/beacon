@@ -15,13 +15,14 @@ use crate::axum::auth::basic_auth;
 mod check;
 mod crawlers;
 mod external_tables;
+mod tables;
 
 /// OpenAPI document marker for the admin surface.
 #[derive(OpenApi)]
 #[openapi(
     modifiers(&SecurityAddon),
     tags(
-        (name = "admin", description = "Authenticated administrative endpoints (HTTP Basic auth) for managing crawlers and external tables.")
+        (name = "admin", description = "Authenticated administrative endpoints (HTTP Basic auth) for managing crawlers and external tables, and inspecting table configuration.")
     )
 )]
 pub struct AdminApiDoc;
@@ -37,6 +38,7 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
         ))
         .routes(routes!(crawlers::run_crawler))
         .routes(routes!(external_tables::create_external_table))
+        .routes(routes!(tables::list_table_config))
         .layer(::axum::middleware::from_fn(basic_auth))
         .split_for_parts();
 
