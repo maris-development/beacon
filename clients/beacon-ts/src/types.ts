@@ -135,7 +135,7 @@ export interface StructuredQuery extends QueryBody {
  */
 export type QueryInput = string | SqlQuery | StructuredQuery;
 
-/** A decoded result row from `query()` (JSON output). */
+/** A decoded result row from `query()` (from the Arrow stream, or CSV). */
 export type Row = Record<string, unknown>;
 
 /** Planner/execution metrics returned by `GET /api/query/metrics/{id}`. */

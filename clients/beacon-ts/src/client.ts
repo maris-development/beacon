@@ -38,9 +38,9 @@ export interface QueryResult<T = Row> {
 /** Options for `query()`. */
 export interface QueryOptions {
   /**
-   * Force a decode path. `"arrow"` requires `apache-arrow`; `"csv"` uses the
-   * dependency-free CSV fallback. Omit to use Arrow when available and fall back
-   * to CSV otherwise.
+   * The decode path. Defaults to `"arrow"`, decoding Beacon's native (zstd)
+   * Arrow IPC stream. Set `"csv"` to instead request CSV output and parse it
+   * (all values become strings, and the result's `table` is absent).
    */
   format?: "arrow" | "csv";
   signal?: AbortSignal;

@@ -98,6 +98,24 @@ describe("QueryBuilder.build", () => {
 });
 
 describe("BeaconClient builder integration", () => {
+  it("first() requests limit 1 without mutating the builder", async () => {
+    const ipc = tableToIPC(tableFromArrays({ TEMP: Float64Array.from([1]) }), "stream");
+    const bodies: unknown[] = [];
+    const fn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(init?.body as string));
+      return new Response(ipc);
+    }) as unknown as typeof fetch;
+    const client = new BeaconClient({ url: "http://beacon.test", fetch: fn });
+
+    const builder = client.from("ctd").select("TEMP");
+    await builder.first();
+    await builder.execute();
+
+    expect(bodies[0]).toEqual({ select: ["TEMP"], from: "ctd", limit: 1 }); // first() → limit 1
+    expect(bodies[1]).toEqual({ select: ["TEMP"], from: "ctd" }); // builder unchanged → no limit
+    expect(builder.build().limit).toBeUndefined();
+  });
+
   it("from().where().execute() posts the built DSL and decodes rows", async () => {
     const ipc = tableToIPC(tableFromArrays({ TEMP: Float64Array.from([4.2]) }), "stream");
     const calls: RequestInit[] = [];

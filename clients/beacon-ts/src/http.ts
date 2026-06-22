@@ -29,13 +29,24 @@ export interface ClientOptions {
 
 /** Builds an HTTP Basic `Authorization` header value, isomorphically. */
 export function basicAuthHeader(username: string, password: string): string {
-  const raw = `${username}:${password}`;
-  // `btoa` exists in browsers and modern Node; fall back to Buffer on older Node.
-  const encode =
-    typeof globalThis.btoa === "function"
-      ? globalThis.btoa
-      : (s: string) => Buffer.from(s, "binary").toString("base64");
-  return `Basic ${encode(raw)}`;
+  return `Basic ${base64Utf8(`${username}:${password}`)}`;
+}
+
+/**
+ * Base64-encodes a string's UTF-8 bytes, in both the browser and Node.
+ *
+ * `btoa` operates on Latin-1 code points and throws on characters outside that
+ * range, so we encode to UTF-8 bytes first — credentials may contain any
+ * Unicode character.
+ */
+function base64Utf8(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return globalThis.btoa(binary);
 }
 
 /** The resolved transport shared by the client and its sub-clients. */
@@ -92,12 +103,16 @@ export class Http {
       body = JSON.stringify(init.json);
     }
 
-    const { signal, cancel } = this.withTimeout(init.signal);
+    const { signal, cancel, timedOut } = this.withTimeout(init.signal);
     let res: Response;
     try {
       res = await this.fetchImpl(url, { method, headers, body, signal });
     } catch (err) {
-      if (isAbortError(err)) throw new TimeoutError(url, err);
+      // Our internal controller aborted the request: classify why.
+      if (signal.aborted) {
+        if (timedOut()) throw new TimeoutError(url, err);
+        throw err; // external cancellation — preserve the caller's AbortError/reason
+      }
       throw new ConnectionError(url, err);
     } finally {
       cancel();
@@ -130,22 +145,41 @@ export class Http {
     return url.toString();
   }
 
-  private withTimeout(external?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
-    if (this.timeoutMs <= 0) {
-      return { signal: external ?? new AbortController().signal, cancel: () => {} };
-    }
+  /**
+   * Composes the request's abort signal: the configured timeout plus any
+   * caller-supplied signal. Returns `timedOut()` so the caller can tell a
+   * timeout abort apart from an external cancellation (the abort reason is not
+   * reliably propagated across runtimes, so we track it explicitly).
+   */
+  private withTimeout(external?: AbortSignal): {
+    signal: AbortSignal;
+    cancel: () => void;
+    timedOut: () => boolean;
+  } {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    if (external) {
-      if (external.aborted) controller.abort();
-      else external.addEventListener("abort", () => controller.abort(), { once: true });
-    }
-    return { signal: controller.signal, cancel: () => clearTimeout(timer) };
-  }
-}
+    let timedOut = false;
 
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.name === "AbortError";
+    // Forward an external abort to our controller, preserving its reason.
+    const onExternalAbort = () => controller.abort(external?.reason);
+    if (external) {
+      if (external.aborted) controller.abort(external.reason);
+      else external.addEventListener("abort", onExternalAbort, { once: true });
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (this.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort(new DOMException("Request timed out", "TimeoutError"));
+      }, this.timeoutMs);
+    }
+
+    const cancel = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      external?.removeEventListener("abort", onExternalAbort);
+    };
+    return { signal: controller.signal, cancel, timedOut: () => timedOut };
+  }
 }
 
 /**

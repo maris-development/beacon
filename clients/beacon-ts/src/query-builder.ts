@@ -331,7 +331,8 @@ export class QueryBuilder<T = Row> {
   }
   /** Executes and returns the first row, or `null` if there are none. */
   async first(signal?: AbortSignal): Promise<T | null> {
-    const rows = await this.take(1).toArray(signal);
+    // Build with `limit: 1` without mutating this builder's own state.
+    const { rows } = await this.runner().query<T>({ ...this.build(), limit: 1 }, { signal });
     return rows[0] ?? null;
   }
   /** Executes and decodes the result into an Arrow Table. */
