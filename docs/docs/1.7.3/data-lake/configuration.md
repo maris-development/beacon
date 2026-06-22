@@ -34,6 +34,17 @@ over HTTP and the admin endpoints).
 | `BEACON_ADMIN_USERNAME` | `beacon-admin` | Admin username for management endpoints. |
 | `BEACON_ADMIN_PASSWORD` | `beacon-password` | Admin password — **change this in production**. |
 
+## Secrets
+
+Master key used to encrypt persisted credentials at rest — currently the
+`password` of external [SQL database tables](./sql-databases.md). It is required
+to create a database table with a password; without it, such a `CREATE` is
+rejected rather than writing plaintext.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_SECRETS_KEY` | _(none)_ | Base64-encoded **32-byte** key (e.g. `openssl rand -base64 32`). If set, it must decode to exactly 32 bytes or Beacon exits at startup. Losing or changing it makes previously stored credentials undecryptable — recreate those tables with the new key. |
+
 ## Query engine
 
 | Variable | Default | Description |

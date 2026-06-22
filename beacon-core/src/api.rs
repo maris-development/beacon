@@ -1,14 +1,15 @@
 //! Beacon-core-owned contracts for outer layers such as beacon-api.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema};
+use beacon_data_lake::crawler::{CrawlReport, CrawlerDefinition, TableNaming};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_functions::function_doc::FunctionDoc;
 use crate::metrics::ConsolidatedMetrics;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -160,6 +161,12 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
                 if let Some(Value::Object(options)) = config.get_mut("options") {
                     options.retain(|key, _| !key.starts_with("__"));
                 }
+                // Never expose a persisted credential — even encrypted — through
+                // the public table-config endpoint (external SQL-database tables
+                // carry one in `secret`).
+                if config.contains_key("secret") {
+                    config.insert("secret".to_string(), Value::String("***".to_string()));
+                }
                 Ok(Self {
                     config: config.into_iter().collect(),
                 })
@@ -168,5 +175,229 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
                 "expected table config object, got {other:?}"
             )),
         }
+    }
+}
+
+/// How a crawler turns a discovered group of files into a table name. Mirrors the
+/// data-lake [`TableNaming`] so the API surface need not depend on its internals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TableNamingView {
+    /// Use the leaf component of the group's base prefix (`argo/floats` -> `floats`).
+    #[default]
+    LeafPrefix,
+    /// Prefix the leaf with the crawler name (`<crawler>_<leaf>`).
+    CrawlerPrefixed,
+}
+
+impl From<TableNaming> for TableNamingView {
+    fn from(value: TableNaming) -> Self {
+        match value {
+            TableNaming::LeafPrefix => Self::LeafPrefix,
+            TableNaming::CrawlerPrefixed => Self::CrawlerPrefixed,
+        }
+    }
+}
+
+impl From<TableNamingView> for TableNaming {
+    fn from(value: TableNamingView) -> Self {
+        match value {
+            TableNamingView::LeafPrefix => Self::LeafPrefix,
+            TableNamingView::CrawlerPrefixed => Self::CrawlerPrefixed,
+        }
+    }
+}
+
+/// Request body to define (or replace) a crawler. Mirrors the SQL `CREATE CRAWLER`
+/// surface as structured JSON; maps into a data-lake [`CrawlerDefinition`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+#[schema(example = json!({
+    "name": "argo",
+    "target_prefix": "argo/",
+    "format_filter": ["parquet", "nc"],
+    "table_naming": "crawler_prefixed",
+    "detect_partitions": true,
+    "schedule_secs": 900,
+    "event_driven": false,
+    "options": { "read_dimensions": "lat,lon" }
+}))]
+pub struct CreateCrawlerRequest {
+    /// Unique crawler name.
+    #[schema(example = "argo")]
+    pub name: String,
+    /// Datasets-store prefix to scan, e.g. `argo/`.
+    #[schema(example = "argo/")]
+    pub target_prefix: String,
+    /// Restrict discovery to these format identifiers (e.g. `["parquet", "nc"]`).
+    /// Omit (or `null`) to crawl every registered format.
+    #[serde(default)]
+    #[schema(example = json!(["parquet", "nc"]))]
+    pub format_filter: Option<Vec<String>>,
+    /// How discovered groups are named.
+    #[serde(default)]
+    pub table_naming: TableNamingView,
+    /// Detect Hive-style `key=value/` partitions (default `true`).
+    #[serde(default = "default_true")]
+    #[schema(default = true, example = true)]
+    pub detect_partitions: bool,
+    /// Periodic crawl interval, in seconds. Omit for no timer.
+    #[serde(default)]
+    #[schema(example = 900)]
+    pub schedule_secs: Option<u64>,
+    /// Subscribe to datasets-store events under `target_prefix` for incremental crawls.
+    #[serde(default)]
+    #[schema(default = false, example = false)]
+    pub event_driven: bool,
+    /// Extra format options forwarded into every discovered table's `OPTIONS`.
+    #[serde(default)]
+    #[schema(example = json!({ "read_dimensions": "lat,lon" }))]
+    pub options: HashMap<String, String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl From<CreateCrawlerRequest> for CrawlerDefinition {
+    fn from(value: CreateCrawlerRequest) -> Self {
+        CrawlerDefinition {
+            name: value.name,
+            target_prefix: value.target_prefix,
+            format_filter: value.format_filter,
+            table_naming: value.table_naming.into(),
+            detect_partitions: value.detect_partitions,
+            schedule_secs: value.schedule_secs,
+            event_driven: value.event_driven,
+            options: value.options,
+        }
+    }
+}
+
+/// A crawler definition as returned to API clients. Mirrors [`CrawlerDefinition`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct CrawlerView {
+    pub name: String,
+    pub target_prefix: String,
+    pub format_filter: Option<Vec<String>>,
+    pub table_naming: TableNamingView,
+    pub detect_partitions: bool,
+    pub schedule_secs: Option<u64>,
+    pub event_driven: bool,
+    pub options: HashMap<String, String>,
+}
+
+impl From<CrawlerDefinition> for CrawlerView {
+    fn from(value: CrawlerDefinition) -> Self {
+        Self {
+            name: value.name,
+            target_prefix: value.target_prefix,
+            format_filter: value.format_filter,
+            table_naming: value.table_naming.into(),
+            detect_partitions: value.detect_partitions,
+            schedule_secs: value.schedule_secs,
+            event_driven: value.event_driven,
+            options: value.options,
+        }
+    }
+}
+
+/// The outcome of a single crawler run. Mirrors the data-lake [`CrawlReport`].
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct CrawlReportView {
+    /// Crawler name.
+    pub crawler: String,
+    /// Candidate tables discovered.
+    pub discovered: usize,
+    /// Newly registered tables.
+    pub created: Vec<String>,
+    /// Existing crawler-owned tables that were refreshed.
+    pub updated: Vec<String>,
+    /// Tables left untouched because they are not owned by this crawler.
+    pub skipped: Vec<String>,
+    /// Per-table failures as `[name, error message]` pairs.
+    pub failed: Vec<(String, String)>,
+    /// Files that did not match any crawlable format.
+    pub skipped_files: usize,
+}
+
+impl From<CrawlReport> for CrawlReportView {
+    fn from(value: CrawlReport) -> Self {
+        Self {
+            crawler: value.crawler,
+            discovered: value.discovered,
+            created: value.created,
+            updated: value.updated,
+            skipped: value.skipped,
+            failed: value.failed,
+            skipped_files: value.skipped_files,
+        }
+    }
+}
+
+/// Request body to create an external table from structured fields. The runtime
+/// assembles the equivalent `CREATE EXTERNAL TABLE` statement and runs it through
+/// the same DDL path as SQL.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+#[schema(example = json!({
+    "name": "observations",
+    "location": "obs/",
+    "file_type": "PARQUET",
+    "partition_cols": ["year", "month"],
+    "options": {},
+    "if_not_exists": false
+}))]
+pub struct CreateExternalTableRequest {
+    /// Logical table name.
+    #[schema(example = "observations")]
+    pub name: String,
+    /// Datasets-store-relative location or glob (e.g. `obs/` or `data/**/*.parquet`),
+    /// or a scheme-qualified location for `REMOTE`/`DELTA` types.
+    #[schema(example = "obs/")]
+    pub location: String,
+    /// Storage type, e.g. `PARQUET`, `CSV`, `DELTA`, `REMOTE`.
+    #[schema(example = "PARQUET")]
+    pub file_type: String,
+    /// Hive-style partition columns, in path order.
+    #[serde(default)]
+    #[schema(example = json!(["year", "month"]))]
+    pub partition_cols: Vec<String>,
+    /// Format-specific options forwarded to the table's `OPTIONS`.
+    #[serde(default)]
+    pub options: HashMap<String, String>,
+    /// Skip creation (instead of erroring) when the table already exists.
+    #[serde(default)]
+    #[schema(default = false, example = false)]
+    pub if_not_exists: bool,
+}
+
+#[cfg(test)]
+mod table_config_redaction_tests {
+    use super::*;
+    use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
+
+    /// The public table-config view must never expose a persisted credential,
+    /// even in its encrypted form — the `secret` field is replaced with `***`.
+    #[test]
+    fn sql_database_secret_is_redacted_in_config_view() {
+        let mut options = BTreeMap::new();
+        options.insert("host".to_string(), "db.internal".to_string());
+        let definition: Arc<dyn TableDefinition> = Arc::new(SqlDatabaseTableDefinition {
+            name: "orders".to_string(),
+            engine: SqlEngine::Postgres,
+            remote_table: "public.orders".to_string(),
+            schema: beacon_sql_databases::unresolved_schema(),
+            options,
+            secret: Some(EncryptedSecret::encrypt("super-secret-password", &[9u8; 32]).unwrap()),
+        });
+
+        let view = TableConfigView::try_from(definition).unwrap();
+        let json = serde_json::to_string(&view).unwrap();
+
+        assert!(!json.contains("super-secret-password"));
+        // The encrypted material (ciphertext/nonce) must not leak either.
+        assert!(!json.contains("ciphertext"));
+        assert_eq!(view.config.get("secret"), Some(&Value::String("***".to_string())));
+        // Non-secret connection options remain visible.
+        assert!(json.contains("db.internal"));
     }
 }

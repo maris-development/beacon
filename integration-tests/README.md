@@ -57,7 +57,8 @@ pytest -v
 | ---- | ------ |
 | `test_health.py` | `/api/health`, `/swagger`, `beacon_version()`, `/api/datasets`, `list_datasets()` |
 | `test_queries_parquet.py` | `read_parquet()` counts/aggregates over a multi-file glob; equivalent JSON DSL; malformed-query 400 |
-| `test_external_tables.py` | `CREATE EXTERNAL TABLE` (admin); `SHOW TABLES` / `/api/tables`; no-auth → 400, bad-auth → 401 |
+| `test_external_tables.py` | `CREATE EXTERNAL TABLE` (admin SQL + `POST /api/admin/external-tables`); `SHOW TABLES` / `/api/tables`; no-auth → 400/401, bad-auth → 401 |
+| `test_admin_crawlers.py` | admin crawler CRUD + run (`/api/admin/crawlers*`): create/list/get/run/drop, 404 for unknown, 401 without auth |
 | `test_managed_tables.py` | managed-table `CREATE`/`INSERT`/`SELECT`/`UPDATE`/`DELETE`/`DROP`; writes need admin |
 
 ## How it works

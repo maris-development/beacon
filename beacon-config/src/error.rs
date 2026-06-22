@@ -25,6 +25,10 @@ pub enum ConfigError {
     #[error("invalid storage configuration: {0}")]
     InvalidStorage(String),
 
+    /// `BEACON_SECRETS_KEY` was set but is not a base64-encoded 32-byte key.
+    #[error("invalid BEACON_SECRETS_KEY: {0}")]
+    InvalidSecretsKey(String),
+
     /// A required data directory could not be created.
     #[error("failed to create directory {}: {source}", .path.display())]
     CreateDir {
