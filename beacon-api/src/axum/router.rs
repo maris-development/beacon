@@ -112,9 +112,11 @@ pub(crate) fn setup_router(
 /// `/admin`, or `None` when no build is present at `dir`.
 ///
 /// The whole router is later nested under `base_path`, so the SPA is reachable at
-/// `{base_path}/admin`. Requests for missing files fall back to `index.html` so
-/// deep client-side routes (e.g. `/admin/tables`) resolve on a hard reload, while
-/// genuinely missing assets still return the SPA shell rather than a 404 page.
+/// `{base_path}/admin`. Missing files fall back to `index.html` with a `200` (via
+/// `fallback`, not `not_found_service`, which would preserve the `404`) so deep
+/// client-side routes (e.g. `/admin/tables`) resolve on a hard reload. A genuinely
+/// missing asset thus also yields the SPA shell, which the build's hashed asset
+/// names make a non-issue in practice.
 ///
 /// Presence is detected by `index.html` rather than the directory itself so a
 /// stray empty `web/` directory does not advertise a broken UI.
@@ -126,7 +128,7 @@ fn web_ui_router(dir: &str) -> Option<Router<Arc<Runtime>>> {
     }
 
     tracing::info!("serving admin web UI from {} at /admin", dir.display());
-    let serve = ServeDir::new(dir).not_found_service(ServeFile::new(index));
+    let serve = ServeDir::new(dir).fallback(ServeFile::new(index));
     Some(Router::new().nest_service("/admin", serve))
 }
 
