@@ -3,13 +3,13 @@
 
 use std::sync::Arc;
 
-use beacon_core::api::QueryRequest;
+use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
 use futures::TryStreamExt;
 
 async fn run_sql(runtime: &Runtime, sql: &str) {
     runtime
-        .run_query(beacon_core::query::Query::sql(sql.to_string()), true)
+        .run_query(Query::sql(sql.to_string()), true)
         .await
         .expect("sql should run")
         .into_record_stream()
@@ -19,11 +19,8 @@ async fn run_sql(runtime: &Runtime, sql: &str) {
         .expect("sql should drain");
 }
 
-fn sql_request(sql: &str) -> QueryRequest {
-    // `QueryRequest` is `#[serde(flatten)]`, so the body is the query object
-    // itself (`{"sql": "..."}`), not nested under a `query` field.
-    serde_json::from_value(serde_json::json!({ "sql": sql }))
-        .expect("query request should deserialize")
+fn sql_query(sql: &str) -> Query {
+    Query::sql(sql.to_string())
 }
 
 /// `explain_analyze_client_query` returns the pgjson "Plan with Metrics" shape:
@@ -41,7 +38,7 @@ async fn explain_analyze_returns_pg_json_with_metrics() {
     run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2), (3)")).await;
 
     let json_str = runtime
-        .explain_analyze_client_query(sql_request(&format!("SELECT a FROM {table}")), false)
+        .explain_analyze_client_query(sql_query(&format!("SELECT a FROM {table}")), false)
         .await
         .expect("explain analyze should succeed");
 
@@ -97,7 +94,7 @@ async fn explain_analyze_gates_ddl_by_privilege() {
     // which rejects it before any execution with a "DDL not supported" error.
     let err = runtime
         .explain_analyze_client_query(
-            sql_request(&format!("CREATE TABLE {table} (a BIGINT)")),
+            sql_query(&format!("CREATE TABLE {table} (a BIGINT)")),
             false,
         )
         .await
@@ -111,7 +108,7 @@ async fn explain_analyze_gates_ddl_by_privilege() {
     // Super-user: the same DDL passes the gate and is analyzed (and executed).
     runtime
         .explain_analyze_client_query(
-            sql_request(&format!("CREATE TABLE {table} (a BIGINT)")),
+            sql_query(&format!("CREATE TABLE {table} (a BIGINT)")),
             true,
         )
         .await

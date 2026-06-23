@@ -369,13 +369,30 @@ pub(crate) async fn explain_analyze_query(
     headers: HeaderMap,
     Json(query_obj): Json<QueryRequest>,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
-    // EXPLAIN ANALYZE executes the query, so it resolves admin vs anonymous the
-    // same way `/api/query` does: anonymous is read-only, valid admin basic auth
-    // elevates to super-user (allowing DDL/DML, with the same side effects).
+    let query = query_obj.into_query().map_err(|err| {
+        tracing::error!("Error parsing beacon query: {}", err);
+        (StatusCode::BAD_REQUEST, Json(err.to_string()))
+    })?;
+
+    // EXPLAIN ANALYZE executes the query, so it is gated by `sql.enable` exactly
+    // like `/api/query` (JSON is always allowed). Without this, SQL could be run
+    // through this endpoint while SQL is disabled, bypassing the restriction.
+    if matches!(query.inner, beacon_core::query::InnerQuery::Sql(_))
+        && !state.config().sql.enable
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json("SQL queries are not enabled".to_string()),
+        ));
+    }
+
+    // It also resolves admin vs anonymous the same way `/api/query` does:
+    // anonymous is read-only, valid admin basic auth elevates to super-user
+    // (allowing DDL/DML, with the same side effects).
     let is_super_user = resolve_super_user(&headers, &state.config().admin)
         .map_err(|status| (status, Json("invalid admin credentials".to_string())))?;
     let result = state
-        .explain_analyze_client_query(query_obj, is_super_user)
+        .explain_analyze_client_query(query, is_super_user)
         .await;
     match result {
         Ok(explanation) => Ok((

@@ -404,10 +404,12 @@ impl Runtime {
     /// runs the plan, has the same side effects as `/api/query`.
     pub async fn explain_analyze_client_query(
         &self,
-        query: QueryRequest,
+        query: crate::query::Query,
         is_super_user: bool,
     ) -> anyhow::Result<String> {
-        let plan = self.lower_query(query.into_query()?.inner).await?;
+        // `output` (file format) is meaningless for EXPLAIN ANALYZE — only the
+        // query body is planned and executed for its metrics.
+        let plan = self.lower_query(query.inner).await?;
         crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
 
         // Build the physical plan and keep the `Arc` so its metrics can be read
