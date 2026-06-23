@@ -7,7 +7,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { HeroBackdrop } from "@/components/hero-backdrop";
 import { useBeaconSession } from "@/lib/beacon-context";
-import { DEFAULT_URL, makeClient, verifyAdmin, type Connection } from "@/lib/auth";
+import {
+  DEFAULT_URL,
+  SAME_ORIGIN,
+  defaultServerUrl,
+  makeClient,
+  verifyAdmin,
+  type Connection,
+} from "@/lib/auth";
 import { errorMessage } from "@/lib/errors";
 
 export function LoginPage() {
@@ -16,7 +23,7 @@ export function LoginPage() {
   const location = useLocation();
   const from = (location.state as { from?: string } | null)?.from ?? "/query";
 
-  const [url, setUrl] = React.useState(DEFAULT_URL);
+  const [url, setUrl] = React.useState(defaultServerUrl);
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -58,18 +65,20 @@ export function LoginPage() {
           className="beacon-rise space-y-4 rounded-lg border border-white/10 bg-card/95 p-6 shadow-2xl backdrop-blur"
           style={{ animationDelay: "0.1s" }}
         >
-          <div className="space-y-1.5">
-            <Label htmlFor="url">Server URL</Label>
-            <Input
-              id="url"
-              type="url"
-              required
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder={DEFAULT_URL}
-              autoComplete="url"
-            />
-          </div>
+          {!SAME_ORIGIN && (
+            <div className="space-y-1.5">
+              <Label htmlFor="url">Server URL</Label>
+              <Input
+                id="url"
+                type="url"
+                required
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder={DEFAULT_URL}
+                autoComplete="url"
+              />
+            </div>
+          )}
           <div className="space-y-1.5">
             <Label htmlFor="username">Username</Label>
             <Input

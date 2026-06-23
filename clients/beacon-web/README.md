@@ -60,3 +60,20 @@ npm run preview    # preview the production build
 
 Open the dev URL, sign in with the server URL (default `http://localhost:5001`) and your admin
 credentials, and you're in.
+
+## Bundled with the Beacon server (Docker)
+
+The production build is shipped inside the Beacon Docker image and served by `beacon-api`
+itself, so no separate web host is needed. The Dockerfile builds the SDK and this app in a
+Node stage and copies `dist/` into `/beacon/web`; `beacon-api` mounts it at **`/admin`** and
+redirects `/` there. Just run the image and open `http://localhost:5001/admin`:
+
+```bash
+docker run -p 5001:5001 beacon
+```
+
+When served this way the UI talks to its own origin automatically — the login screen only asks
+for admin username/password (no server URL). The directory is configurable via
+`BEACON_WEB_UI_DIR` (default `web`, relative to the working directory); if it is absent — as in a
+bare `cargo run` — the `/admin` route is simply not mounted and `/` keeps redirecting to the API
+docs.

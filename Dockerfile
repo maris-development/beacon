@@ -52,9 +52,22 @@ COPY rust-toolchain /
 #Build the project
 RUN cargo build --release
 
+# Build the admin web UI (Vite SPA) from the JS client workspace. The SDK
+# (@beacon/client) must be built before the web app, which imports from its dist.
+FROM node:20-slim AS webui
+WORKDIR /clients
+COPY clients/package.json clients/package-lock.json ./
+COPY clients/beacon-ts/ ./beacon-ts/
+COPY clients/beacon-web/ ./beacon-web/
+RUN npm ci
+RUN npm run build --workspace beacon-ts
+RUN npm run build --workspace beacon-web
+
 FROM ubuntu:latest AS node
 WORKDIR /beacon
 COPY --from=builder /target/release/beacon-api /beacon/
+# Bundle the built admin UI; beacon-api serves it at /admin (BEACON_WEB_UI_DIR=web).
+COPY --from=webui /clients/beacon-web/dist /beacon/web
 
 #Install Dependencies
 RUN apt-get update

@@ -49,6 +49,9 @@ pub struct ServerConfig {
     pub worker_threads: usize,
     /// URL prefix for all HTTP routes, e.g. `/base-path`. Empty string means serve at `/`.
     pub base_path: String,
+    /// Directory holding the built admin web UI (Vite `dist/`). Served at
+    /// `{base_path}/admin` when the directory exists; skipped otherwise.
+    pub web_ui_dir: String,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +215,10 @@ struct RawConfig {
     worker_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
     base_path: String,
+    /// Directory containing the built admin web UI. Defaults to `web` (resolved
+    /// relative to the working directory; `/beacon/web` in the Docker image).
+    #[envconfig(from = "BEACON_WEB_UI_DIR", default = "web")]
+    web_ui_dir: String,
 
     #[envconfig(from = "BEACON_S3_BUCKET")]
     s3_bucket: Option<String>,
@@ -331,6 +338,7 @@ impl From<RawConfig> for Config {
                 log_level: raw.log_level,
                 worker_threads: raw.worker_threads,
                 base_path: raw.base_path,
+                web_ui_dir: raw.web_ui_dir,
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,

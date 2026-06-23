@@ -13,6 +13,30 @@ export interface Connection {
 
 export const DEFAULT_URL = "http://localhost:5001";
 
+/**
+ * Whether the UI is served by the Beacon server itself (production build) rather
+ * than the standalone Vite dev server. When true, the UI talks to its own origin
+ * and the login screen does not ask for a server URL.
+ */
+export const SAME_ORIGIN = import.meta.env.PROD;
+
+/**
+ * The API base URL when the UI is served by Beacon: the current origin plus any
+ * deployment base path (the path segment preceding `/admin`). The SDK appends
+ * `/api/...` to this, so an empty base path yields just the origin.
+ */
+export function sameOriginUrl(): string {
+  const { origin, pathname } = window.location;
+  const idx = pathname.indexOf("/admin");
+  const prefix = idx >= 0 ? pathname.slice(0, idx) : "";
+  return origin + prefix;
+}
+
+/** The server URL to connect to: the serving origin in production, else the dev default. */
+export function defaultServerUrl(): string {
+  return SAME_ORIGIN ? sameOriginUrl() : DEFAULT_URL;
+}
+
 /** Loads the persisted connection from localStorage, if any. */
 export function loadConnection(): Connection | null {
   try {
