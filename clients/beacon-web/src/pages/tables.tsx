@@ -255,8 +255,12 @@ function TablePreview({ name }: { name: string }) {
   const beacon = useBeacon();
   const query = useQuery({
     queryKey: ["table-preview", name],
-    queryFn: async () =>
-      (await beacon.query(`SELECT * FROM ${quoteIdent(name)} LIMIT ${PREVIEW_ROWS}`)).rows,
+    queryFn: async () => {
+      const { rows, table } = await beacon.query(
+        `SELECT * FROM ${quoteIdent(name)} LIMIT ${PREVIEW_ROWS}`,
+      );
+      return { rows, table };
+    },
   });
 
   if (query.isLoading)
@@ -272,11 +276,11 @@ function TablePreview({ name }: { name: string }) {
       </div>
     );
 
-  const rows = query.data ?? [];
+  const rows = query.data?.rows ?? [];
   return (
     <div className="space-y-2">
       <div className="max-h-[60vh] overflow-auto rounded-md border">
-        <ResultsGrid rows={rows} />
+        <ResultsGrid rows={rows} table={query.data?.table} />
       </div>
       {rows.length > 0 && (
         <p className="text-xs text-muted-foreground">First {rows.length} rows.</p>

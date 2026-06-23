@@ -24,6 +24,40 @@ export function formatCell(value: unknown): string {
   return String(value);
 }
 
+/**
+ * Maps each Arrow `Timestamp` column to its unit (SECOND/MILLISECOND/…), read
+ * from the decoded table's schema. apache-arrow returns timestamp values as raw
+ * numbers, so we need the type to render them as dates. Defensive: returns an
+ * empty map if the table or its schema is unavailable.
+ */
+export function timestampColumns(table: unknown): Map<string, string> {
+  const map = new Map<string, string>();
+  const fields = (table as { schema?: { fields?: unknown[] } } | undefined)?.schema?.fields;
+  if (!Array.isArray(fields)) return map;
+  for (const f of fields) {
+    const field = f as { name?: unknown; type?: unknown };
+    const match = /^Timestamp<(\w+)>/.exec(String(field.type ?? ""));
+    if (match && typeof field.name === "string") map.set(field.name, match[1]);
+  }
+  return map;
+}
+
+const TS_UNIT_TO_MS: Record<string, number> = {
+  SECOND: 1000,
+  MILLISECOND: 1,
+  MICROSECOND: 1 / 1000,
+  NANOSECOND: 1 / 1_000_000,
+};
+
+/** Formats a raw Arrow timestamp value (in `unit`) as an ISO-8601 UTC string. */
+export function formatTimestamp(value: unknown, unit: string): string {
+  if (value === null || value === undefined) return "";
+  const raw = typeof value === "bigint" ? Number(value) : Number(value);
+  if (!Number.isFinite(raw)) return formatCell(value);
+  const date = new Date(raw * (TS_UNIT_TO_MS[unit] ?? 1));
+  return Number.isNaN(date.getTime()) ? formatCell(value) : date.toISOString();
+}
+
 /** Compact byte-size label, e.g. 1536 -> "1.5 KB". */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes)) return "—";

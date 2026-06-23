@@ -6,6 +6,7 @@ import {
   Bookmark,
   Download,
   FolderOpen,
+  Gauge,
   Loader2,
   Network,
   Play,
@@ -58,10 +59,12 @@ export function WorkbenchPage() {
   const [sql, setSql] = React.useState(STARTER_SQL);
   const [running, setRunning] = React.useState(false);
   const [explaining, setExplaining] = React.useState(false);
+  const [analyzing, setAnalyzing] = React.useState(false);
   const [downloading, setDownloading] = React.useState(false);
   const [mode, setMode] = React.useState<ViewMode>("results");
   const [result, setResult] = React.useState<RunResult | null>(null);
   const [plan, setPlan] = React.useState<unknown>(null);
+  const [analyzed, setAnalyzed] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
   const [saveOpen, setSaveOpen] = React.useState(false);
@@ -91,6 +94,7 @@ export function WorkbenchPage() {
     setExplaining(true);
     setError(null);
     setMode("explain");
+    setAnalyzed(false);
     try {
       setPlan(await beacon.explainQuery(text));
     } catch (err) {
@@ -98,6 +102,23 @@ export function WorkbenchPage() {
       setError(errorMessage(err));
     } finally {
       setExplaining(false);
+    }
+  }
+
+  async function analyze() {
+    const text = sql.trim();
+    if (!text || analyzing) return;
+    setAnalyzing(true);
+    setError(null);
+    setMode("explain");
+    setAnalyzed(true);
+    try {
+      setPlan(await beacon.explainAnalyzeQuery(text));
+    } catch (err) {
+      setPlan(null);
+      setError(errorMessage(err));
+    } finally {
+      setAnalyzing(false);
     }
   }
 
@@ -159,6 +180,17 @@ export function WorkbenchPage() {
             )}
             Explain
           </Button>
+          <Button
+            onClick={analyze}
+            disabled={analyzing}
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            title="Run the query and show its plan with execution metrics"
+          >
+            {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gauge className="h-4 w-4" />}
+            Analyze
+          </Button>
           <span className="text-xs text-muted-foreground">⌘/Ctrl + Enter</span>
 
           <div className="ml-auto flex items-center gap-2">
@@ -214,7 +246,9 @@ export function WorkbenchPage() {
             </>
           )}
           {mode === "explain" && plan != null && (
-            <span className="text-muted-foreground">logical plan</span>
+            <span className="text-muted-foreground">
+              {analyzed ? "physical plan · execution metrics" : "logical plan"}
+            </span>
           )}
         </div>
 
@@ -234,7 +268,7 @@ export function WorkbenchPage() {
               <Empty>Run Explain to see the query plan.</Empty>
             )
           ) : result ? (
-            <ResultsGrid rows={result.rows} />
+            <ResultsGrid rows={result.rows} table={result.table} />
           ) : (
             <Empty>Run a query to see results.</Empty>
           )}

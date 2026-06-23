@@ -191,13 +191,13 @@ function DatasetPreview({ path, format }: { path: string; format?: string }) {
     queryKey: ["dataset-preview", path],
     queryFn: async () => {
       const cols = parseSchema(await beacon.datasetSchema(path)).map((c) => c.name);
-      if (cols.length === 0) return { rows: [] as Record<string, unknown>[] };
-      const { rows } = await beacon.query({
+      if (cols.length === 0) return { rows: [] as Record<string, unknown>[], table: undefined };
+      const { rows, table } = await beacon.query({
         select: cols.map((name) => ({ column: name })),
         from: { [fromKey(format)]: { paths: [path] } },
         limit: PREVIEW_ROWS,
       });
-      return { rows };
+      return { rows, table };
     },
   });
 
@@ -218,7 +218,7 @@ function DatasetPreview({ path, format }: { path: string; format?: string }) {
   return (
     <div className="space-y-2">
       <div className="max-h-[60vh] overflow-auto rounded-md border">
-        <ResultsGrid rows={rows} />
+        <ResultsGrid rows={rows} table={query.data?.table} />
       </div>
       {rows.length > 0 && (
         <p className="text-xs text-muted-foreground">First {rows.length} rows.</p>

@@ -1,16 +1,19 @@
 import { useMemo } from "react";
-import type { Row } from "@beacon/client";
+import type { ArrowTable, Row } from "@beacon/client";
 
-import { columnsOf, formatCell } from "@/lib/format";
+import { columnsOf, formatCell, formatTimestamp, timestampColumns } from "@/lib/format";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 interface ResultsGridProps {
   rows: Row[];
+  /** Decoded Arrow table, used to render timestamp columns as date strings. */
+  table?: ArrowTable;
 }
 
 /** A scrollable, monospaced grid over decoded query rows. */
-export function ResultsGrid({ rows }: ResultsGridProps) {
+export function ResultsGrid({ rows, table }: ResultsGridProps) {
   const columns = useMemo(() => columnsOf(rows), [rows]);
+  const tsColumns = useMemo(() => timestampColumns(table), [table]);
 
   if (rows.length === 0) {
     return (
@@ -39,7 +42,9 @@ export function ResultsGrid({ rows }: ResultsGridProps) {
           <TableRow key={i}>
             <TableCell className="text-right text-muted-foreground">{i + 1}</TableCell>
             {columns.map((col) => {
-              const text = formatCell(row[col]);
+              const tsUnit = tsColumns.get(col);
+              const text =
+                tsUnit !== undefined ? formatTimestamp(row[col], tsUnit) : formatCell(row[col]);
               return (
                 <TableCell
                   key={col}

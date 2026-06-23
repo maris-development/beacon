@@ -163,6 +163,17 @@ export class BeaconClient {
     return this.http.fetchJson<T>("POST", "/api/explain-query", { json: buildBody(query) });
   }
 
+  /**
+   * Runs a query and returns its physical plan annotated with execution metrics
+   * (`EXPLAIN ANALYZE`), as a PostgreSQL-style JSON plan. Unlike `explainQuery`,
+   * this executes the query to collect actual row counts and timings.
+   */
+  explainAnalyzeQuery<T = unknown>(query: QueryInput): Promise<T> {
+    return this.http.fetchJson<T>("POST", "/api/explain-analyze-query", {
+      json: buildBody(query),
+    });
+  }
+
   /** Fetches recorded metrics for a previously executed query by its id. */
   queryMetrics(queryId: string): Promise<QueryMetricsView> {
     return this.http.fetchJson<QueryMetricsView>(

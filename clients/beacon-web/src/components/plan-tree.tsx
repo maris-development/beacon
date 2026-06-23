@@ -54,10 +54,15 @@ function PlanNode({
   const children = Array.isArray(node.Plans) ? (node.Plans as RawNode[]) : [];
   const nodeType = typeof node["Node Type"] === "string" ? (node["Node Type"] as string) : "Node";
 
-  // Detail fields = everything except the node type and the child list.
-  const details = Object.entries(node).filter(
-    ([k]) => k !== "Node Type" && k !== "Plans",
-  );
+  // EXPLAIN ANALYZE metrics, surfaced as always-visible badges on the node.
+  const actualRows = node["Actual Rows"];
+  const actualTime = node["Actual Total Time"]; // operator compute time (ms)
+  const wallMs = wallTimeMs(node.Extras); // wall time from start/end timestamps
+  const metricKeys = new Set(["Node Type", "Plans", "Actual Rows", "Actual Total Time"]);
+
+  // Detail fields = everything except the node type, child list, and the
+  // metrics already shown as badges.
+  const details = Object.entries(node).filter(([k]) => !metricKeys.has(k));
 
   return (
     <div className={cn(depth > 0 && "ml-3 border-l border-border pl-3")}>
@@ -77,6 +82,27 @@ function PlanNode({
           <span className="rounded bg-primary/10 px-1.5 py-0.5 font-semibold text-primary">
             {nodeType}
           </span>
+          {actualRows !== undefined && (
+            <span className="ml-1.5 rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
+              {formatValue(actualRows)} rows
+            </span>
+          )}
+          {actualTime !== undefined && (
+            <span
+              className="ml-1.5 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] font-medium text-accent"
+              title="Operator compute time (elapsed_compute)"
+            >
+              compute {formatTime(actualTime)}
+            </span>
+          )}
+          {wallMs !== undefined && (
+            <span
+              className="ml-1.5 rounded bg-sky-500/15 px-1.5 py-0.5 text-[11px] font-medium text-sky-600 dark:text-sky-400"
+              title="Wall-clock time (end − start timestamp)"
+            >
+              wall {formatTime(wallMs)}
+            </span>
+          )}
           {open && details.length > 0 && (
             <div className="mt-1 space-y-0.5">
               {details.map(([key, value]) => (
@@ -99,6 +125,35 @@ function PlanNode({
       )}
     </div>
   );
+}
+
+/**
+ * Wall-clock time (ms) of a node, derived from its `Extras` start/end epoch-ns
+ * timestamps. Returns undefined when the timestamps are absent or unusable.
+ */
+function wallTimeMs(extras: unknown): number | undefined {
+  if (!extras || typeof extras !== "object") return undefined;
+  const e = extras as Record<string, unknown>;
+  const start = Number(e.start_timestamp);
+  const end = Number(e.end_timestamp);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return undefined;
+  return (end - start) / 1_000_000;
+}
+
+/**
+ * Formats an "Actual Total Time" value (milliseconds) as a compact label,
+ * adapting the unit so sub-millisecond times don't collapse to "0.000 ms".
+ * Note this is the operator's compute time; scan operators report ~0 here and
+ * record their I/O cost under `Extras` (`time_elapsed_*`).
+ */
+function formatTime(value: unknown): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return `${formatValue(value)} ms`;
+  if (n === 0) return "0 ms";
+  if (n >= 1000) return `${(n / 1000).toFixed(2)} s`;
+  if (n >= 1) return `${n.toFixed(2)} ms`;
+  if (n >= 0.001) return `${(n * 1000).toFixed(1)} µs`;
+  return `${Math.round(n * 1_000_000)} ns`;
 }
 
 function formatValue(value: unknown): string {
