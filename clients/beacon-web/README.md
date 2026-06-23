@@ -72,7 +72,15 @@ redirects `/` there. Just run the image and open `http://localhost:5001/admin`:
 docker run -p 5001:5001 beacon
 ```
 
-When served this way the UI talks to its own origin automatically — the login screen only asks
+For local development there are `make` shortcuts at the repo root:
+
+```bash
+make run      # build the SPA, then serve API + UI on http://localhost:5001/admin
+make dev-api  # API only (terminal 1)  ┐ UI with hot-reload
+make dev-ui   # Vite dev server (terminal 2)  ┘ at http://localhost:5173
+```
+
+When served by the Beacon server the UI talks to its own origin automatically — the login screen only asks
 for admin username/password (no server URL). The directory is configurable via
 `BEACON_WEB_UI_DIR` (default `web`, relative to the working directory); if it is absent — as in a
 bare `cargo run` — the `/admin` route is simply not mounted and `/` keeps redirecting to the API
