@@ -1,6 +1,6 @@
 # Beacon Admin Web UI
 
-An Athena-style admin web interface for a Beacon instance, built with React, Vite, Tailwind
+An admin web interface for a Beacon instance, built with React, Vite, Tailwind
 CSS and shadcn/ui. It talks to Beacon exclusively through the [`@beacon/client`](../beacon-ts)
 TypeScript SDK.
 
