@@ -1128,6 +1128,33 @@ mod tests {
         temps.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(temps, vec![20.0f32, 21.0, 22.0], "only summer's temperatures remain");
     }
+
+    #[tokio::test]
+    async fn repartitioned_scan_preserves_all_rows() {
+        use datafusion::prelude::SessionConfig;
+
+        // With target_partitions > 1 the atlas store is repartitioned across
+        // partitions that work-steal datasets. The result must be identical to
+        // a single-partition scan — every dataset read exactly once, none lost
+        // or duplicated.
+        ensure_fixture().await;
+        let store = test_store().await;
+        let cfg = SessionConfig::new().with_target_partitions(4);
+        let ctx = SessionContext::new_with_config(cfg);
+        register_example(&ctx, store).await;
+
+        let rows: usize = ctx
+            .sql("SELECT temperature FROM atlas_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 7, "winter (4) + summer (3) temperature rows across partitions");
+    }
 }
 
 pub mod table_function;
