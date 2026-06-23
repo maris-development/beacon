@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, Search, Table2, Trash2 } from "lucide-react";
+import { AlertTriangle, Loader2, Plus, RefreshCw, Search, Table2, Trash2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useBeacon } from "@/lib/beacon-context";
@@ -9,9 +9,11 @@ import { errorMessage } from "@/lib/errors";
 import { PageContainer } from "@/components/app-shell";
 import { JsonView } from "@/components/json-view";
 import { ResultsGrid } from "@/components/results-grid";
+import { SqlEditor } from "@/components/sql-editor";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -22,6 +24,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 
 /** Friendly labels for Beacon's `definition_type` (typetag) values. */
@@ -63,7 +66,11 @@ export function TablesPage() {
   }, [selected, tablesQuery.data]);
 
   return (
-    <PageContainer title="Tables" description="Registered tables, their schemas, and configuration.">
+    <PageContainer
+      title="Tables"
+      description="Registered tables, their schemas, and configuration."
+      actions={<NewMaterializedViewDialog onCreated={(name) => setSelected(name)} />}
+    >
       <div className="flex h-full min-h-0 gap-4">
         <Card className="flex w-64 shrink-0 flex-col overflow-hidden">
           <div className="border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -134,6 +141,10 @@ function TableDetail({ name, onDeleted }: { name: string; onDeleted: () => void 
       )
     : columns;
 
+  const isMaterializedView =
+    (configQuery.data as Record<string, unknown> | undefined)?.definition_type ===
+    "materialized_view";
+
   return (
     <Card className="p-4">
       <div className="mb-3 flex items-center gap-2">
@@ -143,7 +154,10 @@ function TableDetail({ name, onDeleted }: { name: string; onDeleted: () => void 
         {tableKind(configQuery.data) && (
           <Badge variant="secondary">{tableKind(configQuery.data)}</Badge>
         )}
-        <DeleteTableDialog name={name} onDeleted={onDeleted} />
+        <div className="ml-auto flex items-center gap-2">
+          {isMaterializedView && <RefreshMvButton name={name} />}
+          <DeleteTableDialog name={name} onDeleted={onDeleted} />
+        </div>
       </div>
       <Tabs defaultValue="schema" key={name}>
         <TabsList>
@@ -249,6 +263,121 @@ function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
+/** Re-materializes a materialized view (`REFRESH <name>`). */
+function RefreshMvButton({ name }: { name: string }) {
+  const beacon = useBeacon();
+  const qc = useQueryClient();
+  const [error, setError] = React.useState<string | null>(null);
+
+  const refresh = useMutation({
+    mutationFn: () => beacon.query(`REFRESH ${quoteIdent(name)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["table-preview", name] });
+      qc.invalidateQueries({ queryKey: ["table-schema", name] });
+    },
+    onError: (e) => setError(errorMessage(e)),
+  });
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="gap-1.5"
+      disabled={refresh.isPending}
+      title={error ?? "Re-run the view's query and store the result"}
+      onClick={() => {
+        setError(null);
+        refresh.mutate();
+      }}
+    >
+      <RefreshCw className={cn("h-4 w-4", refresh.isPending && "animate-spin")} />
+      Refresh
+    </Button>
+  );
+}
+
+/** Dialog to create a materialized view from a SQL query. */
+function NewMaterializedViewDialog({ onCreated }: { onCreated: (name: string) => void }) {
+  const beacon = useBeacon();
+  const qc = useQueryClient();
+  const [open, setOpen] = React.useState(false);
+  const [name, setName] = React.useState("");
+  const [sql, setSql] = React.useState("SELECT 1 AS a");
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (open) {
+      setName("");
+      setSql("SELECT 1 AS a");
+      setError(null);
+    }
+  }, [open]);
+
+  const create = useMutation({
+    mutationFn: () =>
+      beacon.query(`CREATE MATERIALIZED VIEW ${quoteIdent(name.trim())} AS ${sql}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["tables"] });
+      onCreated(name.trim());
+      setOpen(false);
+    },
+    onError: (e) => setError(errorMessage(e)),
+  });
+
+  function submit() {
+    setError(null);
+    if (!name.trim()) return setError("Name is required.");
+    if (!sql.trim()) return setError("Query is required.");
+    create.mutate();
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm" className="gap-1.5">
+          <Plus className="h-4 w-4" /> New materialized view
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>New materialized view</DialogTitle>
+          <DialogDescription>
+            Runs the query now and stores the result as a queryable table. Refresh it later to
+            re-materialize.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="mv-name">Name</Label>
+            <Input
+              id="mv-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="my_view"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Query</Label>
+            <div className="h-48 overflow-hidden rounded-md border">
+              <SqlEditor value={sql} onChange={setSql} />
+            </div>
+          </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={create.isPending}>
+            {create.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+            Create
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 const PREVIEW_ROWS = 10;
 
 function TablePreview({ name }: { name: string }) {
@@ -316,7 +445,7 @@ function DeleteTableDialog({ name, onDeleted }: { name: string; onDeleted: () =>
       <Button
         variant="ghost"
         size="sm"
-        className="ml-auto text-destructive hover:bg-destructive/10 hover:text-destructive"
+        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
         onClick={() => setOpen(true)}
       >
         <Trash2 className="h-4 w-4" /> Delete
