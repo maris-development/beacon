@@ -1,7 +1,8 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Eye, FileStack, Loader2, Search, Table2 } from "lucide-react";
+import { ChevronRight, CornerLeftUp, Eye, FileStack, Folder, Loader2, Search, Table2 } from "lucide-react";
 
+import { cn } from "@/lib/utils";
 import { useBeacon } from "@/lib/beacon-context";
 import { COLUMN_PAGE_SIZE, parseSchema } from "@/lib/schema";
 import { errorMessage } from "@/lib/errors";
@@ -53,48 +54,117 @@ function normalize(raw: unknown): DatasetItem[] {
   });
 }
 
+interface FolderEntry {
+  name: string;
+  count: number;
+}
+
+/** Splits the datasets under `prefix` into immediate sub-folders and files. */
+function browse(items: DatasetItem[], prefix: string, filterText: string) {
+  const folderCounts = new Map<string, number>();
+  const files: DatasetItem[] = [];
+  for (const it of items) {
+    if (prefix && !it.path.startsWith(prefix)) continue;
+    const rest = it.path.slice(prefix.length);
+    if (!rest) continue;
+    const slash = rest.indexOf("/");
+    if (slash >= 0) {
+      const folder = rest.slice(0, slash);
+      folderCounts.set(folder, (folderCounts.get(folder) ?? 0) + 1);
+    } else {
+      files.push(it);
+    }
+  }
+  const f = filterText.trim().toLowerCase();
+  let folders: FolderEntry[] = [...folderCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  let fileList = files;
+  if (f) {
+    folders = folders.filter((x) => x.name.toLowerCase().includes(f));
+    fileList = files.filter((x) => baseName(x.path).toLowerCase().includes(f));
+  }
+  return { folders, files: fileList };
+}
+
+const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+
+/** The parent folder prefix of a folder prefix ("a/b/" -> "a/", "a/" -> ""). */
+function parentPrefix(p: string): string {
+  const trimmed = p.replace(/\/$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  return idx >= 0 ? trimmed.slice(0, idx + 1) : "";
+}
+
 export function DatasetsPage() {
   const beacon = useBeacon();
-  const [pattern, setPattern] = React.useState("");
-  const [applied, setApplied] = React.useState("");
+  const [path, setPath] = React.useState(""); // current folder prefix, "" = root, else ends with "/"
+  const [filter, setFilter] = React.useState("");
   const [dialog, setDialog] = React.useState<DialogTarget | null>(null);
 
   const totalQuery = useQuery({ queryKey: ["total-datasets"], queryFn: () => beacon.totalDatasets() });
   const datasetsQuery = useQuery({
-    queryKey: ["datasets", applied],
-    queryFn: async () => normalize(await beacon.datasets({ pattern: applied || undefined, limit: 200 })),
+    queryKey: ["datasets-all"],
+    queryFn: async () => normalize(await beacon.datasets({ limit: 100_000 })),
   });
+
+  const items = datasetsQuery.data ?? [];
+  const { folders, files } = React.useMemo(() => browse(items, path, filter), [items, path, filter]);
+  const crumbs = path ? path.replace(/\/$/, "").split("/") : [];
+
+  function enter(folder: string) {
+    setPath(path + folder + "/");
+    setFilter("");
+  }
+  function goTo(prefix: string) {
+    setPath(prefix);
+    setFilter("");
+  }
 
   return (
     <PageContainer
       title="Datasets"
-      description="Files discovered in the datasets store. Preview rows or inspect a file's schema."
+      description="Browse the datasets store. Preview rows or inspect a file's schema."
       actions={
         typeof totalQuery.data === "number" ? (
           <Badge variant="secondary">{totalQuery.data} total</Badge>
         ) : undefined
       }
     >
-      <form
-        className="mb-4 flex max-w-md items-center gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setApplied(pattern.trim());
-        }}
-      >
-        <div className="relative flex-1">
+      <div className="mb-3 flex items-center gap-3">
+        <nav className="flex flex-wrap items-center gap-1 text-sm">
+          <button
+            onClick={() => goTo("")}
+            className={cn("hover:text-primary", path === "" ? "font-medium" : "text-muted-foreground")}
+          >
+            datasets
+          </button>
+          {crumbs.map((c, i) => (
+            <span key={i} className="flex items-center gap-1">
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+              <button
+                onClick={() => goTo(crumbs.slice(0, i + 1).join("/") + "/")}
+                className={cn(
+                  "hover:text-primary",
+                  i === crumbs.length - 1 ? "font-medium" : "text-muted-foreground",
+                )}
+              >
+                {c}
+              </button>
+            </span>
+          ))}
+        </nav>
+        <div className="relative ml-auto w-64">
           <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            value={pattern}
-            onChange={(e) => setPattern(e.target.value)}
-            placeholder="Glob pattern, e.g. **/*.nc"
-            className="pl-8"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter this folder"
+            className="h-8 pl-8"
           />
         </div>
-        <Button type="submit" variant="outline">
-          Filter
-        </Button>
-      </form>
+      </div>
 
       <Card className="overflow-hidden">
         {datasetsQuery.isLoading && (
@@ -105,20 +175,47 @@ export function DatasetsPage() {
         {datasetsQuery.isError && (
           <div className="p-4 text-sm text-destructive">{errorMessage(datasetsQuery.error)}</div>
         )}
-        {datasetsQuery.data && datasetsQuery.data.length === 0 && (
-          <div className="p-4 text-sm text-muted-foreground">No datasets match.</div>
+        {datasetsQuery.data && folders.length === 0 && files.length === 0 && (
+          <div className="p-4 text-sm text-muted-foreground">
+            {filter ? "Nothing matches in this folder." : "This folder is empty."}
+          </div>
         )}
-        {datasetsQuery.data && datasetsQuery.data.length > 0 && (
+        {datasetsQuery.data && (folders.length > 0 || files.length > 0) && (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Path</TableHead>
+                <TableHead>Name</TableHead>
                 <TableHead className="w-28">Format</TableHead>
                 <TableHead className="w-56 text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {datasetsQuery.data.map((d) => (
+              {path !== "" && (
+                <TableRow className="cursor-pointer" onClick={() => goTo(parentPrefix(path))}>
+                  <TableCell className="font-mono text-xs">
+                    <span className="flex items-center gap-1.5 text-muted-foreground">
+                      <CornerLeftUp className="h-3.5 w-3.5 shrink-0" /> ..
+                    </span>
+                  </TableCell>
+                  <TableCell />
+                  <TableCell />
+                </TableRow>
+              )}
+              {folders.map((d) => (
+                <TableRow key={"dir:" + d.name} className="cursor-pointer" onClick={() => enter(d.name)}>
+                  <TableCell className="font-mono text-xs">
+                    <span className="flex items-center gap-1.5">
+                      <Folder className="h-3.5 w-3.5 shrink-0 text-primary" />
+                      {d.name}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {d.count} item{d.count === 1 ? "" : "s"}
+                  </TableCell>
+                  <TableCell />
+                </TableRow>
+              ))}
+              {files.map((d) => (
                 <TableRow key={d.path}>
                   <TableCell className="font-mono text-xs">
                     <button
@@ -127,7 +224,7 @@ export function DatasetsPage() {
                       title="Preview rows"
                     >
                       <FileStack className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      {d.path}
+                      {baseName(d.path)}
                     </button>
                   </TableCell>
                   <TableCell>
