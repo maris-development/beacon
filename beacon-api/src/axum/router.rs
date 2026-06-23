@@ -296,6 +296,20 @@ fn build_cors_layer(cors: &beacon_config::CorsConfig) -> anyhow::Result<CorsLaye
         .collect::<anyhow::Result<Vec<_>>>()?;
     layer = layer.allow_headers(headers);
 
+    let expose = cors
+        .expose_headers
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            HeaderName::from_str(s)
+                .with_context(|| format!("invalid CORS expose header in config: {s}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if !expose.is_empty() {
+        layer = layer.expose_headers(expose);
+    }
+
     if cors.allowed_credentials {
         layer = layer.allow_credentials(true);
     }

@@ -95,6 +95,10 @@ pub struct CorsConfig {
     pub allowed_methods: String,
     pub allowed_origins: String,
     pub allowed_headers: String,
+    /// Response headers exposed to browser JS on cross-origin requests. Defaults
+    /// to `x-beacon-query-id` so a cross-origin UI (e.g. the Vite dev server) can
+    /// read the query id the SDK surfaces; same-origin requests can already.
+    pub expose_headers: String,
     pub allowed_credentials: bool,
     pub max_age: u64,
 }
@@ -258,6 +262,11 @@ struct RawConfig {
         default = "Content-Type,Authorization"
     )]
     allowed_headers: String,
+    #[envconfig(
+        from = "BEACON_CORS_EXPOSE_HEADERS",
+        default = "x-beacon-query-id"
+    )]
+    expose_headers: String,
     #[envconfig(from = "BEACON_CORS_ALLOWED_CREDENTIALS", default = "false")]
     allowed_credentials: bool,
     #[envconfig(from = "BEACON_CORS_MAX_AGE", default = "3600")]
@@ -395,6 +404,7 @@ impl From<RawConfig> for Config {
                 allowed_methods: raw.allowed_methods,
                 allowed_origins: raw.allowed_origins,
                 allowed_headers: raw.allowed_headers,
+                expose_headers: raw.expose_headers,
                 allowed_credentials: raw.allowed_credentials,
                 max_age: raw.max_age,
             },
