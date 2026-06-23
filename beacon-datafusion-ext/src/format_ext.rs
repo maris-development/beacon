@@ -15,6 +15,16 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     fn list_with_file_extension(&self) -> bool {
         true
     }
+
+    /// The filename extensions this format recognizes (e.g. `["tiff", "tif"]`).
+    ///
+    /// DataFusion's session registry keys a format only under its canonical
+    /// [`GetExt::get_ext`], so resolving a format from a raw filename extension
+    /// must consult this list to honor aliases. Defaults to the canonical
+    /// extension; override when a format accepts more than one spelling.
+    fn file_extensions(&self) -> Vec<String> {
+        vec![self.get_ext()]
+    }
 }
 
 pub fn file_format_by_ext(ext: &str, session_ctx: &SessionContext) -> Option<Arc<dyn FileFormat>> {
