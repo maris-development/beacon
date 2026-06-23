@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronRight } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { formatBytes } from "@/lib/format";
 
 /**
  * Renders a DataFusion/Postgres-style EXPLAIN plan as a collapsible tree.
@@ -58,11 +59,25 @@ function PlanNode({
   const actualRows = node["Actual Rows"];
   const actualTime = node["Actual Total Time"]; // operator compute time (ms)
   const wallMs = wallTimeMs(node.Extras); // wall time from start/end timestamps
-  const metricKeys = new Set(["Node Type", "Plans", "Actual Rows", "Actual Total Time"]);
+  const metricKeys = new Set([
+    "Node Type",
+    "Plans",
+    "Actual Rows",
+    "Actual Total Time",
+    "Details",
+    "Extras",
+  ]);
 
-  // Detail fields = everything except the node type, child list, and the
-  // metrics already shown as badges.
-  const details = Object.entries(node).filter(([k]) => !metricKeys.has(k));
+  // The operator's descriptive string and its metrics bag get bespoke rendering;
+  // everything else (Sort Key, Expressions, Output, … from plain EXPLAIN) is a
+  // generic key/value line.
+  const detailsStr = typeof node.Details === "string" ? (node.Details as string) : null;
+  const extras =
+    node.Extras && typeof node.Extras === "object"
+      ? (node.Extras as Record<string, unknown>)
+      : null;
+  const otherFields = Object.entries(node).filter(([k]) => !metricKeys.has(k));
+  const hasBody = otherFields.length > 0 || detailsStr || extras;
 
   return (
     <div className={cn(depth > 0 && "ml-3 border-l border-border pl-3")}>
@@ -103,14 +118,24 @@ function PlanNode({
               wall {formatTime(wallMs)}
             </span>
           )}
-          {open && details.length > 0 && (
-            <div className="mt-1 space-y-0.5">
-              {details.map(([key, value]) => (
-                <div key={key} className="flex gap-1.5">
-                  <span className="shrink-0 text-muted-foreground">{key}:</span>
-                  <span className="break-all text-foreground">{formatValue(value)}</span>
+          {open && hasBody && (
+            <div className="mt-1 space-y-1.5">
+              {otherFields.length > 0 && (
+                <div className="space-y-0.5">
+                  {otherFields.map(([key, value]) => (
+                    <div key={key} className="flex gap-1.5">
+                      <span className="shrink-0 text-muted-foreground">{key}:</span>
+                      <span className="break-all text-foreground">{formatValue(value)}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
+              {detailsStr && (
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded bg-secondary/40 px-2 py-1 text-[11px] leading-relaxed text-muted-foreground">
+                  {detailsStr}
+                </pre>
+              )}
+              {extras && <PlanExtras extras={extras} />}
             </div>
           )}
         </div>
@@ -125,6 +150,55 @@ function PlanNode({
       )}
     </div>
   );
+}
+
+/** Renders a node's `Extras` metric bag as a compact definition grid. */
+function PlanExtras({ extras }: { extras: Record<string, unknown> }) {
+  // Drop the raw epoch timestamps (already surfaced as the wall-time badge) and
+  // split the rest so the many all-zero counters don't drown the signal.
+  const entries = Object.entries(extras).filter(([k]) => !k.endsWith("_timestamp"));
+  const shown = entries.filter(([, v]) => !(typeof v === "number" && v === 0));
+  const zeroCount = entries.length - shown.length;
+  if (shown.length === 0 && zeroCount === 0) return null;
+
+  return (
+    <div>
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Metrics
+      </div>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 sm:grid-cols-[auto_1fr_auto_1fr]">
+        {shown.map(([key, value]) => (
+          <React.Fragment key={key}>
+            <dt className="truncate text-muted-foreground" title={key}>
+              {humanizeKey(key)}
+            </dt>
+            <dd className="break-all font-medium text-foreground">{formatMetric(key, value)}</dd>
+          </React.Fragment>
+        ))}
+      </dl>
+      {zeroCount > 0 && (
+        <div className="mt-1 text-[10px] text-muted-foreground">
+          +{zeroCount} zero-valued metric{zeroCount === 1 ? "" : "s"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Turns a snake_case metric key into a readable label. */
+function humanizeKey(key: string): string {
+  const s = key.replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Formats a metric value using key-name heuristics (time in ns, byte sizes). */
+function formatMetric(key: string, value: unknown): string {
+  if (typeof value !== "number" && typeof value !== "bigint") return formatValue(value);
+  const n = Number(value);
+  if (!Number.isFinite(n)) return formatValue(value);
+  if (/bytes/.test(key)) return formatBytes(n);
+  if (/time/.test(key)) return formatTime(n / 1_000_000); // values are nanoseconds
+  return n.toLocaleString();
 }
 
 /**
