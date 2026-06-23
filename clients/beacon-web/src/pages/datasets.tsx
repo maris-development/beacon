@@ -368,7 +368,7 @@ function DatasetSchema({ file }: { file: string }) {
         />
       </div>
       <div className="max-h-[55vh] overflow-auto rounded-md border">
-        <Table>
+        <Table className="text-[13px] [&_td]:py-1 [&_th]:h-8">
           <TableHeader>
             <TableRow>
               <TableHead>Column</TableHead>

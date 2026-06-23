@@ -133,7 +133,7 @@ export function TablesPage() {
                 key={name}
                 onClick={() => setSelected(name)}
                 className={cn(
-                  "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm",
+                  "flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[13px]",
                   selected === name
                     ? "bg-secondary font-medium"
                     : "hover:bg-secondary/60 text-muted-foreground",
@@ -242,7 +242,7 @@ function TableDetail({ name, onDeleted }: { name: string; onDeleted: () => void 
                 />
               </div>
               <div className="overflow-auto rounded-md border">
-                <Table>
+                <Table className="text-[13px] [&_td]:py-1 [&_th]:h-8">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Column</TableHead>
