@@ -393,6 +393,37 @@ impl Runtime {
         Ok(json)
     }
 
+    /// Run the query and return its physical plan as pgjson annotated with
+    /// per-node runtime metrics (the `EXPLAIN ANALYZE` analog of
+    /// [`Self::explain_client_query`]).
+    ///
+    /// Unlike `explain_client_query`, this executes the plan to completion to
+    /// populate the metrics, so it applies the same permission gate the client
+    /// query path uses: anonymous callers are read-only, while a super-user
+    /// (valid admin basic auth) may also analyze DDL/DML — which, since this
+    /// runs the plan, has the same side effects as `/api/query`.
+    pub async fn explain_analyze_client_query(
+        &self,
+        query: QueryRequest,
+        is_super_user: bool,
+    ) -> anyhow::Result<String> {
+        let plan = self.lower_query(query.into_query()?.inner).await?;
+        crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
+
+        // Build the physical plan and keep the `Arc` so its metrics can be read
+        // after the stream drains. `execute_statement_plan` discards the plan,
+        // so the create/execute steps are inlined here.
+        let physical_plan = self.session_ctx.state().create_physical_plan(&plan).await?;
+        let mut stream = datafusion::physical_plan::execute_stream(
+            physical_plan.clone(),
+            self.session_ctx.task_ctx(),
+        )?;
+        // Drain to completion so each node's metrics are fully recorded.
+        while stream.try_next().await?.is_some() {}
+
+        Ok(crate::metrics::explain_analyze_pg_json(physical_plan.as_ref()).to_string())
+    }
+
     pub fn list_functions(&self) -> Vec<FunctionInfo> {
         self.list_runtime_functions()
             .into_iter()

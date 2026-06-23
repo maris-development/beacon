@@ -339,6 +339,60 @@ pub(crate) async fn explain_query(
     }
 }
 
+/// Runs the supplied query and returns its physical plan annotated with per-node
+/// runtime metrics as PostgreSQL-style JSON (pgjson) — the `EXPLAIN ANALYZE`
+/// analog of `/api/explain-query`. Unlike that endpoint, the query is executed.
+#[tracing::instrument(level = "info", skip(state, headers))]
+#[utoipa::path(
+    tag = "query",
+    post,
+    path = "/api/explain-analyze-query",
+    request_body = Query,
+    responses(
+        (
+            status = 200,
+            description = "pgjson explanation of the query's physical plan annotated \
+                with per-node runtime metrics (the query IS executed to collect them)",
+            content_type = "application/json"
+        ),
+        (status = 400, description = "Invalid or unsupported query"),
+        (status = 401, description = "Basic credentials were supplied but are invalid"),
+    ),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn explain_analyze_query(
+    State(state): State<Arc<Runtime>>,
+    headers: HeaderMap,
+    Json(query_obj): Json<QueryRequest>,
+) -> Result<Response<Body>, (StatusCode, Json<String>)> {
+    // EXPLAIN ANALYZE executes the query, so it resolves admin vs anonymous the
+    // same way `/api/query` does: anonymous is read-only, valid admin basic auth
+    // elevates to super-user (allowing DDL/DML, with the same side effects).
+    let is_super_user = resolve_super_user(&headers, &state.config().admin)
+        .map_err(|status| (status, Json("invalid admin credentials".to_string())))?;
+    let result = state
+        .explain_analyze_client_query(query_obj, is_super_user)
+        .await;
+    match result {
+        Ok(explanation) => Ok((
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CONTENT_DISPOSITION, "attachment"),
+            ],
+            Body::from(explanation),
+        )
+            .into_response()),
+        Err(err) => {
+            tracing::error!("Error explain-analyzing beacon query: {}", err);
+            Err((StatusCode::BAD_REQUEST, Json(err.to_string())))
+        }
+    }
+}
+
 /// Backward-compatible endpoint for clients that still request the default schema as column names.
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
