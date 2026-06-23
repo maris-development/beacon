@@ -1,5 +1,8 @@
 /** Defensive parsing of Beacon's table/dataset schema responses. */
 
+/** How many columns to render at once before a "show more" control. */
+export const COLUMN_PAGE_SIZE = 500;
+
 export interface SchemaColumn {
   name: string;
   dataType: string;

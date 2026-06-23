@@ -36,9 +36,9 @@
 
     --radius: 0.5rem;
 
-    /* Deep-navy brand top navigation bar (matches the login backdrop). */
-    --topbar: 226 45% 10%;
-    --topbar-foreground: 0 0% 100%;
+    /* Top navigation bar — light in light mode. */
+    --topbar: 0 0% 100%;
+    --topbar-foreground: 226 28% 20%;
   }
 
   .dark {

@@ -4,7 +4,7 @@ import { ChevronRight, Columns3, Loader2, RefreshCw, Search, Table2 } from "luci
 
 import { cn } from "@/lib/utils";
 import { useBeacon } from "@/lib/beacon-context";
-import { parseSchema } from "@/lib/schema";
+import { COLUMN_PAGE_SIZE, parseSchema } from "@/lib/schema";
 import { errorMessage } from "@/lib/errors";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -79,12 +79,16 @@ export function DataPanel({ onInsert }: DataPanelProps) {
 function TableNode({ name, onInsert }: { name: string; onInsert: (text: string) => void }) {
   const beacon = useBeacon();
   const [open, setOpen] = React.useState(false);
+  const [visible, setVisible] = React.useState(COLUMN_PAGE_SIZE);
 
   const schemaQuery = useQuery({
     queryKey: ["table-schema", name],
     queryFn: async () => parseSchema(await beacon.tableSchema(name)),
     enabled: open,
   });
+
+  const columns = schemaQuery.data ?? [];
+  const hidden = Math.max(0, columns.length - visible);
 
   return (
     <div>
@@ -118,7 +122,7 @@ function TableNode({ name, onInsert }: { name: string; onInsert: (text: string) 
               {errorMessage(schemaQuery.error)}
             </div>
           )}
-          {schemaQuery.data?.map((col) => (
+          {columns.slice(0, visible).map((col) => (
             <button
               key={col.name}
               onClick={() => onInsert(col.name)}
@@ -132,6 +136,14 @@ function TableNode({ name, onInsert }: { name: string; onInsert: (text: string) 
               </span>
             </button>
           ))}
+          {hidden > 0 && (
+            <button
+              onClick={() => setVisible((v) => v + COLUMN_PAGE_SIZE)}
+              className="mt-0.5 w-full rounded px-1 py-1 text-left text-[11px] font-medium text-primary hover:bg-secondary/60"
+            >
+              Show {Math.min(hidden, COLUMN_PAGE_SIZE)} more ({columns.length.toLocaleString()} total)
+            </button>
+          )}
           {schemaQuery.data?.length === 0 && (
             <div className="py-1 text-[11px] text-muted-foreground">No columns.</div>
           )}
