@@ -51,6 +51,20 @@ interface RunResult {
 
 type ViewMode = "results" | "explain";
 
+interface DownloadFormat {
+  format: "csv" | "parquet" | "arrow" | "netcdf";
+  label: string;
+  ext: string;
+}
+
+/** Output formats offered in the Download menu (see SDK `OutputFormat`). */
+const DOWNLOAD_FORMATS: DownloadFormat[] = [
+  { format: "csv", label: "CSV", ext: "csv" },
+  { format: "parquet", label: "Parquet", ext: "parquet" },
+  { format: "arrow", label: "Arrow IPC", ext: "arrow" },
+  { format: "netcdf", label: "NetCDF", ext: "nc" },
+];
+
 const STARTER_SQL = "SELECT 1 AS n";
 
 export function WorkbenchPage() {
@@ -122,7 +136,7 @@ export function WorkbenchPage() {
     }
   }
 
-  async function download(format: "csv" | "parquet") {
+  async function download(format: DownloadFormat["format"], ext: string) {
     const text = sql.trim();
     if (!text) return;
     setDownloading(true);
@@ -133,7 +147,7 @@ export function WorkbenchPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `beacon-result.${format}`;
+      a.download = `beacon-result.${ext}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -217,10 +231,11 @@ export function WorkbenchPage() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => download("csv")}>CSV (.csv)</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => download("parquet")}>
-                  Parquet (.parquet)
-                </DropdownMenuItem>
+                {DOWNLOAD_FORMATS.map((f) => (
+                  <DropdownMenuItem key={f.format} onClick={() => download(f.format, f.ext)}>
+                    {f.label} (.{f.ext})
+                  </DropdownMenuItem>
+                ))}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
