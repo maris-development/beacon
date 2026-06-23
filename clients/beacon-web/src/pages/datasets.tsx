@@ -191,7 +191,7 @@ export function DatasetsPage() {
             </TableHeader>
             <TableBody>
               {path !== "" && (
-                <TableRow className="cursor-pointer" onClick={() => goTo(parentPrefix(path))}>
+                <TableRow className="h-11 cursor-pointer" onClick={() => goTo(parentPrefix(path))}>
                   <TableCell className="font-mono text-xs">
                     <span className="flex items-center gap-1.5 text-muted-foreground">
                       <CornerLeftUp className="h-3.5 w-3.5 shrink-0" /> ..
@@ -202,7 +202,7 @@ export function DatasetsPage() {
                 </TableRow>
               )}
               {folders.map((d) => (
-                <TableRow key={"dir:" + d.name} className="cursor-pointer" onClick={() => enter(d.name)}>
+                <TableRow key={"dir:" + d.name} className="h-11 cursor-pointer" onClick={() => enter(d.name)}>
                   <TableCell className="font-mono text-xs">
                     <span className="flex items-center gap-1.5">
                       <Folder className="h-3.5 w-3.5 shrink-0 text-primary" />
@@ -216,7 +216,8 @@ export function DatasetsPage() {
                 </TableRow>
               ))}
               {files.map((d) => (
-                <TableRow key={d.path}>
+                <TableRow key={d.path} className="h-11">
+
                   <TableCell className="font-mono text-xs">
                     <button
                       className="flex items-center gap-1.5 text-left hover:text-primary hover:underline"
