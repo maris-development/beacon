@@ -1,0 +1,226 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 215 28% 17%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 215 28% 17%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 28% 17%;
+
+    /* Docs-site indigo as the primary action color (#3451b2). */
+    --primary: 226 55% 45%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 226 24% 95%;
+    --secondary-foreground: 226 28% 24%;
+
+    --muted: 226 20% 94%;
+    --muted-foreground: 226 12% 45%;
+
+    /* Beacon cyan accent (#24c6dc). */
+    --accent: 187 72% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 226 22% 88%;
+    --input: 226 22% 88%;
+    --ring: 226 55% 45%;
+
+    --radius: 0.5rem;
+
+    /* Top navigation bar — light in light mode. */
+    --topbar: 0 0% 100%;
+    --topbar-foreground: 226 28% 20%;
+  }
+
+  .dark {
+    --background: 226 28% 11%;
+    --foreground: 226 20% 96%;
+    --card: 226 24% 15%;
+    --card-foreground: 226 20% 96%;
+    --popover: 226 24% 15%;
+    --popover-foreground: 226 20% 96%;
+    --primary: 230 74% 66%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 226 18% 23%;
+    --secondary-foreground: 226 20% 96%;
+    --muted: 226 18% 23%;
+    --muted-foreground: 226 14% 66%;
+    --accent: 187 72% 52%;
+    --accent-foreground: 226 28% 11%;
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 226 18% 27%;
+    --input: 226 18% 27%;
+    --ring: 230 74% 66%;
+    --topbar: 226 50% 7%;
+    --topbar-foreground: 0 0% 100%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+}
+
+/* CodeMirror should fill its container and use the app font sizing. */
+.cm-editor {
+  height: 100%;
+  font-size: 13px;
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+/* ===========================================================================
+   Login hero backdrop — ported from the Beacon docs homepage. Palette matches
+   the docs: indigo (#3451b2 / #a8b1ff) + cyan (#24c6dc). Motion-reduced safe.
+   =========================================================================== */
+.beacon-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.hb-glow {
+  position: absolute;
+  top: -180px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 820px;
+  height: 820px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at center,
+    rgba(99, 122, 234, 0.5) 0%,
+    rgba(36, 198, 220, 0.28) 38%,
+    transparent 68%
+  );
+  filter: blur(10px);
+  opacity: 0.55;
+  animation: hb-pulse 7s ease-in-out infinite;
+}
+
+.hb-sweep {
+  position: absolute;
+  top: -380px;
+  left: 50%;
+  margin-left: -450px;
+  width: 900px;
+  height: 900px;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(99, 122, 234, 0.5) 18deg,
+    transparent 42deg,
+    transparent 360deg
+  );
+  opacity: 0.14;
+  animation: hb-rotate 22s linear infinite;
+}
+
+.hb-net {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.6;
+}
+.hb-drift {
+  transform-origin: center;
+  animation: hb-driftmove 32s ease-in-out infinite alternate;
+}
+.hb-line {
+  stroke: rgba(99, 122, 234, 0.45);
+  stroke-width: 1;
+  opacity: 0.35;
+}
+.hb-dot {
+  fill: #a8b1ff;
+  filter: drop-shadow(0 0 3px rgba(36, 198, 220, 0.7));
+  animation: hb-twinkle 4.5s ease-in-out infinite;
+}
+.hb-dot:nth-child(3n) {
+  fill: #24c6dc;
+}
+.hb-packet {
+  fill: #24c6dc;
+  filter: drop-shadow(0 0 3px rgba(36, 198, 220, 0.8));
+  animation-name: hb-travel;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes hb-pulse {
+  0%, 100% { opacity: 0.45; transform: translateX(-50%) scale(1); }
+  50%      { opacity: 0.7; transform: translateX(-50%) scale(1.06); }
+}
+@keyframes hb-rotate {
+  to { transform: rotate(360deg); }
+}
+@keyframes hb-driftmove {
+  0%   { transform: translate(0, 0); }
+  100% { transform: translate(-26px, 18px); }
+}
+@keyframes hb-twinkle {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+@keyframes hb-travel {
+  0%   { transform: translate(0, 0); opacity: 0; }
+  12%  { opacity: 0.85; }
+  88%  { opacity: 0.85; }
+  100% { transform: translate(var(--dx), var(--dy)); opacity: 0; }
+}
+
+/* Animated gradient wordmark (matches the docs hero name). */
+.beacon-gradient-text {
+  background: linear-gradient(270deg, #ff512f, #dd2476, #24c6dc);
+  background-size: 300% 300%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: beacon-gradient-move 4s ease infinite;
+}
+@keyframes beacon-gradient-move {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* Login card entrance. */
+.beacon-rise {
+  animation: beacon-rise 0.65s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+@keyframes beacon-rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hb-glow, .hb-sweep, .hb-drift, .hb-dot { animation: none; }
+  .hb-packet { display: none; }
+  .beacon-gradient-text { animation: none; }
+  .beacon-rise { animation: none; }
+}

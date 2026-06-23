@@ -61,12 +61,16 @@ export class Http {
     const base = options.url.replace(/\/+$/, "");
     const prefix = (options.basePath ?? "").replace(/\/+$/, "");
     this.baseUrl = `${base}${prefix}`;
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
-    if (typeof this.fetchImpl !== "function") {
+    const fetchImpl = options.fetch ?? globalThis.fetch;
+    if (typeof fetchImpl !== "function") {
       throw new Error(
         "global fetch is unavailable; pass a `fetch` implementation in ClientOptions (Node < 18).",
       );
     }
+    // Bind to `globalThis` so the native `fetch` keeps its receiver. Calling it
+    // as a method (`this.fetchImpl(...)`) would otherwise throw "Illegal
+    // invocation" in browsers, where `fetch` must run with `this === window`.
+    this.fetchImpl = options.fetch ?? fetchImpl.bind(globalThis);
     this.timeoutMs = options.timeoutMs ?? 60_000;
     this.extraHeaders = options.headers ?? {};
     if (options.username != null && options.password != null) {

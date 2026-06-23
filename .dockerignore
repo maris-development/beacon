@@ -17,6 +17,9 @@ beacon-py
 integration-tests
 **/.venv
 **/node_modules
+# JS build outputs are regenerated inside the webui Docker stage.
+clients/beacon-ts/dist
+clients/beacon-web/dist
 **/*.pyc
 __pycache__
 *.ipynb

@@ -163,6 +163,17 @@ export class BeaconClient {
     return this.http.fetchJson<T>("POST", "/api/explain-query", { json: buildBody(query) });
   }
 
+  /**
+   * Runs a query and returns its physical plan annotated with execution metrics
+   * (`EXPLAIN ANALYZE`), as a PostgreSQL-style JSON plan. Unlike `explainQuery`,
+   * this executes the query to collect actual row counts and timings.
+   */
+  explainAnalyzeQuery<T = unknown>(query: QueryInput): Promise<T> {
+    return this.http.fetchJson<T>("POST", "/api/explain-analyze-query", {
+      json: buildBody(query),
+    });
+  }
+
   /** Fetches recorded metrics for a previously executed query by its id. */
   queryMetrics(queryId: string): Promise<QueryMetricsView> {
     return this.http.fetchJson<QueryMetricsView>(
@@ -188,9 +199,14 @@ export class BeaconClient {
     return this.http.fetchJson<T>("GET", "/api/table-schema", { query: { table_name: tableName } });
   }
 
-  /** Gets a table's configuration (`GET /api/table-config`). */
+  /**
+   * Gets a table's configuration (`GET /api/admin/table-config`). This is an
+   * admin-only endpoint, so the client must be configured with credentials.
+   */
   tableConfig<T = unknown>(tableName: string): Promise<T> {
-    return this.http.fetchJson<T>("GET", "/api/table-config", { query: { table_name: tableName } });
+    return this.http.fetchJson<T>("GET", "/api/admin/table-config", {
+      query: { table_name: tableName },
+    });
   }
 
   /** Gets the default table (`GET /api/default-table`). */

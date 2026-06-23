@@ -13,6 +13,7 @@ use ::axum::{
 use anyhow::Context;
 use beacon_core::runtime::Runtime;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{info_span, Span};
 use utoipa::openapi::OpenApi;
@@ -54,7 +55,17 @@ pub(crate) fn setup_router(
         OpenApi::default().nest(base_path, api_docs_client)
     };
 
-    let router = client_router
+    // Mount the bundled admin web UI when its build directory is present (it is in
+    // the Docker image; usually absent for a bare `cargo run`). The bare root then
+    // lands on the UI instead of the API docs.
+    let web_ui = web_ui_router(&config.server.web_ui_dir);
+    let root_redirect: &'static str = if web_ui.is_some() {
+        format!("{base_path}/admin/").leak()
+    } else {
+        swagger_redirect
+    };
+
+    let mut router = client_router
         .merge(admin_router)
         .merge(Scalar::with_url("/scalar/", docs.clone()))
         .route(
@@ -67,8 +78,14 @@ pub(crate) fn setup_router(
         )
         .route(
             "/",
-            get(move || async move { Redirect::to(swagger_redirect) }),
-        )
+            get(move || async move { Redirect::to(root_redirect) }),
+        );
+
+    if let Some(web_ui) = web_ui {
+        router = router.merge(web_ui);
+    }
+
+    let router = router
         .layer(build_cors_layer(&config.cors)?)
         // Publish the config so middleware/handlers can read transport settings.
         .layer(::axum::Extension(config.clone()))
@@ -89,6 +106,30 @@ pub(crate) fn setup_router(
             .nest(base_path, setup_tracing_router(router))
             .merge(swagger_ui))
     }
+}
+
+/// Builds a router that serves the admin web UI (a Vite single-page app) at
+/// `/admin`, or `None` when no build is present at `dir`.
+///
+/// The whole router is later nested under `base_path`, so the SPA is reachable at
+/// `{base_path}/admin`. Missing files fall back to `index.html` with a `200` (via
+/// `fallback`, not `not_found_service`, which would preserve the `404`) so deep
+/// client-side routes (e.g. `/admin/tables`) resolve on a hard reload. A genuinely
+/// missing asset thus also yields the SPA shell, which the build's hashed asset
+/// names make a non-issue in practice.
+///
+/// Presence is detected by `index.html` rather than the directory itself so a
+/// stray empty `web/` directory does not advertise a broken UI.
+fn web_ui_router(dir: &str) -> Option<Router<Arc<Runtime>>> {
+    let dir = std::path::Path::new(dir);
+    let index = dir.join("index.html");
+    if !index.is_file() {
+        return None;
+    }
+
+    tracing::info!("serving admin web UI from {} at /admin", dir.display());
+    let serve = ServeDir::new(dir).fallback(ServeFile::new(index));
+    Some(Router::new().nest_service("/admin", serve))
 }
 
 /// Fills in the top-level OpenAPI metadata exposed by the HTTP documentation endpoints.
@@ -254,6 +295,20 @@ fn build_cors_layer(cors: &beacon_config::CorsConfig) -> anyhow::Result<CorsLaye
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     layer = layer.allow_headers(headers);
+
+    let expose = cors
+        .expose_headers
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            HeaderName::from_str(s)
+                .with_context(|| format!("invalid CORS expose header in config: {s}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if !expose.is_empty() {
+        layer = layer.expose_headers(expose);
+    }
 
     if cors.allowed_credentials {
         layer = layer.allow_credentials(true);

@@ -49,6 +49,9 @@ pub struct ServerConfig {
     pub worker_threads: usize,
     /// URL prefix for all HTTP routes, e.g. `/base-path`. Empty string means serve at `/`.
     pub base_path: String,
+    /// Directory holding the built admin web UI (Vite `dist/`). Served at
+    /// `{base_path}/admin` when the directory exists; skipped otherwise.
+    pub web_ui_dir: String,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +95,10 @@ pub struct CorsConfig {
     pub allowed_methods: String,
     pub allowed_origins: String,
     pub allowed_headers: String,
+    /// Response headers exposed to browser JS on cross-origin requests. Defaults
+    /// to `x-beacon-query-id` so a cross-origin UI (e.g. the Vite dev server) can
+    /// read the query id the SDK surfaces; same-origin requests can already.
+    pub expose_headers: String,
     pub allowed_credentials: bool,
     pub max_age: u64,
 }
@@ -212,6 +219,10 @@ struct RawConfig {
     worker_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
     base_path: String,
+    /// Directory containing the built admin web UI. Defaults to `web` (resolved
+    /// relative to the working directory; `/beacon/web` in the Docker image).
+    #[envconfig(from = "BEACON_WEB_UI_DIR", default = "web")]
+    web_ui_dir: String,
 
     #[envconfig(from = "BEACON_S3_BUCKET")]
     s3_bucket: Option<String>,
@@ -251,6 +262,11 @@ struct RawConfig {
         default = "Content-Type,Authorization"
     )]
     allowed_headers: String,
+    #[envconfig(
+        from = "BEACON_CORS_EXPOSE_HEADERS",
+        default = "x-beacon-query-id"
+    )]
+    expose_headers: String,
     #[envconfig(from = "BEACON_CORS_ALLOWED_CREDENTIALS", default = "false")]
     allowed_credentials: bool,
     #[envconfig(from = "BEACON_CORS_MAX_AGE", default = "3600")]
@@ -331,6 +347,7 @@ impl From<RawConfig> for Config {
                 log_level: raw.log_level,
                 worker_threads: raw.worker_threads,
                 base_path: raw.base_path,
+                web_ui_dir: raw.web_ui_dir,
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
@@ -387,6 +404,7 @@ impl From<RawConfig> for Config {
                 allowed_methods: raw.allowed_methods,
                 allowed_origins: raw.allowed_origins,
                 allowed_headers: raw.allowed_headers,
+                expose_headers: raw.expose_headers,
                 allowed_credentials: raw.allowed_credentials,
                 max_age: raw.max_age,
             },

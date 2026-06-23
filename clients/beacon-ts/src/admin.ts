@@ -23,9 +23,12 @@ export class AdminClient {
     return this.http.fetchJson<T>("GET", "/api/admin/crawlers");
   }
 
-  /** Creates/defines a crawler (`POST /api/admin/crawlers`). */
-  createCrawler<T = Crawler>(definition: Crawler): Promise<T> {
-    return this.http.fetchJson<T>("POST", "/api/admin/crawlers", { json: definition });
+  /**
+   * Creates/defines a crawler (`POST /api/admin/crawlers`). The endpoint returns
+   * an empty body on success, so this resolves to `void`.
+   */
+  async createCrawler(definition: Crawler): Promise<void> {
+    await this.http.fetchRaw("POST", "/api/admin/crawlers", { json: definition });
   }
 
   /** Gets a single crawler by name (`GET /api/admin/crawlers/{name}`). */
@@ -45,8 +48,11 @@ export class AdminClient {
 
   // -- external tables --------------------------------------------------------
 
-  /** Creates an external table (`POST /api/admin/external-tables`). */
-  createExternalTable<T = unknown>(spec: ExternalTableSpec): Promise<T> {
-    return this.http.fetchJson<T>("POST", "/api/admin/external-tables", { json: spec });
+  /**
+   * Creates an external table (`POST /api/admin/external-tables`). The endpoint
+   * returns an empty body on success, so this resolves to `void`.
+   */
+  async createExternalTable(spec: ExternalTableSpec): Promise<void> {
+    await this.http.fetchRaw("POST", "/api/admin/external-tables", { json: spec });
   }
 }
