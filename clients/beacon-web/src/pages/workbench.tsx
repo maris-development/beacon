@@ -15,6 +15,7 @@ import {
 
 import { useBeacon } from "@/lib/beacon-context";
 import { errorMessage } from "@/lib/errors";
+import { formatBytes } from "@/lib/format";
 import {
   deleteSavedQuery,
   listSavedQueries,
@@ -83,6 +84,7 @@ export function WorkbenchPage() {
 
   const [saveOpen, setSaveOpen] = React.useState(false);
   const [savedOpen, setSavedOpen] = React.useState(false);
+  const [metricsId, setMetricsId] = React.useState<string | null>(null);
 
   const run = React.useCallback(async () => {
     const text = sql.trim();
@@ -254,9 +256,15 @@ export function WorkbenchPage() {
               <span className="text-muted-foreground">{result.rows.length} rows</span>
               <span className="text-muted-foreground">{result.elapsedMs.toFixed(0)} ms</span>
               {result.queryId && (
-                <span className="ml-auto font-mono text-[11px] text-muted-foreground">
+                <button
+                  type="button"
+                  onClick={() => setMetricsId(result.queryId)}
+                  title="View execution metrics"
+                  className="ml-auto flex items-center gap-1 font-mono text-[11px] text-muted-foreground hover:text-foreground"
+                >
+                  <Gauge className="h-3.5 w-3.5" />
                   {result.queryId}
-                </span>
+                </button>
               )}
             </>
           )}
@@ -290,6 +298,7 @@ export function WorkbenchPage() {
         </div>
       </div>
 
+      <QueryMetricsDialog queryId={metricsId} onClose={() => setMetricsId(null)} />
       <SaveQueryDialog open={saveOpen} onOpenChange={setSaveOpen} sql={sql} />
       <SavedQueriesDialog
         open={savedOpen}
@@ -307,6 +316,94 @@ function Empty({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
       {children}
+    </div>
+  );
+}
+
+interface QueryMetrics {
+  input_rows?: number;
+  input_bytes?: number;
+  result_num_rows?: number;
+  result_size_in_bytes?: number;
+  [key: string]: unknown;
+}
+
+/** Fetches and shows `/api/query/metrics/{id}` for a completed query. */
+function QueryMetricsDialog({
+  queryId,
+  onClose,
+}: {
+  queryId: string | null;
+  onClose: () => void;
+}) {
+  const beacon = useBeacon();
+  const [data, setData] = React.useState<QueryMetrics | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!queryId) return;
+    setData(null);
+    setError(null);
+    setLoading(true);
+    let cancelled = false;
+    beacon
+      .queryMetrics(queryId)
+      .then((m) => !cancelled && setData(m as QueryMetrics))
+      .catch((e) => !cancelled && setError(errorMessage(e)))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [queryId, beacon]);
+
+  // Known scalar fields surfaced as tiles; anything else is shown as raw JSON.
+  const known = ["input_rows", "input_bytes", "result_num_rows", "result_size_in_bytes"];
+  const extras = data
+    ? Object.fromEntries(Object.entries(data).filter(([k]) => !known.includes(k)))
+    : {};
+
+  return (
+    <Dialog open={queryId != null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Gauge className="h-4 w-4" /> Query metrics
+          </DialogTitle>
+          <DialogDescription className="font-mono text-[11px]">{queryId}</DialogDescription>
+        </DialogHeader>
+
+        {loading && (
+          <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading metrics…
+          </div>
+        )}
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        {data && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <MetricTile label="Input rows" value={(data.input_rows ?? 0).toLocaleString()} />
+              <MetricTile label="Input bytes" value={formatBytes(data.input_bytes ?? 0)} />
+              <MetricTile label="Result rows" value={(data.result_num_rows ?? 0).toLocaleString()} />
+              <MetricTile label="Result size" value={formatBytes(data.result_size_in_bytes ?? 0)} />
+            </div>
+            {Object.keys(extras).length > 0 && (
+              <pre className="max-h-48 overflow-auto rounded-md bg-secondary/50 p-3 font-mono text-xs">
+                {JSON.stringify(extras, null, 2)}
+              </pre>
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function MetricTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border bg-card p-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-0.5 text-lg font-semibold tabular-nums">{value}</div>
     </div>
   );
 }
