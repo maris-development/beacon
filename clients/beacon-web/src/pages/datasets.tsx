@@ -191,7 +191,7 @@ export function DatasetsPage() {
             </TableHeader>
             <TableBody>
               {path !== "" && (
-                <TableRow className="h-11 cursor-pointer" onClick={() => goTo(parentPrefix(path))}>
+                <TableRow className="cursor-pointer" onClick={() => goTo(parentPrefix(path))}>
                   <TableCell className="font-mono text-xs">
                     <span className="flex items-center gap-1.5 text-muted-foreground">
                       <CornerLeftUp className="h-3.5 w-3.5 shrink-0" /> ..
@@ -202,7 +202,7 @@ export function DatasetsPage() {
                 </TableRow>
               )}
               {folders.map((d) => (
-                <TableRow key={"dir:" + d.name} className="h-11 cursor-pointer" onClick={() => enter(d.name)}>
+                <TableRow key={"dir:" + d.name} className="cursor-pointer" onClick={() => enter(d.name)}>
                   <TableCell className="font-mono text-xs">
                     <span className="flex items-center gap-1.5">
                       <Folder className="h-3.5 w-3.5 shrink-0 text-primary" />
@@ -216,7 +216,7 @@ export function DatasetsPage() {
                 </TableRow>
               ))}
               {files.map((d) => (
-                <TableRow key={d.path} className="h-11">
+                <TableRow key={d.path}>
 
                   <TableCell className="font-mono text-xs">
                     <button
@@ -228,26 +228,26 @@ export function DatasetsPage() {
                       {baseName(d.path)}
                     </button>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="py-0">
                     {d.format ? <Badge variant="muted">{d.format}</Badge> : "—"}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="py-0 text-right">
                     <div className="flex justify-end gap-2">
                       <Button
                         variant="outline"
                         size="sm"
-                        className="gap-1.5"
+                        className="h-6 gap-1 px-2 text-[11px]"
                         onClick={() => setDialog({ path: d.path, format: d.format, tab: "preview" })}
                       >
-                        <Eye className="h-3.5 w-3.5" /> Preview
+                        <Eye className="h-3 w-3" /> Preview
                       </Button>
                       <Button
                         variant="outline"
                         size="sm"
-                        className="gap-1.5"
+                        className="h-6 gap-1 px-2 text-[11px]"
                         onClick={() => setDialog({ path: d.path, format: d.format, tab: "schema" })}
                       >
-                        <Table2 className="h-3.5 w-3.5" /> Schema
+                        <Table2 className="h-3 w-3" /> Schema
                       </Button>
                     </div>
                   </TableCell>
