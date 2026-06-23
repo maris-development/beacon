@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { useBeacon } from "@/lib/beacon-context";
 import { errorMessage } from "@/lib/errors";
 import { PageContainer } from "@/components/app-shell";
+import { InfoBanner } from "@/components/info-banner";
 import { JsonView } from "@/components/json-view";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,8 @@ import {
 } from "@/components/ui/dialog";
 
 /** Format identifiers accepted by a crawler's `format_filter`. */
+const CRAWLER_DOCS = "https://maris-development.github.io/beacon/docs/1.7.3/data-lake/crawlers";
+
 const FORMATS = [
   { value: "parquet", label: "Parquet" },
   { value: "nc", label: "NetCDF" },
@@ -80,6 +83,11 @@ export function CrawlersPage() {
         </div>
       }
     >
+      <InfoBanner>
+        A crawler scans a prefix in the datasets store and automatically registers the files it
+        finds as queryable tables — similar to an AWS Glue crawler. Run it on demand, on a
+        schedule, or have it react to new files. <a href={CRAWLER_DOCS} target="_blank" rel="noreferrer">Learn more</a>.
+      </InfoBanner>
       {actionError && (
         <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
           {actionError}

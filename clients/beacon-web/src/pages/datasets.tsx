@@ -7,6 +7,7 @@ import { useBeacon } from "@/lib/beacon-context";
 import { COLUMN_PAGE_SIZE, parseSchema } from "@/lib/schema";
 import { errorMessage } from "@/lib/errors";
 import { PageContainer } from "@/components/app-shell";
+import { InfoBanner } from "@/components/info-banner";
 import { ResultsGrid } from "@/components/results-grid";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -132,6 +133,11 @@ export function DatasetsPage() {
         ) : undefined
       }
     >
+      <InfoBanner>
+        Datasets are the raw files discovered in the datasets store. Browse folders, preview the
+        first rows, or inspect a file&rsquo;s schema. To make them queryable, register a table from
+        the <strong>Tables</strong> page (External table) or via a Crawler.
+      </InfoBanner>
       <div className="mb-3 flex items-center gap-3">
         <nav className="flex flex-wrap items-center gap-1 text-sm">
           <button

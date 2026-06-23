@@ -3,7 +3,6 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   BookOpen,
   ChevronDown,
-  Database,
   ExternalLink,
   FileStack,
   LogOut,
@@ -33,7 +32,6 @@ const NAV = [
   { to: "/tables", label: "Tables", icon: TableProperties },
   { to: "/datasets", label: "Datasets", icon: FileStack },
   { to: "/crawlers", label: "Crawlers", icon: Radar },
-  { to: "/external-tables", label: "External tables", icon: Database },
   { to: "/server", label: "Server", icon: Server },
 ];
 

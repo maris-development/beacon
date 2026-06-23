@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, Plus, RefreshCw, Search, Table2, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, Loader2, Plus, RefreshCw, Search, Table2, Trash2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useBeacon } from "@/lib/beacon-context";
@@ -9,11 +9,12 @@ import { errorMessage } from "@/lib/errors";
 import { PageContainer } from "@/components/app-shell";
 import { JsonView } from "@/components/json-view";
 import { ResultsGrid } from "@/components/results-grid";
-import { SqlEditor } from "@/components/sql-editor";
+import { InfoBanner } from "@/components/info-banner";
+import { CreateViewDialog } from "@/components/create-view-dialog";
+import { ExternalTableDialog } from "@/components/external-table-dialog";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -24,8 +25,14 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 /** Friendly labels for Beacon's `definition_type` (typetag) values. */
 const KIND_LABELS: Record<string, string> = {
@@ -53,9 +60,15 @@ function tableKind(config: unknown): string | null {
   return base;
 }
 
+type CreateTarget =
+  | { kind: "view" }
+  | { kind: "materialized" }
+  | { kind: "external"; format: string };
+
 export function TablesPage() {
   const beacon = useBeacon();
   const [selected, setSelected] = React.useState<string | null>(null);
+  const [create, setCreate] = React.useState<CreateTarget | null>(null);
 
   const tablesQuery = useQuery({ queryKey: ["tables"], queryFn: () => beacon.tables() });
 
@@ -69,9 +82,39 @@ export function TablesPage() {
     <PageContainer
       title="Tables"
       description="Registered tables, their schemas, and configuration."
-      actions={<NewMaterializedViewDialog onCreated={(name) => setSelected(name)} />}
+      actions={
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" className="gap-1.5">
+              <Plus className="h-4 w-4" /> Create <ChevronDown className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => setCreate({ kind: "view" })}>View</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setCreate({ kind: "materialized" })}>
+              Materialized view
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setCreate({ kind: "external", format: "PARQUET" })}>
+              External table
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setCreate({ kind: "external", format: "DELTA" })}>
+              Delta Lake table
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setCreate({ kind: "external", format: "ICEBERG" })}>
+              Iceberg table
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      }
     >
-      <div className="flex h-full min-h-0 gap-4">
+      <div className="flex h-full min-h-0 flex-col gap-3">
+        <InfoBanner>
+          Tables are the named, queryable datasets in Beacon — external (file-backed), views,
+          materialized views, Delta/Iceberg, and more. Use <strong>Create</strong> to add one; the
+          tag next to a table&rsquo;s name shows its kind.
+        </InfoBanner>
+        <div className="flex min-h-0 flex-1 gap-4">
         <Card className="flex w-64 shrink-0 flex-col overflow-hidden">
           <div className="border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             {tablesQuery.data?.length ?? 0} tables
@@ -106,7 +149,21 @@ export function TablesPage() {
         <div className="min-h-0 min-w-0 flex-1 overflow-auto">
           {selected ? <TableDetail name={selected} onDeleted={() => setSelected(null)} /> : null}
         </div>
+        </div>
       </div>
+
+      <CreateViewDialog
+        open={create?.kind === "view" || create?.kind === "materialized"}
+        materialized={create?.kind === "materialized"}
+        onOpenChange={(o) => !o && setCreate(null)}
+        onCreated={(name) => setSelected(name)}
+      />
+      <ExternalTableDialog
+        open={create?.kind === "external"}
+        presetFormat={create?.kind === "external" ? create.format : undefined}
+        onOpenChange={(o) => !o && setCreate(null)}
+        onCreated={(name) => setSelected(name)}
+      />
     </PageContainer>
   );
 }
@@ -293,88 +350,6 @@ function RefreshMvButton({ name }: { name: string }) {
       <RefreshCw className={cn("h-4 w-4", refresh.isPending && "animate-spin")} />
       Refresh
     </Button>
-  );
-}
-
-/** Dialog to create a materialized view from a SQL query. */
-function NewMaterializedViewDialog({ onCreated }: { onCreated: (name: string) => void }) {
-  const beacon = useBeacon();
-  const qc = useQueryClient();
-  const [open, setOpen] = React.useState(false);
-  const [name, setName] = React.useState("");
-  const [sql, setSql] = React.useState("SELECT 1 AS a");
-  const [error, setError] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    if (open) {
-      setName("");
-      setSql("SELECT 1 AS a");
-      setError(null);
-    }
-  }, [open]);
-
-  const create = useMutation({
-    mutationFn: () =>
-      beacon.query(`CREATE MATERIALIZED VIEW ${quoteIdent(name.trim())} AS ${sql}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["tables"] });
-      onCreated(name.trim());
-      setOpen(false);
-    },
-    onError: (e) => setError(errorMessage(e)),
-  });
-
-  function submit() {
-    setError(null);
-    if (!name.trim()) return setError("Name is required.");
-    if (!sql.trim()) return setError("Query is required.");
-    create.mutate();
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button size="sm" className="gap-1.5">
-          <Plus className="h-4 w-4" /> New materialized view
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>New materialized view</DialogTitle>
-          <DialogDescription>
-            Runs the query now and stores the result as a queryable table. Refresh it later to
-            re-materialize.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="mv-name">Name</Label>
-            <Input
-              id="mv-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="my_view"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Query</Label>
-            <div className="h-48 overflow-hidden rounded-md border">
-              <SqlEditor value={sql} onChange={setSql} />
-            </div>
-          </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>
-            Cancel
-          </Button>
-          <Button onClick={submit} disabled={create.isPending}>
-            {create.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-            Create
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 
