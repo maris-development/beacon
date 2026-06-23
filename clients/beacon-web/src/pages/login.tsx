@@ -55,7 +55,7 @@ export function LoginPage() {
       <HeroBackdrop />
       <div className="relative z-10 w-full max-w-sm">
         <div className="beacon-rise mb-6 flex flex-col items-center gap-2 text-center">
-          <img src="/beacon-logo-small.png" alt="" className="h-16 w-16 drop-shadow-[0_0_18px_rgba(36,198,220,0.45)]" />
+          <img src={`${import.meta.env.BASE_URL}beacon-logo-small.png`} alt="" className="h-16 w-16 drop-shadow-[0_0_18px_rgba(36,198,220,0.45)]" />
           <h1 className="beacon-gradient-text text-3xl font-bold">Beacon Admin</h1>
           <p className="text-sm text-white/60">Sign in with your administrator credentials.</p>
         </div>
