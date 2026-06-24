@@ -34,6 +34,9 @@ ui: ## Build the admin web UI (SDK first, then the SPA) into $(WEB_DIR)
 run: ui ## Build the SPA, then serve API + UI on http://localhost:5001/admin
 	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run -p beacon-api
 
+run-release: ui ## Build the SPA, then serve API + UI on http://localhost:5001/admin
+	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run --release -p beacon-api
+
 serve: ## Serve API + UI without rebuilding the SPA (expects $(WEB_DIR) to exist)
 	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run -p beacon-api
 
