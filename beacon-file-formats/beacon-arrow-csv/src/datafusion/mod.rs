@@ -68,6 +68,10 @@ impl FileFormatFactoryExt for CsvFormatFactory {
     fn file_format_name(&self) -> String {
         self.get_ext()
     }
+
+    fn file_extensions(&self) -> Vec<String> {
+        vec!["csv".to_string(), "tsv".to_string()]
+    }
 }
 
 #[derive(Debug)]
