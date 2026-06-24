@@ -24,9 +24,9 @@ iceberg-rust = { workspace = true }
 datafusion_iceberg = { workspace = true }
 iceberg-file-catalog = { workspace = true }
 
-beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-beacon-config = { path = "../beacon-config" }
-beacon-object-storage = { path = "../beacon-object-storage" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-config = { path = "../../beacon-config" }
+beacon-object-storage = { path = "../../beacon-object-storage" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

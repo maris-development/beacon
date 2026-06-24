@@ -26,7 +26,7 @@ beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-beacon-iceberg = { path = "../beacon-iceberg" }
+beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 

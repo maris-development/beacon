@@ -41,7 +41,7 @@ COPY beacon-file-formats/beacon-arrow-parquet/ /beacon-file-formats/beacon-arrow
 COPY beacon-file-formats/beacon-arrow-geoparquet/ /beacon-file-formats/beacon-arrow-geoparquet/
 COPY beacon-file-formats/beacon-arrow-bbf/ /beacon-file-formats/beacon-arrow-bbf/
 COPY beacon-functions/ /beacon-functions/
-COPY beacon-iceberg/ /beacon-iceberg/
+COPY beacon-file-formats/beacon-iceberg/ /beacon-file-formats/beacon-iceberg/
 COPY beacon-file-formats/beacon-nd-array/ /beacon-file-formats/beacon-nd-array/
 COPY beacon-file-formats/beacon-nd-arrow/ /beacon-file-formats/beacon-nd-arrow/
 COPY beacon-object-storage/ /beacon-object-storage/
