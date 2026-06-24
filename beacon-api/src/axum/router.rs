@@ -59,11 +59,6 @@ pub(crate) fn setup_router(
     // the Docker image; usually absent for a bare `cargo run`). The bare root then
     // lands on the UI instead of the API docs.
     let web_ui = web_ui_router(&config.server.web_ui_dir);
-    let root_redirect: &'static str = if web_ui.is_some() {
-        format!("{base_path}/admin/").leak()
-    } else {
-        swagger_redirect
-    };
 
     let mut router = client_router
         .merge(admin_router)
@@ -78,7 +73,7 @@ pub(crate) fn setup_router(
         )
         .route(
             "/",
-            get(move || async move { Redirect::to(root_redirect) }),
+            get(move || async move { Redirect::to(swagger_redirect) }),
         );
 
     if let Some(web_ui) = web_ui {
