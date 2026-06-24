@@ -49,7 +49,7 @@ beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 beacon-common = { path = "../beacon-common" }
-beacon-iceberg = { path = "../beacon-iceberg" }
+beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-nd-array = { path = "../beacon-file-formats/beacon-nd-array" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
