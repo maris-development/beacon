@@ -68,6 +68,10 @@ impl FileFormatFactoryExt for ArrowFormatFactory {
     fn file_format_name(&self) -> String {
         self.get_ext()
     }
+
+    fn file_extensions(&self) -> Vec<String> {
+        vec!["arrow".to_string(), "feather".to_string()]
+    }
 }
 
 #[derive(Debug)]
