@@ -4,7 +4,11 @@ use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use crate::datafusion::ZarrFormat;
 use datafusion::{
-    catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
+    catalog::TableFunctionImpl,
+    common::plan_err,
+    execution::object_store::ObjectStoreUrl,
+    prelude::{Expr, SessionContext},
+    scalar::ScalarValue,
 };
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
@@ -65,6 +69,30 @@ impl TableFunctionImpl for ReadZarrFunc {
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_zarr")?;
 
+        // Optional second argument: an explicit list of dimensions to read.
+        let mut dimensions: Vec<String> = vec![];
+        if let Some(dimensions_arg) = args.get(1) {
+            if let Expr::Literal(ScalarValue::List(values), _) = dimensions_arg {
+                let string_array = values.as_ref().values();
+                match string_array
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                {
+                    Some(str_arr) => {
+                        dimensions = str_arr
+                            .iter()
+                            .filter_map(|opt_str| opt_str.map(|s| s.to_string()))
+                            .collect();
+                    }
+                    None => {
+                        return plan_err!(
+                            "read_zarr second argument must be a List<Utf8> of dimension names"
+                        );
+                    }
+                }
+            }
+        }
+
         tracing::debug!("read_zarr glob paths: {:?}", glob_paths);
 
         let mut listing_urls = vec![];
@@ -75,7 +103,8 @@ impl TableFunctionImpl for ReadZarrFunc {
 
         // Predicate pushdown is handled automatically by the shared engine, so
         // no manual statistics/column selection is needed.
-        let file_format = ZarrFormat::default();
+        let read_dimensions = (!dimensions.is_empty()).then_some(dimensions);
+        let file_format = ZarrFormat::new(read_dimensions);
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(

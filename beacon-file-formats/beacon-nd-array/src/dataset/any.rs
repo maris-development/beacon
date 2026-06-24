@@ -126,6 +126,20 @@ impl AnyDataset {
         }
     }
 
+    /// Broadcast-compatible default dimension set for `SELECT *` reads.
+    ///
+    /// Only regular datasets need this: they broadcast every variable onto a
+    /// shared shape and can fail when variables live on incompatible dimension
+    /// sets. Ragged datasets null-pad instead of broadcasting (and reject
+    /// dimension projection altogether — see [`AnyDataset::project`]), so they
+    /// are unaffected and always return `None`.
+    pub fn default_broadcast_dimensions(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Regular(ds) => ds.default_broadcast_dimensions(),
+            Self::Ragged { .. } => None,
+        }
+    }
+
     pub fn project(&self, projection: &DatasetProjection) -> anyhow::Result<Self> {
         match self {
             Self::Regular(ds) => {
