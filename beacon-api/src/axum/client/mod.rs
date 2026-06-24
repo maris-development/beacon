@@ -28,12 +28,16 @@ pub struct ClientApiDoc;
 #[allow(deprecated)]
 pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ClientApiDoc::openapi())
-        .routes(routes!(query::query))
-        .routes(routes!(query::parse_query))
-        .routes(routes!(query::query_metrics))
-        .routes(routes!(query::explain_query))
-        .routes(routes!(query::explain_analyze_query))
-        .routes(routes!(query::available_columns))
+        .routes(routes!(query::execute::query))
+        .routes(routes!(query::jobs::submit_query_job))
+        .routes(routes!(query::jobs::query_job_status, query::jobs::cancel_query_job))
+        .routes(routes!(query::jobs::query_job_stream))
+        .routes(routes!(query::jobs::query_job_result))
+        .routes(routes!(query::execute::parse_query))
+        .routes(routes!(query::metrics::query_metrics))
+        .routes(routes!(query::explain::explain_query))
+        .routes(routes!(query::explain::explain_analyze_query))
+        .routes(routes!(query::execute::available_columns))
         .routes(routes!(datasets::datasets))
         .routes(routes!(datasets::list_datasets))
         .routes(routes!(datasets::list_dataset_schema))
@@ -87,5 +91,23 @@ mod tests {
             Some("#/components/schemas/Query"),
             "expected /api/query requestBody to $ref the Query schema"
         );
+
+        // The async query-job endpoints are registered.
+        let paths = spec.pointer("/paths").and_then(|p| p.as_object()).expect("paths");
+        for (path, method) in [
+            ("/api/query/jobs", "post"),
+            ("/api/query/jobs/{query_id}", "get"),
+            ("/api/query/jobs/{query_id}", "delete"),
+            ("/api/query/jobs/{query_id}/stream", "get"),
+            ("/api/query/jobs/{query_id}/result", "get"),
+        ] {
+            let entry = paths
+                .get(path)
+                .unwrap_or_else(|| panic!("expected path `{path}` in OpenAPI doc"));
+            assert!(
+                entry.get(method).is_some(),
+                "expected `{method}` operation on `{path}`"
+            );
+        }
     }
 }
