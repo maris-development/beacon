@@ -766,6 +766,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_default_broadcast_dimensions_makes_select_star_safe() {
+        // `temp(a,b,c)` is the highest-dimensionality variable, plus a
+        // CF-bounds-style `bnds(b,d)` whose `d` dimension is absent from the
+        // main grid. A naive SELECT * (all variables) cannot broadcast `bnds`
+        // onto `(a,b,c)` and fails.
+        let temp = NdArray::<f64>::try_new_from_vec_in_mem(
+            (0..8).map(|v| v as f64).collect(),
+            vec![2, 2, 2],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            None,
+        )
+        .unwrap();
+        let a = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![0.0, 1.0],
+            vec![2],
+            vec!["a".to_string()],
+            None,
+        )
+        .unwrap();
+        let bnds = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![0.0, 1.0, 2.0, 3.0],
+            vec![2, 2],
+            vec!["b".to_string(), "d".to_string()],
+            None,
+        )
+        .unwrap();
+
+        let ds = make_dataset(vec![
+            ("temp", Arc::new(temp)),
+            ("a", Arc::new(a)),
+            ("bnds", Arc::new(bnds)),
+        ])
+        .await;
+
+        // Naive SELECT * over all variables errors at the broadcast step.
+        let naive: Vec<anyhow::Result<RecordBatch>> =
+            dataset_as_record_batch_stream(ds.clone(), usize::MAX, None, None)
+                .collect()
+                .await;
+        assert!(
+            naive.iter().any(|r| r.is_err()),
+            "expected broadcast error without dimension narrowing"
+        );
+
+        // The default selection keeps the variable group that retains the most
+        // variables: the `(a,b,c)` grid, dropping the incompatible `bnds`.
+        let default_dims = ds
+            .default_broadcast_dimensions()
+            .expect("incompatible dataset should narrow");
+        assert_eq!(default_dims, vec!["a", "b", "c"]);
+
+        let projected = ds.project_with_dimensions(&default_dims).unwrap();
+        let batches: Vec<RecordBatch> =
+            dataset_as_record_batch_stream(projected, usize::MAX, None, None)
+                .try_collect()
+                .await
+                .expect("SELECT * succeeds after default dimension narrowing");
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 8); // 2 * 2 * 2
+        assert!(batches[0].column_by_name("temp").is_some());
+        assert!(batches[0].column_by_name("a").is_some());
+        assert!(
+            batches[0].column_by_name("bnds").is_none(),
+            "incompatible variable must be excluded"
+        );
+    }
+
+    #[tokio::test]
     async fn test_dimension_mismatch_error() {
         let nd1 = NdArray::<i32>::try_new_from_vec_in_mem(
             vec![1, 2, 3],

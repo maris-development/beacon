@@ -66,6 +66,81 @@ impl Dataset {
         })
     }
 
+    /// Compute a broadcast-compatible *default* dimension set for `SELECT *`
+    /// style reads, used when no explicit dimensions were requested.
+    ///
+    /// A regular dataset combines all of its variables into a single Arrow
+    /// table by broadcasting each one onto the dimensions of the
+    /// highest-dimensionality variable. When variables live on mutually
+    /// incompatible dimension sets (e.g. `temp(time,lat,lon)` alongside a CF
+    /// bounds variable `lat_bnds(lat,nv)`) that broadcast cannot succeed.
+    ///
+    /// This picks the variable dimension set that retains the **most**
+    /// variables (tie-break: higher dimensionality, then first-encountered
+    /// order for determinism). Projecting the dataset to the returned set is
+    /// guaranteed to be broadcast-safe: the set is itself some variable's
+    /// dimensions, so that variable survives and becomes the max-dimensionality
+    /// array, and every other survivor has dimensions that are a subset of it.
+    ///
+    /// Returns `None` when no narrowing is needed — i.e. every variable already
+    /// broadcasts onto the highest-dimensionality variable — so callers can
+    /// skip projection entirely.
+    pub fn default_broadcast_dimensions(&self) -> Option<Vec<String>> {
+        // Highest-dimensionality array's dimension set.
+        let max_dims = self
+            .arrays
+            .values()
+            .max_by_key(|array| array.dimensions().len())
+            .map(|array| array.dimensions())?;
+
+        // Already broadcast-safe: every variable's dims fit inside `max_dims`.
+        let needs_narrowing = self.arrays.values().any(|array| {
+            !array
+                .dimensions()
+                .iter()
+                .all(|dim| max_dims.contains(dim))
+        });
+        if !needs_narrowing {
+            return None;
+        }
+
+        // Candidate targets: each variable's (non-empty) dimension set, deduped
+        // in first-encountered order.
+        let mut candidates: Vec<Vec<String>> = Vec::new();
+        for array in self.arrays.values() {
+            let dims = array.dimensions();
+            if dims.is_empty() {
+                continue;
+            }
+            if !candidates.iter().any(|c| c == &dims) {
+                candidates.push(dims);
+            }
+        }
+
+        // Score each candidate by how many variables it retains (variables whose
+        // dimensions are all contained in the candidate). Pick the highest score,
+        // breaking ties by larger dimensionality, then first-encountered order.
+        let score = |c: &[String]| -> usize {
+            self.arrays
+                .values()
+                .filter(|array| array.dimensions().iter().all(|d| c.contains(d)))
+                .count()
+        };
+        let mut best: Option<(usize, usize, Vec<String>)> = None;
+        for candidate in candidates {
+            let key = (score(&candidate), candidate.len());
+            let is_better = match &best {
+                // Strictly greater key wins; equal keys keep the earlier candidate.
+                Some((best_score, best_len, _)) => key > (*best_score, *best_len),
+                None => true,
+            };
+            if is_better {
+                best = Some((key.0, key.1, candidate));
+            }
+        }
+        best.map(|(_, _, dims)| dims)
+    }
+
     pub fn project(&self, indices: &[usize]) -> anyhow::Result<Dataset> {
         let mut arrays = indexmap::IndexMap::new();
         for &index in indices {
@@ -102,6 +177,55 @@ impl Dataset {
             DatasetType::Regular
         }
     }
+}
+
+/// Resolve the dimension projection to apply to a freshly-opened dataset for a
+/// `SELECT *`-style read.
+///
+/// An explicit `read_dimensions` (e.g. a table-function argument or format
+/// option) always wins. When none is given, fall back to the dataset's
+/// auto-selected broadcast-compatible default (see
+/// [`AnyDataset::default_broadcast_dimensions`]) so that combining all variables
+/// into a single table cannot fail at the broadcast step for files whose
+/// variables live on mutually-incompatible dimension sets.
+///
+/// `None` means "apply no dimension projection" — explicit and default both
+/// absent (ragged datasets, or files that are already broadcast-safe).
+///
+/// When `log_label` is `Some(label)` and the default narrowing actually excludes
+/// variables, a single `info` line prefixed with `label` names them. Pass
+/// `Some(..)` only from schema inference (runs once per query) and `None` from
+/// the per-file execution path to avoid log spam.
+pub fn resolve_read_dimensions(
+    dataset: &AnyDataset,
+    read_dimensions: Option<Vec<String>>,
+    log_label: Option<&str>,
+) -> Option<Vec<String>> {
+    if let Some(dims) = read_dimensions {
+        return Some(dims);
+    }
+
+    let default_dims = dataset.default_broadcast_dimensions()?;
+
+    if let Some(label) = log_label {
+        let dropped: Vec<&String> = dataset
+            .dataset()
+            .arrays
+            .iter()
+            .filter(|(_, array)| !array.dimensions().iter().all(|d| default_dims.contains(d)))
+            .map(|(name, _)| name)
+            .collect();
+        if !dropped.is_empty() {
+            tracing::info!(
+                "{label}: SELECT * auto-selected dimensions {:?}; excluded variables {:?} \
+                 have incompatible dimensions and were omitted.",
+                default_dims,
+                dropped
+            );
+        }
+    }
+
+    Some(default_dims)
 }
 
 #[cfg(test)]
@@ -879,5 +1003,124 @@ mod tests {
         assert_eq!(ds.arrays.len(), 1);
         assert!(ds.get_array("beta").is_some());
         assert!(ds.get_array("alpha").is_none());
+    }
+
+    // ── default_broadcast_dimensions ─────────────────────────────────
+
+    /// Helper: f64 array with the given dims (shape filled with 1s).
+    async fn arr(dims: &[&str]) -> Arc<dyn NdArrayD> {
+        let shape: Vec<usize> = vec![1; dims.len()];
+        let len: usize = shape.iter().product();
+        let dim_names: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
+        Arc::new(
+            NdArray::<f64>::try_new_from_vec_in_mem(vec![0.0; len], shape, dim_names, None).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_already_safe_returns_none() {
+        // 2D var plus a 1D subset — already broadcast-safe.
+        let ds = make_dataset(
+            "safe",
+            vec![("grid", arr(&["x", "y"]).await), ("scale", arr(&["y"]).await)],
+        )
+        .await;
+        assert_eq!(ds.default_broadcast_dimensions(), None);
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_picks_group_with_most_variables() {
+        // `temp(x,y,z)` is the highest-dimensionality variable; a CF-bounds-style
+        // `bnds(y,nv)` has an extra `nv` dim. Several coords sit on (x,y,z) subsets.
+        let ds = make_dataset(
+            "incompatible",
+            vec![
+                ("temp", arr(&["x", "y", "z"]).await),
+                ("bnds", arr(&["y", "nv"]).await),
+                ("x", arr(&["x"]).await),
+                ("y", arr(&["y"]).await),
+                ("z", arr(&["z"]).await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["x".to_string(), "y".to_string(), "z".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_tie_on_count_prefers_higher_dimensionality() {
+        // Two incompatible groups retaining the same number of variables, but
+        // one is higher-dimensional → it should win.
+        let ds = make_dataset(
+            "tie",
+            vec![
+                ("a3", arr(&["a", "b", "c"]).await),
+                ("d2", arr(&["d", "e"]).await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_full_tie_is_deterministic_first_encountered() {
+        // Equal variable count and equal dimensionality → first-encountered wins.
+        let ds = make_dataset(
+            "fulltie",
+            vec![("first", arr(&["a", "b"]).await), ("second", arr(&["c", "d"]).await)],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_all_scalar_returns_none() {
+        let scalar = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![1.0],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let ds = make_dataset("scalars", vec![("attr", Arc::new(scalar))]).await;
+        assert_eq!(ds.default_broadcast_dimensions(), None);
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_empty_dataset_returns_none() {
+        let ds = make_dataset("empty", vec![]).await;
+        assert_eq!(ds.default_broadcast_dimensions(), None);
+    }
+
+    #[tokio::test]
+    async fn test_any_default_dims_ragged_returns_none() {
+        let ds = make_ragged_dataset().await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+        assert_eq!(any.default_broadcast_dimensions(), None);
+    }
+
+    #[tokio::test]
+    async fn test_any_default_dims_regular_delegates() {
+        let ds = make_dataset(
+            "incompatible",
+            vec![
+                ("temp", arr(&["x", "y", "z"]).await),
+                ("bnds", arr(&["y", "nv"]).await),
+            ],
+        )
+        .await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+        assert_eq!(
+            any.default_broadcast_dimensions(),
+            Some(vec!["x".to_string(), "y".to_string(), "z".to_string()])
+        );
     }
 }
