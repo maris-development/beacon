@@ -257,7 +257,12 @@ impl NetCDFOpener {
                 ))
             })?;
 
-        // Apply dimension projection before deriving the file schema.
+        // Apply dimension projection before deriving the file schema. When no
+        // explicit dimensions were requested, fall back to the dataset's
+        // auto-selected default (matching `fetch_schema`). No log label here:
+        // this runs per file/partition, so logging would spam.
+        let read_dimensions =
+            beacon_nd_array::dataset::resolve_read_dimensions(&dataset, read_dimensions, None);
         let dataset = if let Some(dims) = read_dimensions {
             let proj = DatasetProjection {
                 dimension_projection: Some(dims),

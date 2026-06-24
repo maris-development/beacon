@@ -13,7 +13,9 @@ use beacon_common::listing_url::parse_listing_table_url;
 use beacon_datafusion_ext::file_collection::FileCollection;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use datafusion::{
-    catalog::TableProvider, datasource::listing::ListingTableUrl, error::DataFusionError,
+    catalog::TableProvider,
+    datasource::{file_format::FileFormatFactory, listing::ListingTableUrl},
+    error::DataFusionError,
     prelude::SessionContext,
 };
 use futures::StreamExt;
@@ -87,6 +89,7 @@ pub async fn list_datasets(
 /// the file format from the extension and reading the matching files.
 pub async fn list_dataset_schema(
     session_ctx: &SessionContext,
+    file_formats: &[Arc<dyn FileFormatFactoryExt>],
     file_pattern: &str,
 ) -> datafusion::error::Result<SchemaRef> {
     let session_state = session_ctx.state();
@@ -109,8 +112,16 @@ pub async fn list_dataset_schema(
     tracing::debug!("Interpreted file extension: {}", extension);
     let listing_url = create_listing_url(file_pattern.to_string())?;
 
-    let file_format_factory = session_state
-        .get_file_format_factory(&extension)
+    // Resolve the format from the raw filename extension. The session registry
+    // keys each format only under its canonical extension, so aliases (e.g.
+    // `.tif` for the `tiff` format) are matched against each factory's declared
+    // `file_extensions()` first, falling back to the registry for anything not
+    // in the format list.
+    let file_format_factory = file_formats
+        .iter()
+        .find(|factory| factory.file_extensions().iter().any(|ext| ext == &extension))
+        .map(|factory| factory.clone() as Arc<dyn FileFormatFactory>)
+        .or_else(|| session_state.get_file_format_factory(&extension))
         .ok_or_else(|| {
             DataFusionError::Plan(format!("No file format reader found for {}", extension))
         })?;

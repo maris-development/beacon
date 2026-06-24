@@ -625,7 +625,10 @@ impl Runtime {
     }
 
     pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {
-        Ok(beacon_data_lake::list_dataset_schema(&self.session_ctx, &file).await?)
+        Ok(
+            beacon_data_lake::list_dataset_schema(&self.session_ctx, &self.file_formats, &file)
+                .await?,
+        )
     }
 
     pub async fn list_dataset_schema_view(&self, file: String) -> anyhow::Result<SchemaView> {

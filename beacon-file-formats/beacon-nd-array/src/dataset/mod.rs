@@ -66,6 +66,122 @@ impl Dataset {
         })
     }
 
+    /// Compute a broadcast-compatible *default* dimension set for `SELECT *`
+    /// style reads, used when no explicit dimensions were requested.
+    ///
+    /// A regular dataset combines all of its variables into a single Arrow
+    /// table by broadcasting each one onto the dimensions of the
+    /// highest-dimensionality variable. When variables live on mutually
+    /// incompatible dimension sets (e.g. `temp(time,lat,lon)` alongside a CF
+    /// bounds variable `lat_bnds(lat,nv)`) that broadcast cannot succeed.
+    ///
+    /// This picks the variable dimension set that, in priority order, (1) is
+    /// non-empty — never a grid whose dimension sizes multiply to zero rows when a
+    /// non-empty alternative exists — (2) retains the **most** variables, (3) is the
+    /// native dimension set of the most variables, (4) has the largest data volume,
+    /// and finally (5) was encountered first, for determinism. Projecting the dataset
+    /// to the returned set is guaranteed to be broadcast-safe: the set is itself some
+    /// variable's dimensions, so that variable survives and becomes the
+    /// max-dimensionality array, and every other survivor has dimensions that are a
+    /// subset of it.
+    ///
+    /// Returns `None` when no narrowing is needed — i.e. every variable already
+    /// broadcasts onto the highest-dimensionality variable — so callers can
+    /// skip projection entirely.
+    pub fn default_broadcast_dimensions(&self) -> Option<Vec<String>> {
+        // Highest-dimensionality array's dimension set.
+        let max_dims = self
+            .arrays
+            .values()
+            .max_by_key(|array| array.dimensions().len())
+            .map(|array| array.dimensions())?;
+
+        // Already broadcast-safe: every variable's dims fit inside `max_dims`.
+        let needs_narrowing = self.arrays.values().any(|array| {
+            !array
+                .dimensions()
+                .iter()
+                .all(|dim| max_dims.contains(dim))
+        });
+        if !needs_narrowing {
+            return None;
+        }
+
+        // Candidate targets: each variable's (non-empty) dimension set, deduped
+        // in first-encountered order.
+        let mut candidates: Vec<Vec<String>> = Vec::new();
+        for array in self.arrays.values() {
+            let dims = array.dimensions();
+            if dims.is_empty() {
+                continue;
+            }
+            if !candidates.iter().any(|c| c == &dims) {
+                candidates.push(dims);
+            }
+        }
+
+        // Only *gridded* variables (those with at least one dimension) drive the
+        // choice. Scalars — including every NetCDF attribute, which is surfaced as a
+        // scalar `<var>.<attr>` array — broadcast onto every candidate equally, so
+        // they only inflate the score by a constant and obscure ties. Excluding them
+        // makes the score mean what it says: how many data variables a grid retains.
+        let score = |c: &[String]| -> usize {
+            self.arrays
+                .values()
+                .filter(|array| {
+                    let dims = array.dimensions();
+                    !dims.is_empty() && dims.iter().all(|d| c.contains(d))
+                })
+                .count()
+        };
+        // First tie-break: prefer the grid that is the *native* dimension set of the
+        // most variables (an exact match). On a file like an Argo profile this picks
+        // the data grid (e.g. `N_PROF × N_LEVELS`, home of PRES/TEMP/PSAL) over an
+        // equally scoring bookkeeping grid (e.g. `N_HISTORY × N_PROF × DATE_TIME`, home
+        // of a single HISTORY variable): both retain every `N_PROF`-only variable, so
+        // the count alone ties, but the data grid carries far more variables on its own.
+        let exact_count = |c: &[String]| -> usize {
+            self.arrays
+                .values()
+                .filter(|array| array.dimensions() == c)
+                .count()
+        };
+        // Number of rows the grid materialises — the product of its dimension sizes.
+        // A grid with a zero-length dimension (e.g. an unlimited `N_HISTORY` that is
+        // currently empty) yields 0 rows: selecting it would broadcast the whole table
+        // down to nothing. `u128` so large grids cannot overflow the product.
+        let grid_rows = |c: &[String]| -> u128 {
+            c.iter()
+                .map(|d| self.dimensions.get(d).copied().unwrap_or(0) as u128)
+                .product()
+        };
+        // Selection key, compared lexicographically, larger wins:
+        //   1. non-empty before empty — never auto-pick a grid that yields 0 rows when
+        //      a non-empty alternative exists, even if the empty grid scores higher;
+        //   2. most data variables retained (score);
+        //   3. native home of the most variables (exact_count);
+        //   4. largest data volume (grid_rows) — a principled stand-in for the old
+        //      "higher dimensionality" tie-break;
+        //   5. first-encountered order (equal keys keep the earlier candidate) for
+        //      determinism.
+        let mut best: Option<(bool, usize, usize, u128, Vec<String>)> = None;
+        for candidate in candidates {
+            let rows = grid_rows(&candidate);
+            let key = (rows > 0, score(&candidate), exact_count(&candidate), rows);
+            let is_better = match &best {
+                // Strictly greater key wins; equal keys keep the earlier candidate.
+                Some((b_nonempty, b_score, b_exact, b_rows, _)) => {
+                    key > (*b_nonempty, *b_score, *b_exact, *b_rows)
+                }
+                None => true,
+            };
+            if is_better {
+                best = Some((key.0, key.1, key.2, key.3, candidate));
+            }
+        }
+        best.map(|(_, _, _, _, dims)| dims)
+    }
+
     pub fn project(&self, indices: &[usize]) -> anyhow::Result<Dataset> {
         let mut arrays = indexmap::IndexMap::new();
         for &index in indices {
@@ -102,6 +218,55 @@ impl Dataset {
             DatasetType::Regular
         }
     }
+}
+
+/// Resolve the dimension projection to apply to a freshly-opened dataset for a
+/// `SELECT *`-style read.
+///
+/// An explicit `read_dimensions` (e.g. a table-function argument or format
+/// option) always wins. When none is given, fall back to the dataset's
+/// auto-selected broadcast-compatible default (see
+/// [`AnyDataset::default_broadcast_dimensions`]) so that combining all variables
+/// into a single table cannot fail at the broadcast step for files whose
+/// variables live on mutually-incompatible dimension sets.
+///
+/// `None` means "apply no dimension projection" — explicit and default both
+/// absent (ragged datasets, or files that are already broadcast-safe).
+///
+/// When `log_label` is `Some(label)` and the default narrowing actually excludes
+/// variables, a single `info` line prefixed with `label` names them. Pass
+/// `Some(..)` only from schema inference (runs once per query) and `None` from
+/// the per-file execution path to avoid log spam.
+pub fn resolve_read_dimensions(
+    dataset: &AnyDataset,
+    read_dimensions: Option<Vec<String>>,
+    log_label: Option<&str>,
+) -> Option<Vec<String>> {
+    if let Some(dims) = read_dimensions {
+        return Some(dims);
+    }
+
+    let default_dims = dataset.default_broadcast_dimensions()?;
+
+    if let Some(label) = log_label {
+        let dropped: Vec<&String> = dataset
+            .dataset()
+            .arrays
+            .iter()
+            .filter(|(_, array)| !array.dimensions().iter().all(|d| default_dims.contains(d)))
+            .map(|(name, _)| name)
+            .collect();
+        if !dropped.is_empty() {
+            tracing::info!(
+                "{label}: SELECT * auto-selected dimensions {:?}; excluded variables {:?} \
+                 have incompatible dimensions and were omitted.",
+                default_dims,
+                dropped
+            );
+        }
+    }
+
+    Some(default_dims)
 }
 
 #[cfg(test)]
@@ -879,5 +1044,218 @@ mod tests {
         assert_eq!(ds.arrays.len(), 1);
         assert!(ds.get_array("beta").is_some());
         assert!(ds.get_array("alpha").is_none());
+    }
+
+    // ── default_broadcast_dimensions ─────────────────────────────────
+
+    /// Helper: f64 array with the given dims (shape filled with 1s).
+    async fn arr(dims: &[&str]) -> Arc<dyn NdArrayD> {
+        let shape: Vec<usize> = vec![1; dims.len()];
+        arr_shaped(dims, &shape).await
+    }
+
+    /// Helper: f64 array with the given dims and explicit shape (sizes per dim).
+    async fn arr_shaped(dims: &[&str], shape: &[usize]) -> Arc<dyn NdArrayD> {
+        let len: usize = shape.iter().product();
+        let dim_names: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
+        Arc::new(
+            NdArray::<f64>::try_new_from_vec_in_mem(vec![0.0; len], shape.to_vec(), dim_names, None)
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_already_safe_returns_none() {
+        // 2D var plus a 1D subset — already broadcast-safe.
+        let ds = make_dataset(
+            "safe",
+            vec![("grid", arr(&["x", "y"]).await), ("scale", arr(&["y"]).await)],
+        )
+        .await;
+        assert_eq!(ds.default_broadcast_dimensions(), None);
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_picks_group_with_most_variables() {
+        // `temp(x,y,z)` is the highest-dimensionality variable; a CF-bounds-style
+        // `bnds(y,nv)` has an extra `nv` dim. Several coords sit on (x,y,z) subsets.
+        let ds = make_dataset(
+            "incompatible",
+            vec![
+                ("temp", arr(&["x", "y", "z"]).await),
+                ("bnds", arr(&["y", "nv"]).await),
+                ("x", arr(&["x"]).await),
+                ("y", arr(&["y"]).await),
+                ("z", arr(&["z"]).await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["x".to_string(), "y".to_string(), "z".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_tie_prefers_larger_volume() {
+        // Two incompatible groups retaining the same number of variables and each
+        // the native grid of exactly one variable → the tie falls to data volume.
+        // `big` (10×10 = 100 rows) must win over `small` (2×2 = 4 rows) even though
+        // it is listed second, proving volume — not order — decides.
+        let ds = make_dataset(
+            "tie",
+            vec![
+                ("small", arr_shaped(&["c", "d"], &[2, 2]).await),
+                ("big", arr_shaped(&["a", "b"], &[10, 10]).await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_skips_empty_grid_for_nonempty_alternative() {
+        // The `hist × prof` grid is the native home of MORE variables (3 vs 1) but
+        // `hist` is a currently-empty unlimited dimension (size 0), so projecting to
+        // it would broadcast the table down to zero rows. The non-empty `prof × lev`
+        // grid must win despite its lower variable count.
+        let ds = make_dataset(
+            "empty-history",
+            vec![
+                ("history_a", arr_shaped(&["hist", "prof"], &[0, 5]).await),
+                ("history_b", arr_shaped(&["hist", "prof"], &[0, 5]).await),
+                ("history_c", arr_shaped(&["hist", "prof"], &[0, 5]).await),
+                ("pres", arr_shaped(&["prof", "lev"], &[5, 3]).await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["prof".to_string(), "lev".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_tie_on_count_prefers_native_data_grid() {
+        // Mirrors an Argo profile file: a `prof × levels` data grid (many
+        // variables) and a `hist × prof × time` bookkeeping grid (one variable)
+        // both retain every scalar and `prof`-only variable, so they tie on
+        // total count. The data grid — native home of the most variables — must
+        // win, even though the bookkeeping grid is higher-dimensional.
+        //
+        // Counts are balanced so the two grids tie on total retained variables:
+        //   data grid `prof × levels`     : 1 shared `prof` + 3 exact          = 4
+        //   bookkeeping `hist × prof × time`: 1 shared `prof` + 1 `time`
+        //                                     + 1 `hist × prof` + 1 exact       = 4
+        // Exact-match count (3 vs 1) is the deciding tie-break.
+        let ds = make_dataset(
+            "argo-like",
+            vec![
+                // 3 measurement variables share the `prof × levels` data grid.
+                ("pres", arr(&["prof", "levels"]).await),
+                ("temp", arr(&["prof", "levels"]).await),
+                ("psal", arr(&["prof", "levels"]).await),
+                // Bookkeeping grid: 1 exact var + subset vars that pad its count.
+                ("history_date", arr(&["hist", "prof", "time"]).await),
+                ("history_institution", arr(&["hist", "prof"]).await),
+                ("date_creation", arr(&["time"]).await),
+                // A shared `prof`-only variable broadcasts onto either grid.
+                ("juld", arr(&["prof"]).await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["prof".to_string(), "levels".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_scalars_and_attributes_do_not_sway_choice() {
+        // Scalar entries (here standing in for NetCDF attributes like `temp.units`)
+        // broadcast onto every grid and must not tip the score. The data grid wins
+        // on gridded-variable count regardless of how many scalars surround it.
+        let scalar = || async {
+            NdArray::<f64>::try_new_from_vec_in_mem(vec![1.0], vec![1], vec![] as Vec<String>, None)
+                .map(|a| Arc::new(a) as Arc<dyn NdArrayD>)
+                .unwrap()
+        };
+        let ds = make_dataset(
+            "with-attrs",
+            vec![
+                ("temp", arr(&["prof", "levels"]).await),
+                ("psal", arr(&["prof", "levels"]).await),
+                ("history_date", arr(&["hist", "prof", "time"]).await),
+                ("temp.units", scalar().await),
+                ("psal.units", scalar().await),
+                (".Conventions", scalar().await),
+                (".title", scalar().await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["prof".to_string(), "levels".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_full_tie_is_deterministic_first_encountered() {
+        // Equal variable count and equal dimensionality → first-encountered wins.
+        let ds = make_dataset(
+            "fulltie",
+            vec![("first", arr(&["a", "b"]).await), ("second", arr(&["c", "d"]).await)],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_all_scalar_returns_none() {
+        let scalar = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![1.0],
+            vec![1],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let ds = make_dataset("scalars", vec![("attr", Arc::new(scalar))]).await;
+        assert_eq!(ds.default_broadcast_dimensions(), None);
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_empty_dataset_returns_none() {
+        let ds = make_dataset("empty", vec![]).await;
+        assert_eq!(ds.default_broadcast_dimensions(), None);
+    }
+
+    #[tokio::test]
+    async fn test_any_default_dims_ragged_returns_none() {
+        let ds = make_ragged_dataset().await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+        assert_eq!(any.default_broadcast_dimensions(), None);
+    }
+
+    #[tokio::test]
+    async fn test_any_default_dims_regular_delegates() {
+        let ds = make_dataset(
+            "incompatible",
+            vec![
+                ("temp", arr(&["x", "y", "z"]).await),
+                ("bnds", arr(&["y", "nv"]).await),
+            ],
+        )
+        .await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+        assert_eq!(
+            any.default_broadcast_dimensions(),
+            Some(vec!["x".to_string(), "y".to_string(), "z".to_string()])
+        );
     }
 }
