@@ -75,12 +75,15 @@ impl Dataset {
     /// incompatible dimension sets (e.g. `temp(time,lat,lon)` alongside a CF
     /// bounds variable `lat_bnds(lat,nv)`) that broadcast cannot succeed.
     ///
-    /// This picks the variable dimension set that retains the **most**
-    /// variables (tie-break: higher dimensionality, then first-encountered
-    /// order for determinism). Projecting the dataset to the returned set is
-    /// guaranteed to be broadcast-safe: the set is itself some variable's
-    /// dimensions, so that variable survives and becomes the max-dimensionality
-    /// array, and every other survivor has dimensions that are a subset of it.
+    /// This picks the variable dimension set that, in priority order, (1) is
+    /// non-empty — never a grid whose dimension sizes multiply to zero rows when a
+    /// non-empty alternative exists — (2) retains the **most** variables, (3) is the
+    /// native dimension set of the most variables, (4) has the largest data volume,
+    /// and finally (5) was encountered first, for determinism. Projecting the dataset
+    /// to the returned set is guaranteed to be broadcast-safe: the set is itself some
+    /// variable's dimensions, so that variable survives and becomes the
+    /// max-dimensionality array, and every other survivor has dimensions that are a
+    /// subset of it.
     ///
     /// Returns `None` when no narrowing is needed — i.e. every variable already
     /// broadcasts onto the highest-dimensionality variable — so callers can
@@ -117,28 +120,66 @@ impl Dataset {
             }
         }
 
-        // Score each candidate by how many variables it retains (variables whose
-        // dimensions are all contained in the candidate). Pick the highest score,
-        // breaking ties by larger dimensionality, then first-encountered order.
+        // Only *gridded* variables (those with at least one dimension) drive the
+        // choice. Scalars — including every NetCDF attribute, which is surfaced as a
+        // scalar `<var>.<attr>` array — broadcast onto every candidate equally, so
+        // they only inflate the score by a constant and obscure ties. Excluding them
+        // makes the score mean what it says: how many data variables a grid retains.
         let score = |c: &[String]| -> usize {
             self.arrays
                 .values()
-                .filter(|array| array.dimensions().iter().all(|d| c.contains(d)))
+                .filter(|array| {
+                    let dims = array.dimensions();
+                    !dims.is_empty() && dims.iter().all(|d| c.contains(d))
+                })
                 .count()
         };
-        let mut best: Option<(usize, usize, Vec<String>)> = None;
+        // First tie-break: prefer the grid that is the *native* dimension set of the
+        // most variables (an exact match). On a file like an Argo profile this picks
+        // the data grid (e.g. `N_PROF × N_LEVELS`, home of PRES/TEMP/PSAL) over an
+        // equally scoring bookkeeping grid (e.g. `N_HISTORY × N_PROF × DATE_TIME`, home
+        // of a single HISTORY variable): both retain every `N_PROF`-only variable, so
+        // the count alone ties, but the data grid carries far more variables on its own.
+        let exact_count = |c: &[String]| -> usize {
+            self.arrays
+                .values()
+                .filter(|array| array.dimensions() == c)
+                .count()
+        };
+        // Number of rows the grid materialises — the product of its dimension sizes.
+        // A grid with a zero-length dimension (e.g. an unlimited `N_HISTORY` that is
+        // currently empty) yields 0 rows: selecting it would broadcast the whole table
+        // down to nothing. `u128` so large grids cannot overflow the product.
+        let grid_rows = |c: &[String]| -> u128 {
+            c.iter()
+                .map(|d| self.dimensions.get(d).copied().unwrap_or(0) as u128)
+                .product()
+        };
+        // Selection key, compared lexicographically, larger wins:
+        //   1. non-empty before empty — never auto-pick a grid that yields 0 rows when
+        //      a non-empty alternative exists, even if the empty grid scores higher;
+        //   2. most data variables retained (score);
+        //   3. native home of the most variables (exact_count);
+        //   4. largest data volume (grid_rows) — a principled stand-in for the old
+        //      "higher dimensionality" tie-break;
+        //   5. first-encountered order (equal keys keep the earlier candidate) for
+        //      determinism.
+        let mut best: Option<(bool, usize, usize, u128, Vec<String>)> = None;
         for candidate in candidates {
-            let key = (score(&candidate), candidate.len());
+            let rows = grid_rows(&candidate);
+            let key = (rows > 0, score(&candidate), exact_count(&candidate), rows);
             let is_better = match &best {
                 // Strictly greater key wins; equal keys keep the earlier candidate.
-                Some((best_score, best_len, _)) => key > (*best_score, *best_len),
+                Some((b_nonempty, b_score, b_exact, b_rows, _)) => {
+                    key > (*b_nonempty, *b_score, *b_exact, *b_rows)
+                }
                 None => true,
             };
             if is_better {
-                best = Some((key.0, key.1, candidate));
+                best = Some((key.0, key.1, key.2, key.3, candidate));
             }
         }
-        best.map(|(_, _, dims)| dims)
+        best.map(|(_, _, _, _, dims)| dims)
     }
 
     pub fn project(&self, indices: &[usize]) -> anyhow::Result<Dataset> {
@@ -1010,10 +1051,16 @@ mod tests {
     /// Helper: f64 array with the given dims (shape filled with 1s).
     async fn arr(dims: &[&str]) -> Arc<dyn NdArrayD> {
         let shape: Vec<usize> = vec![1; dims.len()];
+        arr_shaped(dims, &shape).await
+    }
+
+    /// Helper: f64 array with the given dims and explicit shape (sizes per dim).
+    async fn arr_shaped(dims: &[&str], shape: &[usize]) -> Arc<dyn NdArrayD> {
         let len: usize = shape.iter().product();
         let dim_names: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
         Arc::new(
-            NdArray::<f64>::try_new_from_vec_in_mem(vec![0.0; len], shape, dim_names, None).unwrap(),
+            NdArray::<f64>::try_new_from_vec_in_mem(vec![0.0; len], shape.to_vec(), dim_names, None)
+                .unwrap(),
         )
     }
 
@@ -1050,20 +1097,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_dims_tie_on_count_prefers_higher_dimensionality() {
-        // Two incompatible groups retaining the same number of variables, but
-        // one is higher-dimensional → it should win.
+    async fn test_default_dims_tie_prefers_larger_volume() {
+        // Two incompatible groups retaining the same number of variables and each
+        // the native grid of exactly one variable → the tie falls to data volume.
+        // `big` (10×10 = 100 rows) must win over `small` (2×2 = 4 rows) even though
+        // it is listed second, proving volume — not order — decides.
         let ds = make_dataset(
             "tie",
             vec![
-                ("a3", arr(&["a", "b", "c"]).await),
-                ("d2", arr(&["d", "e"]).await),
+                ("small", arr_shaped(&["c", "d"], &[2, 2]).await),
+                ("big", arr_shaped(&["a", "b"], &[10, 10]).await),
             ],
         )
         .await;
         assert_eq!(
             ds.default_broadcast_dimensions(),
-            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_skips_empty_grid_for_nonempty_alternative() {
+        // The `hist × prof` grid is the native home of MORE variables (3 vs 1) but
+        // `hist` is a currently-empty unlimited dimension (size 0), so projecting to
+        // it would broadcast the table down to zero rows. The non-empty `prof × lev`
+        // grid must win despite its lower variable count.
+        let ds = make_dataset(
+            "empty-history",
+            vec![
+                ("history_a", arr_shaped(&["hist", "prof"], &[0, 5]).await),
+                ("history_b", arr_shaped(&["hist", "prof"], &[0, 5]).await),
+                ("history_c", arr_shaped(&["hist", "prof"], &[0, 5]).await),
+                ("pres", arr_shaped(&["prof", "lev"], &[5, 3]).await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["prof".to_string(), "lev".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_tie_on_count_prefers_native_data_grid() {
+        // Mirrors an Argo profile file: a `prof × levels` data grid (many
+        // variables) and a `hist × prof × time` bookkeeping grid (one variable)
+        // both retain every scalar and `prof`-only variable, so they tie on
+        // total count. The data grid — native home of the most variables — must
+        // win, even though the bookkeeping grid is higher-dimensional.
+        //
+        // Counts are balanced so the two grids tie on total retained variables:
+        //   data grid `prof × levels`     : 1 shared `prof` + 3 exact          = 4
+        //   bookkeeping `hist × prof × time`: 1 shared `prof` + 1 `time`
+        //                                     + 1 `hist × prof` + 1 exact       = 4
+        // Exact-match count (3 vs 1) is the deciding tie-break.
+        let ds = make_dataset(
+            "argo-like",
+            vec![
+                // 3 measurement variables share the `prof × levels` data grid.
+                ("pres", arr(&["prof", "levels"]).await),
+                ("temp", arr(&["prof", "levels"]).await),
+                ("psal", arr(&["prof", "levels"]).await),
+                // Bookkeeping grid: 1 exact var + subset vars that pad its count.
+                ("history_date", arr(&["hist", "prof", "time"]).await),
+                ("history_institution", arr(&["hist", "prof"]).await),
+                ("date_creation", arr(&["time"]).await),
+                // A shared `prof`-only variable broadcasts onto either grid.
+                ("juld", arr(&["prof"]).await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["prof".to_string(), "levels".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_dims_scalars_and_attributes_do_not_sway_choice() {
+        // Scalar entries (here standing in for NetCDF attributes like `temp.units`)
+        // broadcast onto every grid and must not tip the score. The data grid wins
+        // on gridded-variable count regardless of how many scalars surround it.
+        let scalar = || async {
+            NdArray::<f64>::try_new_from_vec_in_mem(vec![1.0], vec![1], vec![] as Vec<String>, None)
+                .map(|a| Arc::new(a) as Arc<dyn NdArrayD>)
+                .unwrap()
+        };
+        let ds = make_dataset(
+            "with-attrs",
+            vec![
+                ("temp", arr(&["prof", "levels"]).await),
+                ("psal", arr(&["prof", "levels"]).await),
+                ("history_date", arr(&["hist", "prof", "time"]).await),
+                ("temp.units", scalar().await),
+                ("psal.units", scalar().await),
+                (".Conventions", scalar().await),
+                (".title", scalar().await),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ds.default_broadcast_dimensions(),
+            Some(vec!["prof".to_string(), "levels".to_string()])
         );
     }
 
