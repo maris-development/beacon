@@ -1,13 +1,18 @@
 //! Low-level Lance dataset writes, shared by create / insert / replace.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::record_batch::RecordBatchIterator;
-use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::{Dataset, WriteMode, WriteParams};
+use arrow::error::ArrowError;
+use datafusion::error::DataFusionError;
+use datafusion::execution::SendableRecordBatchStream;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use futures::StreamExt;
+use lance::dataset::write::InsertBuilder;
+use lance::dataset::{WriteMode, WriteParams};
 use lance::session::Session;
 
 /// Map an Arrow data type to one Lance can store. Lance 7.x does not support the
@@ -37,39 +42,40 @@ pub(crate) fn lance_compatible_schema(schema: &Schema) -> SchemaRef {
     Arc::new(Schema::new(fields))
 }
 
-/// Cast `batches` to `target` (only the differing columns are cast).
-fn coerce_batches(
-    batches: Vec<RecordBatch>,
-    target: &SchemaRef,
-) -> anyhow::Result<Vec<RecordBatch>> {
-    batches
-        .into_iter()
-        .map(|batch| {
-            let columns = batch
-                .columns()
-                .iter()
-                .zip(target.fields())
-                .map(|(column, field)| {
-                    if column.data_type() == field.data_type() {
-                        Ok(column.clone())
-                    } else {
-                        cast(column, field.data_type())
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(RecordBatch::try_new(target.clone(), columns)?)
+/// Cast a single batch to `target` (only the differing columns are cast).
+fn coerce_batch(batch: &RecordBatch, target: &SchemaRef) -> Result<RecordBatch, ArrowError> {
+    let columns = batch
+        .columns()
+        .iter()
+        .zip(target.fields())
+        .map(|(column, field)| {
+            if column.data_type() == field.data_type() {
+                Ok(column.clone())
+            } else {
+                cast(column, field.data_type())
+            }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    RecordBatch::try_new(target.clone(), columns)
 }
 
-/// How a batch of rows should be applied to a dataset.
+/// An empty (zero-row) stream carrying `schema` — used to create an empty
+/// dataset that only establishes the schema.
+pub fn empty_stream(schema: SchemaRef) -> SendableRecordBatchStream {
+    Box::pin(RecordBatchStreamAdapter::new(
+        schema,
+        futures::stream::empty::<Result<RecordBatch, DataFusionError>>(),
+    ))
+}
+
+/// How rows should be applied to a dataset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteKind {
     /// Create a new dataset (errors if one already exists at the location).
     Create,
     /// Append rows to an existing dataset.
     Append,
-    /// Replace all rows: a new dataset version containing only `batches`.
+    /// Replace all rows: a new dataset version containing only the streamed rows.
     Overwrite,
 }
 
@@ -83,51 +89,44 @@ impl From<WriteKind> for WriteMode {
     }
 }
 
-/// Write `batches` to the Lance dataset at `uri` (a `beacon-tables://` URI),
-/// resolved through `session`'s object-store registry. Returns the rows written.
+/// Stream `rows` into the Lance dataset at `uri` (a `beacon-tables://` URI),
+/// resolved through `session`'s object-store registry. The input stream is fed
+/// directly into Lance's [`InsertBuilder`] (no full-table buffering); each batch
+/// is coerced to a Lance-writable schema (Arrow view types widened) on the fly.
+/// Returns the number of rows written.
 ///
-/// `Create`/`Overwrite` go through `Dataset::write`; `Append` opens the existing
-/// dataset and appends. Callers hold the dataset's
-/// [`LanceWarehouse`](crate::warehouse::LanceWarehouse) write lock across the call.
-pub async fn write_batches(
+/// Callers hold the dataset's [`LanceWarehouse`](crate::warehouse::LanceWarehouse)
+/// write lock across the call.
+pub async fn write_stream(
     uri: &str,
     session: Arc<Session>,
-    schema: SchemaRef,
-    batches: Vec<RecordBatch>,
+    rows: SendableRecordBatchStream,
     kind: WriteKind,
 ) -> anyhow::Result<u64> {
-    let num_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+    let target = lance_compatible_schema(&rows.schema());
 
-    // Lance can't store Arrow view types; coerce the schema and data to a
-    // Lance-writable form before writing.
-    let target = lance_compatible_schema(&schema);
-    let batches = coerce_batches(batches, &target)?;
+    // Count rows + coerce view types as batches stream past, without collecting.
+    let written = Arc::new(AtomicU64::new(0));
+    let counter = written.clone();
+    let coerce_target = target.clone();
+    let coerced = rows.map(move |batch| {
+        let batch = batch?;
+        counter.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+        coerce_batch(&batch, &coerce_target).map_err(DataFusionError::from)
+    });
+    let source: SendableRecordBatchStream =
+        Box::pin(RecordBatchStreamAdapter::new(target, coerced));
 
-    match kind {
-        WriteKind::Append => {
-            let mut dataset = DatasetBuilder::from_uri(uri)
-                .with_session(session)
-                .load()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
-            let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), target);
-            dataset
-                .append(reader, None)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to append to Lance dataset '{uri}': {e}"))?;
-        }
-        WriteKind::Create | WriteKind::Overwrite => {
-            let params = WriteParams {
-                mode: kind.into(),
-                session: Some(session),
-                ..Default::default()
-            };
-            let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), target);
-            Dataset::write(reader, uri, Some(params))
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to write Lance dataset '{uri}': {e}"))?;
-        }
-    }
+    let params = WriteParams {
+        mode: kind.into(),
+        session: Some(session),
+        ..Default::default()
+    };
+    InsertBuilder::new(uri)
+        .with_params(&params)
+        .execute_stream(source)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to write Lance dataset '{uri}': {e}"))?;
 
-    Ok(num_rows)
+    Ok(written.load(Ordering::Relaxed))
 }

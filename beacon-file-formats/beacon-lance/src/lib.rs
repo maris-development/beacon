@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 use datafusion::execution::SendableRecordBatchStream;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt};
 
 pub use alter::{alter_table, SchemaChange};
@@ -54,8 +54,15 @@ pub async fn create_lance_table(
     {
         let lock = warehouse.lock(&uri);
         let _guard = lock.lock().await;
-        io::write_batches(&uri, warehouse.session(), schema.clone(), Vec::new(), WriteKind::Create)
-            .await?;
+        // Create an empty dataset that just establishes the schema; CTAS inserts
+        // rows afterwards through the streaming insert path.
+        io::write_stream(
+            &uri,
+            warehouse.session(),
+            io::empty_stream(schema.clone()),
+            WriteKind::Create,
+        )
+        .await?;
     }
 
     let definition = LanceTableDefinition::new(name, namespace.to_vec(), uri);
@@ -100,14 +107,9 @@ pub async fn replace_table_contents(
 ) -> anyhow::Result<()> {
     tracing::info!(uri = %uri, "replacing Lance table contents");
 
-    let schema = new_rows.schema();
-    let batches = new_rows
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to read replacement rows: {e}"))?;
     let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
-    io::write_batches(uri, warehouse.session(), schema, batches, WriteKind::Overwrite).await?;
+    io::write_stream(uri, warehouse.session(), new_rows, WriteKind::Overwrite).await?;
     Ok(())
 }
 

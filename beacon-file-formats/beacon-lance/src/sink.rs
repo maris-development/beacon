@@ -16,9 +16,8 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
-use futures::TryStreamExt;
 
-use crate::io::{write_batches, WriteKind};
+use crate::io::{write_stream, WriteKind};
 use crate::warehouse::LanceWarehouse;
 
 /// Sink that applies a stream of batches to a single Lance dataset (by URI).
@@ -71,18 +70,12 @@ impl DataSink for LanceDataSink {
         data: SendableRecordBatchStream,
         _context: &Arc<TaskContext>,
     ) -> DataFusionResult<u64> {
-        let batches = data.try_collect::<Vec<_>>().await?;
-        // Serialize writers to this dataset across the (async) write.
+        // Serialize writers to this dataset across the (async) write, then stream
+        // the input directly into Lance — no full-table buffering.
         let lock = self.warehouse.lock(&self.uri);
         let _guard = lock.lock().await;
-        write_batches(
-            &self.uri,
-            self.warehouse.session(),
-            self.schema.clone(),
-            batches,
-            self.kind,
-        )
-        .await
-        .map_err(|e| DataFusionError::External(e.into()))
+        write_stream(&self.uri, self.warehouse.session(), data, self.kind)
+            .await
+            .map_err(|e| DataFusionError::External(e.into()))
     }
 }
