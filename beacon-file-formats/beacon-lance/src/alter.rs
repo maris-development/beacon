@@ -5,13 +5,13 @@
 //! (rename / cast). Each change is its own atomic dataset version, so existing
 //! data is preserved without a table rebuild — unlike the Iceberg path.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-use lance::dataset::{ColumnAlteration, Dataset, NewColumnTransform};
+use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::{ColumnAlteration, NewColumnTransform};
 
-use crate::warehouse::{self, LanceWarehouse};
+use crate::warehouse::LanceWarehouse;
 
 /// A single schema change to apply to a Lance table.
 #[derive(Debug, Clone)]
@@ -26,21 +26,21 @@ pub enum SchemaChange {
     AlterColumnType { name: String, data_type: DataType },
 }
 
-/// Apply `changes` in order to the Lance table at `location`. Serialized against
-/// concurrent writers via the warehouse's per-location lock.
+/// Apply `changes` in order to the Lance table at `uri`. Serialized against
+/// concurrent writers via the warehouse's per-dataset lock.
 pub async fn alter_table(
     warehouse: &LanceWarehouse,
-    location: &str,
+    uri: &str,
     changes: &[SchemaChange],
 ) -> anyhow::Result<()> {
-    let path = Path::new(location);
-    tracing::info!(location = %location, changes = changes.len(), "altering Lance table");
+    tracing::info!(uri = %uri, changes = changes.len(), "altering Lance table");
 
-    let lock = warehouse.lock(path);
+    let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
-    let uri = warehouse::location_uri(path);
-    let mut dataset = Dataset::open(&uri)
+    let mut dataset = DatasetBuilder::from_uri(uri)
+        .with_session(warehouse.session())
+        .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
 

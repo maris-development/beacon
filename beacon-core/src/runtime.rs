@@ -69,6 +69,7 @@ impl Runtime {
         let session_ctx = Self::init_ctx(
             memory_pool,
             object_stores.datasets.clone(),
+            object_stores.tables.clone(),
             config.clone(),
             crawler_handle.clone(),
         )?;
@@ -169,16 +170,15 @@ impl Runtime {
     fn init_ctx(
         memory_pool: Arc<FairSpillPool>,
         datasets_store: Arc<beacon_object_storage::DatasetsStore>,
+        tables_store: Arc<dyn object_store::ObjectStore>,
         app_config: Arc<beacon_config::Config>,
         crawler_handle: beacon_data_lake::crawler::CrawlerManagerHandle,
     ) -> anyhow::Result<Arc<SessionContext>> {
-        // Runtime-scoped Lance warehouse, threaded through the session so
-        // managed-table CRUD/index ops stay isolated per runtime — no process
-        // globals. Rooted in the (always-local) tables directory, alongside each
-        // table's `table.json`; S3 only ever applies to the datasets store.
-        let lance_warehouse = Arc::new(beacon_lance::LanceWarehouse::new(
-            app_config.storage.tables_dir.join("lance"),
-        ));
+        // Runtime-scoped Lance warehouse over beacon's tables object store,
+        // threaded through the session so managed-table CRUD/index ops stay
+        // isolated per runtime — no process globals. The tables store is the same
+        // (always-local) one used for each table's `table.json`.
+        let lance_warehouse = Arc::new(beacon_lance::LanceWarehouse::new(tables_store));
 
         let mut config = SessionConfig::new()
             .with_batch_size(app_config.runtime.batch_size)

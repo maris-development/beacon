@@ -2285,7 +2285,10 @@ dependencies = [
  "datafusion",
  "futures",
  "lance",
+ "lance-core",
  "lance-index",
+ "lance-io",
+ "object_store 0.13.2",
  "once_cell",
  "parking_lot",
  "serde",
@@ -2295,6 +2298,7 @@ dependencies = [
  "tokio",
  "tracing",
  "typetag",
+ "url",
 ]
 
 [[package]]

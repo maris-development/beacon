@@ -7,7 +7,6 @@
 //! visible. Writes go through a [`LanceDataSink`] (Lance's provider is read-only).
 
 use std::any::Any;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -19,8 +18,9 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
-use lance::dataset::Dataset;
+use lance::dataset::builder::DatasetBuilder;
 use lance::datafusion::LanceTableProvider;
+use lance::session::Session as LanceSession;
 
 use crate::definition::LanceTableDefinition;
 use crate::io::WriteKind;
@@ -54,7 +54,7 @@ impl LanceTable {
         definition: LanceTableDefinition,
         warehouse: Arc<LanceWarehouse>,
     ) -> anyhow::Result<Self> {
-        let provider = open_read_provider(&definition.location)
+        let provider = open_read_provider(&definition.location, warehouse.session())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open Lance table '{}': {e}", definition.name))?;
         Ok(Self::new(definition, provider.schema(), warehouse))
@@ -64,15 +64,17 @@ impl LanceTable {
     pub fn definition(&self) -> &LanceTableDefinition {
         &self.definition
     }
-
-    fn location(&self) -> PathBuf {
-        PathBuf::from(&self.definition.location)
-    }
 }
 
-/// Open the latest dataset version at `location` as a Lance read provider.
-async fn open_read_provider(location: &str) -> DataFusionResult<LanceTableProvider> {
-    let dataset = Dataset::open(location)
+/// Open the latest dataset version at `uri` (resolved through `session`'s
+/// object-store registry) as a Lance read provider.
+async fn open_read_provider(
+    uri: &str,
+    session: Arc<LanceSession>,
+) -> DataFusionResult<LanceTableProvider> {
+    let dataset = DatasetBuilder::from_uri(uri)
+        .with_session(session)
+        .load()
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
     Ok(LanceTableProvider::new(Arc::new(dataset), false, false))
@@ -100,7 +102,8 @@ impl TableProvider for LanceTable {
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         // Reopen to the latest version so scans observe prior inserts/replaces.
-        let provider = open_read_provider(&self.definition.location).await?;
+        let provider =
+            open_read_provider(&self.definition.location, self.warehouse.session()).await?;
         provider.scan(state, projection, filters, limit).await
     }
 
@@ -124,7 +127,7 @@ impl TableProvider for LanceTable {
             InsertOp::Overwrite | InsertOp::Replace => WriteKind::Overwrite,
         };
         let sink = Arc::new(LanceDataSink::new(
-            self.location(),
+            self.definition.location.clone(),
             self.schema.clone(),
             kind,
             self.warehouse.clone(),

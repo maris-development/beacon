@@ -194,6 +194,24 @@ pub(crate) async fn execute_statement_plan(
 ) -> anyhow::Result<SendableRecordBatchStream> {
     use futures::TryStreamExt;
 
+    // Statements (e.g. `SET beacon.table_engine = '…'`) cannot be physical-planned;
+    // DataFusion applies them to the session via `execute_logical_plan`. Route them
+    // there so the session config actually changes, then drain the (empty) result.
+    if matches!(plan, LogicalPlan::Statement(_)) {
+        let schema: arrow::datatypes::SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
+        session_ctx
+            .execute_logical_plan(plan)
+            .await?
+            .collect()
+            .await?;
+        return Ok(Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::empty(),
+            ),
+        ));
+    }
+
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
     let stream = datafusion::physical_plan::execute_stream(physical_plan, session_ctx.task_ctx())?;
     let stream = stream_coalescer::coalesce_sql_stream(session_ctx, stream);

@@ -1,10 +1,11 @@
 //! Persisted definition for a beacon-managed Lance table.
 //!
 //! Serialized to `table.json` (via the typetag `TableDefinition` trait). Unlike
-//! Iceberg there is no catalog: the on-disk `location` is the source of truth, so
-//! it is persisted directly. On startup, `build_provider` reopens the dataset at
-//! that path; the Lance manifest — not the JSON — remains authoritative for the
-//! schema.
+//! Iceberg there is no catalog: the dataset `location` (a `beacon-tables://` URI
+//! into the tables object store) is the source of truth, so it is persisted
+//! directly. On startup, `build_provider` reopens the dataset at that URI through
+//! the runtime's warehouse; the Lance manifest — not the JSON — remains
+//! authoritative for the schema.
 
 use std::sync::Arc;
 
@@ -26,7 +27,7 @@ pub struct LanceTableDefinition {
     pub name: String,
     /// Namespace the table lives under (e.g. `["beacon"]`).
     pub namespace: Vec<String>,
-    /// Absolute on-disk location of the Lance dataset directory.
+    /// The dataset's `beacon-tables://` URI into the tables object store.
     pub location: String,
 }
 

@@ -1,15 +1,14 @@
 //! Low-level Lance dataset writes, shared by create / insert / replace.
 
 use std::sync::Arc;
-use std::path::Path;
 
 use arrow::array::RecordBatch;
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatchIterator;
+use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{Dataset, WriteMode, WriteParams};
-
-use crate::warehouse;
+use lance::session::Session;
 
 /// Map an Arrow data type to one Lance can store. Lance 7.x does not support the
 /// Arrow "view" types (`Utf8View`/`BinaryView`) that DataFusion 53 produces for
@@ -84,20 +83,20 @@ impl From<WriteKind> for WriteMode {
     }
 }
 
-/// Write `batches` to the Lance dataset at `location`. Returns the rows written.
+/// Write `batches` to the Lance dataset at `uri` (a `beacon-tables://` URI),
+/// resolved through `session`'s object-store registry. Returns the rows written.
 ///
 /// `Create`/`Overwrite` go through `Dataset::write`; `Append` opens the existing
-/// dataset and appends. The parent directory is created for `Create`. Callers are
-/// responsible for holding the location's [`LanceWarehouse`](crate::warehouse::LanceWarehouse)
-/// write lock across the call.
+/// dataset and appends. Callers hold the dataset's
+/// [`LanceWarehouse`](crate::warehouse::LanceWarehouse) write lock across the call.
 pub async fn write_batches(
-    location: &Path,
+    uri: &str,
+    session: Arc<Session>,
     schema: SchemaRef,
     batches: Vec<RecordBatch>,
     kind: WriteKind,
 ) -> anyhow::Result<u64> {
     let num_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
-    let uri = warehouse::location_uri(location);
 
     // Lance can't store Arrow view types; coerce the schema and data to a
     // Lance-writable form before writing.
@@ -106,7 +105,9 @@ pub async fn write_batches(
 
     match kind {
         WriteKind::Append => {
-            let mut dataset = Dataset::open(&uri)
+            let mut dataset = DatasetBuilder::from_uri(uri)
+                .with_session(session)
+                .load()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
             let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), target);
@@ -116,17 +117,13 @@ pub async fn write_batches(
                 .map_err(|e| anyhow::anyhow!("Failed to append to Lance dataset '{uri}': {e}"))?;
         }
         WriteKind::Create | WriteKind::Overwrite => {
-            if let Some(parent) = location.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    anyhow::anyhow!("Failed to create Lance table directory '{}': {e}", parent.display())
-                })?;
-            }
             let params = WriteParams {
                 mode: kind.into(),
+                session: Some(session),
                 ..Default::default()
             };
             let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), target);
-            Dataset::write(reader, &uri, Some(params))
+            Dataset::write(reader, uri, Some(params))
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to write Lance dataset '{uri}': {e}"))?;
         }

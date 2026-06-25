@@ -1,8 +1,9 @@
 //! Lance integration for beacon managed tables.
 //!
-//! Provides a **local-filesystem**, columnar, transactionally-versioned table
-//! engine for beacon's `CREATE TABLE`:
-//! - a local [`warehouse`] (raw paths, no object store),
+//! Provides a columnar, transactionally-versioned table engine for beacon's
+//! `CREATE TABLE`, backed by beacon's tables object store:
+//! - a [`warehouse`] that routes Lance through that object store (via a
+//!   `beacon-tables://` scheme + [`warehouse::LanceWarehouse`]),
 //! - a [`LanceTable`] `TableProvider` wrapper, and
 //! - a [`LanceTableDefinition`] for persisting tables as `table.json`.
 //!
@@ -11,7 +12,7 @@
 //! `UPDATE`; discovery rebuilds providers via the definition's `build_provider`.
 //!
 //! Lance's atomic, versioned commits give readers a consistent snapshot with no
-//! torn reads; a per-location write lock serializes writers.
+//! torn reads; a per-dataset write lock serializes writers.
 
 pub mod alter;
 pub mod definition;
@@ -21,12 +22,12 @@ pub mod provider;
 pub mod sink;
 pub mod warehouse;
 
-use std::path::Path;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 use datafusion::execution::SendableRecordBatchStream;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
+use object_store::{ObjectStore, ObjectStoreExt};
 
 pub use alter::{alter_table, SchemaChange};
 pub use definition::LanceTableDefinition;
@@ -44,38 +45,46 @@ pub async fn create_lance_table(
     name: &str,
     arrow_schema: &ArrowSchema,
 ) -> anyhow::Result<LanceTable> {
-    let location = warehouse.table_location(namespace, name);
-    tracing::info!(
-        namespace = ?namespace,
-        table = name,
-        location = %location.display(),
-        "creating Lance table"
-    );
+    let uri = warehouse.table_uri(namespace, name);
+    tracing::info!(namespace = ?namespace, table = name, uri = %uri, "creating Lance table");
 
     // Store the Lance-writable schema (view types widened) so the provider's
-    // schema matches the on-disk dataset.
+    // schema matches the written dataset.
     let schema = io::lance_compatible_schema(arrow_schema);
     {
-        let lock = warehouse.lock(&location);
+        let lock = warehouse.lock(&uri);
         let _guard = lock.lock().await;
-        io::write_batches(&location, schema.clone(), Vec::new(), WriteKind::Create).await?;
+        io::write_batches(&uri, warehouse.session(), schema.clone(), Vec::new(), WriteKind::Create)
+            .await?;
     }
 
-    let definition =
-        LanceTableDefinition::new(name, namespace.to_vec(), warehouse::location_uri(&location));
+    let definition = LanceTableDefinition::new(name, namespace.to_vec(), uri);
     Ok(LanceTable::new(definition, schema, warehouse))
 }
 
-/// Drop a Lance table by removing its dataset directory.
-pub async fn drop_lance_table(warehouse: &LanceWarehouse, location: &str) -> anyhow::Result<()> {
-    let path = Path::new(location);
-    tracing::info!(location = %location, "dropping Lance table");
+/// Drop a Lance table by deleting all of its objects from the tables store.
+pub async fn drop_lance_table(warehouse: &LanceWarehouse, uri: &str) -> anyhow::Result<()> {
+    tracing::info!(uri = %uri, "dropping Lance table");
 
-    let lock = warehouse.lock(path);
+    let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
-    if path.exists() {
-        std::fs::remove_dir_all(path)
-            .map_err(|e| anyhow::anyhow!("Failed to remove Lance table '{location}': {e}"))?;
+
+    let prefix = LanceWarehouse::object_path(uri);
+    let store = warehouse.store();
+    let mut listing = store.list(Some(&prefix));
+    let mut locations = Vec::new();
+    while let Some(entry) = listing.next().await {
+        locations.push(
+            entry
+                .map_err(|e| anyhow::anyhow!("Failed to list Lance table files: {e}"))?
+                .location,
+        );
+    }
+    for location in locations {
+        store
+            .delete(&location)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to delete Lance table file: {e}"))?;
     }
     Ok(())
 }
@@ -86,20 +95,19 @@ pub async fn drop_lance_table(warehouse: &LanceWarehouse, location: &str) -> any
 /// match the predicate). An empty stream leaves an empty table.
 pub async fn replace_table_contents(
     warehouse: &LanceWarehouse,
-    location: &str,
+    uri: &str,
     new_rows: SendableRecordBatchStream,
 ) -> anyhow::Result<()> {
-    let path = Path::new(location);
-    tracing::info!(location = %location, "replacing Lance table contents");
+    tracing::info!(uri = %uri, "replacing Lance table contents");
 
     let schema = new_rows.schema();
     let batches = new_rows
         .try_collect::<Vec<_>>()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to read replacement rows: {e}"))?;
-    let lock = warehouse.lock(path);
+    let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
-    io::write_batches(path, schema, batches, WriteKind::Overwrite).await?;
+    io::write_batches(uri, warehouse.session(), schema, batches, WriteKind::Overwrite).await?;
     Ok(())
 }
 
@@ -118,10 +126,13 @@ mod tests {
         ])
     }
 
-    /// A fresh, isolated warehouse rooted in `dir`. Each test owns its own
-    /// warehouse (and `TempDir`), so there is no shared global state.
+    /// A fresh, isolated warehouse over a local-filesystem object store rooted in
+    /// `dir`. Each test owns its own warehouse (and `TempDir`), so there is no
+    /// shared global state.
     fn test_warehouse(dir: &TempDir) -> Arc<LanceWarehouse> {
-        Arc::new(LanceWarehouse::new(dir.path().join("lance")))
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        Arc::new(LanceWarehouse::new(store))
     }
 
     async fn count(ctx: &SessionContext, name: &str) -> i64 {
@@ -198,12 +209,9 @@ mod tests {
             .unwrap();
 
         // Simulate restart: round-trip the definition through JSON and rebuild.
-        let location = warehouse.table_location(&namespace, "discovered");
-        let definition: Arc<dyn TableDefinition> = Arc::new(LanceTableDefinition::new(
-            "discovered",
-            namespace,
-            warehouse::location_uri(&location),
-        ));
+        let location = warehouse.table_uri(&namespace, "discovered");
+        let definition: Arc<dyn TableDefinition> =
+            Arc::new(LanceTableDefinition::new("discovered", namespace, location.clone()));
         let json = serde_json::to_string(&definition).unwrap();
         assert!(json.contains("\"lance\""), "typetag tag present: {json}");
         let restored: Arc<dyn TableDefinition> = serde_json::from_str(&json).unwrap();
@@ -332,7 +340,7 @@ mod tests {
             .await
             .expect("create index should succeed");
 
-        let listed = list_indices(&location).await.expect("list indices");
+        let listed = list_indices(&warehouse, &location).await.expect("list indices");
         assert_eq!(listed.len(), 1, "one index present");
         assert_eq!(listed[0].name, "id_idx");
         assert_eq!(listed[0].columns, vec!["id".to_string()]);
@@ -341,7 +349,7 @@ mod tests {
             .await
             .expect("drop index should succeed");
         assert!(
-            list_indices(&location).await.unwrap().is_empty(),
+            list_indices(&warehouse, &location).await.unwrap().is_empty(),
             "no indices after drop"
         );
     }

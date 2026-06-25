@@ -44,6 +44,10 @@ fn scalar_string(batches: &[RecordBatch]) -> String {
 async fn iceberg_create_insert_select_ctas_drop() {
     let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should boot");
 
+    // The default managed-table engine is Lance; this test exercises the Iceberg
+    // path, so select it explicitly for this session.
+    run(&runtime, "SET beacon.table_engine = 'iceberg'").await;
+
     // Unique names so reruns/parallel suites do not collide in the shared
     // warehouse, and clean any leftovers from a previous aborted run.
     let table = format!("ice_e2e_{}", std::process::id());

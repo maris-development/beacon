@@ -647,7 +647,8 @@ pub(crate) async fn list_indexes(
     table: &str,
 ) -> anyhow::Result<arrow::record_batch::RecordBatch> {
     let location = lance_table_location(session, table).await?;
-    let indices = beacon_lance::list_indices(&location).await?;
+    let warehouse = lance_warehouse(session)?;
+    let indices = beacon_lance::list_indices(&warehouse, &location).await?;
 
     let names = indices.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
     let columns = indices

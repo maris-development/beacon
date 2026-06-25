@@ -74,6 +74,10 @@ lance = "=7.0.0"
 # Lance index types (IndexType, ScalarIndexParams) for managed-table indexing.
 # Version-locked to `lance` so the shared types are a single compilation.
 lance-index = "=7.0.0"
+# Lance IO + core: the ObjectStoreProvider/ObjectStoreRegistry mechanism used to
+# route Lance through beacon's tables object store. Version-locked to `lance`.
+lance-io = "=7.0.0"
+lance-core = "=7.0.0"
 
 arrow = { version = "^58", features = ["prettyprint"]}
 arrow-schema = { version = "^58", features = ["serde"] }

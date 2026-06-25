@@ -6,7 +6,6 @@
 
 use std::any::Any;
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -22,10 +21,10 @@ use futures::TryStreamExt;
 use crate::io::{write_batches, WriteKind};
 use crate::warehouse::LanceWarehouse;
 
-/// Sink that applies a stream of batches to a single Lance dataset.
+/// Sink that applies a stream of batches to a single Lance dataset (by URI).
 #[derive(Debug)]
 pub struct LanceDataSink {
-    location: PathBuf,
+    uri: String,
     schema: SchemaRef,
     kind: WriteKind,
     warehouse: Arc<LanceWarehouse>,
@@ -33,13 +32,13 @@ pub struct LanceDataSink {
 
 impl LanceDataSink {
     pub fn new(
-        location: PathBuf,
+        uri: String,
         schema: SchemaRef,
         kind: WriteKind,
         warehouse: Arc<LanceWarehouse>,
     ) -> Self {
         Self {
-            location,
+            uri,
             schema,
             kind,
             warehouse,
@@ -49,12 +48,7 @@ impl LanceDataSink {
 
 impl DisplayAs for LanceDataSink {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "LanceDataSink(location={}, kind={:?})",
-            self.location.display(),
-            self.kind
-        )
+        write!(f, "LanceDataSink(uri={}, kind={:?})", self.uri, self.kind)
     }
 }
 
@@ -79,10 +73,16 @@ impl DataSink for LanceDataSink {
     ) -> DataFusionResult<u64> {
         let batches = data.try_collect::<Vec<_>>().await?;
         // Serialize writers to this dataset across the (async) write.
-        let lock = self.warehouse.lock(&self.location);
+        let lock = self.warehouse.lock(&self.uri);
         let _guard = lock.lock().await;
-        write_batches(&self.location, self.schema.clone(), batches, self.kind)
-            .await
-            .map_err(|e| DataFusionError::External(e.into()))
+        write_batches(
+            &self.uri,
+            self.warehouse.session(),
+            self.schema.clone(),
+            batches,
+            self.kind,
+        )
+        .await
+        .map_err(|e| DataFusionError::External(e.into()))
     }
 }

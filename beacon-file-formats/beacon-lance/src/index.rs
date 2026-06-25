@@ -6,14 +6,12 @@
 //! columns). Index creation scans the column once and commits a new dataset
 //! version; queries then use the index automatically.
 
-use std::path::Path;
-
-use lance::dataset::Dataset;
+use lance::dataset::builder::DatasetBuilder;
 use lance::index::DatasetIndexExt;
 use lance_index::scalar::ScalarIndexParams;
 use lance_index::IndexType;
 
-use crate::warehouse::{self, LanceWarehouse};
+use crate::warehouse::LanceWarehouse;
 
 /// Scalar index kinds exposed via `CREATE INDEX ... USING <kind>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,19 +68,19 @@ pub struct IndexInfo {
 /// `location`. Errors if an index with that name already exists.
 pub async fn create_index(
     warehouse: &LanceWarehouse,
-    location: &str,
+    uri: &str,
     column: &str,
     name: &str,
     kind: ScalarIndexKind,
 ) -> anyhow::Result<()> {
-    let path = Path::new(location);
-    tracing::info!(location = %location, column, name, kind = kind.as_str(), "creating Lance index");
+    tracing::info!(uri = %uri, column, name, kind = kind.as_str(), "creating Lance index");
 
-    let lock = warehouse.lock(path);
+    let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
-    let uri = warehouse::location_uri(path);
-    let mut dataset = Dataset::open(&uri)
+    let mut dataset = DatasetBuilder::from_uri(uri)
+        .with_session(warehouse.session())
+        .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
 
@@ -94,20 +92,20 @@ pub async fn create_index(
     Ok(())
 }
 
-/// Drop the index named `name` from the Lance table at `location`.
+/// Drop the index named `name` from the Lance table at `uri`.
 pub async fn drop_index(
     warehouse: &LanceWarehouse,
-    location: &str,
+    uri: &str,
     name: &str,
 ) -> anyhow::Result<()> {
-    let path = Path::new(location);
-    tracing::info!(location = %location, name, "dropping Lance index");
+    tracing::info!(uri = %uri, name, "dropping Lance index");
 
-    let lock = warehouse.lock(path);
+    let lock = warehouse.lock(uri);
     let _guard = lock.lock().await;
 
-    let uri = warehouse::location_uri(path);
-    let mut dataset = Dataset::open(&uri)
+    let mut dataset = DatasetBuilder::from_uri(uri)
+        .with_session(warehouse.session())
+        .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
 
@@ -118,11 +116,14 @@ pub async fn drop_index(
     Ok(())
 }
 
-/// List the indexes on the Lance table at `location` (name + indexed columns).
-pub async fn list_indices(location: &str) -> anyhow::Result<Vec<IndexInfo>> {
-    let path = Path::new(location);
-    let uri = warehouse::location_uri(path);
-    let dataset = Dataset::open(&uri)
+/// List the indexes on the Lance table at `uri` (name + indexed columns).
+pub async fn list_indices(
+    warehouse: &LanceWarehouse,
+    uri: &str,
+) -> anyhow::Result<Vec<IndexInfo>> {
+    let dataset = DatasetBuilder::from_uri(uri)
+        .with_session(warehouse.session())
+        .load()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
 
