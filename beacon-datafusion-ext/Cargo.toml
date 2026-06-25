@@ -14,7 +14,6 @@ serde_json = { workspace = true }
 typetag =  { workspace=true}
 anyhow = { workspace = true }
 arrow = { workspace = true }
-arrow-schema = { workspace = true }
 ordered-float = { workspace = true }
 indexmap = { workspace = true }
 moka = { workspace = true }

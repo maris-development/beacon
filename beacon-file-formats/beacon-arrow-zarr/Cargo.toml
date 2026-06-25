@@ -4,24 +4,21 @@ version = "1.7.3"
 edition = "2024"
 
 [dependencies]
-zarrs = {"version" = "0.23.12", features = ["async"]}
-zarrs_object_store = "0.6.0"
-zarrs_storage = "0.4.2"
+zarrs = {workspace = true}
+zarrs_object_store = {workspace = true}
+zarrs_storage = {workspace = true}
 object_store = { workspace = true }
 tokio = { workspace = true }
 arrow = { workspace = true }
 datafusion = { workspace = true }
-ndarray = "0.17"
+ndarray = {workspace = true}
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { workspace = true }
 tracing = { workspace = true }
-hifitime = "4.0.2"
-regex = "1.11.1"
+hifitime = {workspace = true}
 futures = { workspace = true }
-parking_lot = { workspace = true }
-crossbeam = { workspace = true }
 
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

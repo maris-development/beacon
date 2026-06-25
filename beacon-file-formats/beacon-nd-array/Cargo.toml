@@ -6,20 +6,16 @@ readme = "README.md"
 
 [dependencies]
 arrow = { workspace = true }
-arrow-schema = { workspace = true }
 datafusion = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-chrono = { workspace = true }
-ndarray = { version = "0.17" }
+ndarray = {workspace = true}
 anyhow = { workspace=true }
 async-trait = { workspace=true }
 futures = { workspace=true }
 indexmap = { workspace=true }
-pin-project = "1.1.10"
-bytemuck = {version = "1.25.0", features = ["derive"]}
-rkyv = { version = "0.8.10", features = ["pointer_width_64"] }
+bytemuck = {workspace = true}
+rkyv = {workspace = true}
 tokio = { workspace = true }
 tracing = { workspace = true }
 

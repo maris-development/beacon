@@ -6,19 +6,15 @@ edition = "2024"
 [dependencies]
 datafusion = { workspace = true }
 arrow = { workspace = true }
-arrow-schema = { workspace = true }
 async-trait = { workspace = true }
 object_store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 typetag = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
-parking_lot = { workspace = true }
 tracing = { workspace = true }
-once_cell = { workspace = true }
 
 iceberg-rust = { workspace = true }
 datafusion_iceberg = { workspace = true }

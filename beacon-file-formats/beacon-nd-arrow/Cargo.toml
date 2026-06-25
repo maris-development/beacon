@@ -11,17 +11,14 @@ ndarray = ["dep:ndarray", "dep:chrono"]
 [dependencies]
 arrow = { workspace = true }
 arrow-schema = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true, optional = true }
-ndarray = { version = "0.17", optional = true }
+ndarray = {workspace = true, optional = true}
 anyhow = { workspace=true }
 async-trait = { workspace=true }
 futures = { workspace=true }
-pin-project = "1.1.10"
-bytemuck = {version = "1.25.0", features = ["derive"]}
+bytemuck = {workspace = true}
 
 [dev-dependencies]
 arrow-ipc = { workspace = true }

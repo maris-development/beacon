@@ -8,24 +8,20 @@ netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["ndarray"
 netcdf-sys = { git ="https://github.com/robinskil/netcdf.git", package = "netcdf-sys" }
 arrow = { workspace = true }
 
-arrow-schema = { workspace = true }
 anyhow = { workspace=true }
 tempfile = { workspace=true}
 tokio = { workspace=true }
 futures = { workspace=true }
 indexmap = { workspace=true }
-thiserror = { workspace=true }
 async-trait = { workspace=true }
-ndarray = "0.17.1"
+ndarray = {workspace = true}
 ordered-float = { workspace = true }
-num-traits = "0.2.19"
-hifitime = "4.0.2"
-regex = "1.11.1"
-bytemuck = {version = "1.25.0", features = ["derive"]}
-julian = "0.7.1"
+num-traits = {workspace = true}
+hifitime = {workspace = true}
+bytemuck = {workspace = true}
+julian = {workspace = true}
 tracing = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 object_store = { workspace = true }
 datafusion = { workspace = true }
 moka = { workspace = true }
