@@ -144,6 +144,14 @@ def datasets_dir(tmp_path_factory, sample_data) -> Path:
         "platform,description\n" + "\n".join(f"{p},{p.lower()} platform" for p in PLATFORMS) + "\n",
         encoding="utf-8",
     )
+
+    # A directory mixing parquet and csv, present at container start so the crawler's
+    # initial dataset listing sees it (runtime-created dirs are not picked up).
+    mixed = root / "mixed"
+    mixed.mkdir()
+    _write_parquet(rows[:ROWS_FILE_A], mixed / "part-0.parquet")
+    _write_parquet(rows[ROWS_FILE_A:], mixed / "part-1.parquet")
+    (mixed / "lookup.csv").write_text("platform,note\nSHIP,x\n", encoding="utf-8")
     return root
 
 
@@ -242,3 +250,66 @@ def _wait_healthy(base_url: str, container: str) -> None:
 @pytest.fixture(scope="session")
 def client(beacon_container) -> BeaconHTTPClient:
     return BeaconHTTPClient(beacon_container, ADMIN_USERNAME, ADMIN_PASSWORD)
+
+
+# --- helpers for spinning up *additional* beacon containers -------------------
+# Several suites need a beacon configured differently from the shared one (a
+# different default table engine, SQL disabled, anonymous Flight SQL, ...). They
+# reuse the already-built image and the shared docker network, but mount their
+# own data dirs so they cannot interfere with the main container.
+
+
+def run_beacon_container(
+    request,
+    *,
+    name: str,
+    image: str,
+    network: str,
+    datasets_dir,
+    tables_dir,
+    extra_env: dict | None = None,
+) -> str:
+    """Start an extra beacon container and return its base HTTP URL.
+
+    The container is removed on teardown (its logs are dumped first if the
+    session had failures). ``extra_env`` entries are appended last so they
+    override the defaults set here (e.g. ``BEACON_ENABLE_SQL=false``).
+    """
+    _run(["docker", "rm", "-f", name])
+    cmd = [
+        "docker", "run", "-d",
+        "--name", name,
+        "--network", network,
+        "-p", f"{HTTP_PORT}",
+        "-p", f"{FLIGHT_PORT}",
+        "-v", f"{datasets_dir}:/beacon/data/datasets",
+        "-v", f"{tables_dir}:/beacon/data/tables",
+        "-e", "BEACON_ENABLE_SQL=true",
+        "-e", f"BEACON_ADMIN_USERNAME={ADMIN_USERNAME}",
+        "-e", f"BEACON_ADMIN_PASSWORD={ADMIN_PASSWORD}",
+        "-e", f"BEACON_SECRETS_KEY={SECRETS_KEY}",
+        "-e", "BEACON_LOG_LEVEL=info",
+    ]
+    for key, value in (extra_env or {}).items():
+        cmd += ["-e", f"{key}={value}"]
+    cmd.append(image)
+
+    started = _run(cmd)
+    if started.returncode != 0:
+        pytest.fail(f"docker run {name} failed:\n{started.stdout}\n{started.stderr}")
+
+    def _cleanup():
+        if request.session.testsfailed:
+            logs = _run(["docker", "logs", name])
+            print(f"\n===== {name} container logs =====")
+            print(logs.stdout)
+            print(logs.stderr)
+            print("===== end logs =====")
+        _run(["docker", "rm", "-f", name])
+
+    request.addfinalizer(_cleanup)
+
+    host_port = _resolve_host_port(name, HTTP_PORT)
+    base_url = f"http://127.0.0.1:{host_port}"
+    _wait_healthy(base_url, name)
+    return base_url

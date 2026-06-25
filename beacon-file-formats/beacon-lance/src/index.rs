@@ -8,6 +8,7 @@
 
 use lance::dataset::builder::DatasetBuilder;
 use lance::index::DatasetIndexExt;
+use lance_index::scalar::inverted::InvertedIndexParams;
 use lance_index::scalar::ScalarIndexParams;
 use lance_index::IndexType;
 
@@ -84,11 +85,28 @@ pub async fn create_index(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open Lance dataset '{uri}': {e}"))?;
 
-    let params = ScalarIndexParams::default();
-    dataset
-        .create_index(&[column], kind.index_type(), Some(name.to_string()), &params, false)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create index '{name}' on column '{column}': {e}"))?;
+    // INVERTED needs its own params type (carrying the tokenizer config); BTREE
+    // and BITMAP use the generic scalar params. Passing ScalarIndexParams for an
+    // inverted index makes Lance fail to deserialize ("missing field
+    // base_tokenizer").
+    let index_type = kind.index_type();
+    let result = match kind {
+        ScalarIndexKind::Inverted => {
+            let params = InvertedIndexParams::default();
+            dataset
+                .create_index(&[column], index_type, Some(name.to_string()), &params, false)
+                .await
+        }
+        ScalarIndexKind::BTree | ScalarIndexKind::Bitmap => {
+            let params = ScalarIndexParams::default();
+            dataset
+                .create_index(&[column], index_type, Some(name.to_string()), &params, false)
+                .await
+        }
+    };
+    result.map_err(|e| {
+        anyhow::anyhow!("Failed to create index '{name}' on column '{column}': {e}")
+    })?;
     Ok(())
 }
 

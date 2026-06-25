@@ -1,0 +1,8 @@
+# Optional dependencies for specific suites. The core suite does NOT need these;
+# install them only to run the Flight SQL tests:
+#
+#   pip install -r requirements-optional.txt
+#
+# test_flight_sql.py is skipped automatically when adbc-driver-flightsql is absent.
+adbc-driver-flightsql==1.3.0
+adbc-driver-manager==1.3.0

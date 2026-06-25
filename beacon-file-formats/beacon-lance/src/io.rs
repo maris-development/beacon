@@ -18,7 +18,7 @@ use lance::session::Session;
 /// Map an Arrow data type to one Lance can store. Lance 7.x does not support the
 /// Arrow "view" types (`Utf8View`/`BinaryView`) that DataFusion 53 produces for
 /// SQL string/binary columns, so they are widened to their non-view equivalents.
-fn lance_compatible_type(data_type: &DataType) -> DataType {
+pub(crate) fn lance_compatible_type(data_type: &DataType) -> DataType {
     match data_type {
         DataType::Utf8View => DataType::Utf8,
         DataType::BinaryView => DataType::Binary,

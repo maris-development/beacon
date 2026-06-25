@@ -50,7 +50,13 @@ fn unparse_expr(expr: &Expr) -> Option<String> {
         .ok()?
         .data;
 
-    datafusion::sql::unparser::Unparser::default()
+    // Emit bare (unquoted) identifiers: `name = 'b'`, not `"name" = 'b'`. Lance's
+    // predicate parser mis-evaluates a predicate that mixes a double-quoted
+    // identifier with a single-quoted string literal (it matches zero rows),
+    // whereas the bare form parses correctly. Column names are already simple
+    // (dataset fields), so dropping the quotes is safe here.
+    let dialect = datafusion::sql::unparser::dialect::CustomDialectBuilder::new().build();
+    datafusion::sql::unparser::Unparser::new(&dialect)
         .expr_to_sql(&unqualified)
         .ok()
         .map(|ast| ast.to_string())

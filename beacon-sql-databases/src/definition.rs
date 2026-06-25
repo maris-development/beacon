@@ -90,9 +90,11 @@ impl TableDefinition for SqlDatabaseTableDefinition {
             .engine
             .build_table_provider(params, table_ref)
             .await
-            .with_context(|| {
-                format!(
-                    "failed to build {} provider for table '{}'",
+            // Surface the full cause chain ({:#}); the underlying connector error
+            // (auth/TLS/connection) is otherwise hidden behind this top context.
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to build {} provider for table '{}': {e:#}",
                     self.engine.as_str(),
                     self.name
                 )
