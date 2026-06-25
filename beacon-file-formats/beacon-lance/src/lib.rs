@@ -18,6 +18,7 @@ pub mod alter;
 pub mod definition;
 pub mod index;
 pub mod io;
+pub mod mutate;
 pub mod provider;
 pub mod sink;
 pub mod warehouse;
@@ -33,6 +34,7 @@ pub use alter::{alter_table, SchemaChange};
 pub use definition::LanceTableDefinition;
 pub use index::{create_index, drop_index, list_indices, IndexInfo, ScalarIndexKind};
 pub use io::WriteKind;
+pub use mutate::{delete_rows, update_rows};
 pub use provider::LanceTable;
 pub use warehouse::{beacon_namespace, LanceWarehouse, BEACON_NAMESPACE};
 
@@ -354,5 +356,66 @@ mod tests {
             list_indices(&warehouse, &location).await.unwrap().is_empty(),
             "no indices after drop"
         );
+    }
+
+    #[tokio::test]
+    async fn native_update_and_delete() {
+        use datafusion::arrow::array::StringArray;
+
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+        let namespace = beacon_namespace();
+
+        let table = create_lance_table(warehouse.clone(), &namespace, "orders", &sample_schema())
+            .await
+            .unwrap();
+        let location = table.definition().location.clone();
+        let ctx = SessionContext::new();
+        // The provider reopens the latest dataset version on each scan, so it
+        // observes the native mutations below without re-registration.
+        ctx.register_table("orders", Arc::new(table)).unwrap();
+        ctx.sql("INSERT INTO orders VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        // Native UPDATE name = 'Z' WHERE id = 2.
+        update_rows(
+            &warehouse,
+            &location,
+            Some("id = 2"),
+            &[("name".to_string(), "'Z'".to_string())],
+        )
+        .await
+        .expect("update should succeed");
+        let batches = ctx
+            .sql("SELECT name FROM orders WHERE id = 2")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let name = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(name, "Z", "row 2 should be updated");
+        assert_eq!(count(&ctx, "orders").await, 3, "UPDATE must not change row count");
+
+        // Native DELETE WHERE id = 1.
+        delete_rows(&warehouse, &location, Some("id = 1"))
+            .await
+            .expect("delete should succeed");
+        assert_eq!(count(&ctx, "orders").await, 2, "one row deleted");
+
+        // Native DELETE all.
+        delete_rows(&warehouse, &location, None)
+            .await
+            .expect("delete-all should succeed");
+        assert_eq!(count(&ctx, "orders").await, 0, "delete-all empties the table");
     }
 }

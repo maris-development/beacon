@@ -29,7 +29,7 @@ use datafusion::{
     },
 };
 
-use super::logical::AlterTableSpec;
+use super::logical::{AlterTableSpec, Mutation};
 use super::materialized_view::delete_datasets_prefix;
 
 /// Drop a managed table, reclaiming its backing storage. Materialized views
@@ -386,25 +386,46 @@ pub(crate) async fn insert_into(
     Ok(stream)
 }
 
-/// Replace **all** rows of a managed table with the rows produced by `child`,
-/// then (for Iceberg) rebuild the registered provider so later scans see the new
-/// data. Used to implement `DELETE`/`UPDATE`: the caller passes the surviving
-/// rows. Rejects non-managed targets.
+/// Apply a `DELETE`/`UPDATE` to a managed table. Lance uses native row mutations
+/// (deletion vectors / fragment rewrite) when a [`Mutation`] spec was derived,
+/// else copy-on-write overwrite with `child`'s rows. Iceberg always uses
+/// copy-on-write (then rebuilds its provider). Rejects non-managed targets.
 pub(crate) async fn replace_table_contents(
     session: &Arc<SessionContext>,
     table: &TableReference,
     child: Arc<dyn ExecutionPlan>,
+    mutation: Option<Mutation>,
     task_ctx: &Arc<TaskContext>,
 ) -> anyhow::Result<()> {
     let provider = session.table_provider(table.clone()).await?;
 
-    // Lance: atomic overwrite with the surviving rows. The provider reopens the
-    // latest dataset version on each scan, so no rebuild is needed.
+    // Lance: prefer native delete/update; fall back to overwrite with the
+    // surviving/updated rows. The provider reopens the latest dataset version on
+    // each scan, so no rebuild is needed.
     if let Some(lance) = provider.as_any().downcast_ref::<beacon_lance::LanceTable>() {
         let location = lance.definition().location.clone();
         let warehouse = lance_warehouse(session)?;
-        let stream = execute_stream(child, task_ctx.clone())?;
-        beacon_lance::replace_table_contents(&warehouse, &location, stream).await?;
+        match mutation {
+            Some(Mutation::Delete { predicate }) => {
+                beacon_lance::delete_rows(&warehouse, &location, predicate.as_deref()).await?;
+            }
+            Some(Mutation::Update {
+                predicate,
+                assignments,
+            }) => {
+                beacon_lance::update_rows(
+                    &warehouse,
+                    &location,
+                    predicate.as_deref(),
+                    &assignments,
+                )
+                .await?;
+            }
+            None => {
+                let stream = execute_stream(child, task_ctx.clone())?;
+                beacon_lance::replace_table_contents(&warehouse, &location, stream).await?;
+            }
+        }
         return Ok(());
     }
 

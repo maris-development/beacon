@@ -27,7 +27,10 @@ use futures::{StreamExt, TryStreamExt};
 
 use super::{
     actions, crawler,
-    logical::{count_arrow_schema, show_crawlers_arrow_schema, show_indexes_arrow_schema, AlterTableSpec},
+    logical::{
+        count_arrow_schema, show_crawlers_arrow_schema, show_indexes_arrow_schema, AlterTableSpec,
+        Mutation,
+    },
     materialized_view, SessionCell,
 };
 
@@ -443,6 +446,7 @@ side_effect_exec!(AlterTableExec, "AlterTableExec", |exec: &AlterTableExec| {
 pub(crate) struct ReplaceTableContentsExec {
     table: TableReference,
     child: Arc<dyn ExecutionPlan>,
+    mutation: Option<Mutation>,
     session: SessionCell,
     cache: Arc<PlanProperties>,
 }
@@ -451,11 +455,13 @@ impl ReplaceTableContentsExec {
     pub(crate) fn new(
         table: TableReference,
         child: Arc<dyn ExecutionPlan>,
+        mutation: Option<Mutation>,
         session: SessionCell,
     ) -> Self {
         Self {
             table,
             child,
+            mutation,
             session,
             cache: Arc::new(side_effect_properties()),
         }
@@ -493,6 +499,7 @@ impl ExecutionPlan for ReplaceTableContentsExec {
         Ok(Arc::new(Self {
             table: self.table.clone(),
             child: children.swap_remove(0),
+            mutation: self.mutation.clone(),
             session: self.session.clone(),
             cache: self.cache.clone(),
         }))
@@ -505,8 +512,9 @@ impl ExecutionPlan for ReplaceTableContentsExec {
         let session = upgrade_session(&self.session)?;
         let table = self.table.clone();
         let child = self.child.clone();
+        let mutation = self.mutation.clone();
         Ok(side_effect_stream(async move {
-            actions::replace_table_contents(&session, &table, child, &context)
+            actions::replace_table_contents(&session, &table, child, mutation, &context)
                 .await
                 .map_err(to_df_err)
         }))

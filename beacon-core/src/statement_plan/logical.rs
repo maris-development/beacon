@@ -473,13 +473,32 @@ impl UserDefinedLogicalNodeCore for ShowIndexesNode {
     }
 }
 
+/// A native row mutation, derived best-effort at lowering time. When present and
+/// the target is a Lance table, it is applied via Lance's native `delete`/update
+/// (deletion vectors / fragment rewrite) instead of the copy-on-write `input`.
+/// Iceberg always uses the copy-on-write `input`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) enum Mutation {
+    /// `DELETE FROM t [WHERE predicate]`; `None` predicate deletes every row.
+    Delete { predicate: Option<String> },
+    /// `UPDATE t SET <assignments> [WHERE predicate]`, assignments as
+    /// `(column, value_sql)`.
+    Update {
+        predicate: Option<String>,
+        assignments: Vec<(String, String)>,
+    },
+}
+
 /// Logical node for the copy-on-write replacement that backs `DELETE` and
 /// `UPDATE`: `input` computes the table's full post-mutation contents, which
-/// atomically replace the Iceberg table's data files. Produces no rows.
+/// atomically replace the table's data files (used for Iceberg, and as the
+/// fallback when no native [`Mutation`] could be derived). Produces no rows.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct ReplaceTableContentsNode {
     pub(crate) table: TableReference,
     pub(crate) input: LogicalPlan,
+    /// Native mutation spec; `None` means copy-on-write only.
+    pub(crate) mutation: Option<Mutation>,
 }
 
 impl UserDefinedLogicalNodeCore for ReplaceTableContentsNode {
@@ -502,6 +521,7 @@ impl UserDefinedLogicalNodeCore for ReplaceTableContentsNode {
         Ok(Self {
             table: self.table.clone(),
             input: inputs.swap_remove(0),
+            mutation: self.mutation.clone(),
         })
     }
 }

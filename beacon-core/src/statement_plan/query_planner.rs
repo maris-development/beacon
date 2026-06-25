@@ -172,6 +172,7 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             return Ok(Some(Arc::new(physical::ReplaceTableContentsExec::new(
                 replace.table.clone(),
                 physical_inputs[0].clone(),
+                replace.mutation.clone(),
                 session,
             ))));
         }
