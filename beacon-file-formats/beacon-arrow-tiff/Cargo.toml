@@ -17,13 +17,12 @@ arrow = { workspace = true }
 datafusion = { workspace = true }
 object_store = { workspace = true }
 
-async-tiff = { version = "0.3.0", default-features = false }
+async-tiff = {workspace = true}
 
 beacon-common = { path = "../../beacon-common" }
-beacon-config = { path = "../../beacon-config" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-array = { path = "../beacon-nd-array" }
-ndarray = { version = "0.17" }
+ndarray = {workspace = true}
 beacon-object-storage = { path = "../../beacon-object-storage" }
 
 [dev-dependencies]

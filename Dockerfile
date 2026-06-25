@@ -54,8 +54,8 @@ COPY Cargo.toml /
 COPY Cargo.lock /
 COPY rust-toolchain /
 
-#Build the project
-RUN cargo build --release
+#Build the project (only the server binary the image ships; jemalloc on for prod)
+RUN cargo build --release -p beacon-api --features jemalloc
 
 # Build the admin web UI (Vite SPA) from the JS client workspace. The SDK
 # (@beacon/client) must be built before the web app, which imports from its dist.

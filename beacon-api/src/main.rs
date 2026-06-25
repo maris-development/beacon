@@ -16,10 +16,10 @@ mod auth;
 mod axum;
 mod flight_sql;
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
 use tikv_jemallocator::Jemalloc;
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 

@@ -5,32 +5,25 @@ edition = "2021"
 
 [dependencies]
 futures = { workspace=true}
-futures-util = { workspace=true}
-bytes = { workspace=true}
 anyhow = { workspace=true}
 tempfile = { workspace=true}
 serde = { workspace=true}
 serde_json = { workspace=true}
 utoipa = { workspace=true}
-typetag =  { workspace=true}
 async-trait = { workspace=true }
 datafusion = { workspace=true }
 datafusion-federation = { workspace=true }
 geodatafusion = { workspace=true }
 arrow = { workspace=true}
-glob = { workspace = true}
 tokio = { workspace = true }
-indexmap = { workspace = true }
 object_store = { workspace = true }
-async-stream = "0.3.6"
+async-stream = {workspace = true}
 parking_lot = { workspace = true}
-sysinfo = { version = "0.35.2", features = ["serde"]}
-uuid = "1.16.0"
-inventory = "0.3.18"
-pathdiff = "0.2.3"
+sysinfo = {workspace = true}
+uuid = {workspace = true}
 chrono = { workspace = true }
-cast = "0.3.0"
-geojson = "0.24.2"
+cast = {workspace = true}
+geojson = {workspace = true}
 
 tracing = { workspace=true}
 # Local dependencies
@@ -48,13 +41,11 @@ beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-beacon-common = { path = "../beacon-common" }
 beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
 beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
-beacon-nd-array = { path = "../beacon-file-formats/beacon-nd-array" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 
 [dev-dependencies]
 deltalake = { workspace = true }
-url = "2"
+url = {workspace = true}

@@ -6,29 +6,27 @@ edition = "2021"
 [dependencies]
 datafusion = {workspace = true}
 arrow = {workspace = true}
-geo = "0.31"
-geojson = "0.24.2"
-wkt = { version = "0.12.0", features = ["geo-types"] }
-strsim = "0.11.1"
+geo = {workspace = true}
+geojson = {workspace = true}
+wkt = {workspace = true}
+strsim = {workspace = true}
 anyhow = { workspace = true}
-inventory = "0.3.18"
 serde = { workspace = true}
 serde_json = { workspace = true}
-csv = "1.3.1"
+csv = {workspace = true}
 object_store = { workspace = true }
 once_cell = { workspace = true }
 
-lazy_static = "1.5.0"
-gsw = "0.2.2"
-lru = "0.14.0"
-ordered-float = "5.0.0"
+lazy_static = {workspace = true}
+gsw = {workspace = true}
+lru = {workspace = true}
+ordered-float = {workspace = true}
 tracing = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
-beacon-config = { path = "../beacon-config" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
