@@ -1,5 +1,5 @@
 [workspace]
-members = ["beacon-api", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-iceberg", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
+members = ["beacon-api", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-iceberg", "beacon-file-formats/beacon-lance", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
 exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
@@ -65,6 +65,19 @@ tonic = "0.14.1"
 iceberg-rust = "0.10"
 datafusion_iceberg = "0.10"
 iceberg-file-catalog = "0.10"
+
+# Lance managed-table engine. 7.0.0 pins arrow 58 / datafusion 53 / object_store
+# 0.13, matching our versions. Provides `lance::datafusion::LanceTableProvider`
+# plus the `Dataset` write/append/delete API used by beacon-lance. Requires
+# `protoc` at build time (Lance generates protobuf in its build script).
+lance = "=7.0.0"
+# Lance index types (IndexType, ScalarIndexParams) for managed-table indexing.
+# Version-locked to `lance` so the shared types are a single compilation.
+lance-index = "=7.0.0"
+# Lance IO + core: the ObjectStoreProvider/ObjectStoreRegistry mechanism used to
+# route Lance through beacon's tables object store. Version-locked to `lance`.
+lance-io = "=7.0.0"
+lance-core = "=7.0.0"
 
 arrow = { version = "^58", features = ["prettyprint"]}
 arrow-schema = { version = "^58", features = ["serde"] }

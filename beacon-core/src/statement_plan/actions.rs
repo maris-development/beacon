@@ -29,7 +29,7 @@ use datafusion::{
     },
 };
 
-use super::logical::AlterTableSpec;
+use super::logical::{AlterTableSpec, Mutation};
 use super::materialized_view::delete_datasets_prefix;
 
 /// Drop a managed table, reclaiming its backing storage. Materialized views
@@ -58,6 +58,12 @@ pub(crate) async fn drop_table(
             .downcast_ref::<beacon_iceberg::IcebergTable>()
             .map(|table| table.definition().clone())
     });
+    let lance_location = provider.as_ref().and_then(|provider| {
+        provider
+            .as_any()
+            .downcast_ref::<beacon_lance::LanceTable>()
+            .map(|table| table.definition().location.clone())
+    });
 
     session.deregister_table(name.clone())?;
 
@@ -68,6 +74,11 @@ pub(crate) async fn drop_table(
     if let Some(definition) = iceberg_definition {
         let store = beacon_iceberg::get_warehouse_store()?;
         beacon_iceberg::drop_iceberg_table(&store, &definition.namespace, &definition.name).await?;
+    }
+
+    if let Some(location) = lance_location {
+        let warehouse = lance_warehouse(session)?;
+        beacon_lance::drop_lance_table(&warehouse, &location).await?;
     }
 
     Ok(())
@@ -297,8 +308,9 @@ pub(crate) fn create_view(
     Ok(())
 }
 
-/// Create an Iceberg-backed managed table from `child`'s output schema and
-/// register it. For `CREATE TABLE AS SELECT` (`is_ctas`), also populate it from
+/// Create a managed table from `child`'s output schema and register it, using
+/// the engine resolved from session/global config (Lance by default, or
+/// Iceberg). For `CREATE TABLE AS SELECT` (`is_ctas`), also populate it from
 /// `child` and return the inserted-row count stream; otherwise return `None`.
 pub(crate) async fn create_table(
     session: &Arc<SessionContext>,
@@ -317,14 +329,39 @@ pub(crate) async fn create_table(
     }
 
     let arrow_schema = child.schema();
-    let catalog = beacon_iceberg::get_catalog()?;
-    let namespace = beacon_iceberg::beacon_namespace();
-    let table =
-        beacon_iceberg::create_iceberg_table(&catalog, &namespace, &table_name, &arrow_schema)
+
+    // Pick the storage engine: a session `SET beacon.table_engine` overrides the
+    // global default (Lance unless configured otherwise).
+    let engine = super::table_engine::resolve_table_engine(session)?;
+    let provider: Arc<dyn datafusion::catalog::TableProvider> = match engine {
+        beacon_config::TableEngine::Lance => {
+            // Lance managed tables live in the local tables directory, alongside
+            // their `table.json`. Beacon always backs the tables store with a
+            // local filesystem (S3 only ever applies to the datasets store), so
+            // this works regardless of the datasets backend.
+            let warehouse = lance_warehouse(session)?;
+            let namespace = beacon_lance::beacon_namespace();
+            let table =
+                beacon_lance::create_lance_table(warehouse, &namespace, &table_name, &arrow_schema)
+                    .await?;
+            Arc::new(table)
+        }
+        beacon_config::TableEngine::Iceberg => {
+            let catalog = beacon_iceberg::get_catalog()?;
+            let namespace = beacon_iceberg::beacon_namespace();
+            let table = beacon_iceberg::create_iceberg_table(
+                &catalog,
+                &namespace,
+                &table_name,
+                &arrow_schema,
+            )
             .await?;
+            Arc::new(table)
+        }
+    };
 
     // Registration persists the table's `table.json` pointer via the PersistentSchemaProvider.
-    session.register_table(name.clone(), Arc::new(table))?;
+    session.register_table(name.clone(), provider)?;
 
     if is_ctas {
         let stream = insert_into(session, &table_name, InsertOp::Append, child).await?;
@@ -349,23 +386,56 @@ pub(crate) async fn insert_into(
     Ok(stream)
 }
 
-/// Replace **all** rows of an Iceberg table with the rows produced by `child`
-/// (copy-on-write), then rebuild the registered provider so later scans see the
-/// new data. Rejects non-Iceberg targets.
+/// Apply a `DELETE`/`UPDATE` to a managed table. Lance uses native row mutations
+/// (deletion vectors / fragment rewrite) when a [`Mutation`] spec was derived,
+/// else copy-on-write overwrite with `child`'s rows. Iceberg always uses
+/// copy-on-write (then rebuilds its provider). Rejects non-managed targets.
 pub(crate) async fn replace_table_contents(
     session: &Arc<SessionContext>,
     table: &TableReference,
     child: Arc<dyn ExecutionPlan>,
+    mutation: Option<Mutation>,
     task_ctx: &Arc<TaskContext>,
 ) -> anyhow::Result<()> {
     let provider = session.table_provider(table.clone()).await?;
+
+    // Lance: prefer native delete/update; fall back to overwrite with the
+    // surviving/updated rows. The provider reopens the latest dataset version on
+    // each scan, so no rebuild is needed.
+    if let Some(lance) = provider.as_any().downcast_ref::<beacon_lance::LanceTable>() {
+        let location = lance.definition().location.clone();
+        let warehouse = lance_warehouse(session)?;
+        match mutation {
+            Some(Mutation::Delete { predicate }) => {
+                beacon_lance::delete_rows(&warehouse, &location, predicate.as_deref()).await?;
+            }
+            Some(Mutation::Update {
+                predicate,
+                assignments,
+            }) => {
+                beacon_lance::update_rows(
+                    &warehouse,
+                    &location,
+                    predicate.as_deref(),
+                    &assignments,
+                )
+                .await?;
+            }
+            None => {
+                let stream = execute_stream(child, task_ctx.clone())?;
+                beacon_lance::replace_table_contents(&warehouse, &location, stream).await?;
+            }
+        }
+        return Ok(());
+    }
+
     let definition = provider
         .as_any()
         .downcast_ref::<beacon_iceberg::IcebergTable>()
         .map(|table| table.definition().clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "Row mutations are only supported on Iceberg tables, but '{}' is not one",
+                "Row mutations are only supported on managed tables, but '{}' is not one",
                 table.table()
             )
         })?;
@@ -391,8 +461,9 @@ pub(crate) async fn replace_table_contents(
     Ok(())
 }
 
-/// Apply `ALTER TABLE` operations to an Iceberg table by mapping them to schema
-/// changes and rebuilding the table under the new schema.
+/// Apply `ALTER TABLE` operations to a managed table by mapping them to schema
+/// changes. Lance applies them natively (each an atomic version); Iceberg
+/// rebuilds the table under the new schema.
 pub(crate) async fn alter_table(
     session: &Arc<SessionContext>,
     spec: &AlterTableSpec,
@@ -400,16 +471,21 @@ pub(crate) async fn alter_table(
     let table_ref = TableReference::parse_str(&spec.name.to_string());
 
     let provider = session.table_provider(table_ref.clone()).await?;
-    let definition = provider
+    let lance_definition = provider
+        .as_any()
+        .downcast_ref::<beacon_lance::LanceTable>()
+        .map(|table| table.definition().clone());
+    let iceberg_definition = provider
         .as_any()
         .downcast_ref::<beacon_iceberg::IcebergTable>()
-        .map(|table| table.definition().clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "ALTER TABLE is only supported on Iceberg tables, but '{}' is not one",
-                table_ref.table()
-            )
-        })?;
+        .map(|table| table.definition().clone());
+
+    if lance_definition.is_none() && iceberg_definition.is_none() {
+        anyhow::bail!(
+            "ALTER TABLE is only supported on managed tables, but '{}' is not one",
+            table_ref.table()
+        );
+    }
 
     let mut changes = Vec::new();
     for operation in &spec.operations {
@@ -458,6 +534,51 @@ pub(crate) async fn alter_table(
         }
     }
 
+    // Lance: apply the changes natively (each is its own atomic version), then
+    // rebuild the provider so its cached schema reflects the evolution.
+    if let Some(definition) = lance_definition {
+        let lance_changes = changes
+            .iter()
+            .map(|change| match change {
+                beacon_iceberg::SchemaChange::AddColumn { name, data_type } => {
+                    Ok(beacon_lance::SchemaChange::AddColumn {
+                        name: name.clone(),
+                        data_type: data_type.clone(),
+                    })
+                }
+                beacon_iceberg::SchemaChange::DropColumn { name } => {
+                    Ok(beacon_lance::SchemaChange::DropColumn { name: name.clone() })
+                }
+                beacon_iceberg::SchemaChange::RenameColumn { from, to } => {
+                    Ok(beacon_lance::SchemaChange::RenameColumn {
+                        from: from.clone(),
+                        to: to.clone(),
+                    })
+                }
+                beacon_iceberg::SchemaChange::AlterColumnType { name, data_type } => {
+                    Ok(beacon_lance::SchemaChange::AlterColumnType {
+                        name: name.clone(),
+                        data_type: data_type.clone(),
+                    })
+                }
+                #[allow(unreachable_patterns)]
+                _ => Err(anyhow::anyhow!(
+                    "unsupported ALTER operation for a Lance-backed table"
+                )),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let warehouse = lance_warehouse(session)?;
+        beacon_lance::alter_table(&warehouse, &definition.location, &lance_changes).await?;
+
+        let fresh = definition
+            .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+            .await?;
+        session.register_table(table_ref, fresh)?;
+        return Ok(());
+    }
+
+    let definition = iceberg_definition.expect("a managed table definition was found above");
     let catalog = beacon_iceberg::get_catalog()?;
     let store = beacon_iceberg::get_warehouse_store()?;
     beacon_iceberg::alter_table_schema(
@@ -476,6 +597,94 @@ pub(crate) async fn alter_table(
     session.register_table(table_ref, fresh)?;
 
     Ok(())
+}
+
+/// Fetch the runtime-scoped Lance warehouse from the session config extensions.
+fn lance_warehouse(
+    session: &Arc<SessionContext>,
+) -> anyhow::Result<Arc<beacon_lance::LanceWarehouse>> {
+    session
+        .state()
+        .config()
+        .get_extension::<beacon_lance::LanceWarehouse>()
+        .ok_or_else(|| anyhow::anyhow!("Lance warehouse is unavailable"))
+}
+
+/// Resolve a managed table to the on-disk location of its Lance dataset, erroring
+/// if the table is not Lance-backed (indexes are a Lance-only feature).
+async fn lance_table_location(
+    session: &Arc<SessionContext>,
+    table: &str,
+) -> anyhow::Result<String> {
+    let provider = session.table_provider(table).await?;
+    provider
+        .as_any()
+        .downcast_ref::<beacon_lance::LanceTable>()
+        .map(|t| t.definition().location.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Indexes are only supported on Lance-backed tables, but '{table}' is not one"
+            )
+        })
+}
+
+/// `CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]`: build a scalar
+/// index on a Lance table. `using` defaults to `btree`; `name` defaults to
+/// `<table>_<column>_idx`.
+pub(crate) async fn create_index(
+    session: &Arc<SessionContext>,
+    table: &str,
+    column: &str,
+    name: Option<String>,
+    using: Option<String>,
+) -> anyhow::Result<()> {
+    let location = lance_table_location(session, table).await?;
+    let kind = match using {
+        Some(using) => using
+            .parse::<beacon_lance::ScalarIndexKind>()
+            .map_err(|e| anyhow::anyhow!(e))?,
+        None => beacon_lance::ScalarIndexKind::BTree,
+    };
+    let index_name = name.unwrap_or_else(|| format!("{table}_{column}_idx"));
+    let warehouse = lance_warehouse(session)?;
+    beacon_lance::create_index(&warehouse, &location, column, &index_name, kind).await
+}
+
+/// `DROP INDEX <name> ON <table>`: drop a Lance table's index by name.
+pub(crate) async fn drop_index(
+    session: &Arc<SessionContext>,
+    table: &str,
+    name: &str,
+) -> anyhow::Result<()> {
+    let location = lance_table_location(session, table).await?;
+    let warehouse = lance_warehouse(session)?;
+    beacon_lance::drop_index(&warehouse, &location, name).await
+}
+
+/// `SHOW INDEXES ON <table>`: list a Lance table's indexes as rows of
+/// `(index_name, columns)`.
+pub(crate) async fn list_indexes(
+    session: &Arc<SessionContext>,
+    table: &str,
+) -> anyhow::Result<arrow::record_batch::RecordBatch> {
+    let location = lance_table_location(session, table).await?;
+    let warehouse = lance_warehouse(session)?;
+    let indices = beacon_lance::list_indices(&warehouse, &location).await?;
+
+    let names = indices.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
+    let columns = indices
+        .iter()
+        .map(|i| i.columns.join(", "))
+        .collect::<Vec<_>>();
+
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        super::logical::show_indexes_arrow_schema(),
+        vec![
+            Arc::new(arrow::array::StringArray::from_iter_values(names)),
+            Arc::new(arrow::array::StringArray::from_iter_values(columns)),
+        ],
+    )?;
+    Ok(batch)
 }
 
 /// Convert a SQL column definition's type to an Arrow type, reusing

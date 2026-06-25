@@ -381,11 +381,13 @@ export default defineConfig({
                   link: '/docs/1.7.3/sql/managed-tables',
                   collapsed: true,
                   items: [
+                    { text: 'Storage engine', link: '/docs/1.7.3/sql/managed-tables#choosing-the-storage-engine' },
                     { text: 'CREATE TABLE AS SELECT', link: '/docs/1.7.3/sql/managed-tables#create-table-as-select' },
                     { text: 'INSERT INTO', link: '/docs/1.7.3/sql/managed-tables#insert-into' },
                     { text: 'DELETE', link: '/docs/1.7.3/sql/managed-tables#delete' },
                     { text: 'UPDATE', link: '/docs/1.7.3/sql/managed-tables#update' },
                     { text: 'ALTER TABLE', link: '/docs/1.7.3/sql/managed-tables#alter-table' },
+                    { text: 'Indexes', link: '/docs/1.7.3/sql/managed-tables#indexes' },
                     { text: 'DROP TABLE', link: '/docs/1.7.3/sql/managed-tables#drop-table' },
                   ]
                 },

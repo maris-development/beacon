@@ -1,0 +1,34 @@
+[package]
+name = "beacon-lance"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+datafusion = { workspace = true }
+arrow = { workspace = true }
+arrow-schema = { workspace = true, features = ["serde"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+typetag = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+once_cell = { workspace = true }
+
+lance = { workspace = true }
+lance-index = { workspace = true }
+lance-io = { workspace = true }
+lance-core = { workspace = true }
+object_store = { workspace = true }
+url = "2"
+
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-config = { path = "../../beacon-config" }
+beacon-object-storage = { path = "../../beacon-object-storage" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -25,7 +25,36 @@ use datafusion::{
     sql::sqlparser::ast::{AlterTableOperation, ObjectName, Statement as SqlAstStatement},
 };
 
-use super::logical::{AlterTableNode, AlterTableSpec, Keyed, ReplaceTableContentsNode};
+use super::logical::{AlterTableNode, AlterTableSpec, Keyed, Mutation, ReplaceTableContentsNode};
+
+/// Render a DataFusion `Expr` back to a SQL string (best-effort). Used to derive
+/// native Lance `DELETE`/`UPDATE` predicates and `SET` values; `None` if the
+/// expression cannot be unparsed, in which case the caller falls back to the
+/// copy-on-write path.
+///
+/// Column references are stripped of their table qualifier first: Lance parses
+/// the predicate/value against the dataset schema, which has bare field names
+/// (`id`), so a qualified `t.id` would not resolve.
+fn unparse_expr(expr: &Expr) -> Option<String> {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+    use datafusion::common::Column;
+
+    let unqualified = expr
+        .clone()
+        .transform(|e| {
+            Ok(match e {
+                Expr::Column(c) => Transformed::yes(Expr::Column(Column::new_unqualified(c.name))),
+                other => Transformed::no(other),
+            })
+        })
+        .ok()?
+        .data;
+
+    datafusion::sql::unparser::Unparser::default()
+        .expr_to_sql(&unqualified)
+        .ok()
+        .map(|ast| ast.to_string())
+}
 
 /// Lower a parsed DataFusion statement to a logical plan. Permission checks are
 /// applied later by [`validate_query_plan`](super::validate_query_plan), once the
@@ -72,15 +101,15 @@ fn alter_table_plan(name: ObjectName, operations: Vec<AlterTableOperation>) -> L
 /// `DELETE FROM t [WHERE p]`: the surviving rows are `NOT p` (or none when there
 /// is no `WHERE`), and they replace the table's contents.
 fn delete_plan(dml: DmlStatement) -> anyhow::Result<LogicalPlan> {
-    let keep_plan = match dml.input.as_ref() {
+    let (keep_plan, predicate) = match dml.input.as_ref() {
         LogicalPlan::Filter(filter) => {
             let keep = Filter::try_new(not(filter.predicate.clone()), filter.input.clone())?;
-            LogicalPlan::Filter(keep)
+            (LogicalPlan::Filter(keep), Some(filter.predicate.clone()))
         }
         scan @ LogicalPlan::TableScan(_) => {
             // No WHERE clause: delete every row -> keep nothing.
             let keep = Filter::try_new(lit(false), Arc::new(scan.clone()))?;
-            LogicalPlan::Filter(keep)
+            (LogicalPlan::Filter(keep), None)
         }
         other => {
             return Err(anyhow::anyhow!(
@@ -90,7 +119,16 @@ fn delete_plan(dml: DmlStatement) -> anyhow::Result<LogicalPlan> {
         }
     };
 
-    Ok(replace_contents_plan(dml.table_name, keep_plan))
+    // Native delete spec (best-effort). A WHERE whose predicate cannot be
+    // unparsed yields `None` -> copy-on-write (never a native delete-all).
+    let mutation = match &predicate {
+        Some(expr) => unparse_expr(expr).map(|sql| Mutation::Delete {
+            predicate: Some(sql),
+        }),
+        None => Some(Mutation::Delete { predicate: None }),
+    };
+
+    Ok(replace_contents_plan(dml.table_name, keep_plan, mutation))
 }
 
 /// `UPDATE t SET col = expr [WHERE p]`: rebuild the full post-update table as a
@@ -137,11 +175,55 @@ fn update_plan(dml: DmlStatement) -> anyhow::Result<LogicalPlan> {
         _ => dml.input.as_ref().clone(),
     };
 
-    Ok(replace_contents_plan(dml.table_name, new_contents))
+    let mutation = update_mutation(projection);
+    Ok(replace_contents_plan(dml.table_name, new_contents, mutation))
 }
 
-fn replace_contents_plan(table: datafusion::sql::TableReference, input: LogicalPlan) -> LogicalPlan {
-    extension(Arc::new(ReplaceTableContentsNode { table, input }))
+/// Derive a native `UPDATE` spec from the planned projection (best-effort):
+/// the changed columns become `SET` assignments and the filter becomes the
+/// `WHERE`. Returns `None` (→ copy-on-write) if the shape is unexpected or any
+/// expression cannot be unparsed.
+fn update_mutation(projection: &datafusion::logical_expr::Projection) -> Option<Mutation> {
+    let (scan, predicate) = match projection.input.as_ref() {
+        LogicalPlan::Filter(filter) => (filter.input.as_ref(), Some(filter.predicate.clone())),
+        scan => (scan, None),
+    };
+    if projection.expr.len() != scan.schema().fields().len() {
+        return None;
+    }
+    let scan_cols = scan.schema().columns();
+
+    let mut assignments = Vec::new();
+    for (i, expr) in projection.expr.iter().enumerate() {
+        let new_value = expr.clone().unalias();
+        // Unchanged columns project the column through unchanged; skip those.
+        if new_value == Expr::Column(scan_cols[i].clone()) {
+            continue;
+        }
+        let name = projection.schema.field(i).name().clone();
+        assignments.push((name, unparse_expr(&new_value)?));
+    }
+
+    let predicate = match predicate {
+        Some(expr) => Some(unparse_expr(&expr)?),
+        None => None,
+    };
+    Some(Mutation::Update {
+        predicate,
+        assignments,
+    })
+}
+
+fn replace_contents_plan(
+    table: datafusion::sql::TableReference,
+    input: LogicalPlan,
+    mutation: Option<Mutation>,
+) -> LogicalPlan {
+    extension(Arc::new(ReplaceTableContentsNode {
+        table,
+        input,
+        mutation,
+    }))
 }
 
 /// `COPY ... TO` stays a standard DataFusion node (which it can plan + execute);

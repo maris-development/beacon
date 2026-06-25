@@ -16,6 +16,8 @@ RUN apt-get install -y libclang-dev
 RUN apt-get install -y libsqlite3-dev
 RUN apt-get install -y cmake
 RUN apt-get install -y sqlite3
+# protoc: required at build time by the `lance` crate (beacon-lance managed tables)
+RUN apt-get install -y protobuf-compiler
 
 #Install Rust
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
@@ -42,6 +44,7 @@ COPY beacon-file-formats/beacon-arrow-geoparquet/ /beacon-file-formats/beacon-ar
 COPY beacon-file-formats/beacon-arrow-bbf/ /beacon-file-formats/beacon-arrow-bbf/
 COPY beacon-functions/ /beacon-functions/
 COPY beacon-file-formats/beacon-iceberg/ /beacon-file-formats/beacon-iceberg/
+COPY beacon-file-formats/beacon-lance/ /beacon-file-formats/beacon-lance/
 COPY beacon-file-formats/beacon-nd-array/ /beacon-file-formats/beacon-nd-array/
 COPY beacon-file-formats/beacon-nd-arrow/ /beacon-file-formats/beacon-nd-arrow/
 COPY beacon-object-storage/ /beacon-object-storage/

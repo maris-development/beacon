@@ -52,6 +52,7 @@ rejected rather than writing plaintext.
 | `BEACON_ENABLE_SQL` | `true` | Enable the raw SQL query interface. Set to `false` to disable it (the JSON query API stays available). |
 | `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. More is better for larger datasets and memory-heavy operations such as spatial joins and `GROUP BY`. |
 | `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request omits the source. Only applies to the JSON query API — SQL queries must always specify a source. |
+| `BEACON_DEFAULT_TABLE_ENGINE` | `lance` | Storage engine for [managed tables](../sql/managed-tables.md) created with `CREATE TABLE`: `lance` (local, supports indexes) or `iceberg` (object-store). Can be overridden per session with `SET beacon.table_engine = '…'`. |
 | `BEACON_ENABLE_PUSHDOWN_PROJECTION` | `true` | Push column projection down into file readers so only requested columns are decoded. |
 | `BEACON_SANITIZE_SCHEMA` | `false` | Sanitize dataset schemas (normalize column names/types) during discovery. |
 | `BEACON_ST_WITHIN_POINT_CACHE_SIZE` | `10000` | Cache size for `st_within_point` geometry lookups. |

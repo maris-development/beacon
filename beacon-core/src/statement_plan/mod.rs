@@ -19,6 +19,7 @@ pub(crate) mod materialized_view;
 mod physical;
 mod query_planner;
 mod stream_coalescer;
+pub(crate) mod table_engine;
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -30,8 +31,9 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    CreateCrawlerStatement, CreateMaterializedViewStatement, DropCrawlerStatement, RefreshStatement,
-    RunCrawlerStatement,
+    CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
+    DropCrawlerStatement, DropIndexStatement, RefreshStatement, RunCrawlerStatement,
+    ShowIndexesStatement,
 };
 
 pub(crate) use lower::lower_df_statement;
@@ -145,6 +147,37 @@ pub(crate) fn show_crawlers_plan() -> LogicalPlan {
     })
 }
 
+/// Build the logical plan for `CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]`.
+pub(crate) fn create_index_plan(statement: CreateIndexStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::CreateIndexNode {
+            table: statement.table.to_string(),
+            column: statement.column,
+            name: statement.name.map(|n| n.to_string()),
+            using: statement.using,
+        }),
+    })
+}
+
+/// Build the logical plan for `DROP INDEX <name> ON <table>`.
+pub(crate) fn drop_index_plan(statement: DropIndexStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::DropIndexNode {
+            table: statement.table.to_string(),
+            name: statement.name.to_string(),
+        }),
+    })
+}
+
+/// Build the logical plan for `SHOW INDEXES ON <table>`.
+pub(crate) fn show_indexes_plan(statement: ShowIndexesStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::ShowIndexesNode {
+            table: statement.table.to_string(),
+        }),
+    })
+}
+
 /// Plan and execute a beacon statement logical plan through the single
 /// `create_physical_plan` -> `execute_stream` pipeline, coalescing the result the
 /// same way the legacy statement executor does.
@@ -160,6 +193,24 @@ pub(crate) async fn execute_statement_plan(
     plan: LogicalPlan,
 ) -> anyhow::Result<SendableRecordBatchStream> {
     use futures::TryStreamExt;
+
+    // Statements (e.g. `SET beacon.table_engine = '…'`) cannot be physical-planned;
+    // DataFusion applies them to the session via `execute_logical_plan`. Route them
+    // there so the session config actually changes, then drain the (empty) result.
+    if matches!(plan, LogicalPlan::Statement(_)) {
+        let schema: arrow::datatypes::SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
+        session_ctx
+            .execute_logical_plan(plan)
+            .await?
+            .collect()
+            .await?;
+        return Ok(Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::empty(),
+            ),
+        ));
+    }
 
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
     let stream = datafusion::physical_plan::execute_stream(physical_plan, session_ctx.task_ctx())?;

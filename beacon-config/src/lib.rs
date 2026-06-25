@@ -69,6 +69,42 @@ pub struct SqlConfig {
     pub default_table: String,
     pub enable_pushdown_projection: bool,
     pub stream_coalesce: SqlStreamCoalesceConfig,
+    /// Storage engine used for managed `CREATE TABLE` when the statement does not
+    /// override it (via `SET beacon.table_engine = '…'`).
+    pub default_table_engine: TableEngine,
+}
+
+/// The storage engine backing a beacon-managed table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableEngine {
+    /// Lance: local-filesystem, columnar, versioned (default).
+    #[default]
+    Lance,
+    /// Apache Iceberg: object-store-backed lakehouse table.
+    Iceberg,
+}
+
+impl TableEngine {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TableEngine::Lance => "lance",
+            TableEngine::Iceberg => "iceberg",
+        }
+    }
+}
+
+impl std::str::FromStr for TableEngine {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "lance" => Ok(TableEngine::Lance),
+            "iceberg" => Ok(TableEngine::Iceberg),
+            other => Err(format!(
+                "unknown table engine '{other}', expected 'lance' or 'iceberg'"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +220,8 @@ struct RawConfig {
     vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     default_table: String,
+    #[envconfig(from = "BEACON_DEFAULT_TABLE_ENGINE", default = "lance")]
+    default_table_engine: String,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
     sanitize_schema: bool,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "true")]
@@ -365,6 +403,13 @@ impl From<RawConfig> for Config {
                     target_rows: raw.sql_stream_coalesce_target_rows,
                     flush_timeout_ms: raw.sql_stream_coalesce_flush_timeout_ms,
                     max_rows: raw.sql_stream_coalesce_max_rows,
+                },
+                default_table_engine: match raw.default_table_engine.parse() {
+                    Ok(engine) => engine,
+                    Err(e) => {
+                        tracing::warn!("invalid BEACON_DEFAULT_TABLE_ENGINE: {e}; defaulting to lance");
+                        TableEngine::default()
+                    }
                 },
             },
             flight_sql: FlightSqlConfig {
