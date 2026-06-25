@@ -94,7 +94,7 @@ A few terms used throughout the docs:
 - **[Dataset](/docs/1.7.3/data-lake/datasets)** — an individual file Beacon reads in place (NetCDF, Zarr, Parquet, …).
 - **[External table](/docs/1.7.3/data-lake/external-tables)** — a registered name over one or more files (a folder or glob pattern), with a merged schema across them.
 - **[View](/docs/1.7.3/data-lake/view)** — a saved query exposed as a table.
-- **[Managed table](/docs/1.7.3/sql/managed-tables)** — an Iceberg-backed table Beacon owns and can mutate (`INSERT` / `UPDATE` / `DELETE`).
+- **[Managed table](/docs/1.7.3/sql/managed-tables)** — a table Beacon owns and can mutate (`INSERT` / `UPDATE` / `DELETE` / `ALTER` / `CREATE INDEX`), backed by Lance (default) or Iceberg.
 
 ## Next steps
 
