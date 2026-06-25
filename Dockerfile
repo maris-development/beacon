@@ -16,6 +16,8 @@ RUN apt-get install -y libclang-dev
 RUN apt-get install -y libsqlite3-dev
 RUN apt-get install -y cmake
 RUN apt-get install -y sqlite3
+# protoc: required at build time by the `lance` crate (beacon-lance managed tables)
+RUN apt-get install -y protobuf-compiler
 
 #Install Rust
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y

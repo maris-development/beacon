@@ -7,8 +7,9 @@ use datafusion::sql::{
 };
 
 use super::statement::{
-    BeaconStatement, CreateCrawlerStatement, CreateMaterializedViewStatement, DropCrawlerStatement,
-    RefreshStatement, RunCrawlerStatement,
+    BeaconStatement, CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
+    DropCrawlerStatement, DropIndexStatement, RefreshStatement, RunCrawlerStatement,
+    ShowIndexesStatement,
 };
 
 /// A parser that extends `DFParser` with custom Beacon SQL syntax.
@@ -47,6 +48,18 @@ impl<'a> BeaconParser<'a> {
 
         if self.is_show_crawlers() {
             return self.parse_show_crawlers();
+        }
+
+        if self.is_create_index() {
+            return self.parse_create_index();
+        }
+
+        if self.is_drop_index() {
+            return self.parse_drop_index();
+        }
+
+        if self.is_show_indexes() {
+            return self.parse_show_indexes();
         }
 
         let df_statement = Box::new(self.df_parser.parse_statement()?);
@@ -147,6 +160,128 @@ impl<'a> BeaconParser<'a> {
         self.df_parser.parser.next_token(); // SHOW
         self.df_parser.parser.next_token(); // CRAWLERS
         Ok(BeaconStatement::ShowCrawlers)
+    }
+
+    fn is_create_index(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.keyword == Keyword::CREATE)
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "INDEX")
+    }
+
+    fn is_drop_index(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.keyword == Keyword::DROP)
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "INDEX")
+    }
+
+    fn is_show_indexes(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "SHOW")
+            && matches!(t2, Token::Word(w)
+                if matches!(w.value.to_uppercase().as_str(), "INDEXES" | "INDEX" | "INDICES"))
+    }
+
+    /// Parse: CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]
+    fn parse_create_index(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // CREATE
+        self.df_parser.parser.next_token(); // INDEX
+
+        // An index name is present unless the next token is `ON`.
+        let name = if matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.keyword == Keyword::ON
+        ) {
+            None
+        } else {
+            Some(
+                self.df_parser
+                    .parser
+                    .parse_object_name(false)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?,
+            )
+        };
+
+        self.df_parser
+            .parser
+            .expect_keyword(Keyword::ON)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let table = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        self.df_parser
+            .parser
+            .expect_token(&Token::LParen)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let column = self.parse_string_value()?;
+        self.df_parser
+            .parser
+            .expect_token(&Token::RParen)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let using = if matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.keyword == Keyword::USING
+        ) {
+            self.df_parser.parser.next_token(); // USING
+            Some(self.parse_string_value()?)
+        } else {
+            None
+        };
+
+        Ok(BeaconStatement::CreateIndex(CreateIndexStatement {
+            name,
+            table,
+            column,
+            using,
+        }))
+    }
+
+    /// Parse: DROP INDEX <name> ON <table>
+    fn parse_drop_index(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // DROP
+        self.df_parser.parser.next_token(); // INDEX
+        let name = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        self.df_parser
+            .parser
+            .expect_keyword(Keyword::ON)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let table = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(BeaconStatement::DropIndex(DropIndexStatement { name, table }))
+    }
+
+    /// Parse: SHOW INDEXES [ON|FROM] <table>
+    fn parse_show_indexes(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // SHOW
+        self.df_parser.parser.next_token(); // INDEXES
+
+        // Optional `ON`/`FROM` before the table name.
+        if matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.keyword == Keyword::ON || w.keyword == Keyword::FROM
+        ) {
+            self.df_parser.parser.next_token();
+        }
+
+        let table = self
+            .df_parser
+            .parser
+            .parse_object_name(false)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(BeaconStatement::ShowIndexes(ShowIndexesStatement { table }))
     }
 
     /// Read a single string value (single-quoted string, identifier, or number).

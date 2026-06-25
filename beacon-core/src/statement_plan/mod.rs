@@ -19,6 +19,7 @@ pub(crate) mod materialized_view;
 mod physical;
 mod query_planner;
 mod stream_coalescer;
+pub(crate) mod table_engine;
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -30,8 +31,9 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    CreateCrawlerStatement, CreateMaterializedViewStatement, DropCrawlerStatement, RefreshStatement,
-    RunCrawlerStatement,
+    CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
+    DropCrawlerStatement, DropIndexStatement, RefreshStatement, RunCrawlerStatement,
+    ShowIndexesStatement,
 };
 
 pub(crate) use lower::lower_df_statement;
@@ -142,6 +144,37 @@ pub(crate) fn drop_crawler_plan(statement: DropCrawlerStatement) -> LogicalPlan 
 pub(crate) fn show_crawlers_plan() -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::ShowCrawlersNode),
+    })
+}
+
+/// Build the logical plan for `CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]`.
+pub(crate) fn create_index_plan(statement: CreateIndexStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::CreateIndexNode {
+            table: statement.table.to_string(),
+            column: statement.column,
+            name: statement.name.map(|n| n.to_string()),
+            using: statement.using,
+        }),
+    })
+}
+
+/// Build the logical plan for `DROP INDEX <name> ON <table>`.
+pub(crate) fn drop_index_plan(statement: DropIndexStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::DropIndexNode {
+            table: statement.table.to_string(),
+            name: statement.name.to_string(),
+        }),
+    })
+}
+
+/// Build the logical plan for `SHOW INDEXES ON <table>`.
+pub(crate) fn show_indexes_plan(statement: ShowIndexesStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::ShowIndexesNode {
+            table: statement.table.to_string(),
+        }),
     })
 }
 

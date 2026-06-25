@@ -354,6 +354,125 @@ impl UserDefinedLogicalNodeCore for ShowCrawlersNode {
     }
 }
 
+/// Arrow schema produced by `SHOW INDEXES`.
+pub(crate) fn show_indexes_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("index_name", DataType::Utf8, false),
+                Field::new("columns", DataType::Utf8, false),
+            ]))
+        })
+        .clone()
+}
+
+fn show_indexes_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(show_indexes_arrow_schema().as_ref().clone())
+                .expect("SHOW INDEXES schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct CreateIndexNode {
+    pub(crate) table: String,
+    pub(crate) column: String,
+    pub(crate) name: Option<String>,
+    pub(crate) using: Option<String>,
+}
+
+impl UserDefinedLogicalNodeCore for CreateIndexNode {
+    fn name(&self) -> &str {
+        "CreateIndex"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "CreateIndex: table={} column={}", self.table, self.column)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            table: self.table.clone(),
+            column: self.column.clone(),
+            name: self.name.clone(),
+            using: self.using.clone(),
+        })
+    }
+}
+
+/// Logical node for `DROP INDEX <name> ON <table>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct DropIndexNode {
+    pub(crate) table: String,
+    pub(crate) name: String,
+}
+
+impl UserDefinedLogicalNodeCore for DropIndexNode {
+    fn name(&self) -> &str {
+        "DropIndex"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "DropIndex: table={} name={}", self.table, self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            table: self.table.clone(),
+            name: self.name.clone(),
+        })
+    }
+}
+
+/// Logical node for `SHOW INDEXES ON <table>`. Produces rows, so it carries the
+/// listing schema.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct ShowIndexesNode {
+    pub(crate) table: String,
+}
+
+impl UserDefinedLogicalNodeCore for ShowIndexesNode {
+    fn name(&self) -> &str {
+        "ShowIndexes"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        show_indexes_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ShowIndexes: table={}", self.table)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            table: self.table.clone(),
+        })
+    }
+}
+
 /// Logical node for the copy-on-write replacement that backs `DELETE` and
 /// `UPDATE`: `input` computes the table's full post-mutation contents, which
 /// atomically replace the Iceberg table's data files. Produces no rows.

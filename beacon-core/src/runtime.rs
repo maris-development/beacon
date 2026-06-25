@@ -172,6 +172,14 @@ impl Runtime {
         app_config: Arc<beacon_config::Config>,
         crawler_handle: beacon_data_lake::crawler::CrawlerManagerHandle,
     ) -> anyhow::Result<Arc<SessionContext>> {
+        // Runtime-scoped Lance warehouse, threaded through the session so
+        // managed-table CRUD/index ops stay isolated per runtime — no process
+        // globals. Rooted in the (always-local) tables directory, alongside each
+        // table's `table.json`; S3 only ever applies to the datasets store.
+        let lance_warehouse = Arc::new(beacon_lance::LanceWarehouse::new(
+            app_config.storage.tables_dir.join("lance"),
+        ));
+
         let mut config = SessionConfig::new()
             .with_batch_size(app_config.runtime.batch_size)
             .with_coalesce_batches(true)
@@ -183,11 +191,18 @@ impl Runtime {
             // without a process-global accessor.
             .with_extension(datasets_store)
             .with_extension(app_config)
+            .with_extension(lance_warehouse)
             // The (late-filled) crawler manager handle, so DDL crawler actions can
             // reach it from session-scoped execution.
             .with_extension(crawler_handle);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
+        // Register beacon's session-scoped SQL options so `SET beacon.table_engine`
+        // can override the managed-table engine per session.
+        config
+            .options_mut()
+            .extensions
+            .insert(crate::statement_plan::table_engine::BeaconSqlOptions::default());
         config
             .options_mut()
             .execution
@@ -361,6 +376,15 @@ impl Runtime {
                 Ok(crate::statement_plan::drop_crawler_plan(statement))
             }
             BeaconStatement::ShowCrawlers => Ok(crate::statement_plan::show_crawlers_plan()),
+            BeaconStatement::CreateIndex(statement) => {
+                Ok(crate::statement_plan::create_index_plan(statement))
+            }
+            BeaconStatement::DropIndex(statement) => {
+                Ok(crate::statement_plan::drop_index_plan(statement))
+            }
+            BeaconStatement::ShowIndexes(statement) => {
+                Ok(crate::statement_plan::show_indexes_plan(statement))
+            }
             BeaconStatement::DFStatement(statement) => {
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
             }
@@ -1073,6 +1097,59 @@ mod client_query_tests {
             err.to_string().contains("super-user"),
             "unexpected error: {err}"
         );
+    }
+
+    /// End-to-end index lifecycle on a Lance-backed managed table: CREATE INDEX,
+    /// SHOW INDEXES (one row), DROP INDEX (zero rows) — exercising the parser,
+    /// planner, execs, and Lance index ops through the full SQL path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_show_drop_index_round_trip() {
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+            .await
+            .expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("idx_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (id BIGINT, name VARCHAR)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1, 'a'), (2, 'b')")).await;
+        run_sql(
+            &runtime,
+            &format!("CREATE INDEX {table}_id_idx ON {table} (id) USING btree"),
+        )
+        .await;
+
+        let count_indexes = |sql: String| {
+            let runtime = &runtime;
+            async move {
+                runtime
+                    .run_query(crate::query::Query::sql(sql), true)
+                    .await
+                    .expect("show indexes should run")
+                    .into_record_stream()
+                    .expect("streamed result")
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .expect("stream should drain")
+                    .iter()
+                    .map(|b| b.num_rows())
+                    .sum::<usize>()
+            }
+        };
+
+        assert_eq!(
+            count_indexes(format!("SHOW INDEXES ON {table}")).await,
+            1,
+            "one index should be listed"
+        );
+
+        run_sql(&runtime, &format!("DROP INDEX {table}_id_idx ON {table}")).await;
+        assert_eq!(
+            count_indexes(format!("SHOW INDEXES ON {table}")).await,
+            0,
+            "no indexes after drop"
+        );
+
+        run_sql(&runtime, &format!("DROP TABLE {table}")).await;
     }
 }
 

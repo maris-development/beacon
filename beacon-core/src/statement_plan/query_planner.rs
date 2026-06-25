@@ -203,6 +203,31 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             return Ok(Some(Arc::new(physical::ShowCrawlersExec::new(session))));
         }
 
+        if let Some(create) = any.downcast_ref::<logical::CreateIndexNode>() {
+            return Ok(Some(Arc::new(physical::CreateIndexExec::new(
+                create.table.clone(),
+                create.column.clone(),
+                create.name.clone(),
+                create.using.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(drop) = any.downcast_ref::<logical::DropIndexNode>() {
+            return Ok(Some(Arc::new(physical::DropIndexExec::new(
+                drop.table.clone(),
+                drop.name.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(show) = any.downcast_ref::<logical::ShowIndexesNode>() {
+            return Ok(Some(Arc::new(physical::ShowIndexesExec::new(
+                show.table.clone(),
+                session,
+            ))));
+        }
+
         // Unrecognized node: let the default planner handle it.
         Ok(None)
     }
