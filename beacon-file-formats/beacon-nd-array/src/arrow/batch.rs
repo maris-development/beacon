@@ -783,8 +783,10 @@ mod tests {
     async fn test_default_broadcast_dimensions_makes_select_star_safe() {
         // `temp(a,b,c)` is the highest-dimensionality variable, plus a
         // CF-bounds-style `bnds(b,d)` whose `d` dimension is absent from the
-        // main grid. A naive SELECT * (all variables) cannot broadcast `bnds`
-        // onto `(a,b,c)` and fails.
+        // main grid. A naive SELECT * (all variables) broadcasts every variable
+        // onto the union of all dimensions `(a,b,c,d)` — a cross-product that
+        // keeps the incompatible `bnds`; the default narrowing instead drops
+        // `bnds` and keeps the compact `(a,b,c)` grid.
         let temp = NdArray::<f64>::try_new_from_vec_in_mem(
             (0..8).map(|v| v as f64).collect(),
             vec![2, 2, 2],
@@ -814,14 +816,23 @@ mod tests {
         ])
         .await;
 
-        // Naive SELECT * over all variables errors at the broadcast step.
-        let naive: Vec<anyhow::Result<RecordBatch>> =
+        // Without narrowing, SELECT * over *all* variables falls back to the
+        // union of every dataset dimension `(a,b,c,d)`. This does not error —
+        // each variable broadcasts onto the full grid — but it inflates the
+        // result into a cross-product and retains the incompatible `bnds`
+        // (replicated along `a,c`), which is rarely what the caller wants. (In
+        // production this path is never hit un-narrowed: `resolve_read_dimensions`
+        // always narrows first.)
+        let naive: Vec<RecordBatch> =
             dataset_as_record_batch_stream(ds.clone(), usize::MAX, None, None)
-                .collect()
-                .await;
+                .try_collect()
+                .await
+                .expect("union-grid fallback broadcasts every variable onto (a,b,c,d)");
+        let naive_rows: usize = naive.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(naive_rows, 16); // 2 * 2 * 2 * 2 — the (a,b,c,d) cross-product
         assert!(
-            naive.iter().any(|r| r.is_err()),
-            "expected broadcast error without dimension narrowing"
+            naive[0].column_by_name("bnds").is_some(),
+            "without narrowing the incompatible variable is kept"
         );
 
         // The default selection keeps the variable group that retains the most

@@ -48,7 +48,7 @@ impl Dataset {
             }
         }
 
-        let arrays = self
+        let arrays: IndexMap<String, Arc<dyn NdArrayD>> = self
             .arrays
             .iter()
             .filter(|(_, array)| {
@@ -59,9 +59,23 @@ impl Dataset {
             })
             .map(|(name, array)| (name.clone(), array.clone()))
             .collect();
+
+        // Keep only the dimensions actually referenced by a surviving array,
+        // preserving the original order. Dropping a variable can orphan a
+        // dimension (e.g. narrowing away a CF-bounds variable leaves its `nv`
+        // axis behind); retaining it would inflate the broadcast grid with a
+        // spurious dimension. `count(*)` builds its dataset directly (it never
+        // projects) so its full-grid dimensions are unaffected.
+        let dimensions = self
+            .dimensions
+            .iter()
+            .filter(|(dim, _)| arrays.values().any(|array| array.dimensions().contains(dim)))
+            .map(|(dim, size)| (dim.clone(), *size))
+            .collect();
+
         Ok(Dataset {
             name: self.name.clone(),
-            dimensions: self.dimensions.clone(),
+            dimensions,
             arrays,
         })
     }
