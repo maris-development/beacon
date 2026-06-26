@@ -102,23 +102,10 @@ def pg_table(client, postgres_container):
         pass
 
 
-# Executing a federated Postgres scan currently errors: the plan unparses the
-# beacon-side table alias back to Postgres ("relation \"pg_companies\" does not
-# exist", SQLSTATE 42P01), so the result stream is truncated. Planning/`EXPLAIN`
-# still shows a federated plan (see test_postgres_query_is_federated).
-PG_EXEC_XFAIL = pytest.mark.xfail(
-    reason="beacon bug: federated Postgres execution unparses the beacon table name to "
-    "the remote (relation 'pg_companies' does not exist / stream truncated)",
-    strict=False,
-)
-
-
-@PG_EXEC_XFAIL
 def test_postgres_table_row_count(client, pg_table):
     assert client.count(f"SELECT * FROM {pg_table}") == SEED_ROWS
 
 
-@PG_EXEC_XFAIL
 def test_postgres_filter_pushdown_result(client, pg_table):
     """A filtered count returns the correct subset (filter pushed to Postgres)."""
     n = client.scalar(f"SELECT count(*) FROM {pg_table} WHERE revenue > 40")
@@ -138,7 +125,6 @@ def test_postgres_query_is_federated(client, pg_table):
     assert "Federated" in plan, f"expected a federated plan, got:\n{plan}"
 
 
-@PG_EXEC_XFAIL
 def test_postgres_join_with_parquet(client, pg_table, external_table_obs, sample_data):
     """Cross-source query: a Postgres table and a local Parquet table referenced
     together, proving Beacon can combine a federated DB source with file data."""
@@ -171,7 +157,6 @@ def test_postgres_credentials_redacted_in_config(client, pg_table):
     assert config.get("secret") == "***"
 
 
-@PG_EXEC_XFAIL
 def test_postgres_table_survives_restart(client, pg_table, beacon_container):
     """The encrypted definition reloads from table.json after a beacon restart."""
     _run(["docker", "restart", CONTAINER_NAME])

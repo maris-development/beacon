@@ -113,23 +113,10 @@ def my_table(client, mysql_container):
         pass
 
 
-# Like Postgres, executing a federated MySQL scan returns no rows (the federation
-# unparser sends the local alias to the remote); planning/EXPLAIN and the
-# admin-only config endpoint work. Left unfixed per request (federation is shared
-# with the Postgres path).
-MY_EXEC_XFAIL = pytest.mark.xfail(
-    reason="federated MySQL execution returns no rows (shared federation-unparse issue "
-    "with Postgres)",
-    strict=False,
-)
-
-
-@MY_EXEC_XFAIL
 def test_mysql_table_row_count(client, my_table):
     assert client.count(f"SELECT * FROM {my_table}") == SEED_ROWS
 
 
-@MY_EXEC_XFAIL
 def test_mysql_filter_result(client, my_table):
     n = client.scalar(f"SELECT count(*) FROM {my_table} WHERE revenue > 40")
     assert int(n) == HIGH_REVENUE_ROWS

@@ -14,14 +14,15 @@ use datafusion::catalog::TableProvider;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::TableReference;
-use datafusion_federation::{FederatedTableProviderAdaptor, FederatedTableSource};
+use datafusion_federation::sql::{SQLTable, SQLTableSource};
+use datafusion_federation::FederatedTableProviderAdaptor;
 use secrecy::SecretString;
 
 use beacon_datafusion_ext::table_ext::TableDefinition;
 
 use crate::options::build_pool_params;
 use crate::secret::EncryptedSecret;
-use crate::source::BeaconSqlFederatedSource;
+use crate::source::BeaconSqlTable;
 use crate::SqlEngine;
 
 /// Persisted configuration for an external PostgreSQL/MySQL table.
@@ -101,12 +102,15 @@ impl TableDefinition for SqlDatabaseTableDefinition {
             })?;
 
         // `datafusion-table-providers` returns a `FederatedTableProviderAdaptor`
-        // (with the `*-federation` feature). The federation optimizer only
-        // recognizes a scan whose registered provider IS that adaptor, so we
-        // must keep it bare — wrapping it in another `TableProvider` would
-        // silently disable pushdown. Instead, rebuild the adaptor around our own
-        // `FederatedTableSource` that carries the definition, keeping the
-        // original provider as the non-federated scan fallback.
+        // (with the `*-federation` feature) whose `source` is the concrete
+        // `SQLTableSource`. The federation optimizer recognizes that exact type,
+        // and its `RewriteTableScanAnalyzer` rewrites the local catalog name to
+        // the source's `table_reference()` (the remote `LOCATION`) before
+        // generating SQL. We must therefore keep the concrete `SQLTableSource` —
+        // wrapping the *source* in another type would make that downcast fail and
+        // send Beacon's local table name to the remote DB. Instead we wrap the
+        // inner `SQLTable` (which still reports the correct remote
+        // `table_reference`) so it additionally carries our definition.
         let adaptor = provider
             .as_any()
             .downcast_ref::<FederatedTableProviderAdaptor>()
@@ -117,20 +121,31 @@ impl TableDefinition for SqlDatabaseTableDefinition {
                     self.name
                 )
             })?;
+        let sql_source = adaptor
+            .source
+            .as_any()
+            .downcast_ref::<SQLTableSource>()
+            .ok_or_else(|| {
+                anyhow!(
+                    "expected an SQLTableSource from datafusion-table-providers for table '{}'",
+                    self.name
+                )
+            })?;
 
         // Pin the resolved schema so a catalog round-trip persists the concrete
         // schema rather than whatever placeholder was supplied at creation.
         let mut pinned = self.clone();
-        pinned.schema = adaptor.source.schema();
+        pinned.schema = sql_source.table.schema();
 
-        let wrapped: Arc<dyn FederatedTableSource> = Arc::new(BeaconSqlFederatedSource::new(
-            Arc::clone(&adaptor.source),
-            pinned,
+        // Keep the federation provider/executor; swap the inner table for one that
+        // carries our definition while delegating the remote table reference.
+        let table: Arc<dyn SQLTable> =
+            Arc::new(BeaconSqlTable::new(Arc::clone(&sql_source.table), pinned));
+        let source = Arc::new(SQLTableSource::new_with_table(
+            Arc::clone(&sql_source.provider),
+            table,
         ));
-        Ok(Arc::new(FederatedTableProviderAdaptor::new_with_provider(
-            wrapped,
-            Arc::clone(&provider),
-        )))
+        Ok(Arc::new(FederatedTableProviderAdaptor::new(source)))
     }
 
     fn table_name(&self) -> &str {

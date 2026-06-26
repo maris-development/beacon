@@ -1,44 +1,41 @@
-//! Federated-source wrapper that carries the table's definition.
+//! A [`SQLTable`] wrapper that carries the table's definition.
 //!
-//! `datafusion-federation` only federates a table scan when the registered
-//! provider downcasts to [`FederatedTableProviderAdaptor`] and its `source`
-//! yields a [`FederatedTableSource`] (see `get_table_source` in the federation
-//! optimizer). Wrapping the adaptor in another `TableProvider` would defeat that
-//! detection and silently disable pushdown.
+//! `datafusion-federation` federates a scan only when the registered provider is
+//! a bare [`FederatedTableProviderAdaptor`] whose `source` is the concrete
+//! [`SQLTableSource`]. Its `RewriteTableScanAnalyzer` then rewrites the local
+//! catalog name to the table's `table_reference()` before generating the remote
+//! SQL. Wrapping the *source* (as a previous version did) makes that
+//! `downcast_ref::<SQLTableSource>()` fail, so the rewrite is silently skipped
+//! and the remote database receives Beacon's local table name (e.g.
+//! `pg_companies`) instead of the configured `LOCATION` (`public.companies`).
 //!
-//! So, exactly like the remote-Beacon table, we keep the registered provider a
-//! bare `FederatedTableProviderAdaptor` and instead wrap its inner
-//! `FederatedTableSource` in this newtype, which delegates every
-//! [`TableSource`]/[`FederatedTableSource`] method to the original source while
-//! carrying the [`SqlDatabaseTableDefinition`]. The catalog recovers the
-//! definition from a live provider via [`crate::sql_database_table_definition`].
+//! So, exactly like the remote-Beacon table's `BeaconRemoteSqlTable`, we keep the
+//! concrete `SQLTableSource` and instead wrap its inner [`SQLTable`], delegating
+//! every method to the engine's original table while carrying the
+//! [`SqlDatabaseTableDefinition`]. The catalog recovers the definition from a
+//! live provider via [`crate::sql_database_table_definition`].
+//!
+//! [`FederatedTableProviderAdaptor`]: datafusion_federation::FederatedTableProviderAdaptor
+//! [`SQLTableSource`]: datafusion_federation::sql::SQLTableSource
 
 use std::any::Any;
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use datafusion::common::Constraints;
-use datafusion::error::Result as DataFusionResult;
-use datafusion::logical_expr::{
-    Expr, LogicalPlan, TableProviderFilterPushDown, TableSource, TableType,
-};
-use datafusion_federation::{FederatedTableSource, FederationProvider};
+use datafusion::sql::TableReference;
+use datafusion_federation::sql::{AstAnalyzer, LogicalOptimizer, SQLTable, SqlQueryRewriter};
 
 use crate::definition::SqlDatabaseTableDefinition;
 
-/// A [`FederatedTableSource`] that delegates to the engine's original source
-/// while carrying the [`SqlDatabaseTableDefinition`] it was built from.
-pub struct BeaconSqlFederatedSource {
-    inner: Arc<dyn FederatedTableSource>,
+/// A [`SQLTable`] that delegates to the engine's original table while carrying
+/// the [`SqlDatabaseTableDefinition`] it was built from.
+pub struct BeaconSqlTable {
+    inner: Arc<dyn SQLTable>,
     definition: SqlDatabaseTableDefinition,
 }
 
-impl BeaconSqlFederatedSource {
-    pub fn new(
-        inner: Arc<dyn FederatedTableSource>,
-        definition: SqlDatabaseTableDefinition,
-    ) -> Self {
+impl BeaconSqlTable {
+    pub fn new(inner: Arc<dyn SQLTable>, definition: SqlDatabaseTableDefinition) -> Self {
         Self { inner, definition }
     }
 
@@ -48,50 +45,37 @@ impl BeaconSqlFederatedSource {
     }
 }
 
-impl std::fmt::Debug for BeaconSqlFederatedSource {
+impl std::fmt::Debug for BeaconSqlTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BeaconSqlFederatedSource")
+        f.debug_struct("BeaconSqlTable")
             .field("table", &self.definition.name)
             .field("engine", &self.definition.engine)
             .finish()
     }
 }
 
-impl TableSource for BeaconSqlFederatedSource {
+impl SQLTable for BeaconSqlTable {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn table_reference(&self) -> TableReference {
+        self.inner.table_reference()
     }
 
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }
 
-    fn constraints(&self) -> Option<&Constraints> {
-        self.inner.constraints()
+    fn logical_optimizer(&self) -> Option<LogicalOptimizer> {
+        self.inner.logical_optimizer()
     }
 
-    fn table_type(&self) -> TableType {
-        self.inner.table_type()
+    fn ast_analyzer(&self) -> Option<AstAnalyzer> {
+        self.inner.ast_analyzer()
     }
 
-    fn supports_filters_pushdown(
-        &self,
-        filters: &[&Expr],
-    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        self.inner.supports_filters_pushdown(filters)
-    }
-
-    fn get_logical_plan(&self) -> Option<Cow<'_, LogicalPlan>> {
-        self.inner.get_logical_plan()
-    }
-
-    fn get_column_default(&self, column: &str) -> Option<&Expr> {
-        self.inner.get_column_default(column)
-    }
-}
-
-impl FederatedTableSource for BeaconSqlFederatedSource {
-    fn federation_provider(&self) -> Arc<dyn FederationProvider> {
-        self.inner.federation_provider()
+    fn sql_query_rewriter(&self) -> Option<SqlQueryRewriter> {
+        self.inner.sql_query_rewriter()
     }
 }
