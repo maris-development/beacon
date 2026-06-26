@@ -75,11 +75,6 @@ def test_read_netcdf_projects_named_variable(client, netcdf_file):
     assert n > 0
 
 
-@pytest.mark.xfail(
-    reason="beacon bug: read_netcdf(..., ['lat','lon']) errors "
-    "'Failed to subset array lat: subset is missing start for axis 0'.",
-    strict=False,
-)
 def test_read_netcdf_explicit_dimensions(client, netcdf_file):
     """The 2-arg form projects onto an explicit dimension set."""
     rows = client.sql_rows(
@@ -91,11 +86,6 @@ def test_read_netcdf_explicit_dimensions(client, netcdf_file):
 
 
 # --- Zarr reading -------------------------------------------------------------
-@pytest.mark.xfail(
-    reason="committed gridded-example.zarr is not read: 'No valid Zarr v3 groups found "
-    "to infer schema' (fixture may be Zarr v2 / unsupported layout).",
-    strict=False,
-)
 def test_read_zarr_select_star(client, zarr_store):
     header = _header(client, f"SELECT * FROM read_zarr(['{zarr_store}'])")
     assert EXPECTED_VARS <= set(header), header

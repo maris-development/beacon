@@ -432,21 +432,35 @@ fn extract_dataset_layout(
         }
     }
 
-    let (_, max_array) = dataset
+    if dataset.arrays.is_empty() {
+        anyhow::bail!(
+            "Dataset has no arrays, so we can not determine the shape and chunk shape to use for iterating over the dataset."
+        );
+    }
+
+    // Prefer an array that spans *every* dataset dimension: its native dimension
+    // order, shape, and chunk layout drive efficient chunked reads, and the other
+    // (lower-rank) variables broadcast onto it.
+    let dim_count = dataset.dimensions.len();
+    if let Some((_, full)) = dataset
         .arrays
         .iter()
-        .max_by_key(|(_, array)| array.shape().len())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Dataset has no arrays, so we can not determine the shape and chunk shape to use for iterating over the dataset."
-            )
-        })?;
+        .filter(|(_, array)| array.dimensions().len() == dim_count)
+        .max_by_key(|(_, array)| array.shape().iter().product::<usize>())
+    {
+        return Ok((full.dimensions(), full.shape(), full.chunk_shape()));
+    }
 
-    Ok((
-        max_array.dimensions(),
-        max_array.shape(),
-        max_array.chunk_shape(),
-    ))
+    // No single array spans the full dimension set — e.g. a query over only the
+    // coordinate variables of a reduced dimension set (`read_netcdf(.., ['lat',
+    // 'lon'])`, where the data variable carried an extra dimension and was
+    // dropped). Build the grid from the dataset's dimensions so every remaining
+    // variable broadcasts onto the full grid instead of one being picked as an
+    // (incomplete) anchor. The chunk shape equals the full shape; the caller's
+    // `c_order_chunk_shape` then batches it.
+    let dims: Vec<String> = dataset.dimensions.keys().cloned().collect();
+    let shape: Vec<usize> = dataset.dimensions.values().copied().collect();
+    Ok((dims, shape.clone(), shape))
 }
 
 fn build_dataset_schema(arrays: &IndexMap<String, Arc<dyn NdArrayD>>) -> Arc<Schema> {

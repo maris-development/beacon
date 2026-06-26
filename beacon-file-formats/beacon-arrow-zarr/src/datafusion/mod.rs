@@ -170,16 +170,17 @@ impl FileFormat for ZarrFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        for object in objects {
-            if !is_zarr_v3_metadata(object) {
-                return Err(datafusion::error::DataFusionError::Execution(format!(
-                    "Object at location '{}' is not a Zarr v3 metadata file (zarr.json)",
-                    object.location.as_ref()
-                )));
-            }
-        }
-
+        // The listing may include non-metadata objects — chunk data files such as
+        // `<array>/c/0/0/0` — when the table is created without a `zarr.json`
+        // extension filter (e.g. via `read_zarr`). Select the top-level group
+        // metadata files and ignore the rest rather than erroring on the first
+        // chunk we encounter.
         let verified_objects = top_level_zarr_meta_v3(objects);
+        if verified_objects.is_empty() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "No Zarr v3 metadata (zarr.json) found in the provided path(s)".to_string(),
+            ));
+        }
         let mut schemas = Vec::new();
         for object in verified_objects {
             let zarr_path = ZarrPath::new_from_object_meta(object.clone()).map_err(|e| {

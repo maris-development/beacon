@@ -152,6 +152,22 @@ def datasets_dir(tmp_path_factory, sample_data) -> Path:
     _write_parquet(rows[:ROWS_FILE_A], mixed / "part-0.parquet")
     _write_parquet(rows[ROWS_FILE_A:], mixed / "part-1.parquet")
     (mixed / "lookup.csv").write_text("platform,note\nSHIP,x\n", encoding="utf-8")
+
+    # NetCDF + Zarr example fixtures, staged at container start for the same
+    # reason as ``mixed`` above. Docker bind-mounts do not propagate host-side
+    # inotify events into the container, so beacon's cached store listing never
+    # sees directories copied in at runtime. ``read_netcdf`` resolves a single
+    # explicit file (a HEAD, not a listing) so it tolerates runtime staging, but
+    # ``read_zarr`` must *list* the store to find its ``zarr.json`` — staging
+    # both here keeps the nd-format tests deterministic. (test_nd_formats's own
+    # fixtures see these already exist and simply return the paths.)
+    nc_src = REPO_ROOT / "beacon-file-formats/beacon-arrow-netcdf/test_files/gridded-example.nc"
+    if nc_src.exists():
+        (root / "nc").mkdir(exist_ok=True)
+        shutil.copy(nc_src, root / "nc" / "gridded-example.nc")
+    zarr_src = REPO_ROOT / "test-datasets/gridded-example.zarr"
+    if zarr_src.exists():
+        shutil.copytree(zarr_src, root / "zarr" / "gridded-example.zarr")
     return root
 
 
