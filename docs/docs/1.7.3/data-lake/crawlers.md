@@ -141,6 +141,20 @@ Filesystem events require `BEACON_ENABLE_FS_EVENTS=true` (the default for the lo
 | `BEACON_CRAWLER_ENABLE` | `true` | Master switch for crawler background triggers. When `false`, crawlers can still be defined and run on demand, but no scheduled/event tasks are spawned. |
 | `BEACON_CRAWLER_DEFAULT_INTERVAL_SECS` | `900` | Fallback poll interval applied to an `event_driven` crawler when storage events are unavailable and no explicit schedule is set. |
 
+## Admin REST API
+
+Besides the SQL DDL above, crawlers can be managed over HTTP. All of these
+endpoints require admin basic auth (the same credentials used for other write
+operations) and back the admin web UI:
+
+| Method & path | Purpose |
+| --- | --- |
+| `POST /api/admin/crawlers` | Define (or replace) a crawler and start its triggers. |
+| `GET /api/admin/crawlers` | List all defined crawlers. |
+| `GET /api/admin/crawlers/{name}` | Fetch one crawler's definition (404 if unknown). |
+| `POST /api/admin/crawlers/{name}/run` | Run a crawler once on demand and return its report. |
+| `DELETE /api/admin/crawlers/{name}` | Remove a crawler and stop its triggers (crawled tables are left in place). |
+
 ## Supported formats and limitations
 
 The crawler discovers **file-per-dataset** formats whose files are matched by extension: `parquet`, `csv` / `tsv`, `nc` (NetCDF), `bbf`, `arrow`, and `tiff`.

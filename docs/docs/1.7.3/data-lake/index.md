@@ -6,7 +6,7 @@ Beacon provides a lightweight data lake model that makes scientific datasets eas
 
 - **Datasets**: Individual files or stores (for example `.nc`, `.zarr`, `.parquet`). Datasets can be queried directly and are the smallest unit in Beacon.
 - **External tables**: A registered name over one or more files (a folder or glob pattern) with a merged schema, queryable as one logical table. See [External Tables](./external-tables.md).
-- **Managed tables**: Iceberg-backed tables Beacon owns and can mutate with `INSERT` / `UPDATE` / `DELETE`. See [Managed Tables](../sql/managed-tables.md).
+- **Managed tables**: tables Beacon owns and can mutate with `INSERT` / `UPDATE` / `DELETE`, backed by the Lance engine (default) or Iceberg. See [Managed Tables](../sql/managed-tables.md).
 - **Views**: A saved query exposed as a table. See [Views](./view.md).
 - **Metadata & schema**: Beacon inspects dataset metadata and builds schemas so you can discover available columns before running queries.
 - **Pushdown & partitioning**: Filters and projections are pushed down to reduce IO and speed up queries over large data.

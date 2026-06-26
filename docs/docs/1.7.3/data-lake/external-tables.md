@@ -126,10 +126,12 @@ LOCATION 'cruises/'
 
 ### ODV ASCII
 
+ODV ASCII is **not** an external-table format — there is no `STORED AS ODV`. Read
+ODV files directly with the [`read_odv_ascii()`](../sql/table-functions.md#read_odv_ascii)
+table function (or the `odv` source in the JSON query API):
+
 ```sql
-CREATE EXTERNAL TABLE odv_profiles
-STORED AS ODV
-LOCATION 'odv/'
+SELECT * FROM read_odv_ascii('odv/*.txt') LIMIT 100;
 ```
 
 ### GeoTIFF / COG

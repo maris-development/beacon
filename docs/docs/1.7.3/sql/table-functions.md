@@ -57,9 +57,12 @@ LIMIT 1
 
 ```text
 read_zarr(glob_paths)
+read_zarr(glob_paths, dimensions)
 ```
 
 Reads Zarr stores matching one or more glob patterns. Each path should point at a `zarr.json` entry file.
+
+The optional `dimensions` argument restricts the arrays returned to those whose dimensions are a subset of the provided list — use it to drop high-dimensional arrays you don't need.
 
 Predicate pushdown is automatic: Beacon prunes chunks and slices coordinate dimensions (e.g. `time`, `latitude`, `longitude`) based on the query's `WHERE` clause — no statistics columns need to be declared.
 
@@ -136,7 +139,7 @@ SELECT * FROM read_geoparquet('spatial/**/*.geoparquet') LIMIT 100
 read_arrow(glob_paths)
 ```
 
-Reads Arrow IPC stream files (`.arrow`, `.ipc`).
+Reads Arrow IPC stream files (`.arrow`, `.feather`).
 
 ```sql
 SELECT * FROM read_arrow('streams/*.arrow')
@@ -153,7 +156,7 @@ read_csv(glob_paths, delimiter, infer_records)
 Schema is inferred from the file contents. The first row must be a header row.
 
 - `delimiter` — single-character field separator (default: `,`)
-- `infer_records` — number of rows to sample when inferring column types (default: `100`)
+- `infer_records` — number of rows to sample when inferring column types (default: `128000`)
 
 ```sql
 SELECT * FROM read_csv('metadata/*.csv')

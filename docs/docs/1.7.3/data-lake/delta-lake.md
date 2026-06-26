@@ -12,7 +12,7 @@ Delta tables work over both local storage and S3 / object storage, resolved agai
 
 :::tip External vs managed vs Delta
 - An [**external table**](./external-tables.md) (`STORED AS PARQUET`, `NETCDF`, …) reads a folder/glob of files in place; it is read-only.
-- A [**managed table**](../sql/managed-tables.md) is owned by Beacon (Iceberg-backed) and mutable with `INSERT` / `UPDATE` / `DELETE`.
+- A [**managed table**](../sql/managed-tables.md) is owned by Beacon (Lance-backed by default, or Iceberg) and mutable with `INSERT` / `UPDATE` / `DELETE`.
 - A **Delta table** points at an existing Delta Lake table directory. It is read in place, supports snapshot-consistent reads and time travel, and accepts `INSERT INTO` which commits a new Delta version.
 :::
 

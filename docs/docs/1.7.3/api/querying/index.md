@@ -40,6 +40,20 @@ Content-Type: application/json
 { "select": ["time", "temperature"], "limit": 1 }
 ```
 
+### Explain Analyze
+
+**Run** the query and return the physical plan annotated with per-operator
+runtime metrics (rows, bytes, and time per node) — the analog of SQL `EXPLAIN
+ANALYZE`. Because it executes the query, it is subject to the same SQL gating as
+`/api/query` (disabled when `BEACON_ENABLE_SQL=false` for `sql` bodies):
+
+```http
+POST /api/explain-analyze-query
+Content-Type: application/json
+
+{ "select": ["time", "temperature"], "limit": 1 }
+```
+
 ### Query metrics
 
 Beacon returns a query ID via the `x-beacon-query-id` response header. Use it to fetch timing and row-count metrics after the query completes:
@@ -116,6 +130,41 @@ Content-Type: application/json
   }
 }
 ```
+
+### ODV (Ocean Data View)
+
+Exports the result as an Ocean Data View collection, returned as a **ZIP
+archive**. ODV needs to know which columns carry the station coordinates and
+which are data vs. metadata, so the format is configured with an options object:
+
+```http
+POST /api/query
+Content-Type: application/json
+
+{
+  "select": ["cruise", "longitude", "latitude", "depth", "time", "temperature"],
+  "output": {
+    "format": {
+      "odv": {
+        "longitude_column": { "column_name": "longitude" },
+        "latitude_column": { "column_name": "latitude" },
+        "depth_column": { "column_name": "depth" },
+        "time_column": { "column_name": "time" },
+        "key_column": "cruise",
+        "qf_schema": "SEADATANET",
+        "data_columns": [{ "column_name": "temperature" }],
+        "meta_columns": []
+      }
+    }
+  }
+}
+```
+
+Each `*_column` / `data_columns` / `meta_columns` entry identifies a result
+column (and may carry ODV-specific attributes such as units and quality-flag
+column). `key_column` groups rows into ODV stations and `qf_schema` selects the
+quality-flag scheme. Compression and archiving behavior are configurable; the
+response is always a ZIP.
 
 ## Data sources
 

@@ -162,7 +162,7 @@ Beacon is configured entirely through `BEACON_*` environment variables. The most
 | `BEACON_LOG_LEVEL` | `info` | Log verbosity (`trace`, `debug`, `info`, `warn`, `error`). |
 | `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. |
 | `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request specifies no source. |
-| `BEACON_WORKER_THREADS` | `8` | Number of query worker threads. |
+| `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |
 | `BEACON_ENABLE_SQL` | `true` | Enable the read-only raw SQL query interface. |
 | `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable the Arrow Flight SQL endpoint. |
 | `BEACON_FLIGHT_SQL_PORT` | `32011` | Arrow Flight SQL port. |

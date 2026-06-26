@@ -1,8 +1,23 @@
 # Function Reference
 
-Beacon inherits the full [Apache DataFusion](https://datafusion.apache.org/user-guide/sql/scalar_functions.html) scalar function library and adds its own functions for geospatial filtering, type conversion, and domain-specific vocabulary mapping. The sections below cover all available functions.
+Beacon's SQL runtime exposes two families of functions:
 
-## Aggregate functions
+1. **DataFusion built-ins** — Beacon inherits Apache DataFusion's full scalar and
+   aggregate function library. The tables below are a curated selection; for the
+   exhaustive list see DataFusion's
+   [scalar](https://datafusion.apache.org/user-guide/sql/scalar_functions.html)
+   and [aggregate](https://datafusion.apache.org/user-guide/sql/aggregate_functions.html)
+   references.
+2. **[Beacon-specific functions](#beacon-specific-functions)** — added by Beacon
+   for geospatial filtering, type conversion, and domain-specific vocabulary
+   mapping. That section is exhaustive.
+
+## DataFusion built-in functions (inherited)
+
+A curated selection of the inherited DataFusion library — anything in
+DataFusion's reference works even if it is not listed here.
+
+### Aggregate functions
 
 | Function | Description |
 | -------- | ----------- |
@@ -17,7 +32,7 @@ Beacon inherits the full [Apache DataFusion](https://datafusion.apache.org/user-
 | `MEDIAN(col)` | Median |
 | `APPROX_PERCENTILE_CONT(col, p)` | Approximate percentile (0–1) |
 
-## Math functions
+### Math functions
 
 | Function | Description |
 | -------- | ----------- |
@@ -62,7 +77,7 @@ Beacon inherits the full [Apache DataFusion](https://datafusion.apache.org/user-
 | `tanh(x)` | Hyperbolic tangent |
 | `trunc(x[, d])` | Truncate to `d` decimal places (default 0) |
 
-## String functions
+### String functions
 
 | Function | Description |
 | -------- | ----------- |
@@ -107,7 +122,7 @@ Beacon inherits the full [Apache DataFusion](https://datafusion.apache.org/user-
 | `upper(s)` | Uppercase |
 | `uuid()` | Random UUID v4 string (unique per row) |
 
-## Regular expression functions
+### Regular expression functions
 
 | Function | Description |
 | -------- | ----------- |
@@ -119,14 +134,14 @@ Beacon inherits the full [Apache DataFusion](https://datafusion.apache.org/user-
 
 Common flags: `i` (case-insensitive), `g` (global / all occurrences).
 
-## Binary string functions
+### Binary string functions
 
 | Function | Description |
 | -------- | ----------- |
 | `encode(data, format)` | Encode binary data to text (`'hex'`, `'base64'`, `'escape'`) |
 | `decode(text, format)` | Decode text back to binary |
 
-## Date and time functions
+### Date and time functions
 
 | Function | Description |
 | -------- | ----------- |
@@ -174,7 +189,7 @@ FROM ocean_profiles
 GROUP BY bin
 ```
 
-## Conditional expressions
+### Conditional expressions
 
 | Function | Description |
 | -------- | ----------- |
@@ -207,7 +222,7 @@ SELECT NULLIF(quality_flag, 9) AS qc_flag
 FROM ocean_profiles
 ```
 
-## Casting
+### Casting
 
 ```sql
 SELECT CAST(pressure AS DOUBLE) AS pressure_dbar
@@ -409,6 +424,9 @@ All mapping functions return `NULL` when the input code is not found in the look
 | `map_seadatanet_instrument_l05(instrument)` | `VARCHAR` | `VARCHAR` | SeaDataNet instrument code → L05 |
 | `map_seadatanet_platform_l06(platform)` | `VARCHAR` | `VARCHAR` | SeaDataNet platform code → L06 |
 | `map_platform_c17_l06(c17)` | `VARCHAR` | `VARCHAR` | SeaDataNet C17 country code → L06 |
+| `map_seadatanet_instrument_l05_salinity(instrument)` | `VARCHAR` | `VARCHAR` | SeaDataNet instrument code → L05, disambiguated for salinity sensors |
+| `map_seadatanet_instrument_l05_temperature(instrument)` | `VARCHAR` | `VARCHAR` | SeaDataNet instrument code → L05, disambiguated for temperature sensors |
+| `map_originator_edmo(originator)` | `VARCHAR` | `VARCHAR` | SeaDataNet originator code → EDMO identifier |
 
 #### Argo
 
