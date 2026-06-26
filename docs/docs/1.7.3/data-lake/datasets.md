@@ -4,6 +4,28 @@ Beacon discovers datasets from its configured storage root automatically — no 
 
 Default local path inside the Docker container: `/beacon/data/datasets/`
 
+## Format support matrix
+
+| Format | Recognized files | `STORED AS` | `read_*` function | Output format |
+| --- | --- | --- | --- | --- |
+| Parquet | `.parquet` | `PARQUET` | `read_parquet` | ✅ |
+| GeoParquet | `.geoparquet` | `GEOPARQUET` | `read_geoparquet` | ✅ |
+| CSV / TSV | `.csv`, `.tsv` | `CSV` | `read_csv` | ✅ |
+| Arrow IPC | `.arrow`, `.feather` | `ARROW` | `read_arrow` | ✅ (`ipc`) |
+| NetCDF | `.nc` | `NETCDF` | `read_netcdf` | ✅ (+ ND-NetCDF) |
+| Zarr | `zarr.json` marker | `ZARR` | `read_zarr` | — |
+| Atlas | `atlas.json` marker | `ATLAS` | `read_atlas` | — |
+| GeoTIFF / COG | `.tiff`, `.tif` | `TIFF` | `read_tiff` | — |
+| BBF | `.bbf` | `BBF` | `read_bbf` | — |
+| Delta Lake | `_delta_log/` directory | `DELTA` | `read_delta` | — |
+| ODV ASCII | `.txt` | — | `read_odv_ascii` | ✅ |
+
+Every format above is **auto-discovered** from the datasets store except **Delta
+Lake** and **ODV ASCII** — point a [`read_*` function](../sql/table-functions.md)
+(or, for Delta, `CREATE EXTERNAL TABLE … STORED AS DELTA LOCATION …`) at those
+directly. "Output format" marks formats a query result can be exported to via
+[`output.format`](../api/querying/index.md#output-formats).
+
 ## Parquet
 
 Native support via DataFusion. Recommended for analytical workloads due to columnar storage and built-in predicate pushdown.
@@ -111,11 +133,20 @@ For collections that are queried repeatedly, convert the Zarr stores into a sing
 
 ## Arrow IPC
 
-Fully supported. Arrow IPC stream files (`.arrow`, `.ipc`) are read natively with zero-copy column access.
+Fully supported. Arrow IPC stream files (`.arrow`, `.feather`) are read natively with zero-copy column access.
 
 ## ODV ASCII
 
-Fully supported. Storing ODV ASCII files with zstd compression is recommended to reduce storage and I/O:
+Supported via the [`read_odv_ascii()`](../sql/table-functions.md#read_odv_ascii)
+table function (and the `odv` source in the JSON query API). Unlike the formats
+above, ODV is **not** auto-discovered as a dataset and has no `CREATE EXTERNAL
+TABLE ... STORED AS ODV` form — point `read_odv_ascii()` at the files directly:
+
+```sql
+SELECT * FROM read_odv_ascii('odv/*.txt') LIMIT 100;
+```
+
+Storing ODV ASCII files with zstd compression is recommended to reduce storage and I/O:
 
 ```bash
 zstd -9 < input.txt > output.txt.zst

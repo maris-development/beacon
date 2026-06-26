@@ -1,0 +1,63 @@
+name: Codecov
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: Collect and upload coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies (Dockerfile parity)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            capnproto \
+            cmake \
+            curl \
+            libclang-dev \
+            libhdf5-dev \
+            libnetcdf-dev \
+            libsqlite3-dev \
+            netcdf-bin \
+            protobuf-compiler \
+            software-properties-common \
+            sqlite3 \
+            wget
+
+      - name: Install Rust (1.91)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+          components: llvm-tools-preview
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (lcov)
+        env:
+          RUST_BACKTRACE: "1"
+        run: cargo llvm-cov --workspace --no-fail-fast --lib --bins --tests --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

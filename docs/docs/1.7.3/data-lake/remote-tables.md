@@ -118,4 +118,4 @@ DROP TABLE remote_profiles;
 
 - **Custom functions must exist on both sides.** A filter or projection that uses a Beacon UDF (e.g. a geospatial `st_*` function) is only pushed down if the remote instance has the same function. When in doubt, the safe pattern is to keep remote-pushed predicates to standard SQL comparisons; Beacon falls back to local execution where it must.
 - **One endpoint per table.** A remote table maps to a single remote Flight SQL endpoint; it does not shard across multiple remotes.
-- **Authentication is per-table.** Credentials are taken from the `OPTIONS` of each remote table.
+- **Remote connections are anonymous.** A remote table connects to its target Flight SQL endpoint without credentials, so the remote instance must allow anonymous access. The only connection `OPTIONS` key is `tls`.

@@ -44,8 +44,8 @@ Spilling uses the OS temp area (DataFusion disk manager). For best performance, 
 
 When enabled, Beacon will attempt to project only the columns referenced by your JSON query `select` list when building the scan.
 
-- Set to `true` when you frequently query “wide” datasets but only select a few columns.
-- Leave as `false` if you suspect projection bugs or you want the simplest behavior.
+- Enabled by default (`true`), so queries on “wide” datasets only decode the columns they select.
+- Set to `false` only to work around a suspected projection bug or to force the simplest scan behavior.
 
 ### Query language and parsing
 
@@ -92,21 +92,6 @@ NetCDF performance in Beacon is mainly affected by:
 NetCDF scans currently read a single Arrow `RecordBatch` per file. If you have extremely large `.nc` files, performance may improve by splitting them into smaller files or converting to chunk-friendly formats (e.g. Zarr), depending on your access pattern.
 :::
 
-### Schema cache (fast repeated schema inference)
-
-#### `BEACON_NETCDF_USE_SCHEMA_CACHE` and `BEACON_NETCDF_SCHEMA_CACHE_SIZE`
-
-Beacon discovers an Arrow schema for NetCDF datasets by opening files and inspecting variables/attributes. With schema caching enabled, these discovered schemas are cached in-memory and keyed by:
-
-- the object path
-- the object last-modified timestamp
-
-Recommendations:
-
-- Keep `BEACON_NETCDF_USE_SCHEMA_CACHE=true` (default) for most deployments.
-- Increase `BEACON_NETCDF_SCHEMA_CACHE_SIZE` when you query many distinct NetCDF files/tables and see repeated schema inference.
-- Reduce cache size if memory is constrained and your workload touches only a small working set.
-
 ### Reader cache (avoid reopening files)
 
 #### `BEACON_NETCDF_USE_READER_CACHE` and `BEACON_NETCDF_READER_CACHE_SIZE`
@@ -123,10 +108,12 @@ Recommendations:
 
 For a “many NetCDF files” deployment:
 
-- `BEACON_NETCDF_USE_SCHEMA_CACHE=true`
-- `BEACON_NETCDF_SCHEMA_CACHE_SIZE=16484`
 - `BEACON_NETCDF_USE_READER_CACHE=true`
-- `BEACON_NETCDF_READER_CACHE_SIZE=16484`
+- `BEACON_NETCDF_READER_CACHE_SIZE=16384` (size the cache to your hot set of files)
+
+Per-file statistics used for query pruning are controlled separately by
+`BEACON_NETCDF_ENABLE_STATISTICS` (default `true`); keep it on unless you are
+debugging pruning behavior.
 
 ## Zarr predicate pushdown
 

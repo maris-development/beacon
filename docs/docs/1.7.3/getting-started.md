@@ -6,6 +6,10 @@ description: Run Beacon with Docker in minutes — locally or against S3-compati
 
 This guide gets a Beacon instance running with Docker Compose. For ready-made examples including MinIO and sample datasets, see the [beacon-example repository](https://github.com/maris-development/beacon-example).
 
+::: tip In a hurry?
+The [Quick Start guide](https://github.com/maris-development/beacon/blob/main/QUICKSTART.md) gets you running and querying — with the admin UI — in a couple of minutes.
+:::
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/)
