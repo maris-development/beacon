@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use beacon_nd_array::{
     arrow::{
         batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
@@ -258,7 +259,64 @@ impl FileOpener for ZarrOpener {
                 .map(|(i, _)| i)
                 .collect();
             if projection.is_empty() {
-                return Ok(futures::stream::empty().boxed());
+                // COUNT(*): reading zero columns yields an empty stream (count 0).
+                // Drive with the highest-dimensionality variable so the row count
+                // is the full broadcast count (a scalar attribute gives 1 row),
+                // plus any predicate columns (PushdownFilter matches by name), and
+                // emit zero-column batches carrying the row counts.
+                let driver_idx = full
+                    .fields()
+                    .keys()
+                    .max_by_key(|name| {
+                        full.get_array(name)
+                            .map(|a| a.shape().iter().product::<usize>())
+                            .unwrap_or(0)
+                    })
+                    .and_then(|name| file_schema.index_of(name).ok())
+                    .unwrap_or(0);
+                let mut driver: Vec<usize> = vec![driver_idx];
+                if let Some(pred) = &predicate {
+                    for col in datafusion::physical_expr::utils::collect_columns(pred) {
+                        if let Ok(idx) = file_schema.index_of(col.name()) {
+                            driver.push(idx);
+                        }
+                    }
+                }
+                driver.sort_unstable();
+                driver.dedup();
+
+                let projected = full
+                    .project(&DatasetProjection::new_with_index_projection(driver))
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Failed to project Zarr dataset for count: {e}"
+                        ))
+                    })?;
+                let pushdown_filter = predicate.map(PushdownFilter::new);
+                let count_schema = projected_schema.clone();
+                let stream = any_dataset_as_record_batch_stream(
+                    projected,
+                    batch_size,
+                    pushdown_filter,
+                    metrics,
+                )
+                .map(move |batch| {
+                    let batch = batch.map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Error reading Zarr dataset as Arrow: {e}"
+                        ))
+                    })?;
+                    RecordBatch::try_new_with_options(
+                        count_schema.clone(),
+                        vec![],
+                        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+                    )
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!("Failed to build count batch: {e}"))
+                    })
+                })
+                .boxed();
+                return Ok(stream);
             }
 
             // Adapt batches (read with `projection`) onto the projected output

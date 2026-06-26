@@ -56,11 +56,6 @@ def _header(client, sql) -> list[str]:
 
 
 # --- NetCDF reading -----------------------------------------------------------
-@pytest.mark.xfail(
-    reason="beacon bug: SELECT * over a gridded NetCDF (time=1,lat,lon) returns 0 rows — "
-    "dimension auto-selection yields an empty grid for this file.",
-    strict=False,
-)
 def test_read_netcdf_select_star(client, netcdf_file):
     header = _header(client, f"SELECT * FROM read_netcdf(['{netcdf_file}'])")
     # SELECT * auto-selects a broadcast-compatible dimension set; the SST grid
@@ -128,11 +123,6 @@ def test_flat_netcdf_output_roundtrip(client, datasets_dir):
     assert "temperature" in back[0]
 
 
-@pytest.mark.xfail(
-    reason="depends on the gridded NetCDF read path: the ND-NetCDF written file reads back "
-    "as 0 rows (same dimension-selection issue as test_read_netcdf_select_star).",
-    strict=False,
-)
 def test_nd_netcdf_output_roundtrip(client, datasets_dir):
     """ND-NetCDF output keyed on the unique `time` column round-trips."""
     src = (

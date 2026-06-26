@@ -85,7 +85,16 @@ class BeaconHTTPClient:
         except pa.lib.ArrowInvalid:
             return [[]]
         rows: list[list[str]] = [list(table.column_names)]
-        columns = [col.to_pylist() for col in table.columns]
+        columns = []
+        for col in table.columns:
+            try:
+                columns.append(col.to_pylist())
+            except (pa.lib.ArrowInvalid, ValueError):
+                # Nanosecond timestamps (e.g. CF time decoded from NetCDF) are not
+                # safely convertible to python datetime; render them as strings.
+                import pyarrow.compute as pc
+
+                columns.append(pc.cast(col, pa.string()).to_pylist())
         for i in range(table.num_rows):
             rows.append([self._cell(col[i]) for col in columns])
         return rows
