@@ -36,6 +36,18 @@ pub(crate) fn setup_router(
     let (client_router, mut api_docs_client) = setup_client_router();
     let (admin_router, api_docs_admin) = setup_admin_router();
 
+    // Resolve the caller's identity for every client route; gate admin routes on a super-user.
+    // Both middlewares carry the runtime as their own state (independent of the router state set
+    // below), so they are attached per-sub-router before the two are merged.
+    let client_router = client_router.layer(::axum::middleware::from_fn_with_state(
+        beacon_runtime.clone(),
+        crate::axum::auth::resolve_identity,
+    ));
+    let admin_router = admin_router.layer(::axum::middleware::from_fn_with_state(
+        beacon_runtime.clone(),
+        crate::axum::auth::basic_auth,
+    ));
+
     api_docs_client.merge(api_docs_admin);
     api_docs_client = set_api_docs_info(api_docs_client, &config.api_docs);
 

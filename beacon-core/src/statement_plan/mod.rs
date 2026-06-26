@@ -12,6 +12,8 @@
 //! [`LogicalPlan::Extension`]: datafusion::logical_expr::LogicalPlan::Extension
 
 mod actions;
+mod auth;
+mod authz;
 pub(crate) mod crawler;
 mod logical;
 mod lower;
@@ -31,11 +33,12 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
+    AuthStatement, CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
     DropCrawlerStatement, DropIndexStatement, RefreshStatement, RunCrawlerStatement,
     ShowIndexesStatement,
 };
 
+pub(crate) use authz::authorize_logical_plan;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
 
@@ -93,6 +96,18 @@ pub(crate) type SessionCell = Arc<OnceLock<Weak<SessionContext>>>;
 /// Create an empty [`SessionCell`] to be filled once the context exists.
 pub(crate) fn new_session_cell() -> SessionCell {
     Arc::new(OnceLock::new())
+}
+
+/// Build the logical plan for an auth-management statement (CREATE/DROP USER/ROLE, GRANT/DENY/
+/// REVOKE). Lowered to an [`Extension`] node so it inherits the super-user gate in
+/// [`validate_query_plan`] (all beacon extension nodes are super-user-only).
+pub(crate) fn auth_plan(statement: AuthStatement) -> LogicalPlan {
+    let key = statement.to_string();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::AuthNode {
+            statement: logical::Keyed::new(key, statement),
+        }),
+    })
 }
 
 /// Build the logical plan for `CREATE MATERIALIZED VIEW <name> AS <query>`.

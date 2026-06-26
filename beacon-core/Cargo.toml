@@ -27,6 +27,7 @@ geojson = {workspace = true}
 
 tracing = { workspace=true}
 # Local dependencies
+beacon-auth = { path = "../beacon-auth" }
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
@@ -45,6 +46,11 @@ beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
 beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
+
+[features]
+# Exposes Runtime::new_with_in_memory_auth so other crates' tests can build a
+# runtime with an ephemeral (non-persistent) auth context.
+test-util = []
 
 [dev-dependencies]
 deltalake = { workspace = true }

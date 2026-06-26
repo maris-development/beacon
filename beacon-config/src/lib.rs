@@ -19,6 +19,8 @@ pub use beacon_object_storage::{S3Config, StorageConfig};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub admin: AdminConfig,
+    pub auth: AuthConfig,
+    pub oidc: OidcConfig,
     pub server: ServerConfig,
     pub runtime: RuntimeConfig,
     pub sql: SqlConfig,
@@ -39,6 +41,35 @@ pub struct Config {
 pub struct AdminConfig {
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthConfig {
+    /// Whether the built-in anonymous user (empty password) is seeded so unauthenticated requests
+    /// resolve to its roles. When disabled, unauthenticated requests have no roles.
+    pub anonymous_enabled: bool,
+    /// Whether query-time authorization (read enforcement) is applied. When false, queries are not
+    /// privilege-checked beyond the existing super-user DDL/DML gate — backwards compatible default.
+    pub enforce: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct OidcConfig {
+    /// Whether an external OIDC/OAuth2 provider is enabled alongside local users. When enabled,
+    /// `Bearer` JWT access tokens are validated against `jwks_url` and mapped to roles.
+    pub enabled: bool,
+    /// Expected token issuer (`iss` claim).
+    pub issuer: String,
+    /// URL of the issuer's JWKS document (signing keys).
+    pub jwks_url: String,
+    /// Expected audience (`aud` claim); empty disables audience validation.
+    pub audience: String,
+    /// Dotted path to the claim holding the principal's role names (e.g. `realm_access.roles`).
+    pub roles_claim: String,
+    /// Dotted path to the claim holding the principal's username (e.g. `preferred_username`).
+    pub username_claim: String,
+    /// How long (seconds) a fetched JWKS document is cached before being re-fetched.
+    pub jwks_cache_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +239,24 @@ struct RawConfig {
     admin_username: String,
     #[envconfig(from = "BEACON_ADMIN_PASSWORD", default = "beacon-password")]
     admin_password: String,
+    #[envconfig(from = "BEACON_AUTH_ANONYMOUS_ENABLED", default = "true")]
+    auth_anonymous_enabled: bool,
+    #[envconfig(from = "BEACON_AUTH_ENFORCE", default = "false")]
+    auth_enforce: bool,
+    #[envconfig(from = "BEACON_OIDC_ENABLED", default = "false")]
+    oidc_enabled: bool,
+    #[envconfig(from = "BEACON_OIDC_ISSUER", default = "")]
+    oidc_issuer: String,
+    #[envconfig(from = "BEACON_OIDC_JWKS_URL", default = "")]
+    oidc_jwks_url: String,
+    #[envconfig(from = "BEACON_OIDC_AUDIENCE", default = "")]
+    oidc_audience: String,
+    #[envconfig(from = "BEACON_OIDC_ROLES_CLAIM", default = "realm_access.roles")]
+    oidc_roles_claim: String,
+    #[envconfig(from = "BEACON_OIDC_USERNAME_CLAIM", default = "preferred_username")]
+    oidc_username_claim: String,
+    #[envconfig(from = "BEACON_OIDC_JWKS_CACHE_TTL_SECS", default = "300")]
+    oidc_jwks_cache_ttl_secs: u64,
     #[envconfig(from = "BEACON_PORT", default = "5001")]
     port: u16,
     #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
@@ -378,6 +427,19 @@ impl From<RawConfig> for Config {
             admin: AdminConfig {
                 username: raw.admin_username,
                 password: raw.admin_password,
+            },
+            auth: AuthConfig {
+                anonymous_enabled: raw.auth_anonymous_enabled,
+                enforce: raw.auth_enforce,
+            },
+            oidc: OidcConfig {
+                enabled: raw.oidc_enabled,
+                issuer: raw.oidc_issuer,
+                jwks_url: raw.oidc_jwks_url,
+                audience: raw.oidc_audience,
+                roles_claim: raw.oidc_roles_claim,
+                username_claim: raw.oidc_username_claim,
+                jwks_cache_ttl_secs: raw.oidc_jwks_cache_ttl_secs,
             },
             server: ServerConfig {
                 port: raw.port,
@@ -660,6 +722,10 @@ lazy_static! {
     pub static ref TABLES_DIR_PREFIX: object_store::path::Path =
         object_store::path::Path::from("tables");
     pub static ref TABLES_DIR: PathBuf = ensure_dir(DATA_DIR.join("tables"));
+
+    /// The path to the users directory, holding the persisted auth directory
+    /// database (users, roles, and privilege grants), next to the tables directory.
+    pub static ref USERS_DIR: PathBuf = ensure_dir(DATA_DIR.join("users"));
 
     pub static ref TMP_DIR: PathBuf = ensure_dir(DATA_DIR.join("tmp"));
 

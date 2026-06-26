@@ -136,6 +136,38 @@ impl UserDefinedLogicalNodeCore for CreateMaterializedViewNode {
     }
 }
 
+/// Logical node for the auth-management statements (CREATE/DROP USER/ROLE, GRANT/DENY/REVOKE).
+///
+/// The [`AuthStatement`] AST lacks `PartialOrd`/`Hash`, so it is carried in a [`Keyed`] wrapper
+/// whose stable key is the statement's SQL rendering. Produces no rows.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct AuthNode {
+    pub(crate) statement: Keyed<crate::parser::statement::AuthStatement>,
+}
+
+impl UserDefinedLogicalNodeCore for AuthNode {
+    fn name(&self) -> &str {
+        "Auth"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Auth: {}", self.statement.payload)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            statement: self.statement.clone(),
+        })
+    }
+}
+
 /// Logical node for `REFRESH [TABLE] <name>`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct RefreshNode {

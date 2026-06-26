@@ -10,8 +10,6 @@ use utoipa::{
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::axum::auth::basic_auth;
-
 mod check;
 mod crawlers;
 mod external_tables;
@@ -27,7 +25,10 @@ mod tables;
 )]
 pub struct AdminApiDoc;
 
-/// Builds the admin router and attaches basic-auth middleware.
+/// Builds the admin router and its OpenAPI document.
+///
+/// The super-user `basic_auth` middleware is attached by `setup_router`, where the runtime is
+/// available as middleware state.
 pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
         .routes(routes!(check::check))
@@ -39,7 +40,6 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
         .routes(routes!(crawlers::run_crawler))
         .routes(routes!(external_tables::create_external_table))
         .routes(routes!(tables::list_table_config))
-        .layer(::axum::middleware::from_fn(basic_auth))
         .split_for_parts();
 
     (admin_router, admin_api)
