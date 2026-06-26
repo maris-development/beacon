@@ -70,3 +70,44 @@ fn map_wod_quality_flag_impl(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Array, Int64Array};
+
+    #[test]
+    fn flag_lookup_table() {
+        assert_eq!(WOD_FLAG_TO_SDN.get(&0), Some(&"1"));
+        assert_eq!(WOD_FLAG_TO_SDN.get(&3), Some(&"3"));
+        assert_eq!(WOD_FLAG_TO_SDN.get(&9), Some(&"4"));
+        assert_eq!(WOD_FLAG_TO_SDN.get(&99), None);
+    }
+
+    #[test]
+    fn impl_array_path() {
+        let input = ColumnarValue::Array(Arc::new(Int64Array::from(vec![Some(0), Some(6), Some(99)])));
+        let ColumnarValue::Array(arr) = map_wod_quality_flag_impl(&[input]).unwrap() else {
+            panic!("expected array");
+        };
+        let arr = arr.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(arr.value(0), "1");
+        assert_eq!(arr.value(1), "4");
+        assert!(arr.is_null(2));
+    }
+
+    #[test]
+    fn impl_scalar_path() {
+        let input = ColumnarValue::Scalar(ScalarValue::Int64(Some(1)));
+        match map_wod_quality_flag_impl(&[input]).unwrap() {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => assert_eq!(s, "3"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn impl_rejects_non_int64_scalar() {
+        let input = ColumnarValue::Scalar(ScalarValue::Utf8(Some("x".into())));
+        assert!(map_wod_quality_flag_impl(&[input]).is_err());
+    }
+}

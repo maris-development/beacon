@@ -118,3 +118,58 @@ fn map_bigram_l06(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Array;
+
+    #[test]
+    fn mapping_depends_on_wmo_type_only_for_ct() {
+        assert_eq!(map_bigram_l06(Some("CT"), Some("995")), Some("SDN:L06::70"));
+        assert_eq!(map_bigram_l06(Some("CT"), Some("other")), Some("SDN:L06::30"));
+        assert_eq!(map_bigram_l06(Some("BO"), None), Some("SDN:L06::30"));
+        assert_eq!(map_bigram_l06(Some("XX"), None), Some("SDN:L06::0"));
+        assert_eq!(map_bigram_l06(Some("ZZ"), None), None);
+        assert_eq!(map_bigram_l06(None, None), None);
+    }
+
+    #[test]
+    fn impl_rejects_wrong_argument_count() {
+        assert!(map_cmems_bigram_l06_impl(&[]).is_err());
+    }
+
+    #[test]
+    fn impl_array_array_path() {
+        let bigrams =
+            ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("BO"), Some("ZZ")])));
+        let wmo =
+            ColumnarValue::Array(Arc::new(StringArray::from(vec![None::<&str>, None::<&str>])));
+        let ColumnarValue::Array(arr) = map_cmems_bigram_l06_impl(&[bigrams, wmo]).unwrap() else {
+            panic!("expected array");
+        };
+        let arr = arr.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(arr.value(0), "SDN:L06::30");
+        assert!(arr.is_null(1));
+    }
+
+    #[test]
+    fn impl_scalar_scalar_path() {
+        let bigram = ColumnarValue::Scalar(ScalarValue::Utf8(Some("CT".into())));
+        let wmo = ColumnarValue::Scalar(ScalarValue::Utf8(Some("995".into())));
+        match map_cmems_bigram_l06_impl(&[bigram, wmo]).unwrap() {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => assert_eq!(s, "SDN:L06::70"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn impl_scalar_scalar_unknown_is_null() {
+        let bigram = ColumnarValue::Scalar(ScalarValue::Utf8(Some("ZZ".into())));
+        let wmo = ColumnarValue::Scalar(ScalarValue::Utf8(None));
+        assert!(matches!(
+            map_cmems_bigram_l06_impl(&[bigram, wmo]).unwrap(),
+            ColumnarValue::Scalar(ScalarValue::Utf8(None))
+        ));
+    }
+}
