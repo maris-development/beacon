@@ -141,7 +141,7 @@ Content-Type: application/json
 }
 ```
 
-Other supported format keys: `csv`, `arrow`, `odv`.
+Other supported format keys: `csv`, `arrow`, `odv`, `tiff`, `bbf`.
 
 ## Filters
 
@@ -225,6 +225,28 @@ Content-Type: application/json
   "output": { "format": "csv" }
 }
 ```
+
+### Filter operator reference
+
+Every leaf filter names a column with `column` (alias `for_query_parameter`) plus
+one operator key. The full set:
+
+| Operator | Key(s) | Example |
+| --- | --- | --- |
+| Equal | `eq` | `{ "column": "platform", "eq": "SHIP" }` |
+| Not equal | `neq` (aliases `not_eq`, `not_equal`) | `{ "column": "platform", "neq": "BUOY" }` |
+| Greater than | `gt` | `{ "column": "depth", "gt": 0 }` |
+| Greater or equal | `gt_eq` (alias `min`) | `{ "column": "depth", "gt_eq": 0 }` |
+| Less than | `lt` | `{ "column": "depth", "lt": 100 }` |
+| Less or equal | `lt_eq` (alias `max`) | `{ "column": "depth", "lt_eq": 100 }` |
+| Range (between) | `gt_eq` + `lt_eq` (aliases `min`/`low` and `max`/`high`) | `{ "column": "temp", "min": 2, "max": 10 }` |
+| Is null | `is_null` | `{ "is_null": { "column": "qc_flag" } }` |
+| Is not null | `is_not_null` (aliases `skip_fill_values`, `skip_missing`) | `{ "is_not_null": { "column": "qc_flag" } }` |
+| All of | `and` | `{ "and": [ … ] }` |
+| Any of | `or` | `{ "or": [ … ] }` |
+| Point-in-geometry | `longitude_column` + `latitude_column` + `geometry` | see [GeoJSON spatial filter](#geojson-spatial-filter) |
+
+The `min` / `max` keys used elsewhere on this page are aliases of `gt_eq` / `lt_eq`.
 
 ## Sorting and pagination
 
