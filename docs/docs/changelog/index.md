@@ -1,10 +1,84 @@
 # Changelog
 
-> **Release posts:** [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
+> **Release posts:** [What's new in 1.8.0](/docs/changelog/release-1.8.0) · [What's new since 1.7.0](/docs/changelog/release-1.7.0) · [What's new in 1.6.0](/docs/changelog/release-1.6.0)
 
 All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
+
+## v1.8.0 — 2026-06-26
+
+### Added
+
+- **Lance-backed managed tables — the new default engine.** Managed tables
+  (`CREATE TABLE`) are now backed by [Lance](https://lancedb.github.io/lance/) by
+  default: fast local CRUD, native updates/deletes via deletion vectors, and
+  secondary `INDEX`es (btree, bitmap, full-text). [Apache Iceberg](https://iceberg.apache.org/)
+  remains available for object-store/cloud deployments. Pick the engine per
+  session with `SET beacon.table_engine = 'lance' | 'iceberg'`, or set the
+  deployment-wide default with `BEACON_DEFAULT_TABLE_ENGINE`. See
+  [CREATE TABLE (Managed)](/docs/1.8.0/sql/managed-tables).
+- **Delta Lake tables.** Read [Delta Lake](https://delta.io/) tables in place with
+  `read_delta()` or `CREATE EXTERNAL TABLE … STORED AS DELTA`, including time
+  travel, and append with `INSERT INTO`. See the
+  [Delta Lake chapter](/docs/1.8.0/data-lake/delta-lake).
+- **PostgreSQL / MySQL external tables.** `CREATE EXTERNAL TABLE … STORED AS
+  POSTGRES | MYSQL` registers a federated pointer at a table in an external
+  relational database; Beacon pushes filters, projected columns, `LIMIT`, and
+  aggregates down to the source. Passwords are encrypted at rest with
+  `BEACON_SECRETS_KEY`. See the
+  [SQL Databases chapter](/docs/1.8.0/data-lake/sql-databases).
+- **Crawlers.** `CREATE CRAWLER` discovers files in the datasets store and
+  registers external tables automatically — AWS Glue-style — with partition
+  detection and triggers, plus admin REST endpoints to list, run, and delete
+  them. See the [Crawlers chapter](/docs/1.8.0/data-lake/crawlers).
+- **Admin Web UI.** A React admin console is now bundled into the Beacon server
+  and Docker image and served at `/admin`: an Athena-style SQL workbench plus
+  pages to manage tables, datasets, crawlers, and external tables. See the
+  [Admin Web UI guide](/docs/1.8.0/connect/web-admin-ui).
+- **TypeScript / JavaScript SDK** (`@beacon/client`). An isomorphic SDK for
+  Node.js and the browser, with an EF Core / LINQ-style query builder and Arrow
+  result decoding. See the [TypeScript SDK guide](/docs/1.8.0/connect/beacon-typescript-sdk).
+- **`beacon-cli`.** A Python terminal client (interactive REPL and one-shot
+  subcommands) that runs SQL, explores tables / datasets / schemas, and exports
+  to CSV, Parquet, Arrow IPC, or NetCDF. See the
+  [Beacon CLI guide](/docs/1.8.0/connect/beacon-cli).
+- **`EXPLAIN ANALYZE` endpoint.** `POST /api/explain-analyze-query` runs a query
+  and returns the physical plan annotated with per-operator runtime metrics
+  (rows, bytes, time). See the [API querying chapter](/docs/1.8.0/api/querying/).
+- **Per-format configuration & per-table `OPTIONS`.** NetCDF, Atlas, and BBF
+  accept per-format configuration and per-table `OPTIONS (...)` clauses.
+- **Broadcast-compatible `SELECT *` for n-dimensional data.** `SELECT *` over
+  NetCDF and Zarr datasets auto-narrows to a broadcast-compatible default set of
+  dimensions, with the selection now robust across irregular variable shapes.
+
+### Changed
+
+- **Runtime-owned configuration.** Configuration is threaded through
+  `Runtime::new(Arc<Config>)` instead of being process-global. The storage config
+  owns the data directories and optional S3 settings, with `S3Config` as the
+  single source of truth for object storage.
+- **Slimmer data lake.** The bespoke `TableManager` / `FileManager` / `DataLake`
+  layers were replaced with a native DataFusion `SessionContext`.
+- **`table-config` is now an admin-only REST endpoint** (`GET /api/admin/table-config`).
+- **Legacy logical tables are read as external tables**, so tables created by
+  older versions keep resolving.
+- **Reduced dependencies and tuned the build** for faster compile times; the
+  `beacon-iceberg` crate moved under `beacon-file-formats/`.
+- **File-format table functions accept a single path/glob string** in addition to
+  a list, and the dataset-schema endpoint now accepts `.tif` as well as `.tiff`.
+- **Enriched OpenAPI / Swagger documentation** for the REST API.
+
+### Fixed
+
+- A batch of bugs surfaced by an expanded integration-test suite: CTAS / `INSERT`
+  row truncation, Lance string-predicate `UPDATE` / `DELETE`, `ALTER TABLE ADD
+  COLUMN` for `VARCHAR` / `Utf8View`, inverted-index lookups, MySQL TLS
+  connections, Delta `INSERT` reopen, n-dimensional `count(*)` returning `0`,
+  PostgreSQL / MySQL federated execution, NetCDF explicit-dimension subsetting,
+  and `read_zarr` directory listing.
+- **`EXPLAIN ANALYZE` panic** over external NetCDF / n-dimensional tables.
+- **Root redirect** now always points to the Swagger UI.
 
 ## v1.7.3 — 2026-06-19
 

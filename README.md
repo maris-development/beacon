@@ -94,7 +94,7 @@ Start it with `docker compose up -d`, then open the interactive API docs at <htt
 
 Add data by placing files (e.g. `.nc`, `.zarr`, `.parquet`, `.csv`) into `./datasets` — the container discovers them through the mounted volume.
 
-> See the [installation guide](https://maris-development.github.io/beacon/docs/1.7.3/getting-started.html#local).
+> See the [installation guide](https://maris-development.github.io/beacon/docs/1.8.0/getting-started.html#local).
 
 ## Query examples
 
@@ -147,7 +147,7 @@ Content-Type: application/json
 }
 ```
 
-The response is a streamed file in the chosen `output.format` (here, CSV). See the [query reference](https://maris-development.github.io/beacon/docs/1.7.3/api/querying/) for the full schema, all source types, and every output format.
+The response is a streamed file in the chosen `output.format` (here, CSV). See the [query reference](https://maris-development.github.io/beacon/docs/1.8.0/api/querying/) for the full schema, all source types, and every output format.
 
 ## Configuration
 
@@ -167,13 +167,13 @@ Beacon is configured entirely through `BEACON_*` environment variables. The most
 | `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable the Arrow Flight SQL endpoint. |
 | `BEACON_FLIGHT_SQL_PORT` | `32011` | Arrow Flight SQL port. |
 
-S3-compatible storage, CORS, NetCDF caching, the crawler, and Flight SQL authentication have their own `BEACON_*` settings — see the [configuration reference](https://maris-development.github.io/beacon/docs/1.7.3/data-lake/configuration.html) for the complete list.
+S3-compatible storage, CORS, NetCDF caching, the crawler, and Flight SQL authentication have their own `BEACON_*` settings — see the [configuration reference](https://maris-development.github.io/beacon/docs/1.8.0/data-lake/configuration.html) for the complete list.
 
 ## Documentation
 
 - Docs home: <https://maris-development.github.io/beacon/>
-- Getting started: <https://maris-development.github.io/beacon/docs/1.7.3/getting-started.html#local>
-- Query reference: <https://maris-development.github.io/beacon/docs/1.7.3/api/querying/>
+- Getting started: <https://maris-development.github.io/beacon/docs/1.8.0/getting-started.html#local>
+- Query reference: <https://maris-development.github.io/beacon/docs/1.8.0/api/querying/>
 - Community Slack: [join here](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg)
 
 ## Contributing
