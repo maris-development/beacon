@@ -20,7 +20,7 @@ Both styles share the same `output` field and the same supporting endpoints.
 
 ### Validate
 
-Parse and type-check a query without executing it:
+Check that a query body is well-formed (it deserializes into a valid query) without executing it. This is a structural check, not column-level type-checking:
 
 ```http
 POST /api/parse-query
@@ -31,7 +31,7 @@ Content-Type: application/json
 
 ### Explain
 
-Return the physical query plan — useful for debugging and performance work:
+Return the query plan without executing it — useful for debugging and performance work:
 
 ```http
 POST /api/explain-query

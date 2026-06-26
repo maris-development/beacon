@@ -11,6 +11,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{ColumnAlteration, NewColumnTransform};
 
+use crate::io::lance_compatible_type;
 use crate::warehouse::LanceWarehouse;
 
 /// A single schema change to apply to a Lance table.
@@ -47,10 +48,12 @@ pub async fn alter_table(
     for change in changes {
         match change {
             SchemaChange::AddColumn { name, data_type } => {
-                // New columns are nullable so existing rows read NULL.
+                // New columns are nullable so existing rows read NULL. Widen Arrow
+                // "view" types (Utf8View/BinaryView from DataFusion) to the
+                // non-view types Lance can store, matching the write path.
                 let schema = Arc::new(ArrowSchema::new(vec![Field::new(
                     name,
-                    data_type.clone(),
+                    lance_compatible_type(data_type),
                     true,
                 )]));
                 dataset
@@ -72,7 +75,8 @@ pub async fn alter_table(
                     .map_err(|e| anyhow::anyhow!("Failed to rename column '{from}': {e}"))?;
             }
             SchemaChange::AlterColumnType { name, data_type } => {
-                let alteration = ColumnAlteration::new(name.clone()).cast_to(data_type.clone());
+                let alteration =
+                    ColumnAlteration::new(name.clone()).cast_to(lance_compatible_type(data_type));
                 dataset
                     .alter_columns(&[alteration])
                     .await

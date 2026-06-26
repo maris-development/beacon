@@ -66,7 +66,7 @@ Geometry columns are decoded to their native [GeoArrow](https://geoarrow.org/) r
 
 ```sql
 CREATE EXTERNAL TABLE argo
-STORED AS NETCDF
+STORED AS NC
 LOCATION 'argo/**/*.nc'
 ```
 

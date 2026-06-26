@@ -17,7 +17,8 @@ use datafusion::datasource::TableType;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use lance::dataset::builder::DatasetBuilder;
 use lance::datafusion::LanceTableProvider;
 use lance::session::Session as LanceSession;
@@ -132,6 +133,17 @@ impl TableProvider for LanceTable {
             kind,
             self.warehouse.clone(),
         ));
+        // The sink writes a single input stream, but `DataSinkExec` only consumes
+        // partition 0 of its input (it expects the optimizer's EnforceDistribution
+        // to coalesce, which beacon's hand-built physical plans do not run). Merge
+        // multi-partition inputs (e.g. a multi-file `read_parquet` scan feeding a
+        // CTAS / INSERT ... SELECT) so every row is written, not just the first
+        // partition's.
+        let input = if input.output_partitioning().partition_count() > 1 {
+            Arc::new(CoalescePartitionsExec::new(input)) as Arc<dyn ExecutionPlan>
+        } else {
+            input
+        };
         Ok(Arc::new(DataSinkExec::new(input, sink, None)))
     }
 }

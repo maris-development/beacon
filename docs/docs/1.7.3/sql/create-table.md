@@ -21,10 +21,10 @@ LOCATION '<path>'
 
 ```sql
 -- Entire folder
-CREATE EXTERNAL TABLE argo STORED AS NETCDF LOCATION 'argo/'
+CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/'
 
 -- Explicit glob
-CREATE EXTERNAL TABLE argo STORED AS NETCDF LOCATION 'argo/**/*.nc'
+CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
 ```
 
 ## Formats
@@ -33,12 +33,11 @@ CREATE EXTERNAL TABLE argo STORED AS NETCDF LOCATION 'argo/**/*.nc'
 | ----------- | ---------- |
 | `PARQUET`   | `.parquet` |
 | `GEOPARQUET` | `.geoparquet` |
-| `NETCDF`    | `.nc`, `.nc4`, `.cdf` |
-| `ZARR`      | Zarr v2/v3 (`zarr.json`) |
+| `NC`        | `.nc` |
+| `ZARR`      | Zarr v3 (`zarr.json`) |
 | `ATLAS`     | Atlas array store (`atlas.json`) |
 | `CSV`       | `.csv` |
-| `ARROW`     | Arrow IPC (`.arrow`, `.ipc`) |
-| `ODV`       | ODV ASCII spreadsheet |
+| `ARROW`     | Arrow IPC (`.arrow`, `.feather`) |
 | `TIFF`      | GeoTIFF / Cloud-Optimized GeoTIFF |
 | `BBF`       | Beacon Binary Format |
 | `DELTA`     | Delta Lake table directory (`_delta_log/`) |
@@ -63,7 +62,7 @@ Silently skip registration if the table name is already taken:
 
 ```sql
 CREATE EXTERNAL TABLE IF NOT EXISTS argo
-STORED AS NETCDF
+STORED AS NC
 LOCATION 'argo/**/*.nc'
 ```
 
@@ -73,7 +72,7 @@ Re-register and overwrite an existing table definition:
 
 ```sql
 CREATE OR REPLACE EXTERNAL TABLE argo
-STORED AS NETCDF
+STORED AS NC
 LOCATION 'argo/**/*.nc'
 ```
 

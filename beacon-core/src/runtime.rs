@@ -44,6 +44,9 @@ pub struct Runtime {
     listing_table_factory: Arc<ListingTableFactoryExt>,
     crawler_manager: Arc<beacon_data_lake::crawler::CrawlerManager>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
+    /// Documentation for the registered table-valued functions, captured at
+    /// startup (DataFusion's UDTF registry is not enumerable with metadata).
+    table_function_docs: Vec<FunctionDoc>,
     /// The configuration this runtime was built with. Owned, not process-global.
     config: Arc<beacon_config::Config>,
 }
@@ -100,6 +103,13 @@ impl Runtime {
                 Arc::clone(table_function) as Arc<dyn TableFunctionImpl>,
             );
         }
+
+        // Capture table-function docs now: the UDTF registry above cannot be
+        // enumerated with metadata, so `/api/table-functions` reads this snapshot.
+        let table_function_docs = table_functions
+            .iter()
+            .map(|f| FunctionDoc::from_beacon_table_function(f.as_ref()))
+            .collect::<Vec<_>>();
 
         let schema_provider = Arc::new(PersistentSchemaProvider::new(
             tokio::runtime::Handle::current(),
@@ -163,6 +173,7 @@ impl Runtime {
             listing_table_factory,
             crawler_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
+            table_function_docs,
             config,
         })
     }
@@ -493,9 +504,11 @@ impl Runtime {
         functions
     }
 
-    /// ToDo: implement listing of table functions with proper metadata instead of returning an empty list
     fn list_runtime_table_functions(&self) -> Vec<FunctionDoc> {
-        vec![]
+        let mut functions = self.table_function_docs.clone();
+        functions.sort_by(|left, right| left.function_name.cmp(&right.function_name));
+        functions.dedup_by(|left, right| left.function_name == right.function_name);
+        functions
     }
 
     pub fn list_tables(&self) -> Vec<String> {
