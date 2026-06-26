@@ -50,14 +50,22 @@ impl TableDefinition for DeltaTableDefinition {
 
         let time_travel = TimeTravel::from_options(&self.options)?;
 
-        let provider =
-            open_delta_provider(context.clone(), datasets_store, &self.location, time_travel).await?;
+        let provider = open_delta_provider(
+            context.clone(),
+            datasets_store.clone(),
+            &self.location,
+            time_travel.clone(),
+        )
+        .await?;
 
         // Wrap so the catalog can recover this definition from the registered
-        // provider when persisting/reloading `table.json`.
+        // provider when persisting/reloading `table.json`. The store + time-travel
+        // target are kept so reads/writes re-open at the latest version.
         Ok(Arc::new(crate::wrapper::BeaconDeltaTable::new(
             provider,
             self.clone(),
+            datasets_store,
+            time_travel,
         )))
     }
 

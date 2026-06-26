@@ -119,11 +119,6 @@ def test_external_delta_table(client, delta_table):
         client.execute(f"DROP TABLE IF EXISTS {name}", admin=True)
 
 
-@pytest.mark.xfail(
-    reason="beacon bug: INSERT into an external Delta table does not append a new commit "
-    "(row count unchanged); reads work.",
-    strict=False,
-)
 def test_external_delta_insert(client, delta_table):
     """Beacon can append a new commit to the external Delta table (admin)."""
     name = "delta_ins"

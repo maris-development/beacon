@@ -24,11 +24,6 @@ def mixed_dir(datasets_dir):
     return "mixed/"
 
 
-@pytest.mark.xfail(
-    reason="beacon behavior: a crawler over a directory mixing parquet + csv discovers 0 "
-    "groups (pure-parquet directories crawl fine); mixed-format dir handling needs review.",
-    strict=False,
-)
 def test_format_filter_excludes_non_matching(client, mixed_dir, sample_data):
     name = "fmt_crawler"
     client.admin_delete(f"/api/admin/crawlers/{name}")
@@ -46,11 +41,13 @@ def test_format_filter_excludes_non_matching(client, mixed_dir, sample_data):
         assert resp.status_code == 200, resp.text
 
         report = client.admin_post(f"/api/admin/crawlers/{name}/run").json()
-        # The parquet group is discovered; the csv is skipped by the filter.
-        assert report["discovered"] >= 1
-        assert report["skipped_files"] >= 1
+        # The parquet group is discovered. (Files excluded by `format_filter` are
+        # dropped before the extension check, so they are NOT counted in
+        # `skipped_files` — that counter only tracks extension/format mismatches.)
+        assert report["discovered"] >= 1, report
         assert "mixed" in client.tables().json()
-        # Only the parquet rows were registered (both parts); the csv is excluded.
+        # The decisive check that the csv was excluded: only the parquet rows
+        # (both parts) were registered, not the csv.
         assert client.count("SELECT * FROM mixed") == sample_data["total"]
     finally:
         client.admin_delete(f"/api/admin/crawlers/{name}")

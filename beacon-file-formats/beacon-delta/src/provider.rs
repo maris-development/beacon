@@ -21,7 +21,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Once};
 
 use anyhow::Context;
-use datafusion::catalog::TableProvider;
+use datafusion::catalog::{Session, TableProvider};
+use datafusion::execution::context::SessionState;
 use datafusion::prelude::SessionContext;
 use deltalake::logstore::{
     default_logstore, logstore_factories, LogStore, LogStoreFactory, LogStoreRef, ObjectStoreRef,
@@ -318,18 +319,40 @@ pub async fn open_delta_provider(
     location: &str,
     time_travel: Option<TimeTravel>,
 ) -> anyhow::Result<Arc<dyn TableProvider>> {
+    reopen_delta_provider(&ctx.state(), datasets_store, location, time_travel).await
+}
+
+/// Re-open a Delta table from an active query [`Session`] and return a fresh
+/// [`TableProvider`].
+///
+/// Used on every scan/insert so reads observe the latest committed version (a
+/// Delta provider is pinned to the snapshot it was built from, so the registered
+/// one would otherwise go stale after an `INSERT`). With `time_travel` set, the
+/// pinned version/timestamp is re-resolved instead.
+pub async fn reopen_delta_provider(
+    session: &dyn Session,
+    datasets_store: Arc<DatasetsStore>,
+    location: &str,
+    time_travel: Option<TimeTravel>,
+) -> anyhow::Result<Arc<dyn TableProvider>> {
+    let session_state = session
+        .as_any()
+        .downcast_ref::<SessionState>()
+        .context("Delta table requires a DataFusion SessionState")?;
+
     let table = load_delta_table(datasets_store, location, time_travel).await?;
 
     // Register the table's (prefixed) object store under its unique synthetic URL
     // so the scan plan can resolve data-file URLs at execution time. Keyed by
     // scheme+authority, which is unique per table, so tables never clash.
     let log_store: LogStoreRef = table.log_store();
-    ctx.runtime_env()
+    session_state
+        .runtime_env()
         .register_object_store(log_store.root_url(), log_store.object_store(None));
 
     let provider = table
         .table_provider()
-        .with_session(Arc::new(ctx.state()))
+        .with_session(Arc::new(session_state.clone()))
         .await
         .with_context(|| format!("failed to build Delta provider for {location:?}"))?;
 
