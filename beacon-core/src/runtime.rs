@@ -1,7 +1,12 @@
 //! High-level Beacon runtime shared by the API transports.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Weak},
+    time::{Duration, Instant},
+};
 
+use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use arrow::{
     array::AsArray,
     datatypes::{SchemaRef, UInt64Type},
@@ -15,7 +20,6 @@ use beacon_datafusion_ext::{
     stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
-use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use datafusion::{
     catalog::TableFunctionImpl,
     execution::{
@@ -29,13 +33,21 @@ use parking_lot::Mutex;
 
 use crate::{
     api::{
-        CrawlReportView, CrawlerView, CreateCrawlerRequest, CreateExternalTableRequest, DatasetInfo,
-        FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView,
+        CrawlReportView, CrawlerView, CreateCrawlerRequest, CreateExternalTableRequest,
+        DatasetInfo, FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView,
     },
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
+    query_job::{
+        BufferBudget, CancelOutcome, FileResultMeta, JobKind, PollOutcome, QueryJob,
+        QueryJobSnapshot, QueryJobState, SpillableBatchBuffer,
+    },
     query_result::{ArrowOutputStream, QueryOutput, QueryOutputFile, QueryResult},
     sys::{self, SystemInfo},
 };
+
+/// Maximum number of batches a single stream poll drains in one response, to
+/// bound the response size regardless of how far the producer has run ahead.
+const MAX_BATCHES_PER_POLL: usize = 32;
 
 /// Beacon's single execution layer: startup, catalog access, queries, SQL, and files.
 pub struct Runtime {
@@ -44,6 +56,12 @@ pub struct Runtime {
     listing_table_factory: Arc<ListingTableFactoryExt>,
     crawler_manager: Arc<beacon_data_lake::crawler::CrawlerManager>,
     query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
+    /// Registry of async query jobs (submit/poll), keyed by query id.
+    query_jobs: Arc<Mutex<HashMap<uuid::Uuid, QueryJob>>>,
+    /// Process-wide in-memory budget shared by all streamable job buffers.
+    query_job_budget: Arc<BufferBudget>,
+    /// Caps how many query jobs execute in the background concurrently.
+    query_job_semaphore: Arc<tokio::sync::Semaphore>,
     /// The configuration this runtime was built with. Owned, not process-global.
     config: Arc<beacon_config::Config>,
 }
@@ -145,8 +163,7 @@ impl Runtime {
 
         // Build the crawler manager once the data lake and tables exist, then publish
         // it through the handle so `CREATE/RUN/DROP CRAWLER` actions can reach it.
-        let events_available =
-            config.storage.enable_fs_events || config.storage.enable_s3_events;
+        let events_available = config.storage.enable_fs_events || config.storage.enable_s3_events;
         let crawler_manager = beacon_data_lake::crawler::CrawlerManager::new(
             session_ctx.clone(),
             file_formats.clone(),
@@ -157,12 +174,25 @@ impl Runtime {
         crawler_manager.init().await?;
         let _ = crawler_handle.set(crawler_manager.clone());
 
+        let job_cfg = &config.runtime.query_jobs;
+        let query_jobs = Arc::new(Mutex::new(HashMap::new()));
+        let query_job_budget = BufferBudget::new(job_cfg.buffer_memory_bytes);
+        let query_job_semaphore = Arc::new(tokio::sync::Semaphore::new(job_cfg.max_concurrent.max(1)));
+        spawn_query_job_sweeper(
+            Arc::downgrade(&query_jobs),
+            Duration::from_secs(job_cfg.ttl_secs),
+            Duration::from_secs(job_cfg.idle_secs),
+        );
+
         Ok(Self {
             session_ctx,
             file_formats,
             listing_table_factory,
             crawler_manager,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
+            query_jobs,
+            query_job_budget,
+            query_job_semaphore,
             config,
         })
     }
@@ -266,6 +296,31 @@ impl Runtime {
         query: crate::query::Query,
         is_super_user: bool,
     ) -> anyhow::Result<QueryResult> {
+        let (plan, query_id, query_json, output) = self.prepare_plan(query, is_super_user).await?;
+
+        match output {
+            Some(output) => {
+                self.run_query_to_file(plan, output, query_id, query_json)
+                    .await
+            }
+            None => self.run_query_to_stream(plan, query_id, query_json).await,
+        }
+    }
+
+    /// Lower, validate, and assign an id to a query without executing it. Shared
+    /// by the synchronous `run_query` and the async `submit_query_job` paths, so
+    /// parse/validation errors surface to the caller (HTTP 400) before any work
+    /// is scheduled.
+    async fn prepare_plan(
+        &self,
+        query: crate::query::Query,
+        is_super_user: bool,
+    ) -> anyhow::Result<(
+        datafusion::logical_expr::LogicalPlan,
+        uuid::Uuid,
+        serde_json::Value,
+        Option<crate::query::output::Output>,
+    )> {
         let query_id = uuid::Uuid::new_v4();
         let query_json = serde_json::to_value(&query)?;
         let crate::query::Query { inner, output } = query;
@@ -273,10 +328,7 @@ impl Runtime {
         let plan = self.lower_query(inner).await?;
         crate::statement_plan::validate_query_plan(&plan, is_super_user)?;
 
-        match output {
-            Some(output) => self.run_query_to_file(plan, output, query_id, query_json).await,
-            None => self.run_query_to_stream(plan, query_id, query_json).await,
-        }
+        Ok((plan, query_id, query_json, output))
     }
 
     /// Stream the plan's results, wrapping the stream so output rows/bytes are
@@ -313,7 +365,11 @@ impl Runtime {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         let (copy_plan, output_file) = output
-            .parse(self.session_ctx.as_ref(), &self.config.storage.tmp_dir, plan)
+            .parse(
+                self.session_ctx.as_ref(),
+                &self.config.storage.tmp_dir,
+                plan,
+            )
             .await?;
         let output_file = QueryOutputFile::from(output_file);
 
@@ -338,6 +394,199 @@ impl Runtime {
         })
     }
 
+    /// Submit a query for asynchronous execution and return its id plus delivery
+    /// kind. Planning and validation happen synchronously (so bad queries error
+    /// here, surfaced as HTTP 400); execution runs on a background task whose
+    /// results are retrieved via [`Self::poll_query_job_stream`] (streamable) or
+    /// [`Self::query_job_snapshot`] + the file result download (file).
+    ///
+    /// Classification: no `output` or `output.format = Ipc` → [`JobKind::Streamable`];
+    /// any other output format → [`JobKind::File`].
+    pub async fn submit_query_job(
+        self: &Arc<Self>,
+        query: crate::query::Query,
+        is_super_user: bool,
+    ) -> anyhow::Result<(uuid::Uuid, JobKind)> {
+        use crate::query::output::OutputFormat;
+
+        let (plan, query_id, query_json, output) =
+            self.prepare_plan(query, is_super_user).await?;
+
+        let is_file = matches!(&output, Some(o) if !matches!(o.format, OutputFormat::Ipc));
+
+        if is_file {
+            let output = output.expect("file job classified from Some(output)");
+            self.query_jobs
+                .lock()
+                .insert(query_id, QueryJob::new_running(JobKind::File, None));
+
+            let this = self.clone();
+            let handle = tokio::spawn(async move {
+                let _permit = this.query_job_semaphore.clone().acquire_owned().await;
+                let result = this
+                    .run_query_to_file(plan, output, query_id, query_json)
+                    .await;
+                let mut jobs = this.query_jobs.lock();
+                if let Some(job) = jobs.get_mut(&query_id) {
+                    if matches!(job.state, QueryJobState::Running) {
+                        match result {
+                            Ok(QueryResult {
+                                query_output: QueryOutput::File(file),
+                                ..
+                            }) => {
+                                job.output = Some(file);
+                                job.state = QueryJobState::Succeeded;
+                            }
+                            Ok(_) => {
+                                job.state = QueryJobState::Failed {
+                                    error: "file job did not produce a file output".to_string(),
+                                };
+                            }
+                            Err(error) => {
+                                job.state = QueryJobState::Failed {
+                                    error: error.to_string(),
+                                };
+                            }
+                        }
+                        job.finished_at = Some(Instant::now());
+                        job.handle = None;
+                    }
+                }
+            });
+            self.attach_job_handle(query_id, handle);
+            return Ok((query_id, JobKind::File));
+        }
+
+        // Streamable: build the physical stream now (so plan errors surface at
+        // submit), then spawn a producer that drains it into the spill buffer.
+        let stream =
+            crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
+        let schema = stream.schema();
+        let buffer = SpillableBatchBuffer::new(
+            schema,
+            self.query_job_budget.clone(),
+            self.config.storage.tmp_dir.clone(),
+            self.config.runtime.query_jobs.max_spill_bytes,
+        );
+        self.query_jobs.lock().insert(
+            query_id,
+            QueryJob::new_running(JobKind::Streamable, Some(buffer.clone())),
+        );
+
+        let this = self.clone();
+        let metrics = MetricsTracker::new(query_json, query_id);
+        let handle = tokio::spawn(async move {
+            let _permit = this.query_job_semaphore.clone().acquire_owned().await;
+            let outcome = produce_stream_into_buffer(stream, &buffer, &metrics).await;
+            buffer.finish(outcome.clone());
+            if outcome.is_ok() {
+                this.query_metrics
+                    .lock()
+                    .insert(query_id, metrics.get_consolidated_metrics());
+            }
+            let mut jobs = this.query_jobs.lock();
+            if let Some(job) = jobs.get_mut(&query_id) {
+                if matches!(job.state, QueryJobState::Running) {
+                    job.state = match outcome {
+                        Ok(()) => QueryJobState::Succeeded,
+                        Err(error) => QueryJobState::Failed { error },
+                    };
+                    job.finished_at = Some(Instant::now());
+                    job.handle = None;
+                }
+            }
+        });
+        self.attach_job_handle(query_id, handle);
+        Ok((query_id, JobKind::Streamable))
+    }
+
+    /// Store a job's background task handle, unless the task already finished (or
+    /// the job was cancelled) before we got here — in which case the handle is
+    /// simply dropped.
+    fn attach_job_handle(&self, query_id: uuid::Uuid, handle: tokio::task::JoinHandle<()>) {
+        let mut jobs = self.query_jobs.lock();
+        match jobs.get_mut(&query_id) {
+            Some(job) if matches!(job.state, QueryJobState::Running) => {
+                job.handle = Some(handle);
+            }
+            _ => {}
+        }
+    }
+
+    /// Read-only snapshot of a job for the status/result handlers.
+    pub fn query_job_snapshot(&self, query_id: uuid::Uuid) -> Option<QueryJobSnapshot> {
+        let jobs = self.query_jobs.lock();
+        let job = jobs.get(&query_id)?;
+        let file = job.output.as_ref().map(|output| FileResultMeta {
+            path: output.path().to_path_buf(),
+            content_type: output.content_type(),
+            file_ext: output.extension(),
+        });
+        Some(QueryJobSnapshot {
+            kind: job.kind,
+            state: job.state.clone(),
+            file,
+        })
+    }
+
+    /// Long-poll a streamable job for its next batches, waiting up to `wait`.
+    pub async fn poll_query_job_stream(
+        &self,
+        query_id: uuid::Uuid,
+        wait: Duration,
+    ) -> PollOutcome {
+        let buffer = {
+            let mut jobs = self.query_jobs.lock();
+            let Some(job) = jobs.get_mut(&query_id) else {
+                return PollOutcome::NotFound;
+            };
+            if matches!(job.kind, JobKind::File) {
+                return PollOutcome::NotStreamable;
+            }
+            if matches!(job.state, QueryJobState::Cancelled) {
+                return PollOutcome::Cancelled;
+            }
+            job.last_poll_at = Instant::now();
+            job.buffer.clone()
+        };
+        let Some(buffer) = buffer else {
+            return PollOutcome::NotFound;
+        };
+
+        use crate::query_job::DrainOutcome;
+        match buffer.drain(MAX_BATCHES_PER_POLL, wait).await {
+            DrainOutcome::Batches(batches) => PollOutcome::Batches {
+                schema: buffer.schema(),
+                batches,
+            },
+            DrainOutcome::Completed => PollOutcome::Completed,
+            DrainOutcome::Failed(error) => PollOutcome::Failed(error),
+            DrainOutcome::Pending => PollOutcome::Pending,
+        }
+    }
+
+    /// Cancel a running job, aborting its background task.
+    pub fn cancel_query_job(&self, query_id: uuid::Uuid) -> CancelOutcome {
+        let mut jobs = self.query_jobs.lock();
+        let Some(job) = jobs.get_mut(&query_id) else {
+            return CancelOutcome::NotFound;
+        };
+        if job.is_terminal() {
+            return CancelOutcome::AlreadyFinished;
+        }
+        if let Some(handle) = job.handle.take() {
+            handle.abort();
+        }
+        job.state = QueryJobState::Cancelled;
+        job.finished_at = Some(Instant::now());
+        CancelOutcome::Cancelled
+    }
+
+    /// The default stream-poll wait, from config.
+    pub fn query_job_poll_wait(&self) -> Duration {
+        Duration::from_millis(self.config.runtime.query_jobs.poll_wait_ms)
+    }
+
     /// Lower the body of a client query (JSON or SQL) to a `LogicalPlan` without
     /// executing or validating it (permission checks and output formatting happen
     /// in `run_query` on the lowered plan).
@@ -355,14 +604,11 @@ impl Runtime {
 
     /// Lower a SQL statement (SELECT, DDL/DML, or a beacon custom statement) to a
     /// `LogicalPlan`. The result is validated in `run_query` before execution.
-    async fn lower_sql(
-        &self,
-        sql: &str,
-    ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
+    async fn lower_sql(&self, sql: &str) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
         match Self::parse_beacon_statement(sql)? {
-            BeaconStatement::CreateMaterializedView(statement) => {
-                Ok(crate::statement_plan::create_materialized_view_plan(statement))
-            }
+            BeaconStatement::CreateMaterializedView(statement) => Ok(
+                crate::statement_plan::create_materialized_view_plan(statement),
+            ),
             BeaconStatement::Refresh(statement) => {
                 Ok(crate::statement_plan::refresh_plan(statement))
             }
@@ -577,8 +823,13 @@ impl Runtime {
     }
 
     pub async fn list_table_config(&self, table_name: String) -> Option<TableConfigView> {
-        let provider = self.session_ctx.table_provider(table_name.as_str()).await.ok()?;
-        let config = beacon_data_lake::definition_from_provider(&table_name, provider.as_ref()).ok()?;
+        let provider = self
+            .session_ctx
+            .table_provider(table_name.as_str())
+            .await
+            .ok()?;
+        let config =
+            beacon_data_lake::definition_from_provider(&table_name, provider.as_ref()).ok()?;
         match TableConfigView::try_from(config) {
             Ok(config) => Some(config),
             Err(error) => {
@@ -636,10 +887,14 @@ impl Runtime {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<DatasetMetadata>> {
-        Ok(
-            beacon_data_lake::list_datasets(&self.session_ctx, &self.file_formats, offset, limit, pattern)
-                .await?,
+        Ok(beacon_data_lake::list_datasets(
+            &self.session_ctx,
+            &self.file_formats,
+            offset,
+            limit,
+            pattern,
         )
+        .await?)
     }
 
     pub async fn total_datasets(&self) -> anyhow::Result<usize> {
@@ -718,6 +973,84 @@ impl Runtime {
         let mut parser = BeaconParser::new(sql)?;
         parser.parse_statement().map_err(Into::into)
     }
+}
+
+/// Drive a DataFusion result stream into a streamable job's spill buffer,
+/// recording output metrics per batch. Returns `Ok` on clean completion or an
+/// error string (execution failure, or a spill-cap breach reported by `push`).
+async fn produce_stream_into_buffer(
+    mut stream: datafusion::execution::SendableRecordBatchStream,
+    buffer: &SpillableBatchBuffer,
+    metrics: &MetricsTracker,
+) -> Result<(), String> {
+    loop {
+        match stream.try_next().await {
+            Ok(Some(batch)) => {
+                metrics.add_output_rows(batch.num_rows() as u64);
+                metrics.add_output_bytes(batch.get_array_memory_size() as u64);
+                buffer.push(batch)?;
+            }
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+/// Background sweeper that evicts terminal query jobs past their TTL and aborts
+/// streamable jobs that have not been polled within the idle window. Holds only a
+/// `Weak` reference to the job registry, so it stops once the runtime is dropped.
+fn spawn_query_job_sweeper(
+    jobs: Weak<Mutex<HashMap<uuid::Uuid, QueryJob>>>,
+    ttl: Duration,
+    idle: Duration,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            ticker.tick().await;
+            let Some(jobs) = jobs.upgrade() else {
+                break; // runtime dropped
+            };
+            let mut map = jobs.lock();
+            sweep_jobs(&mut map, Instant::now(), ttl, idle);
+        }
+    });
+}
+
+/// Abort idle streamable jobs and evict terminal jobs past their TTL. Extracted
+/// from the sweeper loop so the lifecycle policy can be unit-tested deterministically.
+fn sweep_jobs(
+    map: &mut HashMap<uuid::Uuid, QueryJob>,
+    now: Instant,
+    ttl: Duration,
+    idle: Duration,
+) {
+    // Abort streamable jobs that no client is polling anymore.
+    let idle_ids: Vec<uuid::Uuid> = map
+        .iter()
+        .filter(|(_, job)| {
+            matches!(job.kind, JobKind::Streamable)
+                && matches!(job.state, QueryJobState::Running)
+                && now.duration_since(job.last_poll_at) > idle
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for id in idle_ids {
+        if let Some(job) = map.get_mut(&id) {
+            if let Some(handle) = job.handle.take() {
+                handle.abort();
+            }
+            job.state = QueryJobState::Cancelled;
+            job.finished_at = Some(now);
+        }
+    }
+
+    // Evict terminal jobs whose retention window has elapsed (dropping their
+    // buffers/output files, which deletes the temp files).
+    map.retain(|_, job| match job.finished_at {
+        Some(finished) => now.duration_since(finished) <= ttl,
+        None => true,
+    });
 }
 
 /// Assemble an injection-safe `CREATE EXTERNAL TABLE` statement from a structured
@@ -806,7 +1139,9 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_create_query_refresh_and_drop() {
-        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+            .await
+            .expect("runtime should start");
 
         let suffix = uuid::Uuid::new_v4().simple();
         let mv = format!("mv_test_{suffix}");
@@ -878,7 +1213,9 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_handles_zero_row_result() {
-        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+            .await
+            .expect("runtime should start");
         let mv = format!("mv_empty_{}", uuid::Uuid::new_v4().simple());
 
         // A query with no rows must still create a queryable, Parquet-backed view.
@@ -942,12 +1279,22 @@ mod client_query_tests {
     /// same pipeline as `run_sql`, returning a streamed result.
     #[tokio::test(flavor = "multi_thread")]
     async fn json_query_runs_through_unified_path() {
-        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+            .await
+            .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("json_q_{suffix}");
 
-        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT, b BIGINT)")).await;
-        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1, 2), (3, 4)")).await;
+        run_sql(
+            &runtime,
+            &format!("CREATE TABLE {table} (a BIGINT, b BIGINT)"),
+        )
+        .await;
+        run_sql(
+            &runtime,
+            &format!("INSERT INTO {table} VALUES (1, 2), (3, 4)"),
+        )
+        .await;
 
         let batches = runtime
             .run_query(
@@ -971,7 +1318,9 @@ mod client_query_tests {
     /// file download.
     #[tokio::test(flavor = "multi_thread")]
     async fn query_with_output_format_produces_file() {
-        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+            .await
+            .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("out_{suffix}");
 
@@ -1054,7 +1403,9 @@ mod client_query_tests {
     /// operation (super-user-only).
     #[tokio::test(flavor = "multi_thread")]
     async fn non_super_user_is_gated_by_validation() {
-        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+            .await
+            .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("val_{suffix}");
 
@@ -1063,7 +1414,10 @@ mod client_query_tests {
 
         // Non-super-user: read-only SELECT is allowed.
         runtime
-            .run_query(crate::query::Query::sql(format!("SELECT * FROM {table}")), false)
+            .run_query(
+                crate::query::Query::sql(format!("SELECT * FROM {table}")),
+                false,
+            )
             .await
             .expect("non-super SELECT should be allowed")
             .into_record_stream()
@@ -1201,10 +1555,16 @@ mod restart_tests {
         let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
 
         // First runtime: create a base table with data and a view over it.
-        let runtime = Runtime::new(config.clone()).await.expect("runtime should start");
+        let runtime = Runtime::new(config.clone())
+            .await
+            .expect("runtime should start");
         run_sql(&runtime, &format!("CREATE TABLE {base} (a BIGINT)")).await;
         run_sql(&runtime, &format!("INSERT INTO {base} VALUES (1), (2)")).await;
-        run_sql(&runtime, &format!("CREATE VIEW {view} AS SELECT a FROM {base}")).await;
+        run_sql(
+            &runtime,
+            &format!("CREATE VIEW {view} AS SELECT a FROM {base}"),
+        )
+        .await;
         drop(runtime);
 
         // A fresh runtime rebuilds the catalog purely from the persisted
@@ -1291,9 +1651,7 @@ mod external_table_sql_tests {
     #[test]
     fn rejects_unsafe_identifiers() {
         assert!(build_create_external_table_sql(&req("bad name", "PARQUET", "x/")).is_err());
-        assert!(
-            build_create_external_table_sql(&req("t; DROP TABLE u", "PARQUET", "x/")).is_err()
-        );
+        assert!(build_create_external_table_sql(&req("t; DROP TABLE u", "PARQUET", "x/")).is_err());
         assert!(build_create_external_table_sql(&req("t", "PARQUET'", "x/")).is_err());
 
         let mut r = req("t", "PARQUET", "x/");
@@ -1356,5 +1714,270 @@ mod crawler_admin_tests {
             .expect("drop_crawler should succeed");
         assert!(runtime.get_crawler(&name).is_none());
         assert!(runtime.drop_crawler(&name).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod query_job_tests {
+    use super::{sweep_jobs, Runtime};
+    use crate::api::QueryRequest;
+    use crate::query::Query;
+    use crate::query_job::{CancelOutcome, JobKind, PollOutcome, QueryJob, QueryJobState};
+    use arrow::record_batch::RecordBatch;
+    use futures::TryStreamExt;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Boot a runtime (wrapped in `Arc`, as the job API requires), optionally
+    /// tweaking the config first.
+    async fn runtime_with(tweak: impl FnOnce(&mut beacon_config::Config)) -> Arc<Runtime> {
+        let mut config = beacon_config::Config::load().unwrap();
+        tweak(&mut config);
+        Arc::new(
+            Runtime::new(Arc::new(config))
+                .await
+                .expect("runtime should start"),
+        )
+    }
+
+    /// Seed tables via the synchronous super-user path.
+    async fn run_sql(runtime: &Runtime, sql: &str) {
+        runtime
+            .run_query(Query::sql(sql.to_string()), true)
+            .await
+            .expect("sql should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("sql should drain");
+    }
+
+    fn json_query(value: serde_json::Value) -> Query {
+        serde_json::from_value::<QueryRequest>(value)
+            .expect("query request should deserialize")
+            .into_query()
+            .expect("query request should convert")
+    }
+
+    /// Poll a streamable job to a terminal state, collecting every batch.
+    async fn drain_job(
+        runtime: &Arc<Runtime>,
+        id: uuid::Uuid,
+    ) -> Result<Vec<RecordBatch>, String> {
+        let mut all = Vec::new();
+        loop {
+            match runtime
+                .poll_query_job_stream(id, Duration::from_millis(500))
+                .await
+            {
+                PollOutcome::Batches { batches, .. } => all.extend(batches),
+                PollOutcome::Pending => continue,
+                PollOutcome::Completed => return Ok(all),
+                PollOutcome::Failed(error) => return Err(error),
+                PollOutcome::NotStreamable
+                | PollOutcome::Cancelled
+                | PollOutcome::NotFound => panic!("unexpected poll outcome for {id}"),
+            }
+        }
+    }
+
+    /// A streamable job delivers all produced batches and ends `Completed`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streamable_job_delivers_all_batches() {
+        let runtime = runtime_with(|_| {}).await;
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("job_ok_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2), (3)")).await;
+
+        let (id, kind) = runtime
+            .submit_query_job(Query::sql(format!("SELECT a FROM {table}")), false)
+            .await
+            .expect("submit should succeed");
+        assert_eq!(kind, JobKind::Streamable);
+
+        let batches = drain_job(&runtime, id).await.expect("job should succeed");
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 3, "all inserted rows should be delivered");
+    }
+
+    /// A query that fails mid-execution surfaces as a `Failed` terminal poll —
+    /// the case the synchronous streaming endpoint cannot report.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streamable_job_reports_midstream_failure() {
+        let runtime = runtime_with(|_| {}).await;
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("job_err_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2)")).await;
+
+        // `a - 1` is zero for a = 1, so the integer division errors at execution
+        // (and cannot be constant-folded away since `a` is a column).
+        let (id, _) = runtime
+            .submit_query_job(
+                Query::sql(format!("SELECT 1 / (a - 1) AS x FROM {table}")),
+                false,
+            )
+            .await
+            .expect("submit should succeed (planning is valid)");
+
+        let error = drain_job(&runtime, id)
+            .await
+            .expect_err("job should fail at execution");
+        assert!(!error.is_empty(), "failure should carry an error message");
+
+        // Status reflects the failure too.
+        let snapshot = runtime.query_job_snapshot(id).expect("job present");
+        assert!(matches!(snapshot.state, QueryJobState::Failed { .. }));
+    }
+
+    /// With a tiny memory budget every batch spills to disk; results must still
+    /// come back correctly and the global budget returns to zero.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streamable_job_spills_under_memory_pressure() {
+        let runtime = runtime_with(|c| c.runtime.query_jobs.buffer_memory_bytes = 1).await;
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("job_spill_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (10), (20), (30)")).await;
+
+        let (id, _) = runtime
+            .submit_query_job(Query::sql(format!("SELECT a FROM {table}")), false)
+            .await
+            .expect("submit should succeed");
+
+        let batches = drain_job(&runtime, id).await.expect("job should succeed");
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 3, "rows must survive the spill round-trip");
+        assert_eq!(
+            runtime.query_job_budget.used(),
+            0,
+            "all in-memory budget should be released after draining"
+        );
+    }
+
+    /// A file job materializes a result that the snapshot exposes for download.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_job_materializes_result() {
+        let runtime = runtime_with(|_| {}).await;
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("job_file_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2)")).await;
+
+        let (id, kind) = runtime
+            .submit_query_job(
+                json_query(serde_json::json!({
+                    "from": table,
+                    "select": ["a"],
+                    "output": { "format": "parquet" },
+                })),
+                false,
+            )
+            .await
+            .expect("submit should succeed");
+        assert_eq!(kind, JobKind::File);
+
+        // Poll status until terminal.
+        let snapshot = loop {
+            let snapshot = runtime.query_job_snapshot(id).expect("job present");
+            match snapshot.state {
+                QueryJobState::Running => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                _ => break snapshot,
+            }
+        };
+        assert!(matches!(snapshot.state, QueryJobState::Succeeded));
+        let file = snapshot.file.expect("succeeded file job has a result file");
+        let len = std::fs::metadata(&file.path).expect("result file exists").len();
+        assert!(len > 0, "result file should be non-empty");
+    }
+
+    /// Cancelling a job drives it terminal; a second cancel is a no-op.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_drives_job_terminal() {
+        let runtime = runtime_with(|_| {}).await;
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("job_cancel_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1)")).await;
+
+        let (id, _) = runtime
+            .submit_query_job(Query::sql(format!("SELECT a FROM {table}")), false)
+            .await
+            .expect("submit should succeed");
+
+        // The job may finish before we cancel (tiny query): both are valid first
+        // outcomes. Either way the job is terminal afterward.
+        let first = runtime.cancel_query_job(id);
+        assert!(matches!(
+            first,
+            CancelOutcome::Cancelled | CancelOutcome::AlreadyFinished
+        ));
+        assert!(
+            !matches!(
+                runtime.query_job_snapshot(id).expect("job present").state,
+                QueryJobState::Running
+            ),
+            "job should be terminal after cancel"
+        );
+        assert_eq!(runtime.cancel_query_job(id), CancelOutcome::AlreadyFinished);
+    }
+
+    /// The sweeper aborts idle running streamable jobs and evicts terminal jobs
+    /// past their TTL.
+    #[test]
+    fn sweep_aborts_idle_and_evicts_expired() {
+        let ttl = Duration::from_secs(600);
+        let idle = Duration::from_secs(120);
+        let now = Instant::now();
+        let old = now
+            .checked_sub(Duration::from_secs(10_000))
+            .unwrap_or(now);
+
+        let mut map: HashMap<uuid::Uuid, QueryJob> = HashMap::new();
+
+        // Idle running streamable job → should be cancelled (now terminal).
+        let idle_id = uuid::Uuid::new_v4();
+        let mut idle_job = QueryJob::new_running(JobKind::Streamable, None);
+        idle_job.last_poll_at = old;
+        map.insert(idle_id, idle_job);
+
+        // Terminal job finished long ago → should be evicted.
+        let expired_id = uuid::Uuid::new_v4();
+        let mut expired = QueryJob::new_running(JobKind::File, None);
+        expired.state = QueryJobState::Succeeded;
+        expired.finished_at = Some(old);
+        map.insert(expired_id, expired);
+
+        // Fresh running job → untouched.
+        let fresh_id = uuid::Uuid::new_v4();
+        map.insert(fresh_id, QueryJob::new_running(JobKind::Streamable, None));
+
+        sweep_jobs(&mut map, now, ttl, idle);
+
+        assert!(
+            matches!(
+                map.get(&idle_id).map(|j| &j.state),
+                Some(QueryJobState::Cancelled)
+            ),
+            "idle streamable job should be cancelled"
+        );
+        assert!(!map.contains_key(&expired_id), "expired job should be evicted");
+        assert!(
+            matches!(
+                map.get(&fresh_id).map(|j| &j.state),
+                Some(QueryJobState::Running)
+            ),
+            "fresh job should be left running"
+        );
     }
 }

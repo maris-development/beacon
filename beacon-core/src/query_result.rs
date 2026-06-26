@@ -65,6 +65,32 @@ impl QueryOutputFile {
             QueryOutputFile::GeoParquet(file) => file.path(),
         }
     }
+
+    /// The HTTP `Content-Type` for downloading this output file.
+    pub fn content_type(&self) -> &'static str {
+        match self {
+            QueryOutputFile::Csv(_) => "text/csv",
+            QueryOutputFile::Ipc(_) => "application/vnd.apache.arrow.file",
+            QueryOutputFile::Json(_) => "application/json",
+            QueryOutputFile::Parquet(_) => "application/vnd.apache.parquet",
+            QueryOutputFile::NetCDF(_) => "application/netcdf",
+            QueryOutputFile::Odv(_) => "application/zip",
+            QueryOutputFile::GeoParquet(_) => "application/vnd.apache.arrow.geo+parquet",
+        }
+    }
+
+    /// The file extension (without the dot) for the downloaded file name.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            QueryOutputFile::Csv(_) => "csv",
+            QueryOutputFile::Ipc(_) => "arrow",
+            QueryOutputFile::Json(_) => "json",
+            QueryOutputFile::Parquet(_) => "parquet",
+            QueryOutputFile::NetCDF(_) => "nc",
+            QueryOutputFile::Odv(_) => "zip",
+            QueryOutputFile::GeoParquet(_) => "geoparquet",
+        }
+    }
 }
 
 impl From<crate::query::output::QueryOutputFile> for QueryOutputFile {

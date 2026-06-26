@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use crate::metrics::ConsolidatedMetrics;
 use arrow::datatypes::{Field, Schema};
 use beacon_data_lake::crawler::{CrawlReport, CrawlerDefinition, TableNaming};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_functions::function_doc::FunctionDoc;
-use crate::metrics::ConsolidatedMetrics;
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
 
@@ -196,6 +196,59 @@ impl TryFrom<ConsolidatedMetrics> for QueryMetricsView {
     }
 }
 
+/// Submission acknowledgement for an async query job, returned by
+/// `POST /api/query/jobs`. The `query_id` is used to poll status, stream
+/// results, download a file result, or cancel the job.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct QueryJobSubmitView {
+    /// The job's unique identifier (UUID), also returned in `x-beacon-query-id`.
+    pub query_id: String,
+    /// Whether results are delivered incrementally (`streamable`) or as a file.
+    pub kind: crate::query_job::JobKind,
+}
+
+/// Current status of an async query job, returned by `GET /api/query/jobs/{id}`.
+#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum QueryJobStatusView {
+    /// The job is still executing.
+    Running {
+        /// The job's delivery model.
+        kind: crate::query_job::JobKind,
+    },
+    /// The job finished successfully. For File jobs the result is downloadable.
+    Succeeded {
+        /// The job's delivery model.
+        kind: crate::query_job::JobKind,
+    },
+    /// The job failed; `error` describes why.
+    Failed {
+        /// The job's delivery model.
+        kind: crate::query_job::JobKind,
+        /// Human-readable failure reason.
+        error: String,
+    },
+    /// The job was cancelled by the client or the idle sweeper.
+    Cancelled {
+        /// The job's delivery model.
+        kind: crate::query_job::JobKind,
+    },
+}
+
+impl From<crate::query_job::QueryJobSnapshot> for QueryJobStatusView {
+    fn from(snapshot: crate::query_job::QueryJobSnapshot) -> Self {
+        let kind = snapshot.kind;
+        match snapshot.state {
+            crate::query_job::QueryJobState::Running => QueryJobStatusView::Running { kind },
+            crate::query_job::QueryJobState::Succeeded => QueryJobStatusView::Succeeded { kind },
+            crate::query_job::QueryJobState::Failed { error } => {
+                QueryJobStatusView::Failed { kind, error }
+            }
+            crate::query_job::QueryJobState::Cancelled => QueryJobStatusView::Cancelled { kind },
+        }
+    }
+}
+
 /// The storage format and options of a registered table, as a flattened
 /// configuration object. Internal (double-underscore) option keys are stripped.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -237,7 +290,9 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
 
 /// How a crawler turns a discovered group of files into a table name. Mirrors the
 /// data-lake [`TableNaming`] so the API surface need not depend on its internals.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TableNamingView {
     /// Use the leaf component of the group's base prefix (`argo/floats` -> `floats`).
@@ -462,7 +517,10 @@ mod table_config_redaction_tests {
         assert!(!json.contains("super-secret-password"));
         // The encrypted material (ciphertext/nonce) must not leak either.
         assert!(!json.contains("ciphertext"));
-        assert_eq!(view.config.get("secret"), Some(&Value::String("***".to_string())));
+        assert_eq!(
+            view.config.get("secret"),
+            Some(&Value::String("***".to_string()))
+        );
         // Non-secret connection options remain visible.
         assert!(json.contains("db.internal"));
     }

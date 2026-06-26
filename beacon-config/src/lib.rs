@@ -61,6 +61,26 @@ pub struct RuntimeConfig {
     pub st_within_point_cache_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
+    /// Async query-job buffering and lifecycle settings.
+    pub query_jobs: QueryJobConfig,
+}
+
+/// Settings for the async query-job (submit/poll) subsystem.
+#[derive(Debug, Clone)]
+pub struct QueryJobConfig {
+    /// Process-wide in-memory budget (bytes) for buffered streamable batches
+    /// across all jobs. Once exhausted, further batches spill to disk.
+    pub buffer_memory_bytes: u64,
+    /// Per-job spill cap (bytes); `0` means unbounded. Exceeding it fails the job.
+    pub max_spill_bytes: u64,
+    /// Maximum number of query jobs executing in the background concurrently.
+    pub max_concurrent: usize,
+    /// How long a terminal (succeeded/failed/cancelled) job is retained before eviction.
+    pub ttl_secs: u64,
+    /// Abort a streamable job not polled within this idle window.
+    pub idle_secs: u64,
+    /// How long a stream poll waits for the next batch before returning empty.
+    pub poll_wait_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +353,20 @@ struct RawConfig {
     #[envconfig(from = "BEACON_BATCH_SIZE", default = "64000")]
     beacon_batch_size: usize,
 
+    // Async query-job (submit/poll) subsystem
+    #[envconfig(from = "BEACON_QUERY_JOB_BUFFER_MEMORY_BYTES", default = "268435456")]
+    query_job_buffer_memory_bytes: u64,
+    #[envconfig(from = "BEACON_QUERY_JOB_MAX_SPILL_BYTES", default = "4294967296")]
+    query_job_max_spill_bytes: u64,
+    #[envconfig(from = "BEACON_QUERY_JOB_MAX_CONCURRENT", default = "8")]
+    query_job_max_concurrent: usize,
+    #[envconfig(from = "BEACON_QUERY_JOB_TTL_SECS", default = "600")]
+    query_job_ttl_secs: u64,
+    #[envconfig(from = "BEACON_QUERY_JOB_IDLE_SECS", default = "120")]
+    query_job_idle_secs: u64,
+    #[envconfig(from = "BEACON_QUERY_JOB_POLL_WAIT_MS", default = "5000")]
+    query_job_poll_wait_ms: u64,
+
     /// Whether to split streams into 16k row slices for better memory management and parallelism.
     #[envconfig(from = "BEACON_ENABLE_BBF_SPLIT_STREAMS_SLICE", default = "false")]
     bbf_split_streams_slice: bool,
@@ -393,6 +427,14 @@ impl From<RawConfig> for Config {
                 st_within_point_cache_size: raw.st_within_point_cache_size,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
+                query_jobs: QueryJobConfig {
+                    buffer_memory_bytes: raw.query_job_buffer_memory_bytes,
+                    max_spill_bytes: raw.query_job_max_spill_bytes,
+                    max_concurrent: raw.query_job_max_concurrent,
+                    ttl_secs: raw.query_job_ttl_secs,
+                    idle_secs: raw.query_job_idle_secs,
+                    poll_wait_ms: raw.query_job_poll_wait_ms,
+                },
             },
             sql: SqlConfig {
                 enable: raw.enable_sql,
