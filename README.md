@@ -1,4 +1,4 @@
-# Beacon — ARCO Data Lakehouse Query Engine
+# Beacon — Data Lakehouse Query Engine
 
 [![Release](https://img.shields.io/github/v/release/maris-development/beacon?label=release&color=success)](https://github.com/maris-development/beacon/releases)
 [![Docs](https://img.shields.io/github/actions/workflow/status/maris-development/beacon/pages.yml?label=docs)](https://maris-development.github.io/beacon/)
