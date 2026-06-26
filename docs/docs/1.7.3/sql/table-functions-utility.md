@@ -39,7 +39,7 @@ Lists all files currently stored in Beacon's dataset storage root. Returns one r
 SELECT * FROM list_datasets()
 
 -- Find all NetCDF files
-SELECT file_name FROM list_datasets() WHERE file_format = 'netcdf'
+SELECT file_name FROM list_datasets() WHERE file_format = 'nc'
 ```
 
 ## `view_dataset_statistics`

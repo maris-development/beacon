@@ -11,7 +11,7 @@ CREATE MATERIALIZED VIEW monthly_sales AS
 ```
 
 A materialized view runs its defining query **once**, at creation time, and persists the result
-set as Parquet files. Querying the view reads straight from the persisted Parquet instead of
+set as a single Parquet file. Querying the view reads straight from the persisted Parquet instead of
 recomputing the original query — useful for expensive, repeated, or aggregation-heavy queries.
 
 The defining query can read from any source Beacon knows about — registered tables,
@@ -32,8 +32,8 @@ When the statement runs, Beacon:
 
 1. Stores the materialized view definition in the catalog as a table provider.
 2. Executes the defining query immediately.
-3. Writes the result as one or more Parquet files under the reserved
-   `__beacon__/<view_name>/` prefix in the datasets object store.
+3. Writes the result as a single `part.parquet` file in a per-refresh versioned subdirectory
+   under the reserved `__beacon__/<view_name>/` prefix in the datasets object store.
 4. Serves future reads from the persisted Parquet result.
 
 The catalog records the view name, original SQL query, output schema, storage location, creation

@@ -12,7 +12,7 @@ Default local path inside the Docker container: `/beacon/data/datasets/`
 | GeoParquet | `.geoparquet` | `GEOPARQUET` | `read_geoparquet` | ✅ |
 | CSV / TSV | `.csv`, `.tsv` | `CSV` | `read_csv` | ✅ |
 | Arrow IPC | `.arrow`, `.feather` | `ARROW` | `read_arrow` | ✅ (`ipc`) |
-| NetCDF | `.nc` | `NETCDF` | `read_netcdf` | ✅ (+ ND-NetCDF) |
+| NetCDF | `.nc` | `NC` | `read_netcdf` | ✅ (+ ND-NetCDF) |
 | Zarr | `zarr.json` marker | `ZARR` | `read_zarr` | — |
 | Atlas | `atlas.json` marker | `ATLAS` | `read_atlas` | — |
 | GeoTIFF / COG | `.tiff`, `.tif` | `TIFF` | `read_tiff` | — |
@@ -102,14 +102,14 @@ For best performance with large NetCDF collections, convert the files into a sin
 
 Zarr datasets are queried using chunk-level predicate pushdown — Beacon reads only the chunks that can satisfy the query predicates, which makes spatial and temporal range queries fast even over large multi-dimensional stores.
 
-- Zarr v2 and v3 are supported.
+- Zarr v3 stores are supported, identified by their `zarr.json` entry file. (v2 stores, which use `.zarray`/`.zgroup`/`.zattrs` instead, are not discovered.)
 - Compressed chunks (zstd, gzip, blosc, …) are decompressed transparently.
 - Multiple Zarr stores can be combined in a single external table using glob patterns (e.g. `sst/*/zarr.json`).
 - S3 and other object-store backends are fully supported.
 
 ### Array attributes
 
-Zarr arrays store per-array attributes in `.zattrs` (v2) or the `attributes` section of `zarr.json` (v3). Beacon exposes these as extra columns using dot notation: `<array>.<attribute>`. For example, an array `sst` with a `units` attribute is accessible as the column `sst.units`.
+Zarr arrays store per-array attributes in the `attributes` section of their `zarr.json`. Beacon exposes these as extra columns using dot notation: `<array>.<attribute>`. For example, an array `sst` with a `units` attribute is accessible as the column `sst.units`.
 
 Attribute columns preserve the original type (string, integer, float, …) as stored in the file.
 

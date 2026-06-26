@@ -86,10 +86,10 @@ These control whether Beacon uses S3-compatible object storage for datasets and 
 NetCDF performance in Beacon is mainly affected by:
 
 - How often Beacon needs to open the file and infer schema
-- Whether opened readers/schemas are cached
+- Whether opened readers are cached
 
 ::: tip
-NetCDF scans currently read a single Arrow `RecordBatch` per file. If you have extremely large `.nc` files, performance may improve by splitting them into smaller files or converting to chunk-friendly formats (e.g. Zarr), depending on your access pattern.
+For extremely large `.nc` files, performance may improve by splitting them into smaller files or converting to chunk-friendly formats (e.g. Zarr), depending on your access pattern. Scans are emitted in batches of `BEACON_BATCH_SIZE` rows (default `64000`).
 :::
 
 ### Reader cache (avoid reopening files)
