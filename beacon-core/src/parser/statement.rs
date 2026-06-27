@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
+use beacon_auth::{Privilege, PrivilegeTarget};
 use datafusion::sql::{parser::Statement, sqlparser::ast::ObjectName};
 
 #[derive(Debug, Clone)]
 pub enum BeaconStatement {
     DFStatement(Box<Statement>),
+    Auth(AuthStatement),
     CreateMaterializedView(CreateMaterializedViewStatement),
     Refresh(RefreshStatement),
     CreateCrawler(CreateCrawlerStatement),
@@ -15,6 +17,78 @@ pub enum BeaconStatement {
     CreateIndex(CreateIndexStatement),
     DropIndex(DropIndexStatement),
     ShowIndexes(ShowIndexesStatement),
+}
+
+/// Authentication and authorization management statements (users, roles, grants, denies).
+#[derive(Debug, Clone)]
+pub enum AuthStatement {
+    CreateUser { username: String, password: String },
+    DropUser { username: String },
+    CreateRole { role: String },
+    DropRole { role: String },
+    GrantRoleToUser { role: String, username: String },
+    RevokeRoleFromUser { role: String, username: String },
+    GrantPrivilege {
+        privilege: Privilege,
+        target: Option<PrivilegeTarget>,
+        role: String,
+    },
+    DenyPrivilege {
+        privilege: Privilege,
+        target: Option<PrivilegeTarget>,
+        role: String,
+    },
+    RevokePrivilege {
+        privilege: Privilege,
+        target: Option<PrivilegeTarget>,
+        role: String,
+        /// When true, removes a matching deny rule rather than a grant rule.
+        deny: bool,
+    },
+}
+
+impl Display for AuthStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthStatement::CreateUser { username, password } => {
+                write!(f, "CREATE USER {username} WITH PASSWORD '{password}'")
+            }
+            AuthStatement::DropUser { username } => write!(f, "DROP USER {username}"),
+            AuthStatement::CreateRole { role } => write!(f, "CREATE ROLE {role}"),
+            AuthStatement::DropRole { role } => write!(f, "DROP ROLE {role}"),
+            AuthStatement::GrantRoleToUser { role, username } => {
+                write!(f, "GRANT ROLE {role} TO USER {username}")
+            }
+            AuthStatement::RevokeRoleFromUser { role, username } => {
+                write!(f, "REVOKE ROLE {role} FROM USER {username}")
+            }
+            AuthStatement::GrantPrivilege { privilege, target, role } => {
+                write!(f, "GRANT {privilege}")?;
+                if let Some(target) = target {
+                    write!(f, " ON {target}")?;
+                }
+                write!(f, " TO ROLE {role}")
+            }
+            AuthStatement::DenyPrivilege { privilege, target, role } => {
+                write!(f, "DENY {privilege}")?;
+                if let Some(target) = target {
+                    write!(f, " ON {target}")?;
+                }
+                write!(f, " TO ROLE {role}")
+            }
+            AuthStatement::RevokePrivilege { privilege, target, role, deny } => {
+                write!(f, "REVOKE ")?;
+                if *deny {
+                    write!(f, "DENY ")?;
+                }
+                write!(f, "{privilege}")?;
+                if let Some(target) = target {
+                    write!(f, " ON {target}")?;
+                }
+                write!(f, " FROM ROLE {role}")
+            }
+        }
+    }
 }
 
 /// CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]
@@ -155,6 +229,7 @@ impl Display for BeaconStatement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DFStatement(s) => write!(f, "{s}"),
+            Self::Auth(s) => write!(f, "{s}"),
             Self::CreateMaterializedView(s) => write!(f, "{s}"),
             Self::Refresh(s) => write!(f, "{s}"),
             Self::CreateCrawler(s) => write!(f, "{s}"),

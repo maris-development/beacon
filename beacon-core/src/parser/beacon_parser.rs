@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use datafusion::error::{DataFusionError, Result};
 use datafusion::sql::{
@@ -6,10 +7,12 @@ use datafusion::sql::{
     sqlparser::{keywords::Keyword, tokenizer::Token},
 };
 
+use beacon_auth::{Privilege, PrivilegeTarget};
+
 use super::statement::{
-    BeaconStatement, CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
-    DropCrawlerStatement, DropIndexStatement, RefreshStatement, RunCrawlerStatement,
-    ShowIndexesStatement,
+    AuthStatement, BeaconStatement, CreateCrawlerStatement, CreateIndexStatement,
+    CreateMaterializedViewStatement, DropCrawlerStatement, DropIndexStatement, RefreshStatement,
+    RunCrawlerStatement, ShowIndexesStatement,
 };
 
 /// A parser that extends `DFParser` with custom Beacon SQL syntax.
@@ -26,6 +29,10 @@ impl<'a> BeaconParser<'a> {
 
     /// Parse a single statement, returning a `BeaconStatement`.
     pub fn parse_statement(&mut self) -> Result<BeaconStatement> {
+        if let Some(statement) = self.try_parse_auth()? {
+            return Ok(statement);
+        }
+
         if self.is_refresh() {
             return self.parse_refresh();
         }
@@ -399,6 +406,209 @@ impl<'a> BeaconParser<'a> {
 
         Ok(BeaconStatement::Refresh(RefreshStatement { name }))
     }
+
+    /// Whether the word token at `nth` (case-insensitively) equals `word`.
+    fn word_at(&self, nth: usize, word: &str) -> bool {
+        matches!(
+            &self.df_parser.parser.peek_nth_token(nth).token,
+            Token::Word(w) if w.value.eq_ignore_ascii_case(word)
+        )
+    }
+
+    /// Dispatches the auth-management statements (CREATE/DROP USER/ROLE, GRANT/DENY/REVOKE),
+    /// returning `None` when the next tokens are not an auth statement.
+    fn try_parse_auth(&mut self) -> Result<Option<BeaconStatement>> {
+        let statement = if self.word_at(0, "CREATE") && self.word_at(1, "USER") {
+            self.parse_create_user()?
+        } else if self.word_at(0, "CREATE") && self.word_at(1, "ROLE") {
+            self.parse_create_role()?
+        } else if self.word_at(0, "DROP") && self.word_at(1, "USER") {
+            self.parse_drop_user()?
+        } else if self.word_at(0, "DROP") && self.word_at(1, "ROLE") {
+            self.parse_drop_role()?
+        } else if self.word_at(0, "GRANT") {
+            self.parse_grant()?
+        } else if self.word_at(0, "DENY") {
+            self.parse_deny()?
+        } else if self.word_at(0, "REVOKE") {
+            self.parse_revoke()?
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(statement))
+    }
+
+    /// Reads a single identifier (role/user name) as a string.
+    fn parse_name(&mut self) -> Result<String> {
+        self.df_parser
+            .parser
+            .parse_identifier()
+            .map(|ident| ident.value)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
+    }
+
+    /// Consumes a word token, erroring if it does not match `word` (case-insensitive).
+    fn expect_word(&mut self, word: &str) -> Result<()> {
+        let token = self.df_parser.parser.next_token();
+        match token.token {
+            Token::Word(w) if w.value.eq_ignore_ascii_case(word) => Ok(()),
+            other => Err(DataFusionError::Plan(format!(
+                "expected `{word}`, found {other}"
+            ))),
+        }
+    }
+
+    /// Parse: CREATE USER <name> WITH PASSWORD '<password>'
+    fn parse_create_user(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // CREATE
+        self.df_parser.parser.next_token(); // USER
+        let username = self.parse_name()?;
+        self.expect_word("WITH")?;
+        self.expect_word("PASSWORD")?;
+        let password = self.parse_string_value()?;
+        Ok(BeaconStatement::Auth(AuthStatement::CreateUser {
+            username,
+            password,
+        }))
+    }
+
+    /// Parse: DROP USER <name>
+    fn parse_drop_user(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // DROP
+        self.df_parser.parser.next_token(); // USER
+        let username = self.parse_name()?;
+        Ok(BeaconStatement::Auth(AuthStatement::DropUser { username }))
+    }
+
+    /// Parse: CREATE ROLE <name>
+    fn parse_create_role(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // CREATE
+        self.df_parser.parser.next_token(); // ROLE
+        let role = self.parse_name()?;
+        Ok(BeaconStatement::Auth(AuthStatement::CreateRole { role }))
+    }
+
+    /// Parse: DROP ROLE <name>
+    fn parse_drop_role(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // DROP
+        self.df_parser.parser.next_token(); // ROLE
+        let role = self.parse_name()?;
+        Ok(BeaconStatement::Auth(AuthStatement::DropRole { role }))
+    }
+
+    /// Parse: GRANT ROLE <role> TO USER <user> | GRANT <priv> [ON <target>] TO ROLE <role>
+    fn parse_grant(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // GRANT
+        if self.word_at(0, "ROLE") {
+            self.df_parser.parser.next_token(); // ROLE
+            let role = self.parse_name()?;
+            self.expect_word("TO")?;
+            self.expect_word("USER")?;
+            let username = self.parse_name()?;
+            return Ok(BeaconStatement::Auth(AuthStatement::GrantRoleToUser {
+                role,
+                username,
+            }));
+        }
+
+        let (privilege, target) = self.parse_privilege_and_target()?;
+        self.expect_word("TO")?;
+        self.expect_word("ROLE")?;
+        let role = self.parse_name()?;
+        Ok(BeaconStatement::Auth(AuthStatement::GrantPrivilege {
+            privilege,
+            target,
+            role,
+        }))
+    }
+
+    /// Parse: DENY <priv> [ON <target>] TO ROLE <role>
+    fn parse_deny(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // DENY
+        let (privilege, target) = self.parse_privilege_and_target()?;
+        self.expect_word("TO")?;
+        self.expect_word("ROLE")?;
+        let role = self.parse_name()?;
+        Ok(BeaconStatement::Auth(AuthStatement::DenyPrivilege {
+            privilege,
+            target,
+            role,
+        }))
+    }
+
+    /// Parse: REVOKE ROLE <role> FROM USER <user>
+    ///      | REVOKE [DENY] <priv> [ON <target>] FROM ROLE <role>
+    fn parse_revoke(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // REVOKE
+        if self.word_at(0, "ROLE") {
+            self.df_parser.parser.next_token(); // ROLE
+            let role = self.parse_name()?;
+            self.expect_word("FROM")?;
+            self.expect_word("USER")?;
+            let username = self.parse_name()?;
+            return Ok(BeaconStatement::Auth(AuthStatement::RevokeRoleFromUser {
+                role,
+                username,
+            }));
+        }
+
+        // `REVOKE DENY <priv> ...` removes a deny rule; `REVOKE <priv> ...` removes a grant rule.
+        let deny = self.word_at(0, "DENY");
+        if deny {
+            self.df_parser.parser.next_token(); // DENY
+        }
+        let (privilege, target) = self.parse_privilege_and_target()?;
+        self.expect_word("FROM")?;
+        self.expect_word("ROLE")?;
+        let role = self.parse_name()?;
+        Ok(BeaconStatement::Auth(AuthStatement::RevokePrivilege {
+            privilege,
+            target,
+            role,
+            deny,
+        }))
+    }
+
+    /// Parse `<privilege> [ON <target>]`, where `<target>` is `TABLE <name>`, `PATH '<pattern>'`,
+    /// or `ALL`.
+    fn parse_privilege_and_target(&mut self) -> Result<(Privilege, Option<PrivilegeTarget>)> {
+        let privilege_str = self.parse_string_value()?;
+        let privilege = Privilege::from_str(&privilege_str)
+            .map_err(|err| DataFusionError::Plan(err))?;
+
+        let target = if self.word_at(0, "ON") {
+            self.df_parser.parser.next_token(); // ON
+            Some(self.parse_privilege_target()?)
+        } else {
+            None
+        };
+
+        Ok((privilege, target))
+    }
+
+    /// Parse a privilege target: `TABLE <name>`, `PATH '<pattern>'`, or `ALL`.
+    fn parse_privilege_target(&mut self) -> Result<PrivilegeTarget> {
+        if self.word_at(0, "TABLE") {
+            self.df_parser.parser.next_token(); // TABLE
+            let name = self
+                .df_parser
+                .parser
+                .parse_object_name(false)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            Ok(PrivilegeTarget::Table(name.to_string()))
+        } else if self.word_at(0, "PATH") {
+            self.df_parser.parser.next_token(); // PATH
+            Ok(PrivilegeTarget::Path(self.parse_string_value()?))
+        } else if self.word_at(0, "ALL") {
+            self.df_parser.parser.next_token(); // ALL
+            Ok(PrivilegeTarget::All)
+        } else {
+            let token = self.df_parser.parser.peek_nth_token(0).token.clone();
+            Err(DataFusionError::Plan(format!(
+                "expected a privilege target (TABLE, PATH, or ALL), found {token}"
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +621,110 @@ mod tests {
         let mut parser = BeaconParser::new(sql).unwrap();
         let stmt = parser.parse_statement().unwrap();
         matches!(stmt, BeaconStatement::DFStatement(_));
+    }
+
+    /// Each auth statement parses into the matching `AuthStatement` and round-trips through Display.
+    fn parse_auth(sql: &str) -> AuthStatement {
+        let mut parser = BeaconParser::new(sql).unwrap();
+        match parser.parse_statement().unwrap() {
+            BeaconStatement::Auth(statement) => statement,
+            other => panic!("expected an auth statement for `{sql}`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_create_and_drop_user() {
+        match parse_auth("CREATE USER alice WITH PASSWORD 'secret'") {
+            AuthStatement::CreateUser { username, password } => {
+                assert_eq!(username, "alice");
+                assert_eq!(password, "secret");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match parse_auth("DROP USER alice") {
+            AuthStatement::DropUser { username } => assert_eq!(username, "alice"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_role_lifecycle_and_assignment() {
+        assert!(matches!(parse_auth("CREATE ROLE reader"), AuthStatement::CreateRole { role } if role == "reader"));
+        assert!(matches!(parse_auth("DROP ROLE reader"), AuthStatement::DropRole { role } if role == "reader"));
+        match parse_auth("GRANT ROLE reader TO USER alice") {
+            AuthStatement::GrantRoleToUser { role, username } => {
+                assert_eq!(role, "reader");
+                assert_eq!(username, "alice");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match parse_auth("REVOKE ROLE reader FROM USER alice") {
+            AuthStatement::RevokeRoleFromUser { role, username } => {
+                assert_eq!(role, "reader");
+                assert_eq!(username, "alice");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_privilege_grants_with_targets() {
+        match parse_auth("GRANT SELECT ON PATH 'argo/**/*.nc' TO ROLE reader") {
+            AuthStatement::GrantPrivilege { privilege, target, role } => {
+                assert_eq!(privilege, Privilege::Select);
+                assert_eq!(target, Some(PrivilegeTarget::Path("argo/**/*.nc".to_string())));
+                assert_eq!(role, "reader");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match parse_auth("GRANT SELECT ON TABLE observations TO ROLE reader") {
+            AuthStatement::GrantPrivilege { target, .. } => {
+                assert_eq!(target, Some(PrivilegeTarget::Table("observations".to_string())));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // No `ON` clause means the grant applies to every target.
+        match parse_auth("GRANT ALL TO ROLE admin") {
+            AuthStatement::GrantPrivilege { privilege, target, role } => {
+                assert_eq!(privilege, Privilege::All);
+                assert_eq!(target, None);
+                assert_eq!(role, "admin");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_deny_and_revoke_variants() {
+        match parse_auth("DENY SELECT ON PATH 'argo/restricted/*' TO ROLE reader") {
+            AuthStatement::DenyPrivilege { privilege, target, role } => {
+                assert_eq!(privilege, Privilege::Select);
+                assert_eq!(target, Some(PrivilegeTarget::Path("argo/restricted/*".to_string())));
+                assert_eq!(role, "reader");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // `REVOKE <priv>` removes a grant; `REVOKE DENY <priv>` removes a deny.
+        match parse_auth("REVOKE SELECT ON TABLE observations FROM ROLE reader") {
+            AuthStatement::RevokePrivilege { deny, .. } => assert!(!deny),
+            other => panic!("unexpected: {other:?}"),
+        }
+        match parse_auth("REVOKE DENY SELECT ON PATH 'argo/restricted/*' FROM ROLE reader") {
+            AuthStatement::RevokePrivilege { deny, .. } => assert!(deny),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_statement_round_trips_through_display() {
+        for sql in [
+            "CREATE ROLE reader",
+            "GRANT ROLE reader TO USER alice",
+            "GRANT SELECT ON PATH 'argo/*' TO ROLE reader",
+            "DENY SELECT ON TABLE observations TO ROLE reader",
+        ] {
+            assert_eq!(parse_auth(sql).to_string(), sql);
+        }
     }
 
     #[test]

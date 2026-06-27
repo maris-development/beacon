@@ -146,6 +146,13 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
         let any = node.as_any();
         let session = self.session.clone();
 
+        if let Some(auth) = any.downcast_ref::<logical::AuthNode>() {
+            return Ok(Some(Arc::new(physical::AuthExec::new(
+                auth.statement.payload.clone(),
+                session,
+            ))));
+        }
+
         if let Some(create) = any.downcast_ref::<logical::CreateMaterializedViewNode>() {
             return Ok(Some(Arc::new(physical::CreateMaterializedViewExec::new(
                 create.view_name.clone(),

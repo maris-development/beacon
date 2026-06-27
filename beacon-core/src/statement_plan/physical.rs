@@ -301,6 +301,38 @@ macro_rules! side_effect_exec {
     };
 }
 
+/// Physical node for the auth-management statements (CREATE/DROP USER/ROLE, GRANT/DENY/REVOKE).
+#[derive(Debug)]
+pub(crate) struct AuthExec {
+    statement: crate::parser::statement::AuthStatement,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl AuthExec {
+    pub(crate) fn new(
+        statement: crate::parser::statement::AuthStatement,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            statement,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AuthExec: {}", self.statement)
+    }
+}
+
+side_effect_exec!(AuthExec, "AuthExec", |exec: &AuthExec| {
+    let session = upgrade_session(&exec.session)?;
+    let statement = exec.statement.clone();
+    Ok(side_effect_stream(async move {
+        super::auth::apply_auth_statement(&session, &statement).map_err(to_df_err)
+    }))
+});
+
 /// Physical node for `DROP TABLE`.
 #[derive(Debug)]
 pub(crate) struct DropTableExec {

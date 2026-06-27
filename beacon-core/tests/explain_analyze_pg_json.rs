@@ -9,7 +9,7 @@ use futures::TryStreamExt;
 
 async fn run_sql(runtime: &Runtime, sql: &str) {
     runtime
-        .run_query(Query::sql(sql.to_string()), true)
+        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
         .await
         .expect("sql should run")
         .into_record_stream()
@@ -38,7 +38,7 @@ async fn explain_analyze_returns_pg_json_with_metrics() {
     run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2), (3)")).await;
 
     let json_str = runtime
-        .explain_analyze_client_query(sql_query(&format!("SELECT a FROM {table}")), false)
+        .explain_analyze_client_query(sql_query(&format!("SELECT a FROM {table}")), beacon_core::AuthIdentity::empty())
         .await
         .expect("explain analyze should succeed");
 
@@ -95,7 +95,7 @@ async fn explain_analyze_gates_ddl_by_privilege() {
     let err = runtime
         .explain_analyze_client_query(
             sql_query(&format!("CREATE TABLE {table} (a BIGINT)")),
-            false,
+            beacon_core::AuthIdentity::empty(),
         )
         .await
         .err()
@@ -109,7 +109,7 @@ async fn explain_analyze_gates_ddl_by_privilege() {
     runtime
         .explain_analyze_client_query(
             sql_query(&format!("CREATE TABLE {table} (a BIGINT)")),
-            true,
+            beacon_core::AuthIdentity::system(),
         )
         .await
         .expect("super-user explain analyze of DDL should be permitted");

@@ -14,7 +14,7 @@ use futures::TryStreamExt;
 /// Run SQL as a super-user and collect the result batches.
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
-        .run_query(beacon_core::query::Query::sql(sql.to_string()), true)
+        .run_query(beacon_core::query::Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
         .await
         .unwrap_or_else(|error| panic!("SQL failed to plan/execute: {sql}\n{error}"))
         .into_record_stream()
@@ -76,7 +76,7 @@ async fn delta_external_table_read_insert_time_travel_drop() {
     let _ = runtime
         .run_query(
             beacon_core::query::Query::sql(format!("DROP TABLE IF EXISTS {table}")),
-            true,
+            beacon_core::AuthIdentity::system(),
         )
         .await;
 
@@ -120,7 +120,7 @@ async fn delta_external_table_read_insert_time_travel_drop() {
     let err = runtime
         .run_query(
             beacon_core::query::Query::sql(format!("SELECT count(*) FROM {table}")),
-            true,
+            beacon_core::AuthIdentity::system(),
         )
         .await;
     assert!(err.is_err(), "querying a dropped table should error");
