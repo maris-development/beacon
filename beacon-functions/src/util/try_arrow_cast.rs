@@ -129,3 +129,43 @@ fn data_type_from_args(args: &[Expr]) -> datafusion::error::Result<DataType> {
         e => arrow_datafusion_err!(e),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::prelude::lit;
+
+    #[test]
+    fn parses_a_valid_target_type() {
+        let dt = data_type_from_args(&[lit(1_i64), lit("Int32")]).unwrap();
+        assert_eq!(dt, DataType::Int32);
+    }
+
+    #[test]
+    fn rejects_wrong_argument_count() {
+        assert!(data_type_from_args(&[lit("Int32")]).is_err());
+        assert!(data_type_from_args(&[]).is_err());
+    }
+
+    #[test]
+    fn rejects_non_string_type_argument() {
+        // Second argument must be a constant Utf8 literal.
+        assert!(data_type_from_args(&[lit(1_i64), lit(2_i64)]).is_err());
+    }
+
+    #[test]
+    fn rejects_unparseable_type_name() {
+        assert!(data_type_from_args(&[lit(1_i64), lit("NotARealArrowType")]).is_err());
+    }
+
+    #[test]
+    fn udf_metadata_is_stable() {
+        let func = TryArrowCastFunc::new();
+        assert_eq!(func.name(), "try_arrow_cast");
+        // return_type is intentionally an error; return_field_from_args is used.
+        assert!(func.return_type(&[DataType::Int32]).is_err());
+
+        // The public constructor exposes the same name.
+        assert_eq!(try_arrow_cast().name(), "try_arrow_cast");
+    }
+}

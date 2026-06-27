@@ -1726,6 +1726,7 @@ dependencies = [
  "async-trait",
  "beacon-common",
  "beacon-object-storage",
+ "chrono",
  "datafusion",
  "datafusion-federation",
  "futures",

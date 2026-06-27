@@ -143,3 +143,71 @@ impl FunctionDoc {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{Field, Fields};
+    use datafusion::logical_expr::{ColumnarValue, Volatility};
+    use datafusion::prelude::create_udf;
+    use std::sync::Arc;
+
+    #[test]
+    fn primitive_type_is_formatted_directly() {
+        assert_eq!(
+            FunctionDoc::parse_data_type_to_string(&DataType::Int32),
+            "Int32"
+        );
+    }
+
+    #[test]
+    fn list_type_is_wrapped() {
+        let list = DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
+        assert_eq!(
+            FunctionDoc::parse_data_type_to_string(&list),
+            "List<Float64>"
+        );
+    }
+
+    #[test]
+    fn struct_type_lists_named_fields() {
+        let struct_ty = DataType::Struct(Fields::from(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Utf8, true),
+        ]));
+        assert_eq!(
+            FunctionDoc::parse_data_type_to_string(&struct_ty),
+            "Struct<a: Int32, b: Utf8>"
+        );
+    }
+
+    #[test]
+    fn nested_list_of_struct_recurses() {
+        let inner = DataType::Struct(Fields::from(vec![Field::new("x", DataType::Int8, true)]));
+        let list = DataType::List(Arc::new(Field::new("item", inner, true)));
+        assert_eq!(
+            FunctionDoc::parse_data_type_to_string(&list),
+            "List<Struct<x: Int8>>"
+        );
+    }
+
+    #[test]
+    fn from_scalar_uses_signature_example_types() {
+        let udf = create_udf(
+            "dummy_fn",
+            vec![DataType::Utf8],
+            DataType::Boolean,
+            Volatility::Immutable,
+            Arc::new(|_: &[ColumnarValue]| -> datafusion::error::Result<ColumnarValue> {
+                unimplemented!()
+            }),
+        );
+
+        let docs = FunctionDoc::from_scalar(&udf);
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].function_name, "dummy_fn");
+        // create_udf has no documentation, so the return type comes from the
+        // declared signature.
+        assert_eq!(docs[0].return_type, "Boolean");
+    }
+}

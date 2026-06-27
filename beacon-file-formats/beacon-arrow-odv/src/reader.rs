@@ -467,3 +467,125 @@ mod tests {
         println!("Total rows written: {}", counter);
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn value_type_to_arrow_type_mapping() {
+        let f = AsyncOdvDecoder::value_type_to_arrow_type;
+        assert_eq!(f("INDEXED_TEXT").unwrap(), DataType::Utf8);
+        assert_eq!(f("INTEGER").unwrap(), DataType::Int64);
+        assert_eq!(f("FLOAT").unwrap(), DataType::Float32);
+        assert_eq!(f("DOUBLE").unwrap(), DataType::Float64);
+        assert_eq!(f("TEXT:5").unwrap(), DataType::Utf8);
+        assert!(f("NONSENSE").is_err());
+    }
+
+    #[test]
+    fn odv_field_from_header_extracts_name_units_and_metadata() {
+        let line = r#"//<MetaVariable> label="Longitude [degrees east]" value_type="FLOAT" qf_schema="SEADATANET" comment="pos"</MetaVariable>"#;
+        let field = AsyncOdvDecoder::odv_field_from_header(line).unwrap();
+
+        // Units in brackets are stripped from the name and stored as metadata.
+        assert_eq!(field.name(), "Longitude");
+        assert_eq!(field.data_type(), &DataType::Float32);
+        assert_eq!(field.metadata().get("units").map(|s| s.as_str()), Some("degrees east"));
+        assert_eq!(field.metadata().get("qf_schema").map(|s| s.as_str()), Some("SEADATANET"));
+        assert_eq!(field.metadata().get("comment").map(|s| s.as_str()), Some("pos"));
+    }
+
+    #[test]
+    fn odv_field_from_header_handles_no_units_and_non_matching_lines() {
+        let line = r#"//<MetaVariable> label="Cruise" value_type="INDEXED_TEXT" qf_schema="SEADATANET" comment=""</MetaVariable>"#;
+        let field = AsyncOdvDecoder::odv_field_from_header(line).unwrap();
+        assert_eq!(field.name(), "Cruise");
+        assert_eq!(field.data_type(), &DataType::Utf8);
+        assert!(field.metadata().get("units").is_none());
+        // An empty comment is not recorded as metadata.
+        assert!(field.metadata().get("comment").is_none());
+
+        // Non-variable comment lines yield no field.
+        assert!(AsyncOdvDecoder::odv_field_from_header("//<Encoding>UTF-8</Encoding>").is_none());
+    }
+
+    #[test]
+    fn schema_mapper_appends_and_fills_metadata_columns() {
+        let field = Field::new("Temp", DataType::Float32, true).with_metadata(
+            std::collections::HashMap::from([("units".to_string(), "degC".to_string())]),
+        );
+        let input = Arc::new(arrow::datatypes::Schema::new(vec![field]));
+        let mapper = OdvSchemaMapper::new(input.clone());
+
+        // Output schema = original columns + one Utf8 column per metadata entry.
+        let out_schema = mapper.output_schema();
+        let names: Vec<&str> = out_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert_eq!(names, vec!["Temp", "Temp.units"]);
+
+        let batch = RecordBatch::try_new(
+            input.clone(),
+            vec![Arc::new(arrow::array::Float32Array::from(vec![1.0_f32, 2.0]))
+                as Arc<dyn arrow::array::Array>],
+        )
+        .unwrap();
+        let mapped = mapper.map_batch(batch, None).unwrap();
+        assert_eq!(mapped.num_columns(), 2);
+        assert_eq!(mapped.num_rows(), 2);
+        let units = mapped
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(units.value(0), "degC");
+        assert_eq!(units.value(1), "degC");
+    }
+
+    fn odv_document() -> String {
+        [
+            "//<Encoding>UTF-8</Encoding>",
+            "//<DataType>Profiles</DataType>",
+            r#"//<MetaVariable> label="Cruise" value_type="INDEXED_TEXT" qf_schema="SEADATANET" comment=""</MetaVariable>"#,
+            r#"//<MetaVariable> label="Station" value_type="INDEXED_TEXT" qf_schema="SEADATANET" comment=""</MetaVariable>"#,
+            r#"//<MetaVariable> label="Type" value_type="TEXT:2" qf_schema="SEADATANET" comment=""</MetaVariable>"#,
+            r#"//<DataVariable> label="Depth [m]" value_type="FLOAT" qf_schema="SEADATANET" comment=""</DataVariable>"#,
+            "Cruise\tStation\tType\tDepth [m]",
+            "c1\t1\tB\t10.5",
+        ]
+        .join("\n")
+    }
+
+    fn byte_stream(doc: String) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin {
+        Box::pin(futures::stream::once(async move {
+            Ok::<_, std::io::Error>(Bytes::from(doc.into_bytes()))
+        }))
+    }
+
+    #[tokio::test]
+    async fn decode_schema_mapper_and_body_from_in_memory_document() {
+        let mapper = AsyncOdvDecoder::decode_schema_mapper(byte_stream(odv_document()))
+            .await
+            .unwrap();
+
+        let names: Vec<String> = mapper
+            .output_schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert!(names.iter().any(|n| n == "Cruise"));
+        assert!(names.iter().any(|n| n == "Depth"));
+
+        let mapper = Arc::new(mapper);
+        let mut stream = AsyncOdvDecoder::decode(byte_stream(odv_document()), None, mapper).await;
+        let mut rows = 0;
+        while let Some(batch) = stream.next().await {
+            rows += batch.unwrap().num_rows();
+        }
+        assert_eq!(rows, 1);
+    }
+}
