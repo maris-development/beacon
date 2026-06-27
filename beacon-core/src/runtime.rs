@@ -253,26 +253,28 @@ impl Runtime {
         Self::bootstrap_auth(auth, config)
     }
 
-    /// Seeds the built-in `admin` role (global `ALL` grant), the configured admin super-user, and
+    /// Seeds the built-in super-user role (global `ALL` grant), the configured admin super-user, and
     /// the optional anonymous user. Idempotent: existing roles/users are left in place, so it is
-    /// safe to run against an already-populated (persistent) auth context.
+    /// safe to run against an already-populated (persistent) auth context. The super-user role is
+    /// re-seeded here on every startup and is protected against removal at runtime, so it is always
+    /// available (like a Postgres bootstrap superuser).
     fn bootstrap_auth(
         mut auth: beacon_auth::AuthContext,
         config: &beacon_config::Config,
     ) -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
-        if !auth.role_provider().role_exists("admin") {
-            auth.create_role("admin")?;
+        if !auth.role_provider().role_exists(beacon_auth::SUPERUSER_ROLE) {
+            auth.create_role(beacon_auth::SUPERUSER_ROLE)?;
         }
         // Re-granting the same rule is idempotent (deduped in memory and in storage).
         auth.grant(
-            "admin",
+            beacon_auth::SUPERUSER_ROLE,
             beacon_auth::PrivilegeRule::new(beacon_auth::Privilege::All, None),
         )?;
 
         if !auth.user_exists(&config.admin.username) {
             auth.create_user(&config.admin.username, &config.admin.password)?;
         }
-        auth.grant_role_to_user(&config.admin.username, "admin")?;
+        auth.grant_role_to_user(&config.admin.username, beacon_auth::SUPERUSER_ROLE)?;
 
         // Seed the built-in anonymous user (empty password, no roles) unless disabled. Admins can
         // assign roles to it via `GRANT ROLE <role> TO USER anonymous`.

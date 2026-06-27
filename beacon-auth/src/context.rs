@@ -5,11 +5,24 @@ use std::sync::Arc;
 use crate::{
     credential::Credential,
     provider::AuthProvider,
-    role::{ConcreteTarget, Privilege, PrivilegeRule, RoleProvider},
+    role::{ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, RoleProvider},
 };
 
 /// Default username of the built-in anonymous principal.
 pub const ANONYMOUS_USERNAME: &str = "anonymous";
+
+/// The built-in super-user role.
+///
+/// Analogous to a Postgres bootstrap superuser: it is always present with a global `ALL` grant
+/// (re-seeded on every startup) and is protected — it cannot be dropped, nor can its global `ALL`
+/// grant be revoked, through the auth-management SQL. Any principal holding this role (local or from
+/// an external IdP) is therefore always a super-user.
+pub const SUPERUSER_ROLE: &str = "admin";
+
+/// Whether `rule` is the global `ALL` grant that confers super-user (no target / `ALL` target).
+fn is_global_all(rule: &PrivilegeRule) -> bool {
+    rule.privilege == Privilege::All && matches!(rule.target, None | Some(PrivilegeTarget::All))
+}
 
 /// The resolved identity of an authenticated principal.
 #[derive(Debug, Clone)]
@@ -123,6 +136,9 @@ impl AuthContext {
     }
 
     pub fn drop_role(&self, name: &str) -> anyhow::Result<()> {
+        if name == SUPERUSER_ROLE {
+            anyhow::bail!("cannot drop the built-in super-user role '{SUPERUSER_ROLE}'");
+        }
         self.role_provider.drop_role(name)
     }
 
@@ -135,6 +151,11 @@ impl AuthContext {
     }
 
     pub fn revoke(&self, role: &str, rule: &PrivilegeRule, is_deny: bool) -> anyhow::Result<()> {
+        if role == SUPERUSER_ROLE && !is_deny && is_global_all(rule) {
+            anyhow::bail!(
+                "cannot revoke the global ALL grant from the built-in super-user role '{SUPERUSER_ROLE}'"
+            );
+        }
         self.role_provider.revoke(role, rule, is_deny)
     }
 
@@ -256,5 +277,34 @@ mod tests {
         let ctx = admin_context();
         assert!(!ctx.anonymous_enabled());
         assert!(ctx.authenticate_anonymous().await.is_err());
+    }
+
+    /// The built-in super-user role is protected: it cannot be dropped, nor can its global `ALL`
+    /// grant be revoked — so a principal holding it is always a super-user.
+    #[tokio::test]
+    async fn superuser_role_is_protected() {
+        let ctx = admin_context();
+        ctx.create_role(SUPERUSER_ROLE).unwrap();
+        let all = PrivilegeRule::new(Privilege::All, None);
+        ctx.grant(SUPERUSER_ROLE, all.clone()).unwrap();
+
+        // Cannot be dropped.
+        assert!(ctx.drop_role(SUPERUSER_ROLE).is_err());
+        // Cannot have its global ALL grant revoked.
+        assert!(ctx.revoke(SUPERUSER_ROLE, &all, false).is_err());
+
+        // A user holding it is still a super-user.
+        ctx.create_user("root", "pw").unwrap();
+        ctx.grant_role_to_user("root", SUPERUSER_ROLE).unwrap();
+        let identity = ctx.authenticate(&Credential::basic("root", "pw")).await.unwrap();
+        assert!(identity.is_super_user);
+
+        // Other, scoped rules on the role can still be managed normally.
+        let scoped = PrivilegeRule::new(
+            Privilege::Select,
+            Some(PrivilegeTarget::Table("t".to_string())),
+        );
+        ctx.grant(SUPERUSER_ROLE, scoped.clone()).unwrap();
+        assert!(ctx.revoke(SUPERUSER_ROLE, &scoped, false).is_ok());
     }
 }
