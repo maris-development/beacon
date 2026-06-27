@@ -66,6 +66,33 @@ pub(crate) fn validate_query_plan(plan: &LogicalPlan, is_super_user: bool) -> an
     Ok(())
 }
 
+/// Whether `plan` produces a result set that can be exported in an output format.
+///
+/// A requested output format wraps the plan in a `COPY TO` (see
+/// [`Output::parse`](crate::query::output::Output::parse)), which only accepts a
+/// row-producing input. Side-effecting / administrative statements return no rows,
+/// so they cannot be exported: standard DDL, DML (`INSERT`/`UPDATE`/`DELETE`),
+/// `COPY`, and `SET`, plus beacon's side-effecting extension nodes (materialized
+/// views, `REFRESH`, `ALTER TABLE`, copy-on-write `DELETE`/`UPDATE`, crawler/index
+/// DDL), which all expose an empty schema. Row-producing statements (`SELECT`,
+/// `SHOW CRAWLERS`, `SHOW INDEXES`, ...) do produce an exportable result set.
+pub(crate) fn plan_produces_result_set(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Ddl(_)
+        | LogicalPlan::Dml(_)
+        | LogicalPlan::Copy(_)
+        | LogicalPlan::Statement(_) => false,
+        // Beacon's extension nodes carry their own output schema: the
+        // side-effecting ones (materialized views, `REFRESH`, `ALTER TABLE`,
+        // copy-on-write `DELETE`/`UPDATE`, crawler/index DDL) report an empty
+        // schema, while the row-producing ones (`SHOW CRAWLERS`, `SHOW INDEXES`)
+        // report real columns — so the schema decides whether they can be exported.
+        LogicalPlan::Extension(ext) => !ext.node.schema().fields().is_empty(),
+        // Everything else is a row-producing query (`SELECT`, `VALUES`, ...).
+        other => !other.schema().fields().is_empty(),
+    }
+}
+
 /// Whether `plan` contains any [`LogicalPlan::Extension`] node (all of beacon's
 /// extension nodes are super-user-only operations).
 fn plan_contains_extension(plan: &LogicalPlan) -> anyhow::Result<bool> {

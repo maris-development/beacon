@@ -420,7 +420,19 @@ impl Runtime {
         )?;
 
         match output {
-            Some(output) => self.run_query_to_file(plan, output, query_id, query_json).await,
+            Some(output) => {
+                // An output format wraps the plan in a `COPY TO`, which only
+                // accepts a row-producing input. Reject side-effecting statements
+                // (DDL/DML, `SET`, ...) here with a clear message instead of
+                // letting the `COPY TO` builder fail with a cryptic planner error.
+                if !crate::statement_plan::plan_produces_result_set(&plan) {
+                    anyhow::bail!(
+                        "an output format can only be applied to queries that return rows \
+                         (e.g. SELECT); this statement produces no result set to export"
+                    );
+                }
+                self.run_query_to_file(plan, output, query_id, query_json).await
+            }
             None => self.run_query_to_stream(plan, query_id, query_json).await,
         }
     }
