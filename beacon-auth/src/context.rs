@@ -132,6 +132,11 @@ impl AuthContext {
     // --- Role management (delegated to the role provider) ---
 
     pub fn create_role(&self, name: &str) -> anyhow::Result<()> {
+        if name == SUPERUSER_ROLE {
+            anyhow::bail!(
+                "'{SUPERUSER_ROLE}' is a reserved built-in role and always exists"
+            );
+        }
         self.role_provider.create_role(name)
     }
 
@@ -240,11 +245,12 @@ mod tests {
 
     #[tokio::test]
     async fn super_user_detected_from_global_all_grant() {
+        // Any role with a global ALL grant confers super-user — not only the built-in role.
         let ctx = admin_context();
-        ctx.create_role("admin").unwrap();
+        ctx.create_role("owners").unwrap();
         ctx.create_user("root", "pw").unwrap();
-        ctx.grant_role_to_user("root", "admin").unwrap();
-        ctx.grant("admin", PrivilegeRule::new(Privilege::All, None)).unwrap();
+        ctx.grant_role_to_user("root", "owners").unwrap();
+        ctx.grant("owners", PrivilegeRule::new(Privilege::All, None)).unwrap();
 
         let identity = ctx.authenticate(&Credential::basic("root", "pw")).await.unwrap();
         assert!(identity.is_super_user);
@@ -284,10 +290,14 @@ mod tests {
     #[tokio::test]
     async fn superuser_role_is_protected() {
         let ctx = admin_context();
-        ctx.create_role(SUPERUSER_ROLE).unwrap();
+        // Seed it the way bootstrap does — through the raw provider, which bypasses the reserved
+        // guard on the SQL-facing `create_role`.
+        ctx.role_provider().create_role(SUPERUSER_ROLE).unwrap();
         let all = PrivilegeRule::new(Privilege::All, None);
         ctx.grant(SUPERUSER_ROLE, all.clone()).unwrap();
 
+        // The reserved name cannot be (re-)created through the SQL path.
+        assert!(ctx.create_role(SUPERUSER_ROLE).is_err());
         // Cannot be dropped.
         assert!(ctx.drop_role(SUPERUSER_ROLE).is_err());
         // Cannot have its global ALL grant revoked.

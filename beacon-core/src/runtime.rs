@@ -263,7 +263,8 @@ impl Runtime {
         config: &beacon_config::Config,
     ) -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
         if !auth.role_provider().role_exists(beacon_auth::SUPERUSER_ROLE) {
-            auth.create_role(beacon_auth::SUPERUSER_ROLE)?;
+            // Seed through the raw provider: the SQL-facing `create_role` reserves this name.
+            auth.role_provider().create_role(beacon_auth::SUPERUSER_ROLE)?;
         }
         // Re-granting the same rule is idempotent (deduped in memory and in storage).
         auth.grant(
@@ -1273,6 +1274,61 @@ mod client_query_tests {
         assert!(
             err.to_string().contains("super-user"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// A non-super-user cannot escalate its own privileges: all auth-management statements are
+    /// super-user-only (they lower to extension nodes), so a role-limited caller cannot create a
+    /// role, grant itself privileges, or create users. A super-user can run the same statements.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_super_user_cannot_escalate_privileges() {
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
+
+        // A caller holding a non-super role (no global ALL grant).
+        let limited = beacon_auth::AuthIdentity {
+            username: "alice".to_string(),
+            roles: vec!["reader".to_string()],
+            is_super_user: false,
+        };
+
+        for sql in [
+            "CREATE ROLE hacker",
+            "GRANT ALL TO ROLE reader",
+            "GRANT ALL TO ROLE hacker",
+            "CREATE USER bob WITH PASSWORD 'pw'",
+            "GRANT ROLE reader TO USER alice",
+        ] {
+            let err = runtime
+                .run_query(crate::query::Query::sql(sql.to_string()), limited.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("non-super should be rejected: {sql}"));
+            assert!(
+                err.to_string().contains("super-user"),
+                "expected a super-user error for `{sql}`, got: {err}"
+            );
+        }
+
+        // The super-user can run auth management (the gate is privilege-based, not a blanket block).
+        run_sql(&runtime, "CREATE ROLE analyst").await;
+        run_sql(&runtime, "GRANT SELECT ON TABLE t TO ROLE analyst").await;
+
+        // The reserved super-user role cannot be re-created even by a super-user.
+        let err = runtime
+            .run_query(
+                crate::query::Query::sql("CREATE ROLE admin".to_string()),
+                beacon_auth::AuthIdentity::system(),
+            )
+            .await
+            .err()
+            .expect("re-creating the reserved super-user role should be rejected");
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected a reserved-role error, got: {err}"
         );
     }
 
