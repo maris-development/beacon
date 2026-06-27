@@ -156,6 +156,69 @@ A role named in a token only confers access if it has been created and granted i
 Beacon (`CREATE ROLE <name>` + `GRANT … TO ROLE <name>`). OIDC principals, like
 all non-super-user principals, are read-only.
 
+### How a token is validated
+
+When a request carries `Authorization: Bearer <jwt>`, Beacon validates it as a
+JWT access token:
+
+1. **Read the header.** The token's JOSE header is decoded to read its key id
+   (`kid`) and signing algorithm (`alg`). A token without a `kid` is rejected.
+2. **Resolve the signing key.** The issuer's JWKS (fetched from
+   `BEACON_OIDC_JWKS_URL`) is searched for a key matching the `kid`. If no key
+   matches, the token is rejected — re-fetching only happens on the cache TTL (see
+   below), so brand-new signing keys become usable once the cache expires.
+3. **Verify signature and claims.** The signature is checked with the matched key
+   using the token's own algorithm (whatever the JWK supports — RS256, ES256, …).
+   Expiry (`exp`) and the issuer (`iss`, against `BEACON_OIDC_ISSUER`) are always
+   validated. The audience (`aud`) is validated **only when** `BEACON_OIDC_AUDIENCE`
+   is set; otherwise audience checking is disabled.
+4. **Extract identity and roles** from the claims (below).
+
+Any failure along the way is an authentication failure: a request that **presents**
+an invalid or expired token is rejected with `401 Unauthorized` — it does **not**
+fall back to anonymous. Anonymous access applies only when a request carries **no**
+credentials at all.
+
+### Username and roles claims
+
+Both `BEACON_OIDC_USERNAME_CLAIM` and `BEACON_OIDC_ROLES_CLAIM` are **dotted
+paths**, resolved against the (possibly nested) claims object — e.g.
+`realm_access.roles` reads `claims["realm_access"]["roles"]`.
+
+- The **username** claim must resolve to a string; a token missing it is rejected.
+- The **roles** claim is optional and accepts either shape commonly seen in OIDC
+  tokens: a **JSON array of strings** (`["reader", "writer"]`) or a single
+  **space-delimited string** (`"reader writer"`). A missing or non-string/array
+  roles claim simply yields **no roles** (not an error) — the principal
+  authenticates but, under enforcement, can read nothing until granted roles.
+
+For a Keycloak realm, the defaults (`realm_access.roles` and
+`preferred_username`) work out of the box.
+
+### JWKS caching
+
+The JWKS document is fetched lazily and cached in memory for
+`BEACON_OIDC_JWKS_CACHE_TTL_SECS` (default `300`). Within that window, token
+validation does no network I/O; after it, the next validation re-fetches. The
+cache lock is never held across the network fetch, so token validation doesn't
+serialize behind a slow JWKS endpoint.
+
+### Credential routing (Basic vs Bearer)
+
+When OIDC is enabled, Beacon runs a **composite** provider that routes by
+credential kind:
+
+| Request header | Routed to | Used for |
+| --- | --- | --- |
+| `Authorization: Basic …` | Local provider (SQLite user store) | The super-user and SQL-managed users |
+| `Authorization: Bearer …` | OIDC provider | External IdP tokens |
+
+So local admin users and external IdP users coexist. User-management DDL
+(`CREATE USER`, `DROP USER`, …) always targets the **local** directory — the OIDC
+provider holds no user store, because OIDC users live in your identity provider,
+not in Beacon. (The super-user credential is still checked directly and
+short-circuits before either provider runs.)
+
 ## Configuration reference
 
 | Variable | Default | Description |
