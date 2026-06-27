@@ -268,6 +268,17 @@ export default defineConfig({
               link: '/docs/1.8.0/data-lake/configuration',
             },
             {
+              text: 'Access Control',
+              link: '/docs/1.8.0/security/access-control',
+              collapsed: true,
+              items: [
+                { text: 'Enforcement', link: '/docs/1.8.0/security/access-control#enforcement' },
+                { text: 'Roles & privileges', link: '/docs/1.8.0/security/access-control#roles-privileges-and-targets' },
+                { text: 'OIDC (SSO)', link: '/docs/1.8.0/security/access-control#oidc-single-sign-on' },
+                { text: 'Configuration', link: '/docs/1.8.0/security/access-control#configuration-reference' },
+              ]
+            },
+            {
               text: 'Performance Tuning',
               link: '/docs/1.8.0/data-lake/performance-tuning',
               collapsed: true,
@@ -421,6 +432,17 @@ export default defineConfig({
                     { text: 'DROP CRAWLER', link: '/docs/1.8.0/data-lake/crawlers#drop-crawler' },
                   ]
                 },
+                {
+                  text: 'Users, Roles & Grants',
+                  link: '/docs/1.8.0/security/access-control#managing-users-and-roles-sql',
+                  collapsed: true,
+                  items: [
+                    { text: 'CREATE USER', link: '/docs/1.8.0/security/access-control#users' },
+                    { text: 'CREATE ROLE', link: '/docs/1.8.0/security/access-control#roles' },
+                    { text: 'GRANT / DENY', link: '/docs/1.8.0/security/access-control#grants-and-denies' },
+                    { text: 'Anonymous access', link: '/docs/1.8.0/security/access-control#anonymous-access' },
+                  ]
+                },
               ]
             },
             {
@@ -571,16 +593,6 @@ export default defineConfig({
               text: 'Python ADBC Driver',
               link: '/docs/1.8.0/connect/python-adbc',
             }
-          ]
-        },
-        {
-          text: 'Security',
-          collapsed: true,
-          items: [
-            {
-              text: 'Authentication & Access Control',
-              link: '/docs/1.8.0/security/access-control',
-            },
           ]
         }
       ],
