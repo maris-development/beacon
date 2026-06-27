@@ -125,6 +125,10 @@ export default defineConfig({
           collapsed: false,
           items: [
             {
+              text: 'Quick Start',
+              link: '/docs/1.8.0/getting-started#quick-start',
+            },
+            {
               text: 'Local',
               link: '/docs/1.8.0/getting-started#local',
             },
