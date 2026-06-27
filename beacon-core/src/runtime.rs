@@ -253,32 +253,21 @@ impl Runtime {
         Self::bootstrap_auth(auth, config)
     }
 
-    /// Seeds the built-in super-user role (global `ALL` grant), the configured admin super-user, and
-    /// the optional anonymous user. Idempotent: existing roles/users are left in place, so it is
-    /// safe to run against an already-populated (persistent) auth context. The super-user role is
-    /// re-seeded here on every startup and is protected against removal at runtime, so it is always
-    /// available (like a Postgres bootstrap superuser).
+    /// Configures the single super-user from the `BEACON_ADMIN_*` environment variables and seeds
+    /// the optional anonymous user. Idempotent and safe to run against an already-populated
+    /// (persistent) auth context.
+    ///
+    /// The super-user is config-defined, not a stored role or user: it cannot be created, changed,
+    /// or duplicated through SQL. Every role and user created via SQL is read-only and never a
+    /// super-user.
     fn bootstrap_auth(
         mut auth: beacon_auth::AuthContext,
         config: &beacon_config::Config,
     ) -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
-        if !auth.role_provider().role_exists(beacon_auth::SUPERUSER_ROLE) {
-            // Seed through the raw provider: the SQL-facing `create_role` reserves this name.
-            auth.role_provider().create_role(beacon_auth::SUPERUSER_ROLE)?;
-        }
-        // Re-granting the same rule is idempotent (deduped in memory and in storage).
-        auth.grant(
-            beacon_auth::SUPERUSER_ROLE,
-            beacon_auth::PrivilegeRule::new(beacon_auth::Privilege::All, None),
-        )?;
-
-        if !auth.user_exists(&config.admin.username) {
-            auth.create_user(&config.admin.username, &config.admin.password)?;
-        }
-        auth.grant_role_to_user(&config.admin.username, beacon_auth::SUPERUSER_ROLE)?;
+        auth.set_super_user(&config.admin.username, &config.admin.password);
 
         // Seed the built-in anonymous user (empty password, no roles) unless disabled. Admins can
-        // assign roles to it via `GRANT ROLE <role> TO USER anonymous`.
+        // assign read-only roles to it via `GRANT ROLE <role> TO USER anonymous`.
         if config.auth.anonymous_enabled {
             if !auth.user_exists(beacon_auth::ANONYMOUS_USERNAME) {
                 auth.create_user(beacon_auth::ANONYMOUS_USERNAME, "")?;
@@ -1313,22 +1302,23 @@ mod client_query_tests {
             );
         }
 
-        // The super-user can run auth management (the gate is privilege-based, not a blanket block).
+        // The super-user can create read-only roles and grant SELECT.
         run_sql(&runtime, "CREATE ROLE analyst").await;
         run_sql(&runtime, "GRANT SELECT ON TABLE t TO ROLE analyst").await;
 
-        // The reserved super-user role cannot be re-created even by a super-user.
+        // But even the super-user cannot grant write/management privileges to a role — roles are
+        // read-only, so there is no way to mint another super-user through SQL.
         let err = runtime
             .run_query(
-                crate::query::Query::sql("CREATE ROLE admin".to_string()),
+                crate::query::Query::sql("GRANT ALL TO ROLE analyst".to_string()),
                 beacon_auth::AuthIdentity::system(),
             )
             .await
             .err()
-            .expect("re-creating the reserved super-user role should be rejected");
+            .expect("granting a write/ALL privilege to a role should be rejected");
         assert!(
-            err.to_string().contains("reserved"),
-            "expected a reserved-role error, got: {err}"
+            err.to_string().contains("read-only"),
+            "expected a read-only-role error, got: {err}"
         );
     }
 

@@ -5,23 +5,32 @@ use std::sync::Arc;
 use crate::{
     credential::Credential,
     provider::AuthProvider,
-    role::{ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, RoleProvider},
+    role::{ConcreteTarget, Privilege, PrivilegeRule, RoleProvider},
 };
 
 /// Default username of the built-in anonymous principal.
 pub const ANONYMOUS_USERNAME: &str = "anonymous";
 
-/// The built-in super-user role.
+/// The single super-user, defined entirely by deployment configuration (the `BEACON_ADMIN_*`
+/// environment variables).
 ///
-/// Analogous to a Postgres bootstrap superuser: it is always present with a global `ALL` grant
-/// (re-seeded on every startup) and is protected — it cannot be dropped, nor can its global `ALL`
-/// grant be revoked, through the auth-management SQL. Any principal holding this role (local or from
-/// an external IdP) is therefore always a super-user.
-pub const SUPERUSER_ROLE: &str = "admin";
+/// The super-user is intentionally **not** a role or a stored user: it is a fixed credential checked
+/// directly at authentication time. This makes it impossible to create another super-user through
+/// SQL — every role and user created via `CREATE ROLE`/`CREATE USER` is read-only and never a
+/// super-user — and impossible to change the super-user except via the environment.
+#[derive(Debug, Clone)]
+struct SuperUser {
+    username: String,
+    password: String,
+}
 
-/// Whether `rule` is the global `ALL` grant that confers super-user (no target / `ALL` target).
-fn is_global_all(rule: &PrivilegeRule) -> bool {
-    rule.privilege == Privilege::All && matches!(rule.target, None | Some(PrivilegeTarget::All))
+/// Constant-time string equality, to avoid leaking the super-user credential via timing.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// The resolved identity of an authenticated principal.
@@ -58,6 +67,9 @@ impl AuthIdentity {
 pub struct AuthContext {
     role_provider: RoleProvider,
     auth_provider: Arc<dyn AuthProvider>,
+    /// The single super-user credential, sourced from configuration. `None` disables super-user
+    /// access entirely (used by some tests).
+    super_user: Option<SuperUser>,
     /// Username of the anonymous principal used for unauthenticated access, if enabled.
     anonymous_user: Option<String>,
 }
@@ -76,8 +88,23 @@ impl AuthContext {
         Self {
             role_provider,
             auth_provider,
+            super_user: None,
             anonymous_user: None,
         }
+    }
+
+    /// Configures the single super-user credential (from `BEACON_ADMIN_USERNAME`/`PASSWORD`).
+    /// A Basic login matching these credentials is the only way to become a super-user.
+    pub fn set_super_user(&mut self, username: impl Into<String>, password: impl Into<String>) {
+        self.super_user = Some(SuperUser {
+            username: username.into(),
+            password: password.into(),
+        });
+    }
+
+    /// The configured super-user's username, if any.
+    fn super_user_username(&self) -> Option<&str> {
+        self.super_user.as_ref().map(|su| su.username.as_str())
     }
 
     /// Enables anonymous access, resolving unauthenticated requests to `username`'s roles.
@@ -108,14 +135,32 @@ impl AuthContext {
         &self.auth_provider
     }
 
-    /// Authenticates a credential and resolves the principal's roles into an identity.
+    /// Authenticates a credential and resolves the principal into an identity.
+    ///
+    /// The configured super-user credential is checked first and short-circuits, returning a
+    /// super-user identity without consulting the provider or role store. Every other principal is
+    /// resolved by the provider and is **always non-super** — the only super-user is the configured
+    /// one. Authorization for non-super principals comes entirely from their (read-only) roles.
     pub async fn authenticate(&self, credential: &Credential) -> anyhow::Result<AuthIdentity> {
+        if let Credential::Basic { username, password } = credential {
+            if let Some(super_user) = &self.super_user {
+                if constant_time_eq(username, &super_user.username)
+                    && constant_time_eq(password, &super_user.password)
+                {
+                    return Ok(AuthIdentity {
+                        username: super_user.username.clone(),
+                        roles: Vec::new(),
+                        is_super_user: true,
+                    });
+                }
+            }
+        }
+
         let authed = self.auth_provider.authenticate(credential).await?;
-        let is_super_user = self.role_provider.has_global_all_grant(&authed.roles);
         Ok(AuthIdentity {
             username: authed.username,
             roles: authed.roles,
-            is_super_user,
+            is_super_user: false,
         })
     }
 
@@ -130,38 +175,42 @@ impl AuthContext {
     }
 
     // --- Role management (delegated to the role provider) ---
+    //
+    // Roles are strictly read-only: only `SELECT` may be granted or denied. Write/management access
+    // is reserved to the configured super-user and is never expressible as a role grant.
 
     pub fn create_role(&self, name: &str) -> anyhow::Result<()> {
-        if name == SUPERUSER_ROLE {
-            anyhow::bail!(
-                "'{SUPERUSER_ROLE}' is a reserved built-in role and always exists"
-            );
-        }
         self.role_provider.create_role(name)
     }
 
     pub fn drop_role(&self, name: &str) -> anyhow::Result<()> {
-        if name == SUPERUSER_ROLE {
-            anyhow::bail!("cannot drop the built-in super-user role '{SUPERUSER_ROLE}'");
-        }
         self.role_provider.drop_role(name)
     }
 
     pub fn grant(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
+        Self::ensure_read_only(&rule)?;
         self.role_provider.grant(role, rule)
     }
 
     pub fn deny(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
+        Self::ensure_read_only(&rule)?;
         self.role_provider.deny(role, rule)
     }
 
     pub fn revoke(&self, role: &str, rule: &PrivilegeRule, is_deny: bool) -> anyhow::Result<()> {
-        if role == SUPERUSER_ROLE && !is_deny && is_global_all(rule) {
+        self.role_provider.revoke(role, rule, is_deny)
+    }
+
+    /// Rejects any non-`SELECT` privilege: roles can only grant read access.
+    fn ensure_read_only(rule: &PrivilegeRule) -> anyhow::Result<()> {
+        if rule.privilege != Privilege::Select {
             anyhow::bail!(
-                "cannot revoke the global ALL grant from the built-in super-user role '{SUPERUSER_ROLE}'"
+                "roles are read-only: only SELECT may be granted (got {}). Write and management \
+                 access is reserved to the configured super-user.",
+                rule.privilege
             );
         }
-        self.role_provider.revoke(role, rule, is_deny)
+        Ok(())
     }
 
     // --- User management (delegated to the provider's user directory) ---
@@ -181,11 +230,25 @@ impl AuthContext {
     }
 
     pub fn create_user(&self, username: &str, password: &str) -> anyhow::Result<()> {
+        self.ensure_not_super_user_name(username)?;
         self.user_directory()?.create_user(username, password)
     }
 
     pub fn drop_user(&self, username: &str) -> anyhow::Result<()> {
+        self.ensure_not_super_user_name(username)?;
         self.user_directory()?.drop_user(username)
+    }
+
+    /// Rejects operations on the reserved super-user username: the super-user is config-defined and
+    /// cannot be shadowed, created, or dropped through SQL.
+    fn ensure_not_super_user_name(&self, username: &str) -> anyhow::Result<()> {
+        if self.super_user_username() == Some(username) {
+            anyhow::bail!(
+                "'{username}' is the reserved super-user (defined by configuration) and cannot be \
+                 managed through SQL"
+            );
+        }
+        Ok(())
     }
 
     pub fn grant_role_to_user(&self, username: &str, role: &str) -> anyhow::Result<()> {
@@ -208,6 +271,13 @@ mod tests {
 
     fn admin_context() -> AuthContext {
         AuthContext::new(Arc::new(BasicAuthProvider::new()))
+    }
+
+    /// A context with the configured super-user `root`/`secret`.
+    fn context_with_super_user() -> AuthContext {
+        let mut ctx = admin_context();
+        ctx.set_super_user("root", "secret");
+        ctx
     }
 
     #[tokio::test]
@@ -244,16 +314,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn super_user_detected_from_global_all_grant() {
-        // Any role with a global ALL grant confers super-user — not only the built-in role.
-        let ctx = admin_context();
-        ctx.create_role("owners").unwrap();
-        ctx.create_user("root", "pw").unwrap();
-        ctx.grant_role_to_user("root", "owners").unwrap();
-        ctx.grant("owners", PrivilegeRule::new(Privilege::All, None)).unwrap();
+    async fn only_the_configured_credential_is_super_user() {
+        let ctx = context_with_super_user();
+        // The configured credential authenticates as the super-user.
+        let admin = ctx.authenticate(&Credential::basic("root", "secret")).await.unwrap();
+        assert!(admin.is_super_user);
+        assert_eq!(admin.username, "root");
+        assert!(admin.roles.is_empty());
 
-        let identity = ctx.authenticate(&Credential::basic("root", "pw")).await.unwrap();
-        assert!(identity.is_super_user);
+        // The right username with the wrong password is not super (and not in the store either).
+        assert!(ctx.authenticate(&Credential::basic("root", "wrong")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn created_users_and_roles_are_never_super_user() {
+        let ctx = context_with_super_user();
+        // A normal user with a normal role is never a super-user, whatever roles they hold.
+        ctx.create_role("reader").unwrap();
+        ctx.create_user("alice", "pw").unwrap();
+        ctx.grant_role_to_user("alice", "reader").unwrap();
+        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None)).unwrap();
+
+        let identity = ctx.authenticate(&Credential::basic("alice", "pw")).await.unwrap();
+        assert!(!identity.is_super_user);
+
+        // Write/management privileges cannot be granted to a role at all — roles are read-only.
+        for privilege in [
+            Privilege::Insert,
+            Privilege::Update,
+            Privilege::Delete,
+            Privilege::Create,
+            Privilege::Drop,
+            Privilege::All,
+        ] {
+            assert!(
+                ctx.grant("reader", PrivilegeRule::new(privilege, None)).is_err(),
+                "granting {privilege} to a role must be rejected"
+            );
+        }
+
+        // The super-user username is reserved: it cannot be created or dropped as a stored user.
+        assert!(ctx.create_user("root", "pw").is_err());
+        assert!(ctx.drop_user("root").is_err());
+    }
+
+    #[tokio::test]
+    async fn bearer_credentials_are_never_super_user() {
+        // Even if an external token claimed the super-user's name, a non-Basic credential can never
+        // be the super-user (the config check only matches Basic).
+        let ctx = context_with_super_user();
+        assert!(ctx.authenticate(&Credential::bearer("root")).await.is_err());
     }
 
     #[test]
@@ -285,36 +395,11 @@ mod tests {
         assert!(ctx.authenticate_anonymous().await.is_err());
     }
 
-    /// The built-in super-user role is protected: it cannot be dropped, nor can its global `ALL`
-    /// grant be revoked — so a principal holding it is always a super-user.
     #[tokio::test]
-    async fn superuser_role_is_protected() {
-        let ctx = admin_context();
-        // Seed it the way bootstrap does — through the raw provider, which bypasses the reserved
-        // guard on the SQL-facing `create_role`.
-        ctx.role_provider().create_role(SUPERUSER_ROLE).unwrap();
-        let all = PrivilegeRule::new(Privilege::All, None);
-        ctx.grant(SUPERUSER_ROLE, all.clone()).unwrap();
-
-        // The reserved name cannot be (re-)created through the SQL path.
-        assert!(ctx.create_role(SUPERUSER_ROLE).is_err());
-        // Cannot be dropped.
-        assert!(ctx.drop_role(SUPERUSER_ROLE).is_err());
-        // Cannot have its global ALL grant revoked.
-        assert!(ctx.revoke(SUPERUSER_ROLE, &all, false).is_err());
-
-        // A user holding it is still a super-user.
-        ctx.create_user("root", "pw").unwrap();
-        ctx.grant_role_to_user("root", SUPERUSER_ROLE).unwrap();
-        let identity = ctx.authenticate(&Credential::basic("root", "pw")).await.unwrap();
-        assert!(identity.is_super_user);
-
-        // Other, scoped rules on the role can still be managed normally.
-        let scoped = PrivilegeRule::new(
-            Privilege::Select,
-            Some(PrivilegeTarget::Table("t".to_string())),
-        );
-        ctx.grant(SUPERUSER_ROLE, scoped.clone()).unwrap();
-        assert!(ctx.revoke(SUPERUSER_ROLE, &scoped, false).is_ok());
+    async fn super_user_is_not_stored_so_cannot_be_changed_via_sql() {
+        // The super-user is not a stored user — `user_exists` is false even though it authenticates.
+        let ctx = context_with_super_user();
+        assert!(!ctx.user_exists("root"));
+        assert!(ctx.authenticate(&Credential::basic("root", "secret")).await.unwrap().is_super_user);
     }
 }

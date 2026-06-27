@@ -162,37 +162,64 @@ async fn drop_user_revokes_authentication() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn granting_a_global_all_role_makes_a_user_super() {
+async fn created_users_and_roles_are_never_super_user() {
     let (runtime, _config) = runtime_with(config(false, true)).await;
     exec_admin(&runtime, "CREATE ROLE owners").await;
-    exec_admin(&runtime, "GRANT ALL TO ROLE owners").await;
     exec_admin(&runtime, "CREATE USER root WITH PASSWORD 'pw'").await;
     exec_admin(&runtime, "GRANT ROLE owners TO USER root").await;
 
+    // No SQL-created user is ever a super-user, whatever roles they hold.
     let identity = runtime
         .authenticate(&Credential::basic("root", "pw"))
         .await
         .unwrap();
-    assert!(identity.is_super_user);
+    assert!(!identity.is_super_user);
+
+    // Write/management privileges cannot be granted to a role — roles are strictly read-only, so
+    // there is no way to mint another super-user through SQL.
+    for sql in [
+        "GRANT ALL TO ROLE owners",
+        "GRANT INSERT ON TABLE t TO ROLE owners",
+        "GRANT DROP ON TABLE t TO ROLE owners",
+    ] {
+        let err = exec(&runtime, sql, AuthIdentity::system()).await;
+        assert!(
+            err.is_err_and(|e| e.to_string().contains("read-only")),
+            "granting write privileges to a role should be rejected: {sql}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reserved_super_user_role_cannot_be_created_dropped_or_revoked() {
-    let (runtime, _config) = runtime_with(config(false, true)).await;
+async fn the_super_user_is_config_defined_and_reserved() {
+    let (runtime, config) = runtime_with(config(false, true)).await;
+    let admin = &config.admin.username;
 
-    let created = exec(&runtime, "CREATE ROLE admin", AuthIdentity::system()).await;
+    // The configured admin credential is the one and only super-user.
+    assert!(admin_identity(&runtime, &config).await.is_super_user);
+
+    // Its username is reserved: it cannot be created or dropped as a stored user via SQL.
+    // (Quoted because the default admin username contains a hyphen.)
+    let created = exec(
+        &runtime,
+        &format!("CREATE USER \"{admin}\" WITH PASSWORD 'x'"),
+        AuthIdentity::system(),
+    )
+    .await;
     assert!(
-        created.is_err_and(|e| e.to_string().contains("reserved")),
-        "creating the reserved super-user role should be rejected"
+        created.is_err_and(|e| e.to_string().contains("reserved super-user")),
+        "creating the super-user as a stored user should be rejected"
     );
 
-    let dropped = exec(&runtime, "DROP ROLE admin", AuthIdentity::system()).await;
-    assert!(dropped.is_err(), "dropping the super-user role should be rejected");
-
-    let revoked = exec(&runtime, "REVOKE ALL FROM ROLE admin", AuthIdentity::system()).await;
+    let dropped = exec(
+        &runtime,
+        &format!("DROP USER \"{admin}\""),
+        AuthIdentity::system(),
+    )
+    .await;
     assert!(
-        revoked.is_err(),
-        "revoking the super-user role's global ALL grant should be rejected"
+        dropped.is_err_and(|e| e.to_string().contains("reserved super-user")),
+        "dropping the super-user should be rejected"
     );
 }
 
