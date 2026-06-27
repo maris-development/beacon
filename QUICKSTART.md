@@ -62,5 +62,5 @@ Interactive API docs are at <http://localhost:5001/swagger/>.
 
 - [README](README.md) — features, configuration, and query examples.
 - [Documentation](https://maris-development.github.io/beacon/) — full data model and API reference.
-- [Configuration reference](https://maris-development.github.io/beacon/docs/1.7.3/data-lake/configuration.html) — all `BEACON_*` settings.
+- [Configuration reference](https://maris-development.github.io/beacon/docs/1.8.0/data-lake/configuration.html) — all `BEACON_*` settings.
 - Community [Slack](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg).
