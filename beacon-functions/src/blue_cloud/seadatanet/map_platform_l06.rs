@@ -62,3 +62,46 @@ fn map_seadatanet_platform_l06_impl(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Array;
+
+    #[test]
+    fn extracts_l06_code_from_parenthesised_text() {
+        let input = ColumnarValue::Scalar(ScalarValue::Utf8(Some("Float (46)".into())));
+        match map_seadatanet_platform_l06_impl(&[input]).unwrap() {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => assert_eq!(s, "SDN:L06::46"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_parentheses_yields_null() {
+        let input = ColumnarValue::Scalar(ScalarValue::Utf8(Some("plain".into())));
+        assert!(matches!(
+            map_seadatanet_platform_l06_impl(&[input]).unwrap(),
+            ColumnarValue::Scalar(ScalarValue::Utf8(None))
+        ));
+    }
+
+    #[test]
+    fn impl_array_path() {
+        let input =
+            ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("Q (27)"), Some("x")])));
+        let ColumnarValue::Array(arr) = map_seadatanet_platform_l06_impl(&[input]).unwrap()
+        else {
+            panic!("expected array");
+        };
+        let arr = arr.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(arr.value(0), "SDN:L06::27");
+        assert!(arr.is_null(1));
+    }
+
+    #[test]
+    fn impl_rejects_non_utf8_scalar() {
+        let input = ColumnarValue::Scalar(ScalarValue::Int64(Some(1)));
+        assert!(map_seadatanet_platform_l06_impl(&[input]).is_err());
+    }
+}

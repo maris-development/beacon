@@ -58,3 +58,50 @@ fn map_emodnet_chemistry_originator_edmo_impl(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Array;
+
+    #[test]
+    fn extracts_the_last_parenthesised_edmo_code() {
+        // rfind locates the final '(' — so the EDMO code, not earlier groups.
+        let input = ColumnarValue::Scalar(ScalarValue::Utf8(Some("Origin (1) Lab (486)".into())));
+        match map_emodnet_chemistry_originator_edmo_impl(&[input]).unwrap() {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => assert_eq!(s, "486"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_parentheses_yields_null() {
+        let input = ColumnarValue::Scalar(ScalarValue::Utf8(Some("plain".into())));
+        assert!(matches!(
+            map_emodnet_chemistry_originator_edmo_impl(&[input]).unwrap(),
+            ColumnarValue::Scalar(ScalarValue::Utf8(None))
+        ));
+    }
+
+    #[test]
+    fn impl_array_path() {
+        let input = ColumnarValue::Array(Arc::new(StringArray::from(vec![
+            Some("Lab (42)"),
+            Some("none"),
+        ])));
+        let ColumnarValue::Array(arr) =
+            map_emodnet_chemistry_originator_edmo_impl(&[input]).unwrap()
+        else {
+            panic!("expected array");
+        };
+        let arr = arr.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(arr.value(0), "42");
+        assert!(arr.is_null(1));
+    }
+
+    #[test]
+    fn impl_rejects_non_utf8_scalar() {
+        let input = ColumnarValue::Scalar(ScalarValue::Int64(Some(1)));
+        assert!(map_emodnet_chemistry_originator_edmo_impl(&[input]).is_err());
+    }
+}

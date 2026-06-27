@@ -678,7 +678,7 @@ lazy_static! {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_base_path;
+    use super::{decode_master_key, normalize_base_path, TableEngine};
 
     #[test]
     fn empty_and_blank_serve_at_root() {
@@ -719,5 +719,47 @@ mod tests {
     #[test]
     fn rejects_empty_internal_segment() {
         assert!(normalize_base_path("a//b").is_err());
+    }
+
+    #[test]
+    fn table_engine_parses_case_insensitively_and_trims() {
+        assert_eq!("lance".parse::<TableEngine>(), Ok(TableEngine::Lance));
+        assert_eq!("ICEBERG".parse::<TableEngine>(), Ok(TableEngine::Iceberg));
+        assert_eq!("  Iceberg  ".parse::<TableEngine>(), Ok(TableEngine::Iceberg));
+        assert!("postgres".parse::<TableEngine>().is_err());
+    }
+
+    #[test]
+    fn table_engine_as_str_round_trips_and_defaults_to_lance() {
+        assert_eq!(TableEngine::Lance.as_str(), "lance");
+        assert_eq!(TableEngine::Iceberg.as_str(), "iceberg");
+        assert_eq!(TableEngine::default(), TableEngine::Lance);
+        for e in [TableEngine::Lance, TableEngine::Iceberg] {
+            assert_eq!(e.as_str().parse::<TableEngine>(), Ok(e));
+        }
+    }
+
+    #[test]
+    fn decode_master_key_accepts_exactly_32_bytes() {
+        use base64::Engine;
+        let raw = [7u8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        assert_eq!(decode_master_key(&b64), Ok(raw));
+        // Surrounding whitespace is trimmed before decoding.
+        assert_eq!(decode_master_key(&format!("  {b64}\n")), Ok(raw));
+    }
+
+    #[test]
+    fn decode_master_key_rejects_invalid_base64() {
+        let err = decode_master_key("not valid base64!!!").unwrap_err();
+        assert!(err.contains("not valid base64"), "got: {err}");
+    }
+
+    #[test]
+    fn decode_master_key_rejects_wrong_length() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
+        let err = decode_master_key(&b64).unwrap_err();
+        assert!(err.contains("expected 32 bytes, got 4"), "got: {err}");
     }
 }

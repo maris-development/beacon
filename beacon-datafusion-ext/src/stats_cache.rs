@@ -160,3 +160,92 @@ impl FileStatisticsCache for BeaconFileStatisticsCache {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use datafusion::common::Statistics;
+
+    fn meta(path: &str, size: u64) -> ObjectMeta {
+        ObjectMeta {
+            location: Path::from(path),
+            last_modified: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            size,
+            e_tag: None,
+            version: None,
+        }
+    }
+
+    fn stats() -> Arc<Statistics> {
+        Arc::new(Statistics::new_unknown(&arrow::datatypes::Schema::empty()))
+    }
+
+    #[test]
+    fn get_with_extra_returns_value_only_when_metadata_matches() {
+        let cache = BeaconFileStatisticsCache::with_capacity(8);
+        let p = Path::from("a/b.parquet");
+
+        // Nothing cached yet.
+        assert!(cache.get_with_extra(&p, &meta("a/b.parquet", 100)).is_none());
+
+        // First insert returns no previous value.
+        assert!(cache.put_with_extra(&p, stats(), &meta("a/b.parquet", 100)).is_none());
+
+        // Matching size + last_modified => hit.
+        assert!(cache.get_with_extra(&p, &meta("a/b.parquet", 100)).is_some());
+
+        // Size changed => the cached entry is treated as stale.
+        assert!(cache.get_with_extra(&p, &meta("a/b.parquet", 200)).is_none());
+    }
+
+    #[test]
+    fn put_with_extra_returns_the_previous_statistics() {
+        let cache = BeaconFileStatisticsCache::with_capacity(8);
+        let p = Path::from("c.parquet");
+        assert!(cache.put_with_extra(&p, stats(), &meta("c.parquet", 1)).is_none());
+        // A second put for the same key reports the prior value.
+        assert!(cache.put_with_extra(&p, stats(), &meta("c.parquet", 2)).is_some());
+    }
+
+    #[test]
+    fn cache_accessor_put_get_remove_roundtrip() {
+        let cache = BeaconFileStatisticsCache::with_capacity(8);
+        let p = Path::from("d.parquet");
+        let entry = CachedFileMetadata::new(meta("d.parquet", 10), stats(), None);
+
+        assert!(cache.put(&p, entry).is_none());
+        assert!(cache.contains_key(&p));
+        assert!(cache.get(&p).is_some());
+
+        let removed = cache.remove(&p);
+        assert!(removed.is_some());
+        assert!(!cache.contains_key(&p));
+        assert!(cache.get(&p).is_none());
+    }
+
+    #[test]
+    fn name_and_empty_cache() {
+        let cache = BeaconFileStatisticsCache::default();
+        assert_eq!(cache.name(), "BeaconFileStatisticsCache");
+        // A fresh cache reports no entries (entry_count is exact at zero).
+        assert_eq!(cache.len(), 0);
+        assert!(cache.get(&Path::from("missing")).is_none());
+    }
+
+    #[test]
+    fn list_entries_reports_inserted_entry() {
+        let cache = BeaconFileStatisticsCache::with_capacity(8);
+        let p = Path::from("e.parquet");
+        cache.put_with_extra(&p, stats(), &meta("e.parquet", 7));
+
+        // Inherent API: snapshot of (path, meta, stats).
+        let entries = cache.list_entries();
+        assert!(entries.iter().any(|(path, _, _)| path == &p));
+
+        // DataFusion trait API: maps statistics into cache-entry summaries.
+        let trait_entries = FileStatisticsCache::list_entries(&cache);
+        let summary = trait_entries.get(&p).expect("entry present");
+        assert_eq!(summary.num_columns, 0);
+    }
+}
