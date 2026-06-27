@@ -12,6 +12,8 @@
 //! [`LogicalPlan::Extension`]: datafusion::logical_expr::LogicalPlan::Extension
 
 mod actions;
+mod auth;
+mod authz;
 pub(crate) mod crawler;
 mod logical;
 mod lower;
@@ -31,11 +33,12 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
+    AuthStatement, CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
     DropCrawlerStatement, DropIndexStatement, RefreshStatement, RunCrawlerStatement,
     ShowIndexesStatement,
 };
 
+pub(crate) use authz::authorize_logical_plan;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
 
@@ -61,6 +64,33 @@ pub(crate) fn validate_query_plan(plan: &LogicalPlan, is_super_user: bool) -> an
     }
 
     Ok(())
+}
+
+/// Whether `plan` produces a result set that can be exported in an output format.
+///
+/// A requested output format wraps the plan in a `COPY TO` (see
+/// [`Output::parse`](crate::query::output::Output::parse)), which only accepts a
+/// row-producing input. Side-effecting / administrative statements return no rows,
+/// so they cannot be exported: standard DDL, DML (`INSERT`/`UPDATE`/`DELETE`),
+/// `COPY`, and `SET`, plus beacon's side-effecting extension nodes (materialized
+/// views, `REFRESH`, `ALTER TABLE`, copy-on-write `DELETE`/`UPDATE`, crawler/index
+/// DDL), which all expose an empty schema. Row-producing statements (`SELECT`,
+/// `SHOW CRAWLERS`, `SHOW INDEXES`, ...) do produce an exportable result set.
+pub(crate) fn plan_produces_result_set(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Ddl(_)
+        | LogicalPlan::Dml(_)
+        | LogicalPlan::Copy(_)
+        | LogicalPlan::Statement(_) => false,
+        // Beacon's extension nodes carry their own output schema: the
+        // side-effecting ones (materialized views, `REFRESH`, `ALTER TABLE`,
+        // copy-on-write `DELETE`/`UPDATE`, crawler/index DDL) report an empty
+        // schema, while the row-producing ones (`SHOW CRAWLERS`, `SHOW INDEXES`)
+        // report real columns — so the schema decides whether they can be exported.
+        LogicalPlan::Extension(ext) => !ext.node.schema().fields().is_empty(),
+        // Everything else is a row-producing query (`SELECT`, `VALUES`, ...).
+        other => !other.schema().fields().is_empty(),
+    }
 }
 
 /// Whether `plan` contains any [`LogicalPlan::Extension`] node (all of beacon's
@@ -93,6 +123,18 @@ pub(crate) type SessionCell = Arc<OnceLock<Weak<SessionContext>>>;
 /// Create an empty [`SessionCell`] to be filled once the context exists.
 pub(crate) fn new_session_cell() -> SessionCell {
     Arc::new(OnceLock::new())
+}
+
+/// Build the logical plan for an auth-management statement (CREATE/DROP USER/ROLE, GRANT/DENY/
+/// REVOKE). Lowered to an [`Extension`] node so it inherits the super-user gate in
+/// [`validate_query_plan`] (all beacon extension nodes are super-user-only).
+pub(crate) fn auth_plan(statement: AuthStatement) -> LogicalPlan {
+    let key = statement.to_string();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::AuthNode {
+            statement: logical::Keyed::new(key, statement),
+        }),
+    })
 }
 
 /// Build the logical plan for `CREATE MATERIALIZED VIEW <name> AS <query>`.

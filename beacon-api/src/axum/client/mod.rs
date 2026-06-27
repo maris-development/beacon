@@ -25,6 +25,9 @@ mod tables;
 pub struct ClientApiDoc;
 
 /// Builds the client router and returns the generated OpenAPI document alongside it.
+///
+/// The `resolve_identity` middleware (which resolves the caller's `AuthIdentity` into the request
+/// extensions) is attached by `setup_router`, where the runtime is available as middleware state.
 #[allow(deprecated)]
 pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ClientApiDoc::openapi())

@@ -117,3 +117,83 @@ fn map_cora_platform_func_impl(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Array;
+
+    #[test]
+    fn known_bigrams_map_to_l06_codes() {
+        assert_eq!(map_cora_platform_func_impl(Some("BO"), None), Some("SDN:L06::30"));
+        assert_eq!(map_cora_platform_func_impl(Some("DB"), None), Some("SDN:L06::42"));
+        assert_eq!(map_cora_platform_func_impl(Some("GL"), None), Some("SDN:L06::27"));
+        assert_eq!(map_cora_platform_func_impl(Some("XX"), None), Some("SDN:L06::0"));
+    }
+
+    #[test]
+    fn wmo_inst_type_is_ignored_for_codes_that_do_not_depend_on_it() {
+        assert_eq!(
+            map_cora_platform_func_impl(Some("CT"), Some("995")),
+            Some("SDN:L06::30")
+        );
+        assert_eq!(
+            map_cora_platform_func_impl(Some("CT"), Some("anything")),
+            Some("SDN:L06::30")
+        );
+    }
+
+    #[test]
+    fn unknown_or_missing_bigram_returns_none() {
+        assert_eq!(map_cora_platform_func_impl(Some("ZZ"), None), None);
+        assert_eq!(map_cora_platform_func_impl(None, Some("995")), None);
+        assert_eq!(map_cora_platform_func_impl(None, None), None);
+    }
+
+    #[test]
+    fn udf_rejects_wrong_argument_count() {
+        let single = [ColumnarValue::Scalar(ScalarValue::Utf8(Some("BO".into())))];
+        assert!(map_cora_platform_l06_impl(&single).is_err());
+    }
+
+    #[test]
+    fn udf_handles_array_array() {
+        let bigrams = ColumnarValue::Array(Arc::new(StringArray::from(vec![
+            Some("BO"),
+            Some("ZZ"),
+        ])));
+        let wmo = ColumnarValue::Array(Arc::new(StringArray::from(vec![
+            None::<&str>,
+            None::<&str>,
+        ])));
+
+        let out = map_cora_platform_l06_impl(&[bigrams, wmo]).unwrap();
+        let ColumnarValue::Array(arr) = out else {
+            panic!("expected array output");
+        };
+        let arr = arr.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(arr.value(0), "SDN:L06::30");
+        assert!(arr.is_null(1));
+    }
+
+    #[test]
+    fn udf_handles_scalar_scalar() {
+        let bigram = ColumnarValue::Scalar(ScalarValue::Utf8(Some("DB".into())));
+        let wmo = ColumnarValue::Scalar(ScalarValue::Utf8(None));
+        let out = map_cora_platform_l06_impl(&[bigram, wmo]).unwrap();
+        match out {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(code))) => {
+                assert_eq!(code, "SDN:L06::42")
+            }
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn udf_scalar_scalar_unknown_is_null() {
+        let bigram = ColumnarValue::Scalar(ScalarValue::Utf8(Some("ZZ".into())));
+        let wmo = ColumnarValue::Scalar(ScalarValue::Utf8(None));
+        let out = map_cora_platform_l06_impl(&[bigram, wmo]).unwrap();
+        assert!(matches!(out, ColumnarValue::Scalar(ScalarValue::Utf8(None))));
+    }
+}

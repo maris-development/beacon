@@ -56,3 +56,51 @@ fn map_bigram_l05(platform_bigram: Option<&str>) -> Option<&'static str> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Array;
+
+    #[test]
+    fn known_and_unknown_bigrams() {
+        assert_eq!(map_bigram_l05(Some("BO")), Some("SDN:L05::30"));
+        assert_eq!(map_bigram_l05(Some("SF")), Some("SDN:L05::131"));
+        assert_eq!(map_bigram_l05(Some("ZZ")), None);
+        assert_eq!(map_bigram_l05(None), None);
+    }
+
+    #[test]
+    fn impl_rejects_wrong_argument_count() {
+        assert!(map_cmems_bigram_l05_impl(&[]).is_err());
+    }
+
+    #[test]
+    fn impl_array_path() {
+        let input = ColumnarValue::Array(Arc::new(StringArray::from(vec![
+            Some("CT"),
+            Some("ZZ"),
+        ])));
+        let ColumnarValue::Array(arr) = map_cmems_bigram_l05_impl(&[input]).unwrap() else {
+            panic!("expected array");
+        };
+        let arr = arr.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(arr.value(0), "SDN:L05::130");
+        assert!(arr.is_null(1));
+    }
+
+    #[test]
+    fn impl_scalar_path() {
+        let input = ColumnarValue::Scalar(ScalarValue::Utf8(Some("XB".into())));
+        match map_cmems_bigram_l05_impl(&[input]).unwrap() {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => assert_eq!(s, "SDN:L05::132"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn impl_rejects_non_utf8_scalar() {
+        let input = ColumnarValue::Scalar(ScalarValue::Int64(Some(1)));
+        assert!(map_cmems_bigram_l05_impl(&[input]).is_err());
+    }
+}

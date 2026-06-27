@@ -81,3 +81,52 @@ fn map_emodnet_chemistry_instrument_l05_multi_impl(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Array;
+
+    #[test]
+    fn extracts_every_parenthesised_group() {
+        let values = extract_parenthesized_values_ref("CTD (130) and XBT (132)");
+        assert_eq!(values, vec!["SDN:L05::130", "SDN:L05::132"]);
+    }
+
+    #[test]
+    fn skips_empty_groups_and_stops_at_unclosed_parenthesis() {
+        // Empty () is dropped; an unclosed '(' ends the scan.
+        assert_eq!(extract_parenthesized_values_ref("a () b (7)"), vec!["SDN:L05::7"]);
+        assert_eq!(extract_parenthesized_values_ref("a (7) b (oops"), vec!["SDN:L05::7"]);
+        assert!(extract_parenthesized_values_ref("no groups").is_empty());
+    }
+
+    #[test]
+    fn impl_scalar_joins_with_separator() {
+        let input = ColumnarValue::Scalar(ScalarValue::Utf8(Some("A (1) B (2)".into())));
+        match map_emodnet_chemistry_instrument_l05_multi_impl(&[input]).unwrap() {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => {
+                assert_eq!(s, "SDN:L05::1 | SDN:L05::2")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn impl_array_path() {
+        let input = ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("X (5)")])));
+        let ColumnarValue::Array(arr) =
+            map_emodnet_chemistry_instrument_l05_multi_impl(&[input]).unwrap()
+        else {
+            panic!("expected array");
+        };
+        let arr = arr.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(arr.value(0), "SDN:L05::5");
+    }
+
+    #[test]
+    fn impl_rejects_non_utf8_scalar() {
+        let input = ColumnarValue::Scalar(ScalarValue::Int64(Some(1)));
+        assert!(map_emodnet_chemistry_instrument_l05_multi_impl(&[input]).is_err());
+    }
+}
