@@ -6,7 +6,8 @@
 //! check in [`validate_query_plan`](super::validate_query_plan).
 
 use beacon_auth::{AuthContext, AuthIdentity, ConcreteTarget, Privilege};
-use beacon_datafusion_ext::file_collection::FileCollection;
+use beacon_common::super_table::SuperListingTable;
+use beacon_datafusion_ext::{file_collection::FileCollection, table_ext::ExternalTable};
 use datafusion::{
     common::tree_node::TreeNodeRecursion,
     datasource::{
@@ -74,22 +75,31 @@ fn scan_targets(scan: &TableScan, session_ctx: &SessionContext) -> Vec<ConcreteT
         return vec![];
     };
 
+    // A `read_*` table function resolves to a `SuperListingTable` over its glob paths.
+    if let Some(table) = provider.as_any().downcast_ref::<SuperListingTable>() {
+        return paths_of(table.table_paths());
+    }
+    // Multi-glob ad-hoc scans merge their schemas behind a `FileCollection`.
     if let Some(collection) = provider.as_any().downcast_ref::<FileCollection>() {
-        return collection
-            .table_paths()
-            .iter()
-            .map(|url| ConcreteTarget::Path(listing_url_to_path(url)))
-            .collect();
+        return paths_of(collection.table_paths());
+    }
+    // A single-glob `read_*` (and external tables) resolve to a self-refreshing `ExternalTable`
+    // wrapping a `ListingTable`.
+    if let Some(external) = provider.as_any().downcast_ref::<ExternalTable>() {
+        return paths_of(external.inner().table_paths());
     }
     if let Some(listing) = provider.as_any().downcast_ref::<ListingTable>() {
-        return listing
-            .table_paths()
-            .iter()
-            .map(|url| ConcreteTarget::Path(listing_url_to_path(url)))
-            .collect();
+        return paths_of(listing.table_paths());
     }
 
     vec![]
+}
+
+/// Maps listing URLs to `Path` targets.
+fn paths_of(urls: &[ListingTableUrl]) -> Vec<ConcreteTarget> {
+    urls.iter()
+        .map(|url| ConcreteTarget::Path(listing_url_to_path(url)))
+        .collect()
 }
 
 /// Reconstructs the datasets-root-relative path (matching `GRANT ... ON PATH`) from a listing URL.

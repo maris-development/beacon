@@ -1647,6 +1647,7 @@ dependencies = [
  "beacon-arrow-tiff",
  "beacon-arrow-zarr",
  "beacon-auth",
+ "beacon-common",
  "beacon-config",
  "beacon-core",
  "beacon-data-lake",

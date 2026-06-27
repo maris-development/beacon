@@ -6,6 +6,7 @@
 //! isolated per test. The rest of the runtime (object stores, tables dir) is shared on disk, so
 //! table names are suffixed with a uuid to avoid cross-test collisions.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
@@ -403,4 +404,175 @@ async fn non_super_user_cannot_manage_auth_or_run_ddl() {
     assert!(exec(&runtime, &format!("CREATE TABLE {} (a BIGINT)", unique("x")), alice)
         .await
         .is_err());
+}
+
+// --------------------------------------------------------------------------------------------
+// Path-glob enforcement (ad-hoc file scans via `read_parquet`)
+// --------------------------------------------------------------------------------------------
+//
+// An ad-hoc `read_parquet('<glob>')` scan resolves to a `Path` target (the datasets-root-relative
+// glob), checked against `GRANT/DENY ... ON PATH '<pattern>'` with segment-aware matching.
+
+/// The bundled parquet fixture used to back dataset files.
+fn parquet_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("test-datasets/test_file.parquet")
+}
+
+/// Copies the parquet fixture to `<datasets_dir>/<rel>`, creating parent dirs.
+fn place_dataset(datasets_dir: &Path, rel: &str) {
+    let dst = datasets_dir.join(rel);
+    std::fs::create_dir_all(dst.parent().unwrap()).expect("create dataset subdir");
+    std::fs::copy(parquet_fixture(), &dst).expect("copy parquet fixture");
+}
+
+/// Seeds a `reader` role assigned to a fresh user, returning `(role, user, alice_identity)`.
+async fn seed_reader(runtime: &Runtime) -> (String, AuthIdentity) {
+    let role = unique("preader");
+    let user = unique("palice");
+    exec_admin(runtime, &format!("CREATE ROLE {role}")).await;
+    exec_admin(runtime, &format!("CREATE USER {user} WITH PASSWORD 'pw'")).await;
+    exec_admin(runtime, &format!("GRANT ROLE {role} TO USER {user}")).await;
+    let identity = runtime
+        .authenticate(&Credential::basic(user, "pw"))
+        .await
+        .unwrap();
+    (role, identity)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enforced_path_grant_matches_only_granted_prefix() {
+    let config = config(true, true);
+    let datasets = config.storage.datasets_dir.clone();
+    let root = unique("pathauth");
+    place_dataset(&datasets, &format!("{root}/allowed/data.parquet"));
+    place_dataset(&datasets, &format!("{root}/blocked/data.parquet"));
+
+    let (runtime, _config) = runtime_with(config).await;
+    let (role, alice) = seed_reader(&runtime).await;
+    exec_admin(
+        &runtime,
+        &format!("GRANT SELECT ON PATH '{root}/allowed/*' TO ROLE {role}"),
+    )
+    .await;
+
+    let allowed = exec(
+        &runtime,
+        &format!("SELECT * FROM read_parquet('{root}/allowed/*.parquet')"),
+        alice.clone(),
+    )
+    .await;
+    assert!(allowed.is_ok(), "granted path should be readable: {allowed:?}");
+
+    let denied = exec(
+        &runtime,
+        &format!("SELECT * FROM read_parquet('{root}/blocked/*.parquet')"),
+        alice,
+    )
+    .await;
+    assert!(
+        denied.is_err_and(|e| e.to_string().contains("permission denied")),
+        "a different path prefix must be denied"
+    );
+
+    let _ = std::fs::remove_dir_all(datasets.join(&root));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enforced_path_glob_is_segment_aware() {
+    let config = config(true, true);
+    let datasets = config.storage.datasets_dir.clone();
+    let root = unique("pathseg");
+    place_dataset(&datasets, &format!("{root}/data/top.parquet"));
+    place_dataset(&datasets, &format!("{root}/data/sub/nested.parquet"));
+    place_dataset(&datasets, &format!("{root}/rec/sub/nested.parquet"));
+
+    let (runtime, _config) = runtime_with(config).await;
+    let (role, alice) = seed_reader(&runtime).await;
+    // Single-segment grant: `*` does not cross `/`.
+    exec_admin(
+        &runtime,
+        &format!("GRANT SELECT ON PATH '{root}/data/*' TO ROLE {role}"),
+    )
+    .await;
+    // Recursive grant: `**` crosses `/`.
+    exec_admin(
+        &runtime,
+        &format!("GRANT SELECT ON PATH '{root}/rec/**' TO ROLE {role}"),
+    )
+    .await;
+
+    // Top-level file under the single-segment grant is allowed.
+    assert!(exec(
+        &runtime,
+        &format!("SELECT * FROM read_parquet('{root}/data/*.parquet')"),
+        alice.clone(),
+    )
+    .await
+    .is_ok());
+
+    // A nested path is NOT covered by the single-`*` grant.
+    assert!(
+        exec(
+            &runtime,
+            &format!("SELECT * FROM read_parquet('{root}/data/sub/*.parquet')"),
+            alice.clone(),
+        )
+        .await
+        .is_err_and(|e| e.to_string().contains("permission denied")),
+        "a single `*` grant must not cross a path separator"
+    );
+
+    // The recursive `**` grant does cover a nested path.
+    assert!(exec(
+        &runtime,
+        &format!("SELECT * FROM read_parquet('{root}/rec/sub/*.parquet')"),
+        alice,
+    )
+    .await
+    .is_ok());
+
+    let _ = std::fs::remove_dir_all(datasets.join(&root));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enforced_path_deny_wins_over_broad_grant() {
+    let config = config(true, true);
+    let datasets = config.storage.datasets_dir.clone();
+    let root = unique("pathdeny");
+    place_dataset(&datasets, &format!("{root}/public/data.parquet"));
+    place_dataset(&datasets, &format!("{root}/secret/data.parquet"));
+
+    let (runtime, _config) = runtime_with(config).await;
+    let (role, alice) = seed_reader(&runtime).await;
+    // Broad SELECT grant, then deny one subtree — the deny must win.
+    exec_admin(&runtime, &format!("GRANT SELECT TO ROLE {role}")).await;
+    exec_admin(
+        &runtime,
+        &format!("DENY SELECT ON PATH '{root}/secret/*' TO ROLE {role}"),
+    )
+    .await;
+
+    assert!(exec(
+        &runtime,
+        &format!("SELECT * FROM read_parquet('{root}/public/*.parquet')"),
+        alice.clone(),
+    )
+    .await
+    .is_ok());
+
+    assert!(
+        exec(
+            &runtime,
+            &format!("SELECT * FROM read_parquet('{root}/secret/*.parquet')"),
+            alice,
+        )
+        .await
+        .is_err_and(|e| e.to_string().contains("permission denied")),
+        "the denied subtree must be rejected despite the broad grant"
+    );
+
+    let _ = std::fs::remove_dir_all(datasets.join(&root));
 }
