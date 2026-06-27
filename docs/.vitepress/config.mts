@@ -572,6 +572,16 @@ export default defineConfig({
               link: '/docs/1.8.0/connect/python-adbc',
             }
           ]
+        },
+        {
+          text: 'Security',
+          collapsed: true,
+          items: [
+            {
+              text: 'Authentication & Access Control',
+              link: '/docs/1.8.0/security/access-control',
+            },
+          ]
         }
       ],
       '/docs/1.7.3/': [

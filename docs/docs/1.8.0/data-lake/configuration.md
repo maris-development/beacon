@@ -32,8 +32,27 @@ over HTTP and the admin endpoints).
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_ADMIN_USERNAME` | `beacon-admin` | Admin username for management endpoints. |
-| `BEACON_ADMIN_PASSWORD` | `beacon-password` | Admin password — **change this in production**. |
+| `BEACON_ADMIN_USERNAME` | `beacon-admin` | Super-user username for management endpoints. |
+| `BEACON_ADMIN_PASSWORD` | `beacon-password` | Super-user password — **change this in production**. |
+
+## Authentication & access control
+
+Beacon adds role-based access control on top of the super-user above: read-only
+SQL-managed users and roles, table/path grants and denies, anonymous access, and
+optional OIDC. See the [Access Control guide](/docs/1.8.0/security/access-control)
+for the full model and SQL reference. The variables that tune it:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BEACON_AUTH_ENFORCE` | `false` | Enforce read authorization (default-deny). When `false`, authorization is a no-op. |
+| `BEACON_AUTH_ANONYMOUS_ENABLED` | `true` | Allow unauthenticated requests as the built-in `anonymous` user. |
+| `BEACON_OIDC_ENABLED` | `false` | Accept OIDC bearer tokens in addition to local passwords. |
+| `BEACON_OIDC_ISSUER` | _(none)_ | Expected token issuer. |
+| `BEACON_OIDC_JWKS_URL` | _(none)_ | JWKS endpoint used to validate token signatures. |
+| `BEACON_OIDC_AUDIENCE` | _(none)_ | Expected audience; validated only when set. |
+| `BEACON_OIDC_ROLES_CLAIM` | `realm_access.roles` | Token claim (dot-path) holding role names. |
+| `BEACON_OIDC_USERNAME_CLAIM` | `preferred_username` | Token claim holding the username. |
+| `BEACON_OIDC_JWKS_CACHE_TTL_SECS` | `300` | How long to cache the issuer's JWKS. |
 
 ## Secrets
 

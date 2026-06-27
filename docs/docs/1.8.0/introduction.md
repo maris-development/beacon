@@ -102,3 +102,4 @@ A few terms used throughout the docs:
 - **[Connect a client](/docs/1.8.0/connect/jetbrains-datagrip)** — JetBrains DataGrip, Python ADBC/SDK, or the CLI.
 - **[Write queries](/docs/1.8.0/sql/)** — the SQL guide.
 - **[Register your data](/docs/1.8.0/data-lake/)** — external tables and views.
+- **[Secure it](/docs/1.8.0/security/access-control)** — authentication, roles, and grants.

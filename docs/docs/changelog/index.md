@@ -6,10 +6,20 @@ All notable changes to Beacon are documented here, newest first. Entries are
 grouped into **Added** (new features), **Changed** (behaviour or internal
 changes), and **Fixed** (bug fixes).
 
-## v1.8.0 — 2026-06-26
+## v1.8.0 — 2026-06-27
 
 ### Added
 
+- **Authentication & role-based access control.** Beacon gains a built-in
+  auth/RBAC layer: a single config-defined super-user (`BEACON_ADMIN_*`) that owns
+  all writes and management, read-only SQL-managed users and roles
+  (`CREATE USER` / `CREATE ROLE` / `GRANT` / `DENY` / `REVOKE`), and `SELECT`
+  grants/denies scoped to tables (`ON TABLE`) or file globs (`ON PATH`) with
+  deny-wins, default-deny evaluation. Enforcement is opt-in
+  (`BEACON_AUTH_ENFORCE`), anonymous access is configurable
+  (`BEACON_AUTH_ANONYMOUS_ENABLED`), and **OIDC** bearer tokens are supported
+  (`BEACON_OIDC_*`) with Beacon still owning the grant model. See the
+  [Access Control guide](/docs/1.8.0/security/access-control).
 - **Lance-backed managed tables — the new default engine.** Managed tables
   (`CREATE TABLE`) are now backed by [Lance](https://lancedb.github.io/lance/) by
   default: fast local CRUD, native updates/deletes via deletion vectors, and
@@ -79,6 +89,10 @@ changes), and **Fixed** (bug fixes).
   and `read_zarr` directory listing.
 - **`EXPLAIN ANALYZE` panic** over external NetCDF / n-dimensional tables.
 - **Root redirect** now always points to the Swagger UI.
+- **Clear error for output formats on non-`SELECT` statements.** Requesting an
+  output format for a statement that produces no result set (DDL/DML) now returns
+  an explanatory error instead of failing obscurely.
+- **`super_type` Arrow coercion bugs** surfaced by expanded unit-test coverage.
 
 ## v1.7.3 — 2026-06-19
 

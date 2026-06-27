@@ -4,9 +4,9 @@ Beacon is an open-source data lakehouse query engine for scientific and climate
 data, with native subsetting over NetCDF, Zarr, Parquet, Arrow IPC, CSV,
 GeoTIFF, GeoParquet, Atlas and BBF. 1.8.0 is a big one: managed tables get a
 fast new **Lance** engine, Beacon learns to read **Delta Lake** and **federate to
-PostgreSQL/MySQL**, file discovery is automated with **crawlers**, and the server
-now ships a bundled **admin web UI** alongside a new **TypeScript SDK** and a
-**Python CLI**.
+PostgreSQL/MySQL**, file discovery is automated with **crawlers**, the server now
+ships a bundled **admin web UI** alongside a new **TypeScript SDK** and a **Python
+CLI**, and a built-in **authentication & role-based access control** layer lands.
 
 Here's everything that landed.
 
@@ -162,6 +162,36 @@ Two new ways to talk to Beacon from outside the browser:
   tables/datasets/schemas, render results in the terminal, and export to CSV,
   Parquet, Arrow IPC, or NetCDF without leaving the shell.
 
+## Authentication & role-based access control
+
+Beacon now has a built-in **authentication and RBAC** layer. The model is small
+on purpose:
+
+- A **single super-user**, defined entirely by configuration
+  (`BEACON_ADMIN_USERNAME` / `BEACON_ADMIN_PASSWORD`), owns every write and all
+  management and bypasses authorization. It is a fixed credential, never a stored
+  user — so you can't create a second super-user through SQL.
+- **Users and roles created through SQL are read-only.** Authorization governs
+  *reads*; grants and denies attach to roles and are scoped to tables or file
+  globs, evaluated **deny-wins, default-deny**.
+
+```sql
+CREATE ROLE reader;
+GRANT SELECT ON TABLE observations TO ROLE reader;
+GRANT SELECT ON PATH 'argo/**/*.nc'   TO ROLE reader;
+DENY  SELECT ON PATH 'argo/restricted/*' TO ROLE reader;   -- deny-wins
+
+CREATE USER alice WITH PASSWORD 'secret';
+GRANT ROLE reader TO USER alice;
+```
+
+Enforcement is opt-in (`BEACON_AUTH_ENFORCE=true`) so existing deployments stay
+open until you turn it on, and anonymous access is configurable — assign roles to
+the built-in `anonymous` user to control what unauthenticated callers can read.
+For single sign-on, Beacon validates **OIDC bearer tokens** (`BEACON_OIDC_*`),
+taking the identity and role names from the token while still owning the grants.
+Full details are in the [Access Control guide](/docs/1.8.0/security/access-control).
+
 ## EXPLAIN ANALYZE over the API
 
 Performance work gets a new endpoint: `POST /api/explain-analyze-query` **runs**
@@ -204,6 +234,9 @@ the [changelog](/docs/changelog/).
   to stay on Iceberg.
 - **PostgreSQL/MySQL external tables** require `BEACON_SECRETS_KEY` to be set when
   a `password` is supplied — `CREATE` fails closed without it.
+- **Access control is opt-in.** Existing deployments are unaffected until you set
+  `BEACON_AUTH_ENFORCE=true`. As always, change the default `BEACON_ADMIN_*`
+  credentials before exposing Beacon.
 
 ---
 
