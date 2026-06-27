@@ -216,3 +216,118 @@ impl Default for WithinPointUdf {
         Self::new(10_000)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 10x10 square anchored at the origin.
+    const SQUARE: &str = "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))";
+
+    fn geometry(wkt: &str) -> Geometry {
+        Wkt::from_str(wkt).unwrap().try_into().unwrap()
+    }
+
+    #[test]
+    fn point_inside_polygon_is_within() {
+        assert!(st_within_point_impl(Some(SQUARE), Some(5.0), Some(5.0)).unwrap());
+    }
+
+    #[test]
+    fn point_outside_polygon_is_not_within() {
+        assert!(!st_within_point_impl(Some(SQUARE), Some(20.0), Some(20.0)).unwrap());
+    }
+
+    #[test]
+    fn missing_geometry_or_coordinate_yields_false() {
+        assert!(!st_within_point_impl(None, Some(5.0), Some(5.0)).unwrap());
+        assert!(!st_within_point_impl(Some(SQUARE), None, Some(5.0)).unwrap());
+        assert!(!st_within_point_impl(Some(SQUARE), Some(5.0), None).unwrap());
+    }
+
+    #[test]
+    fn invalid_wkt_is_an_error() {
+        let err = st_within_point_impl(Some("NOT WKT"), Some(1.0), Some(1.0));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn iterator_variant_maps_each_row() {
+        let geoms = [Some(SQUARE), Some(SQUARE), None];
+        let lons = [Some(5.0), Some(50.0), Some(5.0)];
+        let lats = [Some(5.0), Some(50.0), Some(5.0)];
+
+        let result = st_within_point(
+            &mut geoms.into_iter(),
+            &mut lons.into_iter(),
+            &mut lats.into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![true, false, false]);
+    }
+
+    #[test]
+    fn fast_variant_matches_the_simple_variant() {
+        let geom = geometry(SQUARE);
+        let lons = [Some(5.0), Some(20.0), None];
+        let lats = [Some(5.0), Some(20.0), Some(5.0)];
+
+        let result = st_within_point_fast(
+            geom,
+            &mut lons.into_iter(),
+            &mut lats.into_iter(),
+            16,
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![true, false, false]);
+    }
+
+    #[test]
+    fn fast_impl_rejects_points_outside_the_bounding_rect() {
+        let geom = geometry(SQUARE);
+        let bounding_rect = geom.bounding_rect();
+        let mut cache = lru::LruCache::new(NonZero::new(4).unwrap());
+
+        // Far outside the bounding rect: short-circuits to false.
+        assert!(!st_within_point_fast_impl(
+            &geom,
+            bounding_rect,
+            &mut cache,
+            Some(100.0),
+            Some(100.0)
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn fast_impl_caches_repeated_lookups() {
+        let geom = geometry(SQUARE);
+        let bounding_rect = geom.bounding_rect();
+        let mut cache = lru::LruCache::new(NonZero::new(4).unwrap());
+
+        // First call computes and stores; second call must read from the cache
+        // and return the same answer.
+        let first =
+            st_within_point_fast_impl(&geom, bounding_rect, &mut cache, Some(5.0), Some(5.0))
+                .unwrap();
+        assert!(first);
+        assert_eq!(cache.len(), 1);
+
+        let second =
+            st_within_point_fast_impl(&geom, bounding_rect, &mut cache, Some(5.0), Some(5.0))
+                .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn fast_impl_handles_missing_coordinates() {
+        let geom = geometry(SQUARE);
+        let bounding_rect = geom.bounding_rect();
+        let mut cache = lru::LruCache::new(NonZero::new(4).unwrap());
+        assert!(!st_within_point_fast_impl(&geom, bounding_rect, &mut cache, None, Some(5.0))
+            .unwrap());
+    }
+}
