@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { sql, type SQLNamespace } from "@codemirror/lang-sql";
+import type { Extension } from "@codemirror/state";
 import type {
   Completion,
   CompletionContext,
@@ -8,6 +9,18 @@ import type {
 } from "@codemirror/autocomplete";
 
 import { useBeacon } from "@/lib/beacon-context";
+
+/** Stable empty-extension identity (a fresh `[]` each render reconfigures CodeMirror). */
+const NO_EXTENSIONS: Extension[] = [];
+
+/**
+ * Max column completions to build per table. A wide table (we've seen 100K+
+ * columns) would otherwise allocate that many `Completion` objects and feed them
+ * all to `sql({ schema })` synchronously on the main thread — enough to hang the
+ * renderer. Beyond this many columns the dropdown is unusable to a human anyway,
+ * so we take the first N; the table name itself still completes.
+ */
+const MAX_COMPLETION_COLUMNS_PER_TABLE = 100;
 
 /** Shape of one entry from `GET /api/tables-with-schema`. */
 interface TableWithSchema {
@@ -100,13 +113,14 @@ function renderFnDoc(fn: FnMeta): HTMLElement {
  *
  * Returns a CodeMirror extension that updates as the metadata loads.
  */
-export function useSqlCompletion() {
+export function useSqlCompletion(enabled = true) {
   const beacon = useBeacon();
 
   const tablesQuery = useQuery({
     queryKey: ["tables-with-schema"],
     queryFn: () => beacon.tablesWithSchema<TableWithSchema[]>(),
     staleTime: 60_000,
+    enabled,
   });
 
   const fnQuery = useQuery({
@@ -130,23 +144,31 @@ export function useSqlCompletion() {
       return { scalar: parse(scalar), table: parse(table) };
     },
     staleTime: 60_000,
+    enabled,
   });
 
   return React.useMemo(() => {
+    // When autocomplete is disabled we never fetched metadata; skip building the
+    // (potentially very large) completion schema entirely.
+    if (!enabled) return NO_EXTENSIONS;
     // Build the table → columns namespace. Columns are Completion objects so the
     // popup shows each column's data type (detail) and a small info tooltip.
     const schema: SQLNamespace = {};
     for (const t of tablesQuery.data ?? []) {
-      (schema as Record<string, Completion[]>)[t.table_name] = (t.columns ?? [])
-        .filter((c) => c.name)
-        .map((c) => ({
-          label: c.name,
-          type: "property",
-          detail: c.data_type,
-          info: c.data_type
-            ? `${t.table_name}.${c.name} — ${c.data_type}${c.nullable === false ? " (not null)" : ""}`
-            : undefined,
-        }));
+      const named = (t.columns ?? []).filter((c) => c.name);
+      // Cap very wide tables so building completions can't lock up the renderer.
+      const cols =
+        named.length > MAX_COMPLETION_COLUMNS_PER_TABLE
+          ? named.slice(0, MAX_COMPLETION_COLUMNS_PER_TABLE)
+          : named;
+      (schema as Record<string, Completion[]>)[t.table_name] = cols.map((c) => ({
+        label: c.name,
+        type: "property",
+        detail: c.data_type,
+        info: c.data_type
+          ? `${t.table_name}.${c.name} — ${c.data_type}${c.nullable === false ? " (not null)" : ""}`
+          : undefined,
+      }));
     }
 
     // Function completions: insert `name(` and attach a doc tooltip. Scalar
@@ -177,5 +199,5 @@ export function useSqlCompletion() {
 
     // Merge our function source with the language's built-in (tables/columns/keywords).
     return [lang, lang.language.data.of({ autocomplete: fnSource })];
-  }, [tablesQuery.data, fnQuery.data]);
+  }, [enabled, tablesQuery.data, fnQuery.data]);
 }

@@ -8,13 +8,17 @@ interface SqlEditorProps {
   value: string;
   onChange: (value: string) => void;
   onRun?: () => void;
+  /** Enable metadata-aware autocomplete (default true). */
+  autocomplete?: boolean;
 }
 
 /** CodeMirror SQL editor with metadata-aware autocomplete. Cmd/Ctrl+Enter runs. */
 export const SqlEditor = forwardRef<ReactCodeMirrorRef, SqlEditorProps>(
-  ({ value, onChange, onRun }, ref) => {
+  ({ value, onChange, onRun, autocomplete = true }, ref) => {
     const { resolved } = useTheme();
-    const completion = useSqlCompletion();
+    // When disabled, the hook skips the metadata fetch + schema build and returns
+    // a stable empty extension array.
+    const completion = useSqlCompletion(autocomplete);
     return (
       <CodeMirror
         ref={ref}
@@ -23,7 +27,12 @@ export const SqlEditor = forwardRef<ReactCodeMirrorRef, SqlEditorProps>(
         theme={resolved}
         extensions={completion}
         onChange={onChange}
-        basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: false }}
+        basicSetup={{
+          lineNumbers: true,
+          foldGutter: false,
+          highlightActiveLine: false,
+          autocompletion: autocomplete,
+        }}
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
             e.preventDefault();

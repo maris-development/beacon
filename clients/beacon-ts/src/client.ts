@@ -115,10 +115,28 @@ export class BeaconClient {
    * `batch.toArray()`.
    */
   async *queryStream(query: QueryInput, signal?: AbortSignal): AsyncGenerator<ArrowRecordBatch> {
+    const { batches } = await this.queryBatches(query, signal);
+    for await (const batch of batches) yield batch;
+  }
+
+  /**
+   * Opens a streaming query, returning the server-assigned query id together
+   * with an async iterable of Arrow `RecordBatch`es as they arrive.
+   *
+   * Unlike {@link queryStream}, this also surfaces the `x-beacon-query-id` header
+   * (available before the first batch). Combined with an `AbortSignal` it lets a
+   * caller render results progressively and stop early — e.g. after a preview
+   * limit — without downloading the full result.
+   */
+  async queryBatches(
+    query: QueryInput,
+    signal?: AbortSignal,
+  ): Promise<{ queryId: string | null; batches: AsyncIterable<ArrowRecordBatch> }> {
     const decoder = await getArrowDecoder();
     const res = await this.queryRaw(query, undefined, signal);
-    const reader = await decoder.readStream(responseByteStream(res));
-    for await (const batch of reader) yield batch;
+    const queryId = res.headers.get(QUERY_ID_HEADER);
+    const batches = await decoder.readStream(responseByteStream(res));
+    return { queryId, batches };
   }
 
   /**
@@ -159,18 +177,20 @@ export class BeaconClient {
   }
 
   /** Returns the planner's explanation of a query without running it. */
-  explainQuery<T = unknown>(query: QueryInput): Promise<T> {
-    return this.http.fetchJson<T>("POST", "/api/explain-query", { json: buildBody(query) });
+  explainQuery<T = unknown>(query: QueryInput, signal?: AbortSignal): Promise<T> {
+    return this.http.fetchJson<T>("POST", "/api/explain-query", { json: buildBody(query), signal });
   }
 
   /**
    * Runs a query and returns its physical plan annotated with execution metrics
    * (`EXPLAIN ANALYZE`), as a PostgreSQL-style JSON plan. Unlike `explainQuery`,
-   * this executes the query to collect actual row counts and timings.
+   * this executes the query to collect actual row counts and timings. Pass a
+   * `signal` to cancel the (potentially long-running) execution.
    */
-  explainAnalyzeQuery<T = unknown>(query: QueryInput): Promise<T> {
+  explainAnalyzeQuery<T = unknown>(query: QueryInput, signal?: AbortSignal): Promise<T> {
     return this.http.fetchJson<T>("POST", "/api/explain-analyze-query", {
       json: buildBody(query),
+      signal,
     });
   }
 

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useLocation } from "react-router-dom";
 import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import type { ArrowTable, Row } from "@beacon/client";
+import { rowsFromBatch, type ArrowRecordBatch, type ArrowTable, type Row } from "@beacon/client";
 import {
   AlertCircle,
   Bookmark,
@@ -11,6 +11,7 @@ import {
   Loader2,
   Network,
   Play,
+  Square,
   Trash2,
 } from "lucide-react";
 
@@ -46,9 +47,14 @@ import {
 
 interface RunResult {
   rows: Row[];
-  table?: ArrowTable;
+  /** First record batch (or full table) — carries the schema for timestamp rendering. */
+  table?: ArrowTable | ArrowRecordBatch;
   queryId: string | null;
   elapsedMs: number;
+  /** True when the preview row limit was hit and the query was stopped early. */
+  truncated?: boolean;
+  /** True when the user cancelled the query mid-stream. */
+  cancelled?: boolean;
 }
 
 type ViewMode = "results" | "explain";
@@ -69,10 +75,21 @@ const DOWNLOAD_FORMATS: DownloadFormat[] = [
 
 const STARTER_SQL = "SELECT 1 AS n";
 
+/**
+ * How many rows to render for a result preview. Once this many have streamed in
+ * the query is aborted, so a `SELECT *` over a huge table fills the grid quickly
+ * instead of downloading (and buffering) the entire result.
+ */
+const PREVIEW_ROW_LIMIT = 500;
+
 export function WorkbenchPage() {
   const beacon = useBeacon();
   const location = useLocation();
   const editorRef = React.useRef<ReactCodeMirrorRef>(null);
+  // Tracks the in-flight streaming query so it can be cancelled by the user.
+  const abortRef = React.useRef<AbortController | null>(null);
+  // Tracks the in-flight EXPLAIN ANALYZE run so it can be cancelled.
+  const analyzeAbortRef = React.useRef<AbortController | null>(null);
   // Another page (e.g. Datasets → "Query") can open the editor pre-filled by
   // navigating to `/query` with `{ state: { sql } }`.
   const initialSql = (location.state as { sql?: string } | null)?.sql;
@@ -97,17 +114,78 @@ export function WorkbenchPage() {
     setRunning(true);
     setError(null);
     setMode("results");
+    setResult(null);
     const started = performance.now();
+    // Stream record batches and render them as they arrive, stopping (and
+    // aborting the server query) once the preview limit is reached — or when the
+    // user cancels.
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const { rows, queryId, table } = await beacon.query(text);
-      setResult({ rows, table, queryId, elapsedMs: performance.now() - started });
+      const { queryId, batches } = await beacon.queryBatches(text, controller.signal);
+      const rows: Row[] = [];
+      let schema: ArrowRecordBatch | undefined;
+      let truncated = false;
+      for await (const batch of batches) {
+        if (!schema) schema = batch; // the first batch carries the Arrow schema
+        for (const row of rowsFromBatch<Row>(batch)) {
+          if (rows.length >= PREVIEW_ROW_LIMIT) {
+            truncated = true;
+            break;
+          }
+          rows.push(row);
+        }
+        // New array reference so React re-renders with the rows so far.
+        setResult({
+          rows: rows.slice(),
+          table: schema,
+          queryId,
+          elapsedMs: performance.now() - started,
+          truncated,
+        });
+        if (truncated) {
+          controller.abort(); // we have our preview; stop the query
+          break;
+        }
+      }
+      // No batches arrived (DDL/DML or an empty result): surface a zero-row result.
+      setResult(
+        (prev) =>
+          prev ?? { rows: [], queryId, elapsedMs: performance.now() - started, truncated: false },
+      );
     } catch (err) {
-      setResult(null);
-      setError(errorMessage(err));
+      if (controller.signal.aborted) {
+        // User cancelled mid-stream: keep whatever rows already arrived. (Don't
+        // relabel a result that stopped because it hit the preview limit.)
+        setResult((prev) => (prev && !prev.truncated ? { ...prev, cancelled: true } : prev));
+      } else {
+        setResult(null);
+        setError(errorMessage(err));
+      }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setRunning(false);
     }
   }, [beacon, sql, running]);
+
+  /** Aborts the in-flight query (if any); partial results stay on screen. */
+  const cancel = React.useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  /** Aborts the in-flight EXPLAIN ANALYZE run (if any). */
+  const cancelAnalyze = React.useCallback(() => {
+    analyzeAbortRef.current?.abort();
+  }, []);
+
+  // Abort any in-flight work if the page unmounts.
+  React.useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      analyzeAbortRef.current?.abort();
+    },
+    [],
+  );
 
   async function explain() {
     const text = sql.trim();
@@ -133,12 +211,16 @@ export function WorkbenchPage() {
     setError(null);
     setMode("explain");
     setAnalyzed(true);
+    const controller = new AbortController();
+    analyzeAbortRef.current = controller;
     try {
-      setPlan(await beacon.explainAnalyzeQuery(text));
+      setPlan(await beacon.explainAnalyzeQuery(text, controller.signal));
     } catch (err) {
       setPlan(null);
-      setError(errorMessage(err));
+      // Swallow user cancellation; only surface real failures.
+      if (!controller.signal.aborted) setError(errorMessage(err));
     } finally {
+      if (analyzeAbortRef.current === controller) analyzeAbortRef.current = null;
       setAnalyzing(false);
     }
   }
@@ -189,10 +271,17 @@ export function WorkbenchPage() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Toolbar */}
         <div className="flex items-center gap-2 border-b bg-card px-4 py-2">
-          <Button onClick={run} disabled={running} size="sm" className="gap-1.5">
-            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            Run
-          </Button>
+          {running ? (
+            <Button onClick={cancel} variant="destructive" size="sm" className="gap-1.5">
+              <Square className="h-4 w-4" />
+              Stop
+            </Button>
+          ) : (
+            <Button onClick={run} size="sm" className="gap-1.5">
+              <Play className="h-4 w-4" />
+              Run
+            </Button>
+          )}
           <Button onClick={explain} disabled={explaining} variant="outline" size="sm" className="gap-1.5">
             {explaining ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -201,17 +290,29 @@ export function WorkbenchPage() {
             )}
             Explain
           </Button>
-          <Button
-            onClick={analyze}
-            disabled={analyzing}
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            title="Run the query and show its plan with execution metrics"
-          >
-            {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gauge className="h-4 w-4" />}
-            Analyze
-          </Button>
+          {analyzing ? (
+            <Button
+              onClick={cancelAnalyze}
+              variant="destructive"
+              size="sm"
+              className="gap-1.5"
+              title="Stop the running EXPLAIN ANALYZE"
+            >
+              <Square className="h-4 w-4" />
+              Stop
+            </Button>
+          ) : (
+            <Button
+              onClick={analyze}
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              title="Run the query and show its plan with execution metrics"
+            >
+              <Gauge className="h-4 w-4" />
+              Analyze
+            </Button>
+          )}
           <span className="text-xs text-muted-foreground">⌘/Ctrl + Enter</span>
 
           <div className="ml-auto flex items-center gap-2">
@@ -258,7 +359,12 @@ export function WorkbenchPage() {
           <span className="font-semibold">{mode === "explain" ? "Query plan" : "Results"}</span>
           {mode === "results" && result && (
             <>
-              <span className="text-muted-foreground">{result.rows.length} rows</span>
+              <span className="text-muted-foreground">
+                {result.rows.length} rows
+                {result.truncated && ` (first ${PREVIEW_ROW_LIMIT} — query stopped)`}
+                {result.cancelled && " (cancelled)"}
+              </span>
+              {running && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
               <span className="text-muted-foreground">{result.elapsedMs.toFixed(0)} ms</span>
               {result.queryId && (
                 <button
@@ -292,11 +398,21 @@ export function WorkbenchPage() {
           ) : mode === "explain" ? (
             plan != null ? (
               <PlanTree plan={plan} />
+            ) : explaining || analyzing ? (
+              <Empty>
+                <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
+                {analyzing ? "Analyzing…" : "Explaining…"}
+              </Empty>
             ) : (
               <Empty>Run Explain to see the query plan.</Empty>
             )
           ) : result ? (
             <ResultsGrid rows={result.rows} table={result.table} />
+          ) : running ? (
+            <Empty>
+              <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
+              Running…
+            </Empty>
           ) : (
             <Empty>Run a query to see results.</Empty>
           )}

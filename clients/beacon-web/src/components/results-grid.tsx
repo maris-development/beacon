@@ -1,13 +1,16 @@
 import { useMemo } from "react";
-import type { ArrowTable, Row } from "@beacon/client";
+import type { ArrowRecordBatch, ArrowTable, Row } from "@beacon/client";
 
 import { columnsOf, formatCell, formatTimestamp, timestampColumns } from "@/lib/format";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 interface ResultsGridProps {
   rows: Row[];
-  /** Decoded Arrow table, used to render timestamp columns as date strings. */
-  table?: ArrowTable;
+  /**
+   * Decoded Arrow table or record batch — its schema is used to render timestamp
+   * columns as date strings.
+   */
+  table?: ArrowTable | ArrowRecordBatch;
 }
 
 /** A scrollable, monospaced grid over decoded query rows. */

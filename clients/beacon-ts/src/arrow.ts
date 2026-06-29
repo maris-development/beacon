@@ -21,6 +21,8 @@ export interface ArrowTable {
 /** Minimal structural view of an apache-arrow `RecordBatch`. */
 export interface ArrowRecordBatch {
   readonly numRows: number;
+  /** The batch's Arrow schema (carries field names and types). */
+  readonly schema?: unknown;
   toArray(): unknown[];
 }
 
@@ -125,6 +127,11 @@ async function registerZstd(arrow: ArrowModule): Promise<void> {
 /** Converts an Arrow Table to plain JS row objects. */
 export function rowsFromTable<T>(table: ArrowTable): T[] {
   return table.toArray().map(toPlainRow) as T[];
+}
+
+/** Converts a single Arrow RecordBatch to plain JS row objects. */
+export function rowsFromBatch<T>(batch: ArrowRecordBatch): T[] {
+  return batch.toArray().map(toPlainRow) as T[];
 }
 
 function toPlainRow(row: unknown): unknown {
