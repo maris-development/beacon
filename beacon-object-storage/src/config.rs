@@ -26,6 +26,18 @@ pub struct StorageConfig {
     pub enable_fs_events: bool,
     /// Reserved: wire S3 change notifications into the event listener.
     pub enable_s3_events: bool,
+    /// Maximum size, in bytes, accepted for a single dataset upload through the
+    /// admin API. `0` means unlimited. Defaults to `0` so embedders and tests that
+    /// build a [`StorageConfig`] directly are not capped; `beacon-config` fills a
+    /// concrete default from `BEACON_MAX_UPLOAD_BYTES`.
+    pub max_upload_bytes: u64,
+    /// Part size, in bytes, advertised to clients for chunked (resumable) uploads.
+    /// Clients slice large files into parts of this size. `0` => the built-in
+    /// default (8 MiB). Kept ≥ 5 MiB so each part satisfies S3's minimum.
+    pub upload_part_size: usize,
+    /// Idle timeout, in seconds, after which an in-progress chunked upload session
+    /// is aborted and cleaned up. `0` => the built-in default (1 hour).
+    pub upload_session_ttl_secs: u64,
     /// S3 backing for the datasets store. `None` => local filesystem; `Some` =>
     /// the datasets store is backed by S3, configured from these settings.
     pub s3: Option<S3Config>,

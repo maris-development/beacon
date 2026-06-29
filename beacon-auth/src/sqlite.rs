@@ -18,7 +18,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::{
     credential::Credential,
     password::{hash_password, verify_password},
-    provider::{AuthProvider, Authenticated, UserDirectory},
+    provider::{AuthProvider, Authenticated, UserDirectory, UserRecord},
     role::{Privilege, PrivilegeRule, PrivilegeTarget, Role, RoleStore},
 };
 
@@ -184,6 +184,33 @@ impl UserDirectory for SqliteStore {
         .optional()
         .map(|row| row.is_some())
         .unwrap_or(false)
+    }
+
+    fn list_users(&self) -> anyhow::Result<Vec<UserRecord>> {
+        let conn = self.conn.lock();
+        let usernames = conn
+            .prepare("SELECT username FROM users ORDER BY username")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let pairs = conn
+            .prepare("SELECT username, role FROM user_roles")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<(String, String)>, _>>()?;
+
+        let mut by_user: HashMap<String, Vec<String>> = HashMap::new();
+        for (username, role) in pairs {
+            by_user.entry(username).or_default().push(role);
+        }
+        Ok(usernames
+            .into_iter()
+            .map(|username| {
+                let mut roles = by_user.remove(&username).unwrap_or_default();
+                roles.sort();
+                UserRecord { username, roles }
+            })
+            .collect())
     }
 }
 

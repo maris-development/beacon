@@ -7,6 +7,7 @@ import { WorkbenchPage } from "./pages/workbench";
 import { TablesPage } from "./pages/tables";
 import { DatasetsPage } from "./pages/datasets";
 import { CrawlersPage } from "./pages/crawlers";
+import { AccessPage } from "./pages/access";
 import { ServerInfoPage } from "./pages/server-info";
 
 export default function App() {
@@ -20,6 +21,7 @@ export default function App() {
           <Route path="/tables" element={<TablesPage />} />
           <Route path="/datasets" element={<DatasetsPage />} />
           <Route path="/crawlers" element={<CrawlersPage />} />
+          <Route path="/access" element={<AccessPage />} />
           <Route path="/server" element={<ServerInfoPage />} />
         </Route>
       </Route>

@@ -3,6 +3,15 @@
 export { BeaconClient } from "./client.js";
 export type { QueryResult, QueryOptions } from "./client.js";
 export { AdminClient } from "./admin.js";
+export type {
+  UploadResult,
+  UploadProgress,
+  UploadOptions,
+  PrivilegeTarget,
+  AuthUser,
+  AuthRule,
+  AuthRole,
+} from "./admin.js";
 export { Http, basicAuthHeader } from "./http.js";
 export type { ClientOptions, FetchLike } from "./http.js";
 export { BeaconError, ApiError, ConnectionError, TimeoutError } from "./errors.js";

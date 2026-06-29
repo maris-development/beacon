@@ -51,6 +51,11 @@ pub struct Runtime {
     config: Arc<beacon_config::Config>,
     /// Authentication + authorization context (users, roles, grants). Shared, owned by the runtime.
     auth: Arc<beacon_auth::AuthContext>,
+    /// The datasets object store, retained so the admin file-management endpoints
+    /// (upload/download/delete) can operate on it directly.
+    datasets_store: Arc<beacon_object_storage::DatasetsStore>,
+    /// In-progress chunked (resumable) upload sessions for large files.
+    upload_manager: Arc<crate::dataset_uploads::UploadManager>,
 }
 
 impl Runtime {
@@ -87,6 +92,11 @@ impl Runtime {
         ));
 
         let object_stores = beacon_object_storage::ObjectStores::new(&config.storage).await?;
+        let datasets_store = object_stores.datasets.clone();
+        let upload_manager = crate::dataset_uploads::UploadManager::new(
+            config.storage.upload_part_size,
+            config.storage.upload_session_ttl_secs,
+        );
 
         // The crawler manager is built after the file formats are registered, so
         // register an empty handle now and fill it below — the same late-fill
@@ -200,6 +210,8 @@ impl Runtime {
             table_function_docs,
             config,
             auth,
+            datasets_store,
+            upload_manager,
         })
     }
 
@@ -302,6 +314,41 @@ impl Runtime {
         self.auth.anonymous_enabled()
     }
 
+    /// List all principals for the admin Users page: the config-defined super-user first (flagged,
+    /// not editable), then every stored local user with its roles. OIDC-only deployments have no
+    /// stored users, so only the super-user is returned.
+    pub fn list_auth_users(&self) -> anyhow::Result<Vec<crate::api::AuthUserView>> {
+        let super_username = self.config.admin.username.clone();
+        let anonymous_username = self.auth.anonymous_username().map(str::to_owned);
+        let mut views = vec![crate::api::AuthUserView {
+            username: super_username.clone(),
+            roles: Vec::new(),
+            is_super_user: true,
+            is_anonymous: false,
+        }];
+        for record in self.auth.list_users()? {
+            // The super-user is config-only, never stored; guard against a name clash anyway.
+            if record.username == super_username {
+                continue;
+            }
+            let is_anonymous = anonymous_username.as_deref() == Some(record.username.as_str());
+            views.push(crate::api::AuthUserView {
+                is_anonymous,
+                ..crate::api::AuthUserView::from(record)
+            });
+        }
+        Ok(views)
+    }
+
+    /// Snapshot of all roles with their grant/deny rules, for the admin Roles page.
+    pub fn list_auth_roles(&self) -> Vec<crate::api::AuthRoleView> {
+        self.auth
+            .list_roles()
+            .into_iter()
+            .map(crate::api::AuthRoleView::from)
+            .collect()
+    }
+
     fn init_ctx(
         memory_pool: Arc<FairSpillPool>,
         datasets_store: Arc<beacon_object_storage::DatasetsStore>,
@@ -358,6 +405,12 @@ impl Runtime {
             .with_cache_manager(
                 datafusion::execution::cache::cache_manager::CacheManagerConfig {
                     table_files_statistics_cache: Some(beacon_file_statistics_cache()),
+                    // Disable DataFusion's directory-listing cache. Its default
+                    // config installs one (non-zero `list_files_cache_limit`) with a
+                    // TTL, which serves stale listings — missing freshly written
+                    // files and retaining deleted ones — and broke read-after-write
+                    // for the datasets view (uploads invisible, deletes lingering).
+                    list_files_cache_limit: 0,
                     ..Default::default()
                 },
             )
@@ -815,10 +868,20 @@ impl Runtime {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<DatasetMetadata>> {
-        Ok(
-            beacon_data_lake::list_datasets(&self.session_ctx, &self.file_formats, offset, limit, pattern)
-                .await?,
+        // List against the datasets store's *backing* store (disk/S3 truth) rather
+        // than the cache-backed facade. The cache is kept warm asynchronously by
+        // the filesystem watcher, which on some platforms lags or replays stale
+        // events — so a freshly uploaded or just-deleted file would otherwise be
+        // missing from / lingering in the listing until the watcher caught up.
+        Ok(beacon_data_lake::list_datasets(
+            &self.session_ctx,
+            self.datasets_store.backing_store(),
+            &self.file_formats,
+            offset,
+            limit,
+            pattern,
         )
+        .await?)
     }
 
     pub async fn total_datasets(&self) -> anyhow::Result<usize> {
@@ -896,6 +959,153 @@ impl Runtime {
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
         let mut parser = BeaconParser::new(sql)?;
         parser.parse_statement().map_err(Into::into)
+    }
+
+    /// The set of filename extensions an uploaded dataset may carry, derived from
+    /// the formats this runtime can actually read. Keeping the allowlist in sync
+    /// with the registry means an upload only succeeds if it could be queried.
+    pub fn dataset_upload_extensions(&self) -> Vec<String> {
+        let mut exts: Vec<String> = self
+            .file_formats
+            .iter()
+            .flat_map(|f| f.file_extensions())
+            .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
+            .filter(|e| !e.is_empty())
+            .collect();
+        exts.sort();
+        exts.dedup();
+        exts
+    }
+
+    /// Stream an uploaded file into the datasets store. The path is validated
+    /// (anti-traversal, internal-prefix guard) and its extension checked against
+    /// [`Self::dataset_upload_extensions`] before any bytes are written. The size
+    /// cap comes from `BEACON_MAX_UPLOAD_BYTES`.
+    pub async fn upload_dataset<S>(
+        &self,
+        raw_path: &str,
+        overwrite: bool,
+        body: S,
+    ) -> Result<crate::dataset_files::UploadResult, crate::dataset_files::FileError>
+    where
+        S: futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
+    {
+        let path = crate::dataset_files::validate_dataset_path(raw_path)?;
+        crate::dataset_files::validate_extension(&path, &self.dataset_upload_extensions())?;
+        let max_bytes = self.config.storage.max_upload_bytes;
+        crate::dataset_files::upload_dataset(&self.datasets_store, &path, overwrite, max_bytes, body)
+            .await
+    }
+
+    /// Begin a chunked (resumable) upload for a large file. Validates the path and
+    /// extension and the overwrite policy, opens a multipart upload, and returns
+    /// the new session id plus the part size clients should slice the file into.
+    pub async fn initiate_dataset_upload(
+        &self,
+        raw_path: &str,
+        overwrite: bool,
+    ) -> Result<(uuid::Uuid, usize), crate::dataset_files::FileError> {
+        let path = crate::dataset_files::validate_dataset_path(raw_path)?;
+        crate::dataset_files::validate_extension(&path, &self.dataset_upload_extensions())?;
+
+        if !overwrite {
+            use object_store::ObjectStoreExt;
+            match self.datasets_store.head(&path).await {
+                Ok(_) => {
+                    return Err(crate::dataset_files::FileError::AlreadyExists(
+                        path.to_string(),
+                    ))
+                }
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        let max_bytes = self.config.storage.max_upload_bytes;
+        let id = self
+            .upload_manager
+            .initiate(&self.datasets_store, path, max_bytes)
+            .await?;
+        Ok((id, self.upload_manager.part_size()))
+    }
+
+    /// Submit one part of a chunked upload (1-based `part_number`, in order).
+    pub async fn upload_dataset_part(
+        &self,
+        upload_id: uuid::Uuid,
+        part_number: u32,
+        data: bytes::Bytes,
+    ) -> Result<(), crate::dataset_files::FileError> {
+        self.upload_manager
+            .put_part(upload_id, part_number, data)
+            .await
+    }
+
+    /// Finalize a chunked upload, returning the resulting object's key and size.
+    pub async fn complete_dataset_upload(
+        &self,
+        upload_id: uuid::Uuid,
+    ) -> Result<crate::dataset_files::UploadResult, crate::dataset_files::FileError> {
+        self.upload_manager.complete(upload_id).await
+    }
+
+    /// Abort and discard an in-progress chunked upload.
+    pub async fn abort_dataset_upload(
+        &self,
+        upload_id: uuid::Uuid,
+    ) -> Result<(), crate::dataset_files::FileError> {
+        self.upload_manager.abort(upload_id).await
+    }
+
+    /// Open a streaming read of a dataset file for download. The path is validated
+    /// before the store is touched.
+    pub async fn download_dataset(
+        &self,
+        raw_path: &str,
+    ) -> Result<object_store::GetResult, crate::dataset_files::FileError> {
+        let path = crate::dataset_files::validate_dataset_path(raw_path)?;
+        crate::dataset_files::download_dataset(&self.datasets_store, &path).await
+    }
+
+    /// Delete a dataset file. The path is validated, then a best-effort dependency
+    /// check refuses the delete (with [`crate::dataset_files::FileError::InUse`]) if
+    /// any registered table references the file, so a query is not silently broken.
+    pub async fn delete_dataset(
+        &self,
+        raw_path: &str,
+    ) -> Result<(), crate::dataset_files::FileError> {
+        let path = crate::dataset_files::validate_dataset_path(raw_path)?;
+
+        let dependents = self.dataset_dependents(path.as_ref()).await;
+        if !dependents.is_empty() {
+            return Err(crate::dataset_files::FileError::InUse {
+                path: path.to_string(),
+                dependents,
+            });
+        }
+
+        crate::dataset_files::delete_dataset(&self.datasets_store, &path).await
+    }
+
+    /// Best-effort discovery of registered tables that reference a dataset path.
+    ///
+    /// Each table's flattened config is serialized and scanned for the path
+    /// substring (the same shape exposed by the admin table-config endpoint). This
+    /// catches external tables pointed directly at a file or its parent directory;
+    /// it is intentionally conservative — a hit blocks the delete so the caller can
+    /// drop the table first.
+    async fn dataset_dependents(&self, path: &str) -> Vec<String> {
+        let mut dependents = Vec::new();
+        for table in self.list_tables() {
+            if let Some(view) = self.list_table_config(table.clone()).await {
+                if let Ok(json) = serde_json::to_string(&view.config) {
+                    if json.contains(path) {
+                        dependents.push(table);
+                    }
+                }
+            }
+        }
+        dependents
     }
 }
 

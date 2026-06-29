@@ -25,7 +25,7 @@ pub use context::{AuthContext, AuthIdentity, ANONYMOUS_USERNAME};
 pub use credential::Credential;
 pub use oidc::{OidcAuthProvider, OidcConfig};
 pub use password::{hash_password, verify_password};
-pub use provider::{AuthProvider, Authenticated, UserDirectory};
+pub use provider::{AuthProvider, Authenticated, UserDirectory, UserRecord};
 pub use role::{
     ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, Role, RoleProvider, RoleStore,
 };

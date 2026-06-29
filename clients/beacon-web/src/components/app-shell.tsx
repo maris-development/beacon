@@ -8,6 +8,7 @@ import {
   LogOut,
   Radar,
   Server,
+  ShieldCheck,
   TableProperties,
   TerminalSquare,
 } from "lucide-react";
@@ -32,6 +33,7 @@ const NAV = [
   { to: "/tables", label: "Tables", icon: TableProperties },
   { to: "/datasets", label: "Datasets", icon: FileStack },
   { to: "/crawlers", label: "Crawlers", icon: Radar },
+  { to: "/access", label: "Users & roles", icon: ShieldCheck },
   { to: "/server", label: "Server", icon: Server },
 ];
 

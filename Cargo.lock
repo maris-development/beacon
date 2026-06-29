@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-api"
-version = "1.7.3"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1295,6 +1295,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+ "tempfile",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
@@ -1596,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "1.7.3"
+version = "1.8.0"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -1631,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "1.7.3"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1658,6 +1659,7 @@ dependencies = [
  "beacon-lance",
  "beacon-object-storage",
  "beacon-sql-databases",
+ "bytes",
  "cast",
  "chrono",
  "datafusion",
@@ -1672,6 +1674,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",

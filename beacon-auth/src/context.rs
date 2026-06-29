@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::{
     credential::Credential,
-    provider::AuthProvider,
-    role::{ConcreteTarget, Privilege, PrivilegeRule, RoleProvider},
+    provider::{AuthProvider, UserRecord},
+    role::{ConcreteTarget, Privilege, PrivilegeRule, Role, RoleProvider},
 };
 
 /// Default username of the built-in anonymous principal.
@@ -118,6 +118,11 @@ impl AuthContext {
         self.anonymous_user.is_some()
     }
 
+    /// The username resolving anonymous access, if enabled.
+    pub fn anonymous_username(&self) -> Option<&str> {
+        self.anonymous_user.as_deref()
+    }
+
     /// Resolves the anonymous principal's identity (empty password), erroring when disabled.
     pub async fn authenticate_anonymous(&self) -> anyhow::Result<AuthIdentity> {
         let username = self
@@ -125,6 +130,20 @@ impl AuthContext {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("anonymous access is disabled"))?;
         self.authenticate(&Credential::basic(username, "")).await
+    }
+
+    /// Enumerate all stored local users with their assigned roles. Returns empty when the
+    /// authentication provider has no manageable user directory (e.g. an OIDC-only deployment).
+    pub fn list_users(&self) -> anyhow::Result<Vec<UserRecord>> {
+        match self.auth_provider.user_directory() {
+            Some(dir) => dir.list_users(),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Snapshot of all roles with their grant/deny rules.
+    pub fn list_roles(&self) -> Vec<Role> {
+        self.role_provider.list_roles()
     }
 
     pub fn role_provider(&self) -> &RoleProvider {
@@ -236,6 +255,15 @@ impl AuthContext {
 
     pub fn drop_user(&self, username: &str) -> anyhow::Result<()> {
         self.ensure_not_super_user_name(username)?;
+        // The anonymous user is Beacon-managed: while anonymous access is enabled it
+        // must always exist, so it can't be deleted (disable it with
+        // BEACON_AUTH_ANONYMOUS_ENABLED=false instead).
+        if self.anonymous_user.as_deref() == Some(username) {
+            anyhow::bail!(
+                "'{username}' is the anonymous user and cannot be deleted while anonymous access \
+                 is enabled (set BEACON_AUTH_ANONYMOUS_ENABLED=false to disable it)"
+            );
+        }
         self.user_directory()?.drop_user(username)
     }
 
@@ -278,6 +306,26 @@ mod tests {
         let mut ctx = admin_context();
         ctx.set_super_user("root", "secret");
         ctx
+    }
+
+    #[test]
+    fn anonymous_user_cannot_be_dropped_while_enabled() {
+        let mut ctx = admin_context();
+        ctx.create_user("anonymous", "").unwrap();
+        ctx.create_user("alice", "pw").unwrap();
+        ctx.set_anonymous_user("anonymous");
+
+        // The anonymous user is protected; a regular user is not.
+        assert!(ctx.drop_user("anonymous").is_err());
+        assert!(ctx.user_exists("anonymous"));
+        ctx.drop_user("alice").unwrap();
+        assert!(!ctx.user_exists("alice"));
+
+        // With anonymous access disabled, the user is droppable again.
+        let mut ctx = admin_context();
+        ctx.create_user("anonymous", "").unwrap();
+        ctx.drop_user("anonymous").unwrap();
+        assert!(!ctx.user_exists("anonymous"));
     }
 
     #[tokio::test]

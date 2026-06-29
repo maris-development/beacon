@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 datafusion = { workspace = true }
 datafusion-federation = { workspace = true }
+chrono = { workspace = true }
 arrow-flight = { workspace = true, features = ["flight-sql"] }
 tonic = { workspace = true }
 async-trait = { workspace = true }

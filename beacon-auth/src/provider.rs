@@ -35,6 +35,13 @@ pub trait AuthProvider: Send + Sync {
     }
 }
 
+/// A stored user and the roles assigned to it.
+#[derive(Debug, Clone)]
+pub struct UserRecord {
+    pub username: String,
+    pub roles: Vec<String>,
+}
+
 /// SQL-managed user lifecycle and role assignment, exposed by providers that own their user store.
 pub trait UserDirectory: Send + Sync {
     fn create_user(&self, username: &str, password: &str) -> anyhow::Result<()>;
@@ -43,4 +50,6 @@ pub trait UserDirectory: Send + Sync {
     fn revoke_role(&self, username: &str, role: &str) -> anyhow::Result<()>;
     /// Whether a user with `username` exists. Used for idempotent bootstrap.
     fn user_exists(&self, username: &str) -> bool;
+    /// Enumerate all stored users with their assigned roles.
+    fn list_users(&self) -> anyhow::Result<Vec<UserRecord>>;
 }

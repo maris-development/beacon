@@ -326,12 +326,27 @@ struct RawConfig {
     aws_region: Option<String>,
     #[envconfig(from = "BEACON_S3_ALLOW_HTTP", default = "true")]
     s3_allow_http: bool,
-    // Filesystem change events are on by default for the local datasets store;
-    // set BEACON_ENABLE_FS_EVENTS=false to disable the watcher.
-    #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "true")]
+    // Filesystem change events for the local datasets store. Off by default: the
+    // OS watcher (notify/FSEvents) can lag or replay stale events, and listings now
+    // read straight through to the backing store, so the watcher-maintained cache
+    // is not needed for correctness. Enable (BEACON_ENABLE_FS_EVENTS=true) to get
+    // live auto-refresh of external tables and event-driven crawler triggering when
+    // files change on disk (crawlers otherwise still run on their interval).
+    #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "false")]
     enable_fs_events: bool,
     #[envconfig(from = "BEACON_ENABLE_S3_EVENTS", default = "false")]
     enable_s3_events: bool,
+    // Maximum size, in bytes, accepted for a single dataset upload through the
+    // admin API. `0` disables the cap. Default ~5 GiB.
+    #[envconfig(from = "BEACON_MAX_UPLOAD_BYTES", default = "5368709120")]
+    max_upload_bytes: u64,
+    // Part size advertised for chunked (resumable) uploads. Default 8 MiB (≥ S3's
+    // 5 MiB minimum part size).
+    #[envconfig(from = "BEACON_UPLOAD_PART_SIZE", default = "8388608")]
+    upload_part_size: usize,
+    // Idle timeout (seconds) before an abandoned chunked upload session is aborted.
+    #[envconfig(from = "BEACON_UPLOAD_SESSION_TTL_SECS", default = "3600")]
+    upload_session_ttl_secs: u64,
 
     // Others
     #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
@@ -504,6 +519,9 @@ impl From<RawConfig> for Config {
                     data_dir: root,
                     enable_fs_events: raw.enable_fs_events,
                     enable_s3_events: raw.enable_s3_events,
+                    max_upload_bytes: raw.max_upload_bytes,
+                    upload_part_size: raw.upload_part_size,
+                    upload_session_ttl_secs: raw.upload_session_ttl_secs,
                     s3,
                 }
             },
