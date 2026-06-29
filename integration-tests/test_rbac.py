@@ -25,6 +25,11 @@ from beacon_client import BeaconHTTPClient
 ADMIN_USER = os.environ.get("BEACON_ADMIN_USERNAME", "admin")
 ADMIN_PW = os.environ.get("BEACON_ADMIN_PASSWORD", "securepassword")
 
+# Whether the server under test applies query-time authorization. Mirror the
+# server's BEACON_AUTH_ENFORCE so the enforce-on / enforce-off tests each run
+# against the matching configuration (off is the default).
+ENFORCE = os.environ.get("BEACON_AUTH_ENFORCE", "").lower() == "true"
+
 ROLE = "rbac_reader"
 USER = "rbac_alice"
 USER2 = "rbac_bob"
@@ -159,10 +164,7 @@ def test_non_super_user_cannot_manage_or_enumerate(admin, base_url, clean):
     assert bob.admin_get("/api/admin/auth/roles").status_code == 403
 
 
-@pytest.mark.skipif(
-    os.environ.get("BEACON_AUTH_ENFORCE", "").lower() != "true",
-    reason="requires the server to run with BEACON_AUTH_ENFORCE=true",
-)
+@pytest.mark.skipif(not ENFORCE, reason="requires the server to run with BEACON_AUTH_ENFORCE=true")
 def test_enforcement_grant_allows_deny_blocks(admin, base_url, clean):
     admin.execute(f"CREATE TABLE {TABLE} (a BIGINT)", admin=True)
     admin.execute(f"INSERT INTO {TABLE} VALUES (1)", admin=True)
@@ -183,3 +185,30 @@ def test_enforcement_grant_allows_deny_blocks(admin, base_url, clean):
     admin.execute(f"CREATE USER {USER2} WITH PASSWORD 'pw'", admin=True)
     mallory = BeaconHTTPClient(base_url, USER2, "pw")
     assert mallory.raw({"sql": f"SELECT * FROM {TABLE}"}, admin=True).status_code == 400
+
+
+@pytest.mark.skipif(ENFORCE, reason="requires the server's default BEACON_AUTH_ENFORCE=false")
+def test_no_enforcement_reads_not_gated(admin, base_url, clean):
+    """With enforcement off, the role model is managed but not applied to reads:
+    grants/denies and role membership don't gate queries (the super-user DDL gate
+    still applies — covered by the guard tests above)."""
+    admin.execute(f"CREATE TABLE {TABLE} (a BIGINT)", admin=True)
+    admin.execute(f"INSERT INTO {TABLE} VALUES (1)", admin=True)
+
+    # A role that explicitly DENIES the table, assigned to alice.
+    admin.execute(f"CREATE ROLE {ROLE}", admin=True)
+    admin.execute(f"DENY SELECT ON TABLE {TABLE} TO ROLE {ROLE}", admin=True)
+    admin.execute(f"CREATE USER {USER} WITH PASSWORD 'pw'", admin=True)
+    admin.execute(f"GRANT ROLE {ROLE} TO USER {USER}", admin=True)
+    alice = BeaconHTTPClient(base_url, USER, "pw")
+
+    # The deny is not applied: alice can still read.
+    assert alice.raw({"sql": f"SELECT * FROM {TABLE}"}, admin=True).status_code == 200
+
+    # A user with no roles can also read.
+    admin.execute(f"CREATE USER {USER2} WITH PASSWORD 'pw'", admin=True)
+    mallory = BeaconHTTPClient(base_url, USER2, "pw")
+    assert mallory.raw({"sql": f"SELECT * FROM {TABLE}"}, admin=True).status_code == 200
+
+    # An unauthenticated (anonymous) request can read too.
+    assert admin.raw({"sql": f"SELECT * FROM {TABLE}"}, admin=False).status_code == 200
