@@ -44,15 +44,13 @@ pub fn create_temp_output_file(tmp_dir: &Path, extension: &str) -> TempOutputFil
 /// object store, asking each registered file format which objects it owns.
 pub async fn list_datasets(
     session_ctx: &SessionContext,
+    object_store: Arc<dyn object_store::ObjectStore>,
     file_formats: &[Arc<dyn FileFormatFactoryExt>],
     offset: Option<usize>,
     limit: Option<usize>,
     pattern: Option<String>,
 ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
     let state = session_ctx.state();
-    let object_store = session_ctx
-        .runtime_env()
-        .object_store(&*DATASETS_OBJECT_STORE_URL)?;
 
     let listing_url = create_listing_url(pattern.unwrap_or_else(|| "*".to_string()))?;
 
@@ -75,6 +73,36 @@ pub async fn list_datasets(
     for file_format in file_formats.iter() {
         let format_datasets = file_format.discover_datasets(&objects)?;
         datasets.extend(format_datasets);
+    }
+
+    // Enrich each dataset with size + last-modified from the object listing. A
+    // single-file dataset matches an object exactly; a directory-shaped dataset
+    // (e.g. Zarr) aggregates every object under its prefix (sum of sizes, newest
+    // mtime). Datasets with no matching object keep `None`.
+    let by_path: HashMap<&str, &object_store::ObjectMeta> =
+        objects.iter().map(|o| (o.location.as_ref(), o)).collect();
+    for ds in datasets.iter_mut() {
+        if let Some(obj) = by_path.get(ds.file_path.as_str()) {
+            ds.size = Some(obj.size);
+            ds.last_modified = Some(obj.last_modified);
+        } else {
+            let prefix = format!("{}/", ds.file_path);
+            let mut total = 0u64;
+            let mut latest = None;
+            for o in &objects {
+                if o.location.as_ref().starts_with(&prefix) {
+                    total += o.size;
+                    latest = Some(match latest {
+                        Some(l) if l >= o.last_modified => l,
+                        _ => o.last_modified,
+                    });
+                }
+            }
+            if latest.is_some() {
+                ds.size = Some(total);
+                ds.last_modified = latest;
+            }
+        }
     }
 
     // Keep current pagination semantics to avoid behavior regressions.

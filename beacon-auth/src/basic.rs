@@ -89,6 +89,23 @@ impl UserDirectory for InMemoryUserStore {
     fn user_exists(&self, username: &str) -> bool {
         self.users.read().contains_key(username)
     }
+
+    fn list_users(&self) -> anyhow::Result<Vec<crate::provider::UserRecord>> {
+        let users = self.users.read();
+        let mut out: Vec<crate::provider::UserRecord> = users
+            .iter()
+            .map(|(username, record)| {
+                let mut roles: Vec<String> = record.roles.iter().cloned().collect();
+                roles.sort();
+                crate::provider::UserRecord {
+                    username: username.clone(),
+                    roles,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.username.cmp(&b.username));
+        Ok(out)
+    }
 }
 
 /// Default authentication provider backed by an in-memory user store.

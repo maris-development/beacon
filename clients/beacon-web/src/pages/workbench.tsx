@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useLocation } from "react-router-dom";
 import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import type { ArrowTable, Row } from "@beacon/client";
 import {
@@ -70,8 +71,12 @@ const STARTER_SQL = "SELECT 1 AS n";
 
 export function WorkbenchPage() {
   const beacon = useBeacon();
+  const location = useLocation();
   const editorRef = React.useRef<ReactCodeMirrorRef>(null);
-  const [sql, setSql] = React.useState(STARTER_SQL);
+  // Another page (e.g. Datasets → "Query") can open the editor pre-filled by
+  // navigating to `/query` with `{ state: { sql } }`.
+  const initialSql = (location.state as { sql?: string } | null)?.sql;
+  const [sql, setSql] = React.useState(initialSql ?? STARTER_SQL);
   const [running, setRunning] = React.useState(false);
   const [explaining, setExplaining] = React.useState(false);
   const [analyzing, setAnalyzing] = React.useState(false);

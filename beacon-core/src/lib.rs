@@ -1,4 +1,6 @@
 pub mod api;
+pub mod dataset_files;
+pub mod dataset_uploads;
 pub mod metrics;
 pub mod parser;
 pub mod query;

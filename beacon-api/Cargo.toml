@@ -52,3 +52,5 @@ beacon-core = { path = "../beacon-core" }
 beacon-core = { path = "../beacon-core", features = ["test-util"] }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
 tower = { version = "0.5", features = ["util"] }
+# Temp storage roots for the admin dataset file-management HTTP tests.
+tempfile = { workspace = true }

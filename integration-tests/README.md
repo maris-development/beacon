@@ -47,6 +47,7 @@ pytest -v
 | Env var | Default | Effect |
 | ------- | ------- | ------ |
 | `BEACON_IMAGE` | _(unset)_ | If set, run this image instead of building the local `Dockerfile`. Use `ghcr.io/maris-development/beacon:latest` for fast reruns. |
+| `BEACON_BASE_URL` | _(unset)_ | If set, the RBAC tests (`test_rbac.py`) run against this already-running Beacon instead of Docker — handy for iterating against a local debug build. Also reads `BEACON_ADMIN_USERNAME`/`BEACON_ADMIN_PASSWORD` (default `admin`/`securepassword`). Set `BEACON_AUTH_ENFORCE=true` to also run the enforcement test (it must match the server's config). |
 
 > **Note:** The published image will **fail** the external- and managed-table tests
 > until the HTTP write-path change in `beacon-api` (admin basic-auth → super-user on

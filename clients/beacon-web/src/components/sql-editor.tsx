@@ -1,8 +1,8 @@
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import { sql } from "@codemirror/lang-sql";
 import { forwardRef } from "react";
 
 import { useTheme } from "@/lib/theme";
+import { useSqlCompletion } from "@/lib/sql-completion";
 
 interface SqlEditorProps {
   value: string;
@@ -10,17 +10,18 @@ interface SqlEditorProps {
   onRun?: () => void;
 }
 
-/** CodeMirror SQL editor. Cmd/Ctrl+Enter triggers `onRun`. */
+/** CodeMirror SQL editor with metadata-aware autocomplete. Cmd/Ctrl+Enter runs. */
 export const SqlEditor = forwardRef<ReactCodeMirrorRef, SqlEditorProps>(
   ({ value, onChange, onRun }, ref) => {
     const { resolved } = useTheme();
+    const completion = useSqlCompletion();
     return (
       <CodeMirror
         ref={ref}
         value={value}
         height="100%"
         theme={resolved}
-        extensions={[sql()]}
+        extensions={completion}
         onChange={onChange}
         basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: false }}
         onKeyDown={(e) => {

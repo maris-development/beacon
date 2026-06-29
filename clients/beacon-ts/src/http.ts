@@ -93,21 +93,33 @@ export class Http {
     init: {
       query?: Record<string, string | number | undefined>;
       json?: unknown;
+      /**
+       * A raw request body (e.g. a `Blob`/`ArrayBuffer`/`Uint8Array` for binary
+       * uploads). Mutually exclusive with `json`; set `Content-Type` via `headers`.
+       */
+      body?: BodyInit;
       headers?: Record<string, string>;
       signal?: AbortSignal;
+      /**
+       * Per-request timeout override in ms. Falls back to the client default.
+       * Set to 0 to disable (e.g. for large streaming uploads/downloads).
+       */
+      timeoutMs?: number;
     } = {},
   ): Promise<Response> {
     const url = this.buildUrl(path, init.query);
     const headers: Record<string, string> = { ...this.extraHeaders, ...init.headers };
     if (this.authHeader) headers["Authorization"] = this.authHeader;
 
-    let body: string | undefined;
+    let body: BodyInit | undefined;
     if (init.json !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(init.json);
+    } else if (init.body !== undefined) {
+      body = init.body;
     }
 
-    const { signal, cancel, timedOut } = this.withTimeout(init.signal);
+    const { signal, cancel, timedOut } = this.withTimeout(init.signal, init.timeoutMs);
     let res: Response;
     try {
       res = await this.fetchImpl(url, { method, headers, body, signal });
@@ -155,7 +167,10 @@ export class Http {
    * timeout abort apart from an external cancellation (the abort reason is not
    * reliably propagated across runtimes, so we track it explicitly).
    */
-  private withTimeout(external?: AbortSignal): {
+  private withTimeout(
+    external?: AbortSignal,
+    timeoutOverrideMs?: number,
+  ): {
     signal: AbortSignal;
     cancel: () => void;
     timedOut: () => boolean;
@@ -170,12 +185,13 @@ export class Http {
       else external.addEventListener("abort", onExternalAbort, { once: true });
     }
 
+    const timeoutMs = timeoutOverrideMs ?? this.timeoutMs;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    if (this.timeoutMs > 0) {
+    if (timeoutMs > 0) {
       timer = setTimeout(() => {
         timedOut = true;
         controller.abort(new DOMException("Request timed out", "TimeoutError"));
-      }, this.timeoutMs);
+      }, timeoutMs);
     }
 
     const cancel = () => {

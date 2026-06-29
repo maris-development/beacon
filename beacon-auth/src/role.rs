@@ -238,6 +238,13 @@ impl RoleProvider {
         Ok(())
     }
 
+    /// Snapshot of all roles with their grant/deny rules, ordered by name.
+    pub fn list_roles(&self) -> Vec<Role> {
+        let mut roles: Vec<Role> = self.roles.read().values().cloned().collect();
+        roles.sort_by(|a, b| a.name.cmp(&b.name));
+        roles
+    }
+
     /// Whether any of the given roles grants a global `ALL` privilege (i.e. super-user).
     pub fn has_global_all_grant(&self, roles: &[String]) -> bool {
         let registry = self.roles.read();

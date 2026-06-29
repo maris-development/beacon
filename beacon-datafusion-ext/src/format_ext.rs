@@ -39,6 +39,12 @@ pub struct DatasetMetadata {
     pub format: String,
     pub can_inspect: bool,
     pub can_partial_explore: bool,
+    /// Total size in bytes of the underlying object(s), when known. Filled in by
+    /// `list_datasets` from the object listing; `None` for datasets whose size
+    /// can't be resolved (e.g. no matching object).
+    pub size: Option<u64>,
+    /// Last-modified time of the underlying object(s) (RFC 3339), when known.
+    pub last_modified: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl DatasetMetadata {
@@ -48,6 +54,8 @@ impl DatasetMetadata {
             format,
             can_inspect: false,
             can_partial_explore: false,
+            size: None,
+            last_modified: None,
         }
     }
 }

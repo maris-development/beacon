@@ -10,8 +10,10 @@ use utoipa::{
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+mod auth;
 mod check;
 mod crawlers;
+mod datasets;
 mod external_tables;
 mod tables;
 
@@ -39,7 +41,16 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
         ))
         .routes(routes!(crawlers::run_crawler))
         .routes(routes!(external_tables::create_external_table))
+        .routes(routes!(datasets::upload_dataset))
+        .routes(routes!(datasets::download_dataset))
+        .routes(routes!(datasets::delete_dataset))
+        .routes(routes!(datasets::initiate_upload))
+        .routes(routes!(datasets::upload_part))
+        .routes(routes!(datasets::complete_upload))
+        .routes(routes!(datasets::abort_upload))
         .routes(routes!(tables::list_table_config))
+        .routes(routes!(auth::list_users))
+        .routes(routes!(auth::list_roles))
         .split_for_parts();
 
     (admin_router, admin_api)
