@@ -131,7 +131,7 @@ When `schedule` is set, Beacon runs the crawl on that interval. Scheduling re-li
 When `event_driven` is `true` **and** storage events are available, Beacon subscribes to change events under the prefix and runs an incremental crawl shortly after new or changed files appear (debounced to coalesce bursts). This gives lower latency than polling.
 
 :::warning Event availability
-Filesystem events require `BEACON_ENABLE_FS_EVENTS=true` (the default for the local backend). On S3, change events are not yet wired up. If a crawler requests `event_driven` where events cannot fire **and** it has no `schedule`, Beacon falls back to a default poll interval so the crawler still makes progress rather than sitting idle — see [Configuration](#configuration).
+Filesystem events require `BEACON_ENABLE_FS_EVENTS=true` (disabled by default; enable it for the local backend). On S3, change events are not yet wired up. If a crawler requests `event_driven` where events cannot fire **and** it has no `schedule`, Beacon falls back to a default poll interval so the crawler still makes progress rather than sitting idle — see [Configuration](#configuration).
 :::
 
 ## Configuration
@@ -157,11 +157,11 @@ operations) and back the admin web UI:
 
 ## Supported formats and limitations
 
-The crawler discovers **file-per-dataset** formats whose files are matched by extension: `parquet`, `csv` / `tsv`, `nc` (NetCDF), `bbf`, `arrow`, and `tiff`.
+The crawler discovers **file-per-dataset** formats whose filename extension exactly equals the format identifier: `parquet`, `geoparquet`, `csv`, `nc` (NetCDF), `bbf`, `arrow`, and `tiff`. Alias extensions are **not** crawled — a file must use the canonical extension. In particular `.tsv` (read as CSV), `.feather` (read as Arrow), and `.tif` (read as TIFF) are skipped by the crawler even though those formats can read them directly; register such files with an explicit table function or `CREATE EXTERNAL TABLE`.
 
 Directory/marker-based stores — **Zarr** (`*.zarr/zarr.json`) and **Atlas** (`atlas.json`) — are **skipped** by the crawler. They are not registered as external tables through the listing-table path (Zarr is read via [`read_zarr`](../sql/table-functions.md#read_zarr)); a crawl that encounters them ignores them and continues with the other datasets. Register these with an explicit table function or `CREATE EXTERNAL TABLE` instead.
 
-GeoParquet files (`*.parquet`) are claimed by the Parquet crawler; create a GeoParquet external table explicitly if you need GeoArrow geometry decoding.
+GeoParquet files are matched by the `.geoparquet` extension and crawled as GeoParquet tables (with GeoArrow geometry decoding). A plain `.parquet` file — even one carrying `geo` metadata — is crawled as an ordinary Parquet table; to get geometry decoding for such a file, give it the `.geoparquet` extension or register a GeoParquet external table explicitly.
 
 **Delta Lake** tables — directories containing a `_delta_log/` — are also **not** auto-crawled. Register them explicitly with [`CREATE EXTERNAL TABLE ... STORED AS DELTA`](./delta-lake.md).
 

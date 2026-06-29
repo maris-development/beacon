@@ -414,7 +414,7 @@ All mapping functions return `NULL` when the input code is not found in the look
 | `map_emodnet_chemistry_instrument_l05_multi(instrument)` | `VARCHAR` | `VARCHAR` | EMODnet Chemistry instrument code → comma-separated L05 labels |
 | `map_emodnet_chemistry_instrument_info_l22(line, p01)` | `VARCHAR`, `VARCHAR` | `VARCHAR` | EMODnet Chemistry instrument line + P01 code → L22 |
 | `map_emodnet_chemistry_originator_edmo(originator)` | `VARCHAR` | `VARCHAR` | EMODnet Chemistry originator code → EDMO identifier |
-| `map_emodnet_chemistry_p35_contributor_codes_p01(codes)` | `VARCHAR` | `VARCHAR` | EMODnet Chemistry P35 contributor codes → P01 parameter codes |
+| `map_emodnet_chemistry_p35_contributor_codes_p01(contributor_codes, p35)` | `VARCHAR`, `VARCHAR` | `VARCHAR` | Look up the P01 parameter code for `p35` within an EMODnet Chemistry P35→P01 contributor-codes string |
 | `map_emodnet_chemistry_platform_l06(platform)` | `VARCHAR` | `VARCHAR` | EMODnet Chemistry platform code → L06 |
 
 #### SeaDataNet

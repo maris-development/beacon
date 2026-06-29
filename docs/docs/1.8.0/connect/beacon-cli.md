@@ -82,9 +82,9 @@ beacon-cli query "SHOW TABLES"
 beacon-cli query "SHOW CRAWLERS"
 
 # Admin — DDL/DML, crawlers, materialized views
-beacon-cli -u beacon-admin -p beacon-password \
+beacon-cli --username beacon-admin --password beacon-password \
   query "CREATE EXTERNAL TABLE obs STORED AS DELTA LOCATION 'datasets://obs/'"
-beacon-cli -u beacon-admin -p beacon-password \
+beacon-cli --username beacon-admin --password beacon-password \
   query "CREATE CRAWLER cr ON 'crawl_src/' WITH ('format' 'parquet', 'schedule' '15m')"
 ```
 

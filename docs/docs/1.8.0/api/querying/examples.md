@@ -164,7 +164,7 @@ Content-Type: application/json
 ## SQL
 
 :::warning
-SQL requires `BEACON_ENABLE_SQL=true`.
+SQL is enabled by default; it can be disabled with `BEACON_ENABLE_SQL=false`.
 :::
 
 ### Select with a computed column

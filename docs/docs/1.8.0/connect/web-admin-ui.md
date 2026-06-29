@@ -44,12 +44,13 @@ and expose `/admin` only to trusted operators.
   renders the query's logical plan as a collapsible tree, and queries can be
   **saved** to the browser and reloaded.
 - **Tables** — browse registered tables, their Arrow schemas and table
-  configuration, and drop a table (`DROP TABLE`, leaving the underlying files in
-  place).
+  configuration, register an [external table](/docs/1.8.0/data-lake/external-tables)
+  over files in the datasets store, and drop a table (`DROP TABLE`, leaving the
+  underlying files in place).
 - **Datasets** — explore discovered dataset files and inspect each file's schema.
 - **Crawlers** — list, [create, run, and delete crawlers](/docs/1.8.0/data-lake/crawlers).
-- **External tables** — register an [external table](/docs/1.8.0/data-lake/external-tables)
-  over files in the datasets store.
+- **Users & roles** — manage [role-based access control](/docs/1.8.0/security/access-control):
+  users, roles, and privileges.
 - **Server** — runtime info, health, and the available scalar / table functions.
 - **Light / dark / system theme** — switch from the top bar; the choice persists
   in the browser.

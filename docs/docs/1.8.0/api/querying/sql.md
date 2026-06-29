@@ -10,7 +10,7 @@ Content-Type: application/json
 ```
 
 :::warning
-SQL is disabled by default. Enable it by setting the environment variable `BEACON_ENABLE_SQL=true`. Requests with `"sql": "..."` return an error when SQL is disabled.
+SQL is enabled by default. Disable it by setting the environment variable `BEACON_ENABLE_SQL=false`. Requests with `"sql": "..."` return an error when SQL is disabled.
 :::
 
 ## Query a registered table

@@ -115,7 +115,7 @@ Beacon keeps all local state under a single root directory.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_DATA_DIR` | `./data` | Root directory for all local data. |
-| `BEACON_ENABLE_FS_EVENTS` | `true` | Watch the local datasets directory so new files are picked up automatically (uses inotify on Linux). Set to `false` to disable. Not used with the S3 data lake. Mounted Docker volumes can interfere with filesystem events — test this in your deployment environment. |
+| `BEACON_ENABLE_FS_EVENTS` | `false` | Watch the local datasets directory so new files are picked up automatically (uses inotify on Linux). Set to `true` to enable live auto-refresh of external tables and event-driven crawler triggering. Not used with the S3 data lake. Mounted Docker volumes can interfere with filesystem events — test this in your deployment environment. |
 
 The following sub-directories are created under `BEACON_DATA_DIR` and used by
 Beacon:

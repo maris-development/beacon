@@ -161,7 +161,7 @@ all non-super-user principals, are read-only.
 When a request carries `Authorization: Bearer <jwt>`, Beacon validates it as a
 JWT access token:
 
-1. **Read the header.** The token's JOSE header is decoded to read its key id
+1. **Read the header.** The token's JSON header is decoded to read its key id
    (`kid`) and signing algorithm (`alg`). A token without a `kid` is rejected.
 2. **Resolve the signing key.** The issuer's JWKS (fetched from
    `BEACON_OIDC_JWKS_URL`) is searched for a key matching the `kid`. If no key
