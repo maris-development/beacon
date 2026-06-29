@@ -9,7 +9,6 @@ RUN apt-get install -y curl
 RUN apt-get install -y software-properties-common
 RUN apt-get install -y libnetcdf-dev
 RUN apt-get install -y netcdf-bin
-RUN apt-get install -y libnetcdf-dev
 RUN apt-get install -y libhdf5-dev
 RUN apt-get install -y capnproto
 RUN apt-get install -y libclang-dev
@@ -26,6 +25,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # COPY SOURCE
 
 COPY beacon-api/ /beacon-api/
+COPY beacon-auth/ /beacon-auth/
 COPY beacon-file-formats/beacon-arrow-atlas/ /beacon-file-formats/beacon-arrow-atlas/
 COPY beacon-file-formats/beacon-arrow-netcdf/ /beacon-file-formats/beacon-arrow-netcdf/
 COPY beacon-file-formats/beacon-arrow-tiff/ /beacon-file-formats/beacon-arrow-tiff/
@@ -68,7 +68,7 @@ RUN npm ci
 RUN npm run build --workspace beacon-ts
 RUN npm run build --workspace beacon-web
 
-FROM ubuntu:latest AS node
+FROM ubuntu:latest AS runtime
 WORKDIR /beacon
 COPY --from=builder /target/release/beacon-api /beacon/
 # Bundle the built admin UI; beacon-api serves it at /admin (BEACON_WEB_UI_DIR=web).
@@ -80,6 +80,7 @@ RUN apt-get install -y curl
 RUN apt-get install -y netcdf-bin
 RUN apt-get install -y libnetcdf-dev
 
-EXPOSE 5001
+# 5001: HTTP API + admin UI. 32011: Arrow Flight SQL (BEACON_FLIGHT_SQL_PORT).
+EXPOSE 5001 32011
 
 ENTRYPOINT ["/beacon/beacon-api"]
