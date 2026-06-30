@@ -432,21 +432,35 @@ fn extract_dataset_layout(
         }
     }
 
-    let (_, max_array) = dataset
+    if dataset.arrays.is_empty() {
+        anyhow::bail!(
+            "Dataset has no arrays, so we can not determine the shape and chunk shape to use for iterating over the dataset."
+        );
+    }
+
+    // Prefer an array that spans *every* dataset dimension: its native dimension
+    // order, shape, and chunk layout drive efficient chunked reads, and the other
+    // (lower-rank) variables broadcast onto it.
+    let dim_count = dataset.dimensions.len();
+    if let Some((_, full)) = dataset
         .arrays
         .iter()
-        .max_by_key(|(_, array)| array.shape().len())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Dataset has no arrays, so we can not determine the shape and chunk shape to use for iterating over the dataset."
-            )
-        })?;
+        .filter(|(_, array)| array.dimensions().len() == dim_count)
+        .max_by_key(|(_, array)| array.shape().iter().product::<usize>())
+    {
+        return Ok((full.dimensions(), full.shape(), full.chunk_shape()));
+    }
 
-    Ok((
-        max_array.dimensions(),
-        max_array.shape(),
-        max_array.chunk_shape(),
-    ))
+    // No single array spans the full dimension set — e.g. a query over only the
+    // coordinate variables of a reduced dimension set (`read_netcdf(.., ['lat',
+    // 'lon'])`, where the data variable carried an extra dimension and was
+    // dropped). Build the grid from the dataset's dimensions so every remaining
+    // variable broadcasts onto the full grid instead of one being picked as an
+    // (incomplete) anchor. The chunk shape equals the full shape; the caller's
+    // `c_order_chunk_shape` then batches it.
+    let dims: Vec<String> = dataset.dimensions.keys().cloned().collect();
+    let shape: Vec<usize> = dataset.dimensions.values().copied().collect();
+    Ok((dims, shape.clone(), shape))
 }
 
 fn build_dataset_schema(arrays: &IndexMap<String, Arc<dyn NdArrayD>>) -> Arc<Schema> {
@@ -762,6 +776,86 @@ mod tests {
         assert_eq!(
             scale_col.values().as_ref(),
             &[10.0, 20.0, 30.0, 10.0, 20.0, 30.0]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_broadcast_dimensions_makes_select_star_safe() {
+        // `temp(a,b,c)` is the highest-dimensionality variable, plus a
+        // CF-bounds-style `bnds(b,d)` whose `d` dimension is absent from the
+        // main grid. A naive SELECT * (all variables) broadcasts every variable
+        // onto the union of all dimensions `(a,b,c,d)` — a cross-product that
+        // keeps the incompatible `bnds`; the default narrowing instead drops
+        // `bnds` and keeps the compact `(a,b,c)` grid.
+        let temp = NdArray::<f64>::try_new_from_vec_in_mem(
+            (0..8).map(|v| v as f64).collect(),
+            vec![2, 2, 2],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            None,
+        )
+        .unwrap();
+        let a = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![0.0, 1.0],
+            vec![2],
+            vec!["a".to_string()],
+            None,
+        )
+        .unwrap();
+        let bnds = NdArray::<f64>::try_new_from_vec_in_mem(
+            vec![0.0, 1.0, 2.0, 3.0],
+            vec![2, 2],
+            vec!["b".to_string(), "d".to_string()],
+            None,
+        )
+        .unwrap();
+
+        let ds = make_dataset(vec![
+            ("temp", Arc::new(temp)),
+            ("a", Arc::new(a)),
+            ("bnds", Arc::new(bnds)),
+        ])
+        .await;
+
+        // Without narrowing, SELECT * over *all* variables falls back to the
+        // union of every dataset dimension `(a,b,c,d)`. This does not error —
+        // each variable broadcasts onto the full grid — but it inflates the
+        // result into a cross-product and retains the incompatible `bnds`
+        // (replicated along `a,c`), which is rarely what the caller wants. (In
+        // production this path is never hit un-narrowed: `resolve_read_dimensions`
+        // always narrows first.)
+        let naive: Vec<RecordBatch> =
+            dataset_as_record_batch_stream(ds.clone(), usize::MAX, None, None)
+                .try_collect()
+                .await
+                .expect("union-grid fallback broadcasts every variable onto (a,b,c,d)");
+        let naive_rows: usize = naive.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(naive_rows, 16); // 2 * 2 * 2 * 2 — the (a,b,c,d) cross-product
+        assert!(
+            naive[0].column_by_name("bnds").is_some(),
+            "without narrowing the incompatible variable is kept"
+        );
+
+        // The default selection keeps the variable group that retains the most
+        // variables: the `(a,b,c)` grid, dropping the incompatible `bnds`.
+        let default_dims = ds
+            .default_broadcast_dimensions()
+            .expect("incompatible dataset should narrow");
+        assert_eq!(default_dims, vec!["a", "b", "c"]);
+
+        let projected = ds.project_with_dimensions(&default_dims).unwrap();
+        let batches: Vec<RecordBatch> =
+            dataset_as_record_batch_stream(projected, usize::MAX, None, None)
+                .try_collect()
+                .await
+                .expect("SELECT * succeeds after default dimension narrowing");
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 8); // 2 * 2 * 2
+        assert!(batches[0].column_by_name("temp").is_some());
+        assert!(batches[0].column_by_name("a").is_some());
+        assert!(
+            batches[0].column_by_name("bnds").is_none(),
+            "incompatible variable must be excluded"
         );
     }
 

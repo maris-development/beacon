@@ -202,6 +202,70 @@ fn collect_metrics_json(plan: &dyn ExecutionPlan) -> NodeMetrics {
     }
 }
 
+/// Render an executed physical plan as PostgreSQL-style pgjson annotated with
+/// per-node runtime metrics — DataFusion's "Plan with Metrics" shape.
+///
+/// The output is the array form consumed by pgjson visualizers (e.g. dalibo):
+/// a single-element array wrapping the root `"Plan"` node, with children nested
+/// recursively under `"Plans"`. Newer DataFusion produces this natively via
+/// `EXPLAIN (ANALYZE, FORMAT pgjson)`, which the pinned DataFusion 53 rejects;
+/// this backports the same shape by walking the already-executed plan.
+///
+/// The plan must have been run to completion first so its metrics are populated.
+pub fn explain_analyze_pg_json(plan: &dyn ExecutionPlan) -> serde_json::Value {
+    serde_json::json!([{ "Plan": node_to_pg_json(plan) }])
+}
+
+/// Convert a single physical plan node (and its subtree) into a pgjson node.
+fn node_to_pg_json(plan: &dyn ExecutionPlan) -> serde_json::Value {
+    let details = format!(
+        "{}",
+        datafusion::physical_plan::displayable(plan).one_line()
+    );
+
+    let mut node = serde_json::json!({
+        "Node Type": plan.name(),
+        // `one_line` renders with a trailing newline; trim it for a clean detail.
+        "Details": details.trim_end(),
+    });
+
+    if let Some(metrics_set) = plan.metrics() {
+        // Aggregate across partitions, mirroring how `AnalyzeExec` reports metrics.
+        let metrics_set = metrics_set.aggregate_by_name();
+
+        if let Some(rows) = metrics_set.output_rows() {
+            node["Actual Rows"] = serde_json::json!(rows);
+        }
+        // `elapsed_compute` is nanoseconds; PostgreSQL's "Actual Total Time" is ms.
+        if let Some(nanos) = metrics_set.elapsed_compute() {
+            node["Actual Total Time"] = serde_json::json!(nanos as f64 / 1_000_000.0);
+        }
+
+        // Every remaining metric goes under `Extras` (the two promoted above are
+        // excluded so they are not duplicated).
+        let mut extras = serde_json::Map::new();
+        for metric in metrics_set.iter() {
+            let name = metric.value().name();
+            if name == "output_rows" || name == "elapsed_compute" {
+                continue;
+            }
+            extras.insert(name.to_string(), serde_json::json!(metric.value().as_usize()));
+        }
+        if !extras.is_empty() {
+            node["Extras"] = serde_json::Value::Object(extras);
+        }
+    }
+
+    let children: Vec<serde_json::Value> = plan
+        .children()
+        .into_iter()
+        .map(|child| node_to_pg_json(child.as_ref()))
+        .collect();
+    node["Plans"] = serde_json::Value::Array(children);
+
+    node
+}
+
 /// Extended:
 /// Extend the metrics tracker to expose the files as a tracer we can use for BBF
 impl MetricsTracker {

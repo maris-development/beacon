@@ -27,7 +27,10 @@ use futures::{StreamExt, TryStreamExt};
 
 use super::{
     actions, crawler,
-    logical::{count_arrow_schema, show_crawlers_arrow_schema, AlterTableSpec},
+    logical::{
+        count_arrow_schema, show_crawlers_arrow_schema, show_indexes_arrow_schema, AlterTableSpec,
+        Mutation,
+    },
     materialized_view, SessionCell,
 };
 use crate::extensions::{
@@ -302,6 +305,38 @@ macro_rules! side_effect_exec {
     };
 }
 
+/// Physical node for the auth-management statements (CREATE/DROP USER/ROLE, GRANT/DENY/REVOKE).
+#[derive(Debug)]
+pub(crate) struct AuthExec {
+    statement: crate::parser::statement::AuthStatement,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl AuthExec {
+    pub(crate) fn new(
+        statement: crate::parser::statement::AuthStatement,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            statement,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AuthExec: {}", self.statement)
+    }
+}
+
+side_effect_exec!(AuthExec, "AuthExec", |exec: &AuthExec| {
+    let session = upgrade_session(&exec.session)?;
+    let statement = exec.statement.clone();
+    Ok(side_effect_stream(async move {
+        super::auth::apply_auth_statement(&session, &statement).map_err(to_df_err)
+    }))
+});
+
 /// Physical node for `DROP TABLE`.
 #[derive(Debug)]
 pub(crate) struct DropTableExec {
@@ -447,6 +482,7 @@ side_effect_exec!(AlterTableExec, "AlterTableExec", |exec: &AlterTableExec| {
 pub(crate) struct ReplaceTableContentsExec {
     table: TableReference,
     child: Arc<dyn ExecutionPlan>,
+    mutation: Option<Mutation>,
     session: SessionCell,
     cache: Arc<PlanProperties>,
 }
@@ -455,11 +491,13 @@ impl ReplaceTableContentsExec {
     pub(crate) fn new(
         table: TableReference,
         child: Arc<dyn ExecutionPlan>,
+        mutation: Option<Mutation>,
         session: SessionCell,
     ) -> Self {
         Self {
             table,
             child,
+            mutation,
             session,
             cache: Arc::new(side_effect_properties()),
         }
@@ -497,6 +535,7 @@ impl ExecutionPlan for ReplaceTableContentsExec {
         Ok(Arc::new(Self {
             table: self.table.clone(),
             child: children.swap_remove(0),
+            mutation: self.mutation.clone(),
             session: self.session.clone(),
             cache: self.cache.clone(),
         }))
@@ -509,8 +548,9 @@ impl ExecutionPlan for ReplaceTableContentsExec {
         let session = upgrade_session(&self.session)?;
         let table = self.table.clone();
         let child = self.child.clone();
+        let mutation = self.mutation.clone();
         Ok(side_effect_stream(async move {
-            actions::replace_table_contents(&session, &table, child, &context)
+            actions::replace_table_contents(&session, &table, child, mutation, &context)
                 .await
                 .map_err(to_df_err)
         }))
@@ -852,6 +892,149 @@ impl ExecutionPlan for ShowCrawlersExec {
         let schema = show_crawlers_arrow_schema();
         let stream = futures::stream::once(async move {
             crawler::show_crawlers(&session).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+/// Physical node for `CREATE INDEX ... ON <table> (<column>)`.
+#[derive(Debug)]
+pub(crate) struct CreateIndexExec {
+    table: String,
+    column: String,
+    name: Option<String>,
+    using: Option<String>,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl CreateIndexExec {
+    pub(crate) fn new(
+        table: String,
+        column: String,
+        name: Option<String>,
+        using: Option<String>,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            table,
+            column,
+            name,
+            using,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CreateIndexExec: table={} column={}", self.table, self.column)
+    }
+}
+
+side_effect_exec!(CreateIndexExec, "CreateIndexExec", |exec: &CreateIndexExec| {
+    let session = upgrade_session(&exec.session)?;
+    let table = exec.table.clone();
+    let column = exec.column.clone();
+    let name = exec.name.clone();
+    let using = exec.using.clone();
+    Ok(side_effect_stream(async move {
+        actions::create_index(&session, &table, &column, name, using)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `DROP INDEX <name> ON <table>`.
+#[derive(Debug)]
+pub(crate) struct DropIndexExec {
+    table: String,
+    name: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl DropIndexExec {
+    pub(crate) fn new(table: String, name: String, session: SessionCell) -> Self {
+        Self {
+            table,
+            name,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DropIndexExec: table={} name={}", self.table, self.name)
+    }
+}
+
+side_effect_exec!(DropIndexExec, "DropIndexExec", |exec: &DropIndexExec| {
+    let session = upgrade_session(&exec.session)?;
+    let table = exec.table.clone();
+    let name = exec.name.clone();
+    Ok(side_effect_stream(async move {
+        actions::drop_index(&session, &table, &name)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `SHOW INDEXES ON <table>`. Produces one row per index.
+#[derive(Debug)]
+pub(crate) struct ShowIndexesExec {
+    table: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl ShowIndexesExec {
+    pub(crate) fn new(table: String, session: SessionCell) -> Self {
+        Self {
+            table,
+            session,
+            cache: Arc::new(plan_properties(show_indexes_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for ShowIndexesExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "ShowIndexesExec: table={}", self.table)
+            }
+            DisplayFormatType::TreeRender => write!(f, "ShowIndexesExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for ShowIndexesExec {
+    fn name(&self) -> &str {
+        "ShowIndexesExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let table = self.table.clone();
+        let schema = show_indexes_arrow_schema();
+        let stream = futures::stream::once(async move {
+            actions::list_indexes(&session, &table).await.map_err(to_df_err)
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }

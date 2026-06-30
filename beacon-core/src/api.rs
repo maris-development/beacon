@@ -67,6 +67,10 @@ pub struct DatasetInfo {
     pub can_inspect: bool,
     /// Whether the file supports partial (predicate/column-pushdown) exploration.
     pub can_partial_explore: bool,
+    /// Size in bytes of the underlying object(s), when known.
+    pub size: Option<u64>,
+    /// Last-modified timestamp (RFC 3339), when known.
+    pub last_modified: Option<String>,
 }
 
 impl From<DatasetMetadata> for DatasetInfo {
@@ -76,6 +80,87 @@ impl From<DatasetMetadata> for DatasetInfo {
             format: value.format,
             can_inspect: value.can_inspect,
             can_partial_explore: value.can_partial_explore,
+            size: value.size,
+            last_modified: value.last_modified.map(|dt| dt.to_rfc3339()),
+        }
+    }
+}
+
+/// A user account and the roles assigned to it, for the admin Users page.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct AuthUserView {
+    pub username: String,
+    pub roles: Vec<String>,
+    /// True for the single config-defined super-user (not editable via SQL).
+    pub is_super_user: bool,
+    /// True for the Beacon-managed anonymous user, which can't be deleted while
+    /// anonymous access is enabled.
+    pub is_anonymous: bool,
+}
+
+impl From<beacon_auth::UserRecord> for AuthUserView {
+    fn from(value: beacon_auth::UserRecord) -> Self {
+        Self {
+            username: value.username,
+            roles: value.roles,
+            is_super_user: false,
+            is_anonymous: false,
+        }
+    }
+}
+
+/// A single grant/deny rule, flattened for the UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct AuthRuleView {
+    /// Privilege name, e.g. `SELECT`.
+    pub privilege: String,
+    /// Target kind: `table`, `path`, or `all` (every target).
+    pub target_type: String,
+    /// Table name or path glob; `None` when the target is `all`.
+    pub target_value: Option<String>,
+}
+
+impl From<&beacon_auth::PrivilegeRule> for AuthRuleView {
+    fn from(rule: &beacon_auth::PrivilegeRule) -> Self {
+        let (target_type, target_value) = match &rule.target {
+            None | Some(beacon_auth::PrivilegeTarget::All) => ("all".to_string(), None),
+            Some(beacon_auth::PrivilegeTarget::Table(t)) => ("table".to_string(), Some(t.clone())),
+            Some(beacon_auth::PrivilegeTarget::Path(p)) => ("path".to_string(), Some(p.clone())),
+        };
+        Self {
+            privilege: rule.privilege.to_string(),
+            target_type,
+            target_value,
+        }
+    }
+}
+
+/// A role with its grant and deny rules, for the admin Roles page.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct AuthRoleView {
+    pub name: String,
+    pub grants: Vec<AuthRuleView>,
+    pub denies: Vec<AuthRuleView>,
+}
+
+impl From<beacon_auth::Role> for AuthRoleView {
+    fn from(role: beacon_auth::Role) -> Self {
+        // Rules live in a HashSet; sort for a stable, readable order.
+        let to_sorted = |rules: &std::collections::HashSet<beacon_auth::PrivilegeRule>| {
+            let mut views: Vec<AuthRuleView> = rules.iter().map(AuthRuleView::from).collect();
+            views.sort_by(|a, b| {
+                (&a.privilege, &a.target_type, &a.target_value).cmp(&(
+                    &b.privilege,
+                    &b.target_type,
+                    &b.target_value,
+                ))
+            });
+            views
+        };
+        Self {
+            grants: to_sorted(&role.grants),
+            denies: to_sorted(&role.denies),
+            name: role.name,
         }
     }
 }
@@ -224,7 +309,7 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
                     options.retain(|key, _| !key.starts_with("__"));
                 }
                 // Never expose a persisted credential — even encrypted — through
-                // the public table-config endpoint (external SQL-database tables
+                // the admin table-config endpoint (external SQL-database tables
                 // carry one in `secret`).
                 if config.contains_key("secret") {
                     config.insert("secret".to_string(), Value::String("***".to_string()));
@@ -446,7 +531,7 @@ mod table_config_redaction_tests {
     use super::*;
     use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
 
-    /// The public table-config view must never expose a persisted credential,
+    /// The admin table-config view must never expose a persisted credential,
     /// even in its encrypted form — the `secret` field is replaced with `***`.
     #[test]
     fn sql_database_secret_is_redacted_in_config_view() {

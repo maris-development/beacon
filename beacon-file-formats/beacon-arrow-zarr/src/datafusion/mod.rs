@@ -11,6 +11,8 @@ use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use beacon_nd_array::arrow::schema::any_dataset_to_arrow_schema;
+use beacon_nd_array::dataset::resolve_read_dimensions;
+use beacon_nd_array::projection::DatasetProjection;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics},
@@ -65,9 +67,17 @@ impl FileFormatFactory for ZarrFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(ZarrFormat::default()))
+        // Per-table override from `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+        let read_dimensions = format_options.get("read_dimensions").map(|value| {
+            value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        });
+        Ok(Arc::new(ZarrFormat::new(read_dimensions)))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
@@ -117,7 +127,21 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
 // ─── Format ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
-pub struct ZarrFormat;
+pub struct ZarrFormat {
+    /// Explicit dimensions requested via `read_zarr(paths, ['dims'])` or a
+    /// `CREATE EXTERNAL TABLE ... OPTIONS (read_dimensions '...')`. When set,
+    /// only variables whose dimensions are a subset of these are read; when
+    /// `None`, a broadcast-compatible default is auto-selected.
+    pub read_dimensions: Option<Vec<String>>,
+}
+
+impl ZarrFormat {
+    /// Build a format that reads only the variables belonging to
+    /// `read_dimensions` (or auto-selects a default when `None`).
+    pub fn new(read_dimensions: Option<Vec<String>>) -> Self {
+        Self { read_dimensions }
+    }
+}
 
 #[async_trait::async_trait]
 impl FileFormat for ZarrFormat {
@@ -146,16 +170,17 @@ impl FileFormat for ZarrFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        for object in objects {
-            if !is_zarr_v3_metadata(object) {
-                return Err(datafusion::error::DataFusionError::Execution(format!(
-                    "Object at location '{}' is not a Zarr v3 metadata file (zarr.json)",
-                    object.location.as_ref()
-                )));
-            }
-        }
-
+        // The listing may include non-metadata objects — chunk data files such as
+        // `<array>/c/0/0/0` — when the table is created without a `zarr.json`
+        // extension filter (e.g. via `read_zarr`). Select the top-level group
+        // metadata files and ignore the rest rather than erroring on the first
+        // chunk we encounter.
         let verified_objects = top_level_zarr_meta_v3(objects);
+        if verified_objects.is_empty() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "No Zarr v3 metadata (zarr.json) found in the provided path(s)".to_string(),
+            ));
+        }
         let mut schemas = Vec::new();
         for object in verified_objects {
             let zarr_path = ZarrPath::new_from_object_meta(object.clone()).map_err(|e| {
@@ -186,6 +211,24 @@ impl FileFormat for ZarrFormat {
                         "Failed to read Zarr group as dataset: {e}"
                     ))
                 })?;
+
+                // Apply explicit dimensions, or narrow to a broadcast-compatible
+                // default so the inferred schema matches what the scan returns.
+                let any = match resolve_read_dimensions(
+                    &any,
+                    self.read_dimensions.clone(),
+                    Some("read_zarr"),
+                ) {
+                    Some(dims) => any
+                        .project(&DatasetProjection::new_with_dimension_projection(dims))
+                        .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "Failed to project Zarr dataset with dimensions: {e}"
+                            ))
+                        })?,
+                    None => any,
+                };
+
                 let schema = any_dataset_to_arrow_schema(&any).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
                         "Failed to derive Zarr Arrow schema: {e}"
@@ -250,7 +293,9 @@ impl FileFormat for ZarrFormat {
         // Preserve a projection that the scan pushed down into the incoming
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
-        let source = ZarrSource::new(table_schema).with_projection(projection);
+        let source = ZarrSource::new(table_schema)
+            .with_read_dimensions(self.read_dimensions.clone())
+            .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
@@ -262,7 +307,7 @@ impl FileFormat for ZarrFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(ZarrSource::new(table_schema))
+        Arc::new(ZarrSource::new(table_schema).with_read_dimensions(self.read_dimensions.clone()))
     }
 }
 
@@ -402,6 +447,60 @@ mod tests {
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 10, "LIMIT 10 should yield exactly 10 rows");
         assert_eq!(batches[0].num_columns(), 4);
+    }
+
+    /// An explicit `read_dimensions` projects the schema down to only the
+    /// variables whose dimensions are a subset of those requested.
+    #[tokio::test]
+    async fn explicit_read_dimensions_limits_schema() {
+        use datafusion::catalog::TableProvider;
+
+        let ctx = SessionContext::new();
+        let store_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test_files/gridded-example.zarr/"
+        );
+        let table_path = ListingTableUrl::parse(format!("file://{store_dir}")).unwrap();
+
+        let format: Arc<dyn FileFormat> = Arc::new(ZarrFormat::new(Some(vec!["time".to_string()])));
+        let listing_options = ListingOptions::new(format).with_file_extension("zarr.json");
+        let config = ListingTableConfig::new(table_path)
+            .with_listing_options(listing_options)
+            .infer_schema(&ctx.state())
+            .await
+            .unwrap();
+        let table = ListingTable::try_new(config).unwrap();
+        ctx.register_table("gridded_time", Arc::new(table)).unwrap();
+
+        let provider = ctx.table_provider("gridded_time").await.unwrap();
+        let names: Vec<String> = provider
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        assert!(names.contains(&"time".to_string()), "time present: {names:?}");
+        assert!(
+            !names.contains(&"analysed_sst".to_string()),
+            "analysed_sst depends on lat/lon and must be excluded: {names:?}"
+        );
+        assert!(
+            !names.contains(&"lat".to_string()),
+            "lat is on a different dimension and must be excluded: {names:?}"
+        );
+
+        // The narrowed scan still executes and returns the time column.
+        let rows: usize = ctx
+            .sql("SELECT time FROM gridded_time LIMIT 5")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert!(rows > 0, "should read some time rows");
     }
 
     #[tokio::test]

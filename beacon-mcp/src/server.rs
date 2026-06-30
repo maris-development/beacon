@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use beacon_core::runtime::Runtime;
+use beacon_core::AuthIdentity;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
@@ -48,14 +49,27 @@ impl ServerHandler for BeaconMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let args = request.arguments.unwrap_or_default();
-        match crate::catalog::dispatch(&self.runtime, request.name.as_ref(), args).await {
+        let identity = identity_from_context(&context);
+        match crate::catalog::dispatch(&self.runtime, request.name.as_ref(), args, identity).await {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             // Surface tool failures as an error result (not a protocol error) so
             // the model can read and react to the message.
             Err(error) => Ok(CallToolResult::error(vec![Content::text(error.to_string())])),
         }
     }
+}
+
+/// Recover the caller's [`AuthIdentity`], resolved by the `resolve_identity`
+/// middleware and carried in the HTTP request parts that the streamable-HTTP
+/// transport injects into the MCP request context. Falls back to a role-less
+/// identity (no access) when absent.
+fn identity_from_context(context: &RequestContext<RoleServer>) -> AuthIdentity {
+    context
+        .extensions
+        .get::<http::request::Parts>()
+        .and_then(|parts| parts.extensions.get::<AuthIdentity>().cloned())
+        .unwrap_or_else(AuthIdentity::empty)
 }

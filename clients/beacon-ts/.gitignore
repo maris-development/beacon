@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.tsbuildinfo
+# Fetched at codegen time; the committed generated/schema.d.ts is the source of truth.
+openapi.json

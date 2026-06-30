@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use beacon_core::extensions::{McpExtension, PresetExtension, PresetFilter};
 use beacon_core::runtime::Runtime;
+use beacon_core::AuthIdentity;
 use rmcp::model::Tool;
 use serde_json::{json, Map, Value};
 
@@ -34,6 +35,7 @@ pub async fn dispatch(
     runtime: &Arc<Runtime>,
     name: &str,
     args: Map<String, Value>,
+    identity: AuthIdentity,
 ) -> anyhow::Result<String> {
     match name {
         "list_tables" => list_tables_json(runtime).await,
@@ -43,9 +45,9 @@ pub async fn dispatch(
                 .get("sql")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("missing required 'sql' argument"))?;
-            run_sql_to_json(runtime, sql.to_string()).await
+            run_sql_to_json(runtime, sql.to_string(), identity).await
         }
-        other => run_table_tool(runtime, other, &args).await,
+        other => run_table_tool(runtime, other, &args, identity).await,
     }
 }
 
@@ -201,6 +203,7 @@ async fn run_table_tool(
     runtime: &Arc<Runtime>,
     tool_name: &str,
     args: &Map<String, Value>,
+    identity: AuthIdentity,
 ) -> anyhow::Result<String> {
     for table in runtime.list_tables() {
         let ext = runtime
@@ -218,7 +221,7 @@ async fn run_table_tool(
             continue;
         }
         let sql = build_table_sql(&table, mcp, ext.preset.as_ref(), args)?;
-        return run_sql_to_json(runtime, sql).await;
+        return run_sql_to_json(runtime, sql, identity).await;
     }
     anyhow::bail!("unknown tool '{tool_name}'")
 }

@@ -1,20 +1,25 @@
 [package]
 name = "beacon-api"
-version = "1.7.3"
+version = "1.8.0"
 edition = "2021"
 
 [target.'cfg(not(windows))'.dependencies]
-tikv-jemallocator = "0.6.0"
-pprof = { version = "0.15", features = ["flamegraph"] }
+# jemalloc is a production allocator; building its C source costs ~23s. Gate it
+# behind a non-default feature so dev/CI builds skip it. Release images enable
+# it via `cargo build --release -p beacon-api --features jemalloc` (see Dockerfile).
+tikv-jemallocator = {workspace = true, optional = true}
+pprof = {workspace = true}
+
+[features]
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
-axum = { version = "0.8.1", features = ["tracing", "multipart", "ws"] }
-axum-streams = { version = "0.25.0", features = ["arrow"]}
-tower-http = { version = "0.6.1", features = ["trace", "cors"] }
-base64 = "0.22.1"
+axum = {workspace = true}
+axum-streams = {workspace = true}
+tower-http = {workspace = true}
+base64 = {workspace = true}
 
 futures = { workspace = true }
-futures-util = { workspace = true }
 bytes = { workspace = true }
 arrow-flight = { workspace = true, features = ["flight-sql"] }
 arrow-ipc = { workspace = true }
@@ -29,15 +34,24 @@ serde = { workspace = true}
 serde_json = { workspace = true}
 anyhow = { workspace = true}
 arrow = { workspace = true}
-uuid = { version = "1.16.0" }
+uuid = {workspace = true}
 tracing = { workspace = true}
 tracing-subscriber = { workspace = true}
 tracing-appender = { workspace = true}
-tracing-panic = "0.1"
-tonic = "0.14.1"
-prost = "0.14.1"
+tracing-panic = {workspace = true}
+tonic = {workspace = true}
+prost = {workspace = true}
 
 # Local dependencies
 beacon-config = { path = "../beacon-config" }
 beacon-core = { path = "../beacon-core" }
 beacon-mcp = { path = "../beacon-mcp" }
+
+[dev-dependencies]
+# Enable beacon-core's test-only helper (ephemeral in-memory auth runtime) for the
+# Flight SQL integration tests so they don't contend on the shared SQLite directory.
+beacon-core = { path = "../beacon-core", features = ["test-util"] }
+# `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
+tower = { version = "0.5", features = ["util"] }
+# Temp storage roots for the admin dataset file-management HTTP tests.
+tempfile = { workspace = true }

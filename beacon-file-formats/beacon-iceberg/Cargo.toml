@@ -1,0 +1,28 @@
+[package]
+name = "beacon-iceberg"
+version = "1.7.3"
+edition = "2024"
+
+[dependencies]
+datafusion = { workspace = true }
+arrow = { workspace = true }
+async-trait = { workspace = true }
+object_store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+typetag = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+
+iceberg-rust = { workspace = true }
+datafusion_iceberg = { workspace = true }
+iceberg-file-catalog = { workspace = true }
+
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-config = { path = "../../beacon-config" }
+beacon-object-storage = { path = "../../beacon-object-storage" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

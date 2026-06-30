@@ -1,0 +1,9 @@
+{
+  "name": "beacon-clients",
+  "private": true,
+  "description": "npm workspace for Beacon's JavaScript/TypeScript clients.",
+  "workspaces": [
+    "beacon-ts",
+    "beacon-web"
+  ]
+}

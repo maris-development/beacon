@@ -5,6 +5,7 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
+use beacon_core::AuthIdentity;
 use futures::TryStreamExt;
 
 /// Hard cap on rows returned to the model, to keep tool output bounded.
@@ -12,8 +13,12 @@ pub const MAX_ROWS: usize = 1000;
 
 /// Run a read-only SQL query and return the rows as a JSON string. Executes as a
 /// non-super-user, so DDL/DML is rejected by the planner.
-pub async fn run_sql_to_json(runtime: &Arc<Runtime>, sql: String) -> anyhow::Result<String> {
-    let result = runtime.run_query(Query::sql(sql), false).await?;
+pub async fn run_sql_to_json(
+    runtime: &Arc<Runtime>,
+    sql: String,
+    identity: AuthIdentity,
+) -> anyhow::Result<String> {
+    let result = runtime.run_query(Query::sql(sql), identity).await?;
     let mut stream = result.into_record_stream()?;
 
     let mut batches: Vec<RecordBatch> = Vec::new();

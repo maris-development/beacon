@@ -23,6 +23,7 @@ the standard `AWS_*` names so they interoperate with existing AWS tooling (see
 | `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |
 | `BEACON_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` (case-insensitive). |
 | `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the HTTP API, OpenAPI document, and Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
+| `BEACON_WEB_UI_DIR` | `web` | Directory holding the built admin web UI. Served at `{BEACON_BASE_PATH}/admin` when the directory exists, and skipped otherwise. Resolved relative to the working directory (`/beacon/web` in the Docker image). |
 
 ## Admin
 
@@ -52,10 +53,12 @@ rejected rather than writing plaintext.
 | `BEACON_ENABLE_SQL` | `true` | Enable the raw SQL query interface. Set to `false` to disable it (the JSON query API stays available). |
 | `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. More is better for larger datasets and memory-heavy operations such as spatial joins and `GROUP BY`. |
 | `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request omits the source. Only applies to the JSON query API — SQL queries must always specify a source. |
+| `BEACON_DEFAULT_TABLE_ENGINE` | `lance` | Storage engine for [managed tables](../sql/managed-tables.md) created with `CREATE TABLE`: `lance` (local, supports indexes) or `iceberg` (object-store). Can be overridden per session with `SET beacon.table_engine = '…'`. |
 | `BEACON_ENABLE_PUSHDOWN_PROJECTION` | `true` | Push column projection down into file readers so only requested columns are decoded. |
 | `BEACON_SANITIZE_SCHEMA` | `false` | Sanitize dataset schemas (normalize column names/types) during discovery. |
 | `BEACON_ST_WITHIN_POINT_CACHE_SIZE` | `10000` | Cache size for `st_within_point` geometry lookups. |
 | `BEACON_BATCH_SIZE` | `64000` | Batch size, in rows, for NetCDF reads (local and MPIO). |
+| `BEACON_STATS_CACHE_CAPACITY` | `10000` | Maximum number of per-file statistics entries cached for query pruning. Read once at startup. |
 
 ### SQL result-stream coalescing
 
@@ -155,6 +158,7 @@ external tables.
 | `BEACON_CORS_ALLOWED_METHODS` | `GET,POST,PUT,DELETE,OPTIONS` | Allowed HTTP methods. |
 | `BEACON_CORS_ALLOWED_ORIGINS` | `*` | Allowed origins. |
 | `BEACON_CORS_ALLOWED_HEADERS` | `Content-Type,Authorization` | Allowed request headers. |
+| `BEACON_CORS_EXPOSE_HEADERS` | `x-beacon-query-id` | Response headers exposed to browser JS on cross-origin requests. The default lets a cross-origin UI (e.g. the Vite dev server) read the `x-beacon-query-id` the SDK surfaces. |
 | `BEACON_CORS_ALLOWED_CREDENTIALS` | `false` | Allow credentials. |
 | `BEACON_CORS_MAX_AGE` | `3600` | Preflight cache duration (seconds). |
 

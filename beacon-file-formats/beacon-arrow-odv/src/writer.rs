@@ -1716,6 +1716,198 @@ mod tests {
     use crate::writer::OdvOptions;
 
     use super::OdvBatchType;
+    use super::{ColumnInfo, OdvBatchSchemaMapper, OdvFile, Profiles, Trajectories};
+
+    /// A user-facing input schema (before `map_schema` adds Station/Type).
+    fn user_input_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("Cruise", DataType::Utf8, true),
+            Field::new("yyyy-MM-ddTHH:mm:ss.SSS", DataType::Utf8, true),
+            Field::new("Longitude [degrees east]", DataType::Float64, true),
+            Field::new("Latitude [degrees north]", DataType::Float64, true),
+            Field::new("Depth [m]", DataType::Float64, true),
+        ]))
+    }
+
+    fn user_input_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["c1"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["2020-01-01T00:00:00.000"])),
+                Arc::new(Float64Array::from(vec![1.5])),
+                Arc::new(Float64Array::from(vec![2.5])),
+                Arc::new(Float64Array::from(vec![10.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn odv_file_writes_profiles_header_and_data() {
+        let schema = user_input_schema();
+        let opts = OdvOptions::default();
+
+        let mut file =
+            OdvFile::<Profiles, Vec<u8>>::new(Vec::new(), &opts, schema.clone()).unwrap();
+        file.write_batch(user_input_batch(&schema)).unwrap();
+        let text = String::from_utf8(file.finish().unwrap()).unwrap();
+
+        // ODV preamble + type header.
+        assert!(text.contains("//<Encoding>UTF-8</Encoding>"));
+        assert!(text.contains("//<DataType>Profiles</DataType>"));
+        // Required metadata variables.
+        assert!(text.contains("<MetaVariable> label=\"Cruise\""));
+        assert!(text.contains("<MetaVariable> label=\"Station\""));
+        // Depth is the primary variable for profiles.
+        assert!(text.contains("is_primary_variable=\"T\""));
+        assert!(text.contains("time_ISO8601"));
+        // Float columns map to ODV value_type FLOAT.
+        assert!(text.contains("value_type=\"FLOAT\""));
+        // The data row is written via the CSV writer.
+        assert!(text.contains("c1"));
+    }
+
+    #[test]
+    fn odv_file_writes_trajectories_header() {
+        // Trajectories take the TimeSeries|Trajectories header branch (time is the
+        // primary variable, marked "T").
+        let schema = user_input_schema();
+        let opts = OdvOptions::default();
+
+        let mut file =
+            OdvFile::<Trajectories, Vec<u8>>::new(Vec::new(), &opts, schema.clone()).unwrap();
+        file.write_batch(user_input_batch(&schema)).unwrap();
+        let text = String::from_utf8(file.finish().unwrap()).unwrap();
+
+        assert!(text.contains("//<DataType>Trajectories</DataType>"));
+        assert!(text.contains("is_primary_variable=\"T\""));
+    }
+
+    #[test]
+    fn try_from_arrow_schema_classifies_data_and_meta_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temperature", DataType::Float64, true),
+            Field::new("temperature_qf", DataType::Utf8, true),
+            Field::new("salinity", DataType::Float64, true),
+            Field::new("platform", DataType::Utf8, true),
+        ]));
+
+        let opts = OdvOptions::try_from_arrow_schema(schema).unwrap();
+
+        // A column with a sibling `_qf`/`_qc` column becomes a data column.
+        assert_eq!(opts.data_columns.len(), 1);
+        assert_eq!(opts.data_columns[0].column_name, "temperature");
+        assert_eq!(
+            opts.data_columns[0].qf_column.as_deref(),
+            Some("temperature_qf")
+        );
+
+        // Columns with no quality flag become metadata columns; the `_qf` column
+        // itself is skipped.
+        let meta: Vec<&str> = opts
+            .meta_columns
+            .iter()
+            .map(|c| c.column_name.as_str())
+            .collect();
+        assert_eq!(meta, vec!["salinity", "platform"]);
+    }
+
+    #[test]
+    fn default_options_use_seadatanet_conventions() {
+        let opts = OdvOptions::default();
+        assert_eq!(opts.key_column, "Cruise");
+        assert_eq!(opts.qf_schema, "SEADATANET");
+        assert_eq!(opts.depth_column.column_name, "Depth [m]");
+        assert_eq!(opts.latitude_column.column_name, "Latitude [degrees north]");
+        assert!(opts.data_columns.is_empty());
+        assert!(opts.meta_columns.is_empty());
+    }
+
+    #[test]
+    fn builder_methods_override_fields() {
+        let ci = ColumnInfo {
+            column_name: "lon".to_string(),
+            comment: None,
+            significant_digits: None,
+            qf_column: None,
+            units: None,
+        };
+        let opts = OdvOptions::default()
+            .with_longitude_column(ci)
+            .with_key_column("KEY".to_string())
+            .with_qf_schema("CUSTOM".to_string());
+
+        assert_eq!(opts.longitude_column.column_name, "lon");
+        assert_eq!(opts.key_column, "KEY");
+        assert_eq!(opts.qf_schema, "CUSTOM");
+    }
+
+    fn required_input_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("Cruise", DataType::Utf8, true),
+            Field::new("Station", DataType::Utf8, true),
+            Field::new("Type", DataType::Utf8, true),
+            Field::new("yyyy-MM-ddTHH:mm:ss.SSS", DataType::Utf8, true),
+            Field::new("Longitude [degrees east]", DataType::Float64, true),
+            Field::new("Latitude [degrees north]", DataType::Float64, true),
+            Field::new("Depth [m]", DataType::Float64, true),
+        ]))
+    }
+
+    #[test]
+    fn batch_schema_mapper_projects_and_renames() {
+        let input_schema = required_input_schema();
+        let mapper =
+            OdvBatchSchemaMapper::new(input_schema.clone(), OdvOptions::default()).unwrap();
+
+        // Required columns expand to: Cruise, Station, Type, date, longitude,
+        // latitude, time_ISO8601, depth.
+        assert_eq!(mapper.projection().len(), 8);
+        let out = mapper.output_schema();
+        let names: Vec<&str> = out.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names.len(), 8);
+        assert!(names.contains(&"Cruise"));
+        assert!(names.contains(&"time_ISO8601"));
+        assert!(names.contains(&"Longitude [degrees east]"));
+
+        let batch = RecordBatch::try_new(
+            input_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["c1"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["s1"])),
+                Arc::new(StringArray::from(vec!["B"])),
+                Arc::new(StringArray::from(vec!["2020-01-01T00:00:00.000"])),
+                Arc::new(Float64Array::from(vec![1.5])),
+                Arc::new(Float64Array::from(vec![2.5])),
+                Arc::new(Float64Array::from(vec![10.0])),
+            ],
+        )
+        .unwrap();
+
+        let mapped = mapper.map(batch);
+        assert_eq!(mapped.num_columns(), 8);
+        assert_eq!(mapped.num_rows(), 1);
+        assert_eq!(mapped.schema(), out);
+        // The Cruise column is the first projected column and keeps its value.
+        let cruise = mapped
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(cruise.value(0), "c1");
+    }
+
+    #[test]
+    fn batch_schema_mapper_errors_on_missing_required_column() {
+        // Only the key column is present; Station/Type/etc. are missing.
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "Cruise",
+            DataType::Utf8,
+            true,
+        )]));
+        assert!(OdvBatchSchemaMapper::new(input_schema, OdvOptions::default()).is_err());
+    }
 
     // #[test]
     // fn test_key_batches() {

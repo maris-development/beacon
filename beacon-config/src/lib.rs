@@ -19,6 +19,8 @@ pub use beacon_object_storage::{S3Config, StorageConfig};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub admin: AdminConfig,
+    pub auth: AuthConfig,
+    pub oidc: OidcConfig,
     pub server: ServerConfig,
     pub runtime: RuntimeConfig,
     pub sql: SqlConfig,
@@ -42,6 +44,35 @@ pub struct AdminConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct AuthConfig {
+    /// Whether the built-in anonymous user (empty password) is seeded so unauthenticated requests
+    /// resolve to its roles. When disabled, unauthenticated requests have no roles.
+    pub anonymous_enabled: bool,
+    /// Whether query-time authorization (read enforcement) is applied. When false, queries are not
+    /// privilege-checked beyond the existing super-user DDL/DML gate — backwards compatible default.
+    pub enforce: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct OidcConfig {
+    /// Whether an external OIDC/OAuth2 provider is enabled alongside local users. When enabled,
+    /// `Bearer` JWT access tokens are validated against `jwks_url` and mapped to roles.
+    pub enabled: bool,
+    /// Expected token issuer (`iss` claim).
+    pub issuer: String,
+    /// URL of the issuer's JWKS document (signing keys).
+    pub jwks_url: String,
+    /// Expected audience (`aud` claim); empty disables audience validation.
+    pub audience: String,
+    /// Dotted path to the claim holding the principal's role names (e.g. `realm_access.roles`).
+    pub roles_claim: String,
+    /// Dotted path to the claim holding the principal's username (e.g. `preferred_username`).
+    pub username_claim: String,
+    /// How long (seconds) a fetched JWKS document is cached before being re-fetched.
+    pub jwks_cache_ttl_secs: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
@@ -49,6 +80,9 @@ pub struct ServerConfig {
     pub worker_threads: usize,
     /// URL prefix for all HTTP routes, e.g. `/base-path`. Empty string means serve at `/`.
     pub base_path: String,
+    /// Directory holding the built admin web UI (Vite `dist/`). Served at
+    /// `{base_path}/admin` when the directory exists; skipped otherwise.
+    pub web_ui_dir: String,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +100,42 @@ pub struct SqlConfig {
     pub default_table: String,
     pub enable_pushdown_projection: bool,
     pub stream_coalesce: SqlStreamCoalesceConfig,
+    /// Storage engine used for managed `CREATE TABLE` when the statement does not
+    /// override it (via `SET beacon.table_engine = '…'`).
+    pub default_table_engine: TableEngine,
+}
+
+/// The storage engine backing a beacon-managed table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableEngine {
+    /// Lance: local-filesystem, columnar, versioned (default).
+    #[default]
+    Lance,
+    /// Apache Iceberg: object-store-backed lakehouse table.
+    Iceberg,
+}
+
+impl TableEngine {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TableEngine::Lance => "lance",
+            TableEngine::Iceberg => "iceberg",
+        }
+    }
+}
+
+impl std::str::FromStr for TableEngine {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "lance" => Ok(TableEngine::Lance),
+            "iceberg" => Ok(TableEngine::Iceberg),
+            other => Err(format!(
+                "unknown table engine '{other}', expected 'lance' or 'iceberg'"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +162,10 @@ pub struct CorsConfig {
     pub allowed_methods: String,
     pub allowed_origins: String,
     pub allowed_headers: String,
+    /// Response headers exposed to browser JS on cross-origin requests. Defaults
+    /// to `x-beacon-query-id` so a cross-origin UI (e.g. the Vite dev server) can
+    /// read the query id the SDK surfaces; same-origin requests can already.
+    pub expose_headers: String,
     pub allowed_credentials: bool,
     pub max_age: u64,
 }
@@ -165,6 +239,24 @@ struct RawConfig {
     admin_username: String,
     #[envconfig(from = "BEACON_ADMIN_PASSWORD", default = "beacon-password")]
     admin_password: String,
+    #[envconfig(from = "BEACON_AUTH_ANONYMOUS_ENABLED", default = "true")]
+    auth_anonymous_enabled: bool,
+    #[envconfig(from = "BEACON_AUTH_ENFORCE", default = "false")]
+    auth_enforce: bool,
+    #[envconfig(from = "BEACON_OIDC_ENABLED", default = "false")]
+    oidc_enabled: bool,
+    #[envconfig(from = "BEACON_OIDC_ISSUER", default = "")]
+    oidc_issuer: String,
+    #[envconfig(from = "BEACON_OIDC_JWKS_URL", default = "")]
+    oidc_jwks_url: String,
+    #[envconfig(from = "BEACON_OIDC_AUDIENCE", default = "")]
+    oidc_audience: String,
+    #[envconfig(from = "BEACON_OIDC_ROLES_CLAIM", default = "realm_access.roles")]
+    oidc_roles_claim: String,
+    #[envconfig(from = "BEACON_OIDC_USERNAME_CLAIM", default = "preferred_username")]
+    oidc_username_claim: String,
+    #[envconfig(from = "BEACON_OIDC_JWKS_CACHE_TTL_SECS", default = "300")]
+    oidc_jwks_cache_ttl_secs: u64,
     #[envconfig(from = "BEACON_PORT", default = "5001")]
     port: u16,
     #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
@@ -177,6 +269,8 @@ struct RawConfig {
     vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     default_table: String,
+    #[envconfig(from = "BEACON_DEFAULT_TABLE_ENGINE", default = "lance")]
+    default_table_engine: String,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
     sanitize_schema: bool,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "true")]
@@ -212,6 +306,10 @@ struct RawConfig {
     worker_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
     base_path: String,
+    /// Directory containing the built admin web UI. Defaults to `web` (resolved
+    /// relative to the working directory; `/beacon/web` in the Docker image).
+    #[envconfig(from = "BEACON_WEB_UI_DIR", default = "web")]
+    web_ui_dir: String,
 
     #[envconfig(from = "BEACON_S3_BUCKET")]
     s3_bucket: Option<String>,
@@ -228,12 +326,27 @@ struct RawConfig {
     aws_region: Option<String>,
     #[envconfig(from = "BEACON_S3_ALLOW_HTTP", default = "true")]
     s3_allow_http: bool,
-    // Filesystem change events are on by default for the local datasets store;
-    // set BEACON_ENABLE_FS_EVENTS=false to disable the watcher.
-    #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "true")]
+    // Filesystem change events for the local datasets store. Off by default: the
+    // OS watcher (notify/FSEvents) can lag or replay stale events, and listings now
+    // read straight through to the backing store, so the watcher-maintained cache
+    // is not needed for correctness. Enable (BEACON_ENABLE_FS_EVENTS=true) to get
+    // live auto-refresh of external tables and event-driven crawler triggering when
+    // files change on disk (crawlers otherwise still run on their interval).
+    #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "false")]
     enable_fs_events: bool,
     #[envconfig(from = "BEACON_ENABLE_S3_EVENTS", default = "false")]
     enable_s3_events: bool,
+    // Maximum size, in bytes, accepted for a single dataset upload through the
+    // admin API. `0` disables the cap. Default ~5 GiB.
+    #[envconfig(from = "BEACON_MAX_UPLOAD_BYTES", default = "5368709120")]
+    max_upload_bytes: u64,
+    // Part size advertised for chunked (resumable) uploads. Default 8 MiB (≥ S3's
+    // 5 MiB minimum part size).
+    #[envconfig(from = "BEACON_UPLOAD_PART_SIZE", default = "8388608")]
+    upload_part_size: usize,
+    // Idle timeout (seconds) before an abandoned chunked upload session is aborted.
+    #[envconfig(from = "BEACON_UPLOAD_SESSION_TTL_SECS", default = "3600")]
+    upload_session_ttl_secs: u64,
 
     // Others
     #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
@@ -251,6 +364,11 @@ struct RawConfig {
         default = "Content-Type,Authorization"
     )]
     allowed_headers: String,
+    #[envconfig(
+        from = "BEACON_CORS_EXPOSE_HEADERS",
+        default = "x-beacon-query-id"
+    )]
+    expose_headers: String,
     #[envconfig(from = "BEACON_CORS_ALLOWED_CREDENTIALS", default = "false")]
     allowed_credentials: bool,
     #[envconfig(from = "BEACON_CORS_MAX_AGE", default = "3600")]
@@ -325,12 +443,26 @@ impl From<RawConfig> for Config {
                 username: raw.admin_username,
                 password: raw.admin_password,
             },
+            auth: AuthConfig {
+                anonymous_enabled: raw.auth_anonymous_enabled,
+                enforce: raw.auth_enforce,
+            },
+            oidc: OidcConfig {
+                enabled: raw.oidc_enabled,
+                issuer: raw.oidc_issuer,
+                jwks_url: raw.oidc_jwks_url,
+                audience: raw.oidc_audience,
+                roles_claim: raw.oidc_roles_claim,
+                username_claim: raw.oidc_username_claim,
+                jwks_cache_ttl_secs: raw.oidc_jwks_cache_ttl_secs,
+            },
             server: ServerConfig {
                 port: raw.port,
                 host: raw.host,
                 log_level: raw.log_level,
                 worker_threads: raw.worker_threads,
                 base_path: raw.base_path,
+                web_ui_dir: raw.web_ui_dir,
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
@@ -348,6 +480,13 @@ impl From<RawConfig> for Config {
                     target_rows: raw.sql_stream_coalesce_target_rows,
                     flush_timeout_ms: raw.sql_stream_coalesce_flush_timeout_ms,
                     max_rows: raw.sql_stream_coalesce_max_rows,
+                },
+                default_table_engine: match raw.default_table_engine.parse() {
+                    Ok(engine) => engine,
+                    Err(e) => {
+                        tracing::warn!("invalid BEACON_DEFAULT_TABLE_ENGINE: {e}; defaulting to lance");
+                        TableEngine::default()
+                    }
                 },
             },
             flight_sql: FlightSqlConfig {
@@ -380,6 +519,9 @@ impl From<RawConfig> for Config {
                     data_dir: root,
                     enable_fs_events: raw.enable_fs_events,
                     enable_s3_events: raw.enable_s3_events,
+                    max_upload_bytes: raw.max_upload_bytes,
+                    upload_part_size: raw.upload_part_size,
+                    upload_session_ttl_secs: raw.upload_session_ttl_secs,
                     s3,
                 }
             },
@@ -387,6 +529,7 @@ impl From<RawConfig> for Config {
                 allowed_methods: raw.allowed_methods,
                 allowed_origins: raw.allowed_origins,
                 allowed_headers: raw.allowed_headers,
+                expose_headers: raw.expose_headers,
                 allowed_credentials: raw.allowed_credentials,
                 max_age: raw.max_age,
             },
@@ -598,6 +741,10 @@ lazy_static! {
         object_store::path::Path::from("tables");
     pub static ref TABLES_DIR: PathBuf = ensure_dir(DATA_DIR.join("tables"));
 
+    /// The path to the users directory, holding the persisted auth directory
+    /// database (users, roles, and privilege grants), next to the tables directory.
+    pub static ref USERS_DIR: PathBuf = ensure_dir(DATA_DIR.join("users"));
+
     pub static ref TMP_DIR: PathBuf = ensure_dir(DATA_DIR.join("tmp"));
 
     /// The path to the indexes directory
@@ -615,7 +762,7 @@ lazy_static! {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_base_path;
+    use super::{decode_master_key, normalize_base_path, TableEngine};
 
     #[test]
     fn empty_and_blank_serve_at_root() {
@@ -656,5 +803,47 @@ mod tests {
     #[test]
     fn rejects_empty_internal_segment() {
         assert!(normalize_base_path("a//b").is_err());
+    }
+
+    #[test]
+    fn table_engine_parses_case_insensitively_and_trims() {
+        assert_eq!("lance".parse::<TableEngine>(), Ok(TableEngine::Lance));
+        assert_eq!("ICEBERG".parse::<TableEngine>(), Ok(TableEngine::Iceberg));
+        assert_eq!("  Iceberg  ".parse::<TableEngine>(), Ok(TableEngine::Iceberg));
+        assert!("postgres".parse::<TableEngine>().is_err());
+    }
+
+    #[test]
+    fn table_engine_as_str_round_trips_and_defaults_to_lance() {
+        assert_eq!(TableEngine::Lance.as_str(), "lance");
+        assert_eq!(TableEngine::Iceberg.as_str(), "iceberg");
+        assert_eq!(TableEngine::default(), TableEngine::Lance);
+        for e in [TableEngine::Lance, TableEngine::Iceberg] {
+            assert_eq!(e.as_str().parse::<TableEngine>(), Ok(e));
+        }
+    }
+
+    #[test]
+    fn decode_master_key_accepts_exactly_32_bytes() {
+        use base64::Engine;
+        let raw = [7u8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        assert_eq!(decode_master_key(&b64), Ok(raw));
+        // Surrounding whitespace is trimmed before decoding.
+        assert_eq!(decode_master_key(&format!("  {b64}\n")), Ok(raw));
+    }
+
+    #[test]
+    fn decode_master_key_rejects_invalid_base64() {
+        let err = decode_master_key("not valid base64!!!").unwrap_err();
+        assert!(err.contains("not valid base64"), "got: {err}");
+    }
+
+    #[test]
+    fn decode_master_key_rejects_wrong_length() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
+        let err = decode_master_key(&b64).unwrap_err();
+        assert!(err.contains("expected 32 bytes, got 4"), "got: {err}");
     }
 }

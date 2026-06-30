@@ -1,39 +1,36 @@
 [package]
 name = "beacon-core"
-version = "1.7.3"
+version = "1.8.0"
 edition = "2021"
 
 [dependencies]
 futures = { workspace=true}
-futures-util = { workspace=true}
-bytes = { workspace=true}
 anyhow = { workspace=true}
 tempfile = { workspace=true}
 serde = { workspace=true}
 serde_json = { workspace=true}
 utoipa = { workspace=true}
-typetag =  { workspace=true}
 async-trait = { workspace=true }
 datafusion = { workspace=true }
 datafusion-federation = { workspace=true }
 geodatafusion = { workspace=true }
 arrow = { workspace=true}
-glob = { workspace = true}
 tokio = { workspace = true }
-indexmap = { workspace = true }
 object_store = { workspace = true }
-async-stream = "0.3.6"
+bytes = { workspace = true }
+thiserror = { workspace = true }
+async-stream = {workspace = true}
 parking_lot = { workspace = true}
-sysinfo = { version = "0.35.2", features = ["serde"]}
-uuid = "1.16.0"
-inventory = "0.3.18"
-pathdiff = "0.2.3"
+sysinfo = {workspace = true}
+uuid = {workspace = true}
 chrono = { workspace = true }
-cast = "0.3.0"
-geojson = "0.24.2"
+cast = {workspace = true}
+geojson = {workspace = true}
 
 tracing = { workspace=true}
 # Local dependencies
+beacon-auth = { path = "../beacon-auth" }
+beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
@@ -48,12 +45,19 @@ beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
 beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-beacon-common = { path = "../beacon-common" }
-beacon-iceberg = { path = "../beacon-iceberg" }
+beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
+beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
-beacon-nd-array = { path = "../beacon-file-formats/beacon-nd-array" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
+
+[features]
+# Exposes Runtime::new_with_in_memory_auth so other crates' tests can build a
+# runtime with an ephemeral (non-persistent) auth context.
+test-util = []
 
 [dev-dependencies]
 deltalake = { workspace = true }
-url = "2"
+url = {workspace = true}
+# Self-reference enabling `test-util` for this crate's own integration tests
+# (tests/), so they can build an ephemeral in-memory-auth runtime.
+beacon-core = { path = ".", features = ["test-util"] }

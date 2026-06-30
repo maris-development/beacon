@@ -9,8 +9,8 @@ datafusion = { workspace = true }
 anyhow = { workspace = true }
 
 object_store = { workspace = true }
-url = "2.5.4"
-tempfile = "3.15.0"
+url = {workspace = true}
+tempfile = {workspace = true}
 
 typetag =  { workspace=true}
 async-trait = { workspace=true}
@@ -26,7 +26,8 @@ beacon-common = { path = "../beacon-common" }
 beacon-config = { path = "../beacon-config" }
 beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
-beacon-iceberg = { path = "../beacon-iceberg" }
+beacon-iceberg = { path = "../beacon-file-formats/beacon-iceberg" }
+beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 

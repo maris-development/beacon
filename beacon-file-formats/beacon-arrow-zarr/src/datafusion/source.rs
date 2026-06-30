@@ -8,11 +8,13 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use beacon_nd_array::{
     arrow::{
         batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
         pushdown_filter::PushdownFilter, schema::any_dataset_to_arrow_schema,
     },
+    dataset::resolve_read_dimensions,
     projection::DatasetProjection,
 };
 use datafusion::{
@@ -49,6 +51,8 @@ pub struct ZarrSource {
     execution_plan_metrics: ExecutionPlanMetricsSet,
     batch_size: usize,
     predicate: Option<Arc<dyn PhysicalExpr>>,
+    /// Explicit dimensions to read, or `None` to auto-select a default.
+    read_dimensions: Option<Vec<String>>,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
 }
@@ -61,8 +65,16 @@ impl ZarrSource {
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             batch_size: usize::MAX,
             predicate: None,
+            read_dimensions: None,
             projection: None,
         }
+    }
+
+    /// Returns a copy of this source that reads only the variables belonging to
+    /// `read_dimensions` (or auto-selects a default when `None`).
+    pub fn with_read_dimensions(mut self, read_dimensions: Option<Vec<String>>) -> Self {
+        self.read_dimensions = read_dimensions;
+        self
     }
 
     /// Returns a copy of this source carrying the given projection. Used to
@@ -88,6 +100,7 @@ impl FileSource for ZarrSource {
             projected_schema,
             predicate: self.predicate.clone(),
             batch_size: self.batch_size,
+            read_dimensions: self.read_dimensions.clone(),
             metrics: self.execution_plan_metrics.clone(),
             partition,
         }))
@@ -181,6 +194,7 @@ struct ZarrOpener {
     projected_schema: SchemaRef,
     predicate: Option<Arc<dyn PhysicalExpr>>,
     batch_size: usize,
+    read_dimensions: Option<Vec<String>>,
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
 }
@@ -195,6 +209,7 @@ impl FileOpener for ZarrOpener {
         let projected_schema = self.projected_schema.clone();
         let predicate = self.predicate.clone();
         let batch_size = self.batch_size;
+        let read_dimensions = self.read_dimensions.clone();
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
 
         let fut = async move {
@@ -214,6 +229,22 @@ impl FileOpener for ZarrOpener {
             let full = dataset_from_group(&group, None).await.map_err(|e| {
                 DataFusionError::Execution(format!("Failed to read Zarr group as dataset: {e}"))
             })?;
+
+            // Apply explicit dimensions, or narrow to a broadcast-compatible
+            // default so `SELECT *` cannot fail when variables live on
+            // incompatible dimension sets. No log label: this runs per
+            // file/partition (logging happens in schema inference).
+            let full = match resolve_read_dimensions(&full, read_dimensions, None) {
+                Some(dims) => full
+                    .project(&DatasetProjection::new_with_dimension_projection(dims))
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Failed to project Zarr dataset with dimensions: {e}"
+                        ))
+                    })?,
+                None => full,
+            };
+
             let file_schema: SchemaRef = Arc::new(any_dataset_to_arrow_schema(&full).map_err(
                 |e| DataFusionError::Execution(format!("Failed to derive Zarr Arrow schema: {e}")),
             )?);
@@ -228,7 +259,64 @@ impl FileOpener for ZarrOpener {
                 .map(|(i, _)| i)
                 .collect();
             if projection.is_empty() {
-                return Ok(futures::stream::empty().boxed());
+                // COUNT(*): reading zero columns yields an empty stream (count 0).
+                // Drive with the highest-dimensionality variable so the row count
+                // is the full broadcast count (a scalar attribute gives 1 row),
+                // plus any predicate columns (PushdownFilter matches by name), and
+                // emit zero-column batches carrying the row counts.
+                let driver_idx = full
+                    .fields()
+                    .keys()
+                    .max_by_key(|name| {
+                        full.get_array(name)
+                            .map(|a| a.shape().iter().product::<usize>())
+                            .unwrap_or(0)
+                    })
+                    .and_then(|name| file_schema.index_of(name).ok())
+                    .unwrap_or(0);
+                let mut driver: Vec<usize> = vec![driver_idx];
+                if let Some(pred) = &predicate {
+                    for col in datafusion::physical_expr::utils::collect_columns(pred) {
+                        if let Ok(idx) = file_schema.index_of(col.name()) {
+                            driver.push(idx);
+                        }
+                    }
+                }
+                driver.sort_unstable();
+                driver.dedup();
+
+                let projected = full
+                    .project(&DatasetProjection::new_with_index_projection(driver))
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Failed to project Zarr dataset for count: {e}"
+                        ))
+                    })?;
+                let pushdown_filter = predicate.map(PushdownFilter::new);
+                let count_schema = projected_schema.clone();
+                let stream = any_dataset_as_record_batch_stream(
+                    projected,
+                    batch_size,
+                    pushdown_filter,
+                    metrics,
+                )
+                .map(move |batch| {
+                    let batch = batch.map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Error reading Zarr dataset as Arrow: {e}"
+                        ))
+                    })?;
+                    RecordBatch::try_new_with_options(
+                        count_schema.clone(),
+                        vec![],
+                        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+                    )
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!("Failed to build count batch: {e}"))
+                    })
+                })
+                .boxed();
+                return Ok(stream);
             }
 
             // Adapt batches (read with `projection`) onto the projected output

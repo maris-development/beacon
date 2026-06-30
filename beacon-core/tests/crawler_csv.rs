@@ -14,7 +14,7 @@ use futures::TryStreamExt;
 
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
-        .run_query(Query::sql(sql.to_string()), true)
+        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
         .await
         .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
         .into_record_stream()

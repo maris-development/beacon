@@ -75,15 +75,15 @@ SQL is sent over the HTTP API (`POST /api/query`, with `BEACON_ENABLE_SQL=true`)
 
 | Format | Notes |
 | ------ | ----- |
-| NetCDF | `.nc`, `.nc4`, `.cdf` |
-| Zarr | v2 and v3 |
+| NetCDF | `.nc` |
+| Zarr | v3 stores (`zarr.json`) |
 | Atlas | Array store optimized for NetCDF/Zarr query performance |
 | Parquet | Native columnar, Hive partitioning supported |
 | [GeoParquet](/docs/1.7.3/data-lake/geoparquet) | Parquet with geometry columns (WKB) |
 | GeoTIFF / COG | Cloud-Optimized GeoTIFF supported |
 | ODV ASCII | Ocean Data View spreadsheet format |
 | CSV | Header row required, delimiter configurable |
-| Arrow IPC | `.arrow`, `.ipc` stream files |
+| Arrow IPC | `.arrow`, `.feather` stream files |
 | [Delta Lake](/docs/1.7.3/data-lake/delta-lake) | Read & append, with time travel |
 | [Beacon Binary Format](/docs/1.7.3/data-lake/datasets#beacon-binary-format-bbf) | Beacon's native columnar format (BBF) |
 
@@ -94,7 +94,7 @@ A few terms used throughout the docs:
 - **[Dataset](/docs/1.7.3/data-lake/datasets)** — an individual file Beacon reads in place (NetCDF, Zarr, Parquet, …).
 - **[External table](/docs/1.7.3/data-lake/external-tables)** — a registered name over one or more files (a folder or glob pattern), with a merged schema across them.
 - **[View](/docs/1.7.3/data-lake/view)** — a saved query exposed as a table.
-- **[Managed table](/docs/1.7.3/sql/managed-tables)** — an Iceberg-backed table Beacon owns and can mutate (`INSERT` / `UPDATE` / `DELETE`).
+- **[Managed table](/docs/1.7.3/sql/managed-tables)** — a table Beacon owns and can mutate (`INSERT` / `UPDATE` / `DELETE` / `ALTER` / `CREATE INDEX`), backed by Lance (default) or Iceberg.
 
 ## Next steps
 

@@ -1,7 +1,8 @@
-# Beacon — ARCO Data Lakehouse Query Engine
+# Beacon — Data Lakehouse Query Engine
 
 [![Release](https://img.shields.io/github/v/release/maris-development/beacon?label=release&color=success)](https://github.com/maris-development/beacon/releases)
 [![Docs](https://img.shields.io/github/actions/workflow/status/maris-development/beacon/pages.yml?label=docs)](https://maris-development.github.io/beacon/)
+[![codecov](https://codecov.io/gh/maris-development/beacon/branch/main/graph/badge.svg)](https://codecov.io/gh/maris-development/beacon)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/maris-development/beacon/pkgs/container/beacon)
 [![License](https://img.shields.io/github/license/maris-development/beacon)](LICENSE)
 [![Slack](https://img.shields.io/badge/slack-join-4A154B?logo=slack&logoColor=white)](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg)
@@ -10,8 +11,11 @@ Beacon is a lightweight, high-performance **data lakehouse query engine** for sc
 
 It is built on [Apache Arrow](https://arrow.apache.org/) and [Apache DataFusion](https://datafusion.apache.org/), so queries run on a columnar, vectorized engine while reading native scientific formats such as NetCDF, Zarr, Parquet, and ODV.
 
+> 🚀 **In a hurry?** The [Quick Start guide](QUICKSTART.md) gets you running and querying — with the admin UI — in a couple of minutes.
+
 ## Table of contents
 
+- [Quick Start guide](QUICKSTART.md)
 - [Why Beacon](#why-beacon)
 - [Features](#features)
 - [Concepts](#concepts)
@@ -33,7 +37,7 @@ It is built on [Apache Arrow](https://arrow.apache.org/) and [Apache DataFusion]
 
 - **Input formats:** Parquet, GeoParquet, NetCDF, Zarr, Atlas, ODV, CSV, Arrow IPC, GeoTIFF, Delta Lake, and the native Beacon Binary Format (BBF).
 - **Output formats:** Parquet, GeoParquet, NetCDF, ND-NetCDF, CSV, Arrow IPC, and ODV.
-- **Two query interfaces:** a structured **JSON query** API and read-only raw **SQL** (enabled by default; toggle with `BEACON_ENABLE_SQL`).
+- **Two query interfaces:** a structured **JSON query** API and raw **SQL** (enabled by default; toggle with `BEACON_ENABLE_SQL`).
 - **Arrow Flight SQL** endpoint for high-throughput clients (enabled by default).
 - **Storage backends:** local filesystem and S3-compatible object storage, with optional change-event watching.
 - **Interactive API docs** via Swagger UI (`/swagger`) and Scalar (`/scalar`).
@@ -90,7 +94,7 @@ Start it with `docker compose up -d`, then open the interactive API docs at <htt
 
 Add data by placing files (e.g. `.nc`, `.zarr`, `.parquet`, `.csv`) into `./datasets` — the container discovers them through the mounted volume.
 
-> Prefer a native build or a non-Docker install? See the [installation guide](https://maris-development.github.io/beacon/docs/1.7.3/getting-started.html#local).
+> See the [installation guide](https://maris-development.github.io/beacon/docs/1.8.0/getting-started.html#local).
 
 ## Query examples
 
@@ -98,7 +102,7 @@ Both examples below post to the same endpoint and stream back a file in the requ
 
 ### SQL
 
-> SQL is read-only and enabled by default. Set `BEACON_ENABLE_SQL=false` to disable it.
+> SQL is enabled by default but can be disabled. Set `BEACON_ENABLE_SQL=false` to disable it.
 
 ```http
 POST http://localhost:5001/api/query
@@ -112,7 +116,7 @@ Content-Type: application/json
 
 ### JSON
 
-The JSON query API is always available and needs no extra configuration.
+The JSON query API is read-only, always available, and needs no extra configuration.
 
 ```http
 POST http://localhost:5001/api/query
@@ -143,7 +147,7 @@ Content-Type: application/json
 }
 ```
 
-The response is a streamed file in the chosen `output.format` (here, CSV). See the [query reference](https://maris-development.github.io/beacon/docs/1.7.3/api/querying/) for the full schema, all source types, and every output format.
+The response is a streamed file in the chosen `output.format` (here, CSV). See the [query reference](https://maris-development.github.io/beacon/docs/1.8.0/api/querying/) for the full schema, all source types, and every output format.
 
 ## Configuration
 
@@ -158,18 +162,18 @@ Beacon is configured entirely through `BEACON_*` environment variables. The most
 | `BEACON_LOG_LEVEL` | `info` | Log verbosity (`trace`, `debug`, `info`, `warn`, `error`). |
 | `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. |
 | `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request specifies no source. |
-| `BEACON_WORKER_THREADS` | `8` | Number of query worker threads. |
+| `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |
 | `BEACON_ENABLE_SQL` | `true` | Enable the read-only raw SQL query interface. |
 | `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable the Arrow Flight SQL endpoint. |
 | `BEACON_FLIGHT_SQL_PORT` | `32011` | Arrow Flight SQL port. |
 
-S3-compatible storage, CORS, NetCDF caching, the crawler, and Flight SQL authentication have their own `BEACON_*` settings — see the [configuration reference](https://maris-development.github.io/beacon/docs/1.7.3/data-lake/configuration.html) for the complete list.
+S3-compatible storage, CORS, NetCDF caching, the crawler, and Flight SQL authentication have their own `BEACON_*` settings — see the [configuration reference](https://maris-development.github.io/beacon/docs/1.8.0/data-lake/configuration.html) for the complete list.
 
 ## Documentation
 
 - Docs home: <https://maris-development.github.io/beacon/>
-- Getting started: <https://maris-development.github.io/beacon/docs/1.7.3/getting-started.html#local>
-- Query reference: <https://maris-development.github.io/beacon/docs/1.7.3/api/querying/>
+- Getting started: <https://maris-development.github.io/beacon/docs/1.8.0/getting-started.html#local>
+- Query reference: <https://maris-development.github.io/beacon/docs/1.8.0/api/querying/>
 - Community Slack: [join here](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg)
 
 ## Contributing

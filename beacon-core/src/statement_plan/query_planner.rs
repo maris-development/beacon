@@ -146,6 +146,13 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
         let any = node.as_any();
         let session = self.session.clone();
 
+        if let Some(auth) = any.downcast_ref::<logical::AuthNode>() {
+            return Ok(Some(Arc::new(physical::AuthExec::new(
+                auth.statement.payload.clone(),
+                session,
+            ))));
+        }
+
         if let Some(create) = any.downcast_ref::<logical::CreateMaterializedViewNode>() {
             return Ok(Some(Arc::new(physical::CreateMaterializedViewExec::new(
                 create.view_name.clone(),
@@ -172,6 +179,7 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             return Ok(Some(Arc::new(physical::ReplaceTableContentsExec::new(
                 replace.table.clone(),
                 physical_inputs[0].clone(),
+                replace.mutation.clone(),
                 session,
             ))));
         }
@@ -201,6 +209,31 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
 
         if any.downcast_ref::<logical::ShowCrawlersNode>().is_some() {
             return Ok(Some(Arc::new(physical::ShowCrawlersExec::new(session))));
+        }
+
+        if let Some(create) = any.downcast_ref::<logical::CreateIndexNode>() {
+            return Ok(Some(Arc::new(physical::CreateIndexExec::new(
+                create.table.clone(),
+                create.column.clone(),
+                create.name.clone(),
+                create.using.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(drop) = any.downcast_ref::<logical::DropIndexNode>() {
+            return Ok(Some(Arc::new(physical::DropIndexExec::new(
+                drop.table.clone(),
+                drop.name.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(show) = any.downcast_ref::<logical::ShowIndexesNode>() {
+            return Ok(Some(Arc::new(physical::ShowIndexesExec::new(
+                show.table.clone(),
+                session,
+            ))));
         }
 
         if let Some(set) = any.downcast_ref::<logical::SetExtensionNode>() {

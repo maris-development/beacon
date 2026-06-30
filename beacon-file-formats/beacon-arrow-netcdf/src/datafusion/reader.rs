@@ -72,7 +72,10 @@ pub async fn open_dataset(
 ///
 /// When `read_dimensions` is provided the dataset is projected to only
 /// include variables that belong to those dimensions before deriving the
-/// Arrow schema.
+/// Arrow schema. When it is absent, a broadcast-compatible default dimension
+/// set is auto-selected (see [`beacon_nd_array::dataset::resolve_read_dimensions`])
+/// so the schema matches
+/// what `SELECT *` can actually return.
 pub async fn fetch_schema(
     object_store: Arc<DatasetsStore>,
     object: ObjectMeta,
@@ -88,7 +91,11 @@ pub async fn fetch_schema(
             ))
         })?;
 
-    let dataset = if let Some(dims) = read_dimensions {
+    let dataset = if let Some(dims) = beacon_nd_array::dataset::resolve_read_dimensions(
+        &dataset,
+        read_dimensions,
+        Some("read_netcdf"),
+    ) {
         let proj = beacon_nd_array::projection::DatasetProjection {
             dimension_projection: Some(dims),
             index_projection: None,

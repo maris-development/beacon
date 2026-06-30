@@ -15,7 +15,7 @@ async fn spawn_server(allow_anonymous: bool) -> (SocketAddr, tokio::task::JoinHa
     drop(tmp);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let runtime = Arc::new(beacon_core::runtime::Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.unwrap());
+    let runtime = Arc::new(beacon_core::runtime::Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.unwrap());
     let service = BeaconFlightSqlService::new_with_options(runtime, allow_anonymous).unwrap();
 
     let handle = tokio::spawn(async move {
@@ -55,7 +55,7 @@ async fn spawn_server_with_runtime(
     drop(tmp);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let runtime = Arc::new(beacon_core::runtime::Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.unwrap());
+    let runtime = Arc::new(beacon_core::runtime::Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.unwrap());
     let service =
         BeaconFlightSqlService::new_with_options(runtime.clone(), allow_anonymous).unwrap();
 
@@ -86,7 +86,7 @@ async fn run_sql_rows(
     sql: &str,
 ) -> Vec<arrow::array::RecordBatch> {
     runtime
-        .run_query(beacon_core::query::Query::sql(sql.to_string()), true)
+        .run_query(beacon_core::query::Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
         .await
         .expect("query should run")
         .into_record_stream()

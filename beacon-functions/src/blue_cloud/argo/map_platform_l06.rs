@@ -20,3 +20,17 @@ fn map_argo_platform_l06_impl(_: &[ColumnarValue]) -> datafusion::error::Result<
         "SDN:L06::46".to_string(),
     ))));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn always_returns_the_constant_l06_code() {
+        let out = map_argo_platform_l06_impl(&[]).unwrap();
+        assert!(matches!(
+            out,
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(ref s))) if s == "SDN:L06::46"
+        ));
+    }
+}

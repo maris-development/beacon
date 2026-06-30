@@ -10,24 +10,28 @@ use utoipa::{
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::axum::auth::basic_auth;
-
+mod auth;
 mod check;
 mod crawlers;
+mod datasets;
 mod extensions;
 mod external_tables;
+mod tables;
 
 /// OpenAPI document marker for the admin surface.
 #[derive(OpenApi)]
 #[openapi(
     modifiers(&SecurityAddon),
     tags(
-        (name = "admin", description = "Authenticated administrative endpoints (HTTP Basic auth) for managing crawlers and external tables.")
+        (name = "admin", description = "Authenticated administrative endpoints (HTTP Basic auth) for managing crawlers and external tables, and inspecting table configuration.")
     )
 )]
 pub struct AdminApiDoc;
 
-/// Builds the admin router and attaches basic-auth middleware.
+/// Builds the admin router and its OpenAPI document.
+///
+/// The super-user `basic_auth` middleware is attached by `setup_router`, where the runtime is
+/// available as middleware state.
 pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
         .routes(routes!(check::check))
@@ -38,11 +42,20 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
         ))
         .routes(routes!(crawlers::run_crawler))
         .routes(routes!(external_tables::create_external_table))
+        .routes(routes!(datasets::upload_dataset))
+        .routes(routes!(datasets::download_dataset))
+        .routes(routes!(datasets::delete_dataset))
+        .routes(routes!(datasets::initiate_upload))
+        .routes(routes!(datasets::upload_part))
+        .routes(routes!(datasets::complete_upload))
+        .routes(routes!(datasets::abort_upload))
+        .routes(routes!(tables::list_table_config))
+        .routes(routes!(auth::list_users))
+        .routes(routes!(auth::list_roles))
         .routes(routes!(
             extensions::set_table_extensions,
             extensions::delete_table_extensions
         ))
-        .layer(::axum::middleware::from_fn(basic_auth))
         .split_for_parts();
 
     (admin_router, admin_api)

@@ -57,6 +57,13 @@ impl SuperListingTable {
         Ok(Self { inner_table: table })
     }
 
+    /// The listing URLs (including any globs) backing this table.
+    ///
+    /// Used by query-time authorization to resolve the dataset paths a `read_*` scan reads.
+    pub fn table_paths(&self) -> &[ListingTableUrl] {
+        self.inner_table.table_paths()
+    }
+
     pub fn with_pushdown_projection(
         &self,
         projection: Vec<String>,

@@ -16,10 +16,10 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rmp-serde = "1"
-zstd = "0.13"
-lz4_flex = "0.11"
-ndarray = "0.17"
+rmp-serde = {workspace = true}
+zstd = {workspace = true}
+lz4_flex = {workspace = true}
+ndarray = {workspace = true}
 atlas = { package = "atlas-rust", git = "https://github.com/maris-development/atlas.git", version = "0.9.1" }
 crossbeam = { workspace = true }
 moka = { workspace = true }

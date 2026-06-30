@@ -80,6 +80,10 @@ impl FileFormatFactoryExt for TiffFormatFactory {
     fn file_format_name(&self) -> String {
         self.get_ext()
     }
+
+    fn file_extensions(&self) -> Vec<String> {
+        vec![TIFF_EXTENSION.to_string(), TIF_EXTENSION.to_string()]
+    }
 }
 
 #[derive(Debug, Clone)]

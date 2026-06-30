@@ -12,6 +12,8 @@
 //! [`LogicalPlan::Extension`]: datafusion::logical_expr::LogicalPlan::Extension
 
 mod actions;
+mod auth;
+mod authz;
 pub(crate) mod crawler;
 mod logical;
 mod lower;
@@ -19,6 +21,7 @@ pub(crate) mod materialized_view;
 mod physical;
 mod query_planner;
 mod stream_coalescer;
+pub(crate) mod table_engine;
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -30,11 +33,12 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    CreateCrawlerStatement, CreateMaterializedViewStatement, DropCrawlerStatement,
-    DropExtensionStatement, RefreshStatement, RunCrawlerStatement, SetExtensionStatement,
-    ShowExtensionsStatement,
+    AuthStatement, CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
+    DropCrawlerStatement, DropExtensionStatement, DropIndexStatement, RefreshStatement,
+    RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
 };
 
+pub(crate) use authz::authorize_logical_plan;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
 
@@ -60,6 +64,33 @@ pub(crate) fn validate_query_plan(plan: &LogicalPlan, is_super_user: bool) -> an
     }
 
     Ok(())
+}
+
+/// Whether `plan` produces a result set that can be exported in an output format.
+///
+/// A requested output format wraps the plan in a `COPY TO` (see
+/// [`Output::parse`](crate::query::output::Output::parse)), which only accepts a
+/// row-producing input. Side-effecting / administrative statements return no rows,
+/// so they cannot be exported: standard DDL, DML (`INSERT`/`UPDATE`/`DELETE`),
+/// `COPY`, and `SET`, plus beacon's side-effecting extension nodes (materialized
+/// views, `REFRESH`, `ALTER TABLE`, copy-on-write `DELETE`/`UPDATE`, crawler/index
+/// DDL), which all expose an empty schema. Row-producing statements (`SELECT`,
+/// `SHOW CRAWLERS`, `SHOW INDEXES`, ...) do produce an exportable result set.
+pub(crate) fn plan_produces_result_set(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Ddl(_)
+        | LogicalPlan::Dml(_)
+        | LogicalPlan::Copy(_)
+        | LogicalPlan::Statement(_) => false,
+        // Beacon's extension nodes carry their own output schema: the
+        // side-effecting ones (materialized views, `REFRESH`, `ALTER TABLE`,
+        // copy-on-write `DELETE`/`UPDATE`, crawler/index DDL) report an empty
+        // schema, while the row-producing ones (`SHOW CRAWLERS`, `SHOW INDEXES`)
+        // report real columns — so the schema decides whether they can be exported.
+        LogicalPlan::Extension(ext) => !ext.node.schema().fields().is_empty(),
+        // Everything else is a row-producing query (`SELECT`, `VALUES`, ...).
+        other => !other.schema().fields().is_empty(),
+    }
 }
 
 /// Whether `plan` contains any [`LogicalPlan::Extension`] node (all of beacon's
@@ -92,6 +123,18 @@ pub(crate) type SessionCell = Arc<OnceLock<Weak<SessionContext>>>;
 /// Create an empty [`SessionCell`] to be filled once the context exists.
 pub(crate) fn new_session_cell() -> SessionCell {
     Arc::new(OnceLock::new())
+}
+
+/// Build the logical plan for an auth-management statement (CREATE/DROP USER/ROLE, GRANT/DENY/
+/// REVOKE). Lowered to an [`Extension`] node so it inherits the super-user gate in
+/// [`validate_query_plan`] (all beacon extension nodes are super-user-only).
+pub(crate) fn auth_plan(statement: AuthStatement) -> LogicalPlan {
+    let key = statement.to_string();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::AuthNode {
+            statement: logical::Keyed::new(key, statement),
+        }),
+    })
 }
 
 /// Build the logical plan for `CREATE MATERIALIZED VIEW <name> AS <query>`.
@@ -174,6 +217,37 @@ pub(crate) fn show_extensions_plan(statement: ShowExtensionsStatement) -> Logica
     })
 }
 
+/// Build the logical plan for `CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]`.
+pub(crate) fn create_index_plan(statement: CreateIndexStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::CreateIndexNode {
+            table: statement.table.to_string(),
+            column: statement.column,
+            name: statement.name.map(|n| n.to_string()),
+            using: statement.using,
+        }),
+    })
+}
+
+/// Build the logical plan for `DROP INDEX <name> ON <table>`.
+pub(crate) fn drop_index_plan(statement: DropIndexStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::DropIndexNode {
+            table: statement.table.to_string(),
+            name: statement.name.to_string(),
+        }),
+    })
+}
+
+/// Build the logical plan for `SHOW INDEXES ON <table>`.
+pub(crate) fn show_indexes_plan(statement: ShowIndexesStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::ShowIndexesNode {
+            table: statement.table.to_string(),
+        }),
+    })
+}
+
 /// Plan and execute a beacon statement logical plan through the single
 /// `create_physical_plan` -> `execute_stream` pipeline, coalescing the result the
 /// same way the legacy statement executor does.
@@ -189,6 +263,24 @@ pub(crate) async fn execute_statement_plan(
     plan: LogicalPlan,
 ) -> anyhow::Result<SendableRecordBatchStream> {
     use futures::TryStreamExt;
+
+    // Statements (e.g. `SET beacon.table_engine = '…'`) cannot be physical-planned;
+    // DataFusion applies them to the session via `execute_logical_plan`. Route them
+    // there so the session config actually changes, then drain the (empty) result.
+    if matches!(plan, LogicalPlan::Statement(_)) {
+        let schema: arrow::datatypes::SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
+        session_ctx
+            .execute_logical_plan(plan)
+            .await?
+            .collect()
+            .await?;
+        return Ok(Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::empty(),
+            ),
+        ));
+    }
 
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
     let stream = datafusion::physical_plan::execute_stream(physical_plan, session_ctx.task_ctx())?;

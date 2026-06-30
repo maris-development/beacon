@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
+use beacon_auth::{Privilege, PrivilegeTarget};
 use datafusion::sql::{parser::Statement, sqlparser::ast::ObjectName};
 
 #[derive(Debug, Clone)]
 pub enum BeaconStatement {
     DFStatement(Box<Statement>),
+    Auth(AuthStatement),
     CreateMaterializedView(CreateMaterializedViewStatement),
     Refresh(RefreshStatement),
     CreateCrawler(CreateCrawlerStatement),
@@ -15,6 +17,9 @@ pub enum BeaconStatement {
     SetExtension(SetExtensionStatement),
     DropExtension(DropExtensionStatement),
     ShowExtensions(ShowExtensionsStatement),
+    CreateIndex(CreateIndexStatement),
+    DropIndex(DropIndexStatement),
+    ShowIndexes(ShowIndexesStatement),
 }
 
 /// SET EXTENSION '<kind>' FOR <table> TO '<json>'
@@ -78,6 +83,128 @@ impl Display for ShowExtensionsStatement {
 /// `'`).
 fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+/// Authentication and authorization management statements (users, roles, grants, denies).
+#[derive(Debug, Clone)]
+pub enum AuthStatement {
+    CreateUser { username: String, password: String },
+    DropUser { username: String },
+    CreateRole { role: String },
+    DropRole { role: String },
+    GrantRoleToUser { role: String, username: String },
+    RevokeRoleFromUser { role: String, username: String },
+    GrantPrivilege {
+        privilege: Privilege,
+        target: Option<PrivilegeTarget>,
+        role: String,
+    },
+    DenyPrivilege {
+        privilege: Privilege,
+        target: Option<PrivilegeTarget>,
+        role: String,
+    },
+    RevokePrivilege {
+        privilege: Privilege,
+        target: Option<PrivilegeTarget>,
+        role: String,
+        /// When true, removes a matching deny rule rather than a grant rule.
+        deny: bool,
+    },
+}
+
+impl Display for AuthStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthStatement::CreateUser { username, password } => {
+                write!(f, "CREATE USER {username} WITH PASSWORD '{password}'")
+            }
+            AuthStatement::DropUser { username } => write!(f, "DROP USER {username}"),
+            AuthStatement::CreateRole { role } => write!(f, "CREATE ROLE {role}"),
+            AuthStatement::DropRole { role } => write!(f, "DROP ROLE {role}"),
+            AuthStatement::GrantRoleToUser { role, username } => {
+                write!(f, "GRANT ROLE {role} TO USER {username}")
+            }
+            AuthStatement::RevokeRoleFromUser { role, username } => {
+                write!(f, "REVOKE ROLE {role} FROM USER {username}")
+            }
+            AuthStatement::GrantPrivilege { privilege, target, role } => {
+                write!(f, "GRANT {privilege}")?;
+                if let Some(target) = target {
+                    write!(f, " ON {target}")?;
+                }
+                write!(f, " TO ROLE {role}")
+            }
+            AuthStatement::DenyPrivilege { privilege, target, role } => {
+                write!(f, "DENY {privilege}")?;
+                if let Some(target) = target {
+                    write!(f, " ON {target}")?;
+                }
+                write!(f, " TO ROLE {role}")
+            }
+            AuthStatement::RevokePrivilege { privilege, target, role, deny } => {
+                write!(f, "REVOKE ")?;
+                if *deny {
+                    write!(f, "DENY ")?;
+                }
+                write!(f, "{privilege}")?;
+                if let Some(target) = target {
+                    write!(f, " ON {target}")?;
+                }
+                write!(f, " FROM ROLE {role}")
+            }
+        }
+    }
+}
+
+/// CREATE INDEX [<name>] ON <table> (<column>) [USING <type>]
+#[derive(Debug, Clone)]
+pub struct CreateIndexStatement {
+    /// Optional index name; defaults to `<table>_<column>_idx` when omitted.
+    pub name: Option<ObjectName>,
+    pub table: ObjectName,
+    pub column: String,
+    /// Optional `USING <type>` (btree | bitmap | inverted); defaults to btree.
+    pub using: Option<String>,
+}
+
+impl Display for CreateIndexStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CREATE INDEX ")?;
+        if let Some(name) = &self.name {
+            write!(f, "{name} ")?;
+        }
+        write!(f, "ON {} ({})", self.table, self.column)?;
+        if let Some(using) = &self.using {
+            write!(f, " USING {using}")?;
+        }
+        Ok(())
+    }
+}
+
+/// DROP INDEX <name> ON <table>
+#[derive(Debug, Clone)]
+pub struct DropIndexStatement {
+    pub name: ObjectName,
+    pub table: ObjectName,
+}
+
+impl Display for DropIndexStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DROP INDEX {} ON {}", self.name, self.table)
+    }
+}
+
+/// SHOW INDEXES ON <table>
+#[derive(Debug, Clone)]
+pub struct ShowIndexesStatement {
+    pub table: ObjectName,
+}
+
+impl Display for ShowIndexesStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SHOW INDEXES ON {}", self.table)
+    }
 }
 
 /// CREATE CRAWLER <name> [ON '<prefix>'] [WITH (k 'v', ...)]
@@ -168,6 +295,7 @@ impl Display for BeaconStatement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DFStatement(s) => write!(f, "{s}"),
+            Self::Auth(s) => write!(f, "{s}"),
             Self::CreateMaterializedView(s) => write!(f, "{s}"),
             Self::Refresh(s) => write!(f, "{s}"),
             Self::CreateCrawler(s) => write!(f, "{s}"),
@@ -177,6 +305,9 @@ impl Display for BeaconStatement {
             Self::SetExtension(s) => write!(f, "{s}"),
             Self::DropExtension(s) => write!(f, "{s}"),
             Self::ShowExtensions(s) => write!(f, "{s}"),
+            Self::CreateIndex(s) => write!(f, "{s}"),
+            Self::DropIndex(s) => write!(f, "{s}"),
+            Self::ShowIndexes(s) => write!(f, "{s}"),
         }
     }
 }

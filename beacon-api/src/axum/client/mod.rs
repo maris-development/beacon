@@ -18,13 +18,16 @@ mod tables;
 #[openapi(tags(
     (name = "query", description = "Execute, validate, explain, and inspect metrics of queries."),
     (name = "datasets", description = "Discover dataset files in the datasets store and inspect their schemas."),
-    (name = "tables", description = "List registered tables and inspect their schemas and configuration."),
+    (name = "tables", description = "List registered tables and inspect their schemas."),
     (name = "functions", description = "Browse the scalar, aggregate, and table-valued functions available in queries."),
     (name = "system", description = "Beacon runtime version and host information.")
 ))]
 pub struct ClientApiDoc;
 
 /// Builds the client router and returns the generated OpenAPI document alongside it.
+///
+/// The `resolve_identity` middleware (which resolves the caller's `AuthIdentity` into the request
+/// extensions) is attached by `setup_router`, where the runtime is available as middleware state.
 #[allow(deprecated)]
 pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ClientApiDoc::openapi())
@@ -32,6 +35,7 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(query::parse_query))
         .routes(routes!(query::query_metrics))
         .routes(routes!(query::explain_query))
+        .routes(routes!(query::explain_analyze_query))
         .routes(routes!(query::available_columns))
         .routes(routes!(datasets::datasets))
         .routes(routes!(datasets::list_datasets))
@@ -42,7 +46,6 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(tables::default_table))
         .routes(routes!(tables::list_table_schema))
         .routes(routes!(tables::list_table_extensions))
-        .routes(routes!(tables::list_table_config))
         .routes(routes!(tables::default_table_schema))
         .routes(routes!(functions::list_functions))
         .routes(routes!(functions::list_table_functions))

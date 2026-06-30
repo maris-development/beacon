@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 datafusion = { workspace = true }
 datafusion-federation = { workspace = true }
+chrono = { workspace = true }
 arrow-flight = { workspace = true, features = ["flight-sql"] }
 tonic = { workspace = true }
 async-trait = { workspace = true }
@@ -14,7 +15,6 @@ serde_json = { workspace = true }
 typetag =  { workspace=true}
 anyhow = { workspace = true }
 arrow = { workspace = true }
-arrow-schema = { workspace = true }
 ordered-float = { workspace = true }
 indexmap = { workspace = true }
 moka = { workspace = true }
@@ -30,3 +30,4 @@ beacon-object-storage = { path = "../beacon-object-storage" }
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
+chrono = { workspace = true }
