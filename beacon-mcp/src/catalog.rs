@@ -10,7 +10,7 @@ use std::sync::Arc;
 use beacon_core::extensions::{McpExtension, PresetExtension, PresetFilter, PresetOp};
 use beacon_core::runtime::Runtime;
 use beacon_core::AuthIdentity;
-use rmcp::model::Tool;
+use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
 use crate::result::{run_sql_to_json, MAX_ROWS};
@@ -63,34 +63,40 @@ fn object_schema(props: Value, required: &[&str]) -> Map<String, Value> {
     schema
 }
 
+/// Mark a tool as read-only via the MCP `Tool.annotations.readOnlyHint`, so
+/// clients know it never mutates state. Every beacon MCP tool is read-only.
+fn read_only(tool: Tool) -> Tool {
+    tool.with_annotations(ToolAnnotations::new().read_only(true))
+}
+
 fn list_tables_tool() -> Tool {
-    Tool::new(
+    read_only(Tool::new(
         "list_tables",
         "List the tables registered in beacon, with their MCP exposure status.",
         object_schema(json!({}), &[]),
-    )
+    ))
 }
 
 fn describe_table_tool() -> Tool {
-    Tool::new(
+    read_only(Tool::new(
         "describe_table",
         "Return a table's column schema and its attached extensions (MCP descriptor, presets).",
         object_schema(
             json!({ "table_name": { "type": "string", "description": "Name of the table." } }),
             &["table_name"],
         ),
-    )
+    ))
 }
 
 fn run_sql_tool() -> Tool {
-    Tool::new(
+    read_only(Tool::new(
         "run_sql",
         "Run a read-only SQL query (SELECT only) against beacon and return JSON rows.",
         object_schema(
             json!({ "sql": { "type": "string", "description": "A read-only SELECT statement." } }),
             &["sql"],
         ),
-    )
+    ))
 }
 
 async fn list_tables_json(runtime: &Arc<Runtime>) -> anyhow::Result<String> {
@@ -138,7 +144,15 @@ async fn describe_table_json(
 // ---- per-table tools -----------------------------------------------------
 
 fn default_tool_name(table: &str) -> String {
-    format!("query_{table}")
+    // Sanitize to MCP-safe characters so a table name with dots/spaces still
+    // yields a valid tool name (see `beacon_core::extensions::is_valid_tool_name`).
+    let sanitized: String = table
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let mut name = format!("query_{sanitized}");
+    name.truncate(64);
+    name
 }
 
 async fn table_tool(
@@ -196,7 +210,15 @@ async fn table_tool(
         json!({ "type": "integer", "description": "Maximum rows to return (default 100)." }),
     );
 
-    Tool::new(name, description, object_schema(Value::Object(props), &[]))
+    let mut tool = read_only(Tool::new(
+        name,
+        description,
+        object_schema(Value::Object(props), &[]),
+    ));
+    if let Some(title) = mcp.title.clone() {
+        tool = tool.with_title(title);
+    }
+    tool
 }
 
 async fn run_table_tool(
@@ -349,6 +371,7 @@ mod tests {
             enabled: true,
             tool_name: None,
             description: None,
+            title: None,
             exposed_columns: cols.map(|c| c.into_iter().map(String::from).collect()),
         }
     }

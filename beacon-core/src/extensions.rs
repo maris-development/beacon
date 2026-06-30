@@ -97,6 +97,9 @@ pub struct McpExtension {
     /// Human-readable description for the MCP tool/resource.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Human-readable title for the generated tool (MCP `Tool.title`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Columns to expose. `None` (omitted) exposes all columns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposed_columns: Option<Vec<String>>,
@@ -199,6 +202,13 @@ impl TableExtensions {
 
 impl McpExtension {
     fn validate(&self, schema: &Schema) -> anyhow::Result<()> {
+        if let Some(name) = &self.tool_name {
+            anyhow::ensure!(
+                is_valid_tool_name(name),
+                "mcp tool_name '{name}' must be 1-64 characters of letters, digits, '_' or '-' \
+                 (MCP/Anthropic tool-name rules)"
+            );
+        }
         if let Some(columns) = &self.exposed_columns {
             for column in columns {
                 ensure_column(schema, column)?;
@@ -206,6 +216,17 @@ impl McpExtension {
         }
         Ok(())
     }
+}
+
+/// Whether `name` satisfies MCP/Anthropic tool-name rules: 1-64 characters of
+/// `[A-Za-z0-9_-]`. A non-conforming name can make a client reject the entire
+/// tool list, so it is rejected when the extension is set.
+pub fn is_valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 impl PresetExtension {
@@ -451,6 +472,20 @@ mod tests {
         )
         .unwrap();
         assert!(ext.validate(&schema()).unwrap_err().to_string().contains("duplicate preset"));
+    }
+
+    #[test]
+    fn mcp_rejects_invalid_tool_name() {
+        let mut ext = TableExtensions::default();
+        ext.set_kind("mcp", r#"{"enabled":true,"tool_name":"bad name!"}"#)
+            .unwrap();
+        let err = ext.validate(&schema()).unwrap_err().to_string();
+        assert!(err.contains("tool_name"), "unexpected: {err}");
+        // A clean name passes.
+        let mut ok = TableExtensions::default();
+        ok.set_kind("mcp", r#"{"enabled":true,"tool_name":"query_obs"}"#)
+            .unwrap();
+        assert!(ok.validate(&schema()).is_ok());
     }
 
     #[test]

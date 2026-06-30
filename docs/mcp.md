@@ -32,6 +32,13 @@ SET EXTENSION 'preset' FOR obs TO '{"presets":[{"name":"shallow","filters":[{"co
 
 `query_obs` then appears as an MCP tool with a `preset: "shallow"` option.
 
+The `mcp` descriptor maps to the MCP `Tool` standard: `tool_name` → `Tool.name`
+(validated to MCP/Anthropic rules — 1–64 chars of `[A-Za-z0-9_-]`; the generated
+default is sanitized), `title` → `Tool.title`, `description` → `Tool.description`,
+`exposed_columns` constrain the generated `inputSchema`, and every tool carries
+`annotations.readOnlyHint: true`. Payloads are parsed strictly
+(`deny_unknown_fields`), so unknown keys are rejected rather than ignored.
+
 ## Connecting Claude
 
 **HTTP (Claude Code / API):** point the client at `http://<host>:<port>/mcp`.
