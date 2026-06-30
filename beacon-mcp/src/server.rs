@@ -66,10 +66,17 @@ impl ServerHandler for BeaconMcpServer {
 /// middleware and carried in the HTTP request parts that the streamable-HTTP
 /// transport injects into the MCP request context. Falls back to a role-less
 /// identity (no access) when absent.
+///
+/// The MCP surface is strictly read-only: the returned identity always has
+/// `is_super_user` cleared, so the query planner rejects any DDL/DML regardless
+/// of the caller's privileges. The caller's `roles` are preserved so per-user
+/// read grants (RBAC) still apply.
 fn identity_from_context(context: &RequestContext<RoleServer>) -> AuthIdentity {
-    context
+    let mut identity = context
         .extensions
         .get::<http::request::Parts>()
         .and_then(|parts| parts.extensions.get::<AuthIdentity>().cloned())
-        .unwrap_or_else(AuthIdentity::empty)
+        .unwrap_or_else(AuthIdentity::empty);
+    identity.is_super_user = false;
+    identity
 }

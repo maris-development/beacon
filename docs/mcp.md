@@ -15,8 +15,11 @@ Generated dynamically from the runtime:
   derived from the extension: `select` (restricted to `exposed_columns`), `preset`
   (an enum of the table's preset names, expanded to filters), and `limit`.
 
-All execution runs as a non-super-user, so only `SELECT` is permitted. Results are
-capped (1000 rows) to keep tool output bounded.
+The MCP surface is **strictly read-only**: every tool call executes with
+`is_super_user` cleared, so the query planner rejects any DDL/DML (`CREATE`,
+`INSERT`, `UPDATE`, `DELETE`, `SET EXTENSION`, …) regardless of who connects —
+only `SELECT` runs. The caller's roles are preserved, so per-user read grants
+(RBAC) still apply. Results are capped (1000 rows) to keep tool output bounded.
 
 ## Exposing a table to MCP
 
@@ -39,5 +42,7 @@ SET EXTENSION 'preset' FOR obs TO '{"presets":[{"name":"shallow","filters":[{"co
 { "mcpServers": { "beacon": { "url": "http://localhost:5001/mcp" } } }
 ```
 
-> The endpoint is currently unauthenticated and read-only. Put it behind your
-> existing auth/proxy if exposing beyond localhost.
+> The endpoint rides the same `resolve_identity` middleware as the client API:
+> requests authenticate via `Authorization` (resolving to that user's roles), or
+> the anonymous principal when enabled, or a role-less identity otherwise. It is
+> read-only regardless. Gate it with `BEACON_MCP_ENABLED=false` to disable.
