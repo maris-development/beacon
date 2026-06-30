@@ -1,0 +1,16 @@
+[package]
+name = "beacon-mcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beacon-core = { path = "../beacon-core" }
+rmcp = { version = "=1.8.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+arrow = { workspace = true }
+arrow-json = "58"

@@ -56,6 +56,12 @@ pub(crate) fn setup_router(
 
     let router = client_router
         .merge(admin_router)
+        // MCP streamable-HTTP endpoint (read-only; tools generated from table
+        // `mcp` extensions). Mounted as a tower service on a single path.
+        .route_service(
+            "/mcp",
+            beacon_mcp::streamable_http_service(beacon_runtime.clone()),
+        )
         .merge(Scalar::with_url("/scalar/", docs.clone()))
         .route(
             "/scalar",
