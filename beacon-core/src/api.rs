@@ -14,7 +14,7 @@ use utoipa::ToSchema;
 
 /// Re-exported typed table-extension contracts (see [`crate::extensions`]).
 pub use crate::extensions::{
-    McpExtension, Preset, PresetExtension, PresetFilter, TableExtensions,
+    McpExtension, Preset, PresetExtension, PresetFilter, PresetOp, TableExtensions,
 };
 
 /// A single parameter of a registered function.

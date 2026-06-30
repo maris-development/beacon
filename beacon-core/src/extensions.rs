@@ -25,11 +25,49 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// The comparison operators a [`PresetFilter`] may use.
-pub const PRESET_OPS: [&str; 8] = ["=", "!=", "<", "<=", ">", ">=", "between", "in"];
+/// The comparison operators a [`PresetFilter`] may use. Serialized with the
+/// symbolic/SQL spelling shown, so stored preset JSON stays human-readable, and
+/// any other value is rejected at parse time with a clear error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub enum PresetOp {
+    #[serde(rename = "=")]
+    Eq,
+    #[serde(rename = "!=")]
+    Ne,
+    #[serde(rename = "<")]
+    Lt,
+    #[serde(rename = "<=")]
+    Lte,
+    #[serde(rename = ">")]
+    Gt,
+    #[serde(rename = ">=")]
+    Gte,
+    #[serde(rename = "between")]
+    Between,
+    #[serde(rename = "in")]
+    In,
+}
+
+impl PresetOp {
+    /// The SQL spelling of this operator.
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            PresetOp::Eq => "=",
+            PresetOp::Ne => "!=",
+            PresetOp::Lt => "<",
+            PresetOp::Lte => "<=",
+            PresetOp::Gt => ">",
+            PresetOp::Gte => ">=",
+            PresetOp::Between => "BETWEEN",
+            PresetOp::In => "IN",
+        }
+    }
+}
 
 /// The full set of extensions attached to a table — the `extensions.json`
 /// document. Missing kinds are omitted from the serialized form.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TableExtensions {
     /// MCP descriptor: how downstream MCP servers should surface this table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,6 +86,7 @@ pub struct TableExtensions {
     "description": "Argo float observations by location, depth, and time.",
     "exposed_columns": ["lat", "lon", "depth", "temperature", "time"]
 }))]
+#[serde(deny_unknown_fields)]
 pub struct McpExtension {
     /// Whether downstream MCP servers should expose this table at all.
     #[serde(default)]
@@ -75,6 +114,7 @@ pub struct McpExtension {
         ]
     }]
 }))]
+#[serde(deny_unknown_fields)]
 pub struct PresetExtension {
     /// The named presets.
     pub presets: Vec<Preset>,
@@ -82,6 +122,7 @@ pub struct PresetExtension {
 
 /// A single named preset: a bundle of filters applied together.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Preset {
     /// Unique (within the table) preset name.
     pub name: String,
@@ -94,12 +135,12 @@ pub struct Preset {
 
 /// A single predefined filter within a [`Preset`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PresetFilter {
     /// Column the filter applies to (must exist in the table schema).
     pub column: String,
-    /// Comparison operator — one of [`PRESET_OPS`].
-    #[schema(example = "between")]
-    pub op: String,
+    /// Comparison operator.
+    pub op: PresetOp,
     /// Filter value: a scalar, `[lo, hi]` for `between`, or `[..]` for `in`.
     #[schema(value_type = Object)]
     pub value: serde_json::Value,
@@ -176,14 +217,6 @@ impl PresetExtension {
             }
             for filter in &preset.filters {
                 ensure_column(schema, &filter.column)?;
-                if !PRESET_OPS.contains(&filter.op.as_str()) {
-                    anyhow::bail!(
-                        "preset '{}' uses unsupported operator '{}'; expected one of: {}",
-                        preset.name,
-                        filter.op,
-                        PRESET_OPS.join(", ")
-                    );
-                }
                 validate_filter_value_shape(&preset.name, filter)?;
             }
         }
@@ -193,8 +226,8 @@ impl PresetExtension {
 
 /// `between` requires a two-element array; `in` requires a non-empty array.
 fn validate_filter_value_shape(preset: &str, filter: &PresetFilter) -> anyhow::Result<()> {
-    match filter.op.as_str() {
-        "between" => {
+    match filter.op {
+        PresetOp::Between => {
             let ok = filter.value.as_array().is_some_and(|a| a.len() == 2);
             anyhow::ensure!(
                 ok,
@@ -202,7 +235,7 @@ fn validate_filter_value_shape(preset: &str, filter: &PresetFilter) -> anyhow::R
                 filter.column
             );
         }
-        "in" => {
+        PresetOp::In => {
             let ok = filter.value.as_array().is_some_and(|a| !a.is_empty());
             anyhow::ensure!(
                 ok,
@@ -373,14 +406,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_operator() {
+    fn rejects_bad_operator_at_parse() {
+        // An unknown operator no longer parses into the typed `op` enum at all.
         let mut ext = TableExtensions::default();
-        ext.set_kind(
-            "preset",
-            r#"{"presets":[{"name":"p","filters":[{"column":"lat","op":"~~","value":1}]}]}"#,
-        )
-        .unwrap();
-        assert!(ext.validate(&schema()).unwrap_err().to_string().contains("unsupported operator"));
+        let err = ext
+            .set_kind(
+                "preset",
+                r#"{"presets":[{"name":"p","filters":[{"column":"lat","op":"~~","value":1}]}]}"#,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("preset"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn rejects_unknown_field_at_parse() {
+        // `deny_unknown_fields` rejects typos/extra keys instead of dropping them.
+        let mut ext = TableExtensions::default();
+        assert!(ext
+            .set_kind(
+                "preset",
+                r#"{"presets":[{"name":"p","filters":[],"bogus":1}]}"#,
+            )
+            .is_err());
+        assert!(ext.set_kind("mcp", r#"{"enabled":true,"nope":1}"#).is_err());
     }
 
     #[test]

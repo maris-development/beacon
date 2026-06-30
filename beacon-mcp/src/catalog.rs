@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use beacon_core::extensions::{McpExtension, PresetExtension, PresetFilter};
+use beacon_core::extensions::{McpExtension, PresetExtension, PresetFilter, PresetOp};
 use beacon_core::runtime::Runtime;
 use beacon_core::AuthIdentity;
 use rmcp::model::Tool;
@@ -289,11 +289,8 @@ fn default_select(exposed: Option<&Vec<String>>) -> String {
 /// Render a stored preset filter into a SQL boolean expression.
 fn render_filter(filter: &PresetFilter) -> anyhow::Result<String> {
     let col = quote_ident(&filter.column);
-    match filter.op.as_str() {
-        "=" | "!=" | "<" | "<=" | ">" | ">=" => {
-            Ok(format!("{col} {} {}", filter.op, render_scalar(&filter.value)?))
-        }
-        "between" => {
+    match filter.op {
+        PresetOp::Between => {
             let arr = filter
                 .value
                 .as_array()
@@ -305,7 +302,7 @@ fn render_filter(filter: &PresetFilter) -> anyhow::Result<String> {
                 render_scalar(&arr[1])?
             ))
         }
-        "in" => {
+        PresetOp::In => {
             let arr = filter
                 .value
                 .as_array()
@@ -314,7 +311,7 @@ fn render_filter(filter: &PresetFilter) -> anyhow::Result<String> {
             let vals = arr.iter().map(render_scalar).collect::<anyhow::Result<Vec<_>>>()?;
             Ok(format!("{col} IN ({})", vals.join(", ")))
         }
-        other => anyhow::bail!("unsupported operator '{other}'"),
+        op => Ok(format!("{col} {} {}", op.as_sql(), render_scalar(&filter.value)?)),
     }
 }
 
@@ -362,7 +359,7 @@ mod tests {
             "shallow",
             vec![PresetFilter {
                 column: "depth".into(),
-                op: "between".into(),
+                op: PresetOp::Between,
                 value: serde_json::json!([0, 10]),
             }],
         );
@@ -395,7 +392,7 @@ mod tests {
     fn in_and_string_values_are_escaped() {
         let f = PresetFilter {
             column: "basin".into(),
-            op: "in".into(),
+            op: PresetOp::In,
             value: serde_json::json!(["a'b", "c"]),
         };
         assert_eq!(render_filter(&f).unwrap(), r#""basin" IN ('a''b', 'c')"#);
