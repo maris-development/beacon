@@ -7,7 +7,7 @@ use ::axum::{
     http::StatusCode,
     Json,
 };
-use beacon_core::api::{SchemaFieldView, SchemaView};
+use beacon_core::api::{SchemaFieldView, SchemaView, TableExtensions};
 use beacon_core::runtime::Runtime;
 use utoipa::{IntoParams, ToSchema};
 
@@ -102,6 +102,48 @@ pub(crate) async fn list_table_schema(
         Some(schema) => Ok(Json(schema)),
         None => {
             tracing::error!("Error listing table schema: table not found");
+            Err((
+                StatusCode::NOT_FOUND,
+                format!("Table {} not found", query.table_name),
+            ))
+        }
+    }
+}
+
+/// Query parameters for [`list_table_extensions`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema, IntoParams)]
+pub struct ListTableExtensionsQuery {
+    /// Name of the registered table whose extensions to return.
+    pub table_name: String,
+}
+
+/// Returns the downstream extensions (MCP descriptor, query presets) attached to
+/// the named table, or 404 if the table is not registered. A table with no
+/// extensions returns an empty object.
+#[tracing::instrument(level = "info", skip(state))]
+#[utoipa::path(
+    tag = "tables",
+    get,
+    path = "/api/table-extensions",
+    params(ListTableExtensionsQuery),
+    responses(
+        (status = 200, description = "The table's extensions", body = TableExtensions),
+        (status = 404, description = "Table not found"),
+    ),
+    security(
+        (),
+        ("basic-auth" = []),
+        ("bearer" = [])
+    )
+)]
+pub(crate) async fn list_table_extensions(
+    State(state): State<Arc<Runtime>>,
+    Query(query): Query<ListTableExtensionsQuery>,
+) -> Result<Json<TableExtensions>, (StatusCode, String)> {
+    match state.get_table_extensions(query.table_name.clone()).await {
+        Ok(extensions) => Ok(Json(extensions)),
+        Err(error) => {
+            tracing::error!(?error, "error listing table extensions");
             Err((
                 StatusCode::NOT_FOUND,
                 format!("Table {} not found", query.table_name),

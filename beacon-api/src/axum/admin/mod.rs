@@ -14,6 +14,7 @@ mod auth;
 mod check;
 mod crawlers;
 mod datasets;
+mod extensions;
 mod external_tables;
 mod tables;
 
@@ -51,6 +52,10 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
         .routes(routes!(tables::list_table_config))
         .routes(routes!(auth::list_users))
         .routes(routes!(auth::list_roles))
+        .routes(routes!(
+            extensions::set_table_extensions,
+            extensions::delete_table_extensions
+        ))
         .split_for_parts();
 
     (admin_router, admin_api)

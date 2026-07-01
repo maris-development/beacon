@@ -588,6 +588,15 @@ impl Runtime {
                 Ok(crate::statement_plan::drop_crawler_plan(statement))
             }
             BeaconStatement::ShowCrawlers => Ok(crate::statement_plan::show_crawlers_plan()),
+            BeaconStatement::SetExtension(statement) => {
+                Ok(crate::statement_plan::set_extension_plan(statement))
+            }
+            BeaconStatement::DropExtension(statement) => {
+                Ok(crate::statement_plan::drop_extension_plan(statement))
+            }
+            BeaconStatement::ShowExtensions(statement) => {
+                Ok(crate::statement_plan::show_extensions_plan(statement))
+            }
             BeaconStatement::CreateIndex(statement) => {
                 Ok(crate::statement_plan::create_index_plan(statement))
             }
@@ -818,6 +827,30 @@ impl Runtime {
                 None
             }
         }
+    }
+
+    /// Load a table's downstream extensions (MCP descriptor, query presets).
+    /// Returns an empty set if the table has none.
+    pub async fn get_table_extensions(
+        &self,
+        table_name: String,
+    ) -> anyhow::Result<crate::extensions::TableExtensions> {
+        crate::extensions::get_table_extensions(&self.session_ctx, &table_name).await
+    }
+
+    /// Replace a table's extensions document, validating it against the table
+    /// schema. An empty document removes the stored extensions.
+    pub async fn set_table_extensions(
+        &self,
+        table_name: String,
+        extensions: crate::extensions::TableExtensions,
+    ) -> anyhow::Result<()> {
+        crate::extensions::set_table_extensions(&self.session_ctx, &table_name, extensions).await
+    }
+
+    /// Remove all of a table's extensions.
+    pub async fn delete_table_extensions(&self, table_name: String) -> anyhow::Result<()> {
+        crate::extensions::delete_table_extensions(&self.session_ctx, &table_name).await
     }
 
     pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
@@ -1354,6 +1387,91 @@ mod client_query_tests {
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 2, "json query should return the two inserted rows");
         assert_eq!(batches[0].num_columns(), 2);
+    }
+
+    /// `SET EXTENSION` / `SHOW EXTENSIONS` / `DROP EXTENSION` round-trip end to
+    /// end, and an extension referencing a missing column is rejected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn table_extensions_sql_round_trip() {
+        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+            .await
+            .expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("ext_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (lat BIGINT, depth BIGINT)")).await;
+
+        // SET a preset via SQL, then read it back through the typed API.
+        run_sql(
+            &runtime,
+            &format!(
+                "SET EXTENSION 'preset' FOR {table} TO '{{\"presets\":[{{\"name\":\"shallow\",\"filters\":[{{\"column\":\"depth\",\"op\":\"<=\",\"value\":10}}]}}]}}'"
+            ),
+        )
+        .await;
+
+        let ext = runtime
+            .get_table_extensions(table.clone())
+            .await
+            .expect("extensions should load");
+        let preset = ext.preset.expect("preset extension should be set");
+        assert_eq!(preset.presets[0].name, "shallow");
+
+        // SHOW EXTENSIONS returns one JSON row mentioning the preset.
+        let batches = runtime
+            .run_query(
+                crate::query::Query::sql(format!("SHOW EXTENSIONS FOR {table}")),
+                beacon_auth::AuthIdentity::system(),
+            )
+            .await
+            .expect("show extensions should run")
+            .into_record_stream()
+            .expect("streamed result")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("stream should drain");
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 1, "SHOW EXTENSIONS returns one row");
+        let json = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("extensions column is Utf8")
+            .value(0);
+        assert!(json.contains("shallow"), "SHOW output should include the preset: {json}");
+
+        // An extension over a non-existent column is rejected by validation.
+        let rejected = try_run_sql(
+            &runtime,
+            &format!(
+                "SET EXTENSION 'preset' FOR {table} TO '{{\"presets\":[{{\"name\":\"x\",\"filters\":[{{\"column\":\"ghost\",\"op\":\"=\",\"value\":1}}]}}]}}'"
+            ),
+        )
+        .await;
+        assert!(rejected.is_err(), "preset over a missing column should be rejected");
+
+        // DROP removes it; the document becomes empty.
+        run_sql(&runtime, &format!("DROP EXTENSION 'preset' FOR {table}")).await;
+        assert!(
+            runtime
+                .get_table_extensions(table.clone())
+                .await
+                .expect("extensions should load")
+                .is_empty(),
+            "dropping the only extension leaves an empty document"
+        );
+    }
+
+    /// Like `run_sql`, but returns the result (draining the stream) so callers can
+    /// assert on failures from side-effecting statements.
+    async fn try_run_sql(runtime: &Runtime, sql: &str) -> anyhow::Result<()> {
+        runtime
+            .run_query(crate::query::Query::sql(sql.to_string()), beacon_auth::AuthIdentity::system())
+            .await?
+            .into_record_stream()?
+            .try_collect::<Vec<_>>()
+            .await?;
+        Ok(())
     }
 
     /// A query with an `output` format is written to a file and returned as a

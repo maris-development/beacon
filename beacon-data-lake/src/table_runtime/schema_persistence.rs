@@ -37,6 +37,92 @@ impl SchemaPersistenceService {
             .await
     }
 
+    /// Persist a table's extensions sidecar to `tables://<name>/extensions.json`.
+    ///
+    /// Extensions are stored separately from `table.json` so they apply to every
+    /// table type uniformly and can be edited without rebuilding the provider.
+    pub async fn persist_table_extensions_json(
+        &self,
+        table_name: &str,
+        extensions_json: String,
+    ) -> datafusion::error::Result<()> {
+        let path = object_store::path::Path::from(format!("{}/extensions.json", table_name));
+        let table_object_store = self.table_object_store(table_name)?;
+        table_object_store
+            .put(&path, extensions_json.into_bytes().into())
+            .await
+            .map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "Failed to store table extensions for table {}: {}",
+                    table_name, error
+                ))
+            })?;
+        Ok(())
+    }
+
+    /// Load a table's extensions sidecar, or `None` if it has none.
+    pub async fn load_table_extensions_json(
+        &self,
+        table_name: &str,
+    ) -> datafusion::error::Result<Option<String>> {
+        let path = object_store::path::Path::from(format!("{}/extensions.json", table_name));
+        let table_object_store = self.table_object_store(table_name)?;
+        match table_object_store.get(&path).await {
+            Ok(result) => {
+                let bytes = result.bytes().await.map_err(|error| {
+                    DataFusionError::Plan(format!(
+                        "Failed to read table extensions for table {}: {}",
+                        table_name, error
+                    ))
+                })?;
+                let text = String::from_utf8(bytes.to_vec()).map_err(|error| {
+                    DataFusionError::Plan(format!(
+                        "Table extensions for table {} are not valid UTF-8: {}",
+                        table_name, error
+                    ))
+                })?;
+                Ok(Some(text))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(error) => Err(DataFusionError::Plan(format!(
+                "Failed to load table extensions for table {}: {}",
+                table_name, error
+            ))),
+        }
+    }
+
+    /// Remove a table's extensions sidecar. A missing sidecar is not an error.
+    pub async fn remove_table_extensions_json(
+        &self,
+        table_name: &str,
+    ) -> datafusion::error::Result<()> {
+        let path = object_store::path::Path::from(format!("{}/extensions.json", table_name));
+        let table_object_store = self.table_object_store(table_name)?;
+        match table_object_store.delete(&path).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) => Err(DataFusionError::Plan(format!(
+                "Failed to remove table extensions for table {}: {}",
+                table_name, error
+            ))),
+        }
+    }
+
+    /// Resolve the object store backing `tables://` table definitions.
+    fn table_object_store(
+        &self,
+        table_name: &str,
+    ) -> datafusion::error::Result<Arc<dyn object_store::ObjectStore>> {
+        self.session_context
+            .runtime_env()
+            .object_store(&self.table_directory_store_url)
+            .map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "Failed to get table object store for table {}: {}",
+                    table_name, error
+                ))
+            })
+    }
+
     pub async fn remove_persisted_table(&self, table_name: &str) -> datafusion::error::Result<()> {
         let path = object_store::path::Path::from(table_name);
         let table_object_store = self
@@ -258,5 +344,66 @@ mod tests {
             .expect_err("view without SQL definition should fail");
 
         assert!(err.to_string().contains("requires a SQL definition"));
+    }
+
+    #[tokio::test]
+    async fn extensions_sidecar_round_trip_and_cleanup() {
+        let (service, _ctx, table_store, _url) = test_service();
+
+        // Missing sidecar reads as None.
+        assert!(service
+            .load_table_extensions_json("obs")
+            .await
+            .expect("load should succeed")
+            .is_none());
+
+        // Persist then load returns the stored JSON.
+        let payload = r#"{"mcp":{"enabled":true}}"#.to_string();
+        service
+            .persist_table_extensions_json("obs", payload.clone())
+            .await
+            .expect("persist should succeed");
+        assert_eq!(
+            service
+                .load_table_extensions_json("obs")
+                .await
+                .expect("load should succeed")
+                .as_deref(),
+            Some(payload.as_str())
+        );
+        assert!(table_store
+            .get(&Path::from("obs/extensions.json"))
+            .await
+            .is_ok());
+
+        // Explicit removal clears it (and is a no-op when already absent).
+        service
+            .remove_table_extensions_json("obs")
+            .await
+            .expect("remove should succeed");
+        assert!(service
+            .load_table_extensions_json("obs")
+            .await
+            .expect("load should succeed")
+            .is_none());
+        service
+            .remove_table_extensions_json("obs")
+            .await
+            .expect("removing an absent sidecar is not an error");
+
+        // Dropping the whole table directory removes the sidecar too.
+        service
+            .persist_table_extensions_json("obs", payload)
+            .await
+            .expect("persist should succeed");
+        service
+            .remove_persisted_table("obs")
+            .await
+            .expect("table removal should succeed");
+        assert!(service
+            .load_table_extensions_json("obs")
+            .await
+            .expect("load should succeed")
+            .is_none());
     }
 }

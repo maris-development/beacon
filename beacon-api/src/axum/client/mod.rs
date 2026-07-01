@@ -45,6 +45,7 @@ pub(crate) fn setup_client_router() -> (Router<Arc<Runtime>>, utoipa::openapi::O
         .routes(routes!(tables::list_tables_with_schema))
         .routes(routes!(tables::default_table))
         .routes(routes!(tables::list_table_schema))
+        .routes(routes!(tables::list_table_extensions))
         .routes(routes!(tables::default_table_schema))
         .routes(routes!(functions::list_functions))
         .routes(routes!(functions::list_table_functions))

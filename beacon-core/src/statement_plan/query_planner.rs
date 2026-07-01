@@ -236,6 +236,30 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if let Some(set) = any.downcast_ref::<logical::SetExtensionNode>() {
+            return Ok(Some(Arc::new(physical::SetExtensionExec::new(
+                set.kind.clone(),
+                set.table.clone(),
+                set.json.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(drop) = any.downcast_ref::<logical::DropExtensionNode>() {
+            return Ok(Some(Arc::new(physical::DropExtensionExec::new(
+                drop.kind.clone(),
+                drop.table.clone(),
+                session,
+            ))));
+        }
+
+        if let Some(show) = any.downcast_ref::<logical::ShowExtensionsNode>() {
+            return Ok(Some(Arc::new(physical::ShowExtensionsExec::new(
+                show.table.clone(),
+                session,
+            ))));
+        }
+
         // Unrecognized node: let the default planner handle it.
         Ok(None)
     }
