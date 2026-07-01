@@ -95,7 +95,8 @@ call_tool(request, context):
     dispatch(runtime, request.name, request.arguments, identity):
         "list_tables"    -> catalog listing (JSON)
         "describe_table" -> merged columns + extensions (JSON)
-        "run_sql"        -> run_query(SELECT, identity) -> JSON rows
+        "run_sql"        -> run_query(SELECT, identity) -> JSON rows (capped preview)
+        "export_query"   -> fetch recipe (no execution): /api/query request + Python snippet
         <table tool>     -> build_table_sql(...) -> run_query(..., identity) -> JSON rows
 ```
 
@@ -132,6 +133,14 @@ Rows are collected from the query stream, capped at 1000, and serialized to JSON
 (`result.rs`) as the tool's text content. Errors are returned as MCP tool errors
 (`isError: true`) with the message, rather than failing the JSON-RPC call, so the
 model can read and react to them.
+
+For **large** results, `export_query` avoids inlining data entirely: it returns a
+*recipe* (the `/api/query` request body with `output.format` set, plus a Python
+snippet) rather than executing the query. The caller's script POSTs that to
+`/api/query`, which streams the Parquet/Arrow/CSV file in one response — so bulk
+data flows script↔beacon, never through the model's context. `beacon-mcp` builds
+the recipe with a read-only (`SELECT`/`WITH`) guard; the actual query runs under
+the script's own credential and beacon's normal read enforcement.
 
 ## Extending it
 
