@@ -30,7 +30,11 @@ The tool set is generated dynamically from the runtime on every `tools/list`:
   `nullable`, `description`), scoped to `exposed_columns` when set or all columns
   otherwise, plus the raw extensions. Descriptions come from the extension,
   falling back to the Arrow field's `description`/`comment` metadata.
-- **`run_sql`** — run a read-only `SELECT` and get JSON rows.
+- **`run_sql`** — run a read-only `SELECT` and get JSON rows (for previews; capped).
+- **`export_query`** — for **large** results: returns a *recipe* (the exact
+  `/api/query` request + a ready-to-run Python snippet) to fetch the result as a
+  Parquet/Arrow/CSV file. It does **not** run the query or return rows, so the
+  bytes never enter the model's context. See [Large results](#large-results).
 - **one tool per table** whose `mcp` extension is enabled. Inputs are derived from
   the extension: `select` (restricted to `exposed_columns`; its help lists each
   column as `name (type): meaning`), `preset` (an enum of the table's preset
@@ -88,6 +92,45 @@ back or remove with `SHOW EXTENSIONS FOR obs` / `DROP EXTENSION 'mcp' FOR obs`.
 `{"name": ..., "description": ...}`. Payloads parse strictly
 (`deny_unknown_fields`, typed operators), so typos/extra keys are rejected rather
 than silently dropped. See the table-extensions docs for the full schema.
+
+## Large results
+
+`run_sql` inlines rows into the model's context and is capped (1000 rows) — it's
+for previews and reasoning, not bulk data. For large exports, `export_query`
+returns a **fetch recipe** instead of the data: the model gets a small JSON blob,
+and a Python script fetches the file directly from `/api/query` (which streams the
+Parquet/Arrow/CSV in one response). The bytes never pass through the model.
+
+Calling `export_query` with `{"sql": "SELECT ... FROM obs WHERE ...", "format": "parquet"}`
+returns something like:
+
+```json
+{
+  "note": "This does not run the query. POST `request.body` to <BEACON_URL>/api/query; the response body IS the file.",
+  "format": "parquet",
+  "request": {
+    "method": "POST", "path": "/api/query",
+    "headers": {"Content-Type": "application/json", "Authorization": "<same as MCP; omit if anonymous>"},
+    "body": {"sql": "SELECT ... FROM obs WHERE ...", "output": {"format": "parquet"}}
+  },
+  "python": "import io, requests, pandas as pd\nBEACON_URL = \"http://localhost:5001\"\n..."
+}
+```
+
+The `python` field is runnable as-is (fill in `BEACON_URL`/`AUTH`):
+
+```python
+import io, requests, pandas as pd
+resp = requests.post(f"{BEACON_URL}/api/query",
+    headers={"Authorization": AUTH},
+    json={"sql": "SELECT ... FROM obs WHERE ...", "output": {"format": "parquet"}})
+resp.raise_for_status()
+df = pd.read_parquet(io.BytesIO(resp.content))
+```
+
+Formats: `parquet` (default; typed, columnar), `arrow` (IPC), `csv`. Only
+read-only `SELECT`/`WITH` queries are accepted. The query runs when the script
+runs, under whatever credential the script sends (same read-only rules as MCP).
 
 ## Authenticating an agent
 
