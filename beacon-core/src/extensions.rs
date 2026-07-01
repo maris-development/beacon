@@ -84,7 +84,7 @@ pub struct TableExtensions {
     "enabled": true,
     "tool_name": "query_ocean_observations",
     "description": "Argo float observations by location, depth, and time.",
-    "exposed_columns": ["lat", "lon", "depth", "temperature", "time"]
+    "exposed_columns": ["lat", "lon", {"name": "depth", "description": "measurement depth in meters"}]
 }))]
 #[serde(deny_unknown_fields)]
 pub struct McpExtension {
@@ -94,15 +94,59 @@ pub struct McpExtension {
     /// Tool name to expose. Downstream may default to the table name if unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
-    /// Human-readable description for the MCP tool/resource.
+    /// Human-readable description of what the table contains / means (maps to the
+    /// MCP `Tool.description`, so the model knows what the table is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Human-readable title for the generated tool (MCP `Tool.title`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Columns to expose. `None` (omitted) exposes all columns.
+    /// Columns to expose, optionally documented. `None` (omitted) exposes all
+    /// columns. Each entry is either a bare column name (`"lat"`) or an object
+    /// `{ "name": "depth", "description": "measurement depth in meters" }`
+    /// describing what the column means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exposed_columns: Option<Vec<String>>,
+    pub exposed_columns: Option<Vec<ExposedColumn>>,
+}
+
+/// A column surfaced through the MCP tool — a bare name, or a name plus a
+/// human-readable description of what it represents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum ExposedColumn {
+    /// Just the column name.
+    Name(String),
+    /// A column name together with a description of its meaning.
+    Documented(ColumnDoc),
+}
+
+/// A documented column: its name and what it represents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnDoc {
+    /// Column name (must exist in the table schema).
+    pub name: String,
+    /// What the column means / represents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl ExposedColumn {
+    /// The column name.
+    pub fn name(&self) -> &str {
+        match self {
+            ExposedColumn::Name(name) => name,
+            ExposedColumn::Documented(doc) => &doc.name,
+        }
+    }
+
+    /// The column's description, if documented.
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            ExposedColumn::Name(_) => None,
+            ExposedColumn::Documented(doc) => doc.description.as_deref(),
+        }
+    }
 }
 
 /// A set of named, predefined filters consumers can apply.
@@ -211,10 +255,17 @@ impl McpExtension {
         }
         if let Some(columns) = &self.exposed_columns {
             for column in columns {
-                ensure_column(schema, column)?;
+                ensure_column(schema, column.name())?;
             }
         }
         Ok(())
+    }
+
+    /// The names of the curated exposed columns, if any are set.
+    pub fn exposed_column_names(&self) -> Option<Vec<&str>> {
+        self.exposed_columns
+            .as_ref()
+            .map(|cols| cols.iter().map(ExposedColumn::name).collect())
     }
 }
 
@@ -494,6 +545,29 @@ mod tests {
         ext.set_kind("mcp", r#"{"enabled":true,"exposed_columns":["lat","ghost"]}"#)
             .unwrap();
         assert!(ext.validate(&schema()).unwrap_err().to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn mcp_accepts_documented_columns() {
+        // Columns may be bare names or {name, description} objects, mixed freely.
+        let mut ext = TableExtensions::default();
+        ext.set_kind(
+            "mcp",
+            r#"{"enabled":true,"exposed_columns":["lat",{"name":"depth","description":"meters"}]}"#,
+        )
+        .unwrap();
+        assert!(ext.validate(&schema()).is_ok());
+        let cols = ext.mcp.as_ref().unwrap().exposed_columns.as_ref().unwrap();
+        assert_eq!((cols[0].name(), cols[0].description()), ("lat", None));
+        assert_eq!((cols[1].name(), cols[1].description()), ("depth", Some("meters")));
+        // A documented column with an unknown key is rejected (deny_unknown_fields).
+        let mut bad = TableExtensions::default();
+        assert!(bad
+            .set_kind(
+                "mcp",
+                r#"{"enabled":true,"exposed_columns":[{"name":"lat","unit":"deg"}]}"#,
+            )
+            .is_err());
     }
 
     #[test]

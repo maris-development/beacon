@@ -26,7 +26,18 @@ only `SELECT` runs. The caller's roles are preserved, so per-user read grants
 Use the table-extensions surface (SQL or REST):
 
 ```sql
-SET EXTENSION 'mcp' FOR obs TO '{"enabled":true,"tool_name":"query_obs","description":"Ocean observations","exposed_columns":["lat","lon","depth","temperature"]}';
+SET EXTENSION 'mcp' FOR obs TO '{
+  "enabled": true,
+  "tool_name": "query_obs",
+  "title": "Ocean observations",
+  "description": "Argo float profiles: temperature and salinity by location, depth and time.",
+  "exposed_columns": [
+    {"name": "lat", "description": "latitude in decimal degrees"},
+    {"name": "lon", "description": "longitude in decimal degrees"},
+    {"name": "depth", "description": "measurement depth in meters"},
+    "temperature"
+  ]
+}';
 SET EXTENSION 'preset' FOR obs TO '{"presets":[{"name":"shallow","filters":[{"column":"depth","op":"<=","value":10}]}]}';
 ```
 
@@ -34,8 +45,11 @@ SET EXTENSION 'preset' FOR obs TO '{"presets":[{"name":"shallow","filters":[{"co
 
 The `mcp` descriptor maps to the MCP `Tool` standard: `tool_name` → `Tool.name`
 (validated to MCP/Anthropic rules — 1–64 chars of `[A-Za-z0-9_-]`; the generated
-default is sanitized), `title` → `Tool.title`, `description` → `Tool.description`,
-`exposed_columns` constrain the generated `inputSchema`, and every tool carries
+default is sanitized), `title` → `Tool.title`, and `description` describes **what
+the table means** → `Tool.description`. `exposed_columns` constrain the generated
+`inputSchema`; each entry is either a bare name or `{"name", "description"}` — the
+per-column meanings are folded into the `select` parameter help and returned by
+`describe_table`, so the model knows what each field represents. Every tool carries
 `annotations.readOnlyHint: true`. Payloads are parsed strictly
 (`deny_unknown_fields`), so unknown keys are rejected rather than ignored.
 

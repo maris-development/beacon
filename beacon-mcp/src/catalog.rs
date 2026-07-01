@@ -170,28 +170,46 @@ async fn table_tool(
         .clone()
         .unwrap_or_else(|| format!("Query the '{table}' table."));
 
-    // Columns offered to the model: the curated `exposed_columns` if set,
-    // otherwise the table's full schema.
-    let columns: Vec<String> = match &mcp.exposed_columns {
-        Some(cols) => cols.clone(),
+    // Columns offered to the model: the curated `exposed_columns` (with optional
+    // per-column descriptions) if set, otherwise the table's full schema.
+    let columns: Vec<(String, Option<String>)> = match &mcp.exposed_columns {
+        Some(cols) => cols
+            .iter()
+            .map(|c| (c.name().to_string(), c.description().map(String::from)))
+            .collect(),
         None => runtime
             .list_table_schema_view(table.to_string())
             .await
-            .map(|s| s.fields.into_iter().map(|f| f.name).collect())
+            .map(|s| s.fields.into_iter().map(|f| (f.name, None)).collect())
             .unwrap_or_default(),
+    };
+    let column_names: Vec<String> = columns.iter().map(|(name, _)| name.clone()).collect();
+    // Fold any per-column descriptions into the `select` help so the model knows
+    // what each column means.
+    let glossary: Vec<String> = columns
+        .iter()
+        .filter_map(|(name, desc)| desc.as_ref().map(|d| format!("{name}: {d}")))
+        .collect();
+    let select_description = if glossary.is_empty() {
+        "Columns to return. Omit for all exposed columns.".to_string()
+    } else {
+        format!(
+            "Columns to return. Omit for all exposed columns. Column meanings — {}.",
+            glossary.join("; ")
+        )
     };
     let preset_names: Vec<String> = preset
         .map(|p| p.presets.iter().map(|x| x.name.clone()).collect())
         .unwrap_or_default();
 
     let mut props = Map::new();
-    if !columns.is_empty() {
+    if !column_names.is_empty() {
         props.insert(
             "select".into(),
             json!({
                 "type": "array",
-                "items": { "type": "string", "enum": columns },
-                "description": "Columns to return. Omit for all exposed columns."
+                "items": { "type": "string", "enum": column_names },
+                "description": select_description
             }),
         );
     }
@@ -256,7 +274,7 @@ fn build_table_sql(
     preset: Option<&PresetExtension>,
     args: &Map<String, Value>,
 ) -> anyhow::Result<String> {
-    let exposed = mcp.exposed_columns.as_ref();
+    let exposed = mcp.exposed_column_names();
 
     let select = match args.get("select").and_then(Value::as_array) {
         Some(arr) if !arr.is_empty() => {
@@ -264,14 +282,17 @@ fn build_table_sql(
                 .iter()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect();
-            if let Some(exp) = exposed {
+            if let Some(exp) = &exposed {
                 for col in &cols {
-                    anyhow::ensure!(exp.contains(col), "column '{col}' is not exposed by this tool");
+                    anyhow::ensure!(
+                        exp.contains(&col.as_str()),
+                        "column '{col}' is not exposed by this tool"
+                    );
                 }
             }
             cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")
         }
-        _ => default_select(exposed),
+        _ => default_select(exposed.as_deref()),
     };
 
     let mut clauses = Vec::new();
@@ -299,10 +320,10 @@ fn build_table_sql(
     Ok(sql)
 }
 
-fn default_select(exposed: Option<&Vec<String>>) -> String {
+fn default_select(exposed: Option<&[&str]>) -> String {
     match exposed {
         Some(cols) if !cols.is_empty() => {
-            cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")
+            cols.iter().map(|&c| quote_ident(c)).collect::<Vec<_>>().join(", ")
         }
         _ => "*".to_string(),
     }
@@ -372,7 +393,11 @@ mod tests {
             tool_name: None,
             description: None,
             title: None,
-            exposed_columns: cols.map(|c| c.into_iter().map(String::from).collect()),
+            exposed_columns: cols.map(|c| {
+                c.into_iter()
+                    .map(|s| beacon_core::extensions::ExposedColumn::Name(s.to_string()))
+                    .collect()
+            }),
         }
     }
 
