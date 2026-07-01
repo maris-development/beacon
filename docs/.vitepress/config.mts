@@ -570,6 +570,20 @@ export default defineConfig({
           ]
         },
         {
+          text: 'MCP Server',
+          link: '/docs/1.8.0/mcp',
+          collapsed: true,
+          items: [
+            { text: 'Enabling & configuration', link: '/docs/1.8.0/mcp#enabling-configuration' },
+            { text: 'Tools', link: '/docs/1.8.0/mcp#tools' },
+            { text: 'Exposing a table', link: '/docs/1.8.0/mcp#exposing-a-table-to-mcp' },
+            { text: 'Large results', link: '/docs/1.8.0/mcp#large-results' },
+            { text: 'Authenticating an agent', link: '/docs/1.8.0/mcp#authenticating-an-agent' },
+            { text: 'Connecting a client', link: '/docs/1.8.0/mcp#connecting-a-client' },
+            { text: 'How it works', link: '/docs/1.8.0/mcp#how-it-works' },
+          ]
+        },
+        {
           text: 'Connect',
           collapsed: true,
           items: [
