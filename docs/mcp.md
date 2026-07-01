@@ -96,6 +96,26 @@ back or remove with `SHOW EXTENSIONS FOR obs` / `DROP EXTENSION 'mcp' FOR obs`.
 (`deny_unknown_fields`, typed operators), so typos/extra keys are rejected rather
 than silently dropped. See the table-extensions docs for the full schema.
 
+### Advisory guard rails
+
+The `mcp` descriptor may carry a free-form `guardrails` map — arbitrary key/value
+pairs that beacon surfaces to the agent (appended to the tool's description, and
+returned by `describe_table`) but does **not** enforce. Use it to nudge model
+behavior:
+
+```sql
+SET EXTENSION 'mcp' FOR obs TO '{
+  "enabled": true,
+  "guardrails": {
+    "recommended_row_limit": 10000,
+    "note": "Always filter by time range; use export_query for full extracts."
+  }
+}';
+```
+
+Any keys are allowed. These are hints only — enforcement of result size is the
+separate, built-in `run_sql` preview cap described under [Large results](#large-results).
+
 ## Large results
 
 `run_sql` inlines rows into the model's context and is capped (1000 rows) — it's

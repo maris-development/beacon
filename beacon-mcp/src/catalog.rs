@@ -312,6 +312,28 @@ fn default_tool_name(table: &str) -> String {
     name
 }
 
+/// Render a table's advisory guard rails to a compact `key: value; …` string for
+/// the tool description. Beacon does not interpret these — they are hints for the
+/// agent. Returns `None` when there are no guard rails.
+fn guardrails_text(mcp: &McpExtension) -> Option<String> {
+    let guardrails = mcp.guardrails.as_ref()?;
+    if guardrails.is_empty() {
+        return None;
+    }
+    let rendered = guardrails
+        .iter()
+        .map(|(key, value)| {
+            let value = value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            format!("{key}: {value}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(rendered)
+}
+
 async fn table_tool(
     runtime: &Arc<Runtime>,
     table: &str,
@@ -322,10 +344,16 @@ async fn table_tool(
         .tool_name
         .clone()
         .unwrap_or_else(|| default_tool_name(table));
-    let description = mcp
+    let mut description = mcp
         .description
         .clone()
         .unwrap_or_else(|| format!("Query the '{table}' table."));
+    // Surface any advisory guard rails to the model as text (beacon does not
+    // enforce them; they are hints the agent is expected to respect).
+    if let Some(text) = guardrails_text(mcp) {
+        description.push_str("\n\nGuard rails (advisory): ");
+        description.push_str(&text);
+    }
 
     // Merge the table schema (types) with the extension's per-column descriptions,
     // scoped to `exposed_columns` when set, or all columns otherwise, so the model
@@ -595,6 +623,7 @@ mod tests {
                 }),
                 ExposedColumn::Name("lat".into()),
             ]),
+            guardrails: None,
         };
         let cols = resolve_columns(&schema, Some(&ext));
         assert_eq!(cols.len(), 2);
@@ -616,7 +645,23 @@ mod tests {
                     .map(|s| beacon_core::extensions::ExposedColumn::Name(s.to_string()))
                     .collect()
             }),
+            guardrails: None,
         }
+    }
+
+    #[test]
+    fn guardrails_render_as_advisory_text() {
+        assert_eq!(guardrails_text(&mcp(None)), None);
+        let mut ext = mcp(None);
+        let mut g = std::collections::BTreeMap::new();
+        g.insert("recommended_row_limit".to_string(), serde_json::json!(10000));
+        g.insert("note".to_string(), serde_json::json!("filter by time first"));
+        ext.guardrails = Some(g);
+        // Rendered as `key: value` pairs (BTreeMap => deterministic key order).
+        assert_eq!(
+            guardrails_text(&ext).as_deref(),
+            Some("note: filter by time first; recommended_row_limit: 10000")
+        );
     }
 
     #[test]
