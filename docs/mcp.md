@@ -9,11 +9,16 @@ can discover tables and run read-only queries.
 Generated dynamically from the runtime:
 
 - `list_tables` — registered tables and their MCP exposure status.
-- `describe_table` — a table's column schema plus its extensions (MCP descriptor, presets).
+- `describe_table` — one merged view per column (`name`, `data_type`, `nullable`,
+  `description`), scoped to `exposed_columns` when set or all columns otherwise,
+  plus the raw extensions. Descriptions come from the extension, falling back to
+  the Arrow field's `description`/`comment` metadata.
 - `run_sql` — run a read-only `SELECT` and get JSON rows.
 - **one tool per table** whose `mcp` extension is enabled (see below). Its inputs are
-  derived from the extension: `select` (restricted to `exposed_columns`), `preset`
-  (an enum of the table's preset names, expanded to filters), and `limit`.
+  derived from the extension: `select` (restricted to `exposed_columns`, and its
+  help lists each column as `name (type): meaning` so the model knows types and
+  meanings), `preset` (an enum of the table's preset names, expanded to filters),
+  and `limit`.
 
 The MCP surface is **strictly read-only**: every tool call executes with
 `is_super_user` cleared, so the query planner rejects any DDL/DML (`CREATE`,

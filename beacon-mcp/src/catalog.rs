@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use beacon_core::extensions::{McpExtension, PresetExtension, PresetFilter, PresetOp};
+use beacon_core::api::{SchemaFieldView, SchemaView};
 use beacon_core::runtime::Runtime;
 use beacon_core::AuthIdentity;
 use rmcp::model::{Tool, ToolAnnotations};
@@ -131,14 +132,76 @@ async fn describe_table_json(
         .get_table_extensions(table.to_string())
         .await
         .unwrap_or_default();
-    let columns: Vec<Value> = schema
-        .fields
+    // Merge schema types with per-column descriptions, scoped to the exposed
+    // columns (or all columns when none are curated).
+    let columns: Vec<Value> = resolve_columns(&schema, ext.mcp.as_ref())
         .iter()
-        .map(|f| json!({ "name": f.name, "data_type": f.data_type, "nullable": f.nullable }))
+        .map(|c| {
+            json!({
+                "name": c.name,
+                "data_type": c.data_type,
+                "nullable": c.nullable,
+                "description": c.description,
+            })
+        })
         .collect();
     Ok(serde_json::to_string_pretty(
         &json!({ "name": table, "columns": columns, "extensions": ext }),
     )?)
+}
+
+/// A column resolved for the model: its schema type merged with any description.
+struct ResolvedColumn {
+    name: String,
+    data_type: String,
+    nullable: bool,
+    description: Option<String>,
+}
+
+/// Merge the table schema with the mcp extension's per-column descriptions.
+/// Scoped to `exposed_columns` (in that order) when set, otherwise every column.
+/// A column's description comes from the extension entry, falling back to the
+/// Arrow field's `description`/`comment` metadata when present.
+fn resolve_columns(schema: &SchemaView, mcp: Option<&McpExtension>) -> Vec<ResolvedColumn> {
+    match mcp.and_then(|m| m.exposed_columns.as_ref()) {
+        Some(cols) => {
+            let by_name: std::collections::HashMap<&str, &SchemaFieldView> =
+                schema.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+            cols.iter()
+                .filter_map(|c| {
+                    let field = by_name.get(c.name())?;
+                    Some(ResolvedColumn {
+                        name: c.name().to_string(),
+                        data_type: field.data_type.clone(),
+                        nullable: field.nullable,
+                        description: c
+                            .description()
+                            .map(String::from)
+                            .or_else(|| field_description(field)),
+                    })
+                })
+                .collect()
+        }
+        None => schema
+            .fields
+            .iter()
+            .map(|f| ResolvedColumn {
+                name: f.name.clone(),
+                data_type: f.data_type.clone(),
+                nullable: f.nullable,
+                description: field_description(f),
+            })
+            .collect(),
+    }
+}
+
+/// A column description carried in the Arrow field metadata, if any.
+fn field_description(field: &SchemaFieldView) -> Option<String> {
+    field
+        .metadata
+        .get("description")
+        .or_else(|| field.metadata.get("comment"))
+        .cloned()
 }
 
 // ---- per-table tools -----------------------------------------------------
@@ -170,31 +233,26 @@ async fn table_tool(
         .clone()
         .unwrap_or_else(|| format!("Query the '{table}' table."));
 
-    // Columns offered to the model: the curated `exposed_columns` (with optional
-    // per-column descriptions) if set, otherwise the table's full schema.
-    let columns: Vec<(String, Option<String>)> = match &mcp.exposed_columns {
-        Some(cols) => cols
-            .iter()
-            .map(|c| (c.name().to_string(), c.description().map(String::from)))
-            .collect(),
-        None => runtime
-            .list_table_schema_view(table.to_string())
-            .await
-            .map(|s| s.fields.into_iter().map(|f| (f.name, None)).collect())
-            .unwrap_or_default(),
+    // Merge the table schema (types) with the extension's per-column descriptions,
+    // scoped to `exposed_columns` when set, or all columns otherwise, so the model
+    // sees name + data type + meaning for every queryable column.
+    let resolved = match runtime.list_table_schema_view(table.to_string()).await {
+        Some(schema) => resolve_columns(&schema, Some(mcp)),
+        None => Vec::new(),
     };
-    let column_names: Vec<String> = columns.iter().map(|(name, _)| name.clone()).collect();
-    // Fold any per-column descriptions into the `select` help so the model knows
-    // what each column means.
-    let glossary: Vec<String> = columns
+    let column_names: Vec<String> = resolved.iter().map(|c| c.name.clone()).collect();
+    let glossary: Vec<String> = resolved
         .iter()
-        .filter_map(|(name, desc)| desc.as_ref().map(|d| format!("{name}: {d}")))
+        .map(|c| match &c.description {
+            Some(desc) => format!("{} ({}): {}", c.name, c.data_type, desc),
+            None => format!("{} ({})", c.name, c.data_type),
+        })
         .collect();
     let select_description = if glossary.is_empty() {
-        "Columns to return. Omit for all exposed columns.".to_string()
+        "Columns to return. Omit for all columns.".to_string()
     } else {
         format!(
-            "Columns to return. Omit for all exposed columns. Column meanings — {}.",
+            "Columns to return, each shown as name (type): meaning. Omit for all. {}.",
             glossary.join("; ")
         )
     };
@@ -385,6 +443,51 @@ mod tests {
                 filters,
             }],
         }
+    }
+
+    fn field(name: &str, data_type: &str) -> SchemaFieldView {
+        SchemaFieldView {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable: true,
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn resolve_columns_merges_types_and_descriptions() {
+        use beacon_core::extensions::{ColumnDoc, ExposedColumn};
+        let schema = SchemaView {
+            fields: vec![field("lat", "Float64"), field("depth", "Float64"), field("x", "Int64")],
+            metadata: Default::default(),
+        };
+
+        // No exposed_columns -> all columns, types included, no descriptions.
+        let all = resolve_columns(&schema, Some(&mcp(None)));
+        assert_eq!(all.len(), 3);
+        assert_eq!((all[0].name.as_str(), all[0].data_type.as_str()), ("lat", "Float64"));
+
+        // Exposed subset (in order), merging schema type + entry description.
+        let ext = McpExtension {
+            enabled: true,
+            tool_name: None,
+            title: None,
+            description: None,
+            exposed_columns: Some(vec![
+                ExposedColumn::Documented(ColumnDoc {
+                    name: "depth".into(),
+                    description: Some("meters".into()),
+                }),
+                ExposedColumn::Name("lat".into()),
+            ]),
+        };
+        let cols = resolve_columns(&schema, Some(&ext));
+        assert_eq!(cols.len(), 2);
+        assert_eq!(
+            (cols[0].name.as_str(), cols[0].data_type.as_str(), cols[0].description.as_deref()),
+            ("depth", "Float64", Some("meters"))
+        );
+        assert_eq!((cols[1].name.as_str(), cols[1].description.as_deref()), ("lat", None));
     }
 
     fn mcp(cols: Option<Vec<&str>>) -> McpExtension {
