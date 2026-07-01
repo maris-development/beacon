@@ -1,34 +1,53 @@
 # MCP server
 
-Beacon ships an [MCP](https://modelcontextprotocol.io) server over the
-streamable-HTTP transport at `POST/GET/DELETE /mcp`, so MCP clients (e.g. Claude)
-can discover tables and run read-only queries.
+Beacon ships an [MCP](https://modelcontextprotocol.io) server so MCP clients
+(e.g. Claude) can discover beacon's tables and run **read-only** queries against
+them. It is served over the streamable-HTTP transport at `POST/GET/DELETE /mcp`
+by the `beacon-mcp` crate, mounted alongside the REST API.
+
+For how it works internally, see [mcp-architecture.md](mcp-architecture.md).
+
+## Enabling & configuration
+
+The endpoint is mounted by default. Relevant environment variables:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BEACON_MCP_ENABLED` | `true` | Mount `/mcp`. Set `false`/`0`/`off` to disable. |
+| `BEACON_AUTH_ANONYMOUS_ENABLED` | `true` | Unauthenticated requests resolve to the anonymous principal. |
+| `BEACON_AUTH_ENFORCE` | `false` | Apply per-role read grants at query time. |
+
+With the defaults, `/mcp` is on and open (anonymous, read-only). To lock it down,
+set `BEACON_AUTH_ENFORCE=true` and `BEACON_AUTH_ANONYMOUS_ENABLED=false`, then
+issue each agent a credential (below).
 
 ## Tools
 
-Generated dynamically from the runtime:
+The tool set is generated dynamically from the runtime on every `tools/list`:
 
-- `list_tables` — registered tables and their MCP exposure status.
-- `describe_table` — one merged view per column (`name`, `data_type`, `nullable`,
-  `description`), scoped to `exposed_columns` when set or all columns otherwise,
-  plus the raw extensions. Descriptions come from the extension, falling back to
-  the Arrow field's `description`/`comment` metadata.
-- `run_sql` — run a read-only `SELECT` and get JSON rows.
-- **one tool per table** whose `mcp` extension is enabled (see below). Its inputs are
-  derived from the extension: `select` (restricted to `exposed_columns`, and its
-  help lists each column as `name (type): meaning` so the model knows types and
-  meanings), `preset` (an enum of the table's preset names, expanded to filters),
-  and `limit`.
+- **`list_tables`** — registered tables and their MCP exposure status.
+- **`describe_table`** — a merged per-column view (`name`, `data_type`,
+  `nullable`, `description`), scoped to `exposed_columns` when set or all columns
+  otherwise, plus the raw extensions. Descriptions come from the extension,
+  falling back to the Arrow field's `description`/`comment` metadata.
+- **`run_sql`** — run a read-only `SELECT` and get JSON rows.
+- **one tool per table** whose `mcp` extension is enabled. Inputs are derived from
+  the extension: `select` (restricted to `exposed_columns`; its help lists each
+  column as `name (type): meaning`), `preset` (an enum of the table's preset
+  names, expanded to filters at query time), and `limit`.
 
 The MCP surface is **strictly read-only**: every tool call executes with
 `is_super_user` cleared, so the query planner rejects any DDL/DML (`CREATE`,
 `INSERT`, `UPDATE`, `DELETE`, `SET EXTENSION`, …) regardless of who connects —
 only `SELECT` runs. The caller's roles are preserved, so per-user read grants
-(RBAC) still apply. Results are capped (1000 rows) to keep tool output bounded.
+(RBAC) still apply. Every tool carries `annotations.readOnlyHint: true`. Results
+are capped (1000 rows) to keep tool output bounded.
 
 ## Exposing a table to MCP
 
-Use the table-extensions surface (SQL or REST):
+Tables become MCP tools via the table-extensions surface (SQL or the admin REST
+API). The `mcp` extension describes the table; an optional `preset` extension
+adds named, predefined filter sets.
 
 ```sql
 SET EXTENSION 'mcp' FOR obs TO '{
@@ -37,38 +56,117 @@ SET EXTENSION 'mcp' FOR obs TO '{
   "title": "Ocean observations",
   "description": "Argo float profiles: temperature and salinity by location, depth and time.",
   "exposed_columns": [
-    {"name": "lat", "description": "latitude in decimal degrees"},
-    {"name": "lon", "description": "longitude in decimal degrees"},
+    {"name": "lat",   "description": "latitude in decimal degrees"},
+    {"name": "lon",   "description": "longitude in decimal degrees"},
     {"name": "depth", "description": "measurement depth in meters"},
     "temperature"
   ]
 }';
-SET EXTENSION 'preset' FOR obs TO '{"presets":[{"name":"shallow","filters":[{"column":"depth","op":"<=","value":10}]}]}';
+
+SET EXTENSION 'preset' FOR obs TO '{
+  "presets": [
+    {"name": "shallow", "description": "Surface layer",
+     "filters": [{"column": "depth", "op": "<=", "value": 10}]}
+  ]
+}';
 ```
 
-`query_obs` then appears as an MCP tool with a `preset: "shallow"` option.
+`query_obs` then appears as an MCP tool with a `preset: "shallow"` option. Read
+back or remove with `SHOW EXTENSIONS FOR obs` / `DROP EXTENSION 'mcp' FOR obs`.
 
-The `mcp` descriptor maps to the MCP `Tool` standard: `tool_name` → `Tool.name`
-(validated to MCP/Anthropic rules — 1–64 chars of `[A-Za-z0-9_-]`; the generated
-default is sanitized), `title` → `Tool.title`, and `description` describes **what
-the table means** → `Tool.description`. `exposed_columns` constrain the generated
-`inputSchema`; each entry is either a bare name or `{"name", "description"}` — the
-per-column meanings are folded into the `select` parameter help and returned by
-`describe_table`, so the model knows what each field represents. Every tool carries
-`annotations.readOnlyHint: true`. Payloads are parsed strictly
-(`deny_unknown_fields`), so unknown keys are rejected rather than ignored.
+### How the `mcp` fields map to the MCP `Tool` standard
 
-## Connecting Claude
+| Extension field | MCP `Tool` | Notes |
+|---|---|---|
+| `tool_name` | `name` | Validated to 1–64 chars of `[A-Za-z0-9_-]`; the generated default (`query_<table>`) is sanitized. |
+| `title` | `title` | Human-readable label. |
+| `description` | `description` | What the **table** means. |
+| `exposed_columns` | `inputSchema` | Constrains `select`; per-column meanings feed its help + `describe_table`. |
+| — | `annotations.readOnlyHint` | Always `true`. |
 
-**HTTP (Claude Code / API):** point the client at `http://<host>:<port>/mcp`.
+`exposed_columns` entries are either a bare name (`"lat"`) or
+`{"name": ..., "description": ...}`. Payloads parse strictly
+(`deny_unknown_fields`, typed operators), so typos/extra keys are rejected rather
+than silently dropped. See the table-extensions docs for the full schema.
 
-**Claude Desktop** (via an HTTP-capable MCP entry):
+## Authenticating an agent
+
+`/mcp` authenticates via the HTTP `Authorization` header (the same
+`resolve_identity` path as the client API):
+
+- **Basic** — `Authorization: Basic base64(user:pass)` → a beacon user's roles.
+- **Bearer** — `Authorization: Bearer <token>` → an OIDC/OAuth2 JWT.
+- **No header** → the anonymous principal (if enabled), else no access.
+
+MCP is read-only regardless of identity; the identity only decides *which reads*
+are allowed (when `BEACON_AUTH_ENFORCE=true`).
+
+Create a read-only user to hand to an agent (as a super-user, via SQL or the
+admin API):
+
+```sql
+CREATE USER agent WITH PASSWORD 's3cret';
+-- when enforcing, grant reads and assign a role:
+GRANT SELECT ON obs TO ROLE readers;
+GRANT ROLE readers TO USER agent;
+```
+
+> Beacon's built-in super-user is **config-only** (`BEACON_ADMIN_*`) and is not a
+> client identity, so those admin credentials do **not** authenticate on `/mcp`.
+> Use a `CREATE USER` account or an OIDC token.
+
+## Connecting a client
+
+**Claude Code (CLI)** — streamable HTTP with an auth header:
+
+```bash
+claude mcp add --transport http beacon https://your-host/mcp \
+  --header "Authorization: Basic $(printf 'agent:s3cret' | base64)"
+# or: --header "Authorization: Bearer <token>"
+```
+
+**Claude Desktop** — for a static token, bridge with `mcp-remote`:
 
 ```json
-{ "mcpServers": { "beacon": { "url": "http://localhost:5001/mcp" } } }
+{
+  "mcpServers": {
+    "beacon": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://your-host/mcp",
+               "--header", "Authorization: Bearer <token>"]
+    }
+  }
+}
 ```
 
-> The endpoint rides the same `resolve_identity` middleware as the client API:
-> requests authenticate via `Authorization` (resolving to that user's roles), or
-> the anonymous principal when enabled, or a role-less identity otherwise. It is
-> read-only regardless. Gate it with `BEACON_MCP_ENABLED=false` to disable.
+(For an open/anonymous local instance you can point a client straight at the URL
+with no header: `{ "mcpServers": { "beacon": { "url": "http://localhost:5001/mcp" } } }`.)
+
+**Programmatic (MCP SDKs)** — set the header on the streamable-HTTP transport:
+
+```ts
+new StreamableHTTPClientTransport(new URL("https://your-host/mcp"), {
+  requestInit: { headers: { Authorization: "Bearer <token>" } },
+});
+```
+
+```python
+streamablehttp_client("https://your-host/mcp",
+                      headers={"Authorization": "Bearer <token>"})
+```
+
+The transport attaches the header to every request, which is what beacon needs —
+it authenticates per request, even within a long-lived MCP session.
+
+## Quick check
+
+```bash
+curl -s -X POST http://127.0.0.1:5001/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Basic $(printf 'agent:s3cret' | base64)" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"c","version":"0"}}}'
+```
+
+A `200` with an `initialize` result means the credential was accepted; `401`
+means it was rejected.
