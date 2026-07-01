@@ -42,8 +42,15 @@ pub async fn run_sql_to_json(
 
     let rows = batches_to_json(&batches)?;
     if truncated {
+        // Guard rail: the result is larger than the preview cap. Return the
+        // preview but steer the model to `export_query` for the complete data
+        // rather than letting it treat the truncated rows as the full result.
         Ok(format!(
-            "{{\"truncated\":true,\"max_rows\":{MAX_ROWS},\"rows\":{rows}}}"
+            "{{\"truncated\":true,\"returned_rows\":{MAX_ROWS},\"max_rows\":{MAX_ROWS},\
+             \"guidance\":\"This is a truncated preview ({MAX_ROWS} rows) because the result is \
+             large. Do NOT treat these rows as complete. To get the full result, call \
+             export_query with the same SQL to fetch it as a Parquet/Arrow/CSV file.\",\
+             \"rows\":{rows}}}"
         ))
     } else {
         Ok(rows)
