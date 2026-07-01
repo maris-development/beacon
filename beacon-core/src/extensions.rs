@@ -107,6 +107,12 @@ pub struct McpExtension {
     /// describing what the column means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposed_columns: Option<Vec<ExposedColumn>>,
+    /// Free-form advisory guard rails surfaced to the agent (in the generated
+    /// tool's description and via `describe_table`). Any key/value pairs are
+    /// allowed and beacon does **not** enforce them — they are hints for the model
+    /// (e.g. `{"recommended_row_limit": 10000, "note": "filter by time first"}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardrails: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 /// A column surfaced through the MCP tool — a bare name, or a name plus a
