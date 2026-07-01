@@ -30,7 +30,10 @@ The tool set is generated dynamically from the runtime on every `tools/list`:
   `nullable`, `description`), scoped to `exposed_columns` when set or all columns
   otherwise, plus the raw extensions. Descriptions come from the extension,
   falling back to the Arrow field's `description`/`comment` metadata.
-- **`run_sql`** — run a read-only `SELECT` and get JSON rows (for previews; capped).
+- **`run_sql`** — run a read-only `SELECT` and get JSON rows. A bounded **preview**:
+  capped at 1000 rows; when a result is larger it is truncated and the response
+  (`"truncated": true` + `guidance`) steers the model to `export_query` for the
+  complete data — so a partial preview is never mistaken for the full result.
 - **`export_query`** — for **large** results: returns a *recipe* (the exact
   `/api/query` request + a ready-to-run Python snippet) to fetch the result as a
   Parquet/Arrow/CSV file. It does **not** run the query or return rows, so the
@@ -96,10 +99,16 @@ than silently dropped. See the table-extensions docs for the full schema.
 ## Large results
 
 `run_sql` inlines rows into the model's context and is capped (1000 rows) — it's
-for previews and reasoning, not bulk data. For large exports, `export_query`
-returns a **fetch recipe** instead of the data: the model gets a small JSON blob,
-and a Python script fetches the file directly from `/api/query` (which streams the
-Parquet/Arrow/CSV in one response). The bytes never pass through the model.
+for previews and reasoning, not bulk data. **Guard rail:** when a `run_sql` result
+exceeds the cap, the response is marked `"truncated": true` and carries `guidance`
+telling the model not to treat the preview as complete and to call `export_query`
+instead — so large queries are steered to the file path rather than silently
+returning partial data.
+
+For large exports, `export_query` returns a **fetch recipe** instead of the data:
+the model gets a small JSON blob, and a Python script fetches the file directly
+from `/api/query` (which streams the Parquet/Arrow/CSV in one response). The bytes
+never pass through the model.
 
 Calling `export_query` with `{"sql": "SELECT ... FROM obs WHERE ...", "format": "parquet"}`
 returns something like:

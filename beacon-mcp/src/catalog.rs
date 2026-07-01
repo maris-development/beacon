@@ -98,7 +98,11 @@ fn describe_table_tool() -> Tool {
 fn run_sql_tool() -> Tool {
     read_only(Tool::new(
         "run_sql",
-        "Run a read-only SQL query (SELECT only) against beacon and return JSON rows.",
+        "Run a read-only SQL query (SELECT only) and return JSON rows. This is a bounded \
+         PREVIEW: at most 1000 rows are returned; if the result is larger it is truncated \
+         (the response sets \"truncated\": true). For complete or large results — anything you \
+         intend to analyze in full or hand to a script — use export_query to fetch a \
+         Parquet/Arrow/CSV file instead of run_sql.",
         object_schema(
             json!({ "sql": { "type": "string", "description": "A read-only SELECT statement." } }),
             &["sql"],
