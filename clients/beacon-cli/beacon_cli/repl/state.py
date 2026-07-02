@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..render import DEFAULT_MAX_ROWS
 
 
@@ -14,3 +16,4 @@ class ReplState:
         self.expand = False  # vertical (field/value) rendering for wide tables
         self.export_format: str | None = None  # None -> infer from file extension
         self.last_statement: str | None = None
+        self.session: Any = None  # the prompt_toolkit PromptSession (None if no tty)

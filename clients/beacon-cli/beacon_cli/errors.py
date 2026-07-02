@@ -30,6 +30,23 @@ class ConnectionFailedError(BeaconCliError):
         super().__init__(f"could not connect to beacon at {url}: {detail}")
 
 
+class AuthenticationError(BeaconCliError):
+    """Credentials were supplied but the server rejected them.
+
+    Raised when the CLI is configured with admin credentials that fail
+    authentication, so the session could not be established as a super-user.
+    """
+
+    def __init__(self, url: str, username: str | None):
+        self.url = url
+        self.username = username
+        who = f" (user {username!r})" if username else ""
+        super().__init__(
+            f"could not connect to beacon at {url} as super-user{who}: "
+            "invalid admin credentials — check the --username / --password arguments"
+        )
+
+
 class StreamInterruptedError(BeaconCliError):
     """The server closed the response stream before it was complete.
 

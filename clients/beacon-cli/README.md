@@ -6,8 +6,10 @@ tables in your terminal, and export to CSV, Parquet, Arrow IPC, or NetCDF — al
 without leaving the shell.
 
 It talks to the server's `/api/*` HTTP endpoints, decoding the zstd-compressed
-Arrow IPC result stream with `pyarrow`, and offers both one-shot subcommands and
-an interactive REPL.
+Arrow IPC result stream with `pyarrow`. It offers both one-shot subcommands (great
+for scripting and pipes) and a full-featured interactive REPL — SQL syntax
+highlighting, context-aware completion, multi-line editing (emacs or vi),
+on-demand formatting, and a status bar.
 
 ## Install
 
@@ -21,17 +23,34 @@ This installs the `beacon-cli` console script.
 
 ## Connecting
 
-Defaults match the Beacon server (`http://localhost:5001`). Override per-invocation
-or via environment variables:
+Connection details are passed as explicit arguments only — the CLI does **not**
+read `BEACON_*` environment variables (those configure the Beacon *server*, and
+inheriting them would silently connect with the server's admin credentials). The
+URL defaults to a local server:
 
-| Option | Env var | Default |
-| --- | --- | --- |
-| `--url` | `BEACON_URL` | `http://localhost:5001` |
-| `--username` | `BEACON_ADMIN_USERNAME` | _(none)_ |
-| `--password` | `BEACON_ADMIN_PASSWORD` | _(none)_ |
+| Option | Default |
+| --- | --- |
+| `--url`, `-u` | `http://127.0.0.1:5001` |
+| `--username` | *(none)* |
+| `--password` | *(none)* |
+
+```bash
+beacon-cli --url https://beacon.example.com --username admin --password s3cret
+```
 
 Credentials are sent as HTTP Basic auth and elevate the session to super-user,
-which is required for DDL/DML (e.g. `CREATE EXTERNAL TABLE`).
+which is required for DDL/DML (e.g. `CREATE EXTERNAL TABLE`). With no credentials
+the session is anonymous and read-only.
+
+A `localhost` URL is rewritten to `127.0.0.1` automatically: on Windows `localhost`
+resolves to IPv6 (`::1`) first and, when the server listens on IPv4 only, each
+connection stalls ~2s before falling back — targeting `127.0.0.1` avoids that.
+
+When it connects, the interactive shell resolves and greets you with the access
+level the server reports — `super-user`, a named `user` (valid credentials but
+not an admin, read-only), or `anonymous`. If the supplied credentials are
+rejected, the CLI fails fast with a clear *"could not connect … as super-user"*
+error rather than silently falling back to read-only.
 
 ## One-shot commands
 
@@ -133,8 +152,8 @@ so `beacon-cli query ... --json | jq` works.
 
 `query` (and the REPL) send raw SQL straight through, so anything the server
 accepts works — including Beacon's custom statements. Read-only statements need
-no credentials; anything that mutates state requires admin basic auth
-(`--username`/`--password` or the `BEACON_ADMIN_*` env vars).
+no credentials; anything that mutates state requires admin basic auth via
+`--username`/`--password`.
 
 ```bash
 # Read-only (no credentials)
@@ -165,27 +184,75 @@ in `COPY ... TO`, which cannot execute DDL).
 
 ## Interactive shell
 
-Run `beacon-cli` with no subcommand to open the REPL:
+Run `beacon-cli` with no subcommand to open the REPL. The prompt encodes the
+resolved session identity — `beacon (admin - super-user)>`, `beacon (alice - user)>`,
+or `beacon (anonymous)>` — so your access level stays visible on every line:
 
 ```
-beacon> SELECT * FROM default LIMIT 5;
+beacon (admin - super-user)> SELECT * FROM default LIMIT 5;
 beacon> \dt                 -- list tables
 beacon> \dt+                -- tables with kind / format / location
 beacon> \d default          -- table schema
+beacon> \df                 -- scalar/aggregate functions   (\dft for table functions)
 beacon> \datasets           -- list datasets
 beacon> \crawlers           -- SHOW CRAWLERS
 beacon> \run-crawler cr     -- RUN CRAWLER cr      (admin)
 beacon> \refresh obs        -- REFRESH TABLE obs   (admin)
+beacon> \info               -- server info
 beacon> \format parquet     -- set export format
-beacon> \export out.parquet -- write the last statement to a file
+beacon> \export out.parquet -- write the last statement to a file  (\o alias)
+beacon> \i migrate.sql      -- run a SQL script (multiple ;-separated statements)
 beacon> \limit 50           -- change render cap
+beacon> \timing             -- toggle the elapsed/row footer
 beacon> \x                  -- toggle expanded (field/value) display for wide tables
+beacon> \vi                 -- switch to vi key bindings (\emacs to switch back)
 beacon> \help               -- full command list
 beacon> \q                  -- quit
 ```
 
-SQL statements may span multiple lines; finish with `;` or a blank line.
-Command history is saved under your user config directory.
+The prompt is a **multi-line editor**: Enter adds a line, the cursor moves freely
+between lines (Up/Down/Home/End), and `;` (or a blank line, or Alt+Enter) runs the
+statement. Press **Ctrl+F** (or F2) to auto-format (pretty-print) the current SQL
+across lines — upper-cased keywords, one clause per line. A running query shows a
+spinner with an elapsed timer; **Ctrl+C** cancels it (and aborts the rest of a
+`\i` script). Editing uses **emacs** key bindings by default; start with `--vi` (or
+run `\vi` in the shell) for **vi** bindings. Command history is saved under your
+user config directory.
+
+A **status bar** at the bottom shows the connection host, your identity, and the
+live row-limit / export format / timing / editing mode (`emacs`, or `vi:NORMAL` /
+`vi:INSERT`).
+
+In a real terminal the shell highlights SQL as you type — a dark, purple-forward
+theme (keywords in purple, plus strings, numbers, and comments) — and tints the
+prompt by access level using the same palette: green for `super-user`, cyan for a
+named `user`, gray for `anonymous`. Colour is dropped automatically when output
+isn't a terminal (pipes / CI).
+
+Completions suggest SQL keywords, your instance's **table names** (fetched live,
+so newly created tables show up), and backslash meta-commands (`\d`, `\dt`, …).
+Matching is **case-insensitive** (`sel` → `SELECT`, `OC` → `ocean_profiles`). Like
+an IDE, the menu pops **while you're typing a word**; at an empty position (e.g.
+just after a `WHERE` or `FROM` keyword) it stays out of the way until you ask for
+it with **Tab** or **Ctrl+Space**. Tab opens/inserts (Shift+Tab cycles back), arrow keys
+move through the menu, Enter accepts. Ctrl+Space is terminal-dependent — some
+terminals (e.g. Git Bash's mintty) send no code for it, so use **Tab** there.
+
+Completion is **context-aware**:
+
+- Right after `FROM`/`JOIN` it suggests **table names** (even before you type a
+  prefix) and table functions (`read_netcdf`, …).
+- Once a line binds a table via `FROM`/`JOIN`, that table's **columns** are
+  suggested wherever you're editing — the `WHERE`/`GROUP BY` clauses *and* the
+  `SELECT` list. Because a schema can have thousands of columns, only the first
+  ~10 show with no prefix; typing a few letters narrows the list.
+
+The table list and schemas are **prefetched in the background** on connect and
+indexed (sorted for `bisect` lookups), so completions are served from memory in
+microseconds. Cache lookups are **non-blocking** — a miss returns immediately and
+refreshes in the background — so the completer runs inline (no per-keystroke
+thread hand-off) and the menu appears instantly without ever waiting on the
+network.
 
 ## Exporting results
 
@@ -263,14 +330,14 @@ beacon> \export hot.csv
 beacon_cli/
   cli.py            Typer app + global connection callback
   __main__.py       enables `python -m beacon_cli`
-  config.py         ClientConfig (URL / auth / timeout, env resolution)
+  config.py         ClientConfig (URL / auth / timeout from CLI arguments)
   errors.py         user-facing error types
   client.py         BeaconClient — HTTP over /api/*
   arrow_io.py       QueryResult + Arrow IPC stream decoding
   formats.py        output-format inference / spec building
   render/           rich rendering: results.py, metadata.py
   commands/         one module per command group: query.py, catalog.py
-  repl/             interactive shell: reader, runner, meta, state, help
+  repl/             interactive shell: reader, runner, meta, completion, toolbar, state, help
 tests/              one test module per unit (client, config, formats, …)
 ```
 

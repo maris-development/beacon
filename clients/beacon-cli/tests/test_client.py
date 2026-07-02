@@ -11,13 +11,22 @@ import respx
 
 from beacon_cli.client import QUERY_ID_HEADER, BeaconClient
 from beacon_cli.config import ClientConfig
-from beacon_cli.errors import ConnectionFailedError, QueryError, StreamInterruptedError
+from beacon_cli.errors import (
+    AuthenticationError,
+    ConnectionFailedError,
+    QueryError,
+    StreamInterruptedError,
+)
 
 BASE = "http://beacon.test"
 
 
 def _client() -> BeaconClient:
     return BeaconClient(ClientConfig(url=BASE))
+
+
+def _admin_client() -> BeaconClient:
+    return BeaconClient(ClientConfig(url=BASE, username="admin", password="pw"))
 
 
 def _ipc_stream(table: pa.Table) -> bytes:
@@ -164,6 +173,58 @@ def test_tables_with_config_pairs_and_tolerates_404():
         entries = client.tables_with_config()
     assert entries[0][0] == "wod" and entries[0][1]["file_type"] == "NC"
     assert entries[1] == ("default", {})  # 404 -> empty config, not an error
+
+
+def test_identity_anonymous_makes_no_request():
+    # Without credentials the session is anonymous; no admin check is issued.
+    with respx.mock:
+        route = respx.get(f"{BASE}/api/admin/check")
+        with _client() as client:
+            identity = client.identity()
+    assert identity.kind == "anonymous"
+    assert identity.is_super_user is False
+    assert route.called is False
+
+
+@respx.mock
+def test_identity_super_user_on_200():
+    respx.get(f"{BASE}/api/admin/check").mock(
+        return_value=httpx.Response(200, json={"is_admin": True})
+    )
+    with _admin_client() as client:
+        identity = client.identity()
+    assert identity.is_super_user is True
+    assert identity.kind == "super-user"
+    assert "super-user" in identity.label
+
+
+@respx.mock
+def test_identity_invalid_credentials_raise():
+    respx.get(f"{BASE}/api/admin/check").mock(return_value=httpx.Response(401))
+    with _admin_client() as client:
+        with pytest.raises(AuthenticationError) as exc:
+            client.identity()
+    assert "super-user" in str(exc.value)
+    assert BASE in str(exc.value)
+
+
+@respx.mock
+def test_identity_valid_non_super_user_on_403():
+    respx.get(f"{BASE}/api/admin/check").mock(return_value=httpx.Response(403))
+    with _admin_client() as client:
+        identity = client.identity()
+    assert identity.kind == "user"
+    assert identity.is_super_user is False
+
+
+@respx.mock
+def test_identity_unknown_on_unexpected_status():
+    # e.g. an older server without the /api/admin/check endpoint.
+    respx.get(f"{BASE}/api/admin/check").mock(return_value=httpx.Response(404))
+    with _admin_client() as client:
+        identity = client.identity()
+    assert identity.kind == "unknown"
+    assert identity.is_super_user is False
 
 
 @respx.mock

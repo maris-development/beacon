@@ -1,18 +1,38 @@
 """Connection configuration for beacon-cli.
 
-Mirrors the Beacon server defaults (host ``0.0.0.0``, port ``5001``, admin
-basic-auth ``beacon-admin`` / ``beacon-password``) and honours the same
-``BEACON_*`` environment variables so the CLI lines up with a local server out
-of the box.
+Connection details come only from explicit CLI arguments (``--url``,
+``--username``, ``--password``, ``--timeout``); the CLI deliberately does *not*
+read ``BEACON_*`` environment variables, since those configure the Beacon
+*server* and picking them up here would silently connect with the server's admin
+credentials. The URL defaults to a local server so the CLI works out of the box.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
-DEFAULT_URL = "http://localhost:5001"
+DEFAULT_URL = "http://127.0.0.1:5001"
 DEFAULT_TIMEOUT = 600.0
+
+
+def _prefer_ipv4_localhost(url: str) -> str:
+    """Rewrite a ``localhost`` host to ``127.0.0.1``.
+
+    On Windows ``localhost`` resolves to ``::1`` (IPv6) first; when the server
+    listens on IPv4 only, the connection attempt to ``::1`` stalls for ~2s per
+    connection before falling back to IPv4. Targeting ``127.0.0.1`` skips that.
+    """
+    parts = urlsplit(url)
+    if parts.hostname != "localhost":
+        return url
+    netloc = "127.0.0.1"
+    if parts.port:
+        netloc += f":{parts.port}"
+    if parts.username:
+        creds = parts.username + (f":{parts.password}" if parts.password else "")
+        netloc = f"{creds}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 @dataclass
@@ -25,7 +45,7 @@ class ClientConfig:
     timeout: float = DEFAULT_TIMEOUT
 
     def __post_init__(self) -> None:
-        self.url = self.url.rstrip("/")
+        self.url = _prefer_ipv4_localhost(self.url.rstrip("/"))
 
     @property
     def auth(self) -> tuple[str, str] | None:
@@ -45,10 +65,15 @@ class ClientConfig:
         password: str | None = None,
         timeout: float | None = None,
     ) -> ClientConfig:
-        """Build a config from explicit values, falling back to env vars."""
+        """Build a config from explicit CLI values, applying defaults.
+
+        Only the values passed here are used — no environment variables are
+        consulted — so a session's identity is always exactly what the caller
+        asked for.
+        """
         return cls(
-            url=url or os.environ.get("BEACON_URL", DEFAULT_URL),
-            username=username if username is not None else os.environ.get("BEACON_ADMIN_USERNAME"),
-            password=password if password is not None else os.environ.get("BEACON_ADMIN_PASSWORD"),
+            url=url or DEFAULT_URL,
+            username=username,
+            password=password,
             timeout=timeout if timeout is not None else DEFAULT_TIMEOUT,
         )

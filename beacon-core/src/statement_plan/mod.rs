@@ -57,10 +57,18 @@ pub(crate) fn validate_query_plan(plan: &LogicalPlan, is_super_user: bool) -> an
         .with_allow_ddl(is_super_user)
         .with_allow_dml(is_super_user)
         .with_allow_statements(is_super_user);
-    sql_options.verify_plan(plan)?;
+    // A super-user is allowed every statement kind, so any failure here is a
+    // non-super-user attempting a privileged operation. DataFusion's own message
+    // ("DDL not supported: ...") reads like a missing feature, so reframe it as a
+    // permissions error while keeping the underlying detail for debugging.
+    sql_options.verify_plan(plan).map_err(|source| {
+        anyhow::anyhow!(
+            "operation not permitted: this statement requires super-user privileges ({source})"
+        )
+    })?;
 
     if !is_super_user && plan_contains_extension(plan)? {
-        anyhow::bail!("this operation requires super-user privileges");
+        anyhow::bail!("operation not permitted: this statement requires super-user privileges");
     }
 
     Ok(())

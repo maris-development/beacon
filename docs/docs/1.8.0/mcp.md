@@ -51,7 +51,7 @@ carries `annotations.readOnlyHint: true`.
 
 ## Exposing a table to MCP
 
-A table becomes an MCP tool when its `mcp` [extension](/docs/1.8.0/data-lake/external-tables)
+A table becomes an MCP tool when its `mcp` [extension](/docs/1.8.0/data-lake/extensions)
 is enabled. Set it via SQL (`SET EXTENSION`) or the admin REST API. An optional
 `preset` extension adds named, predefined filter sets.
 
@@ -168,11 +168,61 @@ Use a `CREATE USER` account or an OIDC token.
 
 **Claude Code (CLI):**
 
-```bash
+::: code-group
+
+```bash [Anonymous]
+claude mcp add --transport http beacon http://localhost:5001/mcp
+```
+
+```bash [Authenticated]
+# Basic auth
 claude mcp add --transport http beacon https://your-host/mcp \
   --header "Authorization: Basic $(printf 'agent:s3cret' | base64)"
-# or: --header "Authorization: Bearer <token>"
+
+# Bearer token
+claude mcp add --transport http beacon https://your-host/mcp \
+  --header "Authorization: Bearer <token>"
 ```
+
+:::
+
+**GitHub Copilot CLI** — add Beacon as an MCP server via `gh copilot`:
+
+::: code-group
+
+```bash [Anonymous]
+gh copilot mcp add --name beacon --type http --url http://localhost:5001/mcp
+```
+
+```bash [Authenticated]
+# Basic auth
+gh copilot mcp add --name beacon --type http --url https://your-host/mcp \
+  --header "Authorization: Basic $(printf 'agent:s3cret' | base64)"
+
+# Bearer token
+gh copilot mcp add --name beacon --type http --url https://your-host/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+:::
+
+**VS Code (CLI)** — register the server with `code --add-mcp`:
+
+::: code-group
+
+```bash [Anonymous]
+code --add-mcp "{\"name\":\"beacon\",\"type\":\"http\",\"url\":\"http://localhost:5001/mcp\"}"
+```
+
+```bash [Authenticated]
+# Basic auth
+code --add-mcp "{\"name\":\"beacon\",\"type\":\"http\",\"url\":\"https://your-host/mcp\",\"headers\":{\"Authorization\":\"Basic $(printf 'agent:s3cret' | base64)\"}}"
+
+# Bearer token
+code --add-mcp "{\"name\":\"beacon\",\"type\":\"http\",\"url\":\"https://your-host/mcp\",\"headers\":{\"Authorization\":\"Bearer <token>\"}}"
+```
+
+:::
 
 **Claude Desktop** — bridge a static token with `mcp-remote`:
 

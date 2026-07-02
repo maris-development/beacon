@@ -79,7 +79,11 @@ def collect_ipc_stream(
     the whole stream. A stream with no schema message (a side-effecting
     statement) yields an empty 0-column table.
     """
-    source = io.BufferedReader(_ChunkStream(chunks))
+    # Read straight from the chunk stream — no BufferedReader. pyarrow reads exact
+    # message sizes and stops at the Arrow end-of-stream marker, instead of
+    # over-reading to fill an 8 KB buffer and blocking until the HTTP body ends
+    # (which a keep-alive connection can delay ~seconds past the last data byte).
+    source = _ChunkStream(chunks)
     try:
         reader = pa.ipc.open_stream(source)
     except pa.ArrowInvalid:

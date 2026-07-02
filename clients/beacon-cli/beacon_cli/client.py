@@ -16,15 +16,48 @@ The request contract mirrors ``integration-tests/beacon_client.py``:
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from .arrow_io import QueryResult, collect_ipc_stream
 from .config import ClientConfig
-from .errors import ConnectionFailedError, QueryError, StreamInterruptedError
+from .errors import (
+    AuthenticationError,
+    ConnectionFailedError,
+    QueryError,
+    StreamInterruptedError,
+)
 
 QUERY_ID_HEADER = "x-beacon-query-id"
+
+
+@dataclass(frozen=True)
+class Identity:
+    """Who the server considers the caller, resolved from ``/api/admin/check``.
+
+    ``kind`` is one of ``"super-user"`` (admin auth accepted), ``"user"`` (valid
+    credentials but not a super-user), ``"anonymous"`` (no credentials), or
+    ``"unknown"`` (server didn't report — e.g. an older build without the check).
+    """
+
+    kind: str
+    username: str | None = None
+
+    @property
+    def is_super_user(self) -> bool:
+        return self.kind == "super-user"
+
+    @property
+    def label(self) -> str:
+        if self.kind == "super-user":
+            return f"super-user ({self.username})"
+        if self.kind == "user":
+            return f"{self.username} (read-only)"
+        if self.kind == "anonymous":
+            return "anonymous (read-only)"
+        return "unknown identity"
 
 
 class BeaconClient:
@@ -159,6 +192,29 @@ class BeaconClient:
 
     def info(self) -> Any:
         return self.get_json("/api/info")
+
+    def identity(self) -> Identity:
+        """Resolve who the server considers this session, via ``/api/admin/check``.
+
+        * No credentials configured -> ``anonymous`` (no request is made).
+        * ``200`` -> ``super-user`` (admin auth accepted).
+        * ``401`` -> credentials were supplied but rejected; raises
+          :class:`AuthenticationError` so the caller can report that it could not
+          connect as a super-user.
+        * ``403`` -> valid credentials, but not a super-user (``user``).
+        * anything else -> ``unknown`` (don't block the session on it).
+        """
+        auth = self._auth()
+        if auth is None:
+            return Identity(kind="anonymous")
+        resp = self._request("GET", "/api/admin/check", auth=auth)
+        if resp.status_code == 200:
+            return Identity(kind="super-user", username=self.config.username)
+        if resp.status_code == 401:
+            raise AuthenticationError(self.config.url, self.config.username)
+        if resp.status_code == 403:
+            return Identity(kind="user", username=self.config.username)
+        return Identity(kind="unknown", username=self.config.username)
 
     def metrics(self, query_id: str) -> dict:
         return self.get_json(f"/api/query/metrics/{query_id}")

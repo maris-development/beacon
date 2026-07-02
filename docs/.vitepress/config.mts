@@ -304,6 +304,20 @@ export default defineConfig({
                   link: '/docs/1.8.0/data-lake/performance-tuning#atlas-tuning'
                 }
               ]
+            },
+            {
+              text: 'Table Extensions',
+              link: '/docs/1.8.0/data-lake/extensions',
+              collapsed: true,
+              items: [
+                { text: 'Managing extensions', link: '/docs/1.8.0/data-lake/extensions#managing-extensions' },
+                { text: 'MCP extension', link: '/docs/1.8.0/data-lake/extensions#the-mcp-extension' },
+                { text: 'Preset extension', link: '/docs/1.8.0/data-lake/extensions#the-preset-extension' },
+              ]
+            },
+            {
+              text: 'Serve to AI Agents (MCP)',
+              link: '/docs/1.8.0/data-lake#serve-the-lakehouse-to-ai-agents-mcp',
             }
           ]
         },

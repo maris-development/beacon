@@ -16,6 +16,8 @@ dependencies = [
     "pyarrow>=14.0",
     "rich>=13.0",
     "prompt_toolkit>=3.0",
+    "pygments>=2.13",
+    "sqlparse>=0.4",
     "typer>=0.12",
 ]
 

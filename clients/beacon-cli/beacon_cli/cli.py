@@ -10,8 +10,9 @@ from __future__ import annotations
 import typer
 
 from . import __version__, commands
-from .commands._shared import console, err_console, get_client
+from .commands._shared import console, err_console, fail, get_client
 from .config import ClientConfig
+from .errors import BeaconCliError
 
 app = typer.Typer(
     add_completion=True,
@@ -25,17 +26,14 @@ app = typer.Typer(
 @app.callback()
 def main(
     ctx: typer.Context,
-    url: str | None = typer.Option(
-        None, "--url", "-u", envvar="BEACON_URL", help="Beacon server URL."
-    ),
+    url: str | None = typer.Option(None, "--url", "-u", help="Beacon server URL."),
     username: str | None = typer.Option(
-        None, "--username", envvar="BEACON_ADMIN_USERNAME", help="Admin username (enables DDL/DML)."
+        None, "--username", help="Admin username (enables DDL/DML)."
     ),
-    password: str | None = typer.Option(
-        None, "--password", envvar="BEACON_ADMIN_PASSWORD", help="Admin password."
-    ),
+    password: str | None = typer.Option(None, "--password", help="Admin password."),
     timeout: float | None = typer.Option(None, "--timeout", help="Request timeout (seconds)."),
     no_color: bool = typer.Option(False, "--no-color", help="Disable coloured output."),
+    vi: bool = typer.Option(False, "--vi", help="Use vi key bindings in the shell."),
     version: bool = typer.Option(False, "--version", help="Show version and exit."),
 ) -> None:
     if version:
@@ -54,7 +52,14 @@ def main(
         from .repl import run_repl
 
         with get_client(ctx) as client:
-            run_repl(client, console)
+            # Resolve the session identity up front: this both greets the user
+            # with their access level and fails fast with a clear message when
+            # configured admin credentials are rejected.
+            try:
+                identity = client.identity()
+            except BeaconCliError as exc:
+                fail(exc)
+            run_repl(client, console, identity, vi_mode=vi)
 
 
 # Register all subcommands onto the app.

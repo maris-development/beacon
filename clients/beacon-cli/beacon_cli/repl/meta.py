@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlparse
+from prompt_toolkit.enums import EditingMode
 from rich.console import Console
 
 from ..client import BeaconClient
@@ -29,6 +31,10 @@ def handle_meta(line: str, client: BeaconClient, console: Console, state: ReplSt
         return "quit"
     if cmd in {"\\help", "\\?"}:
         console.print(HELP_TEXT)
+        return None
+    if cmd == "\\i":
+        # Path may contain spaces; take everything after the command verbatim.
+        _run_script(line.strip()[len(cmd) :].strip(), client, console, state)
         return None
 
     try:
@@ -85,8 +91,59 @@ def _dispatch(
         state.expand = not state.expand
         mode = "expanded (field/value)" if state.expand else "table"
         console.print(f"display [bold]{mode}[/bold]")
+    elif cmd == "\\vi":
+        _set_editing_mode(state, console, EditingMode.VI)
+    elif cmd == "\\emacs":
+        _set_editing_mode(state, console, EditingMode.EMACS)
     else:
         console.print(f"[yellow]unknown command: {cmd}[/yellow] (try \\help)")
+
+
+def split_sql_script(text: str) -> list[str]:
+    """Split a SQL script into individual statements (semicolon-aware — ignores
+    semicolons inside strings/comments), trimmed of terminators. Blank and
+    comment-only pieces are dropped so they aren't sent to the server."""
+    statements = []
+    for stmt in sqlparse.split(text):
+        cleaned = stmt.strip().rstrip(";").strip()
+        if not cleaned:
+            continue
+        parsed = sqlparse.parse(cleaned)
+        if not parsed or parsed[0].token_first(skip_cm=True) is None:
+            continue  # only comments / whitespace
+        statements.append(cleaned)
+    return statements
+
+
+def _run_script(path: str, client: BeaconClient, console: Console, state: ReplState) -> None:
+    if not path:
+        console.print("[yellow]usage: \\i <file.sql>[/yellow]")
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            script = fh.read()
+    except OSError as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        return
+    statements = split_sql_script(script)
+    if not statements:
+        console.print("[yellow]no statements in file[/yellow]")
+        return
+    for i, stmt in enumerate(statements, 1):
+        console.print(f"[dim]-- [{i}/{len(statements)}] {stmt.splitlines()[0][:80]}[/dim]")
+        try:
+            run_sql(stmt, client, console, state)
+        except KeyboardInterrupt:
+            console.print("[yellow]script cancelled[/yellow]")
+            return
+
+
+def _set_editing_mode(state: ReplState, console: Console, mode: EditingMode) -> None:
+    if state.session is None:
+        console.print("[yellow]editing modes need an interactive terminal[/yellow]")
+        return
+    state.session.editing_mode = mode
+    console.print(f"editing mode -> [bold]{'vi' if mode == EditingMode.VI else 'emacs'}[/bold]")
 
 
 def _set_format(args: list[str], console: Console, state: ReplState) -> None:
