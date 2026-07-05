@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "Isomorphic TypeScript SDK for managing and querying a Beacon instance.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maris-development/beacon.git",
+    "directory": "clients/beacon-ts"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -16,7 +21,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

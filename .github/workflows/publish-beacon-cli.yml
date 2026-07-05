@@ -1,0 +1,124 @@
+name: Publish beacon-cli
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 1.8.0. Leave empty to use the latest v* release tag."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: clients/beacon-cli
+
+jobs:
+  build:
+    name: Test and build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags, so we can find the latest tag
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package (with dev tools)
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Resolve version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$EVENT" = "push" ]; then
+            version="$REF_NAME"                          # the pushed release tag, e.g. v1.8.0
+          elif [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"                     # from the manual input
+          else
+            tag=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+            [ -n "$tag" ] || { echo "::error::No v* tags found; provide a version input."; exit 1; }
+            version="$tag"                               # latest release tag
+          fi
+          version="${version#v}"                         # strip the leading 'v' -> X.Y.Z
+          [ -n "$version" ] || { echo "::error::Could not resolve a version."; exit 1; }
+          echo "Resolved version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set package version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os, re, pathlib
+          v = os.environ["VERSION"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+([.\-+a-zA-Z0-9]*)?", v):
+              raise SystemExit(f"Version '{v}' does not look like a valid version")
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text()
+          new = re.sub(r'(?m)^version = "[^"]*"', f'version = "{v}"', text, count=1)
+          if new == text:
+              raise SystemExit("Could not find a 'version = \"...\"' line in pyproject.toml")
+          path.write_text(new)
+          print("pyproject version set to", v)
+          PY
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check distributions
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: beacon-cli-dist
+          path: clients/beacon-cli/dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/beacon-cli
+    permissions:
+      id-token: write # OIDC token for PyPI Trusted Publishing
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: beacon-cli-dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # A release tag may fire this more than once (e.g. a re-run) — don't
+          # fail if that exact version is already on PyPI.
+          skip-existing: true

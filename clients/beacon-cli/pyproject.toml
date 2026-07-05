@@ -8,9 +8,25 @@ version = "0.1.0"
 description = "Terminal client for the Beacon data lake: run SQL, explore tables/datasets, render results, and export to CSV/Parquet/Arrow/NetCDF."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "Beacon" }]
 keywords = ["beacon", "datalake", "sql", "arrow", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Utilities",
+]
 dependencies = [
     "httpx>=0.27",
     "pyarrow>=14.0",
@@ -27,6 +43,13 @@ dev = [
     "respx>=0.21",
     "ruff>=0.6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/maris-development/beacon"
+Repository = "https://github.com/maris-development/beacon"
+Documentation = "https://maris-development.github.io/beacon/"
+Issues = "https://github.com/maris-development/beacon/issues"
+Source = "https://github.com/maris-development/beacon/tree/main/clients/beacon-cli"
 
 [project.scripts]
 beacon-cli = "beacon_cli.cli:app"
