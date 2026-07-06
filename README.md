@@ -149,6 +149,38 @@ Content-Type: application/json
 
 The response is a streamed file in the chosen `output.format` (here, CSV). See the [query reference](https://maris-development.github.io/beacon/docs/1.8.0/api/querying/) for the full schema, all source types, and every output format.
 
+### CLI
+
+Prefer the terminal? [`beacon-datalake-cli`](clients/beacon-datalake-cli) is a Python
+terminal client that talks to a running server over the same `/api/*` endpoints —
+run SQL, explore tables/datasets/schemas, and export results without leaving the
+shell. Install it from a checkout of the repo:
+
+```bash
+pip install -e clients/beacon-datalake-cli
+# or, with uv:
+uv pip install -e clients/beacon-datalake-cli
+```
+
+This installs the `beacon-datalake-cli` console script:
+
+```bash
+# Run SQL and render a table
+beacon-datalake-cli --url http://localhost:5001 query "SELECT * FROM default LIMIT 10"
+
+# Export results to a file (format inferred from the extension)
+beacon-datalake-cli --url http://localhost:5001 export "SELECT * FROM default" -o out.parquet
+
+# Explore the catalog
+beacon-datalake-cli --url http://localhost:5001 tables
+
+# Or drop into the interactive REPL (run with no subcommand)
+beacon-datalake-cli --url http://localhost:5001
+```
+
+See the [Beacon Datalake CLI guide](https://maris-development.github.io/beacon/docs/1.8.0/connect/beacon-datalake-cli)
+for the full command list, REPL meta-commands, and export options.
+
 ## Configuration
 
 Beacon is configured entirely through `BEACON_*` environment variables. The most common ones:
