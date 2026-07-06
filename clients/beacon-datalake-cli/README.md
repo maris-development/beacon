@@ -1,4 +1,4 @@
-# beacon-cli
+# beacon-datalake-cli
 
 A terminal client for the [Beacon](../../) data lake. Run SQL against a running
 `beacon-api` server, explore tables / datasets / schemas, render results as
@@ -14,12 +14,12 @@ on-demand formatting, and a status bar.
 ## Install
 
 ```bash
-pip install -e clients/beacon-cli
+pip install -e clients/beacon-datalake-cli
 # or, with uv:
-uv pip install -e clients/beacon-cli
+uv pip install -e clients/beacon-datalake-cli
 ```
 
-This installs the `beacon-cli` console script.
+This installs the `beacon-datalake-cli` console script.
 
 ## Connecting
 
@@ -35,7 +35,7 @@ URL defaults to a local server:
 | `--password` | *(none)* |
 
 ```bash
-beacon-cli --url https://beacon.example.com --username admin --password s3cret
+beacon-datalake-cli --url https://beacon.example.com --username admin --password s3cret
 ```
 
 Credentials are sent as HTTP Basic auth and elevate the session to super-user,
@@ -56,26 +56,26 @@ error rather than silently falling back to read-only.
 
 ```bash
 # Run SQL and render a table
-beacon-cli query "SELECT * FROM default LIMIT 10"
+beacon-datalake-cli query "SELECT * FROM default LIMIT 10"
 
 # From a file or stdin
-beacon-cli query -f query.sql
-echo "SELECT count(*) FROM default" | beacon-cli query
+beacon-datalake-cli query -f query.sql
+echo "SELECT count(*) FROM default" | beacon-datalake-cli query
 
 # Export results to a file (see "Exporting results" below for all formats/options)
-beacon-cli export "SELECT * FROM default" -o out.parquet
+beacon-datalake-cli export "SELECT * FROM default" -o out.parquet
 
 # Explore
-beacon-cli tables                 # list table names
-beacon-cli tables --detail        # + kind / format / location / partitions
-beacon-cli tables --schema        # + each table's columns
-beacon-cli schema default         # one table's schema
-beacon-cli datasets               # list datasets
-beacon-cli dataset-schema path/to/file.parquet
-beacon-cli functions              # scalar/aggregate functions
-beacon-cli functions --table      # table functions
-beacon-cli info                   # server info
-beacon-cli metrics <query-id>     # metrics for a prior query
+beacon-datalake-cli tables                 # list table names
+beacon-datalake-cli tables --detail        # + kind / format / location / partitions
+beacon-datalake-cli tables --schema        # + each table's columns
+beacon-datalake-cli schema default         # one table's schema
+beacon-datalake-cli datasets               # list datasets
+beacon-datalake-cli dataset-schema path/to/file.parquet
+beacon-datalake-cli functions              # scalar/aggregate functions
+beacon-datalake-cli functions --table      # table functions
+beacon-datalake-cli info                   # server info
+beacon-datalake-cli metrics <query-id>     # metrics for a prior query
 ```
 
 ### `query` options
@@ -97,7 +97,7 @@ row becomes a `field | value` block, so the column count no longer competes for
 width.
 
 ```bash
-beacon-cli query 'SELECT * FROM wod' --max-rows 1 --expand
+beacon-datalake-cli query 'SELECT * FROM wod' --max-rows 1 --expand
 ```
 ```
 record 1
@@ -126,11 +126,11 @@ On the command line, put the whole statement in **single** quotes so the double
 quotes survive the shell (works in PowerShell and bash):
 
 ```bash
-beacon-cli query 'SELECT "Temperature.coordinates" FROM wod'
+beacon-datalake-cli query 'SELECT "Temperature.coordinates" FROM wod'
 ```
 
 In the REPL there's no shell in the way — type the double quotes directly. Use
-`beacon-cli schema <table>` (or `\d <table>`) to see the exact column names.
+`beacon-datalake-cli schema <table>` (or `\d <table>`) to see the exact column names.
 
 ### Incremental fetching
 
@@ -141,12 +141,12 @@ and doesn't download the whole result. When it stops early the footer reads
 accurate total or full `--json` output), pass `--all` (or `--max-rows -1`):
 
 ```bash
-beacon-cli query "SELECT * FROM big_table"            # fast preview, first 100 rows
-beacon-cli query "SELECT * FROM big_table" --all      # fetch everything
+beacon-datalake-cli query "SELECT * FROM big_table"            # fast preview, first 100 rows
+beacon-datalake-cli query "SELECT * FROM big_table" --all      # fetch everything
 ```
 
 With `--json`, the rows go to stdout as valid JSON and the footer goes to stderr,
-so `beacon-cli query ... --json | jq` works.
+so `beacon-datalake-cli query ... --json | jq` works.
 
 ### DDL, admin & crawler statements
 
@@ -157,24 +157,24 @@ no credentials; anything that mutates state requires admin basic auth via
 
 ```bash
 # Read-only (no credentials)
-beacon-cli query "SHOW TABLES"
-beacon-cli query "SHOW COLUMNS FROM default"
-beacon-cli query "SHOW CRAWLERS"
-beacon-cli query "SELECT * FROM information_schema.tables"
+beacon-datalake-cli query "SHOW TABLES"
+beacon-datalake-cli query "SHOW COLUMNS FROM default"
+beacon-datalake-cli query "SHOW CRAWLERS"
+beacon-datalake-cli query "SELECT * FROM information_schema.tables"
 
 # Admin (credentials required) — DDL/DML
-beacon-cli --username beacon-admin --password beacon-password \
+beacon-datalake-cli --username beacon-admin --password beacon-password \
   query "CREATE EXTERNAL TABLE obs STORED AS DELTA LOCATION 'datasets://obs/'"
 
 # Admin — AWS Glue-style crawlers
-beacon-cli -u ... query \
+beacon-datalake-cli -u ... query \
   "CREATE CRAWLER cr ON 'crawl_src/' WITH ('format' 'parquet', 'schedule' '15m')"
-beacon-cli -u ... query "RUN CRAWLER cr"
-beacon-cli -u ... query "DROP CRAWLER cr"
+beacon-datalake-cli -u ... query "RUN CRAWLER cr"
+beacon-datalake-cli -u ... query "DROP CRAWLER cr"
 
 # Admin — materialized views / refresh
-beacon-cli -u ... query "CREATE MATERIALIZED VIEW mv AS SELECT * FROM obs"
-beacon-cli -u ... query "REFRESH TABLE obs"
+beacon-datalake-cli -u ... query "CREATE MATERIALIZED VIEW mv AS SELECT * FROM obs"
+beacon-datalake-cli -u ... query "REFRESH TABLE obs"
 ```
 
 Side-effecting statements print `OK`; statements that return rows
@@ -184,7 +184,7 @@ in `COPY ... TO`, which cannot execute DDL).
 
 ## Interactive shell
 
-Run `beacon-cli` with no subcommand to open the REPL. The prompt encodes the
+Run `beacon-datalake-cli` with no subcommand to open the REPL. The prompt encodes the
 resolved session identity — `beacon (admin - super-user)>`, `beacon (alice - user)>`,
 or `beacon (anonymous)>` — so your access level stays visible on every line:
 
@@ -261,7 +261,7 @@ result in a file format and streams the bytes to disk. Unlike `query`, an export
 always fetches the **complete** result (the server writes the whole file).
 
 ```bash
-beacon-cli export "SELECT * FROM obs WHERE temperature > 20" -o out.parquet
+beacon-datalake-cli export "SELECT * FROM obs WHERE temperature > 20" -o out.parquet
 ```
 
 ### `export` options
@@ -294,24 +294,24 @@ The format is inferred from the output extension, or set explicitly with
 
 ```bash
 # Format inferred from the extension
-beacon-cli export "SELECT * FROM obs" -o obs.csv
-beacon-cli export "SELECT * FROM obs" -o obs.parquet
-beacon-cli export "SELECT * FROM obs" -o obs.nc              # NetCDF
+beacon-datalake-cli export "SELECT * FROM obs" -o obs.csv
+beacon-datalake-cli export "SELECT * FROM obs" -o obs.parquet
+beacon-datalake-cli export "SELECT * FROM obs" -o obs.nc              # NetCDF
 
 # Explicit format (extension doesn't have to match)
-beacon-cli export "SELECT * FROM obs" -o obs.bin --format ipc
+beacon-datalake-cli export "SELECT * FROM obs" -o obs.bin --format ipc
 
 # GeoParquet with geometry built from lon/lat columns
-beacon-cli export "SELECT lon, lat, temperature FROM obs" \
+beacon-datalake-cli export "SELECT lon, lat, temperature FROM obs" \
   -o obs.geoparquet --lon lon --lat lat
 
 # N-dimensional NetCDF over time/lat/lon dimensions
-beacon-cli export "SELECT time, lat, lon, temperature FROM obs" \
+beacon-datalake-cli export "SELECT time, lat, lon, temperature FROM obs" \
   -o obs.nc --format nd_netcdf \
   --dimension-columns time --dimension-columns lat --dimension-columns lon
 
 # Read the SQL from a file
-beacon-cli export -f query.sql -o out.parquet
+beacon-datalake-cli export -f query.sql -o out.parquet
 ```
 
 In the REPL, `\format <fmt>` sets a session format and `\export <file>` (or
@@ -327,9 +327,9 @@ beacon> \export hot.csv
 ## Project layout
 
 ```
-beacon_cli/
+beacon_datalake_cli/
   cli.py            Typer app + global connection callback
-  __main__.py       enables `python -m beacon_cli`
+  __main__.py       enables `python -m beacon_datalake_cli`
   config.py         ClientConfig (URL / auth / timeout from CLI arguments)
   errors.py         user-facing error types
   client.py         BeaconClient — HTTP over /api/*
@@ -344,7 +344,7 @@ tests/              one test module per unit (client, config, formats, …)
 ## Development
 
 ```bash
-pip install -e "clients/beacon-cli[dev]"
-ruff check clients/beacon-cli
-pytest clients/beacon-cli
+pip install -e "clients/beacon-datalake-cli[dev]"
+ruff check clients/beacon-datalake-cli
+pytest clients/beacon-datalake-cli
 ```

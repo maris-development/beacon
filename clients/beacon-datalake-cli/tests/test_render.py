@@ -5,7 +5,7 @@ from __future__ import annotations
 import pyarrow as pa
 from rich.console import Console
 
-from beacon_cli.render import (
+from beacon_datalake_cli.render import (
     table_to_json,
     table_to_records,
     table_to_rich,

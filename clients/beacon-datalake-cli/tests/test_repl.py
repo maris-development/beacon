@@ -5,9 +5,9 @@ from __future__ import annotations
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import fragment_list_to_text, to_formatted_text
 
-from beacon_cli.client import Identity
-from beacon_cli.repl import _prompt
-from beacon_cli.repl.reader import (
+from beacon_datalake_cli.client import Identity
+from beacon_datalake_cli.repl import _prompt
+from beacon_datalake_cli.repl.reader import (
     _key_bindings,
     _should_submit,
     _strip_terminator,

@@ -1,4 +1,4 @@
-"""Enable ``python -m beacon_cli``."""
+"""Enable ``python -m beacon_datalake_cli``."""
 
 from .cli import app
 

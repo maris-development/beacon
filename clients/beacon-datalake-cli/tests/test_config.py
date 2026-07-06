@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from beacon_cli.config import DEFAULT_URL, ClientConfig
+from beacon_datalake_cli.config import DEFAULT_URL, ClientConfig
 
 
 def test_defaults_when_nothing_set():

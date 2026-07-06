@@ -9,9 +9,9 @@ import pyarrow as pa
 import pytest
 import respx
 
-from beacon_cli.client import QUERY_ID_HEADER, BeaconClient
-from beacon_cli.config import ClientConfig
-from beacon_cli.errors import (
+from beacon_datalake_cli.client import QUERY_ID_HEADER, BeaconClient
+from beacon_datalake_cli.config import ClientConfig
+from beacon_datalake_cli.errors import (
     AuthenticationError,
     ConnectionFailedError,
     QueryError,

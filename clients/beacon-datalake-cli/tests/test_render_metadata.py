@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rich.console import Console
 
-from beacon_cli.render.metadata import friendly_kind, tables_detail_to_rich
+from beacon_datalake_cli.render.metadata import friendly_kind, tables_detail_to_rich
 
 
 def _text(renderable) -> str:

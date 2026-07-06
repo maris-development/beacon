@@ -7,9 +7,9 @@ from types import SimpleNamespace
 from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.key_binding.vi_state import InputMode
 
-from beacon_cli.client import Identity
-from beacon_cli.repl.state import ReplState
-from beacon_cli.repl.toolbar import (
+from beacon_datalake_cli.client import Identity
+from beacon_datalake_cli.repl.state import ReplState
+from beacon_datalake_cli.repl.toolbar import (
     _editing_label,
     _host,
     _identity_label,

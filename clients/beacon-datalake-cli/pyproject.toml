@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "beacon-cli"
+name = "beacon-datalake-cli"
 version = "0.1.0"
 description = "Terminal client for the Beacon data lake: run SQL, explore tables/datasets, render results, and export to CSV/Parquet/Arrow/NetCDF."
 readme = "README.md"
@@ -49,13 +49,13 @@ Homepage = "https://github.com/maris-development/beacon"
 Repository = "https://github.com/maris-development/beacon"
 Documentation = "https://maris-development.github.io/beacon/"
 Issues = "https://github.com/maris-development/beacon/issues"
-Source = "https://github.com/maris-development/beacon/tree/main/clients/beacon-cli"
+Source = "https://github.com/maris-development/beacon/tree/main/clients/beacon-datalake-cli"
 
 [project.scripts]
-beacon-cli = "beacon_cli.cli:app"
+beacon-datalake-cli = "beacon_datalake_cli.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["beacon_cli"]
+packages = ["beacon_datalake_cli"]
 
 [tool.ruff]
 line-length = 100

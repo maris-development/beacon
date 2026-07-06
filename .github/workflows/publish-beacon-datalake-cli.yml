@@ -1,4 +1,4 @@
-name: Publish beacon-cli
+name: Publish beacon-datalake-cli
 
 on:
   push:
@@ -17,7 +17,7 @@ permissions:
 
 defaults:
   run:
-    working-directory: clients/beacon-cli
+    working-directory: clients/beacon-datalake-cli
 
 jobs:
   build:
@@ -95,8 +95,8 @@ jobs:
       - name: Upload distributions
         uses: actions/upload-artifact@v4
         with:
-          name: beacon-cli-dist
-          path: clients/beacon-cli/dist/*
+          name: beacon-datalake-cli-dist
+          path: clients/beacon-datalake-cli/dist/*
           if-no-files-found: error
 
   publish:
@@ -105,14 +105,14 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/beacon-cli
+      url: https://pypi.org/p/beacon-datalake-cli
     permissions:
       id-token: write # OIDC token for PyPI Trusted Publishing
     steps:
       - name: Download distributions
         uses: actions/download-artifact@v4
         with:
-          name: beacon-cli-dist
+          name: beacon-datalake-cli-dist
           path: dist
 
       - name: Publish to PyPI

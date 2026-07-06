@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from beacon_cli.repl.meta import split_sql_script
+from beacon_datalake_cli.repl.meta import split_sql_script
 
 
 def test_split_sql_script_separates_statements():

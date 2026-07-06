@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from beacon_cli.formats import (
+from beacon_datalake_cli.formats import (
     ExportFormatError,
     build_output_format,
     infer_format_name,

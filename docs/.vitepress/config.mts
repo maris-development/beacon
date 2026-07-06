@@ -606,8 +606,8 @@ export default defineConfig({
               link: '/docs/1.8.0/connect/jetbrains-datagrip',
             },
             {
-              text: 'Beacon CLI',
-              link: '/docs/1.8.0/connect/beacon-cli',
+              text: 'Beacon Datalake CLI',
+              link: '/docs/1.8.0/connect/beacon-datalake-cli',
             },
             {
               text: 'Beacon TypeScript SDK',
@@ -1066,8 +1066,8 @@ export default defineConfig({
               link: '/docs/1.7.3/connect/jetbrains-datagrip',
             },
             {
-              text: 'Beacon CLI',
-              link: '/docs/1.7.3/connect/beacon-cli',
+              text: 'Beacon Datalake CLI',
+              link: '/docs/1.7.3/connect/beacon-datalake-cli',
             },
             {
               text: 'Beacon Python SDK',

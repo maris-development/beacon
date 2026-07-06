@@ -157,7 +157,7 @@ Two new ways to talk to Beacon from outside the browser:
     .execute();
   ```
 
-- **`beacon-cli`** — a [**Python terminal client**](/docs/1.8.0/connect/beacon-cli)
+- **`beacon-datalake-cli`** — a [**Python terminal client**](/docs/1.8.0/connect/beacon-datalake-cli)
   with an interactive REPL and one-shot subcommands. Run SQL, explore
   tables/datasets/schemas, render results in the terminal, and export to CSV,
   Parquet, Arrow IPC, or NetCDF without leaving the shell.

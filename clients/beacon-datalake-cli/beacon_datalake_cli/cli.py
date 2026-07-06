@@ -1,8 +1,8 @@
 """Typer application wiring for beacon-cli.
 
 This module owns only the Typer ``app`` and the global connection callback;
-the individual subcommands live in :mod:`beacon_cli.commands` and the
-interactive shell in :mod:`beacon_cli.repl`.
+the individual subcommands live in :mod:`beacon_datalake_cli.commands` and the
+interactive shell in :mod:`beacon_datalake_cli.repl`.
 """
 
 from __future__ import annotations

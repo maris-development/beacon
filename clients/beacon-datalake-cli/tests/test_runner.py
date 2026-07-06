@@ -7,7 +7,7 @@ import io
 import pytest
 from rich.console import Console
 
-from beacon_cli.repl.runner import run_with_spinner
+from beacon_datalake_cli.repl.runner import run_with_spinner
 
 
 def _console() -> Console:

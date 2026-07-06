@@ -7,7 +7,7 @@ import time
 
 import pyarrow as pa
 
-from beacon_cli.arrow_io import QueryResult, collect_ipc_stream, decode_ipc_stream
+from beacon_datalake_cli.arrow_io import QueryResult, collect_ipc_stream, decode_ipc_stream
 
 
 def _ipc_stream(table: pa.Table) -> bytes:

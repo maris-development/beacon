@@ -8,7 +8,7 @@ import time
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
-from beacon_cli.repl.completion import (
+from beacon_datalake_cli.repl.completion import (
     BeaconCompleter,
     ColumnIndex,
     TableColumns,
