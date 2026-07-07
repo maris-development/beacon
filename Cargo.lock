@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-api"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-auth"
-version = "1.7.3"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-common"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-config"
-version = "1.7.3"
+version = "1.9.0"
 dependencies = [
  "base64",
  "beacon-arrow-atlas",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-core"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-data-lake"
-version = "1.7.3"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-datafusion-ext"
-version = "1.7.3"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-mcp"
-version = "0.1.0"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
