@@ -221,6 +221,8 @@ cargo test
 
 Issues and pull requests are welcome on [GitHub](https://github.com/maris-development/beacon/issues). For larger changes, please open an issue first to discuss the approach.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites (toolchain, submodules, system libraries), the formatting/lint/test checks CI enforces, and how to install the pre-commit hook.
+
 ## License
 
 Beacon is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0). See [LICENSE](LICENSE) for the full text.
