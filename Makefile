@@ -18,11 +18,18 @@ WEB_DIR ?= clients/beacon-web/dist
 export BEACON_ADMIN_USERNAME
 export BEACON_ADMIN_PASSWORD
 
-.PHONY: help ui-deps ui run serve dev-api dev-ui clean-ui
+.PHONY: help hooks fmt ui-deps ui run serve dev-api dev-ui clean-ui
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
+
+hooks: ## Install the git pre-commit hook (rustfmt check on staged Rust)
+	git config core.hooksPath .githooks
+	@echo "Installed .githooks (core.hooksPath). Commits now run the rustfmt check."
+
+fmt: ## Format all Rust code with rustfmt
+	cargo fmt --all
 
 ui-deps: ## Install JS workspace dependencies
 	cd clients && npm install

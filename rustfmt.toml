@@ -1,0 +1,17 @@
+# Beacon uses the default Rust formatting style.
+#
+# This is intentional and matches Google's Rust style guide, which mandates
+# "rustfmt with its default settings" rather than a customized profile
+# (https://google.github.io/styleguide/rust/). The community default *is* the
+# Google style, so the entries below simply pin those defaults explicitly.
+#
+# Only stable-channel options are used here: CI formats with stable rustfmt
+# (toolchain 1.91), and nightly-only knobs (import grouping, comment wrapping,
+# etc.) would merely emit "unstable features are only available in nightly"
+# warnings without taking effect.
+
+edition = "2024"
+max_width = 100
+tab_spaces = 4
+hard_tabs = false
+newline_style = "Unix"

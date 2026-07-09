@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#
+# Beacon pre-commit hook: reject commits containing unformatted Rust code.
+#
+# Mirrors the `fmt` job in .github/workflows/ci.yml so formatting problems are
+# caught locally instead of failing CI. Install it with `make hooks` (which
+# points core.hooksPath at .githooks/).
+#
+# Bypass for a single commit with `git commit --no-verify` if you must.
+
+set -euo pipefail
+
+# Nothing to check if no Rust files are staged.
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -q '\.rs$'; then
+    exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not found on PATH; skipping rustfmt check." >&2
+    exit 0
+fi
+
+if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+    echo >&2
+    echo "pre-commit: Rust code is not formatted." >&2
+    echo "  Run 'cargo fmt --all' and stage the changes, then commit again." >&2
+    echo "  (Bypass with 'git commit --no-verify' if you really need to.)" >&2
+    echo >&2
+    exit 1
+fi
