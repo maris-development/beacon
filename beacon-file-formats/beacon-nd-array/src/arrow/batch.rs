@@ -82,19 +82,32 @@ pub fn any_dataset_as_row_size(
     }
 }
 
+/// Default number of chunks to read concurrently when a caller has no
+/// better figure. Mirrors BBF's per-file task fan-out, scaled to cores.
+pub fn default_chunk_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8)
+}
+
 pub fn any_dataset_as_record_batch_stream(
     dataset: AnyDataset,
     batch_size: usize,
+    concurrency: usize,
     predicate: Option<PushdownFilter>,
     metrics: Option<DatasetReadMetrics>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
     match dataset {
         AnyDataset::Regular(ds) => {
-            dataset_as_record_batch_stream(ds, batch_size, predicate, metrics)
+            dataset_as_record_batch_stream(ds, batch_size, concurrency, predicate, metrics)
         }
-        AnyDataset::Ragged { ragged, .. } => {
-            ragged_dataset_as_record_batch_stream(ragged, batch_size, predicate, metrics)
-        }
+        AnyDataset::Ragged { ragged, .. } => ragged_dataset_as_record_batch_stream(
+            ragged,
+            batch_size,
+            concurrency,
+            predicate,
+            metrics,
+        ),
     }
 }
 
@@ -105,6 +118,7 @@ pub fn any_dataset_as_record_batch_stream(
 fn ragged_dataset_as_record_batch_stream(
     ragged: RaggedDataset,
     batch_size: usize,
+    concurrency: usize,
     predicate: Option<PushdownFilter>,
     metrics: Option<DatasetReadMetrics>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
@@ -195,17 +209,17 @@ fn ragged_dataset_as_record_batch_stream(
             metrics,
         ))
     })
-    .map(|init| match init {
+    .map(move |init| match init {
         Ok((ragged, schema, obs_dims, offsets, passing_indices, ranges, metrics)) => {
             futures::stream::iter(ranges)
-                .then(move |range| {
+                .map(move |range| {
                     let ragged = ragged.clone();
                     let schema = schema.clone();
                     let obs_dims = obs_dims.clone();
                     let offsets = offsets.clone();
                     let passing_indices = passing_indices.clone();
                     let metrics = metrics.clone();
-                    async move {
+                    let fut = async move {
                         // Map filtered range back to original indices for reading.
                         let batch_indices: Vec<usize> =
                             passing_indices[range.start..range.end].to_vec();
@@ -243,8 +257,22 @@ fn ragged_dataset_as_record_batch_stream(
                             m.output_batches.add(1);
                         }
                         Ok(batch)
+                    };
+                    // Spawn so cast reads + Arrow conversion spread across worker
+                    // threads; fall back to inline when polled off-runtime. Both
+                    // arms resolve to `anyhow::Result<RecordBatch>`.
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(_) => futures::future::Either::Left(async move {
+                            tokio::spawn(fut).await.unwrap_or_else(|e| {
+                                Err(anyhow::anyhow!("ragged cast read task failed: {e}"))
+                            })
+                        }),
+                        Err(_) => futures::future::Either::Right(fut),
                     }
                 })
+                // Ordered: ragged tests assert per-cast `batches[i]`. Bounds
+                // in-flight cast reads to `concurrency`.
+                .buffered(concurrency.max(1))
                 .boxed()
         }
         Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
@@ -534,6 +562,7 @@ async fn read_chunk(
 pub fn dataset_as_record_batch_stream(
     dataset: Dataset,
     batch_size: usize,
+    concurrency: usize,
     predicate: Option<PushdownFilter>,
     metrics: Option<DatasetReadMetrics>,
 ) -> BoxStream<'static, anyhow::Result<RecordBatch>> {
@@ -564,14 +593,14 @@ pub fn dataset_as_record_batch_stream(
         let metrics_for_filter = metrics.clone();
         match result {
             Ok((arrays, subsets, schema, max_dims, dim_masks)) => futures::stream::iter(subsets)
-                .then(move |subset| {
+                .map(move |subset| {
                     let arrays = arrays.clone();
                     let schema = schema.clone();
                     let max_dims = max_dims.clone();
                     let dim_masks = dim_masks.clone();
                     let metrics = metrics_for_then.clone();
                     let chunk_rows: usize = subset.shape.iter().product();
-                    async move {
+                    let fut = async move {
                         let result =
                             read_chunk(&arrays, subset, schema, &max_dims, &dim_masks).await;
                         if let Ok(None) = &result {
@@ -581,8 +610,23 @@ pub fn dataset_as_record_batch_stream(
                             }
                         }
                         result
+                    };
+                    // Spawn so each chunk's read + broadcast + Arrow conversion
+                    // runs on a worker thread; fall back to inline when polled
+                    // off-runtime. Both arms resolve to
+                    // `anyhow::Result<Option<RecordBatch>>`.
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(_) => futures::future::Either::Left(async move {
+                            tokio::spawn(fut).await.unwrap_or_else(|e| {
+                                Err(anyhow::anyhow!("chunk read task failed: {e}"))
+                            })
+                        }),
+                        Err(_) => futures::future::Either::Right(fut),
                     }
                 })
+                // Ordered: existing positional chunk tests depend on emission
+                // order. Bounds in-flight chunk reads to `concurrency`.
+                .buffered(concurrency.max(1))
                 .filter_map(move |result| {
                     let metrics = metrics_for_filter.clone();
                     async move {
@@ -723,10 +767,11 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("values", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> =
+            dataset_as_record_batch_stream(ds, usize::MAX, 4, None, None)
+                .try_collect()
+                .await
+                .unwrap();
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 6);
@@ -758,10 +803,11 @@ mod tests {
 
         let ds = make_dataset(vec![("data", Arc::new(nd_2d)), ("scale", Arc::new(nd_1d))]).await;
 
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> =
+            dataset_as_record_batch_stream(ds, usize::MAX, 4, None, None)
+                .try_collect()
+                .await
+                .unwrap();
         assert_eq!(batches.len(), 1);
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 6);
@@ -874,7 +920,7 @@ mod tests {
         ds.dimensions.clear();
 
         let results: Vec<anyhow::Result<RecordBatch>> =
-            dataset_as_record_batch_stream(ds, usize::MAX, None, None)
+            dataset_as_record_batch_stream(ds, usize::MAX, 4, None, None)
                 .collect()
                 .await;
         assert_eq!(results.len(), 1);
@@ -885,7 +931,7 @@ mod tests {
     async fn test_empty_dataset_error() {
         let ds = make_dataset(vec![]).await;
         let results: Vec<anyhow::Result<RecordBatch>> =
-            dataset_as_record_batch_stream(ds, usize::MAX, None, None)
+            dataset_as_record_batch_stream(ds, usize::MAX, 4, None, None)
                 .collect()
                 .await;
         assert_eq!(results.len(), 1);
@@ -902,10 +948,11 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, usize::MAX, None, None)
-            .try_collect()
-            .await
-            .unwrap();
+        let batches: Vec<RecordBatch> =
+            dataset_as_record_batch_stream(ds, usize::MAX, 4, None, None)
+                .try_collect()
+                .await
+                .unwrap();
         let col = batches[0]
             .column(0)
             .as_any()
@@ -1001,7 +1048,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 2, None, None)
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 2, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1022,7 +1069,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("v", Arc::new(nd))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 3, None, None)
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 3, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1054,7 +1101,7 @@ mod tests {
         )
         .unwrap();
         let ds = make_dataset(vec![("data", Arc::new(nd_2d)), ("scale", Arc::new(nd_1d))]).await;
-        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 6, None, None)
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 6, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1177,7 +1224,7 @@ mod tests {
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
         let batches: Vec<RecordBatch> =
-            any_dataset_as_record_batch_stream(any, usize::MAX, None, None)
+            any_dataset_as_record_batch_stream(any, usize::MAX, 4, None, None)
                 .try_collect()
                 .await
                 .unwrap();
@@ -1196,7 +1243,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1223,7 +1270,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1239,7 +1286,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1268,7 +1315,7 @@ mod tests {
         let ds = make_ragged().await;
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
 
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1363,7 +1410,7 @@ mod tests {
         .await;
 
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1444,7 +1491,7 @@ mod tests {
         .await;
 
         let any = AnyDataset::try_from_dataset(ds).await.unwrap();
-        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, None, None)
+        let batches: Vec<RecordBatch> = any_dataset_as_record_batch_stream(any, 1, 4, None, None)
             .try_collect()
             .await
             .unwrap();
@@ -1454,5 +1501,173 @@ mod tests {
         assert_eq!(batches[0].num_rows(), 0);
         // Second cast: 2 observations.
         assert_eq!(batches[1].num_rows(), 2);
+    }
+
+    // ── Concurrent chunk reading ───────────────────────────────────────
+
+    mod parallel_chunk_reads {
+        use super::*;
+        use crate::array::backend::ArrayBackend;
+        use ndarray::ArrayD;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// A 1-D `i32` backend that instruments each `read_subset`:
+        ///  - tracks how many reads are concurrently in flight (and the max),
+        ///  - sleeps *longer for earlier chunks* so an unordered combinator
+        ///    would visibly reorder output, and
+        ///  - returns the chunk's start index as its value, so emission order
+        ///    is verifiable.
+        #[derive(Debug)]
+        struct InstrumentedBackend {
+            shape: Vec<usize>,
+            in_flight: Arc<AtomicUsize>,
+            max_in_flight: Arc<AtomicUsize>,
+            fail: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl ArrayBackend<i32> for InstrumentedBackend {
+            fn len(&self) -> usize {
+                self.shape.iter().product()
+            }
+            fn shape(&self) -> Vec<usize> {
+                self.shape.clone()
+            }
+            // One chunk per element along the only axis → many small chunks.
+            fn chunk_shape(&self) -> Vec<usize> {
+                vec![1]
+            }
+            fn dimensions(&self) -> Vec<String> {
+                vec!["x".to_string()]
+            }
+            async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayD<i32>> {
+                let cur = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_in_flight.fetch_max(cur, Ordering::SeqCst);
+
+                let idx = *subset.start.first().unwrap_or(&0);
+                let axis_len = self.shape.first().copied().unwrap_or(1);
+                let sleep_ms = (10 * (axis_len.saturating_sub(idx)) as u64).max(1);
+                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                if self.fail {
+                    anyhow::bail!("instrumented backend failure");
+                }
+                let n: usize = subset.shape.iter().product();
+                Ok(ArrayD::from_shape_vec(
+                    subset.shape.clone(),
+                    vec![idx as i32; n],
+                )?)
+            }
+        }
+
+        async fn instrumented_dataset(n: usize, fail: bool) -> (Dataset, Arc<AtomicUsize>) {
+            let max_in_flight = Arc::new(AtomicUsize::new(0));
+            let backend = InstrumentedBackend {
+                shape: vec![n],
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                max_in_flight: max_in_flight.clone(),
+                fail,
+            };
+            let nd = NdArray::<i32>::new_with_backend(backend).unwrap();
+            let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
+            (ds, max_in_flight)
+        }
+
+        fn collect_values(batches: &[RecordBatch]) -> Vec<i32> {
+            let mut out = Vec::new();
+            for b in batches {
+                let c = b
+                    .column_by_name("vals")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                for i in 0..c.len() {
+                    out.push(c.value(i));
+                }
+            }
+            out
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn chunk_reads_overlap_and_stay_ordered() {
+            let (ds, max_in_flight) = instrumented_dataset(8, false).await;
+            let batches: Vec<RecordBatch> =
+                dataset_as_record_batch_stream(ds, usize::MAX, 4, None, None)
+                    .try_collect()
+                    .await
+                    .unwrap();
+
+            // 8 single-element chunks emitted in chunk order despite earlier
+            // chunks taking longer — proves ordered emission.
+            assert_eq!(collect_values(&batches), (0..8).collect::<Vec<i32>>());
+
+            // Reads genuinely overlapped, bounded by the concurrency limit.
+            let mx = max_in_flight.load(Ordering::SeqCst);
+            assert!(mx > 1, "expected concurrent reads, max in-flight was {mx}");
+            assert!(
+                mx <= 4,
+                "in-flight {mx} exceeded the concurrency limit of 4"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrency_one_is_serial() {
+            let (ds, max_in_flight) = instrumented_dataset(6, false).await;
+            let batches: Vec<RecordBatch> =
+                dataset_as_record_batch_stream(ds, usize::MAX, 1, None, None)
+                    .try_collect()
+                    .await
+                    .unwrap();
+
+            assert_eq!(collect_values(&batches), (0..6).collect::<Vec<i32>>());
+            assert_eq!(
+                max_in_flight.load(Ordering::SeqCst),
+                1,
+                "concurrency=1 must read chunks one at a time"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn chunk_read_error_propagates() {
+            let (ds, _max) = instrumented_dataset(4, true).await;
+            let result: anyhow::Result<Vec<RecordBatch>> =
+                dataset_as_record_batch_stream(ds, usize::MAX, 4, None, None)
+                    .try_collect()
+                    .await;
+            assert!(result.is_err(), "a failing chunk read must surface as Err");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn metrics_are_interleaving_independent() {
+            use crate::arrow::metrics::DatasetReadMetrics;
+            use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+
+            async fn run(concurrency: usize) -> (usize, usize) {
+                let (ds, _max) = instrumented_dataset(8, false).await;
+                let mset = ExecutionPlanMetricsSet::new();
+                let metrics = DatasetReadMetrics::new(&mset, 0);
+                let _batches: Vec<RecordBatch> = dataset_as_record_batch_stream(
+                    ds,
+                    usize::MAX,
+                    concurrency,
+                    None,
+                    Some(metrics.clone()),
+                )
+                .try_collect()
+                .await
+                .unwrap();
+                (metrics.output_rows.value(), metrics.output_batches.value())
+            }
+
+            let serial = run(1).await;
+            let parallel = run(8).await;
+            assert_eq!(
+                serial, parallel,
+                "output metrics must not depend on concurrency"
+            );
+            assert_eq!(serial, (8, 8), "8 single-row chunks → 8 rows in 8 batches");
+        }
     }
 }
