@@ -25,7 +25,11 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        # Plain `cargo fmt` (no --all) formats every workspace member but not
+        # their path dependencies, so the vendored beacon-binary-format
+        # submodule (excluded from the workspace) is skipped. It is formatted
+        # in its own upstream repository.
+        run: cargo fmt -- --check
 
   ci:
     name: Clippy, test, and build

@@ -56,9 +56,14 @@ style** (pinned in [`rustfmt.toml`](rustfmt.toml)), which matches
 guide mandates rustfmt defaults rather than a custom profile.
 
 ```bash
-cargo fmt --all           # format everything (or: make fmt)
-cargo fmt --all -- --check # what CI enforces; fails on unformatted code
+cargo fmt            # format every workspace crate (or: make fmt)
+cargo fmt -- --check # what CI enforces; fails on unformatted code
 ```
+
+Plain `cargo fmt` (rather than `cargo fmt --all`) formats the workspace
+members but not their path dependencies, so the vendored
+`beacon-binary-format` submodule — which lives in its own repository and is
+excluded from the workspace — is left alone.
 
 To catch formatting problems before you commit, install the pre-commit hook
 once per clone:
@@ -67,7 +72,7 @@ once per clone:
 make hooks   # sets core.hooksPath to .githooks/
 ```
 
-The hook (`.githooks/pre-commit`) runs the same `cargo fmt --all -- --check`
+The hook (`.githooks/pre-commit`) runs the same `cargo fmt -- --check`
 whenever a commit touches Rust files and rejects unformatted changes. Bypass it
 for a single commit with `git commit --no-verify` if you must.
 
@@ -81,7 +86,7 @@ cargo test --workspace --no-fail-fast --lib --bins --tests
 ## Pull requests
 
 - Keep the branch focused; unrelated changes are easier to review separately.
-- Make sure `cargo fmt --all -- --check`, `cargo clippy`, and `cargo test`
+- Make sure `cargo fmt -- --check`, `cargo clippy`, and `cargo test`
   pass — these are the same checks CI will run.
 - Reference any related issue in the PR description.
 

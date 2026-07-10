@@ -28,8 +28,8 @@ hooks: ## Install the git pre-commit hook (rustfmt check on staged Rust)
 	git config core.hooksPath .githooks
 	@echo "Installed .githooks (core.hooksPath). Commits now run the rustfmt check."
 
-fmt: ## Format all Rust code with rustfmt
-	cargo fmt --all
+fmt: ## Format all workspace crates with rustfmt (skips the vendored submodule)
+	cargo fmt
 
 ui-deps: ## Install JS workspace dependencies
 	cd clients && npm install

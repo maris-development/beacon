@@ -20,10 +20,10 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 0
 fi
 
-if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+if ! cargo fmt -- --check >/dev/null 2>&1; then
     echo >&2
     echo "pre-commit: Rust code is not formatted." >&2
-    echo "  Run 'cargo fmt --all' and stage the changes, then commit again." >&2
+    echo "  Run 'cargo fmt' and stage the changes, then commit again." >&2
     echo "  (Bypass with 'git commit --no-verify' if you really need to.)" >&2
     echo >&2
     exit 1
