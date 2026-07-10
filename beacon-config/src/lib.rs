@@ -25,6 +25,7 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     pub sql: SqlConfig,
     pub flight_sql: FlightSqlConfig,
+    pub mcp: McpConfig,
     pub storage: StorageConfig,
     pub cors: CorsConfig,
     pub netcdf: NetcdfConfig,
@@ -155,6 +156,14 @@ pub struct FlightSqlConfig {
     pub token_ttl_secs: u64,
     pub statement_ttl_secs: u64,
     pub prepared_statement_ttl_secs: u64,
+}
+
+/// Settings for the Model Context Protocol (MCP) streamable-HTTP endpoint.
+#[derive(Debug, Clone)]
+pub struct McpConfig {
+    /// Whether the `/mcp` endpoint is mounted. When false, the route is not
+    /// registered and MCP clients receive a 404.
+    pub enable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -292,6 +301,10 @@ struct RawConfig {
         default = "900"
     )]
     flight_sql_prepared_statement_ttl_secs: u64,
+    // Parsed leniently below (accepts `false`/`0`/`off`), so kept as a String
+    // rather than a strict `bool` which would only accept `true`/`false`.
+    #[envconfig(from = "BEACON_MCP_ENABLED", default = "true")]
+    mcp_enabled: String,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_ENABLED", default = "true")]
     sql_stream_coalesce_enabled: bool,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_TARGET_ROWS", default = "65536")]
@@ -497,6 +510,13 @@ impl From<RawConfig> for Config {
                 token_ttl_secs: raw.flight_sql_token_ttl_secs,
                 statement_ttl_secs: raw.flight_sql_statement_ttl_secs,
                 prepared_statement_ttl_secs: raw.flight_sql_prepared_statement_ttl_secs,
+            },
+            mcp: McpConfig {
+                // Lenient: any value other than false/0/off enables the endpoint.
+                enable: !matches!(
+                    raw.mcp_enabled.trim().to_ascii_lowercase().as_str(),
+                    "false" | "0" | "off"
+                ),
             },
             storage: {
                 let root = PathBuf::from(&raw.data_dir);

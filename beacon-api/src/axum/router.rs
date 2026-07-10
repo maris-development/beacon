@@ -72,15 +72,12 @@ pub(crate) fn setup_router(
     // lands on the UI instead of the API docs.
     let web_ui = web_ui_router(&config.server.web_ui_dir);
 
-    // MCP streamable-HTTP endpoint, gated by BEACON_MCP_ENABLED (default on). It
-    // rides the same `resolve_identity` middleware as the client API, so MCP tool
-    // calls execute under the caller's identity (or the anonymous principal when
-    // enabled) and per-user RBAC applies at query time.
-    let mcp_enabled = std::env::var("BEACON_MCP_ENABLED")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "off"))
-        .unwrap_or(true);
+    // MCP streamable-HTTP endpoint, gated by `mcp.enable` (BEACON_MCP_ENABLED,
+    // default on). It rides the same `resolve_identity` middleware as the client
+    // API, so MCP tool calls execute under the caller's identity (or the anonymous
+    // principal when enabled) and per-user RBAC applies at query time.
     let mut router = client_router.merge(admin_router);
-    if mcp_enabled {
+    if config.mcp.enable {
         let mcp_router = ::axum::Router::new()
             .route_service(
                 "/mcp",
