@@ -12,8 +12,10 @@ mod source_exec;
 
 use std::sync::Arc;
 
+use arrow::record_batch::RecordBatch;
 use datafusion::error::Result;
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::metrics::BaselineMetrics;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use futures::StreamExt;
@@ -48,22 +50,34 @@ pub fn as_nd_plan(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn NdExecutionPl
 }
 
 /// Adapt an nd batch stream into a standard record batch stream, dropping
-/// empty batches.
+/// empty batches and recording output rows / materialization time into
+/// `baseline`.
 pub fn materialize_nd_stream(
     schema: arrow::datatypes::SchemaRef,
     stream: SendableNdBatchStream,
+    baseline: BaselineMetrics,
 ) -> SendableRecordBatchStream {
-    let batches = stream.filter_map(|item| async move {
-        match item {
-            Ok(batch) => {
-                if batch.num_rows() == 0 {
-                    None
-                } else {
-                    Some(batch.materialize())
+    // `baseline` is moved into this synchronous closure once and borrowed per
+    // item; it is dropped when the stream ends, which records the end time.
+    let batches = stream
+        .map(move |item| -> Option<Result<RecordBatch>> {
+            match item {
+                Ok(batch) => {
+                    if batch.num_rows() == 0 {
+                        return None;
+                    }
+                    let _timer = baseline.elapsed_compute().timer();
+                    match batch.materialize() {
+                        Ok(record_batch) => {
+                            baseline.record_output(record_batch.num_rows());
+                            Some(Ok(record_batch))
+                        }
+                        Err(e) => Some(Err(e)),
+                    }
                 }
+                Err(e) => Some(Err(e)),
             }
-            Err(e) => Some(Err(e)),
-        }
-    });
+        })
+        .filter_map(|item| async move { item });
     Box::pin(RecordBatchStreamAdapter::new(schema, batches))
 }

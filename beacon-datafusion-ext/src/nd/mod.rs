@@ -156,6 +156,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nodes_report_metrics() {
+        let (_, source) = test_source();
+        let broadcast = Arc::new(NdBroadcastExec::try_new(source.clone()).unwrap());
+
+        // Drain the plan so the streams run to completion and finalize metrics.
+        let out = run(broadcast.clone() as Arc<dyn ExecutionPlan>).await.unwrap();
+        assert_eq!(out.num_rows(), 24);
+
+        // Broadcast reports the flattened output rows.
+        let broadcast_metrics = broadcast.metrics().unwrap();
+        assert_eq!(broadcast_metrics.output_rows(), Some(24));
+
+        // Source reports the grid rows it produced (12 + 12) and the number of
+        // nd batches — recorded via the same shared metrics set the broadcast
+        // pulled from.
+        let source_metrics = source.metrics().unwrap();
+        assert_eq!(source_metrics.output_rows(), Some(24));
+        assert_eq!(
+            source_metrics
+                .sum_by_name("nd_batches")
+                .map(|v| v.as_usize()),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
     async fn broadcast_requires_nd_input() {
         // A non-nd child is rejected at construction.
         let (_, source) = test_source();

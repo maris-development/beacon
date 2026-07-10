@@ -9,12 +9,16 @@ use datafusion::error::Result;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
+use futures::StreamExt;
 
-use super::{NdExecutionPlan, SendableNdBatchStream, materialize_nd_stream};
+use super::{NdBroadcastExec, NdExecutionPlan, SendableNdBatchStream};
 
 /// Producer of nd batch streams. Format crates (zarr, netcdf, …) implement
 /// this instead of defining their own `ExecutionPlan`, so [`super::as_nd_plan`]
@@ -38,6 +42,7 @@ pub trait NdBatchProvider: fmt::Debug + Send + Sync {
 pub struct NdSourceExec {
     provider: Arc<dyn NdBatchProvider>,
     properties: Arc<PlanProperties>,
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl NdSourceExec {
@@ -51,6 +56,7 @@ impl NdSourceExec {
         Self {
             provider,
             properties,
+            metrics: ExecutionPlanMetricsSet::new(),
         }
     }
 
@@ -98,8 +104,15 @@ impl ExecutionPlan for NdSourceExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let stream = self.execute_nd(partition, context)?;
-        Ok(materialize_nd_stream(self.provider.schema(), stream))
+        // The source only produces nd batches (`execute_nd`); flattening to
+        // Arrow lives in `NdBroadcastExec`. When this node is executed as a
+        // standalone plan, borrow that broadcast behaviour rather than
+        // duplicating it here.
+        NdBroadcastExec::try_new(Arc::new(self.clone()))?.execute(partition, context)
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 }
 
@@ -109,7 +122,23 @@ impl NdExecutionPlan for NdSourceExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableNdBatchStream> {
-        self.provider.execute(partition, context)
+        // `output_rows` counts the un-broadcast grid rows each nd batch
+        // represents; `nd_batches` counts the batches produced. `baseline` is
+        // moved into the closure once and dropped at stream end, recording the
+        // elapsed time.
+        let baseline = BaselineMetrics::new(&self.metrics, partition);
+        let nd_batches: Count =
+            MetricBuilder::new(&self.metrics).counter("nd_batches", partition);
+
+        let stream = self.provider.execute(partition, context)?.map(move |item| {
+            let _timer = baseline.elapsed_compute().timer();
+            if let Ok(batch) = &item {
+                baseline.record_output(batch.num_rows());
+                nd_batches.add(1);
+            }
+            item
+        });
+        Ok(Box::pin(stream))
     }
 }
 

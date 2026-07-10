@@ -7,6 +7,7 @@ use std::sync::Arc;
 use datafusion::common::plan_err;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
 };
@@ -21,6 +22,7 @@ use super::{as_nd_plan, materialize_nd_stream};
 pub struct NdBroadcastExec {
     input: Arc<dyn ExecutionPlan>,
     properties: Arc<PlanProperties>,
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl NdBroadcastExec {
@@ -32,7 +34,11 @@ impl NdBroadcastExec {
             );
         }
         let properties = input.properties().clone();
-        Ok(Self { input, properties })
+        Ok(Self {
+            input,
+            properties,
+            metrics: ExecutionPlanMetricsSet::new(),
+        })
     }
 
     /// The nd-aware child whose batches this node materializes.
@@ -82,6 +88,11 @@ impl ExecutionPlan for NdBroadcastExec {
         let stream = as_nd_plan(&self.input)
             .expect("validated in try_new")
             .execute_nd(partition, context)?;
-        Ok(materialize_nd_stream(self.input.schema(), stream))
+        let baseline = BaselineMetrics::new(&self.metrics, partition);
+        Ok(materialize_nd_stream(self.input.schema(), stream, baseline))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 }
