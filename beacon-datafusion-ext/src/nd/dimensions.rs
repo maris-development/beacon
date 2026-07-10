@@ -29,10 +29,6 @@ impl Dimension {
         &self.name
     }
 
-    pub fn name_arc(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
     pub fn size(&self) -> usize {
         self.size
     }
@@ -73,10 +69,6 @@ impl Dimensions {
 
     pub fn rank(&self) -> usize {
         self.dims.len()
-    }
-
-    pub fn is_scalar(&self) -> bool {
-        self.dims.is_empty()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Dimension> {

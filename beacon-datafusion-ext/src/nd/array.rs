@@ -6,20 +6,7 @@ use datafusion::common::plan_err;
 use datafusion::error::{DataFusionError, Result};
 
 use super::broadcast::BroadcastMap;
-use super::dimensions::{Dimension, Dimensions};
-
-/// A hyperslab of an N-dimensional array: per-axis start offset and extent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArraySubset {
-    pub start: Vec<usize>,
-    pub shape: Vec<usize>,
-}
-
-impl ArraySubset {
-    pub fn new(start: Vec<usize>, shape: Vec<usize>) -> Self {
-        Self { start, shape }
-    }
-}
+use super::dimensions::Dimensions;
 
 /// A flat Arrow array plus the named C-order dimensions describing its
 /// logical N-dimensional shape.
@@ -46,116 +33,8 @@ impl NdArrowArray {
         Ok(Self { values, dims })
     }
 
-    /// A rank-0 array wrapping a single-element Arrow array.
-    pub fn try_new_scalar(values: ArrayRef) -> Result<Self> {
-        Self::try_new(values, Dimensions::scalar())
-    }
-
-    pub fn values(&self) -> &ArrayRef {
-        &self.values
-    }
-
-    pub fn dims(&self) -> &Dimensions {
-        &self.dims
-    }
-
-    pub fn shape(&self) -> Vec<usize> {
-        self.dims.shape()
-    }
-
     pub fn data_type(&self) -> &DataType {
         self.values.data_type()
-    }
-
-    pub fn num_elements(&self) -> usize {
-        self.values.len()
-    }
-
-    /// Extract a hyperslab. Zero-copy (`Array::slice`) when the subset is
-    /// contiguous in C-order; a single `take` gather otherwise.
-    pub fn subset(&self, subset: &ArraySubset) -> Result<NdArrowArray> {
-        let rank = self.dims.rank();
-        if subset.start.len() != rank || subset.shape.len() != rank {
-            return plan_err!(
-                "subset rank {}/{} does not match array rank {rank}",
-                subset.start.len(),
-                subset.shape.len()
-            );
-        }
-        for axis in 0..rank {
-            let size = self.dims.get(axis).size();
-            if subset.start[axis] + subset.shape[axis] > size {
-                return plan_err!(
-                    "subset [{}..{}) exceeds axis '{}' of size {size}",
-                    subset.start[axis],
-                    subset.start[axis] + subset.shape[axis],
-                    self.dims.get(axis).name()
-                );
-            }
-        }
-
-        let new_dims = Dimensions::try_new(
-            self.dims
-                .iter()
-                .zip(subset.shape.iter())
-                .map(|(dim, &size)| Dimension::new(dim.name_arc(), size))
-                .collect(),
-        )?;
-
-        if new_dims.num_elements() == self.num_elements() {
-            return Ok(Self {
-                values: self.values.clone(),
-                dims: new_dims,
-            });
-        }
-
-        if let Some((offset, len)) = self.contiguous_range(subset) {
-            return Ok(Self {
-                values: self.values.slice(offset, len),
-                dims: new_dims,
-            });
-        }
-
-        // Orthogonal gather: kept coordinates per axis are contiguous ranges.
-        let identity = BroadcastMap::try_new(&self.dims, &self.dims)?;
-        let keep_owned: Vec<Vec<u32>> = (0..rank)
-            .map(|axis| {
-                (subset.start[axis]..subset.start[axis] + subset.shape[axis])
-                    .map(|c| c as u32)
-                    .collect()
-            })
-            .collect();
-        let keep: Vec<Option<&[u32]>> = keep_owned.iter().map(|k| Some(k.as_slice())).collect();
-        let indices = identity.gather_indices(Some(&keep));
-        let values = arrow::compute::take(self.values.as_ref(), &indices, None)
-            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-        Self::try_new(values, new_dims)
-    }
-
-    /// If the hyperslab is one contiguous run of the flat buffer, return its
-    /// (offset, length). Writing `p` for the last axis whose extent is not
-    /// full, the run is contiguous iff every axis before `p` has extent 1
-    /// (each contributes a single coordinate); axis `p` itself may take any
-    /// contiguous extent and everything after it is full by construction.
-    fn contiguous_range(&self, subset: &ArraySubset) -> Option<(usize, usize)> {
-        let rank = self.dims.rank();
-        let strides = self.dims.c_strides();
-        let p = (0..rank)
-            .rev()
-            .find(|&axis| subset.shape[axis] != self.dims.get(axis).size())
-            .unwrap_or(0);
-        if (0..p).any(|axis| subset.shape[axis] != 1) {
-            return None;
-        }
-
-        let offset: usize = subset
-            .start
-            .iter()
-            .zip(strides.iter())
-            .map(|(&s, &stride)| s * stride)
-            .sum();
-        let len: usize = subset.shape.iter().product();
-        Some((offset, len))
     }
 
     /// Broadcast map from this array's dimensions onto `target`.
@@ -163,19 +42,14 @@ impl NdArrowArray {
         BroadcastMap::try_new(&self.dims, target)
     }
 
-    /// Materialize this array broadcast onto `target`, optionally restricted
-    /// to kept coordinates per target axis. Filter and broadcast compose into
-    /// a single `take`; the unfiltered expansion is never built.
-    pub fn materialize(
-        &self,
-        target: &Dimensions,
-        keep: Option<&[Option<&[u32]>]>,
-    ) -> Result<ArrayRef> {
+    /// Materialize this array broadcast onto `target` as a single `take` (or a
+    /// zero-copy clone when the broadcast is the identity).
+    pub fn materialize(&self, target: &Dimensions) -> Result<ArrayRef> {
         let map = self.broadcast_map(target)?;
-        if map.is_identity() && keep.map_or(true, |k| k.iter().all(|axis| axis.is_none())) {
+        if map.is_identity() {
             return Ok(self.values.clone());
         }
-        let indices = map.gather_indices(keep);
+        let indices = map.gather_indices();
         arrow::compute::take(self.values.as_ref(), &indices, None)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
@@ -189,6 +63,7 @@ mod tests {
     use arrow::datatypes::Int32Type;
 
     use super::*;
+    use crate::nd::dimensions::Dimension;
 
     fn dims(spec: &[(&str, usize)]) -> Dimensions {
         Dimensions::try_new(
@@ -217,64 +92,18 @@ mod tests {
     }
 
     #[test]
-    fn contiguous_subset_is_slice() {
-        // (time=4, lon=3): rows 1..3 with all lon → contiguous.
-        let a = nd((0..12).collect(), &[("time", 4), ("lon", 3)]);
-        let s = a
-            .subset(&ArraySubset::new(vec![1, 0], vec![2, 3]))
-            .unwrap();
-        assert_eq!(s.shape(), vec![2, 3]);
-        assert_eq!(ints(s.values()), vec![3, 4, 5, 6, 7, 8]);
-    }
-
-    #[test]
-    fn strided_subset_gathers() {
-        // (time=2, lon=3): lon 1..3 for all time → non-contiguous.
-        let a = nd((0..6).collect(), &[("time", 2), ("lon", 3)]);
-        let s = a
-            .subset(&ArraySubset::new(vec![0, 1], vec![2, 2]))
-            .unwrap();
-        assert_eq!(s.shape(), vec![2, 2]);
-        assert_eq!(ints(s.values()), vec![1, 2, 4, 5]);
-    }
-
-    #[test]
-    fn full_subset_is_zero_copy() {
-        let a = nd((0..6).collect(), &[("time", 2), ("lon", 3)]);
-        let s = a
-            .subset(&ArraySubset::new(vec![0, 0], vec![2, 3]))
-            .unwrap();
-        assert_eq!(ints(s.values()), ints(a.values()));
-    }
-
-    #[test]
-    fn out_of_bounds_subset_rejected() {
-        let a = nd((0..6).collect(), &[("time", 2), ("lon", 3)]);
-        assert!(a.subset(&ArraySubset::new(vec![1, 0], vec![2, 3])).is_err());
-    }
-
-    #[test]
     fn materialize_broadcast() {
         let lat = nd(vec![10, 20, 30], &[("lat", 3)]);
         let target = dims(&[("time", 2), ("lat", 3)]);
-        let out = lat.materialize(&target, None).unwrap();
+        let out = lat.materialize(&target).unwrap();
         assert_eq!(ints(&out), vec![10, 20, 30, 10, 20, 30]);
-    }
-
-    #[test]
-    fn materialize_with_selection_composes() {
-        let lat = nd(vec![10, 20, 30], &[("lat", 3)]);
-        let target = dims(&[("time", 2), ("lat", 3)]);
-        let keep: Vec<Option<&[u32]>> = vec![Some(&[1]), Some(&[0, 2])];
-        let out = lat.materialize(&target, Some(&keep)).unwrap();
-        assert_eq!(ints(&out), vec![10, 30]);
     }
 
     #[test]
     fn materialize_identity_zero_copy() {
         let a = nd((0..6).collect(), &[("time", 2), ("lon", 3)]);
         let target = dims(&[("time", 2), ("lon", 3)]);
-        let out = a.materialize(&target, None).unwrap();
+        let out = a.materialize(&target).unwrap();
         assert_eq!(ints(&out), (0..6).collect::<Vec<_>>());
     }
 }

@@ -83,7 +83,7 @@ impl NdRecordBatch {
         let arrays: Vec<ArrayRef> = self
             .columns
             .iter()
-            .map(|column| column.materialize(&self.target, None))
+            .map(|column| column.materialize(&self.target))
             .collect::<Result<_>>()?;
 
         let options = RecordBatchOptions::new().with_row_count(Some(self.num_rows()));

@@ -23,9 +23,9 @@ pub mod broadcast;
 pub mod dimensions;
 pub mod exec;
 
-pub use array::{ArraySubset, NdArrowArray};
+pub use array::NdArrowArray;
 pub use batch::NdRecordBatch;
-pub use broadcast::{BroadcastMap, RunStructure};
+pub use broadcast::BroadcastMap;
 pub use dimensions::{Dimension, Dimensions};
 
 #[cfg(test)]
