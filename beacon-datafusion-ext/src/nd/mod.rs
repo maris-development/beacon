@@ -21,12 +21,17 @@ pub mod array;
 pub mod batch;
 pub mod broadcast;
 pub mod dimensions;
+pub mod encoding;
 pub mod exec;
 
 pub use array::NdArrowArray;
 pub use batch::NdRecordBatch;
 pub use broadcast::BroadcastMap;
 pub use dimensions::{Dimension, Dimensions};
+pub use encoding::{
+    decode_nd_record_batch, encode_nd_record_batch, is_nd_encoded, logical_schema,
+    nd_encoded_field, nd_encoded_type,
+};
 
 #[cfg(test)]
 mod tests {
@@ -34,13 +39,16 @@ mod tests {
 
     use arrow::array::{AsArray, Float64Array, Int32Array};
     use arrow::compute::concat_batches;
-    use arrow::datatypes::{DataType, Field, Float64Type, Int32Type, Schema};
+    use arrow::datatypes::{Float64Type, Int32Type, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::error::Result;
     use datafusion::execution::TaskContext;
     use datafusion::physical_plan::ExecutionPlan;
     use futures::TryStreamExt;
 
-    use super::exec::{MemoryNdBatchProvider, NdBroadcastExec, NdSourceExec};
+    use super::encoding::encode_nd_record_batch;
+    use super::exec::{NdBroadcastExec, NdSourceExec};
     use super::*;
 
     fn dims(spec: &[(&str, usize)]) -> Dimensions {
@@ -53,13 +61,15 @@ mod tests {
     }
 
     /// A (time=4, lat=3, lon=2) grid with coordinate variables and one data
-    /// variable, split into two nd batches along `time`.
-    fn test_source() -> (Arc<Schema>, Arc<NdSourceExec>) {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("time", DataType::Int32, true),
-            Field::new("lat", DataType::Int32, true),
-            Field::new("lon", DataType::Int32, true),
-            Field::new("sst", DataType::Float64, true),
+    /// variable, encoded into two nd-encoded `RecordBatch`es (split along
+    /// `time`) and served from an in-memory `DataSourceExec` — the shape a file
+    /// opener produces.
+    fn test_source() -> Arc<NdSourceExec> {
+        let logical = Arc::new(Schema::new(vec![
+            arrow::datatypes::Field::new("time", arrow::datatypes::DataType::Int32, true),
+            arrow::datatypes::Field::new("lat", arrow::datatypes::DataType::Int32, true),
+            arrow::datatypes::Field::new("lon", arrow::datatypes::DataType::Int32, true),
+            arrow::datatypes::Field::new("sst", arrow::datatypes::DataType::Float64, true),
         ]));
 
         let lat = || {
@@ -74,7 +84,7 @@ mod tests {
                 .unwrap()
         };
 
-        let mut batches = Vec::new();
+        let mut encoded = Vec::new();
         for chunk in 0..2u32 {
             let t0 = chunk * 2;
             let time = NdArrowArray::try_new(
@@ -88,20 +98,27 @@ mod tests {
                 dims(&[("time", 2), ("lat", 3), ("lon", 2)]),
             )
             .unwrap();
-            let batch = NdRecordBatch::try_new(
-                schema.clone(),
+            let nd = NdRecordBatch::try_new(
+                logical.clone(),
                 vec![time, lat(), lon(), sst],
                 dims(&[("time", 2), ("lat", 3), ("lon", 2)]),
             )
             .unwrap();
-            batches.push(batch);
+            encoded.push(encode_nd_record_batch(&nd).unwrap());
         }
 
-        let provider = MemoryNdBatchProvider::new(schema.clone(), batches);
-        (schema, Arc::new(NdSourceExec::new(Arc::new(provider))))
+        let encoded_schema = encoded[0].schema();
+        // One partition, each nd chunk its own single-row encoded batch.
+        let source = MemorySourceConfig::try_new_exec(
+            &[encoded.into_iter().map(|b| vec![b]).flatten().collect()],
+            encoded_schema,
+            None,
+        )
+        .unwrap();
+        Arc::new(NdSourceExec::try_new(source).unwrap())
     }
 
-    async fn run(plan: Arc<dyn ExecutionPlan>) -> Result<arrow::record_batch::RecordBatch> {
+    async fn run(plan: Arc<dyn ExecutionPlan>) -> Result<RecordBatch> {
         let schema = plan.schema();
         let batches: Vec<_> = plan
             .execute(0, Arc::new(TaskContext::default()))?
@@ -113,8 +130,7 @@ mod tests {
     #[tokio::test]
     async fn source_alone_materializes_full_grid() {
         // NdSourceExec's own `execute` materializes (no broadcast node needed).
-        let (_, source) = test_source();
-        let batch = run(source).await.unwrap();
+        let batch = run(test_source()).await.unwrap();
         assert_eq!(batch.num_rows(), 24);
         assert_eq!(batch.column(0).as_primitive::<Int32Type>().value(0), 100);
         assert_eq!(batch.column(1).as_primitive::<Int32Type>().value(0), -30);
@@ -123,8 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_then_broadcast_materializes_full_grid() {
-        let (_, source) = test_source();
-        let plan = Arc::new(NdBroadcastExec::try_new(source).unwrap());
+        let plan = Arc::new(NdBroadcastExec::try_new(test_source()).unwrap());
         let batch = run(plan).await.unwrap();
 
         // 4 time x 3 lat x 2 lon = 24 rows, C-order (time outer, lon inner).
@@ -157,7 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn nodes_report_metrics() {
-        let (_, source) = test_source();
+        let source = test_source();
         let broadcast = Arc::new(NdBroadcastExec::try_new(source.clone()).unwrap());
 
         // Drain the plan so the streams run to completion and finalize metrics.
@@ -168,9 +183,8 @@ mod tests {
         let broadcast_metrics = broadcast.metrics().unwrap();
         assert_eq!(broadcast_metrics.output_rows(), Some(24));
 
-        // Source reports the grid rows it produced (12 + 12) and the number of
-        // nd batches — recorded via the same shared metrics set the broadcast
-        // pulled from.
+        // Source reports the grid rows it decoded (12 + 12) and the number of
+        // nd batches.
         let source_metrics = source.metrics().unwrap();
         assert_eq!(source_metrics.output_rows(), Some(24));
         assert_eq!(
@@ -184,8 +198,7 @@ mod tests {
     #[tokio::test]
     async fn broadcast_requires_nd_input() {
         // A non-nd child is rejected at construction.
-        let (_, source) = test_source();
-        let broadcast = Arc::new(NdBroadcastExec::try_new(source).unwrap());
+        let broadcast = Arc::new(NdBroadcastExec::try_new(test_source()).unwrap());
         // Wrapping a broadcast (which is not nd-aware) must fail.
         assert!(NdBroadcastExec::try_new(broadcast).is_err());
     }

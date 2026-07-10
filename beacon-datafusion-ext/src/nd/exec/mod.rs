@@ -24,7 +24,7 @@ use futures::stream::BoxStream;
 use super::batch::NdRecordBatch;
 
 pub use broadcast_exec::NdBroadcastExec;
-pub use source_exec::{MemoryNdBatchProvider, NdBatchProvider, NdSourceExec};
+pub use source_exec::NdSourceExec;
 
 /// Stream of nd batches exchanged between nd-aware operators.
 pub type SendableNdBatchStream = BoxStream<'static, Result<NdRecordBatch>>;

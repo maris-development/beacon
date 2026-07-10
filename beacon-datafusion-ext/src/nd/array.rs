@@ -33,6 +33,14 @@ impl NdArrowArray {
         Ok(Self { values, dims })
     }
 
+    pub fn values(&self) -> &ArrayRef {
+        &self.values
+    }
+
+    pub fn dims(&self) -> &Dimensions {
+        &self.dims
+    }
+
     pub fn data_type(&self) -> &DataType {
         self.values.data_type()
     }

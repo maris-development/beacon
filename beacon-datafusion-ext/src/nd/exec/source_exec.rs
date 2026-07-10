@@ -1,77 +1,70 @@
-//! Source node bridging arbitrary nd batch producers into the nd pipeline.
+//! Decoder node: nd-encoded `RecordBatch`es from a child plan → nd batches.
 
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use datafusion::error::Result;
+use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
 };
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
+
+use crate::nd::encoding::{decode_nd_record_batch, logical_schema};
 
 use super::{NdBroadcastExec, NdExecutionPlan, SendableNdBatchStream};
 
-/// Producer of nd batch streams. Format crates (zarr, netcdf, …) implement
-/// this instead of defining their own `ExecutionPlan`, so [`super::as_nd_plan`]
-/// only ever needs to know about [`NdSourceExec`].
-pub trait NdBatchProvider: fmt::Debug + Send + Sync {
-    fn schema(&self) -> SchemaRef;
-
-    fn partition_count(&self) -> usize {
-        1
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        context: Arc<TaskContext>,
-    ) -> Result<SendableNdBatchStream>;
-}
-
-/// Leaf node that streams nd batches from an [`NdBatchProvider`].
+/// Leaf of the nd pipeline: decodes the `beacon.nd`-encoded `RecordBatch`es
+/// produced by a child plan (typically a `DataSourceExec` whose file opener
+/// emits encoded batches) into un-broadcast [`NdRecordBatch`]es.
+///
+/// Its own output schema is the *logical* (decoded) schema; broadcasting to
+/// flat Arrow happens in [`NdBroadcastExec`] above it.
 #[derive(Debug, Clone)]
 pub struct NdSourceExec {
-    provider: Arc<dyn NdBatchProvider>,
+    /// Child plan producing nd-encoded `RecordBatch`es.
+    input: Arc<dyn ExecutionPlan>,
+    /// Decoded (logical) output schema.
+    logical_schema: SchemaRef,
     properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
 }
 
 impl NdSourceExec {
-    pub fn new(provider: Arc<dyn NdBatchProvider>) -> Self {
-        let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(provider.schema()),
-            Partitioning::UnknownPartitioning(provider.partition_count()),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
-        Self {
-            provider,
+    /// Wrap a child plan whose output columns are `beacon.nd`-encoded structs.
+    pub fn try_new(input: Arc<dyn ExecutionPlan>) -> Result<Self> {
+        let logical_schema = logical_schema(&input.schema())?;
+        // Same partitioning/emission/boundedness as the child; only the schema
+        // changes (encoded structs → logical value types).
+        let properties = Arc::new(
+            input
+                .properties()
+                .as_ref()
+                .clone()
+                .with_eq_properties(EquivalenceProperties::new(logical_schema.clone())),
+        );
+        Ok(Self {
+            input,
+            logical_schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
-        }
+        })
     }
 
-    pub fn provider(&self) -> &Arc<dyn NdBatchProvider> {
-        &self.provider
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
     }
 }
 
 impl DisplayAs for NdSourceExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "NdSourceExec: partitions={}",
-            self.provider.partition_count()
-        )
+        write!(f, "NdSourceExec")
     }
 }
 
@@ -89,14 +82,17 @@ impl ExecutionPlan for NdSourceExec {
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
+        vec![&self.input]
     }
 
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(self)
+        let [input] = <[_; 1]>::try_from(children).map_err(|_| {
+            DataFusionError::Internal("NdSourceExec expects exactly one child".to_string())
+        })?;
+        Ok(Arc::new(Self::try_new(input)?))
     }
 
     fn execute(
@@ -105,9 +101,8 @@ impl ExecutionPlan for NdSourceExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         // The source only produces nd batches (`execute_nd`); flattening to
-        // Arrow lives in `NdBroadcastExec`. When this node is executed as a
-        // standalone plan, borrow that broadcast behaviour rather than
-        // duplicating it here.
+        // Arrow lives in `NdBroadcastExec`. When executed as a standalone plan,
+        // borrow that broadcast behaviour rather than duplicating it.
         NdBroadcastExec::try_new(Arc::new(self.clone()))?.execute(partition, context)
     }
 
@@ -122,52 +117,26 @@ impl NdExecutionPlan for NdSourceExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableNdBatchStream> {
-        // `output_rows` counts the un-broadcast grid rows each nd batch
-        // represents; `nd_batches` counts the batches produced. `baseline` is
-        // moved into the closure once and dropped at stream end, recording the
-        // elapsed time.
         let baseline = BaselineMetrics::new(&self.metrics, partition);
         let nd_batches: Count =
             MetricBuilder::new(&self.metrics).counter("nd_batches", partition);
 
-        let stream = self.provider.execute(partition, context)?.map(move |item| {
-            let _timer = baseline.elapsed_compute().timer();
-            if let Ok(batch) = &item {
-                baseline.record_output(batch.num_rows());
-                nd_batches.add(1);
-            }
-            item
-        });
+        let input = self.input.execute(partition, context)?;
+        let stream = input
+            .map(move |item| {
+                let _timer = baseline.elapsed_compute().timer();
+                match item {
+                    // An empty encoded batch carries no nd array — skip it.
+                    Ok(batch) if batch.num_rows() == 0 => Ok(None),
+                    Ok(batch) => decode_nd_record_batch(&batch).map(|nd| {
+                        nd_batches.add(1);
+                        baseline.record_output(nd.num_rows());
+                        Some(nd)
+                    }),
+                    Err(e) => Err(e),
+                }
+            })
+            .try_filter_map(|decoded| async move { Ok(decoded) });
         Ok(Box::pin(stream))
-    }
-}
-
-/// In-memory provider, useful for tests and for callers that already hold
-/// nd batches.
-#[derive(Debug)]
-pub struct MemoryNdBatchProvider {
-    schema: SchemaRef,
-    batches: Vec<crate::nd::NdRecordBatch>,
-}
-
-impl MemoryNdBatchProvider {
-    pub fn new(schema: SchemaRef, batches: Vec<crate::nd::NdRecordBatch>) -> Self {
-        Self { schema, batches }
-    }
-}
-
-impl NdBatchProvider for MemoryNdBatchProvider {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn execute(
-        &self,
-        _partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> Result<SendableNdBatchStream> {
-        Ok(Box::pin(futures::stream::iter(
-            self.batches.clone().into_iter().map(Ok),
-        )))
     }
 }
