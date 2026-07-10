@@ -45,7 +45,10 @@ impl AuthProvider for CompositeAuthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{basic::BasicAuthProvider, oidc::{OidcAuthProvider, OidcConfig}};
+    use crate::{
+        basic::BasicAuthProvider,
+        oidc::{OidcAuthProvider, OidcConfig},
+    };
     use std::time::Duration;
 
     fn composite() -> CompositeAuthProvider {
@@ -86,7 +89,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("token header") || err.contains("invalid"), "got: {err}");
+        assert!(
+            err.contains("token header") || err.contains("invalid"),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -641,7 +641,8 @@ mod tests {
     #[tokio::test]
     async fn factory_get_ext_returns_atlas() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+        let factory =
+            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
         // `get_ext` is the format identity used to register and resolve
         // external tables (`STORED AS ATLAS`), not the marker filename
         // (`atlas.json`).
@@ -652,7 +653,8 @@ mod tests {
     #[tokio::test]
     async fn discover_datasets_emits_one_entry_per_atlas_dataset() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+        let factory =
+            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
 
         let objects = vec![fixture_marker_object_meta()];
         let datasets = factory.discover_datasets(&objects).expect("discover");
@@ -671,7 +673,8 @@ mod tests {
     #[tokio::test]
     async fn discover_datasets_ignores_non_marker_objects() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+        let factory =
+            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
         let objects = vec![ObjectMeta {
             location: object_store::path::Path::from("some/other.nc"),
             last_modified: chrono::Utc::now(),
@@ -762,8 +765,7 @@ mod tests {
             insert_op: datafusion::logical_expr::dml::InsertOp::Append,
             keep_partition_by_columns: false,
             file_extension: "atlas.json".to_string(),
-            file_output_mode:
-                datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
+            file_output_mode: datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
         };
         let err = format
             .create_writer_physical_plan(input, &ctx.state(), conf, None)
@@ -1000,7 +1002,8 @@ mod tests {
     async fn discover_datasets_finds_msgpack_zst_store() {
         ensure_msgpack_zst_fixture().await;
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+        let factory =
+            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
 
         let marker = ObjectMeta {
             location: OsPath::from(format!("{MSGPACK_ZST_FIXTURE_DIR}/atlas.msgpack.zst")),
@@ -1115,18 +1118,21 @@ mod tests {
             .unwrap();
         let mut temps: Vec<f32> = vec![];
         for b in &batches {
-            let col = b
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap();
+            let col = b.column(0).as_any().downcast_ref::<Float32Array>().unwrap();
             for i in 0..col.len() {
-                assert!(col.value(i) > 10.0, "every returned temperature must satisfy the predicate");
+                assert!(
+                    col.value(i) > 10.0,
+                    "every returned temperature must satisfy the predicate"
+                );
                 temps.push(col.value(i));
             }
         }
         temps.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert_eq!(temps, vec![20.0f32, 21.0, 22.0], "only summer's temperatures remain");
+        assert_eq!(
+            temps,
+            vec![20.0f32, 21.0, 22.0],
+            "only summer's temperatures remain"
+        );
     }
 }
 

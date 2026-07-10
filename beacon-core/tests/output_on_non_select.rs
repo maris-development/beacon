@@ -26,7 +26,10 @@ fn csv_query(sql: &str) -> Query {
 /// Run a CSV-output query expecting it to fail, returning the error message.
 /// (`QueryResult` is not `Debug`, so `Result::expect_err` is unavailable.)
 async fn expect_output_error(runtime: &Runtime, sql: &str) -> String {
-    match runtime.run_query(csv_query(sql), beacon_core::AuthIdentity::system()).await {
+    match runtime
+        .run_query(csv_query(sql), beacon_core::AuthIdentity::system())
+        .await
+    {
         Ok(_) => panic!("expected an error for: {sql}"),
         Err(error) => error.to_string(),
     }
@@ -39,7 +42,10 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
     let runtime = boot().await;
     let table = format!("output_guard_{}", std::process::id());
     let _ = runtime
-        .run_query(Query::sql(format!("DROP TABLE IF EXISTS {table}")), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(format!("DROP TABLE IF EXISTS {table}")),
+            beacon_core::AuthIdentity::system(),
+        )
         .await;
 
     // CREATE TABLE (DDL) and SET (statement) both return no rows.
@@ -70,7 +76,10 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
     );
 
     let _ = runtime
-        .run_query(Query::sql(format!("DROP TABLE IF EXISTS {table}")), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(format!("DROP TABLE IF EXISTS {table}")),
+            beacon_core::AuthIdentity::system(),
+        )
         .await;
 }
 
@@ -79,7 +88,10 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
 async fn output_on_select_still_succeeds() {
     let runtime = boot().await;
     let result = runtime
-        .run_query(csv_query("SELECT 1 AS a"), beacon_core::AuthIdentity::system())
+        .run_query(
+            csv_query("SELECT 1 AS a"),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .expect("SELECT with output should succeed");
     assert!(

@@ -108,7 +108,14 @@ pub fn array_to_nd_array(
         && let Some((epoch, unit)) = parse_cf_time_units(units, calendar)
     {
         let backend = CfTimeBackend::new(
-            array, kind, shape, dimensions, chunk_shape, epoch, unit, raw_fill,
+            array,
+            kind,
+            shape,
+            dimensions,
+            chunk_shape,
+            epoch,
+            unit,
+            raw_fill,
         );
         return Ok(Arc::new(NdArray::new_with_backend(backend)?));
     }
@@ -116,13 +123,8 @@ pub fn array_to_nd_array(
     // Direct read in the array's native dtype.
     macro_rules! direct {
         ($ty:ty, $fill:expr) => {{
-            let backend = ZarrArrayBackend::<$ty>::new(
-                array,
-                shape,
-                dimensions,
-                chunk_shape,
-                $fill,
-            );
+            let backend =
+                ZarrArrayBackend::<$ty>::new(array, shape, dimensions, chunk_shape, $fill);
             Ok(Arc::new(NdArray::new_with_backend(backend)?) as Arc<dyn NdArrayD>)
         }};
     }

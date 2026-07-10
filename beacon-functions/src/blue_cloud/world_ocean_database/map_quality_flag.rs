@@ -42,8 +42,10 @@ fn map_wod_quality_flag_impl(
 ) -> datafusion::error::Result<ColumnarValue> {
     match &parameters[0] {
         ColumnarValue::Array(flag) => {
-            let flag_array =
-                crate::util::downcast_arg::<arrow::array::Int64Array>(flag, "map_wod_quality_flag")?;
+            let flag_array = crate::util::downcast_arg::<arrow::array::Int64Array>(
+                flag,
+                "map_wod_quality_flag",
+            )?;
 
             let array = flag_array.iter().map(|flag| {
                 flag.map(|wod_flag| WOD_FLAG_TO_SDN.get(&wod_flag).map(|s| s).cloned())
@@ -86,7 +88,8 @@ mod tests {
 
     #[test]
     fn impl_array_path() {
-        let input = ColumnarValue::Array(Arc::new(Int64Array::from(vec![Some(0), Some(6), Some(99)])));
+        let input =
+            ColumnarValue::Array(Arc::new(Int64Array::from(vec![Some(0), Some(6), Some(99)])));
         let ColumnarValue::Array(arr) = map_wod_quality_flag_impl(&[input]).unwrap() else {
             panic!("expected array");
         };

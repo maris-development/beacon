@@ -14,7 +14,10 @@ use futures::TryStreamExt;
 
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
-        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(sql.to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
         .into_record_stream()
@@ -62,7 +65,10 @@ async fn crawler_discovers_partitioned_csv() {
 
     let pruned =
         scalar_count(&run(&runtime, "SELECT count(*) FROM csv_src WHERE year = '2024'").await);
-    assert_eq!(pruned, 1, "partition column 'year' should filter to one file");
+    assert_eq!(
+        pruned, 1,
+        "partition column 'year' should filter to one file"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

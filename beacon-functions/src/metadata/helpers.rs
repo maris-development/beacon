@@ -1,5 +1,5 @@
 use arrow::datatypes::FieldRef;
-use datafusion::common::{ColumnStatistics, stats::Precision};
+use datafusion::common::{stats::Precision, ColumnStatistics};
 use datafusion::scalar::ScalarValue;
 
 /// One column's worth of statistics as plain strings, ready to push into Arrow arrays.

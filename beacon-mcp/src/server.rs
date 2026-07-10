@@ -57,7 +57,9 @@ impl ServerHandler for BeaconMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             // Surface tool failures as an error result (not a protocol error) so
             // the model can read and react to the message.
-            Err(error) => Ok(CallToolResult::error(vec![Content::text(error.to_string())])),
+            Err(error) => Ok(CallToolResult::error(vec![Content::text(
+                error.to_string(),
+            )])),
         }
     }
 }

@@ -17,7 +17,7 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use datafusion::catalog::TableProvider;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::dml::InsertOp;
-use datafusion::logical_expr::{cast, col, lit, Expr};
+use datafusion::logical_expr::{Expr, cast, col, lit};
 use datafusion::prelude::SessionContext;
 use datafusion_iceberg::DataFusionTable;
 use iceberg_rust::catalog::Catalog;
@@ -235,7 +235,10 @@ fn build_transform_exprs(original_names: &[String], changes: &[SchemaChange]) ->
     for change in changes {
         match change {
             SchemaChange::AddColumn { name, data_type } => {
-                entries.push((name.clone(), cast(lit(ScalarValue::Null), data_type.clone())));
+                entries.push((
+                    name.clone(),
+                    cast(lit(ScalarValue::Null), data_type.clone()),
+                ));
             }
             SchemaChange::DropColumn { name } => {
                 entries.retain(|(out_name, _)| out_name != name);

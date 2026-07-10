@@ -16,7 +16,10 @@ use futures::TryStreamExt;
 /// Run SQL as super-user and collect the result batches.
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
-        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(sql.to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .unwrap_or_else(|error| panic!("SQL failed to plan/execute: {sql}\n{error}"))
         .into_record_stream()
@@ -92,9 +95,17 @@ async fn crawler_discovers_partitioned_parquet() {
     assert_eq!(count, 2, "both partition files should be discovered");
 
     // The Hive partition column 'year' exists and prunes correctly.
-    let pruned =
-        scalar_count(&run(&runtime, "SELECT count(*) FROM crawl_src WHERE year = '2024'").await);
-    assert_eq!(pruned, 1, "partition column 'year' should filter to one file");
+    let pruned = scalar_count(
+        &run(
+            &runtime,
+            "SELECT count(*) FROM crawl_src WHERE year = '2024'",
+        )
+        .await,
+    );
+    assert_eq!(
+        pruned, 1,
+        "partition column 'year' should filter to one file"
+    );
 
     // Re-running is idempotent: the crawler owns the table, so it updates (not
     // skips) it, and the row count is unchanged.

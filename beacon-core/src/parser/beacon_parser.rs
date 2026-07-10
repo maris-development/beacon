@@ -95,11 +95,15 @@ impl<'a> BeaconParser<'a> {
     }
 
     fn is_create_crawler(&self) -> bool {
-        self.is_keyword_then_crawler(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::CREATE))
+        self.is_keyword_then_crawler(
+            |t| matches!(t, Token::Word(w) if w.keyword == Keyword::CREATE),
+        )
     }
 
     fn is_run_crawler(&self) -> bool {
-        self.is_keyword_then_crawler(|t| matches!(t, Token::Word(w) if w.value.to_uppercase() == "RUN"))
+        self.is_keyword_then_crawler(
+            |t| matches!(t, Token::Word(w) if w.value.to_uppercase() == "RUN"),
+        )
     }
 
     fn is_drop_crawler(&self) -> bool {
@@ -195,7 +199,9 @@ impl<'a> BeaconParser<'a> {
     }
 
     fn is_drop_extension(&self) -> bool {
-        self.is_keyword_then_extension(|t| matches!(t, Token::Word(w) if w.keyword == Keyword::DROP))
+        self.is_keyword_then_extension(
+            |t| matches!(t, Token::Word(w) if w.keyword == Keyword::DROP),
+        )
     }
 
     fn is_show_extensions(&self) -> bool {
@@ -360,7 +366,10 @@ impl<'a> BeaconParser<'a> {
             .parser
             .parse_object_name(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        Ok(BeaconStatement::DropIndex(DropIndexStatement { name, table }))
+        Ok(BeaconStatement::DropIndex(DropIndexStatement {
+            name,
+            table,
+        }))
     }
 
     /// Parse: SHOW INDEXES [ON|FROM] <table>
@@ -666,8 +675,8 @@ impl<'a> BeaconParser<'a> {
     /// or `ALL`.
     fn parse_privilege_and_target(&mut self) -> Result<(Privilege, Option<PrivilegeTarget>)> {
         let privilege_str = self.parse_string_value()?;
-        let privilege = Privilege::from_str(&privilege_str)
-            .map_err(|err| DataFusionError::Plan(err))?;
+        let privilege =
+            Privilege::from_str(&privilege_str).map_err(|err| DataFusionError::Plan(err))?;
 
         let target = if self.word_at(0, "ON") {
             self.df_parser.parser.next_token(); // ON
@@ -742,8 +751,12 @@ mod tests {
 
     #[test]
     fn parse_role_lifecycle_and_assignment() {
-        assert!(matches!(parse_auth("CREATE ROLE reader"), AuthStatement::CreateRole { role } if role == "reader"));
-        assert!(matches!(parse_auth("DROP ROLE reader"), AuthStatement::DropRole { role } if role == "reader"));
+        assert!(
+            matches!(parse_auth("CREATE ROLE reader"), AuthStatement::CreateRole { role } if role == "reader")
+        );
+        assert!(
+            matches!(parse_auth("DROP ROLE reader"), AuthStatement::DropRole { role } if role == "reader")
+        );
         match parse_auth("GRANT ROLE reader TO USER alice") {
             AuthStatement::GrantRoleToUser { role, username } => {
                 assert_eq!(role, "reader");
@@ -763,22 +776,36 @@ mod tests {
     #[test]
     fn parse_privilege_grants_with_targets() {
         match parse_auth("GRANT SELECT ON PATH 'argo/**/*.nc' TO ROLE reader") {
-            AuthStatement::GrantPrivilege { privilege, target, role } => {
+            AuthStatement::GrantPrivilege {
+                privilege,
+                target,
+                role,
+            } => {
                 assert_eq!(privilege, Privilege::Select);
-                assert_eq!(target, Some(PrivilegeTarget::Path("argo/**/*.nc".to_string())));
+                assert_eq!(
+                    target,
+                    Some(PrivilegeTarget::Path("argo/**/*.nc".to_string()))
+                );
                 assert_eq!(role, "reader");
             }
             other => panic!("unexpected: {other:?}"),
         }
         match parse_auth("GRANT SELECT ON TABLE observations TO ROLE reader") {
             AuthStatement::GrantPrivilege { target, .. } => {
-                assert_eq!(target, Some(PrivilegeTarget::Table("observations".to_string())));
+                assert_eq!(
+                    target,
+                    Some(PrivilegeTarget::Table("observations".to_string()))
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
         // No `ON` clause means the grant applies to every target.
         match parse_auth("GRANT ALL TO ROLE admin") {
-            AuthStatement::GrantPrivilege { privilege, target, role } => {
+            AuthStatement::GrantPrivilege {
+                privilege,
+                target,
+                role,
+            } => {
                 assert_eq!(privilege, Privilege::All);
                 assert_eq!(target, None);
                 assert_eq!(role, "admin");
@@ -790,9 +817,16 @@ mod tests {
     #[test]
     fn parse_deny_and_revoke_variants() {
         match parse_auth("DENY SELECT ON PATH 'argo/restricted/*' TO ROLE reader") {
-            AuthStatement::DenyPrivilege { privilege, target, role } => {
+            AuthStatement::DenyPrivilege {
+                privilege,
+                target,
+                role,
+            } => {
                 assert_eq!(privilege, Privilege::Select);
-                assert_eq!(target, Some(PrivilegeTarget::Path("argo/restricted/*".to_string())));
+                assert_eq!(
+                    target,
+                    Some(PrivilegeTarget::Path("argo/restricted/*".to_string()))
+                );
                 assert_eq!(role, "reader");
             }
             other => panic!("unexpected: {other:?}"),
@@ -994,7 +1028,10 @@ mod tests {
         for sql in ["SET timezone = 'UTC'", "DROP TABLE t", "SHOW TABLES"] {
             let mut p = BeaconParser::new(sql).unwrap();
             assert!(
-                matches!(p.parse_statement().unwrap(), BeaconStatement::DFStatement(_)),
+                matches!(
+                    p.parse_statement().unwrap(),
+                    BeaconStatement::DFStatement(_)
+                ),
                 "`{sql}` should be a DataFusion statement"
             );
         }

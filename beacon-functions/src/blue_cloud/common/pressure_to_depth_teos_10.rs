@@ -105,7 +105,10 @@ mod tests {
         // ~100 dbar is roughly ~99 m of depth; assert it is positive and close.
         let depth = gsw_depth_from_pressure(100.0, 30.0);
         assert!(depth > 0.0, "depth should be positive, got {depth}");
-        assert!((depth - 99.0).abs() < 5.0, "depth out of expected range: {depth}");
+        assert!(
+            (depth - 99.0).abs() < 5.0,
+            "depth out of expected range: {depth}"
+        );
     }
 
     fn f64_array(out: ColumnarValue) -> Float64Array {

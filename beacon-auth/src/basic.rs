@@ -212,7 +212,10 @@ mod tests {
         store.grant_role("alice", "reader").unwrap();
         store.grant_role("alice", "writer").unwrap();
         store.revoke_role("alice", "writer").unwrap();
-        assert_eq!(store.verify("alice", "secret").unwrap(), vec!["reader".to_string()]);
+        assert_eq!(
+            store.verify("alice", "secret").unwrap(),
+            vec!["reader".to_string()]
+        );
 
         store.drop_user("alice").unwrap();
         assert!(!store.user_exists("alice"));

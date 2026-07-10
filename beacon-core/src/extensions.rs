@@ -210,18 +210,16 @@ impl TableExtensions {
     pub fn set_kind(&mut self, kind: &str, json: &str) -> anyhow::Result<()> {
         match kind.to_ascii_lowercase().as_str() {
             "mcp" => {
-                self.mcp = Some(
-                    serde_json::from_str(json).context("invalid 'mcp' extension payload")?,
-                );
+                self.mcp =
+                    Some(serde_json::from_str(json).context("invalid 'mcp' extension payload")?);
             }
             "preset" => {
-                self.preset = Some(
-                    serde_json::from_str(json).context("invalid 'preset' extension payload")?,
-                );
+                self.preset =
+                    Some(serde_json::from_str(json).context("invalid 'preset' extension payload")?);
             }
-            other => anyhow::bail!(
-                "unknown extension kind '{other}'; expected one of: mcp, preset"
-            ),
+            other => {
+                anyhow::bail!("unknown extension kind '{other}'; expected one of: mcp, preset")
+            }
         }
         Ok(())
     }
@@ -231,9 +229,9 @@ impl TableExtensions {
         match kind.to_ascii_lowercase().as_str() {
             "mcp" => self.mcp = None,
             "preset" => self.preset = None,
-            other => anyhow::bail!(
-                "unknown extension kind '{other}'; expected one of: mcp, preset"
-            ),
+            other => {
+                anyhow::bail!("unknown extension kind '{other}'; expected one of: mcp, preset")
+            }
         }
         Ok(())
     }
@@ -338,7 +336,13 @@ fn ensure_column(schema: &Schema, column: &str) -> anyhow::Result<()> {
 pub fn show_extensions_arrow_schema() -> SchemaRef {
     static SCHEMA: OnceLock<SchemaRef> = OnceLock::new();
     SCHEMA
-        .get_or_init(|| Arc::new(Schema::new(vec![Field::new("extensions", DataType::Utf8, false)])))
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![Field::new(
+                "extensions",
+                DataType::Utf8,
+                false,
+            )]))
+        })
         .clone()
 }
 
@@ -362,8 +366,9 @@ pub async fn get_table_extensions(
 ) -> anyhow::Result<TableExtensions> {
     anyhow::ensure!(ctx.table_exist(name)?, "table '{name}' not found");
     match persistence(ctx).load_table_extensions_json(name).await? {
-        Some(json) => Ok(serde_json::from_str(&json)
-            .context("stored table extensions are not valid")?),
+        Some(json) => {
+            Ok(serde_json::from_str(&json).context("stored table extensions are not valid")?)
+        }
         None => Ok(TableExtensions::default()),
     }
 }
@@ -410,10 +415,7 @@ pub async fn set_table_extensions(
 }
 
 /// Remove all extensions for a table.
-pub async fn delete_table_extensions(
-    ctx: &Arc<SessionContext>,
-    name: &str,
-) -> anyhow::Result<()> {
+pub async fn delete_table_extensions(ctx: &Arc<SessionContext>, name: &str) -> anyhow::Result<()> {
     anyhow::ensure!(ctx.table_exist(name)?, "table '{name}' not found");
     persistence(ctx).remove_table_extensions_json(name).await?;
     Ok(())
@@ -517,7 +519,11 @@ mod tests {
             r#"{"presets":[{"name":"p","filters":[{"column":"lat","op":"between","value":5}]}]}"#,
         )
         .unwrap();
-        assert!(ext.validate(&schema()).unwrap_err().to_string().contains("between"));
+        assert!(ext
+            .validate(&schema())
+            .unwrap_err()
+            .to_string()
+            .contains("between"));
     }
 
     #[test]
@@ -528,7 +534,11 @@ mod tests {
             r#"{"presets":[{"name":"p","filters":[]},{"name":"p","filters":[]}]}"#,
         )
         .unwrap();
-        assert!(ext.validate(&schema()).unwrap_err().to_string().contains("duplicate preset"));
+        assert!(ext
+            .validate(&schema())
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate preset"));
     }
 
     #[test]
@@ -548,9 +558,16 @@ mod tests {
     #[test]
     fn mcp_exposed_columns_must_exist() {
         let mut ext = TableExtensions::default();
-        ext.set_kind("mcp", r#"{"enabled":true,"exposed_columns":["lat","ghost"]}"#)
-            .unwrap();
-        assert!(ext.validate(&schema()).unwrap_err().to_string().contains("does not exist"));
+        ext.set_kind(
+            "mcp",
+            r#"{"enabled":true,"exposed_columns":["lat","ghost"]}"#,
+        )
+        .unwrap();
+        assert!(ext
+            .validate(&schema())
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist"));
     }
 
     #[test]
@@ -565,7 +582,10 @@ mod tests {
         assert!(ext.validate(&schema()).is_ok());
         let cols = ext.mcp.as_ref().unwrap().exposed_columns.as_ref().unwrap();
         assert_eq!((cols[0].name(), cols[0].description()), ("lat", None));
-        assert_eq!((cols[1].name(), cols[1].description()), ("depth", Some("meters")));
+        assert_eq!(
+            (cols[1].name(), cols[1].description()),
+            ("depth", Some("meters"))
+        );
         // A documented column with an unknown key is rejected (deny_unknown_fields).
         let mut bad = TableExtensions::default();
         assert!(bad

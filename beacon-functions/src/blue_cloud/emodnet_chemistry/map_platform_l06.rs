@@ -90,8 +90,7 @@ mod tests {
     fn impl_array_path() {
         let input =
             ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("Y (30)"), Some("x")])));
-        let ColumnarValue::Array(arr) =
-            map_emodnet_chemistry_platform_l06_impl(&[input]).unwrap()
+        let ColumnarValue::Array(arr) = map_emodnet_chemistry_platform_l06_impl(&[input]).unwrap()
         else {
             panic!("expected array");
         };

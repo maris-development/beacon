@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field};
 use crate::datafusion::TiffFormat;
+use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use beacon_object_storage::DatasetsStore;
 use datafusion::{

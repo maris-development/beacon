@@ -198,9 +198,11 @@ mod tests {
             vec![DataType::Utf8],
             DataType::Boolean,
             Volatility::Immutable,
-            Arc::new(|_: &[ColumnarValue]| -> datafusion::error::Result<ColumnarValue> {
-                unimplemented!()
-            }),
+            Arc::new(
+                |_: &[ColumnarValue]| -> datafusion::error::Result<ColumnarValue> {
+                    unimplemented!()
+                },
+            ),
         );
 
         let docs = FunctionDoc::from_scalar(&udf);

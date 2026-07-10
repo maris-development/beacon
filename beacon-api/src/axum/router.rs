@@ -77,7 +77,12 @@ pub(crate) fn setup_router(
     // calls execute under the caller's identity (or the anonymous principal when
     // enabled) and per-user RBAC applies at query time.
     let mcp_enabled = std::env::var("BEACON_MCP_ENABLED")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "off"
+            )
+        })
         .unwrap_or(true);
     let mut router = client_router.merge(admin_router);
     if mcp_enabled {

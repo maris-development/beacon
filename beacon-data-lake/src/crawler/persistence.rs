@@ -11,7 +11,7 @@ use datafusion::{
     error::DataFusionError, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 use futures::StreamExt;
-use object_store::{path::Path, ObjectStore, ObjectStoreExt};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 
 use super::definition::CrawlerDefinition;
 

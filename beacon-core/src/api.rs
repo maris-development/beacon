@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use crate::metrics::ConsolidatedMetrics;
 use arrow::datatypes::{Field, Schema};
 use beacon_data_lake::crawler::{CrawlReport, CrawlerDefinition, TableNaming};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_functions::function_doc::FunctionDoc;
-use crate::metrics::ConsolidatedMetrics;
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
 
@@ -328,7 +328,9 @@ impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
 
 /// How a crawler turns a discovered group of files into a table name. Mirrors the
 /// data-lake [`TableNaming`] so the API surface need not depend on its internals.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TableNamingView {
     /// Use the leaf component of the group's base prefix (`argo/floats` -> `floats`).
@@ -553,7 +555,10 @@ mod table_config_redaction_tests {
         assert!(!json.contains("super-secret-password"));
         // The encrypted material (ciphertext/nonce) must not leak either.
         assert!(!json.contains("ciphertext"));
-        assert_eq!(view.config.get("secret"), Some(&Value::String("***".to_string())));
+        assert_eq!(
+            view.config.get("secret"),
+            Some(&Value::String("***".to_string()))
+        );
         // Non-secret connection options remain visible.
         assert!(json.contains("db.internal"));
     }

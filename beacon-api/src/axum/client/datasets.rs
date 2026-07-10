@@ -29,8 +29,8 @@ pub struct ListDatasetsQuery {
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "datasets",
-    get, 
-    path = "/api/datasets", 
+    get,
+    path = "/api/datasets",
     params(ListDatasetsQuery),
     responses(
         (status = 200, description = "List of dataset file paths", body = Vec<String>),
@@ -111,7 +111,7 @@ pub struct ListDatasetSchemaQuery {
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "datasets",
-    get, 
+    get,
     path = "/api/dataset-schema",
     params(ListDatasetSchemaQuery),
     responses(

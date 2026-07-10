@@ -39,14 +39,21 @@ pub(crate) fn apply_auth_statement(
         AuthStatement::RevokeRoleFromUser { role, username } => {
             auth.revoke_role_from_user(username, role)
         }
-        AuthStatement::GrantPrivilege { privilege, target, role } => {
-            auth.grant(role, PrivilegeRule::new(*privilege, target.clone()))
-        }
-        AuthStatement::DenyPrivilege { privilege, target, role } => {
-            auth.deny(role, PrivilegeRule::new(*privilege, target.clone()))
-        }
-        AuthStatement::RevokePrivilege { privilege, target, role, deny } => {
-            auth.revoke(role, &PrivilegeRule::new(*privilege, target.clone()), *deny)
-        }
+        AuthStatement::GrantPrivilege {
+            privilege,
+            target,
+            role,
+        } => auth.grant(role, PrivilegeRule::new(*privilege, target.clone())),
+        AuthStatement::DenyPrivilege {
+            privilege,
+            target,
+            role,
+        } => auth.deny(role, PrivilegeRule::new(*privilege, target.clone())),
+        AuthStatement::RevokePrivilege {
+            privilege,
+            target,
+            role,
+            deny,
+        } => auth.revoke(role, &PrivilegeRule::new(*privilege, target.clone()), *deny),
     }
 }

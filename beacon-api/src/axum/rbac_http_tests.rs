@@ -123,7 +123,9 @@ async fn auth_endpoints_gated_and_list_default_principals() {
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        send(&router, get("/api/admin/auth/users", Some(&alice))).await.0,
+        send(&router, get("/api/admin/auth/users", Some(&alice)))
+            .await
+            .0,
         StatusCode::FORBIDDEN
     );
     let (status, body) = send(&router, get("/api/admin/auth/users", Some(&admin))).await;
@@ -156,14 +158,33 @@ async fn rbac_lifecycle_reflected_in_endpoints() {
 
     // Create + grant + deny + assign.
     admin_ok(&router, &admin, "CREATE ROLE reader").await;
-    admin_ok(&router, &admin, "GRANT SELECT ON TABLE observations TO ROLE reader").await;
-    admin_ok(&router, &admin, "GRANT SELECT ON PATH 'argo/**/*.nc' TO ROLE reader").await;
-    admin_ok(&router, &admin, "DENY SELECT ON TABLE secret TO ROLE reader").await;
+    admin_ok(
+        &router,
+        &admin,
+        "GRANT SELECT ON TABLE observations TO ROLE reader",
+    )
+    .await;
+    admin_ok(
+        &router,
+        &admin,
+        "GRANT SELECT ON PATH 'argo/**/*.nc' TO ROLE reader",
+    )
+    .await;
+    admin_ok(
+        &router,
+        &admin,
+        "DENY SELECT ON TABLE secret TO ROLE reader",
+    )
+    .await;
     admin_ok(&router, &admin, "CREATE USER alice WITH PASSWORD 'pw'").await;
     admin_ok(&router, &admin, "GRANT ROLE reader TO USER alice").await;
 
     // Roles endpoint reflects the grants and denies.
-    let roles = json(&send(&router, get("/api/admin/auth/roles", Some(&admin))).await.1);
+    let roles = json(
+        &send(&router, get("/api/admin/auth/roles", Some(&admin)))
+            .await
+            .1,
+    );
     let reader = roles
         .as_array()
         .unwrap()
@@ -172,7 +193,9 @@ async fn rbac_lifecycle_reflected_in_endpoints() {
         .expect("reader role present");
     let grants = reader["grants"].as_array().unwrap();
     assert!(grants.iter().any(|g| {
-        g["privilege"] == "SELECT" && g["target_type"] == "table" && g["target_value"] == "observations"
+        g["privilege"] == "SELECT"
+            && g["target_type"] == "table"
+            && g["target_value"] == "observations"
     }));
     assert!(grants
         .iter()
@@ -183,7 +206,11 @@ async fn rbac_lifecycle_reflected_in_endpoints() {
         .any(|d| d["target_type"] == "table" && d["target_value"] == "secret"));
 
     // Users endpoint reflects the role assignment.
-    let users = json(&send(&router, get("/api/admin/auth/users", Some(&admin))).await.1);
+    let users = json(
+        &send(&router, get("/api/admin/auth/users", Some(&admin)))
+            .await
+            .1,
+    );
     let alice = users
         .as_array()
         .unwrap()
@@ -193,15 +220,37 @@ async fn rbac_lifecycle_reflected_in_endpoints() {
     assert_eq!(alice["roles"], serde_json::json!(["reader"]));
 
     // Revoke + drop, then confirm the state is gone.
-    admin_ok(&router, &admin, "REVOKE SELECT ON TABLE observations FROM ROLE reader").await;
-    admin_ok(&router, &admin, "REVOKE DENY SELECT ON TABLE secret FROM ROLE reader").await;
+    admin_ok(
+        &router,
+        &admin,
+        "REVOKE SELECT ON TABLE observations FROM ROLE reader",
+    )
+    .await;
+    admin_ok(
+        &router,
+        &admin,
+        "REVOKE DENY SELECT ON TABLE secret FROM ROLE reader",
+    )
+    .await;
     admin_ok(&router, &admin, "REVOKE ROLE reader FROM USER alice").await;
     admin_ok(&router, &admin, "DROP USER alice").await;
 
-    let users = json(&send(&router, get("/api/admin/auth/users", Some(&admin))).await.1);
-    assert!(!users.as_array().unwrap().iter().any(|u| u["username"] == "alice"));
+    let users = json(
+        &send(&router, get("/api/admin/auth/users", Some(&admin)))
+            .await
+            .1,
+    );
+    assert!(!users
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["username"] == "alice"));
 
-    let roles = json(&send(&router, get("/api/admin/auth/roles", Some(&admin))).await.1);
+    let roles = json(
+        &send(&router, get("/api/admin/auth/roles", Some(&admin)))
+            .await
+            .1,
+    );
     let reader = roles
         .as_array()
         .unwrap()
@@ -216,8 +265,16 @@ async fn rbac_lifecycle_reflected_in_endpoints() {
     assert!(reader["denies"].as_array().unwrap().is_empty());
 
     admin_ok(&router, &admin, "DROP ROLE reader").await;
-    let roles = json(&send(&router, get("/api/admin/auth/roles", Some(&admin))).await.1);
-    assert!(!roles.as_array().unwrap().iter().any(|r| r["name"] == "reader"));
+    let roles = json(
+        &send(&router, get("/api/admin/auth/roles", Some(&admin)))
+            .await
+            .1,
+    );
+    assert!(!roles
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["name"] == "reader"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -231,18 +288,30 @@ async fn model_guards_are_enforced() {
     admin_ok(&router, &admin, "CREATE ROLE reader").await;
 
     // Roles are read-only: only SELECT may be granted.
-    let bad = send(&router, post_query("GRANT INSERT ON TABLE t TO ROLE reader", Some(&admin))).await;
+    let bad = send(
+        &router,
+        post_query("GRANT INSERT ON TABLE t TO ROLE reader", Some(&admin)),
+    )
+    .await;
     assert_eq!(bad.0, StatusCode::BAD_REQUEST);
 
     // The super-user username is reserved (can't be created or dropped via SQL).
     assert_eq!(
-        send(&router, post_query(&format!("DROP USER {admin_name}"), Some(&admin))).await.0,
+        send(
+            &router,
+            post_query(&format!("DROP USER {admin_name}"), Some(&admin))
+        )
+        .await
+        .0,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
         send(
             &router,
-            post_query(&format!("CREATE USER {admin_name} WITH PASSWORD 'x'"), Some(&admin))
+            post_query(
+                &format!("CREATE USER {admin_name} WITH PASSWORD 'x'"),
+                Some(&admin)
+            )
         )
         .await
         .0,
@@ -251,11 +320,21 @@ async fn model_guards_are_enforced() {
 
     // The anonymous user can't be deleted while anonymous access is enabled.
     assert_eq!(
-        send(&router, post_query("DROP USER anonymous", Some(&admin))).await.0,
+        send(&router, post_query("DROP USER anonymous", Some(&admin)))
+            .await
+            .0,
         StatusCode::BAD_REQUEST
     );
-    let users = json(&send(&router, get("/api/admin/auth/users", Some(&admin))).await.1);
-    assert!(users.as_array().unwrap().iter().any(|u| u["username"] == "anonymous"));
+    let users = json(
+        &send(&router, get("/api/admin/auth/users", Some(&admin)))
+            .await
+            .1,
+    );
+    assert!(users
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["username"] == "anonymous"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -270,12 +349,16 @@ async fn non_super_user_cannot_manage_or_enumerate_auth() {
 
     // Auth DDL requires the super-user → 400 for bob.
     assert_eq!(
-        send(&router, post_query("CREATE ROLE hacker", Some(&bob))).await.0,
+        send(&router, post_query("CREATE ROLE hacker", Some(&bob)))
+            .await
+            .0,
         StatusCode::BAD_REQUEST
     );
     // The admin enumeration endpoints reject non-super principals → 403.
     assert_eq!(
-        send(&router, get("/api/admin/auth/roles", Some(&bob))).await.0,
+        send(&router, get("/api/admin/auth/roles", Some(&bob)))
+            .await
+            .0,
         StatusCode::FORBIDDEN
     );
 }
@@ -305,22 +388,47 @@ async fn enforcement_grants_allow_and_denies_block() {
 
     // The global grant lets alice read both tables.
     assert_eq!(
-        send(&router, post_query(&format!("SELECT * FROM {t1}"), Some(&alice))).await.0,
+        send(
+            &router,
+            post_query(&format!("SELECT * FROM {t1}"), Some(&alice))
+        )
+        .await
+        .0,
         StatusCode::OK
     );
     assert_eq!(
-        send(&router, post_query(&format!("SELECT * FROM {t2}"), Some(&alice))).await.0,
+        send(
+            &router,
+            post_query(&format!("SELECT * FROM {t2}"), Some(&alice))
+        )
+        .await
+        .0,
         StatusCode::OK
     );
 
     // A deny on t1 wins over the grant; t2 is still readable.
-    admin_ok(&router, &admin, &format!("DENY SELECT ON TABLE {t1} TO ROLE reader")).await;
+    admin_ok(
+        &router,
+        &admin,
+        &format!("DENY SELECT ON TABLE {t1} TO ROLE reader"),
+    )
+    .await;
     assert_eq!(
-        send(&router, post_query(&format!("SELECT * FROM {t1}"), Some(&alice))).await.0,
+        send(
+            &router,
+            post_query(&format!("SELECT * FROM {t1}"), Some(&alice))
+        )
+        .await
+        .0,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        send(&router, post_query(&format!("SELECT * FROM {t2}"), Some(&alice))).await.0,
+        send(
+            &router,
+            post_query(&format!("SELECT * FROM {t2}"), Some(&alice))
+        )
+        .await
+        .0,
         StatusCode::OK
     );
 
@@ -328,7 +436,12 @@ async fn enforcement_grants_allow_and_denies_block() {
     admin_ok(&router, &admin, "CREATE USER mallory WITH PASSWORD 'pw'").await;
     let mallory = basic("mallory", "pw");
     assert_eq!(
-        send(&router, post_query(&format!("SELECT * FROM {t2}"), Some(&mallory))).await.0,
+        send(
+            &router,
+            post_query(&format!("SELECT * FROM {t2}"), Some(&mallory))
+        )
+        .await
+        .0,
         StatusCode::BAD_REQUEST
     );
 }

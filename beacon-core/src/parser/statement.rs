@@ -88,12 +88,27 @@ fn escape_sql_literal(value: &str) -> String {
 /// Authentication and authorization management statements (users, roles, grants, denies).
 #[derive(Debug, Clone)]
 pub enum AuthStatement {
-    CreateUser { username: String, password: String },
-    DropUser { username: String },
-    CreateRole { role: String },
-    DropRole { role: String },
-    GrantRoleToUser { role: String, username: String },
-    RevokeRoleFromUser { role: String, username: String },
+    CreateUser {
+        username: String,
+        password: String,
+    },
+    DropUser {
+        username: String,
+    },
+    CreateRole {
+        role: String,
+    },
+    DropRole {
+        role: String,
+    },
+    GrantRoleToUser {
+        role: String,
+        username: String,
+    },
+    RevokeRoleFromUser {
+        role: String,
+        username: String,
+    },
     GrantPrivilege {
         privilege: Privilege,
         target: Option<PrivilegeTarget>,
@@ -128,21 +143,34 @@ impl Display for AuthStatement {
             AuthStatement::RevokeRoleFromUser { role, username } => {
                 write!(f, "REVOKE ROLE {role} FROM USER {username}")
             }
-            AuthStatement::GrantPrivilege { privilege, target, role } => {
+            AuthStatement::GrantPrivilege {
+                privilege,
+                target,
+                role,
+            } => {
                 write!(f, "GRANT {privilege}")?;
                 if let Some(target) = target {
                     write!(f, " ON {target}")?;
                 }
                 write!(f, " TO ROLE {role}")
             }
-            AuthStatement::DenyPrivilege { privilege, target, role } => {
+            AuthStatement::DenyPrivilege {
+                privilege,
+                target,
+                role,
+            } => {
                 write!(f, "DENY {privilege}")?;
                 if let Some(target) = target {
                     write!(f, " ON {target}")?;
                 }
                 write!(f, " TO ROLE {role}")
             }
-            AuthStatement::RevokePrivilege { privilege, target, role, deny } => {
+            AuthStatement::RevokePrivilege {
+                privilege,
+                target,
+                role,
+                deny,
+            } => {
                 write!(f, "REVOKE ")?;
                 if *deny {
                     write!(f, "DENY ")?;

@@ -488,7 +488,10 @@ mod tests {
             None
         );
         // Boolean still has no common type with non-numeric, non-string types.
-        assert_eq!(super_type_arrow(&DataType::Boolean, &DataType::Date32), None);
+        assert_eq!(
+            super_type_arrow(&DataType::Boolean, &DataType::Date32),
+            None
+        );
     }
 
     fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
@@ -517,9 +520,18 @@ mod tests {
         let names: Vec<&str> = merged.fields.iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
 
-        assert_eq!(merged.field_with_name("a").unwrap().data_type(), &DataType::Int32);
-        assert_eq!(merged.field_with_name("b").unwrap().data_type(), &DataType::Float64);
-        assert_eq!(merged.field_with_name("c").unwrap().data_type(), &DataType::Utf8);
+        assert_eq!(
+            merged.field_with_name("a").unwrap().data_type(),
+            &DataType::Int32
+        );
+        assert_eq!(
+            merged.field_with_name("b").unwrap().data_type(),
+            &DataType::Float64
+        );
+        assert_eq!(
+            merged.field_with_name("c").unwrap().data_type(),
+            &DataType::Utf8
+        );
 
         // super_type_schema marks every output field nullable.
         assert!(merged.fields.iter().all(|f| f.is_nullable()));

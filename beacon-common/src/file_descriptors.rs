@@ -8,7 +8,7 @@
 pub fn max_open_fd() -> u64 {
     #[cfg(unix)]
     {
-        use rlimit::{Resource, getrlimit};
+        use rlimit::{getrlimit, Resource};
         if let Ok((soft_limit, _)) = getrlimit(Resource::NOFILE) {
             tracing::debug!(
                 "Max open file descriptors (NOFILE soft limit): {}",
@@ -26,6 +26,6 @@ pub fn max_open_fd() -> u64 {
 
 pub fn file_open_parallelism() -> usize {
     let max = max_open_fd() as usize / 2; // use half of the available file descriptors for parallelism to be safe
-    //Make sure max is at least 1 to avoid zero parallelism
+                                          //Make sure max is at least 1 to avoid zero parallelism
     std::cmp::max(max, 1)
 }

@@ -107,7 +107,10 @@ async fn read_raw_as_f64(
         ZarrDtypeKind::Float32 => read_widen!(f32),
         ZarrDtypeKind::Float64 => read_widen!(f64),
         other => {
-            anyhow::bail!("CF decoding is not supported for zarr dtype kind {:?}", other)
+            anyhow::bail!(
+                "CF decoding is not supported for zarr dtype kind {:?}",
+                other
+            )
         }
     };
     Ok(out)
@@ -342,7 +345,10 @@ impl ArrayBackend<TimestampNanosecond> for CfTimeBackend {
         self.fill_value
     }
 
-    async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayD<TimestampNanosecond>> {
+    async fn read_subset(
+        &self,
+        subset: ArraySubset,
+    ) -> anyhow::Result<ArrayD<TimestampNanosecond>> {
         let raw = read_raw_as_f64(&self.array, &to_zarr_subset(&subset), self.kind).await?;
         let epoch = self.epoch;
         let unit = self.unit;

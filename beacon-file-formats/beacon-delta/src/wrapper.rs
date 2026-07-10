@@ -12,6 +12,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use beacon_object_storage::DatasetsStore;
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{Constraints, Statistics};
 use datafusion::datasource::TableType;
@@ -20,7 +21,6 @@ use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
-use datafusion::arrow::datatypes::SchemaRef;
 
 use crate::definition::DeltaTableDefinition;
 use crate::provider::{reopen_delta_provider, TimeTravel};

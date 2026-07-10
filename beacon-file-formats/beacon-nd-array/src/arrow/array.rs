@@ -23,7 +23,10 @@ macro_rules! convert_ndarray {
             .as_any()
             .downcast_ref::<NdArray<$rust_ty>>()
             .ok_or_else(|| {
-                tracing::error!(target_type = $label, "failed to downcast NdArray for Arrow conversion");
+                tracing::error!(
+                    target_type = $label,
+                    "failed to downcast NdArray for Arrow conversion"
+                );
                 anyhow::anyhow!(
                     "Failed to downcast NdArray to NdArray<{}> for Arrow conversion.",
                     $label

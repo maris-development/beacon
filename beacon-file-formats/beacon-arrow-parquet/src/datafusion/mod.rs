@@ -177,7 +177,10 @@ impl FileFormat for ParquetFormat {
             .await
     }
 
-    fn file_source(&self, table_schema: datafusion::datasource::table_schema::TableSchema) -> Arc<dyn FileSource> {
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
         self.inner.file_source(table_schema)
     }
 }
@@ -202,8 +205,10 @@ fn cast_ts_seconds_to_ms(
                     let expr = cast(Expr::Column(Column::new_unqualified(&name)), target);
                     session.create_physical_expr(expr, &df_schema)?
                 }
-                _ => session
-                    .create_physical_expr(Expr::Column(Column::new_unqualified(&name)), &df_schema)?,
+                _ => session.create_physical_expr(
+                    Expr::Column(Column::new_unqualified(&name)),
+                    &df_schema,
+                )?,
             };
             Ok((expr, name))
         })

@@ -54,7 +54,8 @@ pub async fn dataset_from_atlas(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to open atlas dataset '{}': {}", dataset_name, e))?;
 
-    let included = |name: &str| projected_names.map_or(true, |names| names.iter().any(|n| n == name));
+    let included =
+        |name: &str| projected_names.map_or(true, |names| names.iter().any(|n| n == name));
 
     let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
 

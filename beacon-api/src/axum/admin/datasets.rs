@@ -94,7 +94,10 @@ pub(crate) async fn download_dataset(
     State(state): State<Arc<Runtime>>,
     Query(params): Query<PathParams>,
 ) -> Result<Response, (StatusCode, String)> {
-    let result = state.download_dataset(&params.path).await.map_err(file_error)?;
+    let result = state
+        .download_dataset(&params.path)
+        .await
+        .map_err(file_error)?;
     let size = result.meta.size;
     let filename = attachment_filename(&params.path);
     let body = Body::from_stream(result.into_stream());
@@ -230,7 +233,10 @@ pub(crate) async fn complete_upload(
     Query(params): Query<UploadIdParams>,
 ) -> Result<Json<UploadResult>, (StatusCode, String)> {
     let id = parse_upload_id(&params.upload_id)?;
-    let result = state.complete_dataset_upload(id).await.map_err(file_error)?;
+    let result = state
+        .complete_dataset_upload(id)
+        .await
+        .map_err(file_error)?;
     Ok(Json(result))
 }
 
@@ -281,7 +287,10 @@ pub(crate) async fn delete_dataset(
     State(state): State<Arc<Runtime>>,
     Query(params): Query<PathParams>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    state.delete_dataset(&params.path).await.map_err(file_error)?;
+    state
+        .delete_dataset(&params.path)
+        .await
+        .map_err(file_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

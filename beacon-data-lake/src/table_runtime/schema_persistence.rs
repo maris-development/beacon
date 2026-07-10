@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use object_store::ObjectStoreExt;
+use std::sync::Arc;
 
 use beacon_datafusion_ext::table_ext::{
     ExternalTable, MaterializedView, TableDefinition, ViewTableDefinition,
@@ -220,7 +220,10 @@ pub fn definition_from_provider(
     table_name: &str,
     table: &dyn TableProvider,
 ) -> datafusion::error::Result<Arc<dyn TableDefinition>> {
-    if let Some(table) = table.as_any().downcast_ref::<beacon_iceberg::IcebergTable>() {
+    if let Some(table) = table
+        .as_any()
+        .downcast_ref::<beacon_iceberg::IcebergTable>()
+    {
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(table) = table.as_any().downcast_ref::<beacon_lance::LanceTable>() {
         Ok(Arc::new(table.definition().clone()))
@@ -230,7 +233,10 @@ pub fn definition_from_provider(
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(definition) = beacon_datafusion_ext::remote::remote_table_definition(table) {
         Ok(Arc::new(definition))
-    } else if let Some(table) = table.as_any().downcast_ref::<beacon_delta::BeaconDeltaTable>() {
+    } else if let Some(table) = table
+        .as_any()
+        .downcast_ref::<beacon_delta::BeaconDeltaTable>()
+    {
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(definition) = beacon_sql_databases::sql_database_table_definition(table) {
         Ok(Arc::new(definition))
@@ -351,11 +357,13 @@ mod tests {
         let (service, _ctx, table_store, _url) = test_service();
 
         // Missing sidecar reads as None.
-        assert!(service
-            .load_table_extensions_json("obs")
-            .await
-            .expect("load should succeed")
-            .is_none());
+        assert!(
+            service
+                .load_table_extensions_json("obs")
+                .await
+                .expect("load should succeed")
+                .is_none()
+        );
 
         // Persist then load returns the stored JSON.
         let payload = r#"{"mcp":{"enabled":true}}"#.to_string();
@@ -371,21 +379,25 @@ mod tests {
                 .as_deref(),
             Some(payload.as_str())
         );
-        assert!(table_store
-            .get(&Path::from("obs/extensions.json"))
-            .await
-            .is_ok());
+        assert!(
+            table_store
+                .get(&Path::from("obs/extensions.json"))
+                .await
+                .is_ok()
+        );
 
         // Explicit removal clears it (and is a no-op when already absent).
         service
             .remove_table_extensions_json("obs")
             .await
             .expect("remove should succeed");
-        assert!(service
-            .load_table_extensions_json("obs")
-            .await
-            .expect("load should succeed")
-            .is_none());
+        assert!(
+            service
+                .load_table_extensions_json("obs")
+                .await
+                .expect("load should succeed")
+                .is_none()
+        );
         service
             .remove_table_extensions_json("obs")
             .await
@@ -400,10 +412,12 @@ mod tests {
             .remove_persisted_table("obs")
             .await
             .expect("table removal should succeed");
-        assert!(service
-            .load_table_extensions_json("obs")
-            .await
-            .expect("load should succeed")
-            .is_none());
+        assert!(
+            service
+                .load_table_extensions_json("obs")
+                .await
+                .expect("load should succeed")
+                .is_none()
+        );
     }
 }

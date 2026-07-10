@@ -108,30 +108,23 @@ impl ScalarUDFImpl for MapUnits {
 
         let from_unit = match arg0 {
             ColumnarValue::Array(array) => array,
-            ColumnarValue::Scalar(scalar_value) => {
-                scalar_value.to_array_of_size(number_rows)?
-            }
+            ColumnarValue::Scalar(scalar_value) => scalar_value.to_array_of_size(number_rows)?,
         };
         let to_unit = match arg1 {
             ColumnarValue::Array(array) => array,
-            ColumnarValue::Scalar(scalar_value) => {
-                scalar_value.to_array_of_size(number_rows)?
-            }
+            ColumnarValue::Scalar(scalar_value) => scalar_value.to_array_of_size(number_rows)?,
         };
 
         let values = match arg2 {
             ColumnarValue::Array(array) => array,
-            ColumnarValue::Scalar(scalar_value) => {
-                scalar_value.to_array_of_size(number_rows)?
-            }
+            ColumnarValue::Scalar(scalar_value) => scalar_value.to_array_of_size(number_rows)?,
         };
 
         let from_unit =
             crate::util::downcast_arg::<arrow::array::StringArray>(&from_unit, "map_units")?;
         let to_unit =
             crate::util::downcast_arg::<arrow::array::StringArray>(&to_unit, "map_units")?;
-        let values =
-            crate::util::downcast_arg::<arrow::array::Float64Array>(&values, "map_units")?;
+        let values = crate::util::downcast_arg::<arrow::array::Float64Array>(&values, "map_units")?;
 
         let array = PrimitiveArray::<Float64Type>::from_iter(
             values

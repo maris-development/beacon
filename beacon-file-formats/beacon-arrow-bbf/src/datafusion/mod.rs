@@ -78,7 +78,9 @@ impl FileFormatFactory for BBFFormatFactory {
         if let Some(value) = format_options.get("split_streams_slice") {
             split_streams_slice = parse_bool_option("split_streams_slice", value)?;
         }
-        Ok(Arc::new(BBFFormat { split_streams_slice }))
+        Ok(Arc::new(BBFFormat {
+            split_streams_slice,
+        }))
     }
 
     fn as_any(&self) -> &dyn Any {

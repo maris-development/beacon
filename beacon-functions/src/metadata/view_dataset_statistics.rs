@@ -44,8 +44,8 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 
+use super::helpers::{column_stat_rows, ColumnStatRow};
 use crate::file_formats::BeaconTableFunctionImpl;
-use super::helpers::{ColumnStatRow, column_stat_rows};
 
 fn output_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -186,11 +186,21 @@ fn build_record_batch(
     RecordBatch::try_new(
         output_schema(),
         vec![
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.column_name.as_deref()))),
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.data_type.as_deref()))),
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.min_value.as_deref()))),
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.max_value.as_deref()))),
-            Arc::new(BooleanArray::from(rows.iter().map(|r| r.is_exact).collect::<Vec<_>>())),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.column_name.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.data_type.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.min_value.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.max_value.as_deref()),
+            )),
+            Arc::new(BooleanArray::from(
+                rows.iter().map(|r| r.is_exact).collect::<Vec<_>>(),
+            )),
         ],
     )
     .map_err(|e| plan_datafusion_err!("Failed to build statistics record batch: {e}"))

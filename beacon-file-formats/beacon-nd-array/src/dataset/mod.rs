@@ -69,7 +69,11 @@ impl Dataset {
         let dimensions = self
             .dimensions
             .iter()
-            .filter(|(dim, _)| arrays.values().any(|array| array.dimensions().contains(dim)))
+            .filter(|(dim, _)| {
+                arrays
+                    .values()
+                    .any(|array| array.dimensions().contains(dim))
+            })
             .map(|(dim, size)| (dim.clone(), *size))
             .collect();
 
@@ -111,12 +115,10 @@ impl Dataset {
             .map(|array| array.dimensions())?;
 
         // Already broadcast-safe: every variable's dims fit inside `max_dims`.
-        let needs_narrowing = self.arrays.values().any(|array| {
-            !array
-                .dimensions()
-                .iter()
-                .all(|dim| max_dims.contains(dim))
-        });
+        let needs_narrowing = self
+            .arrays
+            .values()
+            .any(|array| !array.dimensions().iter().all(|dim| max_dims.contains(dim)));
         if !needs_narrowing {
             return None;
         }
@@ -1073,8 +1075,13 @@ mod tests {
         let len: usize = shape.iter().product();
         let dim_names: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
         Arc::new(
-            NdArray::<f64>::try_new_from_vec_in_mem(vec![0.0; len], shape.to_vec(), dim_names, None)
-                .unwrap(),
+            NdArray::<f64>::try_new_from_vec_in_mem(
+                vec![0.0; len],
+                shape.to_vec(),
+                dim_names,
+                None,
+            )
+            .unwrap(),
         )
     }
 
@@ -1083,7 +1090,10 @@ mod tests {
         // 2D var plus a 1D subset — already broadcast-safe.
         let ds = make_dataset(
             "safe",
-            vec![("grid", arr(&["x", "y"]).await), ("scale", arr(&["y"]).await)],
+            vec![
+                ("grid", arr(&["x", "y"]).await),
+                ("scale", arr(&["y"]).await),
+            ],
         )
         .await;
         assert_eq!(ds.default_broadcast_dimensions(), None);
@@ -1221,7 +1231,10 @@ mod tests {
         // Equal variable count and equal dimensionality → first-encountered wins.
         let ds = make_dataset(
             "fulltie",
-            vec![("first", arr(&["a", "b"]).await), ("second", arr(&["c", "d"]).await)],
+            vec![
+                ("first", arr(&["a", "b"]).await),
+                ("second", arr(&["c", "d"]).await),
+            ],
         )
         .await;
         assert_eq!(

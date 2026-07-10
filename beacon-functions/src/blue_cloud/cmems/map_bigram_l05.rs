@@ -77,10 +77,7 @@ mod tests {
 
     #[test]
     fn impl_array_path() {
-        let input = ColumnarValue::Array(Arc::new(StringArray::from(vec![
-            Some("CT"),
-            Some("ZZ"),
-        ])));
+        let input = ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("CT"), Some("ZZ")])));
         let ColumnarValue::Array(arr) = map_cmems_bigram_l05_impl(&[input]).unwrap() else {
             panic!("expected array");
         };

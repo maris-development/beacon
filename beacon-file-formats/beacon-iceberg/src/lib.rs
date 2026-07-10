@@ -20,18 +20,18 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion_iceberg::table::write_parquet_data_files;
 use datafusion_iceberg::DataFusionTable;
+use datafusion_iceberg::table::write_parquet_data_files;
 use futures::StreamExt;
+use iceberg_rust::catalog::Catalog;
 use iceberg_rust::catalog::identifier::Identifier;
 use iceberg_rust::catalog::tabular::Tabular;
-use iceberg_rust::catalog::Catalog;
 use iceberg_rust::table::Table;
 use object_store::{ObjectStore, ObjectStoreExt};
 
-pub use alter::{alter_table_schema, is_allowed_promotion, SchemaChange};
+pub use alter::{SchemaChange, alter_table_schema, is_allowed_promotion};
 pub use catalog::{
-    beacon_namespace, get_catalog, get_warehouse_store, init_catalog, BEACON_NAMESPACE,
+    BEACON_NAMESPACE, beacon_namespace, get_catalog, get_warehouse_store, init_catalog,
 };
 pub use definition::IcebergTableDefinition;
 pub use provider::IcebergTable;
@@ -84,7 +84,11 @@ pub async fn drop_iceberg_table(
         );
     }
 
-    tracing::debug!(table = name, files = locations.len(), "deleting Iceberg table files");
+    tracing::debug!(
+        table = name,
+        files = locations.len(),
+        "deleting Iceberg table files"
+    );
     for location in locations {
         store
             .delete(&location)
@@ -269,7 +273,10 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap()
             .value(0);
-        assert_eq!(count, 1, "row written before restart should survive discovery");
+        assert_eq!(
+            count, 1,
+            "row written before restart should survive discovery"
+        );
     }
 
     /// Count rows by loading a fresh provider straight from the catalog (the
@@ -442,9 +449,13 @@ mod tests {
         .await
         .expect("add column should commit");
 
-        let batches =
-            query_from_catalog(&catalog, &namespace, "orders", "SELECT count(age) AS c FROM orders")
-                .await;
+        let batches = query_from_catalog(
+            &catalog,
+            &namespace,
+            "orders",
+            "SELECT count(age) AS c FROM orders",
+        )
+        .await;
         let non_null_age = batches[0]
             .column(0)
             .as_any()

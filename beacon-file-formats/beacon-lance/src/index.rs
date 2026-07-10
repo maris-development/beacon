@@ -8,9 +8,9 @@
 
 use lance::dataset::builder::DatasetBuilder;
 use lance::index::DatasetIndexExt;
-use lance_index::scalar::inverted::InvertedIndexParams;
-use lance_index::scalar::ScalarIndexParams;
 use lance_index::IndexType;
+use lance_index::scalar::ScalarIndexParams;
+use lance_index::scalar::inverted::InvertedIndexParams;
 
 use crate::warehouse::LanceWarehouse;
 
@@ -94,13 +94,25 @@ pub async fn create_index(
         ScalarIndexKind::Inverted => {
             let params = InvertedIndexParams::default();
             dataset
-                .create_index(&[column], index_type, Some(name.to_string()), &params, false)
+                .create_index(
+                    &[column],
+                    index_type,
+                    Some(name.to_string()),
+                    &params,
+                    false,
+                )
                 .await
         }
         ScalarIndexKind::BTree | ScalarIndexKind::Bitmap => {
             let params = ScalarIndexParams::default();
             dataset
-                .create_index(&[column], index_type, Some(name.to_string()), &params, false)
+                .create_index(
+                    &[column],
+                    index_type,
+                    Some(name.to_string()),
+                    &params,
+                    false,
+                )
                 .await
         }
     };
@@ -111,11 +123,7 @@ pub async fn create_index(
 }
 
 /// Drop the index named `name` from the Lance table at `uri`.
-pub async fn drop_index(
-    warehouse: &LanceWarehouse,
-    uri: &str,
-    name: &str,
-) -> anyhow::Result<()> {
+pub async fn drop_index(warehouse: &LanceWarehouse, uri: &str, name: &str) -> anyhow::Result<()> {
     tracing::info!(uri = %uri, name, "dropping Lance index");
 
     let lock = warehouse.lock(uri);
@@ -135,10 +143,7 @@ pub async fn drop_index(
 }
 
 /// List the indexes on the Lance table at `uri` (name + indexed columns).
-pub async fn list_indices(
-    warehouse: &LanceWarehouse,
-    uri: &str,
-) -> anyhow::Result<Vec<IndexInfo>> {
+pub async fn list_indices(warehouse: &LanceWarehouse, uri: &str) -> anyhow::Result<Vec<IndexInfo>> {
     let dataset = DatasetBuilder::from_uri(uri)
         .with_session(warehouse.session())
         .load()

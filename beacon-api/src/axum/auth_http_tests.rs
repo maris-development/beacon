@@ -102,7 +102,11 @@ async fn admin_route_requires_a_super_user() {
     );
     // Valid but non-super credentials → 403.
     assert_eq!(
-        status(&router, get("/api/admin/check", Some(&basic("alice", "pw")))).await,
+        status(
+            &router,
+            get("/api/admin/check", Some(&basic("alice", "pw")))
+        )
+        .await,
         StatusCode::FORBIDDEN
     );
     // Wrong password → 401.
@@ -180,19 +184,31 @@ async fn enforced_http_query_respects_table_grants() {
     seed(&runtime, "CREATE ROLE reader").await;
     seed(&runtime, "CREATE USER alice WITH PASSWORD 'pw'").await;
     seed(&runtime, "GRANT ROLE reader TO USER alice").await;
-    seed(&runtime, &format!("GRANT SELECT ON TABLE {t1} TO ROLE reader")).await;
+    seed(
+        &runtime,
+        &format!("GRANT SELECT ON TABLE {t1} TO ROLE reader"),
+    )
+    .await;
 
     let router = setup_router(runtime, config).unwrap();
     let auth = basic("alice", "pw");
 
     // Granted table → 200.
     assert_eq!(
-        status(&router, post_query(&format!("SELECT * FROM {t1}"), Some(&auth))).await,
+        status(
+            &router,
+            post_query(&format!("SELECT * FROM {t1}"), Some(&auth))
+        )
+        .await,
         StatusCode::OK
     );
     // Ungranted table → permission denied, surfaced as 400.
     assert_eq!(
-        status(&router, post_query(&format!("SELECT * FROM {t2}"), Some(&auth))).await,
+        status(
+            &router,
+            post_query(&format!("SELECT * FROM {t2}"), Some(&auth))
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
 }

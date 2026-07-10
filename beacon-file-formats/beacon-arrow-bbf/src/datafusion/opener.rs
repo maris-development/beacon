@@ -314,7 +314,8 @@ impl PruningStatistics for BBFPruningStatistics {
             // Return Null Array as all the values are null. If the column is not
             // in the table schema, there are no usable stats: return None so the
             // container is conservatively kept.
-            let null_array = new_null_array(self.table_schema.get(&column.name)?, self.num_containers);
+            let null_array =
+                new_null_array(self.table_schema.get(&column.name)?, self.num_containers);
             return Some(null_array);
         }
 
@@ -342,7 +343,8 @@ impl PruningStatistics for BBFPruningStatistics {
             // Return Null Array as all the values are null. If the column is not
             // in the table schema, there are no usable stats: return None so the
             // container is conservatively kept.
-            let null_array = new_null_array(self.table_schema.get(&column.name)?, self.num_containers);
+            let null_array =
+                new_null_array(self.table_schema.get(&column.name)?, self.num_containers);
             return Some(null_array);
         }
 

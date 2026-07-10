@@ -5,12 +5,12 @@
 
 use std::sync::Arc;
 
-use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
-use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
-use beacon_arrow_odv::writer::OdvOptions;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
 use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
+use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
+use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
+use beacon_arrow_odv::writer::OdvOptions;
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use datafusion::{
     common::file_options::file_type::FileType,

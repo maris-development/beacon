@@ -55,7 +55,9 @@ pub async fn list_datasets(
     let listing_url = create_listing_url(pattern.unwrap_or_else(|| "*".to_string()))?;
 
     let mut objects = Vec::new();
-    let mut entry_stream = listing_url.list_all_files(&state, &object_store, "").await?;
+    let mut entry_stream = listing_url
+        .list_all_files(&state, &object_store, "")
+        .await?;
 
     while let Some(entry) = entry_stream.next().await {
         if let Ok(entry) = entry {
@@ -147,7 +149,12 @@ pub async fn list_dataset_schema(
     // in the format list.
     let file_format_factory = file_formats
         .iter()
-        .find(|factory| factory.file_extensions().iter().any(|ext| ext == &extension))
+        .find(|factory| {
+            factory
+                .file_extensions()
+                .iter()
+                .any(|ext| ext == &extension)
+        })
         .map(|factory| factory.clone() as Arc<dyn FileFormatFactory>)
         .or_else(|| session_state.get_file_format_factory(&extension))
         .ok_or_else(|| {

@@ -221,7 +221,9 @@ pub(crate) fn drop_extension_plan(statement: DropExtensionStatement) -> LogicalP
 /// Build the logical plan for `SHOW EXTENSIONS FOR <table>`.
 pub(crate) fn show_extensions_plan(statement: ShowExtensionsStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::ShowExtensionsNode::new(statement.table.to_string())),
+        node: Arc::new(logical::ShowExtensionsNode::new(
+            statement.table.to_string(),
+        )),
     })
 }
 

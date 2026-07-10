@@ -59,9 +59,7 @@ pub(crate) async fn query(
 
     // SQL over the HTTP client API is gated by `sql.enable` (JSON is always
     // allowed); the Flight SQL transport has its own `flight_sql.enable`.
-    if matches!(query.inner, beacon_core::query::InnerQuery::Sql(_))
-        && !state.config().sql.enable
-    {
+    if matches!(query.inner, beacon_core::query::InnerQuery::Sql(_)) && !state.config().sql.enable {
         return Err((
             StatusCode::BAD_REQUEST,
             Json("SQL queries are not enabled".to_string()),
@@ -346,9 +344,7 @@ pub(crate) async fn explain_analyze_query(
     // EXPLAIN ANALYZE executes the query, so it is gated by `sql.enable` exactly
     // like `/api/query` (JSON is always allowed). Without this, SQL could be run
     // through this endpoint while SQL is disabled, bypassing the restriction.
-    if matches!(query.inner, beacon_core::query::InnerQuery::Sql(_))
-        && !state.config().sql.enable
-    {
+    if matches!(query.inner, beacon_core::query::InnerQuery::Sql(_)) && !state.config().sql.enable {
         return Err((
             StatusCode::BAD_REQUEST,
             Json("SQL queries are not enabled".to_string()),

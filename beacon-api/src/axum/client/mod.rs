@@ -83,9 +83,8 @@ mod tests {
 
         // The /api/query request body references the real Query schema rather
         // than an opaque object.
-        let request_ref = spec.pointer(
-            "/paths/~1api~1query/post/requestBody/content/application~1json/schema/$ref",
-        );
+        let request_ref = spec
+            .pointer("/paths/~1api~1query/post/requestBody/content/application~1json/schema/$ref");
         assert_eq!(
             request_ref.and_then(|r| r.as_str()),
             Some("#/components/schemas/Query"),

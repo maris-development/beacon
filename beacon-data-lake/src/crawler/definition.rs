@@ -99,8 +99,9 @@ impl CrawlerDefinition {
         });
 
         let detect_partitions = match with.get("detect_partitions") {
-            Some(v) => parse_bool(v)
-                .ok_or_else(|| format!("invalid detect_partitions value '{v}'"))?,
+            Some(v) => {
+                parse_bool(v).ok_or_else(|| format!("invalid detect_partitions value '{v}'"))?
+            }
             None => true,
         };
 
@@ -216,7 +217,10 @@ mod tests {
         assert_eq!(def.schedule(), Some(Duration::from_secs(900)));
         assert_eq!(def.table_naming, TableNaming::CrawlerPrefixed);
         // Non-control keys are forwarded verbatim.
-        assert_eq!(def.options.get("read_dimensions").map(String::as_str), Some("lat,lon"));
+        assert_eq!(
+            def.options.get("read_dimensions").map(String::as_str),
+            Some("lat,lon")
+        );
         assert!(!def.options.contains_key("format"));
         assert!(!def.options.contains_key("schedule"));
     }

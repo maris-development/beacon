@@ -235,9 +235,9 @@ impl AuthContext {
     // --- User management (delegated to the provider's user directory) ---
 
     fn user_directory(&self) -> anyhow::Result<Arc<dyn crate::provider::UserDirectory>> {
-        self.auth_provider
-            .user_directory()
-            .ok_or_else(|| anyhow::anyhow!("the active auth provider does not support user management"))
+        self.auth_provider.user_directory().ok_or_else(|| {
+            anyhow::anyhow!("the active auth provider does not support user management")
+        })
     }
 
     /// Whether a user exists in the active provider's directory (false if it has none).
@@ -334,7 +334,8 @@ mod tests {
         ctx.create_role("reader").unwrap();
         ctx.create_user("alice", "secret").unwrap();
         ctx.grant_role_to_user("alice", "reader").unwrap();
-        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None)).unwrap();
+        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .unwrap();
         ctx.deny(
             "reader",
             PrivilegeRule::new(
@@ -344,7 +345,10 @@ mod tests {
         )
         .unwrap();
 
-        let identity = ctx.authenticate(&Credential::basic("alice", "secret")).await.unwrap();
+        let identity = ctx
+            .authenticate(&Credential::basic("alice", "secret"))
+            .await
+            .unwrap();
         assert_eq!(identity.username, "alice");
         assert_eq!(identity.roles, vec!["reader".to_string()]);
         assert!(!identity.is_super_user);
@@ -365,13 +369,19 @@ mod tests {
     async fn only_the_configured_credential_is_super_user() {
         let ctx = context_with_super_user();
         // The configured credential authenticates as the super-user.
-        let admin = ctx.authenticate(&Credential::basic("root", "secret")).await.unwrap();
+        let admin = ctx
+            .authenticate(&Credential::basic("root", "secret"))
+            .await
+            .unwrap();
         assert!(admin.is_super_user);
         assert_eq!(admin.username, "root");
         assert!(admin.roles.is_empty());
 
         // The right username with the wrong password is not super (and not in the store either).
-        assert!(ctx.authenticate(&Credential::basic("root", "wrong")).await.is_err());
+        assert!(ctx
+            .authenticate(&Credential::basic("root", "wrong"))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -381,9 +391,13 @@ mod tests {
         ctx.create_role("reader").unwrap();
         ctx.create_user("alice", "pw").unwrap();
         ctx.grant_role_to_user("alice", "reader").unwrap();
-        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None)).unwrap();
+        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .unwrap();
 
-        let identity = ctx.authenticate(&Credential::basic("alice", "pw")).await.unwrap();
+        let identity = ctx
+            .authenticate(&Credential::basic("alice", "pw"))
+            .await
+            .unwrap();
         assert!(!identity.is_super_user);
 
         // Write/management privileges cannot be granted to a role at all — roles are read-only.
@@ -396,7 +410,8 @@ mod tests {
             Privilege::All,
         ] {
             assert!(
-                ctx.grant("reader", PrivilegeRule::new(privilege, None)).is_err(),
+                ctx.grant("reader", PrivilegeRule::new(privilege, None))
+                    .is_err(),
                 "granting {privilege} to a role must be rejected"
             );
         }
@@ -426,7 +441,8 @@ mod tests {
         let mut ctx = admin_context();
         ctx.create_role("public").unwrap();
         ctx.create_user(ANONYMOUS_USERNAME, "").unwrap();
-        ctx.grant_role_to_user(ANONYMOUS_USERNAME, "public").unwrap();
+        ctx.grant_role_to_user(ANONYMOUS_USERNAME, "public")
+            .unwrap();
         ctx.set_anonymous_user(ANONYMOUS_USERNAME);
 
         assert!(ctx.anonymous_enabled());
@@ -448,6 +464,11 @@ mod tests {
         // The super-user is not a stored user — `user_exists` is false even though it authenticates.
         let ctx = context_with_super_user();
         assert!(!ctx.user_exists("root"));
-        assert!(ctx.authenticate(&Credential::basic("root", "secret")).await.unwrap().is_super_user);
+        assert!(
+            ctx.authenticate(&Credential::basic("root", "secret"))
+                .await
+                .unwrap()
+                .is_super_user
+        );
     }
 }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use crate::datafusion::ParquetFormat;
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use crate::datafusion::ParquetFormat;
 use datafusion::{
     catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };

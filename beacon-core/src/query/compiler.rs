@@ -15,7 +15,10 @@ pub async fn compile_json_query(
 ) -> anyhow::Result<LogicalPlan> {
     // The runtime config is published as a SessionConfig extension; fall back to
     // defaults if absent (e.g. a bare session in a unit test).
-    let config = session.state().config().get_extension::<beacon_config::Config>();
+    let config = session
+        .state()
+        .config()
+        .get_extension::<beacon_config::Config>();
     let enable_pushdown_projection = config
         .as_ref()
         .map(|c| c.sql.enable_pushdown_projection)
@@ -36,11 +39,9 @@ pub async fn compile_json_query(
             all_columns.extend(select_cols);
         }
 
-        from.init_builder(session, Some(&all_columns))
-            .await?
+        from.init_builder(session, Some(&all_columns)).await?
     } else {
-        from.init_builder(session, None)
-            .await?
+        from.init_builder(session, None).await?
     };
 
     let session_state = session.state();

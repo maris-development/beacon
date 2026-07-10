@@ -14,7 +14,10 @@ use futures::TryStreamExt;
 /// Run SQL as a super-user and collect the result batches.
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
-        .run_query(beacon_core::query::Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(
+            beacon_core::query::Query::sql(sql.to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .unwrap_or_else(|error| panic!("SQL failed to plan/execute: {sql}\n{error}"))
         .into_record_stream()
@@ -98,7 +101,10 @@ async fn delta_external_table_read_insert_time_travel_drop() {
         )
         .await,
     );
-    assert_eq!(v0_count, 2, "read_delta(.., 0) should see version 0 (2 rows)");
+    assert_eq!(
+        v0_count, 2,
+        "read_delta(.., 0) should see version 0 (2 rows)"
+    );
 
     // CREATE EXTERNAL TABLE ... STORED AS DELTA, then SELECT.
     run(
@@ -111,8 +117,13 @@ async fn delta_external_table_read_insert_time_travel_drop() {
 
     // INSERT INTO appends a new Delta version.
     run(&runtime, &format!("INSERT INTO {table} VALUES (5), (6)")).await;
-    let after_insert =
-        scalar_count(&run(&runtime, &format!("SELECT count(*) FROM read_delta('{location}')")).await);
+    let after_insert = scalar_count(
+        &run(
+            &runtime,
+            &format!("SELECT count(*) FROM read_delta('{location}')"),
+        )
+        .await,
+    );
     assert_eq!(after_insert, 6, "INSERT INTO should commit two more rows");
 
     // DROP TABLE deregisters it (the underlying Delta files remain on disk).

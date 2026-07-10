@@ -72,52 +72,51 @@ impl ScalarUDFImpl for WithinPointUdf {
                 "st_within_point expects a float64 array as its third argument".to_string(),
             ))?;
 
-        let mut geom_iter: Box<dyn Iterator<Item = Option<&str>>> = match &args.args[0] {
-            datafusion::logical_expr::ColumnarValue::Array(array) => {
-                if let Some(array) = array.as_string_opt::<i32>() {
-                    Box::new(array.iter())
-                } else {
-                    return Err(datafusion::error::DataFusionError::Internal(
-                        "st_within_point expects a string array as its first argument".to_string(),
-                    ));
-                }
-            }
-            datafusion::logical_expr::ColumnarValue::Scalar(scalar_value) => {
-                if let ScalarValue::Utf8(wkt) = scalar_value {
-                    if let Some(wkt) = wkt {
-                        let wkt =
-                            Wkt::from_str(wkt)
-                                .map_err(|e| anyhow::anyhow!(e))
-                                .map_err(|e| {
-                                    datafusion::error::DataFusionError::Execution(e.to_string())
-                                })?;
-                        let geometry: Geometry = wkt.try_into().map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "st_within_point: invalid WKT geometry: {e:?}"
-                            ))
-                        })?;
-                        let result = st_within_point_fast(
-                            geometry,
-                            &mut lon_iter,
-                            &mut lat_iter,
-                            self.cache_size,
-                        )
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(e.to_string())
-                        })?;
-                        return Ok(ColumnarValue::Array(Arc::new(
-                            arrow::array::BooleanArray::from(result),
-                        )));
+        let mut geom_iter: Box<dyn Iterator<Item = Option<&str>>> =
+            match &args.args[0] {
+                datafusion::logical_expr::ColumnarValue::Array(array) => {
+                    if let Some(array) = array.as_string_opt::<i32>() {
+                        Box::new(array.iter())
+                    } else {
+                        return Err(datafusion::error::DataFusionError::Internal(
+                            "st_within_point expects a string array as its first argument"
+                                .to_string(),
+                        ));
                     }
-                    // Fallback to repeating the WKT string
-                    Box::new(std::iter::repeat_n(wkt.as_deref(), args.number_rows))
-                } else {
-                    return Err(datafusion::error::DataFusionError::Internal(
-                        "st_within_point expects a string as its first argument".to_string(),
-                    ));
                 }
-            }
-        };
+                datafusion::logical_expr::ColumnarValue::Scalar(scalar_value) => {
+                    if let ScalarValue::Utf8(wkt) = scalar_value {
+                        if let Some(wkt) = wkt {
+                            let wkt = Wkt::from_str(wkt).map_err(|e| anyhow::anyhow!(e)).map_err(
+                                |e| datafusion::error::DataFusionError::Execution(e.to_string()),
+                            )?;
+                            let geometry: Geometry = wkt.try_into().map_err(|e| {
+                                datafusion::error::DataFusionError::Execution(format!(
+                                    "st_within_point: invalid WKT geometry: {e:?}"
+                                ))
+                            })?;
+                            let result = st_within_point_fast(
+                                geometry,
+                                &mut lon_iter,
+                                &mut lat_iter,
+                                self.cache_size,
+                            )
+                            .map_err(|e| {
+                                datafusion::error::DataFusionError::Execution(e.to_string())
+                            })?;
+                            return Ok(ColumnarValue::Array(Arc::new(
+                                arrow::array::BooleanArray::from(result),
+                            )));
+                        }
+                        // Fallback to repeating the WKT string
+                        Box::new(std::iter::repeat_n(wkt.as_deref(), args.number_rows))
+                    } else {
+                        return Err(datafusion::error::DataFusionError::Internal(
+                            "st_within_point expects a string as its first argument".to_string(),
+                        ));
+                    }
+                }
+            };
 
         let result = st_within_point(&mut geom_iter, &mut lon_iter, &mut lat_iter)
             .map_err(|e| datafusion::error::DataFusionError::Internal(e.to_string()))?;
@@ -147,8 +146,9 @@ fn st_within_point_impl(
         (Some(geom), Some(lon), Some(lat)) => {
             // ST_WithinPoint implementation
             let wkt = Wkt::from_str(geom).map_err(|e| anyhow::anyhow!(e))?;
-            let geometry: Geometry =
-                wkt.try_into().map_err(|e| anyhow::anyhow!("invalid WKT geometry: {e:?}"))?;
+            let geometry: Geometry = wkt
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("invalid WKT geometry: {e:?}"))?;
 
             let point = geo::Point::new(lon, lat);
             Ok(geometry.contains(&point))
@@ -163,9 +163,8 @@ fn st_within_point_fast(
     lat: &mut dyn Iterator<Item = Option<f64>>,
     cache_size: usize,
 ) -> anyhow::Result<Vec<bool>> {
-    let mut cache: lru::LruCache<Point<OrderedFloat<f64>>, bool> = lru::LruCache::new(
-        NonZero::new(cache_size).expect("Cache size must be non-zero"),
-    );
+    let mut cache: lru::LruCache<Point<OrderedFloat<f64>>, bool> =
+        lru::LruCache::new(NonZero::new(cache_size).expect("Cache size must be non-zero"));
     let bounding_rect = geom.bounding_rect();
     lon.zip(lat)
         .map(|(lon, lat)| st_within_point_fast_impl(&geom, bounding_rect, &mut cache, lon, lat))
@@ -273,13 +272,8 @@ mod tests {
         let lons = [Some(5.0), Some(20.0), None];
         let lats = [Some(5.0), Some(20.0), Some(5.0)];
 
-        let result = st_within_point_fast(
-            geom,
-            &mut lons.into_iter(),
-            &mut lats.into_iter(),
-            16,
-        )
-        .unwrap();
+        let result =
+            st_within_point_fast(geom, &mut lons.into_iter(), &mut lats.into_iter(), 16).unwrap();
 
         assert_eq!(result, vec![true, false, false]);
     }
@@ -327,7 +321,8 @@ mod tests {
         let geom = geometry(SQUARE);
         let bounding_rect = geom.bounding_rect();
         let mut cache = lru::LruCache::new(NonZero::new(4).unwrap());
-        assert!(!st_within_point_fast_impl(&geom, bounding_rect, &mut cache, None, Some(5.0))
-            .unwrap());
+        assert!(
+            !st_within_point_fast_impl(&geom, bounding_rect, &mut cache, None, Some(5.0)).unwrap()
+        );
     }
 }

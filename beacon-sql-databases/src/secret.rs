@@ -15,7 +15,8 @@ use chacha20poly1305::{
 };
 use secrecy::SecretString;
 
-const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+const B64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::STANDARD;
 
 /// An encrypted secret as persisted in a table definition. Carries only
 /// ciphertext and a nonce — never plaintext. `Debug` is redacted so the secret

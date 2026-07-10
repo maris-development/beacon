@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use beacon_core::extensions::{McpExtension, PresetExtension, PresetFilter, PresetOp};
 use beacon_core::api::{SchemaFieldView, SchemaView};
+use beacon_core::extensions::{McpExtension, PresetExtension, PresetFilter, PresetOp};
 use beacon_core::runtime::Runtime;
 use beacon_core::AuthIdentity;
 use rmcp::model::{Tool, ToolAnnotations};
@@ -142,12 +142,19 @@ fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("missing required 'sql' argument"))?
         .trim();
     // MCP is read-only: only allow SELECT / WITH (CTE) exports.
-    let head = sql.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+    let head = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
     anyhow::ensure!(
         matches!(head.as_str(), "SELECT" | "WITH"),
         "export_query only supports read-only SELECT queries"
     );
-    let format = args.get("format").and_then(Value::as_str).unwrap_or("parquet");
+    let format = args
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("parquet");
     anyhow::ensure!(
         matches!(format, "parquet" | "arrow" | "csv"),
         "unsupported format '{format}'; expected one of: parquet, arrow, csv"
@@ -156,8 +163,14 @@ fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
     let body = json!({ "sql": sql, "output": { "format": format } });
     let body_py = serde_json::to_string(&body)?;
     let (imports, reader) = match format {
-        "parquet" => ("import io, requests, pandas as pd", "df = pd.read_parquet(io.BytesIO(resp.content))"),
-        "csv" => ("import io, requests, pandas as pd", "df = pd.read_csv(io.BytesIO(resp.content))"),
+        "parquet" => (
+            "import io, requests, pandas as pd",
+            "df = pd.read_parquet(io.BytesIO(resp.content))",
+        ),
+        "csv" => (
+            "import io, requests, pandas as pd",
+            "df = pd.read_csv(io.BytesIO(resp.content))",
+        ),
         "arrow" => (
             "import io, requests, pyarrow.ipc as pa_ipc",
             "df = pa_ipc.open_file(io.BytesIO(resp.content)).read_all().to_pandas()",
@@ -305,7 +318,13 @@ fn default_tool_name(table: &str) -> String {
     // yields a valid tool name (see `beacon_core::extensions::is_valid_tool_name`).
     let sanitized: String = table
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let mut name = format!("query_{sanitized}");
     name.truncate(64);
@@ -470,7 +489,10 @@ fn build_table_sql(
                     );
                 }
             }
-            cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")
+            cols.iter()
+                .map(|c| quote_ident(c))
+                .collect::<Vec<_>>()
+                .join(", ")
         }
         _ => default_select(exposed.as_deref()),
     };
@@ -502,9 +524,11 @@ fn build_table_sql(
 
 fn default_select(exposed: Option<&[&str]>) -> String {
     match exposed {
-        Some(cols) if !cols.is_empty() => {
-            cols.iter().map(|&c| quote_ident(c)).collect::<Vec<_>>().join(", ")
-        }
+        Some(cols) if !cols.is_empty() => cols
+            .iter()
+            .map(|&c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => "*".to_string(),
     }
 }
@@ -531,10 +555,17 @@ fn render_filter(filter: &PresetFilter) -> anyhow::Result<String> {
                 .as_array()
                 .filter(|a| !a.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("'in' requires a non-empty array"))?;
-            let vals = arr.iter().map(render_scalar).collect::<anyhow::Result<Vec<_>>>()?;
+            let vals = arr
+                .iter()
+                .map(render_scalar)
+                .collect::<anyhow::Result<Vec<_>>>()?;
             Ok(format!("{col} IN ({})", vals.join(", ")))
         }
-        op => Ok(format!("{col} {} {}", op.as_sql(), render_scalar(&filter.value)?)),
+        op => Ok(format!(
+            "{col} {} {}",
+            op.as_sql(),
+            render_scalar(&filter.value)?
+        )),
     }
 }
 
@@ -542,7 +573,13 @@ fn render_scalar(value: &Value) -> anyhow::Result<String> {
     Ok(match value {
         Value::Number(n) => n.to_string(),
         Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
+        Value::Bool(b) => {
+            if *b {
+                "TRUE".into()
+            } else {
+                "FALSE".into()
+            }
+        }
         Value::Null => "NULL".into(),
         other => anyhow::bail!("unsupported filter value: {other}"),
     })
@@ -573,13 +610,22 @@ mod tests {
         args.insert("sql".into(), Value::String("SELECT * FROM obs".into()));
         args.insert("format".into(), Value::String("parquet".into()));
         let out = export_query_recipe(&args).unwrap();
-        assert!(out.contains("/api/query"), "recipe should reference the query endpoint");
-        assert!(out.contains("read_parquet"), "parquet snippet should use read_parquet");
+        assert!(
+            out.contains("/api/query"),
+            "recipe should reference the query endpoint"
+        );
+        assert!(
+            out.contains("read_parquet"),
+            "parquet snippet should use read_parquet"
+        );
         assert!(out.contains("\"format\": \"parquet\""));
 
         // WITH (CTE) is allowed; default format is parquet.
         let mut cte = Map::new();
-        cte.insert("sql".into(), Value::String("WITH x AS (SELECT 1) SELECT * FROM x".into()));
+        cte.insert(
+            "sql".into(),
+            Value::String("WITH x AS (SELECT 1) SELECT * FROM x".into()),
+        );
         assert!(export_query_recipe(&cte).unwrap().contains("read_parquet"));
 
         // Non-SELECT is rejected (MCP is read-only).
@@ -601,14 +647,21 @@ mod tests {
     fn resolve_columns_merges_types_and_descriptions() {
         use beacon_core::extensions::{ColumnDoc, ExposedColumn};
         let schema = SchemaView {
-            fields: vec![field("lat", "Float64"), field("depth", "Float64"), field("x", "Int64")],
+            fields: vec![
+                field("lat", "Float64"),
+                field("depth", "Float64"),
+                field("x", "Int64"),
+            ],
             metadata: Default::default(),
         };
 
         // No exposed_columns -> all columns, types included, no descriptions.
         let all = resolve_columns(&schema, Some(&mcp(None)));
         assert_eq!(all.len(), 3);
-        assert_eq!((all[0].name.as_str(), all[0].data_type.as_str()), ("lat", "Float64"));
+        assert_eq!(
+            (all[0].name.as_str(), all[0].data_type.as_str()),
+            ("lat", "Float64")
+        );
 
         // Exposed subset (in order), merging schema type + entry description.
         let ext = McpExtension {
@@ -628,10 +681,17 @@ mod tests {
         let cols = resolve_columns(&schema, Some(&ext));
         assert_eq!(cols.len(), 2);
         assert_eq!(
-            (cols[0].name.as_str(), cols[0].data_type.as_str(), cols[0].description.as_deref()),
+            (
+                cols[0].name.as_str(),
+                cols[0].data_type.as_str(),
+                cols[0].description.as_deref()
+            ),
             ("depth", "Float64", Some("meters"))
         );
-        assert_eq!((cols[1].name.as_str(), cols[1].description.as_deref()), ("lat", None));
+        assert_eq!(
+            (cols[1].name.as_str(), cols[1].description.as_deref()),
+            ("lat", None)
+        );
     }
 
     fn mcp(cols: Option<Vec<&str>>) -> McpExtension {
@@ -654,8 +714,14 @@ mod tests {
         assert_eq!(guardrails_text(&mcp(None)), None);
         let mut ext = mcp(None);
         let mut g = std::collections::BTreeMap::new();
-        g.insert("recommended_row_limit".to_string(), serde_json::json!(10000));
-        g.insert("note".to_string(), serde_json::json!("filter by time first"));
+        g.insert(
+            "recommended_row_limit".to_string(),
+            serde_json::json!(10000),
+        );
+        g.insert(
+            "note".to_string(),
+            serde_json::json!("filter by time first"),
+        );
         ext.guardrails = Some(g);
         // Rendered as `key: value` pairs (BTreeMap => deterministic key order).
         assert_eq!(
@@ -676,7 +742,8 @@ mod tests {
         );
         let mut args = Map::new();
         args.insert("preset".into(), Value::String("shallow".into()));
-        let sql = build_table_sql("obs", &mcp(Some(vec!["lat", "depth"])), Some(&p), &args).unwrap();
+        let sql =
+            build_table_sql("obs", &mcp(Some(vec!["lat", "depth"])), Some(&p), &args).unwrap();
         assert_eq!(
             sql,
             r#"SELECT "lat", "depth" FROM "obs" WHERE "depth" BETWEEN 0 AND 10 LIMIT 100"#

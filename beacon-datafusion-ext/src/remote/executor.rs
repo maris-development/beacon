@@ -45,10 +45,7 @@ impl BeaconFlightSqlExecutor {
 
     /// Fetch a remote table's schema without transferring data, via a
     /// `LIMIT 0` query whose `FlightInfo` carries the IPC-encoded schema.
-    pub async fn fetch_schema(
-        connection: &RemoteConnection,
-        table: &str,
-    ) -> DFResult<SchemaRef> {
+    pub async fn fetch_schema(connection: &RemoteConnection, table: &str) -> DFResult<SchemaRef> {
         let mut client = connection.connect().await.map_err(remote_err)?;
         let info = client
             .execute(format!("SELECT * FROM {table} LIMIT 0"), None)

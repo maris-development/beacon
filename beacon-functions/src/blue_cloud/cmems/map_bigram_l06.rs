@@ -61,8 +61,10 @@ fn map_cmems_bigram_l06_impl(
             ColumnarValue::Scalar(ScalarValue::Utf8(bigram)),
             ColumnarValue::Array(wmo_inst_type_arr),
         ) => {
-            let wmo_inst_type_array =
-                crate::util::downcast_arg::<StringArray>(wmo_inst_type_arr, "map_cmems_bigram_l06")?;
+            let wmo_inst_type_array = crate::util::downcast_arg::<StringArray>(
+                wmo_inst_type_arr,
+                "map_cmems_bigram_l06",
+            )?;
 
             Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(
                 wmo_inst_type_array
@@ -127,7 +129,10 @@ mod tests {
     #[test]
     fn mapping_depends_on_wmo_type_only_for_ct() {
         assert_eq!(map_bigram_l06(Some("CT"), Some("995")), Some("SDN:L06::70"));
-        assert_eq!(map_bigram_l06(Some("CT"), Some("other")), Some("SDN:L06::30"));
+        assert_eq!(
+            map_bigram_l06(Some("CT"), Some("other")),
+            Some("SDN:L06::30")
+        );
         assert_eq!(map_bigram_l06(Some("BO"), None), Some("SDN:L06::30"));
         assert_eq!(map_bigram_l06(Some("XX"), None), Some("SDN:L06::0"));
         assert_eq!(map_bigram_l06(Some("ZZ"), None), None);
@@ -143,8 +148,10 @@ mod tests {
     fn impl_array_array_path() {
         let bigrams =
             ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("BO"), Some("ZZ")])));
-        let wmo =
-            ColumnarValue::Array(Arc::new(StringArray::from(vec![None::<&str>, None::<&str>])));
+        let wmo = ColumnarValue::Array(Arc::new(StringArray::from(vec![
+            None::<&str>,
+            None::<&str>,
+        ])));
         let ColumnarValue::Array(arr) = map_cmems_bigram_l06_impl(&[bigrams, wmo]).unwrap() else {
             panic!("expected array");
         };

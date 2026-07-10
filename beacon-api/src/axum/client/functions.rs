@@ -10,7 +10,7 @@ use beacon_core::runtime::Runtime;
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "functions",
-    get, 
+    get,
     path = "/api/functions",
     responses((status = 200, description = "Available scalar/aggregate functions with documentation", body = Vec<FunctionInfo>)),
     security(

@@ -37,8 +37,8 @@ use datafusion::{
 use object_store::{ObjectStore, ObjectStoreExt};
 use tokio::runtime::Handle;
 
-use crate::file_formats::BeaconTableFunctionImpl;
 use super::helpers::column_stat_rows;
+use crate::file_formats::BeaconTableFunctionImpl;
 
 // ─── Output schema ──────────────────────────────────────────────────────────
 
@@ -133,23 +133,22 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
 
         // Validate each cached entry against the live object store by calling head().
         // call() is sync, so we bridge into async via block_in_place.
-        let validations: Vec<bool> =
-            tokio::task::block_in_place(|| {
-                self.runtime_handle.block_on(async {
-                    let mut results = Vec::with_capacity(entries.len());
-                    for (path, cached_meta, _) in &entries {
-                        let is_valid = match store.head(path).await {
-                            Ok(current) => {
-                                current.size == cached_meta.size
-                                    && current.last_modified == cached_meta.last_modified
-                            }
-                            Err(_) => false,
-                        };
-                        results.push(is_valid);
-                    }
-                    results
-                })
-            });
+        let validations: Vec<bool> = tokio::task::block_in_place(|| {
+            self.runtime_handle.block_on(async {
+                let mut results = Vec::with_capacity(entries.len());
+                for (path, cached_meta, _) in &entries {
+                    let is_valid = match store.head(path).await {
+                        Ok(current) => {
+                            current.size == cached_meta.size
+                                && current.last_modified == cached_meta.last_modified
+                        }
+                        Err(_) => false,
+                    };
+                    results.push(is_valid);
+                }
+                results
+            })
+        });
 
         // Collect owned path strings first so we can borrow them below.
         let path_strings: Vec<String> = entries
@@ -212,11 +211,8 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
                 Arc::new(BooleanArray::from(is_exact)),
             ],
         )
-        .map_err(|e| {
-            plan_datafusion_err!("Failed to build statistics cache record batch: {e}")
-        })?;
+        .map_err(|e| plan_datafusion_err!("Failed to build statistics cache record batch: {e}"))?;
 
         Ok(Arc::new(MemTable::try_new(schema, vec![vec![batch]])?))
     }
 }
-

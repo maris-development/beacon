@@ -46,11 +46,7 @@ macro_rules! impl_atlas_readable_passthrough {
                     .read_array::<$ty>(array_name, start, shape)
                     .await
                     .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to read atlas array '{}': {}",
-                            array_name,
-                            e
-                        )
+                        anyhow::anyhow!("Failed to read atlas array '{}': {}", array_name, e)
                     })?
                     .ok_or_else(|| {
                         anyhow::anyhow!(
@@ -186,13 +182,17 @@ impl<T: NdArrayType + AtlasReadable> ArrayBackend<T> for AtlasArrayBackend<T> {
     }
 
     async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayD<T>> {
-        let view = self.atlas.open_dataset(&self.dataset_name).await.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to open atlas dataset '{}': {}",
-                self.dataset_name,
-                e
-            )
-        })?;
+        let view = self
+            .atlas
+            .open_dataset(&self.dataset_name)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to open atlas dataset '{}': {}",
+                    self.dataset_name,
+                    e
+                )
+            })?;
         T::read(&view, &self.array_name, subset.start, subset.shape).await
     }
 }
@@ -304,7 +304,10 @@ mod tests {
             vec![4],
             Some(-1.0f32),
         );
-        assert_eq!(<AtlasArrayBackend<f32> as ArrayBackend<f32>>::shape(&backend), vec![4]);
+        assert_eq!(
+            <AtlasArrayBackend<f32> as ArrayBackend<f32>>::shape(&backend),
+            vec![4]
+        );
         assert_eq!(
             <AtlasArrayBackend<f32> as ArrayBackend<f32>>::dimensions(&backend),
             vec!["obs".to_string()]

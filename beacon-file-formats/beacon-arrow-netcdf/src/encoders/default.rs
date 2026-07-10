@@ -158,7 +158,9 @@ impl DefaultEncoder {
                     .as_any()
                     .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
                     .ok_or_else(|| {
-                        anyhow::anyhow!("failed to downcast column {var_name} to FixedSizeBinaryArray")
+                        anyhow::anyhow!(
+                            "failed to downcast column {var_name} to FixedSizeBinaryArray"
+                        )
                     })?;
                 extents.push(0..*size as usize);
 
@@ -176,7 +178,9 @@ impl DefaultEncoder {
                     })?;
 
                 variable.put(view, extents).map_err(|e| {
-                    anyhow::anyhow!("failed to write FixedSizeBinary column {var_name} to NetCDF: {e}")
+                    anyhow::anyhow!(
+                        "failed to write FixedSizeBinary column {var_name} to NetCDF: {e}"
+                    )
                 })?;
             }
             DataType::Utf8 => {

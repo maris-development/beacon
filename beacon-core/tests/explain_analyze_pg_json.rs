@@ -9,7 +9,10 @@ use futures::TryStreamExt;
 
 async fn run_sql(runtime: &Runtime, sql: &str) {
     runtime
-        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(sql.to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .expect("sql should run")
         .into_record_stream()
@@ -35,10 +38,17 @@ async fn explain_analyze_returns_pg_json_with_metrics() {
     let suffix = uuid::Uuid::new_v4().simple();
     let table = format!("explain_analyze_pgjson_{suffix}");
     run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
-    run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2), (3)")).await;
+    run_sql(
+        &runtime,
+        &format!("INSERT INTO {table} VALUES (1), (2), (3)"),
+    )
+    .await;
 
     let json_str = runtime
-        .explain_analyze_client_query(sql_query(&format!("SELECT a FROM {table}")), beacon_core::AuthIdentity::empty())
+        .explain_analyze_client_query(
+            sql_query(&format!("SELECT a FROM {table}")),
+            beacon_core::AuthIdentity::empty(),
+        )
         .await
         .expect("explain analyze should succeed");
 

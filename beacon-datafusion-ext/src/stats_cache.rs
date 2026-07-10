@@ -75,7 +75,11 @@ impl BeaconFileStatisticsCache {
         self.inner
             .iter()
             .map(|(path, cached)| {
-                ((*path).clone(), cached.meta.clone(), Arc::clone(&cached.statistics))
+                (
+                    (*path).clone(),
+                    cached.meta.clone(),
+                    Arc::clone(&cached.statistics),
+                )
             })
             .collect()
     }
@@ -97,7 +101,10 @@ impl BeaconFileStatisticsCache {
         value: Arc<Statistics>,
         e: &ObjectMeta,
     ) -> Option<Arc<Statistics>> {
-        let old = self.inner.get(key).map(|cached| Arc::clone(&cached.statistics));
+        let old = self
+            .inner
+            .get(key)
+            .map(|cached| Arc::clone(&cached.statistics));
         self.inner
             .insert(key.clone(), CachedFileMetadata::new(e.clone(), value, None));
         old
@@ -187,25 +194,49 @@ mod tests {
         let p = Path::from("a/b.parquet");
 
         // Nothing cached yet.
-        assert!(cache.get_with_extra(&p, &meta("a/b.parquet", 100)).is_none());
+        assert!(
+            cache
+                .get_with_extra(&p, &meta("a/b.parquet", 100))
+                .is_none()
+        );
 
         // First insert returns no previous value.
-        assert!(cache.put_with_extra(&p, stats(), &meta("a/b.parquet", 100)).is_none());
+        assert!(
+            cache
+                .put_with_extra(&p, stats(), &meta("a/b.parquet", 100))
+                .is_none()
+        );
 
         // Matching size + last_modified => hit.
-        assert!(cache.get_with_extra(&p, &meta("a/b.parquet", 100)).is_some());
+        assert!(
+            cache
+                .get_with_extra(&p, &meta("a/b.parquet", 100))
+                .is_some()
+        );
 
         // Size changed => the cached entry is treated as stale.
-        assert!(cache.get_with_extra(&p, &meta("a/b.parquet", 200)).is_none());
+        assert!(
+            cache
+                .get_with_extra(&p, &meta("a/b.parquet", 200))
+                .is_none()
+        );
     }
 
     #[test]
     fn put_with_extra_returns_the_previous_statistics() {
         let cache = BeaconFileStatisticsCache::with_capacity(8);
         let p = Path::from("c.parquet");
-        assert!(cache.put_with_extra(&p, stats(), &meta("c.parquet", 1)).is_none());
+        assert!(
+            cache
+                .put_with_extra(&p, stats(), &meta("c.parquet", 1))
+                .is_none()
+        );
         // A second put for the same key reports the prior value.
-        assert!(cache.put_with_extra(&p, stats(), &meta("c.parquet", 2)).is_some());
+        assert!(
+            cache
+                .put_with_extra(&p, stats(), &meta("c.parquet", 2))
+                .is_some()
+        );
     }
 
     #[test]

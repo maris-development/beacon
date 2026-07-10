@@ -75,8 +75,12 @@ pub(crate) async fn show_crawlers(session: &Arc<SessionContext>) -> anyhow::Resu
         .iter()
         .map(|c| c.format_filter.as_ref().map(|f| f.join(",")))
         .collect();
-    let detect_partitions =
-        BooleanArray::from(crawlers.iter().map(|c| c.detect_partitions).collect::<Vec<_>>());
+    let detect_partitions = BooleanArray::from(
+        crawlers
+            .iter()
+            .map(|c| c.detect_partitions)
+            .collect::<Vec<_>>(),
+    );
     let schedule_secs =
         UInt64Array::from(crawlers.iter().map(|c| c.schedule_secs).collect::<Vec<_>>());
     let event_driven =

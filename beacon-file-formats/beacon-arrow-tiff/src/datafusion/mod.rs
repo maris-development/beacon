@@ -189,9 +189,9 @@ mod tests {
     use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures::StreamExt;
+    use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStoreExt;
 
     const TEST_TIF_BYTES: &[u8] = include_bytes!("../../test-files/test.tif");
 
@@ -262,7 +262,9 @@ mod tests {
         };
 
         let stream = file_opener
-            .open(datafusion::datasource::listing::PartitionedFile::from(object))
+            .open(datafusion::datasource::listing::PartitionedFile::from(
+                object,
+            ))
             .expect("open")
             .await
             .expect("stream");
@@ -373,7 +375,9 @@ mod tests {
         };
 
         let stream = file_opener
-            .open(datafusion::datasource::listing::PartitionedFile::from(object))
+            .open(datafusion::datasource::listing::PartitionedFile::from(
+                object,
+            ))
             .expect("open")
             .await
             .expect("stream");
@@ -466,7 +470,10 @@ mod tests {
             .iter()
             .map(|b| b.num_rows())
             .sum();
-        assert_eq!(rows, 0, "impossible latitude predicate should yield no rows");
+        assert_eq!(
+            rows, 0,
+            "impossible latitude predicate should yield no rows"
+        );
     }
 
     #[tokio::test]
@@ -490,7 +497,10 @@ mod tests {
                 .downcast_ref::<arrow::array::Float64Array>()
                 .expect("geo.lat is Float64");
             for i in 0..col.len() {
-                assert!(col.value(i) > 40.0, "every returned lat must satisfy the predicate");
+                assert!(
+                    col.value(i) > 40.0,
+                    "every returned lat must satisfy the predicate"
+                );
             }
             total += b.num_rows();
         }

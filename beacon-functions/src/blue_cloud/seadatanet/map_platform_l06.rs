@@ -90,8 +90,7 @@ mod tests {
     fn impl_array_path() {
         let input =
             ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("Q (27)"), Some("x")])));
-        let ColumnarValue::Array(arr) = map_seadatanet_platform_l06_impl(&[input]).unwrap()
-        else {
+        let ColumnarValue::Array(arr) = map_seadatanet_platform_l06_impl(&[input]).unwrap() else {
             panic!("expected array");
         };
         let arr = arr.as_any().downcast_ref::<StringArray>().unwrap();

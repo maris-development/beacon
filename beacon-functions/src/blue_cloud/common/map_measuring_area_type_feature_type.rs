@@ -66,8 +66,14 @@ mod tests {
 
     #[test]
     fn feature_type_keywords() {
-        assert_eq!(map_str_feature_type("a curve segment"), Some("trajectory".to_string()));
-        assert_eq!(map_str_feature_type("a single point"), Some("profile".to_string()));
+        assert_eq!(
+            map_str_feature_type("a curve segment"),
+            Some("trajectory".to_string())
+        );
+        assert_eq!(
+            map_str_feature_type("a single point"),
+            Some("profile".to_string())
+        );
         assert_eq!(map_str_feature_type("neither keyword"), None);
     }
 

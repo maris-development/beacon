@@ -28,6 +28,9 @@ pub fn remote_table_definition(provider: &dyn TableProvider) -> Option<RemoteTab
         .as_any()
         .downcast_ref::<FederatedTableProviderAdaptor>()?;
     let source = adaptor.source.as_any().downcast_ref::<SQLTableSource>()?;
-    let table = source.table.as_any().downcast_ref::<BeaconRemoteSqlTable>()?;
+    let table = source
+        .table
+        .as_any()
+        .downcast_ref::<BeaconRemoteSqlTable>()?;
     Some(table.definition().clone())
 }

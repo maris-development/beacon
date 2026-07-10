@@ -15,8 +15,8 @@ pub mod engine;
 pub mod manager;
 pub mod persistence;
 
-pub use definition::{CrawlerDefinition, TableNaming, CRAWLER_OWNER_OPTION};
-pub use discovery::{assign_table_names, group_into_tables, CandidateTable};
+pub use definition::{CRAWLER_OWNER_OPTION, CrawlerDefinition, TableNaming};
+pub use discovery::{CandidateTable, assign_table_names, group_into_tables};
 pub use engine::{CrawlEngine, CrawlReport};
-pub use manager::{new_crawler_manager_handle, CrawlerManager, CrawlerManagerHandle};
+pub use manager::{CrawlerManager, CrawlerManagerHandle, new_crawler_manager_handle};
 pub use persistence::CrawlerPersistence;

@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{atomic::AtomicU64, Arc},
 };
 
 use datafusion::{logical_expr::LogicalPlan, physical_plan::ExecutionPlan};
@@ -249,7 +249,10 @@ fn node_to_pg_json(plan: &dyn ExecutionPlan) -> serde_json::Value {
             if name == "output_rows" || name == "elapsed_compute" {
                 continue;
             }
-            extras.insert(name.to_string(), serde_json::json!(metric.value().as_usize()));
+            extras.insert(
+                name.to_string(),
+                serde_json::json!(metric.value().as_usize()),
+            );
         }
         if !extras.is_empty() {
             node["Extras"] = serde_json::Value::Object(extras);

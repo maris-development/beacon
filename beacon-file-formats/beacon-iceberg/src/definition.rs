@@ -64,7 +64,10 @@ impl TableDefinition for IcebergTableDefinition {
 
         let table = match tabular {
             Tabular::Table(table) => table,
-            _ => anyhow::bail!("Iceberg identifier '{}' does not refer to a table", self.name),
+            _ => anyhow::bail!(
+                "Iceberg identifier '{}' does not refer to a table",
+                self.name
+            ),
         };
 
         Ok(Arc::new(IcebergTable::new(
