@@ -1884,6 +1884,7 @@ dependencies = [
  "arrow 58.3.0",
  "arrow-ipc 58.3.0",
  "async-trait",
+ "beacon-datafusion-ext",
  "bytemuck",
  "criterion 0.5.1",
  "datafusion",
