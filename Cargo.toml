@@ -2,8 +2,12 @@
 # Edition-2024 members imply resolver 3; set it explicitly so features aren't
 # over-unified across normal/build/dev deps (fewer features compiled).
 resolver = "3"
-members = ["beacon-api", "beacon-mcp", "beacon-auth", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-iceberg", "beacon-file-formats/beacon-lance", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
-exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
+members = ["beacon-api", "beacon-mcp", "beacon-auth", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-iceberg", "beacon-file-formats/beacon-lance", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
+# beacon-binary-format is a git submodule vendored from its own upstream repo.
+# It is excluded from the workspace so workspace-wide tooling (notably
+# `cargo fmt --all`) does not touch code we don't own here; it is still built
+# as a path dependency of beacon-arrow-bbf, and formatted in its own repo.
+exclude = ["beacon-file-formats/beacon-binary-format-toolbox", "beacon-file-formats/beacon-binary-format"]
 
 [workspace.dependencies]
 tokio = {version = "1.47.1", features = ["full"]}

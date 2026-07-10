@@ -6,8 +6,7 @@ use arrow::{
 };
 use beacon_nd_array::{
     arrow::{
-        batch::any_dataset_as_record_batch_stream,
-        metrics::DatasetReadMetrics,
+        batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
         pushdown_filter::PushdownFilter,
     },
     projection::DatasetProjection,
@@ -385,21 +384,22 @@ impl NetCDFOpener {
         };
 
         let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading NetCDF as Arrow stream: {e}"
-                ))
-            })
-            .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+        let stream =
+            any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
+                .map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to adapt NetCDF batch schema: {e}"
+                        "Error reading NetCDF as Arrow stream: {e}"
                     ))
-                });
-                futures::future::ready(mapped)
-            })
-            .boxed();
+                })
+                .and_then(move |batch| {
+                    let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to adapt NetCDF batch schema: {e}"
+                        ))
+                    });
+                    futures::future::ready(mapped)
+                })
+                .boxed();
 
         Ok(stream)
     }

@@ -146,7 +146,7 @@ mod tests {
     use super::*;
     use datafusion::datasource::ViewTable;
     use futures::StreamExt;
-    use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt};
+    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
     use url::Url;
 
     // The persistence side effect runs the async store I/O via `block_in_place`,
@@ -184,7 +184,10 @@ mod tests {
             .register_table("v".to_string(), view(&ctx, "SELECT 1 AS x").await)
             .expect("registration should succeed");
 
-        assert!(previous.is_none(), "first registration has no previous table");
+        assert!(
+            previous.is_none(),
+            "first registration has no previous table"
+        );
         assert!(provider.table_exist("v"));
         assert!(
             store.get(&Path::from("v/table.json")).await.is_ok(),
@@ -206,7 +209,10 @@ mod tests {
             .register_table("v".to_string(), view(&ctx, "SELECT 2 AS y").await)
             .expect("re-registering an existing name should overwrite, not error");
 
-        assert!(previous.is_some(), "overwrite returns the replaced provider");
+        assert!(
+            previous.is_some(),
+            "overwrite returns the replaced provider"
+        );
         let table = provider
             .table("v")
             .await

@@ -9,11 +9,11 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
-use beacon_object_storage::event::ObjectEvent;
 use beacon_object_storage::DatasetsStore;
+use beacon_object_storage::event::ObjectEvent;
 use datafusion::prelude::SessionContext;
 use parking_lot::Mutex;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use tokio::task::JoinHandle;
 
 use crate::TABLES_OBJECT_STORE_URL;

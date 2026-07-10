@@ -19,7 +19,10 @@ use futures::TryStreamExt;
 
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
-        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(sql.to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
         .into_record_stream()
@@ -31,7 +34,10 @@ async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
 
 async fn try_count(runtime: &Runtime, table: &str) -> Option<i64> {
     let result = runtime
-        .run_query(Query::sql(format!("SELECT count(*) FROM {table}")), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(format!("SELECT count(*) FROM {table}")),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .ok()?;
     let batches: Vec<RecordBatch> = result.into_record_stream().ok()?.try_collect().await.ok()?;

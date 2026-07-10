@@ -9,7 +9,7 @@ use beacon_core::{runtime::Runtime, sys::SystemInfo};
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "system",
-    get, 
+    get,
     path = "/api/info",
     responses((status = 200, description = "Beacon runtime system information", body = SystemInfo)),
     security(

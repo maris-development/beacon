@@ -177,13 +177,11 @@ impl FileSource for ZarrSource {
             ..self.clone()
         };
 
-        Ok(
-            FilterPushdownPropagation::with_parent_pushdown_result(vec![
-                PushedDown::No;
-                filters.len()
-            ])
-            .with_updated_node(Arc::new(source)),
-        )
+        Ok(FilterPushdownPropagation::with_parent_pushdown_result(vec![
+            PushedDown::No;
+            filters.len()
+        ])
+        .with_updated_node(Arc::new(source)))
     }
 }
 
@@ -202,7 +200,9 @@ struct ZarrOpener {
 impl FileOpener for ZarrOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let zarr_path = ZarrPath::new_from_object_meta(file.object_meta.clone()).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create ZarrPath from object metadata: {e}"))
+            DataFusionError::Execution(format!(
+                "Failed to create ZarrPath from object metadata: {e}"
+            ))
         })?;
 
         let object_store = self.object_store.clone();
@@ -245,9 +245,10 @@ impl FileOpener for ZarrOpener {
                 None => full,
             };
 
-            let file_schema: SchemaRef = Arc::new(any_dataset_to_arrow_schema(&full).map_err(
-                |e| DataFusionError::Execution(format!("Failed to derive Zarr Arrow schema: {e}")),
-            )?);
+            let file_schema: SchemaRef =
+                Arc::new(any_dataset_to_arrow_schema(&full).map_err(|e| {
+                    DataFusionError::Execution(format!("Failed to derive Zarr Arrow schema: {e}"))
+                })?);
 
             // Columns of this group that the query needs, in file order — used
             // both to prune the read and as the source schema for the adapter.
@@ -332,22 +333,22 @@ impl FileOpener for ZarrOpener {
                 })?;
 
             let pushdown_filter = predicate.map(PushdownFilter::new);
-            let stream = any_dataset_as_record_batch_stream(
-                projected,
-                batch_size,
-                pushdown_filter,
-                metrics,
-            )
-            .map_err(|e| {
-                DataFusionError::Execution(format!("Error reading Zarr dataset as Arrow: {e}"))
-            })
-            .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to adapt Zarr batch schema: {e}"))
-                });
-                future::ready(mapped)
-            })
-            .boxed();
+            let stream =
+                any_dataset_as_record_batch_stream(projected, batch_size, pushdown_filter, metrics)
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Error reading Zarr dataset as Arrow: {e}"
+                        ))
+                    })
+                    .and_then(move |batch| {
+                        let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "Failed to adapt Zarr batch schema: {e}"
+                            ))
+                        });
+                        future::ready(mapped)
+                    })
+                    .boxed();
 
             Ok(stream)
         };

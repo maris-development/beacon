@@ -80,7 +80,12 @@ impl ObjectStoreProvider for BeaconTablesProvider {
         url: &Url,
         _storage_options: Option<&HashMap<String, String>>,
     ) -> LanceResult<String> {
-        Ok(format!("{}${}{}", url.scheme(), url.authority(), url.path()))
+        Ok(format!(
+            "{}${}{}",
+            url.scheme(),
+            url.authority(),
+            url.path()
+        ))
     }
 }
 

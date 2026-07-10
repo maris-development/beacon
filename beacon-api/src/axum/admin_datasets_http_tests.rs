@@ -259,9 +259,7 @@ async fn chunked_upload_round_trip_and_download() {
             &router,
             request(
                 "PUT",
-                &format!(
-                    "/api/admin/datasets/upload/part?upload_id={upload_id}&part_number={n}"
-                ),
+                &format!("/api/admin/datasets/upload/part?upload_id={upload_id}&part_number={n}"),
                 Some(&admin),
                 Body::from(payload),
             ),

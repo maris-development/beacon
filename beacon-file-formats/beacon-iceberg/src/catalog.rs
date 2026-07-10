@@ -13,9 +13,9 @@ use beacon_object_storage::DATASETS_WRITEABLE_PREFIX;
 use iceberg_file_catalog::FileCatalog;
 use iceberg_rust::catalog::Catalog;
 use iceberg_rust::object_store::ObjectStoreBuilder;
+use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 use object_store::prefix::PrefixStore;
-use object_store::ObjectStore;
 use tokio::sync::OnceCell;
 
 /// The single Iceberg namespace beacon creates managed tables under.
@@ -70,7 +70,10 @@ pub async fn init_datasets_warehouse(
         // endpoint/region explicitly keeps the Iceberg warehouse on the same
         // backend as the datasets without re-reading the environment.
         let mut builder = ObjectStoreBuilder::s3()
-            .with_config("aws_allow_http", if s3.allow_http { "true" } else { "false" })
+            .with_config(
+                "aws_allow_http",
+                if s3.allow_http { "true" } else { "false" },
+            )
             .and_then(|builder| {
                 builder.with_config(
                     "aws_virtual_hosted_style_request",
@@ -85,12 +88,14 @@ pub async fn init_datasets_warehouse(
         if let Some(endpoint) = &s3.endpoint {
             builder = builder
                 .with_config("aws_endpoint", endpoint)
-                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}")
+                })?;
         }
         if let Some(region) = &s3.region {
-            builder = builder
-                .with_config("aws_region", region)
-                .map_err(|error| anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}"))?;
+            builder = builder.with_config("aws_region", region).map_err(|error| {
+                anyhow::anyhow!("Failed to configure Iceberg S3 store: {error}")
+            })?;
         }
         (builder, format!("s3://{}/{warehouse_prefix}", s3.bucket))
     } else {
@@ -113,8 +118,10 @@ pub async fn init_datasets_warehouse(
     // maps paths under `__beacon__`), nested one level into the `iceberg`
     // sub-directory so a table's `<namespace>/<table>` prefix resolves to
     // `__beacon__/iceberg/<namespace>/<table>`.
-    let drop_store: Arc<dyn ObjectStore> =
-        Arc::new(PrefixStore::new(datasets.internal_store(), WAREHOUSE_SUBDIR));
+    let drop_store: Arc<dyn ObjectStore> = Arc::new(PrefixStore::new(
+        datasets.internal_store(),
+        WAREHOUSE_SUBDIR,
+    ));
 
     init_catalog(catalog);
     let _ = WAREHOUSE_STORE.set(drop_store);

@@ -315,7 +315,9 @@ impl RaggedDataset {
                 }
                 RaggedArray::ObservationVariable(array) => {
                     let obs_dim = array.dimensions().first().cloned().ok_or_else(|| {
-                        anyhow::anyhow!("observation variable {name} must have at least one dimension")
+                        anyhow::anyhow!(
+                            "observation variable {name} must have at least one dimension"
+                        )
                     })?;
                     let cum = &offsets[&obs_dim];
                     let obs_start = cum[index];
@@ -396,7 +398,9 @@ impl RaggedDataset {
                 }
                 RaggedArray::ObservationVariable(array) => {
                     let obs_dim = array.dimensions().first().cloned().ok_or_else(|| {
-                        anyhow::anyhow!("observation variable {name} must have at least one dimension")
+                        anyhow::anyhow!(
+                            "observation variable {name} must have at least one dimension"
+                        )
                     })?;
                     let cum = &offsets[&obs_dim];
                     let obs_start = cum[start];

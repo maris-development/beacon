@@ -8,6 +8,29 @@ permissions:
   contents: read
 
 jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust (1.91)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+          components: rustfmt
+
+      - name: Check formatting
+        # Plain `cargo fmt` (no --all) formats every workspace member but not
+        # their path dependencies, so the vendored beacon-binary-format
+        # submodule (excluded from the workspace) is skipped. It is formatted
+        # in its own upstream repository.
+        run: cargo fmt -- --check
+
   ci:
     name: Clippy, test, and build
     runs-on: ubuntu-latest

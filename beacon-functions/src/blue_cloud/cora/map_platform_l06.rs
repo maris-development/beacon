@@ -60,8 +60,10 @@ fn map_cora_platform_l06_impl(
             ColumnarValue::Scalar(ScalarValue::Utf8(bigram)),
             ColumnarValue::Array(wmo_inst_type_arr),
         ) => {
-            let wmo_inst_type_array =
-                crate::util::downcast_arg::<StringArray>(wmo_inst_type_arr, "map_cora_platform_l06")?;
+            let wmo_inst_type_array = crate::util::downcast_arg::<StringArray>(
+                wmo_inst_type_arr,
+                "map_cora_platform_l06",
+            )?;
 
             Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(
                 wmo_inst_type_array.iter().map(|wmo_inst_type| {
@@ -125,10 +127,22 @@ mod tests {
 
     #[test]
     fn known_bigrams_map_to_l06_codes() {
-        assert_eq!(map_cora_platform_func_impl(Some("BO"), None), Some("SDN:L06::30"));
-        assert_eq!(map_cora_platform_func_impl(Some("DB"), None), Some("SDN:L06::42"));
-        assert_eq!(map_cora_platform_func_impl(Some("GL"), None), Some("SDN:L06::27"));
-        assert_eq!(map_cora_platform_func_impl(Some("XX"), None), Some("SDN:L06::0"));
+        assert_eq!(
+            map_cora_platform_func_impl(Some("BO"), None),
+            Some("SDN:L06::30")
+        );
+        assert_eq!(
+            map_cora_platform_func_impl(Some("DB"), None),
+            Some("SDN:L06::42")
+        );
+        assert_eq!(
+            map_cora_platform_func_impl(Some("GL"), None),
+            Some("SDN:L06::27")
+        );
+        assert_eq!(
+            map_cora_platform_func_impl(Some("XX"), None),
+            Some("SDN:L06::0")
+        );
     }
 
     #[test]
@@ -158,10 +172,8 @@ mod tests {
 
     #[test]
     fn udf_handles_array_array() {
-        let bigrams = ColumnarValue::Array(Arc::new(StringArray::from(vec![
-            Some("BO"),
-            Some("ZZ"),
-        ])));
+        let bigrams =
+            ColumnarValue::Array(Arc::new(StringArray::from(vec![Some("BO"), Some("ZZ")])));
         let wmo = ColumnarValue::Array(Arc::new(StringArray::from(vec![
             None::<&str>,
             None::<&str>,
@@ -194,6 +206,9 @@ mod tests {
         let bigram = ColumnarValue::Scalar(ScalarValue::Utf8(Some("ZZ".into())));
         let wmo = ColumnarValue::Scalar(ScalarValue::Utf8(None));
         let out = map_cora_platform_l06_impl(&[bigram, wmo]).unwrap();
-        assert!(matches!(out, ColumnarValue::Scalar(ScalarValue::Utf8(None))));
+        assert!(matches!(
+            out,
+            ColumnarValue::Scalar(ScalarValue::Utf8(None))
+        ));
     }
 }

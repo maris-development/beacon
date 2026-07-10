@@ -4,10 +4,8 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use datafusion::{
-    catalog::TableFunctionImpl,
-    datasource::file_format::FileFormatFactory,
-    execution::object_store::ObjectStoreUrl,
-    prelude::SessionContext,
+    catalog::TableFunctionImpl, datasource::file_format::FileFormatFactory,
+    execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 
 use beacon_common::table_function::BeaconTableFunctionImpl;

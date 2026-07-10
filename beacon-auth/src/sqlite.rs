@@ -401,7 +401,10 @@ mod tests {
         assert!(store.create_user("bob", "pw").is_err());
 
         store.grant_role("bob", "writer").unwrap();
-        assert_eq!(store.verify("bob", "pw").unwrap(), vec!["writer".to_string()]);
+        assert_eq!(
+            store.verify("bob", "pw").unwrap(),
+            vec!["writer".to_string()]
+        );
         assert!(store.verify("bob", "wrong").is_err());
 
         store.revoke_role("bob", "writer").unwrap();

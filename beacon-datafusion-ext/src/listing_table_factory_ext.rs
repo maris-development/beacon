@@ -16,7 +16,9 @@ use datafusion::{
     catalog::{Session, TableProvider, TableProviderFactory},
 };
 
-use crate::table_ext::{ExternalTable, ExternalTableDefinition, ExternalTableRebuild, build_listing_table};
+use crate::table_ext::{
+    ExternalTable, ExternalTableDefinition, ExternalTableRebuild, build_listing_table,
+};
 
 type PartitionCols = Vec<(String, DataType)>;
 
@@ -123,14 +125,11 @@ impl TableProviderFactory for ListingTableFactoryExt {
 
         // Resolve the runtime's datasets store from the session config extension
         // so self-refreshing tables can subscribe to its change events.
-        let datasets_store = self
-            .session_ctx
-            .upgrade()
-            .and_then(|ctx| {
-                ctx.state()
-                    .config()
-                    .get_extension::<beacon_object_storage::DatasetsStore>()
-            });
+        let datasets_store = self.session_ctx.upgrade().and_then(|ctx| {
+            ctx.state()
+                .config()
+                .get_extension::<beacon_object_storage::DatasetsStore>()
+        });
         let events = crate::table_ext::datasets_store_events(&self.store_url, datasets_store);
 
         let external_table = ExternalTable::new_self_refreshing(

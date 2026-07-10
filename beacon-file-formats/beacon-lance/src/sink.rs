@@ -17,7 +17,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 
-use crate::io::{write_stream, WriteKind};
+use crate::io::{WriteKind, write_stream};
 use crate::warehouse::LanceWarehouse;
 
 /// Sink that applies a stream of batches to a single Lance dataset (by URI).

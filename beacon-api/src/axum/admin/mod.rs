@@ -36,10 +36,7 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<Runtime>>, utoipa::openapi::Op
     let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
         .routes(routes!(check::check))
         .routes(routes!(crawlers::create_crawler, crawlers::list_crawlers))
-        .routes(routes!(
-            crawlers::get_crawler,
-            crawlers::drop_crawler
-        ))
+        .routes(routes!(crawlers::get_crawler, crawlers::drop_crawler))
         .routes(routes!(crawlers::run_crawler))
         .routes(routes!(external_tables::create_external_table))
         .routes(routes!(datasets::upload_dataset))

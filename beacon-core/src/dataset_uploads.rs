@@ -115,12 +115,7 @@ impl UploadManager {
     /// On an object-store failure the whole session is aborted and removed, since
     /// a partially-written multipart upload cannot be safely resumed; the client
     /// must restart the upload.
-    pub async fn put_part(
-        &self,
-        id: Uuid,
-        part_number: u32,
-        data: Bytes,
-    ) -> Result<(), FileError> {
+    pub async fn put_part(&self, id: Uuid, part_number: u32, data: Bytes) -> Result<(), FileError> {
         let session = self.session(id)?;
         let mut guard = session.lock().await;
 
@@ -205,7 +200,9 @@ impl UploadManager {
     /// Spawn the background task that aborts sessions idle longer than `ttl`. It
     /// stops once the manager is dropped (the `Weak` no longer upgrades).
     fn spawn_sweeper(manager: Weak<UploadManager>, ttl: Duration) {
-        let interval = ttl.min(MIN_SWEEP_INTERVAL.max(ttl / 4)).max(MIN_SWEEP_INTERVAL);
+        let interval = ttl
+            .min(MIN_SWEEP_INTERVAL.max(ttl / 4))
+            .max(MIN_SWEEP_INTERVAL);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
@@ -264,8 +261,12 @@ mod tests {
         let path = Path::from("big/data.parquet");
 
         let id = mgr.initiate(&store, path.clone(), 0).await.unwrap();
-        mgr.put_part(id, 1, Bytes::from_static(b"aaaa")).await.unwrap();
-        mgr.put_part(id, 2, Bytes::from_static(b"bbbb")).await.unwrap();
+        mgr.put_part(id, 1, Bytes::from_static(b"aaaa"))
+            .await
+            .unwrap();
+        mgr.put_part(id, 2, Bytes::from_static(b"bbbb"))
+            .await
+            .unwrap();
         let res = mgr.complete(id).await.unwrap();
         assert_eq!(res.size, 8);
         assert_eq!(res.path, "big/data.parquet");
@@ -282,10 +283,16 @@ mod tests {
             .initiate(&store, Path::from("a.parquet"), 0)
             .await
             .unwrap();
-        mgr.put_part(id, 1, Bytes::from_static(b"one")).await.unwrap();
+        mgr.put_part(id, 1, Bytes::from_static(b"one"))
+            .await
+            .unwrap();
         // Re-send part 1 (e.g. a lost response): accepted as a no-op.
-        mgr.put_part(id, 1, Bytes::from_static(b"one")).await.unwrap();
-        mgr.put_part(id, 2, Bytes::from_static(b"two")).await.unwrap();
+        mgr.put_part(id, 1, Bytes::from_static(b"one"))
+            .await
+            .unwrap();
+        mgr.put_part(id, 2, Bytes::from_static(b"two"))
+            .await
+            .unwrap();
         let res = mgr.complete(id).await.unwrap();
         assert_eq!(res.size, 6);
     }
@@ -298,11 +305,16 @@ mod tests {
             .initiate(&store, Path::from("a.parquet"), 0)
             .await
             .unwrap();
-        mgr.put_part(id, 1, Bytes::from_static(b"one")).await.unwrap();
+        mgr.put_part(id, 1, Bytes::from_static(b"one"))
+            .await
+            .unwrap();
         // Skipping part 2 → 3 is a gap.
         assert!(matches!(
             mgr.put_part(id, 3, Bytes::from_static(b"three")).await,
-            Err(FileError::PartOutOfOrder { got: 3, expected: 2 })
+            Err(FileError::PartOutOfOrder {
+                got: 3,
+                expected: 2
+            })
         ));
     }
 
@@ -328,7 +340,9 @@ mod tests {
             .initiate(&store, Path::from("a.parquet"), 5)
             .await
             .unwrap();
-        mgr.put_part(id, 1, Bytes::from_static(b"abc")).await.unwrap();
+        mgr.put_part(id, 1, Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
         // 3 + 4 = 7 > cap of 5 → rejected, session torn down.
         assert!(matches!(
             mgr.put_part(id, 2, Bytes::from_static(b"defg")).await,

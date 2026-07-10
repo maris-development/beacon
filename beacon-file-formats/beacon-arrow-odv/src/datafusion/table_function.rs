@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use crate::datafusion::OdvFormat;
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
-use crate::datafusion::OdvFormat;
 use datafusion::{
     catalog::TableFunctionImpl,
     execution::object_store::ObjectStoreUrl,
@@ -64,7 +64,8 @@ impl TableFunctionImpl for ReadOdvAsciiFunc {
         &self,
         args: &[Expr],
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_odv_ascii")?;
+        let glob_paths =
+            beacon_common::table_function::parse_glob_paths_arg(args, "read_odv_ascii")?;
 
         tracing::debug!("read_odv_ascii glob paths: {:?}", glob_paths);
 

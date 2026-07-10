@@ -15,12 +15,12 @@ pub use files::temp_output_file::TempOutputFile;
 pub use files::{create_listing_url, create_temp_output_file, list_dataset_schema, list_datasets};
 pub use table_runtime::init_tables;
 pub use table_runtime::persistent_schema_provider::PersistentSchemaProvider;
-pub use table_runtime::schema_persistence::{definition_from_provider, SchemaPersistenceService};
+pub use table_runtime::schema_persistence::{SchemaPersistenceService, definition_from_provider};
 
 pub mod prelude {
     pub use super::files::*;
     pub use super::{
-        definition_from_provider, init_tables, register_object_stores, PersistentSchemaProvider,
+        PersistentSchemaProvider, definition_from_provider, init_tables, register_object_stores,
     };
 }
 

@@ -32,7 +32,11 @@ pub struct LanceTableDefinition {
 }
 
 impl LanceTableDefinition {
-    pub fn new(name: impl Into<String>, namespace: Vec<String>, location: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        namespace: Vec<String>,
+        location: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             namespace,

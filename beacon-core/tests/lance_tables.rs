@@ -10,7 +10,10 @@ use futures::TryStreamExt;
 /// Run SQL as a super-user (DDL/DML allowed) and collect the result batches.
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
-        .run_query(beacon_core::query::Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(
+            beacon_core::query::Query::sql(sql.to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .unwrap_or_else(|error| panic!("SQL failed to plan/execute: {sql}\n{error}"))
         .into_record_stream()
@@ -54,15 +57,27 @@ async fn lance_create_insert_update_delete() {
         )
         .await;
 
-    run(&runtime, &format!("CREATE TABLE {table} (id BIGINT, name VARCHAR)")).await;
-    run(&runtime, &format!("INSERT INTO {table} VALUES (1, 'a'), (2, 'b'), (3, 'c')")).await;
+    run(
+        &runtime,
+        &format!("CREATE TABLE {table} (id BIGINT, name VARCHAR)"),
+    )
+    .await;
+    run(
+        &runtime,
+        &format!("INSERT INTO {table} VALUES (1, 'a'), (2, 'b'), (3, 'c')"),
+    )
+    .await;
     assert_eq!(
         scalar_count(&run(&runtime, &format!("SELECT count(*) FROM {table}")).await),
         3
     );
 
     // UPDATE WHERE: only the matching row changes; the others are untouched.
-    run(&runtime, &format!("UPDATE {table} SET name = 'Z' WHERE id = 2")).await;
+    run(
+        &runtime,
+        &format!("UPDATE {table} SET name = 'Z' WHERE id = 2"),
+    )
+    .await;
     assert_eq!(
         scalar_string(&run(&runtime, &format!("SELECT name FROM {table} WHERE id = 2")).await),
         "Z"
@@ -82,7 +97,11 @@ async fn lance_create_insert_update_delete() {
     run(&runtime, &format!("UPDATE {table} SET name = 'all'")).await;
     assert_eq!(
         scalar_count(
-            &run(&runtime, &format!("SELECT count(DISTINCT name) FROM {table}")).await
+            &run(
+                &runtime,
+                &format!("SELECT count(DISTINCT name) FROM {table}")
+            )
+            .await
         ),
         1,
         "UPDATE without WHERE should set every row"
@@ -97,7 +116,11 @@ async fn lance_create_insert_update_delete() {
     );
     assert_eq!(
         scalar_count(
-            &run(&runtime, &format!("SELECT id FROM {table} ORDER BY id LIMIT 1")).await
+            &run(
+                &runtime,
+                &format!("SELECT id FROM {table} ORDER BY id LIMIT 1")
+            )
+            .await
         ),
         2,
         "the smallest surviving id should be 2"

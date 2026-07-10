@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::datafusion::cache::AtlasReaderCache;
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use beacon_nd_array::arrow::{
     batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
     pushdown_filter::PushdownFilter,
 };
 use beacon_object_storage::DatasetsStore;
-use crate::datafusion::cache::AtlasReaderCache;
 use datafusion::physical_expr_adapter::BatchAdapterFactory;
 use datafusion::{
     common::Statistics,

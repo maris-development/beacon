@@ -90,11 +90,7 @@ fn bench_subset_2d(c: &mut Criterion) {
     let n_lon = 2048usize;
     let n = n_lat * n_lon;
     let data: Vec<f64> = (0..n).map(|i| i as f64).collect();
-    let array = make_f64(
-        data,
-        vec![n_lat, n_lon],
-        vec![dstr("lat"), dstr("lon")],
-    );
+    let array = make_f64(data, vec![n_lat, n_lon], vec![dstr("lat"), dstr("lon")]);
 
     // (name, start, shape)
     let cases: &[(&str, Vec<usize>, Vec<usize>)] = &[
@@ -109,11 +105,7 @@ fn bench_subset_2d(c: &mut Criterion) {
             vec![256, 512],
             vec![512, 1024], // partial last axis → non-contiguous
         ),
-        (
-            "small_inner_window",
-            vec![100, 100],
-            vec![64, 128],
-        ),
+        ("small_inner_window", vec![100, 100], vec![64, 128]),
     ];
 
     let mut group = c.benchmark_group("subset_2d");
@@ -233,11 +225,7 @@ fn bench_subset_to_arrow_with_fill(c: &mut Criterion) {
         )
         .unwrap(),
     );
-    let array_no_fill = make_f64(
-        data,
-        vec![n_lat, n_lon],
-        vec![dstr("lat"), dstr("lon")],
-    );
+    let array_no_fill = make_f64(data, vec![n_lat, n_lon], vec![dstr("lat"), dstr("lon")]);
 
     let start = vec![32, 32];
     let shape = vec![128, 128];

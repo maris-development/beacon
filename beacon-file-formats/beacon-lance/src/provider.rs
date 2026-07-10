@@ -12,15 +12,15 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
-use datafusion::datasource::sink::DataSinkExec;
 use datafusion::datasource::TableType;
+use datafusion::datasource::sink::DataSinkExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
-use lance::dataset::builder::DatasetBuilder;
 use lance::datafusion::LanceTableProvider;
+use lance::dataset::builder::DatasetBuilder;
 use lance::session::Session as LanceSession;
 
 use crate::definition::LanceTableDefinition;
@@ -57,7 +57,9 @@ impl LanceTable {
     ) -> anyhow::Result<Self> {
         let provider = open_read_provider(&definition.location, warehouse.session())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to open Lance table '{}': {e}", definition.name))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to open Lance table '{}': {e}", definition.name)
+            })?;
         Ok(Self::new(definition, provider.schema(), warehouse))
     }
 

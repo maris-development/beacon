@@ -170,7 +170,10 @@ impl FileFormat for CsvFormat {
             .await
     }
 
-    fn file_source(&self, table_schema: datafusion::datasource::table_schema::TableSchema) -> Arc<dyn FileSource> {
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
         self.inner_format.file_source(table_schema)
     }
 }

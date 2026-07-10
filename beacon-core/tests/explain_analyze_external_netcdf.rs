@@ -18,7 +18,10 @@ use futures::TryStreamExt;
 
 async fn collect(runtime: &Runtime, sql: &str) -> anyhow::Result<Vec<RecordBatch>> {
     Ok(runtime
-        .run_query(beacon_core::query::Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(
+            beacon_core::query::Query::sql(sql.to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
         .await?
         .into_record_stream()?
         .try_collect::<Vec<_>>()

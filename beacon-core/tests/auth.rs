@@ -80,7 +80,10 @@ async fn admin_credentials_authenticate_as_super_user() {
     let (runtime, config) = runtime_with(config(false, true)).await;
     let identity = admin_identity(&runtime, &config).await;
     assert_eq!(identity.username, config.admin.username);
-    assert!(identity.is_super_user, "the bootstrapped admin is a super-user");
+    assert!(
+        identity.is_super_user,
+        "the bootstrapped admin is a super-user"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -242,7 +245,11 @@ async fn seed_two_tables_and_reader(runtime: &Runtime) -> (String, String, AuthI
     exec_admin(runtime, &format!("CREATE ROLE {role}")).await;
     exec_admin(runtime, &format!("CREATE USER {user} WITH PASSWORD 'pw'")).await;
     exec_admin(runtime, &format!("GRANT ROLE {role} TO USER {user}")).await;
-    exec_admin(runtime, &format!("GRANT SELECT ON TABLE {t1} TO ROLE {role}")).await;
+    exec_admin(
+        runtime,
+        &format!("GRANT SELECT ON TABLE {t1} TO ROLE {role}"),
+    )
+    .await;
 
     let identity = runtime
         .authenticate(&Credential::basic(user, "pw"))
@@ -283,16 +290,22 @@ async fn enforced_deny_wins_over_grant() {
     exec_admin(&runtime, &format!("GRANT ROLE {role} TO USER {user}")).await;
     // Grant SELECT on everything, then deny one table — deny must win.
     exec_admin(&runtime, &format!("GRANT SELECT TO ROLE {role}")).await;
-    exec_admin(&runtime, &format!("DENY SELECT ON TABLE {t2} TO ROLE {role}")).await;
+    exec_admin(
+        &runtime,
+        &format!("DENY SELECT ON TABLE {t2} TO ROLE {role}"),
+    )
+    .await;
 
     let alice = runtime
         .authenticate(&Credential::basic(user, "pw"))
         .await
         .unwrap();
 
-    assert!(exec(&runtime, &format!("SELECT * FROM {t1}"), alice.clone())
-        .await
-        .is_ok());
+    assert!(
+        exec(&runtime, &format!("SELECT * FROM {t1}"), alice.clone())
+            .await
+            .is_ok()
+    );
     assert!(
         exec(&runtime, &format!("SELECT * FROM {t2}"), alice)
             .await
@@ -316,7 +329,11 @@ async fn enforced_revoke_removes_access() {
     exec_admin(&runtime, &format!("CREATE ROLE {role}")).await;
     exec_admin(&runtime, &format!("CREATE USER {user} WITH PASSWORD 'pw'")).await;
     exec_admin(&runtime, &format!("GRANT ROLE {role} TO USER {user}")).await;
-    exec_admin(&runtime, &format!("GRANT SELECT ON TABLE {table} TO ROLE {role}")).await;
+    exec_admin(
+        &runtime,
+        &format!("GRANT SELECT ON TABLE {table} TO ROLE {role}"),
+    )
+    .await;
     let u = runtime
         .authenticate(&Credential::basic(user, "pw"))
         .await
@@ -326,7 +343,11 @@ async fn enforced_revoke_removes_access() {
         .await
         .is_ok());
 
-    exec_admin(&runtime, &format!("REVOKE SELECT ON TABLE {table} FROM ROLE {role}")).await;
+    exec_admin(
+        &runtime,
+        &format!("REVOKE SELECT ON TABLE {table} FROM ROLE {role}"),
+    )
+    .await;
     assert!(
         exec(&runtime, &format!("SELECT * FROM {table}"), u)
             .await
@@ -375,8 +396,16 @@ async fn enforcement_off_allows_ungranted_reads() {
     exec_admin(&runtime, &format!("INSERT INTO {table} VALUES (1)")).await;
 
     // A role-less identity can still read when enforcement is off (backwards-compatible default).
-    let result = exec(&runtime, &format!("SELECT * FROM {table}"), AuthIdentity::empty()).await;
-    assert_eq!(total_rows(&result.expect("read allowed when enforce=off")), 1);
+    let result = exec(
+        &runtime,
+        &format!("SELECT * FROM {table}"),
+        AuthIdentity::empty(),
+    )
+    .await;
+    assert_eq!(
+        total_rows(&result.expect("read allowed when enforce=off")),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -392,7 +421,10 @@ async fn information_schema_is_exempt_from_enforcement() {
         AuthIdentity::empty(),
     )
     .await;
-    assert!(result.is_ok(), "information_schema must be readable: {result:?}");
+    assert!(
+        result.is_ok(),
+        "information_schema must be readable: {result:?}"
+    );
 }
 
 // --------------------------------------------------------------------------------------------
@@ -428,9 +460,13 @@ async fn non_super_user_cannot_manage_auth_or_run_ddl() {
     }
 
     // Standard DDL is also rejected for a non-super-user.
-    assert!(exec(&runtime, &format!("CREATE TABLE {} (a BIGINT)", unique("x")), alice)
-        .await
-        .is_err());
+    assert!(exec(
+        &runtime,
+        &format!("CREATE TABLE {} (a BIGINT)", unique("x")),
+        alice
+    )
+    .await
+    .is_err());
 }
 
 // --------------------------------------------------------------------------------------------
@@ -491,7 +527,10 @@ async fn enforced_path_grant_matches_only_granted_prefix() {
         alice.clone(),
     )
     .await;
-    assert!(allowed.is_ok(), "granted path should be readable: {allowed:?}");
+    assert!(
+        allowed.is_ok(),
+        "granted path should be readable: {allowed:?}"
+    );
 
     let denied = exec(
         &runtime,

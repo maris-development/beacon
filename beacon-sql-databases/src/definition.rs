@@ -53,10 +53,7 @@ impl SqlDatabaseTableDefinition {
     /// Decrypt the stored credential using the deployment master key from the
     /// session's [`beacon_config::Config`] extension. Errors (fails closed) if a
     /// secret is present but no `BEACON_SECRETS_KEY` is configured.
-    fn decrypt_password(
-        &self,
-        context: &SessionContext,
-    ) -> anyhow::Result<Option<SecretString>> {
+    fn decrypt_password(&self, context: &SessionContext) -> anyhow::Result<Option<SecretString>> {
         let Some(secret) = &self.secret else {
             return Ok(None);
         };
@@ -64,7 +61,9 @@ impl SqlDatabaseTableDefinition {
             .state()
             .config()
             .get_extension::<beacon_config::Config>()
-            .ok_or_else(|| anyhow!("Beacon configuration is unavailable; cannot decrypt credentials"))?;
+            .ok_or_else(|| {
+                anyhow!("Beacon configuration is unavailable; cannot decrypt credentials")
+            })?;
         let key = config.secrets.master_key().ok_or_else(|| {
             anyhow!(
                 "BEACON_SECRETS_KEY is not set; cannot decrypt stored credentials for table '{}'",

@@ -4,15 +4,11 @@
 
 use std::sync::Arc;
 
-use beacon_datafusion_ext::file_collection::FileCollection;
-use beacon_arrow_odv::datafusion::OdvFormat;
 use beacon_arrow_csv::datafusion::CsvFormat;
+use beacon_arrow_odv::datafusion::OdvFormat;
+use beacon_datafusion_ext::file_collection::FileCollection;
 use datafusion::{
-    datasource::{
-        file_format::FileFormat,
-        listing::ListingTableUrl,
-        provider_as_source,
-    },
+    datasource::{file_format::FileFormat, listing::ListingTableUrl, provider_as_source},
     logical_expr::{LogicalPlanBuilder, TableSource},
     prelude::SessionContext,
 };
@@ -309,20 +305,16 @@ mod tests {
     #[tokio::test]
     async fn csv_and_odv_build_directly() {
         let ctx = SessionContext::new();
-        assert!(
-            FromFormat::Csv {
-                delimiter: Some(';'),
-                paths: vec![],
-            }
+        assert!(FromFormat::Csv {
+            delimiter: Some(';'),
+            paths: vec![],
+        }
+        .file_format(&ctx)
+        .await
+        .is_ok());
+        assert!(FromFormat::Odv { paths: vec![] }
             .file_format(&ctx)
             .await
-            .is_ok()
-        );
-        assert!(
-            FromFormat::Odv { paths: vec![] }
-                .file_format(&ctx)
-                .await
-                .is_ok()
-        );
+            .is_ok());
     }
 }

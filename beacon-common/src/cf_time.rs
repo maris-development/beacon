@@ -208,18 +208,22 @@ fn parse_cf_time_epoch_julian(units: &str) -> Result<(Epoch, Unit)> {
     })?;
 
     // Parse the date into year, month, day
-    let mut year: i32 = caps["year"]
-        .parse()
-        .map_err(|e| CommonError::CfTime(format!("Invalid year in units string: {units}. Error: {e}")))?;
-    let month_num: u32 = caps["month"]
-        .parse()
-        .map_err(|e| CommonError::CfTime(format!("Invalid month in units string: {units}. Error: {e}")))?;
-    let month = julian::Month::try_from(month_num).map_err(|e| {
-        CommonError::CfTime(format!("Invalid month in units string: {units}. Error: {e:?}"))
+    let mut year: i32 = caps["year"].parse().map_err(|e| {
+        CommonError::CfTime(format!("Invalid year in units string: {units}. Error: {e}"))
     })?;
-    let day: u32 = caps["day"]
-        .parse()
-        .map_err(|e| CommonError::CfTime(format!("Invalid day in units string: {units}. Error: {e}")))?;
+    let month_num: u32 = caps["month"].parse().map_err(|e| {
+        CommonError::CfTime(format!(
+            "Invalid month in units string: {units}. Error: {e}"
+        ))
+    })?;
+    let month = julian::Month::try_from(month_num).map_err(|e| {
+        CommonError::CfTime(format!(
+            "Invalid month in units string: {units}. Error: {e:?}"
+        ))
+    })?;
+    let day: u32 = caps["day"].parse().map_err(|e| {
+        CommonError::CfTime(format!("Invalid day in units string: {units}. Error: {e}"))
+    })?;
 
     let jul_cal = julian::Calendar::JULIAN;
 

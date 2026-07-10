@@ -364,10 +364,7 @@ struct RawConfig {
         default = "Content-Type,Authorization"
     )]
     allowed_headers: String,
-    #[envconfig(
-        from = "BEACON_CORS_EXPOSE_HEADERS",
-        default = "x-beacon-query-id"
-    )]
+    #[envconfig(from = "BEACON_CORS_EXPOSE_HEADERS", default = "x-beacon-query-id")]
     expose_headers: String,
     #[envconfig(from = "BEACON_CORS_ALLOWED_CREDENTIALS", default = "false")]
     allowed_credentials: bool,
@@ -484,7 +481,9 @@ impl From<RawConfig> for Config {
                 default_table_engine: match raw.default_table_engine.parse() {
                     Ok(engine) => engine,
                     Err(e) => {
-                        tracing::warn!("invalid BEACON_DEFAULT_TABLE_ENGINE: {e}; defaulting to lance");
+                        tracing::warn!(
+                            "invalid BEACON_DEFAULT_TABLE_ENGINE: {e}; defaulting to lance"
+                        );
                         TableEngine::default()
                     }
                 },
@@ -809,7 +808,10 @@ mod tests {
     fn table_engine_parses_case_insensitively_and_trims() {
         assert_eq!("lance".parse::<TableEngine>(), Ok(TableEngine::Lance));
         assert_eq!("ICEBERG".parse::<TableEngine>(), Ok(TableEngine::Iceberg));
-        assert_eq!("  Iceberg  ".parse::<TableEngine>(), Ok(TableEngine::Iceberg));
+        assert_eq!(
+            "  Iceberg  ".parse::<TableEngine>(),
+            Ok(TableEngine::Iceberg)
+        );
         assert!("postgres".parse::<TableEngine>().is_err());
     }
 

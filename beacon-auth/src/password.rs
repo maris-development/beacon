@@ -41,7 +41,10 @@ mod tests {
     fn hashes_are_salted_and_not_plaintext() {
         let a = hash_password("same").unwrap();
         let b = hash_password("same").unwrap();
-        assert_ne!(a, b, "salt should make identical passwords hash differently");
+        assert_ne!(
+            a, b,
+            "salt should make identical passwords hash differently"
+        );
         assert!(!a.contains("same"));
     }
 

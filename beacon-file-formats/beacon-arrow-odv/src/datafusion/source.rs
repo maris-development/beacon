@@ -13,7 +13,7 @@ use datafusion::{
         schema_adapter::SchemaAdapterFactory,
         table_schema::TableSchema,
     },
-    physical_expr::{LexOrdering, projection::ProjectionExprs},
+    physical_expr::{projection::ProjectionExprs, LexOrdering},
     physical_expr_adapter::BatchAdapterFactory,
     physical_plan::metrics::ExecutionPlanMetricsSet,
 };

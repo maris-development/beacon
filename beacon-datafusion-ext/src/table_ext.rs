@@ -793,7 +793,10 @@ impl TableDefinition for ViewTableDefinition {
             LogicalPlan::Ddl(DdlStatement::CreateView(plan)) => plan.input.as_ref().clone(),
             plan => plan,
         };
-        Ok(Arc::new(ViewTable::new(input, Some(self.definition.clone()))))
+        Ok(Arc::new(ViewTable::new(
+            input,
+            Some(self.definition.clone()),
+        )))
     }
 
     fn table_name(&self) -> &str {
@@ -926,12 +929,13 @@ impl TableDefinition for MaterializedViewDefinition {
         _data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
         let session_state = context.state();
-        let file_format_factory = session_state
-            .get_file_format_factory("parquet")
-            .ok_or(config_datafusion_err!(
-                "Unable to build materialized view '{}': parquet FileFormat not found.",
-                self.name
-            ))?;
+        let file_format_factory =
+            session_state
+                .get_file_format_factory("parquet")
+                .ok_or(config_datafusion_err!(
+                    "Unable to build materialized view '{}': parquet FileFormat not found.",
+                    self.name
+                ))?;
         let file_format =
             file_format_factory.create(&session_state, &std::collections::HashMap::new())?;
 
@@ -993,7 +997,11 @@ mod self_refresh_tests {
     fn write_parquet_i64(disk_path: &std::path::Path, values: &[i64]) {
         std::fs::create_dir_all(disk_path.parent().expect("path has parent"))
             .expect("create parent dirs");
-        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Int64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(values.to_vec()))],
@@ -1055,7 +1063,13 @@ mod self_refresh_tests {
             options: HashMap::new(),
             if_not_exists: false,
         };
-        ExternalTable::new_self_refreshing(definition, initial, rebuild, Arc::downgrade(ctx), events)
+        ExternalTable::new_self_refreshing(
+            definition,
+            initial,
+            rebuild,
+            Arc::downgrade(ctx),
+            events,
+        )
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1065,7 +1079,8 @@ mod self_refresh_tests {
         let ctx = ctx_with_datasets(dir.path());
 
         let external = build_external(&ctx, None).await;
-        ctx.register_table("obs", Arc::new(external.clone())).unwrap();
+        ctx.register_table("obs", Arc::new(external.clone()))
+            .unwrap();
         assert_eq!(count_rows(&ctx).await, 1);
 
         // A new file appears; manual refresh re-lists and picks it up.

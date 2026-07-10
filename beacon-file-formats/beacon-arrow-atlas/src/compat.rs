@@ -181,10 +181,18 @@ pub fn array_to_nd_array(
 /// Convert an atlas attribute value into a rank-0 ND array.
 pub fn attribute_to_nd_array(_name: &str, attr: Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
     match attr {
-        Attr::Bool(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(v))?)),
-        Attr::Int64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(v))?)),
-        Attr::Float64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(v))?)),
-        Attr::String(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(v))?)),
+        Attr::Bool(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+            v,
+        ))?)),
+        Attr::Int64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+            v,
+        ))?)),
+        Attr::Float64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+            v,
+        ))?)),
+        Attr::String(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+            v,
+        ))?)),
         Attr::TimestampNanoseconds(v) => Ok(Arc::new(NdArray::new_with_backend(
             AttributeBackend::new(TimestampNanosecond(v)),
         )?)),
@@ -288,7 +296,10 @@ mod tests {
         let nd = attribute_to_nd_array("flag", Attr::Bool(true)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::Bool);
         assert!(nd.shape().is_empty());
-        let typed = nd.as_any().downcast_ref::<NdArray<bool>>().expect("downcast");
+        let typed = nd
+            .as_any()
+            .downcast_ref::<NdArray<bool>>()
+            .expect("downcast");
         assert_eq!(typed.clone_into_raw_vec().await, vec![true]);
     }
 
@@ -296,7 +307,10 @@ mod tests {
     async fn attribute_int64_round_trips() {
         let nd = attribute_to_nd_array("count", Attr::Int64(42)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::I64);
-        let typed = nd.as_any().downcast_ref::<NdArray<i64>>().expect("downcast");
+        let typed = nd
+            .as_any()
+            .downcast_ref::<NdArray<i64>>()
+            .expect("downcast");
         assert_eq!(typed.clone_into_raw_vec().await, vec![42i64]);
     }
 
@@ -304,7 +318,10 @@ mod tests {
     async fn attribute_float64_round_trips() {
         let nd = attribute_to_nd_array("scale", Attr::Float64(1.5)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::F64);
-        let typed = nd.as_any().downcast_ref::<NdArray<f64>>().expect("downcast");
+        let typed = nd
+            .as_any()
+            .downcast_ref::<NdArray<f64>>()
+            .expect("downcast");
         assert_eq!(typed.clone_into_raw_vec().await, vec![1.5f64]);
     }
 

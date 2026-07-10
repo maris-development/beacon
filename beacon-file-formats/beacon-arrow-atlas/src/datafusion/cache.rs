@@ -77,7 +77,10 @@ pub async fn get_or_open_atlas(
 
     cache
         .cache
-        .try_get_with(key, async move { reader::open_atlas_store(store, &path).await })
+        .try_get_with(
+            key,
+            async move { reader::open_atlas_store(store, &path).await },
+        )
         .await
         .map_err(|e: Arc<datafusion::error::DataFusionError>| {
             datafusion::error::DataFusionError::Execution(format!(
@@ -92,7 +95,11 @@ mod tests {
     use crate::datafusion::test_support::{ensure_fixture, fixture_marker_object_meta, test_store};
     use object_store::path::Path as OsPath;
 
-    fn marker_with(path: OsPath, last_modified: chrono::DateTime<chrono::Utc>, size: u64) -> ObjectMeta {
+    fn marker_with(
+        path: OsPath,
+        last_modified: chrono::DateTime<chrono::Utc>,
+        size: u64,
+    ) -> ObjectMeta {
         ObjectMeta {
             location: path,
             last_modified,

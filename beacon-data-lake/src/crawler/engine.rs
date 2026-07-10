@@ -19,9 +19,9 @@ use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, T
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
-use crate::{list_datasets, DATASETS_OBJECT_STORE_URL};
+use crate::{DATASETS_OBJECT_STORE_URL, list_datasets};
 
-use super::definition::{CrawlerDefinition, CRAWLER_OWNER_OPTION};
+use super::definition::{CRAWLER_OWNER_OPTION, CrawlerDefinition};
 use super::discovery::{assign_table_names, group_into_tables};
 
 /// Outcome of a single crawl, suitable for logging or returning over the API.
@@ -75,7 +75,10 @@ impl CrawlEngine {
             .runtime_env()
             .object_store(&*DATASETS_OBJECT_STORE_URL)
             .map_err(|e| {
-                anyhow::anyhow!("crawler '{}' could not resolve datasets store: {e}", def.name)
+                anyhow::anyhow!(
+                    "crawler '{}' could not resolve datasets store: {e}",
+                    def.name
+                )
             })?;
         let datasets = list_datasets(
             &self.session_ctx,

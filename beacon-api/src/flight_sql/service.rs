@@ -84,7 +84,10 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightInfo, Status> {
         let stream = self
             .runtime
-            .run_query(beacon_core::query::Query::sql(sql.clone()), auth.identity.clone())
+            .run_query(
+                beacon_core::query::Query::sql(sql.clone()),
+                auth.identity.clone(),
+            )
             .await
             .map_err(to_internal_status)?
             .into_record_stream()
@@ -406,11 +409,14 @@ impl FlightSqlService for BeaconFlightSqlService {
         } else {
             let stream = self
                 .runtime
-                .run_query(beacon_core::query::Query::sql(query.query.clone()), auth.identity.clone())
-            .await
-            .map_err(to_internal_status)?
-            .into_record_stream()
-            .map_err(to_internal_status)?;
+                .run_query(
+                    beacon_core::query::Query::sql(query.query.clone()),
+                    auth.identity.clone(),
+                )
+                .await
+                .map_err(to_internal_status)?
+                .into_record_stream()
+                .map_err(to_internal_status)?;
             encode_schema(stream.schema().as_ref())?
         };
 

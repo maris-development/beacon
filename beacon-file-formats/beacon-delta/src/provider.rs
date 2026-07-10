@@ -239,7 +239,10 @@ fn location_to_prefix(location: &str) -> anyhow::Result<String> {
         None => location,
     };
     let trimmed = without_scheme.trim_matches('/');
-    anyhow::ensure!(!trimmed.is_empty(), "Delta table location must not be empty");
+    anyhow::ensure!(
+        !trimmed.is_empty(),
+        "Delta table location must not be empty"
+    );
     Ok(trimmed.to_string())
 }
 
@@ -365,7 +368,10 @@ mod tests {
 
     #[test]
     fn location_to_prefix_strips_scheme_and_slashes() {
-        assert_eq!(location_to_prefix("datasets://argo/tbl").unwrap(), "argo/tbl");
+        assert_eq!(
+            location_to_prefix("datasets://argo/tbl").unwrap(),
+            "argo/tbl"
+        );
         assert_eq!(location_to_prefix("/argo/tbl/").unwrap(), "argo/tbl");
         assert_eq!(location_to_prefix("argo/tbl").unwrap(), "argo/tbl");
         assert!(location_to_prefix("datasets://").is_err());
@@ -390,7 +396,10 @@ mod tests {
         );
 
         let mut opts = HashMap::new();
-        opts.insert("format.timestamp".to_string(), "2026-01-01T00:00:00Z".to_string());
+        opts.insert(
+            "format.timestamp".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+        );
         assert_eq!(
             TimeTravel::from_options(&opts).unwrap(),
             Some(TimeTravel::Timestamp("2026-01-01T00:00:00Z".to_string()))

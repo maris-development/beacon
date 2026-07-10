@@ -799,7 +799,9 @@ side_effect_exec!(RunCrawlerExec, "RunCrawlerExec", |exec: &RunCrawlerExec| {
     let session = upgrade_session(&exec.session)?;
     let name = exec.name.clone();
     Ok(side_effect_stream(async move {
-        crawler::run_crawler(&session, &name).await.map_err(to_df_err)
+        crawler::run_crawler(&session, &name)
+            .await
+            .map_err(to_df_err)
     }))
 });
 
@@ -858,7 +860,9 @@ impl ShowCrawlersExec {
 impl DisplayAs for ShowCrawlersExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => write!(f, "ShowCrawlersExec"),
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "ShowCrawlersExec")
+            }
             DisplayFormatType::TreeRender => write!(f, "ShowCrawlersExec"),
         }
     }
@@ -926,22 +930,30 @@ impl CreateIndexExec {
         }
     }
     fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CreateIndexExec: table={} column={}", self.table, self.column)
+        write!(
+            f,
+            "CreateIndexExec: table={} column={}",
+            self.table, self.column
+        )
     }
 }
 
-side_effect_exec!(CreateIndexExec, "CreateIndexExec", |exec: &CreateIndexExec| {
-    let session = upgrade_session(&exec.session)?;
-    let table = exec.table.clone();
-    let column = exec.column.clone();
-    let name = exec.name.clone();
-    let using = exec.using.clone();
-    Ok(side_effect_stream(async move {
-        actions::create_index(&session, &table, &column, name, using)
-            .await
-            .map_err(to_df_err)
-    }))
-});
+side_effect_exec!(
+    CreateIndexExec,
+    "CreateIndexExec",
+    |exec: &CreateIndexExec| {
+        let session = upgrade_session(&exec.session)?;
+        let table = exec.table.clone();
+        let column = exec.column.clone();
+        let name = exec.name.clone();
+        let using = exec.using.clone();
+        Ok(side_effect_stream(async move {
+            actions::create_index(&session, &table, &column, name, using)
+                .await
+                .map_err(to_df_err)
+        }))
+    }
+);
 
 /// Physical node for `DROP INDEX <name> ON <table>`.
 #[derive(Debug)]
@@ -1034,7 +1046,9 @@ impl ExecutionPlan for ShowIndexesExec {
         let table = self.table.clone();
         let schema = show_indexes_arrow_schema();
         let stream = futures::stream::once(async move {
-            actions::list_indexes(&session, &table).await.map_err(to_df_err)
+            actions::list_indexes(&session, &table)
+                .await
+                .map_err(to_df_err)
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
@@ -1061,7 +1075,11 @@ impl SetExtensionExec {
         }
     }
     fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SetExtensionExec: table={} kind={}", self.table, self.kind)
+        write!(
+            f,
+            "SetExtensionExec: table={} kind={}",
+            self.table, self.kind
+        )
     }
 }
 
@@ -1100,7 +1118,11 @@ impl DropExtensionExec {
         }
     }
     fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DropExtensionExec: table={} kind={}", self.table, self.kind)
+        write!(
+            f,
+            "DropExtensionExec: table={} kind={}",
+            self.table, self.kind
+        )
     }
 }
 

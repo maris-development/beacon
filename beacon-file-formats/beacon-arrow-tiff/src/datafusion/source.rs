@@ -266,21 +266,22 @@ impl TiffOpener {
         };
 
         let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading TIFF as Arrow stream: {e}"
-                ))
-            })
-            .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+        let stream =
+            any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
+                .map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Failed to adapt TIFF batch schema: {e}"
+                        "Error reading TIFF as Arrow stream: {e}"
                     ))
-                });
-                futures::future::ready(mapped)
-            })
-            .boxed();
+                })
+                .and_then(move |batch| {
+                    let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to adapt TIFF batch schema: {e}"
+                        ))
+                    });
+                    futures::future::ready(mapped)
+                })
+                .boxed();
 
         Ok(stream)
     }

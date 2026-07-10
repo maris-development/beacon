@@ -138,10 +138,18 @@ pub trait RoleStore: std::fmt::Debug + Send + Sync {
     fn load_roles(&self) -> anyhow::Result<HashMap<String, Role>>;
     fn persist_create_role(&self, name: &str) -> anyhow::Result<()>;
     fn persist_drop_role(&self, name: &str) -> anyhow::Result<()>;
-    fn persist_insert_rule(&self, role: &str, is_deny: bool, rule: &PrivilegeRule)
-        -> anyhow::Result<()>;
-    fn persist_remove_rule(&self, role: &str, is_deny: bool, rule: &PrivilegeRule)
-        -> anyhow::Result<()>;
+    fn persist_insert_rule(
+        &self,
+        role: &str,
+        is_deny: bool,
+        rule: &PrivilegeRule,
+    ) -> anyhow::Result<()>;
+    fn persist_remove_rule(
+        &self,
+        role: &str,
+        is_deny: bool,
+        rule: &PrivilegeRule,
+    ) -> anyhow::Result<()>;
 }
 
 /// In-memory registry of roles, with interior mutability for SQL-driven management.
@@ -268,21 +276,22 @@ impl RoleProvider {
         target: &ConcreteTarget,
     ) -> bool {
         let registry = self.roles.read();
-        let matched: Vec<&Role> = roles
-            .iter()
-            .filter_map(|name| registry.get(name))
-            .collect();
+        let matched: Vec<&Role> = roles.iter().filter_map(|name| registry.get(name)).collect();
 
-        let denied = matched
-            .iter()
-            .any(|role| role.denies.iter().any(|rule| rule.matches(privilege, target)));
+        let denied = matched.iter().any(|role| {
+            role.denies
+                .iter()
+                .any(|rule| rule.matches(privilege, target))
+        });
         if denied {
             return false;
         }
 
-        matched
-            .iter()
-            .any(|role| role.grants.iter().any(|rule| rule.matches(privilege, target)))
+        matched.iter().any(|role| {
+            role.grants
+                .iter()
+                .any(|rule| rule.matches(privilege, target))
+        })
     }
 }
 

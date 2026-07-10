@@ -890,7 +890,12 @@ mod tests {
 
     #[test]
     fn s3_object_url_path_style_includes_bucket() {
-        let url = s3_object_url("https://example.test", "my-bucket", false, &Path::from("a/b.nc"))
+        let url = s3_object_url(
+            "https://example.test",
+            "my-bucket",
+            false,
+            &Path::from("a/b.nc"),
+        )
         .unwrap();
         assert_eq!(url, "https://example.test/my-bucket/a/b.nc");
     }

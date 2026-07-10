@@ -432,8 +432,14 @@ mod tests {
         // Geometry column round-trips as a native GeoArrow struct (x, y children).
         let geom_idx = full.schema().index_of("geometry").expect("geometry column");
         let geom = full.column(geom_idx).as_struct();
-        let x = geom.column_by_name("x").expect("x child").as_primitive::<Float64Type>();
-        let y = geom.column_by_name("y").expect("y child").as_primitive::<Float64Type>();
+        let x = geom
+            .column_by_name("x")
+            .expect("x child")
+            .as_primitive::<Float64Type>();
+        let y = geom
+            .column_by_name("y")
+            .expect("y child")
+            .as_primitive::<Float64Type>();
         assert_eq!(x.values(), &[1.0, 3.0, 5.0]);
         assert_eq!(y.values(), &[2.0, 4.0, 6.0]);
     }
@@ -467,7 +473,11 @@ mod tests {
 
         let full = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");
         let out_schema = full.schema();
-        let names: Vec<&str> = out_schema.fields().iter().map(|f| f.name().as_str()).collect();
+        let names: Vec<&str> = out_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
         assert_eq!(names, vec!["id"], "only the projected column should remain");
         assert_eq!(full.num_rows(), 3);
         assert_eq!(
@@ -524,8 +534,7 @@ mod tests {
         assert!(inferred.field_with_name("id").is_ok());
         assert!(inferred.field_with_name("geometry").is_err());
 
-        let opener =
-            opener::GeoParquetOpener::new(object_store, inferred.clone(), 128 * 1024);
+        let opener = opener::GeoParquetOpener::new(object_store, inferred.clone(), 128 * 1024);
         let stream = opener
             .open(PartitionedFile::from(object))
             .expect("open")

@@ -1092,8 +1092,7 @@ mod tests {
             insert_op: InsertOp::Append,
             keep_partition_by_columns: false,
             file_extension: "nc".to_string(),
-            file_output_mode:
-                datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
+            file_output_mode: datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
         }
     }
 

@@ -1,4 +1,4 @@
-﻿//! High-level NetCDF reader that produces [`AnyDataset`] values.
+//! High-level NetCDF reader that produces [`AnyDataset`] values.
 //!
 //! The entry point is [`open_dataset`], which opens a NetCDF file, converts
 //! every variable and attribute into a lazy [`NdArrayD`] wrapper, and returns

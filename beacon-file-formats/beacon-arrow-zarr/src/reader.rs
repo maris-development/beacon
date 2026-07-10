@@ -66,7 +66,10 @@ pub async fn dataset_from_group(
         let array_name = array_node_path
             .strip_prefix(&group_path)
             .unwrap_or(&array_node_path);
-        let array_name = array_name.strip_prefix('/').unwrap_or(array_name).to_string();
+        let array_name = array_name
+            .strip_prefix('/')
+            .unwrap_or(array_name)
+            .to_string();
 
         // Parse the array's JSON attributes once: they drive both the
         // surfaced `{array}.{attr}` columns and CF decoding of the array.

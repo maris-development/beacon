@@ -126,11 +126,7 @@ impl UserDefinedLogicalNodeCore for CreateMaterializedViewNode {
         write!(f, "CreateMaterializedView: name={}", self.view_name)
     }
 
-    fn with_exprs_and_inputs(
-        &self,
-        _exprs: Vec<Expr>,
-        _inputs: Vec<LogicalPlan>,
-    ) -> Result<Self> {
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
         Ok(Self {
             view_name: self.view_name.clone(),
             query_sql: self.query_sql.clone(),
@@ -203,11 +199,7 @@ impl UserDefinedLogicalNodeCore for RefreshNode {
         write!(f, "Refresh: name={}", self.name)
     }
 
-    fn with_exprs_and_inputs(
-        &self,
-        _exprs: Vec<Expr>,
-        _inputs: Vec<LogicalPlan>,
-    ) -> Result<Self> {
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
         Ok(Self {
             name: self.name.clone(),
         })
@@ -434,7 +426,11 @@ impl UserDefinedLogicalNodeCore for CreateIndexNode {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "CreateIndex: table={} column={}", self.table, self.column)
+        write!(
+            f,
+            "CreateIndex: table={} column={}",
+            self.table, self.column
+        )
     }
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
         Ok(Self {
@@ -551,7 +547,11 @@ impl UserDefinedLogicalNodeCore for ReplaceTableContentsNode {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "ReplaceTableContents: table={}", self.table)
     }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, mut inputs: Vec<LogicalPlan>) -> Result<Self> {
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
         Ok(Self {
             table: self.table.clone(),
             input: inputs.swap_remove(0),

@@ -29,8 +29,8 @@ pub(crate) async fn stream_builder(
     object_store: Arc<dyn ObjectStore>,
     object: &ObjectMeta,
 ) -> Result<GeoStreamBuilder> {
-    let reader = ParquetObjectReader::new(object_store, object.location.clone())
-        .with_file_size(object.size);
+    let reader =
+        ParquetObjectReader::new(object_store, object.location.clone()).with_file_size(object.size);
 
     ParquetRecordBatchStreamBuilder::new(reader)
         .await

@@ -115,11 +115,7 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArrayDispatch<T, B> {
         Self::from_parts(Arc::new(backend), shape, dimensions)
     }
 
-    fn from_parts(
-        backend: Arc<B>,
-        shape: Vec<usize>,
-        dimensions: Vec<String>,
-    ) -> Result<Self> {
+    fn from_parts(backend: Arc<B>, shape: Vec<usize>, dimensions: Vec<String>) -> Result<Self> {
         if shape.len() != dimensions.len() {
             return Err(NdArrowError::ShapeDimensionMismatch {
                 shape_len: shape.len(),
@@ -259,7 +255,11 @@ impl<T: ArrowTypeConversion, B: ArrayBackend<T>> NdArrowArray for NdArrowArrayDi
 
         let broadcasted = aligned.broadcast(target_shape).ok_or_else(|| {
             let source_shape = self.shape();
-            tracing::warn!(?source_shape, ?target_shape, "cannot broadcast array to target shape");
+            tracing::warn!(
+                ?source_shape,
+                ?target_shape,
+                "cannot broadcast array to target shape"
+            );
             anyhow::anyhow!(
                 "Cannot broadcast array of shape {:?} to target shape {:?}",
                 source_shape,

@@ -18,7 +18,10 @@ use futures::TryStreamExt;
 
 async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
     runtime
-        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(sql.to_string()),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
         .into_record_stream()
@@ -82,7 +85,11 @@ async fn scheduled_crawler_runs_without_manual_trigger() {
     ]));
 
     // Define a crawler with a 1s schedule but DO NOT run it manually.
-    run(&runtime, "CREATE CRAWLER sched ON 'sched_src/' WITH ('schedule' '1s')").await;
+    run(
+        &runtime,
+        "CREATE CRAWLER sched ON 'sched_src/' WITH ('schedule' '1s')",
+    )
+    .await;
 
     // Now drop data in — a subsequent scheduled tick must discover and register it.
     write_parquet(&datasets.join("sched_src/a.parquet"), &schema);

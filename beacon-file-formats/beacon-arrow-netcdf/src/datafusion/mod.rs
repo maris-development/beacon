@@ -602,7 +602,9 @@ mod tests {
         options.insert("use_reader_cache".to_string(), "false".to_string());
         options.insert("enable_statistics".to_string(), "false".to_string());
         options.insert("read_dimensions".to_string(), "time, lat".to_string());
-        let format = factory.create(&ctx.state(), &options).expect("valid options");
+        let format = factory
+            .create(&ctx.state(), &options)
+            .expect("valid options");
         let netcdf = format
             .as_any()
             .downcast_ref::<NetcdfFormat>()
@@ -785,7 +787,8 @@ mod tests {
         let missing_idx = merged.index_of(&missing).unwrap();
 
         // No projection pushed → the opener reads under the full merged schema.
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(merged.clone());
+        let ts =
+            datafusion::datasource::table_schema::TableSchema::from_file_schema(merged.clone());
         let opener = source::NetCDFSource::new(store, None, ts);
         let conf = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
@@ -841,9 +844,8 @@ mod tests {
         .await
         .expect("dim schema");
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            dim_schema.clone(),
-        );
+        let ts =
+            datafusion::datasource::table_schema::TableSchema::from_file_schema(dim_schema.clone());
         let opener = source::NetCDFSource::new(store, Some(vec!["time".to_string()]), ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -944,7 +946,10 @@ mod tests {
             .iter()
             .map(|b| b.num_rows())
             .sum();
-        assert_eq!(rows, 0, "impossible latitude predicate should yield no rows");
+        assert_eq!(
+            rows, 0,
+            "impossible latitude predicate should yield no rows"
+        );
     }
 
     #[tokio::test]
@@ -997,13 +1002,12 @@ mod tests {
             .unwrap();
         let mut kept = 0i64;
         for b in &batches {
-            let col = b
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
+            let col = b.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
             for i in 0..col.len() {
-                assert!(col.value(i) > mid, "every returned lat must satisfy the predicate");
+                assert!(
+                    col.value(i) > mid,
+                    "every returned lat must satisfy the predicate"
+                );
             }
             kept += b.num_rows() as i64;
         }

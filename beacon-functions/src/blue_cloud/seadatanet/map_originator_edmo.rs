@@ -88,7 +88,10 @@ mod tests {
 
     #[test]
     fn scalar_single_parentheses() {
-        assert_eq!(scalar_result(Some("Some Institute (123)")), Some("123".to_string()));
+        assert_eq!(
+            scalar_result(Some("Some Institute (123)")),
+            Some("123".to_string())
+        );
     }
 
     #[test]

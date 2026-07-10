@@ -154,8 +154,8 @@ mod tests {
         let ctx =
             SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
         let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
-        let batch =
-            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))])
+            .unwrap();
         let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
         ctx.register_table(name, Arc::new(table)).unwrap();
         ctx
@@ -180,10 +180,14 @@ mod tests {
         let plan = plan_for(&ctx, "SELECT * FROM observations").await;
 
         let denied = auth_with_reader_grant(None);
-        assert!(authorize_logical_plan(&plan, &ctx, &denied, &identity(&["reader"]), true).is_err());
+        assert!(
+            authorize_logical_plan(&plan, &ctx, &denied, &identity(&["reader"]), true).is_err()
+        );
 
         let allowed = auth_with_reader_grant(Some(PrivilegeRule::new(Privilege::Select, None)));
-        assert!(authorize_logical_plan(&plan, &ctx, &allowed, &identity(&["reader"]), true).is_ok());
+        assert!(
+            authorize_logical_plan(&plan, &ctx, &allowed, &identity(&["reader"]), true).is_ok()
+        );
     }
 
     #[tokio::test]

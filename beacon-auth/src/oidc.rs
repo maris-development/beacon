@@ -127,7 +127,10 @@ impl OidcAuthProvider {
         let username = claim_at(&claims, &self.config.username_claim)
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                anyhow::anyhow!("token is missing the '{}' claim", self.config.username_claim)
+                anyhow::anyhow!(
+                    "token is missing the '{}' claim",
+                    self.config.username_claim
+                )
             })?
             .to_string();
 
@@ -157,7 +160,8 @@ impl AuthProvider for OidcAuthProvider {
 
 /// Resolves a dotted claim path (e.g. `realm_access.roles`) within a claims object.
 fn claim_at<'a>(claims: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').try_fold(claims, |value, segment| value.get(segment))
+    path.split('.')
+        .try_fold(claims, |value, segment| value.get(segment))
 }
 
 /// Extracts role names from a claim, accepting either an array of strings or a single
@@ -188,7 +192,10 @@ mod tests {
             Some("alice")
         );
         let roles = claim_at(&claims, "realm_access.roles").map(roles_from_claim);
-        assert_eq!(roles, Some(vec!["reader".to_string(), "writer".to_string()]));
+        assert_eq!(
+            roles,
+            Some(vec!["reader".to_string(), "writer".to_string()])
+        );
         assert!(claim_at(&claims, "missing.path").is_none());
     }
 

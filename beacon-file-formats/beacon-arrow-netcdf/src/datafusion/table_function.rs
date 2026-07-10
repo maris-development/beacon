@@ -114,11 +114,14 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         }
 
         let state = self.session_ctx.state();
-        let factory = state.get_file_format_factory(NETCDF_FORMAT).ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "read_netcdf: the NetCDF file format is not registered on the session".to_string(),
-            )
-        })?;
+        let factory = state
+            .get_file_format_factory(NETCDF_FORMAT)
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "read_netcdf: the NetCDF file format is not registered on the session"
+                        .to_string(),
+                )
+            })?;
         let file_format = factory.create(&state, &format_options)?;
 
         let super_listing_table = tokio::task::block_in_place(|| {

@@ -28,7 +28,9 @@ pub enum NdArrayError {
     SizeMismatch { expected: usize, actual: usize },
 
     /// A set of source dimensions is not a subset of the broadcast target.
-    #[error("source dimensions {source_dims:?} are not a subset of target dimensions {target_dims:?}")]
+    #[error(
+        "source dimensions {source_dims:?} are not a subset of target dimensions {target_dims:?}"
+    )]
     BroadcastDimensions {
         source_dims: Vec<String>,
         target_dims: Vec<String>,

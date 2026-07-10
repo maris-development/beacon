@@ -96,8 +96,14 @@ mod tests {
     #[test]
     fn skips_empty_groups_and_stops_at_unclosed_parenthesis() {
         // Empty () is dropped; an unclosed '(' ends the scan.
-        assert_eq!(extract_parenthesized_values_ref("a () b (7)"), vec!["SDN:L05::7"]);
-        assert_eq!(extract_parenthesized_values_ref("a (7) b (oops"), vec!["SDN:L05::7"]);
+        assert_eq!(
+            extract_parenthesized_values_ref("a () b (7)"),
+            vec!["SDN:L05::7"]
+        );
+        assert_eq!(
+            extract_parenthesized_values_ref("a (7) b (oops"),
+            vec!["SDN:L05::7"]
+        );
         assert!(extract_parenthesized_values_ref("no groups").is_empty());
     }
 

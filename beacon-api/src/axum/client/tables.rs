@@ -15,7 +15,7 @@ use utoipa::{IntoParams, ToSchema};
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "tables",
-    get, 
+    get,
     path = "/api/tables",
     responses((status = 200, description = "List of registered table names", body = Vec<String>)),
     security(
@@ -42,7 +42,7 @@ pub(crate) struct TableWithSchema {
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "tables",
-    get, 
+    get,
     path = "/api/tables-with-schema",
     responses((status = 200, description = "Registered tables with their Arrow schemas", body = Vec<TableWithSchema>)),
     security(
@@ -79,7 +79,7 @@ pub struct ListTableSchemaQuery {
 #[tracing::instrument(level = "info", skip(state))]
 #[utoipa::path(
     tag = "tables",
-    get, 
+    get,
     path = "/api/table-schema",
     params(ListTableSchemaQuery),
     responses(
@@ -165,9 +165,7 @@ pub(crate) async fn list_table_extensions(
         ("bearer" = [])
     )
 )]
-pub(crate) async fn default_table_schema(
-    State(state): State<Arc<Runtime>>,
-) -> Json<SchemaView> {
+pub(crate) async fn default_table_schema(State(state): State<Arc<Runtime>>) -> Json<SchemaView> {
     let result = state.list_default_table_schema_view().await;
     Json(result)
 }

@@ -195,7 +195,13 @@ pub fn group_into_tables(
 fn slugify(input: &str) -> String {
     let s: String = input
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     s.trim_matches('_').to_string()
 }
@@ -276,7 +282,10 @@ mod tests {
         assert_eq!(cands.len(), 1);
         let c = &cands[0];
         assert_eq!(c.base, "argo");
-        assert_eq!(c.partition_cols, vec!["year".to_string(), "month".to_string()]);
+        assert_eq!(
+            c.partition_cols,
+            vec!["year".to_string(), "month".to_string()]
+        );
         assert!(c.recursive);
         assert_eq!(c.file_count, 2);
         assert_eq!(c.location(), "argo/**/*.parquet");
@@ -284,7 +293,10 @@ mod tests {
 
     #[test]
     fn flat_layout_has_no_partitions() {
-        let datasets = vec![ds("argo/a.parquet", "parquet"), ds("argo/b.parquet", "parquet")];
+        let datasets = vec![
+            ds("argo/a.parquet", "parquet"),
+            ds("argo/b.parquet", "parquet"),
+        ];
         let (cands, _) = group_into_tables(&datasets, &def());
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].base, "argo");
@@ -362,7 +374,10 @@ mod tests {
             recursive: false,
             file_count: 1,
         }];
-        assert_eq!(assign_table_names(&cands, &def()), vec!["argo_floats".to_string()]);
+        assert_eq!(
+            assign_table_names(&cands, &def()),
+            vec!["argo_floats".to_string()]
+        );
 
         let mut prefixed = def();
         prefixed.name = "ocean".to_string();
@@ -394,6 +409,9 @@ mod tests {
         let names = assign_table_names(&cands, &def());
         assert_eq!(names[0], "data");
         assert_ne!(names[1], "data");
-        assert_eq!(names.iter().collect::<std::collections::HashSet<_>>().len(), 2);
+        assert_eq!(
+            names.iter().collect::<std::collections::HashSet<_>>().len(),
+            2
+        );
     }
 }

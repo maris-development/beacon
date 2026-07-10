@@ -91,12 +91,12 @@ pub async fn open_dataset(
     }
 
     if let Some((tiles_x, tiles_y)) = first_ifd.tile_count() {
-        let tile_width = first_ifd
-            .tile_width()
-            .ok_or_else(|| anyhow::anyhow!("tiled TIFF reports a tile count but is missing TileWidth"))?;
-        let tile_height = first_ifd
-            .tile_height()
-            .ok_or_else(|| anyhow::anyhow!("tiled TIFF reports a tile count but is missing TileLength"))?;
+        let tile_width = first_ifd.tile_width().ok_or_else(|| {
+            anyhow::anyhow!("tiled TIFF reports a tile count but is missing TileWidth")
+        })?;
+        let tile_height = first_ifd.tile_height().ok_or_else(|| {
+            anyhow::anyhow!("tiled TIFF reports a tile count but is missing TileLength")
+        })?;
         insert_scalar(&mut arrays, "image.tile_width", tile_width)?;
         insert_scalar(&mut arrays, "image.tile_height", tile_height)?;
         insert_scalar(&mut arrays, "image.tile_count_x", tiles_x as u64)?;
@@ -134,13 +134,15 @@ pub async fn open_dataset(
         )?;
     }
 
-    let nodata_value: Option<f64> = first_ifd.gdal_nodata().and_then(|s| match s.parse::<f64>() {
-        Ok(value) => Some(value),
-        Err(e) => {
-            tracing::warn!(value = %s, error = %e, "ignoring unparseable GDAL_NODATA tag");
-            None
-        }
-    });
+    let nodata_value: Option<f64> = first_ifd
+        .gdal_nodata()
+        .and_then(|s| match s.parse::<f64>() {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::warn!(value = %s, error = %e, "ignoring unparseable GDAL_NODATA tag");
+                None
+            }
+        });
 
     if let Some(nodata) = first_ifd.gdal_nodata() {
         insert_scalar(&mut arrays, "geo.nodata", nodata.to_string())?;
@@ -429,7 +431,9 @@ async fn read_pixel_bands_stripped(
                 None,
             )
             .map_err(|e| {
-                anyhow::anyhow!("Failed to decompress strip at offset {offset} ({compression:?}): {e}")
+                anyhow::anyhow!(
+                    "Failed to decompress strip at offset {offset} ({compression:?}): {e}"
+                )
             })?;
         raw.extend_from_slice(&decoded);
     }
@@ -627,7 +631,11 @@ mod tests {
 
         // The generator carves an 8×8 nodata block and fills the rest with the gradient.
         assert_eq!(n_nodata, 8 * 8, "unexpected nodata pixel count");
-        assert_eq!(n_valid, WIDTH * HEIGHT - 8 * 8, "unexpected valid pixel count");
+        assert_eq!(
+            n_valid,
+            WIDTH * HEIGHT - 8 * 8,
+            "unexpected valid pixel count"
+        );
 
         // Row 0 starts inside the nodata block; the first valid pixel is at column 8.
         assert!(values[0] <= -1e30, "band.0[0] should be nodata");

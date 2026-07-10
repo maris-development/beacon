@@ -72,7 +72,10 @@ pub(crate) async fn lower_df_statement(
     // DataFusion has no `ALTER TABLE` planning, so build the node from the AST.
     if let datafusion::sql::parser::Statement::Statement(sql_stmt) = &statement {
         if let SqlAstStatement::AlterTable(alter) = sql_stmt.as_ref() {
-            return Ok(alter_table_plan(alter.name.clone(), alter.operations.clone()));
+            return Ok(alter_table_plan(
+                alter.name.clone(),
+                alter.operations.clone(),
+            ));
         }
     }
 
@@ -182,7 +185,11 @@ fn update_plan(dml: DmlStatement) -> anyhow::Result<LogicalPlan> {
     };
 
     let mutation = update_mutation(projection);
-    Ok(replace_contents_plan(dml.table_name, new_contents, mutation))
+    Ok(replace_contents_plan(
+        dml.table_name,
+        new_contents,
+        mutation,
+    ))
 }
 
 /// Derive a native `UPDATE` spec from the planned projection (best-effort):

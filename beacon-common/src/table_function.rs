@@ -32,7 +32,10 @@ pub trait BeaconTableFunctionImpl: TableFunctionImpl + Send + Sync {
         for option in options {
             all_datatypes.push(option.data_type().clone());
         }
-        Signature::exact(all_datatypes, datafusion::logical_expr::Volatility::Immutable)
+        Signature::exact(
+            all_datatypes,
+            datafusion::logical_expr::Volatility::Immutable,
+        )
     }
     fn documentation(&self) -> Option<Documentation> {
         None
@@ -43,7 +46,10 @@ pub trait BeaconTableFunctionImpl: TableFunctionImpl + Send + Sync {
 ///
 /// Accepts either a single string scalar (`Utf8`/`LargeUtf8`/`Utf8View`) or a
 /// `List<Utf8>` of strings. `fn_name` is used only to build clear error messages.
-pub fn parse_glob_paths_arg(args: &[Expr], fn_name: &str) -> datafusion::error::Result<Vec<String>> {
+pub fn parse_glob_paths_arg(
+    args: &[Expr],
+    fn_name: &str,
+) -> datafusion::error::Result<Vec<String>> {
     let Some(first) = args.first() else {
         return plan_err!("{fn_name} requires at least 1 argument: glob_paths : Utf8 | List<Utf8>");
     };
@@ -116,7 +122,10 @@ mod tests {
     fn list_of_strings_is_accepted() {
         let expr = list_expr(&["a.parquet", "b.parquet"]);
         let paths = parse_glob_paths_arg(&[expr], "read_parquet").unwrap();
-        assert_eq!(paths, vec!["a.parquet".to_string(), "b.parquet".to_string()]);
+        assert_eq!(
+            paths,
+            vec!["a.parquet".to_string(), "b.parquet".to_string()]
+        );
     }
 
     #[test]

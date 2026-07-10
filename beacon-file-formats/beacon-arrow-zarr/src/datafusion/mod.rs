@@ -479,7 +479,10 @@ mod tests {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        assert!(names.contains(&"time".to_string()), "time present: {names:?}");
+        assert!(
+            names.contains(&"time".to_string()),
+            "time present: {names:?}"
+        );
         assert!(
             !names.contains(&"analysed_sst".to_string()),
             "analysed_sst depends on lat/lon and must be excluded: {names:?}"
@@ -603,13 +606,12 @@ mod tests {
             .unwrap();
         let mut kept = 0i64;
         for b in &batches {
-            let col = b
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap();
+            let col = b.column(0).as_any().downcast_ref::<Float32Array>().unwrap();
             for i in 0..col.len() {
-                assert!(col.value(i) > mid, "every returned lat must satisfy the predicate");
+                assert!(
+                    col.value(i) > mid,
+                    "every returned lat must satisfy the predicate"
+                );
             }
             kept += b.num_rows() as i64;
         }

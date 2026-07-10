@@ -53,11 +53,7 @@ pub(super) struct Authenticator {
 impl Authenticator {
     /// Creates a new authenticator with the given anonymous-access policy and token TTL, resolving
     /// credentials against the shared runtime auth context.
-    pub(super) fn new(
-        runtime: Arc<Runtime>,
-        allow_anonymous: bool,
-        token_ttl: Duration,
-    ) -> Self {
+    pub(super) fn new(runtime: Arc<Runtime>, allow_anonymous: bool, token_ttl: Duration) -> Self {
         Self {
             runtime,
             allow_anonymous,
