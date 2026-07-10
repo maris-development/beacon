@@ -8,6 +8,7 @@ use beacon_nd_array::{
     arrow::{
         batch::any_dataset_as_record_batch_stream,
         metrics::DatasetReadMetrics,
+        nd_provider::any_dataset_as_broadcast_stream,
         pushdown_filter::PushdownFilter,
     },
     projection::DatasetProjection,
@@ -384,13 +385,10 @@ impl NetCDFOpener {
             dataset
         };
 
-        let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading NetCDF as Arrow stream: {e}"
-                ))
-            })
+        // Broadcast through the nd execution-plan spine (NdSourceExec ->
+        // NdBroadcastExec), then adapt onto the projected output schema.
+        let _ = metrics;
+        let stream = any_dataset_as_broadcast_stream(dataset, batch_size)
             .and_then(move |batch| {
                 let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(

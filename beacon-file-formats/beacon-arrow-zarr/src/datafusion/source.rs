@@ -12,7 +12,8 @@ use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use beacon_nd_array::{
     arrow::{
         batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
-        pushdown_filter::PushdownFilter, schema::any_dataset_to_arrow_schema,
+        nd_provider::any_dataset_as_broadcast_stream, pushdown_filter::PushdownFilter,
+        schema::any_dataset_to_arrow_schema,
     },
     dataset::resolve_read_dimensions,
     projection::DatasetProjection,
@@ -331,23 +332,19 @@ impl FileOpener for ZarrOpener {
                     DataFusionError::Execution(format!("Failed to project Zarr dataset: {e}"))
                 })?;
 
-            let pushdown_filter = predicate.map(PushdownFilter::new);
-            let stream = any_dataset_as_record_batch_stream(
-                projected,
-                batch_size,
-                pushdown_filter,
-                metrics,
-            )
-            .map_err(|e| {
-                DataFusionError::Execution(format!("Error reading Zarr dataset as Arrow: {e}"))
-            })
-            .and_then(move |batch| {
-                let mapped = adapter.adapt_batch(&batch).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to adapt Zarr batch schema: {e}"))
-                });
-                future::ready(mapped)
-            })
-            .boxed();
+            // Broadcast through the nd execution-plan spine (NdSourceExec ->
+            // NdBroadcastExec), then adapt onto the projected output schema.
+            let _ = metrics;
+            let stream = any_dataset_as_broadcast_stream(projected, batch_size)
+                .and_then(move |batch| {
+                    let mapped = adapter.adapt_batch(&batch).map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Failed to adapt Zarr batch schema: {e}"
+                        ))
+                    });
+                    future::ready(mapped)
+                })
+                .boxed();
 
             Ok(stream)
         };

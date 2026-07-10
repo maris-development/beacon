@@ -10,21 +10,63 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use beacon_datafusion_ext::nd::exec::{NdBatchProvider, SendableNdBatchStream};
+use arrow::record_batch::RecordBatch;
+use beacon_datafusion_ext::nd::exec::{
+    NdBatchProvider, NdBroadcastExec, NdSourceExec, SendableNdBatchStream,
+};
 use beacon_datafusion_ext::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
-use futures::StreamExt;
+use datafusion::physical_plan::ExecutionPlan;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 
 use crate::arrow::array::ndarray_to_arrow_array;
 use crate::arrow::batch::{
-    build_dataset_schema, c_order_chunk_shape, extract_dataset_layout,
-    generate_array_subset_from_chunk, generate_chunk_subsets,
+    any_dataset_as_record_batch_stream, build_dataset_schema, c_order_chunk_shape,
+    extract_dataset_layout, generate_array_subset_from_chunk, generate_chunk_subsets,
 };
-use crate::dataset::Dataset;
+use crate::dataset::{AnyDataset, Dataset};
 
 fn exec_err(e: impl std::fmt::Display) -> DataFusionError {
     DataFusionError::Execution(e.to_string())
+}
+
+/// Broadcast a dataset to a flat `RecordBatch` stream through the nd
+/// execution-plan spine.
+///
+/// A regular dataset is fed through [`DatasetNdProvider`] → [`NdSourceExec`] →
+/// [`NdBroadcastExec`]: the source streams un-broadcast [`NdRecordBatch`]es and
+/// the broadcast node materializes them. A ragged dataset has no rectangular
+/// grid, so it stays on the v1 stream. This is the drop-in the file-format
+/// openers use in place of the v1 broadcast engine.
+///
+/// Predicate pushdown (chunk pruning) is intentionally not applied here — the
+/// nd spine has no filter node yet, and the scan reports filters as inexact so
+/// DataFusion keeps a `FilterExec` above it. Filtering will return to the spine
+/// later.
+pub fn any_dataset_as_broadcast_stream(
+    dataset: AnyDataset,
+    batch_size: usize,
+) -> BoxStream<'static, Result<RecordBatch>> {
+    match dataset {
+        AnyDataset::Regular(regular) => {
+            let provider =
+                Arc::new(DatasetNdProvider::new(regular, batch_size)) as Arc<dyn NdBatchProvider>;
+            let source = Arc::new(NdSourceExec::new(provider)) as Arc<dyn ExecutionPlan>;
+            // The nd nodes are pure data-flow here (no session state), so a
+            // default context is sufficient.
+            let result = NdBroadcastExec::try_new(source)
+                .and_then(|broadcast| broadcast.execute(0, Arc::new(TaskContext::default())));
+            match result {
+                Ok(stream) => stream.boxed(),
+                Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
+            }
+        }
+        ragged => any_dataset_as_record_batch_stream(ragged, batch_size, None, None)
+            .map_err(exec_err)
+            .boxed(),
+    }
 }
 
 /// An [`NdBatchProvider`] over a regular (non-ragged) [`Dataset`].
