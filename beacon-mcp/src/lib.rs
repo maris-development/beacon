@@ -30,6 +30,10 @@ pub fn streamable_http_service(
     StreamableHttpService::new(
         move || Ok(BeaconMcpServer::new(runtime.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        // rmcp's default host allowlist only accepts loopback (DNS-rebinding
+        // protection for locally-bound servers). Beacon is served publicly
+        // behind TLS + its own auth/RBAC, so accept any Host header rather than
+        // reject requests to the deployment's real hostname with a 403.
+        StreamableHttpServerConfig::default().disable_allowed_hosts(),
     )
 }

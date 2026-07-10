@@ -47,6 +47,7 @@ COPY beacon-file-formats/beacon-iceberg/ /beacon-file-formats/beacon-iceberg/
 COPY beacon-file-formats/beacon-lance/ /beacon-file-formats/beacon-lance/
 COPY beacon-file-formats/beacon-nd-array/ /beacon-file-formats/beacon-nd-array/
 COPY beacon-file-formats/beacon-nd-arrow/ /beacon-file-formats/beacon-nd-arrow/
+COPY beacon-mcp/ /beacon-mcp/
 COPY beacon-object-storage/ /beacon-object-storage/
 COPY beacon-sql-databases/ /beacon-sql-databases/
 COPY beacon-file-formats/beacon-delta/ /beacon-file-formats/beacon-delta/
