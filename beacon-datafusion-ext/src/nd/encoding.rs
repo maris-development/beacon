@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, ListArray, StringArray, StructArray, UInt32Array,
+    Array, ArrayRef, ListArray, StringArray, StructArray, UInt32Array, new_null_array,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
@@ -73,7 +73,19 @@ pub fn nd_encoded_field(name: &str, value_type: &DataType) -> Field {
         ("ARROW:extension:name".to_string(), ND_EXTENSION_NAME.to_string()),
         ("ARROW:extension:metadata".to_string(), "{}".to_string()),
     ]);
-    Field::new(name, nd_encoded_type(value_type), false).with_metadata(metadata)
+    Field::new(name, nd_encoded_type(value_type), true).with_metadata(metadata)
+}
+
+/// The nd-encoded schema of a logical schema: every field becomes a `beacon.nd`
+/// struct column of the same name. This is the schema a `DataSourceExec` carries
+/// while nd data flows up to [`NdSourceExec`](crate::nd::exec::NdSourceExec).
+pub fn encoded_schema(logical: &Schema) -> Schema {
+    let fields: Vec<Field> = logical
+        .fields()
+        .iter()
+        .map(|f| nd_encoded_field(f.name(), f.data_type()))
+        .collect();
+    Schema::new_with_metadata(fields, logical.metadata().clone())
 }
 
 /// True when `field` is an nd-encoded column.
@@ -137,11 +149,19 @@ pub fn encode_nd_array(array: &NdArrowArray) -> ArrayRef {
 }
 
 /// Decode row `row` of an nd-encoded `Struct` column back into an [`NdArrowArray`].
+///
+/// A null struct row (a column a file lacked, null-filled by the schema adapter)
+/// decodes to a rank-0 null scalar, which broadcasts to an all-null column.
 pub fn decode_nd_array(column: &ArrayRef, row: usize) -> Result<NdArrowArray> {
     let structs = column
         .as_any()
         .downcast_ref::<StructArray>()
         .ok_or_else(|| err("nd column is not a Struct array"))?;
+
+    if structs.is_null(row) {
+        let value_type = nd_value_type(structs.data_type())?;
+        return NdArrowArray::try_new(new_null_array(&value_type, 1), Dimensions::scalar());
+    }
 
     let list_at = |name: &str| -> Result<ArrayRef> {
         let list = structs
@@ -202,6 +222,24 @@ pub fn encode_nd_record_batch(batch: &NdRecordBatch) -> Result<RecordBatch> {
         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
 }
 
+/// Encode an already-flat `RecordBatch` (e.g. a run-length-expanded ragged
+/// batch) as nd-encoded columns over a single synthetic `row` dimension. Every
+/// column is full-rank on that axis, so a later broadcast is the identity —
+/// decoding then materializing reproduces the input.
+pub fn encode_flat_batch_as_nd(batch: &RecordBatch) -> Result<RecordBatch> {
+    let rows = batch.num_rows();
+    let row_dim = || Dimensions::try_new(vec![Dimension::new("row", rows)]);
+
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|c| NdArrowArray::try_new(c.clone(), row_dim()?))
+        .collect::<Result<Vec<_>>>()?;
+
+    let nd = NdRecordBatch::try_new(batch.schema(), columns, row_dim()?)?;
+    encode_nd_record_batch(&nd)
+}
+
 /// The logical (decoded) schema of an nd-encoded schema: each `beacon.nd`
 /// struct column becomes its element type.
 pub fn logical_schema(encoded: &Schema) -> Result<SchemaRef> {
@@ -217,6 +255,13 @@ pub fn logical_schema(encoded: &Schema) -> Result<SchemaRef> {
 /// [`NdRecordBatch`]. The target grid is inferred as the union of the columns'
 /// dimensions, ordered by the highest-rank column.
 pub fn decode_nd_record_batch(batch: &RecordBatch) -> Result<NdRecordBatch> {
+    // A zero-column batch is a COUNT(*)-style row carrier: preserve its row
+    // count via a synthetic one-axis grid so the broadcast reproduces it.
+    if batch.num_columns() == 0 {
+        let target = Dimensions::try_new(vec![Dimension::new("row", batch.num_rows())])?;
+        return NdRecordBatch::try_new(Arc::new(Schema::empty()), vec![], target);
+    }
+
     let columns = batch
         .columns()
         .iter()
@@ -339,6 +384,56 @@ mod tests {
             actual.column(2).as_primitive::<Float64Type>().values(),
             &[0.0, 0.1, 0.2, 1.0, 1.1, 1.2]
         );
+    }
+
+    #[test]
+    fn null_struct_column_decodes_to_null_scalar() {
+        // A missing (null-filled) nd column decodes to a rank-0 null scalar and
+        // broadcasts to an all-null column.
+        let null_struct = arrow::array::new_null_array(&nd_encoded_type(&DataType::Float64), 1);
+        let decoded = decode_nd_array(&null_struct, 0).unwrap();
+        assert_eq!(decoded.dims().rank(), 0);
+        let target = dims(&[("time", 3)]);
+        let out = decoded.materialize(&target).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out.null_count(), 3);
+    }
+
+    #[test]
+    fn zero_column_batch_preserves_row_count() {
+        // COUNT(*)-style zero-column batch → nd batch that materializes to the
+        // same row count with no columns.
+        let empty = RecordBatch::try_new_with_options(
+            Arc::new(Schema::empty()),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(42)),
+        )
+        .unwrap();
+        let nd = decode_nd_record_batch(&empty).unwrap();
+        let flat = nd.materialize().unwrap();
+        assert_eq!(flat.num_columns(), 0);
+        assert_eq!(flat.num_rows(), 42);
+    }
+
+    #[test]
+    fn flat_batch_round_trips_through_nd() {
+        // Ragged path: a flat batch wrapped on a synthetic row dim survives
+        // encode → decode → materialize unchanged.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Float64, true),
+        ]));
+        let flat = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(Float64Array::from(vec![1.5, 2.5, 3.5])),
+            ],
+        )
+        .unwrap();
+        let encoded = encode_flat_batch_as_nd(&flat).unwrap();
+        let decoded = decode_nd_record_batch(&encoded).unwrap();
+        assert_eq!(decoded.materialize().unwrap(), flat);
     }
 
     #[test]

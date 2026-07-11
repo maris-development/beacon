@@ -286,8 +286,14 @@ impl FileFormat for ZarrFormat {
             file_groups.push(file);
         }
 
+        // The scan carries nd data as `beacon.nd`-encoded struct columns, so the
+        // file source's schema is the encoded form of the logical table schema.
+        // `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it back to
+        // the logical schema above the scan.
+        let encoded_file_schema =
+            Arc::new(beacon_datafusion_ext::nd::encoded_schema(conf.file_schema()));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            conf.file_schema().clone(),
+            encoded_file_schema,
             conf.table_partition_cols().clone(),
         );
         // Preserve a projection that the scan pushed down into the incoming
@@ -300,7 +306,12 @@ impl FileFormat for ZarrFormat {
             .with_file_groups(file_groups)
             .with_source(Arc::new(source))
             .build();
-        Ok(DataSourceExec::from_data_source(conf))
+
+        let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
+        let nd_source =
+            Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(data_source)?);
+        let broadcast = beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?;
+        Ok(Arc::new(broadcast))
     }
 
     fn file_source(

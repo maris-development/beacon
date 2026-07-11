@@ -14,7 +14,10 @@
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
-use beacon_datafusion_ext::nd::{Dimension, Dimensions, NdArrowArray, NdRecordBatch};
+use beacon_datafusion_ext::nd::{
+    Dimension, Dimensions, NdArrowArray, NdRecordBatch, encode_flat_batch_as_nd,
+    encode_nd_record_batch,
+};
 use datafusion::error::{DataFusionError, Result};
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -30,19 +33,25 @@ fn exec_err(e: impl std::fmt::Display) -> DataFusionError {
     DataFusionError::Execution(e.to_string())
 }
 
-/// Broadcast a dataset to a flat `RecordBatch` stream through the nd spine.
-/// Regular datasets stream as chunked [`NdRecordBatch`]es that are materialized
-/// (broadcast); ragged datasets fall back to the v1 stream.
-pub fn any_dataset_as_broadcast_stream(
+/// Stream a dataset as `beacon.nd`-encoded `RecordBatch`es — the form a file
+/// opener returns so the data can ride a `DataSourceExec` up to an
+/// `NdSourceExec`, which decodes it, and an `NdBroadcastExec`, which broadcasts.
+///
+/// A regular dataset is chunked into un-broadcast [`NdRecordBatch`]es and
+/// encoded. A ragged dataset is run-length expanded by the v1 stream, then each
+/// flat batch is wrapped on a synthetic `row` dimension and encoded (so the
+/// later broadcast is the identity).
+pub fn any_dataset_as_encoded_stream(
     dataset: AnyDataset,
     batch_size: usize,
 ) -> BoxStream<'static, Result<RecordBatch>> {
     match dataset {
         AnyDataset::Regular(regular) => dataset_as_nd_stream(regular, batch_size)
-            .map(|nd| nd.and_then(|batch| batch.materialize()))
+            .map(|nd| nd.and_then(|batch| encode_nd_record_batch(&batch)))
             .boxed(),
         ragged => any_dataset_as_record_batch_stream(ragged, batch_size, None, None)
             .map_err(exec_err)
+            .and_then(|flat| async move { encode_flat_batch_as_nd(&flat) })
             .boxed(),
     }
 }
@@ -122,6 +131,8 @@ mod tests {
     use futures::TryStreamExt;
     use indexmap::IndexMap;
 
+    use beacon_datafusion_ext::nd::decode_nd_record_batch;
+
     use super::*;
     use crate::arrow::batch::dataset_as_record_batch_stream;
     use crate::{NdArray, NdArrayD};
@@ -156,9 +167,10 @@ mod tests {
         Dataset::new("test".to_string(), arrays).await
     }
 
-    /// Broadcasting through the nd spine matches the v1 broadcast stream.
+    /// The encoded stream, decoded and broadcast, matches the v1 broadcast
+    /// stream (i.e. encode → decode → materialize is faithful).
     #[tokio::test]
-    async fn spine_matches_v1_broadcast() {
+    async fn encoded_stream_matches_v1_broadcast() {
         for batch_size in [usize::MAX, 6, 3] {
             let ds = test_dataset().await;
             let schema = build_dataset_schema(&ds.arrays);
@@ -170,12 +182,16 @@ mod tests {
                     .unwrap();
             let expected = concat_batches(&schema, &v1).unwrap();
 
-            let actual_batches: Vec<RecordBatch> =
-                any_dataset_as_broadcast_stream(AnyDataset::Regular(ds), batch_size)
+            let encoded: Vec<RecordBatch> =
+                any_dataset_as_encoded_stream(AnyDataset::Regular(ds), batch_size)
                     .try_collect()
                     .await
                     .unwrap();
-            let actual = concat_batches(&schema, &actual_batches).unwrap();
+            let materialized: Vec<RecordBatch> = encoded
+                .iter()
+                .map(|b| decode_nd_record_batch(b).unwrap().materialize().unwrap())
+                .collect();
+            let actual = concat_batches(&schema, &materialized).unwrap();
 
             assert_eq!(actual, expected, "batch_size={batch_size}");
             assert_eq!(actual.num_rows(), 12);

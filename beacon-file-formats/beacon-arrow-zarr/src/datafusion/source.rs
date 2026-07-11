@@ -12,7 +12,7 @@ use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use beacon_nd_array::{
     arrow::{
         batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
-        nd_provider::any_dataset_as_broadcast_stream, pushdown_filter::PushdownFilter,
+        nd_provider::any_dataset_as_encoded_stream, pushdown_filter::PushdownFilter,
         schema::any_dataset_to_arrow_schema,
     },
     dataset::resolve_read_dimensions,
@@ -320,9 +320,12 @@ impl FileOpener for ZarrOpener {
                 return Ok(stream);
             }
 
-            // Adapt batches (read with `projection`) onto the projected output
-            // schema: reorder, cast, and null-fill columns the group lacks.
-            let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
+            // The opener emits nd-encoded batches, so adaptation happens in the
+            // encoded (struct) domain: reorder and null-fill columns the group
+            // lacks onto the projected encoded schema.
+            let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+                &file_schema.project(&projection)?,
+            ));
             let adapter =
                 BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
 
@@ -332,10 +335,11 @@ impl FileOpener for ZarrOpener {
                     DataFusionError::Execution(format!("Failed to project Zarr dataset: {e}"))
                 })?;
 
-            // Broadcast through the nd execution-plan spine (NdSourceExec ->
-            // NdBroadcastExec), then adapt onto the projected output schema.
+            // Emit nd-encoded batches (decoded/broadcast by the NdSourceExec /
+            // NdBroadcastExec above the scan), adapted onto the projected
+            // encoded schema.
             let _ = metrics;
-            let stream = any_dataset_as_broadcast_stream(projected, batch_size)
+            let stream = any_dataset_as_encoded_stream(projected, batch_size)
                 .and_then(move |batch| {
                     let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                         DataFusionError::Execution(format!(

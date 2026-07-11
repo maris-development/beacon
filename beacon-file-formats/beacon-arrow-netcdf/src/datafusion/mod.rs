@@ -308,8 +308,14 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // The scan carries nd data as `beacon.nd`-encoded struct columns, so
+        // the file source's schema is the encoded form of the logical table
+        // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
+        // back to the logical schema above the scan.
+        let encoded_file_schema =
+            Arc::new(beacon_datafusion_ext::nd::encoded_schema(conf.file_schema()));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            conf.file_schema().clone(),
+            encoded_file_schema,
             conf.table_partition_cols().clone(),
         );
         // Preserve a projection that the scan pushed down into the incoming
@@ -325,7 +331,12 @@ impl FileFormat for NetcdfFormat {
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
-        Ok(DataSourceExec::from_data_source(conf))
+
+        let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
+        let nd_source =
+            Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(data_source)?);
+        let broadcast = beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?;
+        Ok(Arc::new(broadcast))
     }
 
     async fn create_writer_physical_plan(
@@ -627,9 +638,10 @@ mod tests {
             .await
             .expect("schema");
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            table_schema.clone(),
-        );
+        // The opener emits nd-encoded batches, so its source schema is encoded.
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&table_schema),
+        ));
         let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -667,9 +679,9 @@ mod tests {
             .await
             .expect("schema");
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            table_schema.clone(),
-        );
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&table_schema),
+        ));
         let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -710,9 +722,9 @@ mod tests {
         // Project to only the first column.
         let projected_schema: SchemaRef = Arc::new(table_schema.project(&[0]).expect("project"));
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            table_schema.clone(),
-        );
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&table_schema),
+        ));
         let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -785,7 +797,9 @@ mod tests {
         let missing_idx = merged.index_of(&missing).unwrap();
 
         // No projection pushed → the opener reads under the full merged schema.
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(merged.clone());
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&merged),
+        ));
         let opener = source::NetCDFSource::new(store, None, ts);
         let conf = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
@@ -841,9 +855,9 @@ mod tests {
         .await
         .expect("dim schema");
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            dim_schema.clone(),
-        );
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&dim_schema),
+        ));
         let opener = source::NetCDFSource::new(store, Some(vec!["time".to_string()]), ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(

@@ -29,8 +29,8 @@ pub use batch::NdRecordBatch;
 pub use broadcast::BroadcastMap;
 pub use dimensions::{Dimension, Dimensions};
 pub use encoding::{
-    decode_nd_record_batch, encode_nd_record_batch, is_nd_encoded, logical_schema,
-    nd_encoded_field, nd_encoded_type,
+    decode_nd_record_batch, encode_flat_batch_as_nd, encode_nd_record_batch, encoded_schema,
+    is_nd_encoded, logical_schema, nd_encoded_field, nd_encoded_type,
 };
 
 #[cfg(test)]
