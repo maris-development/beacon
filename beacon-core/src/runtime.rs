@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use arrow::{
     array::AsArray,
     datatypes::{SchemaRef, UInt64Type},
@@ -15,7 +16,6 @@ use beacon_datafusion_ext::{
     stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
-use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use datafusion::{
     catalog::TableFunctionImpl,
     execution::{
@@ -29,8 +29,8 @@ use parking_lot::Mutex;
 
 use crate::{
     api::{
-        CrawlReportView, CrawlerView, CreateCrawlerRequest, CreateExternalTableRequest, DatasetInfo,
-        FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView,
+        CrawlReportView, CrawlerView, CreateCrawlerRequest, CreateExternalTableRequest,
+        DatasetInfo, FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView,
     },
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
     query_result::{ArrowOutputStream, QueryOutput, QueryOutputFile, QueryResult},
@@ -189,8 +189,7 @@ impl Runtime {
 
         // Build the crawler manager once the data lake and tables exist, then publish
         // it through the handle so `CREATE/RUN/DROP CRAWLER` actions can reach it.
-        let events_available =
-            config.storage.enable_fs_events || config.storage.enable_s3_events;
+        let events_available = config.storage.enable_fs_events || config.storage.enable_s3_events;
         let crawler_manager = beacon_data_lake::crawler::CrawlerManager::new(
             session_ctx.clone(),
             file_formats.clone(),
@@ -222,9 +221,7 @@ impl Runtime {
     ///
     /// State persists across restarts, so the bootstrap is idempotent: existing roles/users are
     /// left in place rather than re-created.
-    fn init_auth(
-        config: &beacon_config::Config,
-    ) -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
+    fn init_auth(config: &beacon_config::Config) -> anyhow::Result<Arc<beacon_auth::AuthContext>> {
         let store = beacon_auth::SqliteStore::open(beacon_config::USERS_DIR.join("directory.db"))?;
         let role_provider = beacon_auth::RoleProvider::with_persistence(store.clone())?;
         let local: Arc<dyn beacon_auth::AuthProvider> =
@@ -252,7 +249,10 @@ impl Runtime {
             username_claim: config.oidc.username_claim.clone(),
             jwks_cache_ttl: std::time::Duration::from_secs(config.oidc.jwks_cache_ttl_secs),
         });
-        Arc::new(beacon_auth::CompositeAuthProvider::new(local, Arc::new(oidc)))
+        Arc::new(beacon_auth::CompositeAuthProvider::new(
+            local,
+            Arc::new(oidc),
+        ))
     }
 
     /// Builds an ephemeral, non-persistent auth context backed by the in-memory basic-auth provider.
@@ -398,6 +398,8 @@ impl Runtime {
             .execution
             .parquet
             .allow_single_file_parallelism = true;
+        config.options_mut().optimizer.expand_views_at_output = true; // Expain view types (utf8view to utf8)
+        config.options_mut().sql_parser.map_string_types_to_utf8view = false; // Map varchar to utf8
 
         let runtime_env = RuntimeEnvBuilder::new()
             .with_disk_manager_builder(DiskManagerBuilder::default())
@@ -484,7 +486,8 @@ impl Runtime {
                          (e.g. SELECT); this statement produces no result set to export"
                     );
                 }
-                self.run_query_to_file(plan, output, query_id, query_json).await
+                self.run_query_to_file(plan, output, query_id, query_json)
+                    .await
             }
             None => self.run_query_to_stream(plan, query_id, query_json).await,
         }
@@ -524,7 +527,11 @@ impl Runtime {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         let (copy_plan, output_file) = output
-            .parse(self.session_ctx.as_ref(), &self.config.storage.tmp_dir, plan)
+            .parse(
+                self.session_ctx.as_ref(),
+                &self.config.storage.tmp_dir,
+                plan,
+            )
             .await?;
         let output_file = QueryOutputFile::from(output_file);
 
@@ -566,15 +573,12 @@ impl Runtime {
 
     /// Lower a SQL statement (SELECT, DDL/DML, or a beacon custom statement) to a
     /// `LogicalPlan`. The result is validated in `run_query` before execution.
-    async fn lower_sql(
-        &self,
-        sql: &str,
-    ) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
+    async fn lower_sql(&self, sql: &str) -> anyhow::Result<datafusion::logical_expr::LogicalPlan> {
         match Self::parse_beacon_statement(sql)? {
             BeaconStatement::Auth(statement) => Ok(crate::statement_plan::auth_plan(statement)),
-            BeaconStatement::CreateMaterializedView(statement) => {
-                Ok(crate::statement_plan::create_materialized_view_plan(statement))
-            }
+            BeaconStatement::CreateMaterializedView(statement) => Ok(
+                crate::statement_plan::create_materialized_view_plan(statement),
+            ),
             BeaconStatement::Refresh(statement) => {
                 Ok(crate::statement_plan::refresh_plan(statement))
             }
@@ -818,8 +822,13 @@ impl Runtime {
     }
 
     pub async fn list_table_config(&self, table_name: String) -> Option<TableConfigView> {
-        let provider = self.session_ctx.table_provider(table_name.as_str()).await.ok()?;
-        let config = beacon_data_lake::definition_from_provider(&table_name, provider.as_ref()).ok()?;
+        let provider = self
+            .session_ctx
+            .table_provider(table_name.as_str())
+            .await
+            .ok()?;
+        let config =
+            beacon_data_lake::definition_from_provider(&table_name, provider.as_ref()).ok()?;
         match TableConfigView::try_from(config) {
             Ok(config) => Some(config),
             Err(error) => {
@@ -981,11 +990,14 @@ impl Runtime {
         req: CreateExternalTableRequest,
     ) -> anyhow::Result<()> {
         let sql = build_create_external_table_sql(&req)?;
-        self.run_query(crate::query::Query::sql(sql), beacon_auth::AuthIdentity::system())
-            .await?
-            .into_record_stream()?
-            .try_collect::<Vec<_>>()
-            .await?;
+        self.run_query(
+            crate::query::Query::sql(sql),
+            beacon_auth::AuthIdentity::system(),
+        )
+        .await?
+        .into_record_stream()?
+        .try_collect::<Vec<_>>()
+        .await?;
         Ok(())
     }
 
@@ -1026,8 +1038,14 @@ impl Runtime {
         let path = crate::dataset_files::validate_dataset_path(raw_path)?;
         crate::dataset_files::validate_extension(&path, &self.dataset_upload_extensions())?;
         let max_bytes = self.config.storage.max_upload_bytes;
-        crate::dataset_files::upload_dataset(&self.datasets_store, &path, overwrite, max_bytes, body)
-            .await
+        crate::dataset_files::upload_dataset(
+            &self.datasets_store,
+            &path,
+            overwrite,
+            max_bytes,
+            body,
+        )
+        .await
     }
 
     /// Begin a chunked (resumable) upload for a large file. Validates the path and
@@ -1218,7 +1236,10 @@ mod materialized_view_tests {
         sql: &str,
     ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
         let batches = runtime
-            .run_query(crate::query::Query::sql(sql.to_string()), beacon_auth::AuthIdentity::system())
+            .run_query(
+                crate::query::Query::sql(sql.to_string()),
+                beacon_auth::AuthIdentity::system(),
+            )
             .await?
             .into_record_stream()?
             .try_collect::<Vec<_>>()
@@ -1228,7 +1249,11 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_create_query_refresh_and_drop() {
-        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
 
         let suffix = uuid::Uuid::new_v4().simple();
         let mv = format!("mv_test_{suffix}");
@@ -1300,7 +1325,11 @@ mod materialized_view_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn materialized_view_handles_zero_row_result() {
-        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
         let mv = format!("mv_empty_{}", uuid::Uuid::new_v4().simple());
 
         // A query with no rows must still create a queryable, Parquet-backed view.
@@ -1343,7 +1372,10 @@ mod client_query_tests {
 
     async fn run_sql(runtime: &Runtime, sql: &str) {
         runtime
-            .run_query(crate::query::Query::sql(sql.to_string()), beacon_auth::AuthIdentity::system())
+            .run_query(
+                crate::query::Query::sql(sql.to_string()),
+                beacon_auth::AuthIdentity::system(),
+            )
             .await
             .expect("sql should run")
             .into_record_stream()
@@ -1364,12 +1396,24 @@ mod client_query_tests {
     /// same pipeline as `run_sql`, returning a streamed result.
     #[tokio::test(flavor = "multi_thread")]
     async fn json_query_runs_through_unified_path() {
-        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("json_q_{suffix}");
 
-        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT, b BIGINT)")).await;
-        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1, 2), (3, 4)")).await;
+        run_sql(
+            &runtime,
+            &format!("CREATE TABLE {table} (a BIGINT, b BIGINT)"),
+        )
+        .await;
+        run_sql(
+            &runtime,
+            &format!("INSERT INTO {table} VALUES (1, 2), (3, 4)"),
+        )
+        .await;
 
         let batches = runtime
             .run_query(
@@ -1399,7 +1443,11 @@ mod client_query_tests {
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("ext_{suffix}");
 
-        run_sql(&runtime, &format!("CREATE TABLE {table} (lat BIGINT, depth BIGINT)")).await;
+        run_sql(
+            &runtime,
+            &format!("CREATE TABLE {table} (lat BIGINT, depth BIGINT)"),
+        )
+        .await;
 
         // SET a preset via SQL, then read it back through the typed API.
         run_sql(
@@ -1438,7 +1486,10 @@ mod client_query_tests {
             .downcast_ref::<arrow::array::StringArray>()
             .expect("extensions column is Utf8")
             .value(0);
-        assert!(json.contains("shallow"), "SHOW output should include the preset: {json}");
+        assert!(
+            json.contains("shallow"),
+            "SHOW output should include the preset: {json}"
+        );
 
         // An extension over a non-existent column is rejected by validation.
         let rejected = try_run_sql(
@@ -1448,7 +1499,10 @@ mod client_query_tests {
             ),
         )
         .await;
-        assert!(rejected.is_err(), "preset over a missing column should be rejected");
+        assert!(
+            rejected.is_err(),
+            "preset over a missing column should be rejected"
+        );
 
         // DROP removes it; the document becomes empty.
         run_sql(&runtime, &format!("DROP EXTENSION 'preset' FOR {table}")).await;
@@ -1466,7 +1520,10 @@ mod client_query_tests {
     /// assert on failures from side-effecting statements.
     async fn try_run_sql(runtime: &Runtime, sql: &str) -> anyhow::Result<()> {
         runtime
-            .run_query(crate::query::Query::sql(sql.to_string()), beacon_auth::AuthIdentity::system())
+            .run_query(
+                crate::query::Query::sql(sql.to_string()),
+                beacon_auth::AuthIdentity::system(),
+            )
             .await?
             .into_record_stream()?
             .try_collect::<Vec<_>>()
@@ -1478,7 +1535,11 @@ mod client_query_tests {
     /// file download.
     #[tokio::test(flavor = "multi_thread")]
     async fn query_with_output_format_produces_file() {
-        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("out_{suffix}");
 
@@ -1517,7 +1578,9 @@ mod client_query_tests {
     async fn query_with_netcdf_output_writes_under_configured_tmp() {
         let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
         let tmp_dir = config.storage.tmp_dir.clone();
-        let runtime = Runtime::new_with_in_memory_auth(config).await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(config)
+            .await
+            .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("ncout_{suffix}");
 
@@ -1561,7 +1624,11 @@ mod client_query_tests {
     /// operation (super-user-only).
     #[tokio::test(flavor = "multi_thread")]
     async fn non_super_user_is_gated_by_validation() {
-        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap())).await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("val_{suffix}");
 
@@ -1570,7 +1637,10 @@ mod client_query_tests {
 
         // Non-super-user: read-only SELECT is allowed.
         runtime
-            .run_query(crate::query::Query::sql(format!("SELECT * FROM {table}")), beacon_auth::AuthIdentity::empty())
+            .run_query(
+                crate::query::Query::sql(format!("SELECT * FROM {table}")),
+                beacon_auth::AuthIdentity::empty(),
+            )
             .await
             .expect("non-super SELECT should be allowed")
             .into_record_stream()
@@ -1667,14 +1737,24 @@ mod client_query_tests {
     /// planner, execs, and Lance index ops through the full SQL path.
     #[tokio::test(flavor = "multi_thread")]
     async fn create_show_drop_index_round_trip() {
-        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
-            .await
-            .expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("idx_{suffix}");
 
-        run_sql(&runtime, &format!("CREATE TABLE {table} (id BIGINT, name VARCHAR)")).await;
-        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1, 'a'), (2, 'b')")).await;
+        run_sql(
+            &runtime,
+            &format!("CREATE TABLE {table} (id BIGINT, name VARCHAR)"),
+        )
+        .await;
+        run_sql(
+            &runtime,
+            &format!("INSERT INTO {table} VALUES (1, 'a'), (2, 'b')"),
+        )
+        .await;
         run_sql(
             &runtime,
             &format!("CREATE INDEX {table}_id_idx ON {table} (id) USING btree"),
@@ -1685,7 +1765,10 @@ mod client_query_tests {
             let runtime = &runtime;
             async move {
                 runtime
-                    .run_query(crate::query::Query::sql(sql), beacon_auth::AuthIdentity::system())
+                    .run_query(
+                        crate::query::Query::sql(sql),
+                        beacon_auth::AuthIdentity::system(),
+                    )
                     .await
                     .expect("show indexes should run")
                     .into_record_stream()
@@ -1723,7 +1806,10 @@ mod restart_tests {
 
     async fn run_sql(runtime: &Runtime, sql: &str) {
         runtime
-            .run_query(crate::query::Query::sql(sql.to_string()), beacon_auth::AuthIdentity::system())
+            .run_query(
+                crate::query::Query::sql(sql.to_string()),
+                beacon_auth::AuthIdentity::system(),
+            )
             .await
             .expect("sql should run")
             .into_record_stream()
@@ -1735,7 +1821,10 @@ mod restart_tests {
 
     async fn count_rows(runtime: &Runtime, sql: &str) -> usize {
         runtime
-            .run_query(crate::query::Query::sql(sql.to_string()), beacon_auth::AuthIdentity::system())
+            .run_query(
+                crate::query::Query::sql(sql.to_string()),
+                beacon_auth::AuthIdentity::system(),
+            )
             .await
             .expect("sql should run")
             .into_record_stream()
@@ -1764,15 +1853,23 @@ mod restart_tests {
         let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
 
         // First runtime: create a base table with data and a view over it.
-        let runtime = Runtime::new_with_in_memory_auth(config.clone()).await.expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(config.clone())
+            .await
+            .expect("runtime should start");
         run_sql(&runtime, &format!("CREATE TABLE {base} (a BIGINT)")).await;
         run_sql(&runtime, &format!("INSERT INTO {base} VALUES (1), (2)")).await;
-        run_sql(&runtime, &format!("CREATE VIEW {view} AS SELECT a FROM {base}")).await;
+        run_sql(
+            &runtime,
+            &format!("CREATE VIEW {view} AS SELECT a FROM {base}"),
+        )
+        .await;
         drop(runtime);
 
         // A fresh runtime rebuilds the catalog purely from the persisted
         // `tables://<name>/table.json` definitions.
-        let restarted = Runtime::new_with_in_memory_auth(config).await.expect("runtime should restart");
+        let restarted = Runtime::new_with_in_memory_auth(config)
+            .await
+            .expect("runtime should restart");
 
         assert_eq!(
             count_rows(&restarted, &format!("SELECT * FROM {base}")).await,
@@ -1788,10 +1885,16 @@ mod restart_tests {
         // Cleanup so the shared on-disk tables store does not leak into other
         // tests (best-effort; `DROP TABLE` deregisters either provider type).
         let _ = restarted
-            .run_query(crate::query::Query::sql(format!("DROP TABLE {view}")), beacon_auth::AuthIdentity::system())
+            .run_query(
+                crate::query::Query::sql(format!("DROP TABLE {view}")),
+                beacon_auth::AuthIdentity::system(),
+            )
             .await;
         let _ = restarted
-            .run_query(crate::query::Query::sql(format!("DROP TABLE {base}")), beacon_auth::AuthIdentity::system())
+            .run_query(
+                crate::query::Query::sql(format!("DROP TABLE {base}")),
+                beacon_auth::AuthIdentity::system(),
+            )
             .await;
     }
 }
@@ -1854,9 +1957,7 @@ mod external_table_sql_tests {
     #[test]
     fn rejects_unsafe_identifiers() {
         assert!(build_create_external_table_sql(&req("bad name", "PARQUET", "x/")).is_err());
-        assert!(
-            build_create_external_table_sql(&req("t; DROP TABLE u", "PARQUET", "x/")).is_err()
-        );
+        assert!(build_create_external_table_sql(&req("t; DROP TABLE u", "PARQUET", "x/")).is_err());
         assert!(build_create_external_table_sql(&req("t", "PARQUET'", "x/")).is_err());
 
         let mut r = req("t", "PARQUET", "x/");
@@ -1876,9 +1977,11 @@ mod crawler_admin_tests {
     /// second drop). Uses a unique name so the shared on-disk store does not leak.
     #[tokio::test(flavor = "multi_thread")]
     async fn crawler_create_list_get_run_drop_round_trip() {
-        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
-            .await
-            .expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
 
         let name = format!("crawler_test_{}", uuid::Uuid::new_v4().simple());
 
