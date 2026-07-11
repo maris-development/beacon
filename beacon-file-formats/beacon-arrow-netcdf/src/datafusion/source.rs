@@ -8,6 +8,7 @@ use beacon_nd_array::{
     arrow::{
         batch::any_dataset_as_record_batch_stream,
         metrics::DatasetReadMetrics,
+        nd_provider::any_dataset_as_encoded_stream,
         pushdown_filter::PushdownFilter,
     },
     projection::DatasetProjection,
@@ -365,9 +366,12 @@ impl NetCDFOpener {
             return Ok(stream);
         }
 
-        // Adapt batches (read with `projection`) onto the projected output
-        // schema: reorder, cast, and null-fill columns this file lacks.
-        let source_schema: SchemaRef = Arc::new(file_schema.project(&projection)?);
+        // The opener emits nd-encoded batches, so adaptation happens in the
+        // encoded (struct) domain: reorder and null-fill missing columns onto
+        // the projected encoded schema.
+        let source_schema: SchemaRef = Arc::new(beacon_datafusion_ext::nd::encoded_schema(
+            &file_schema.project(&projection)?,
+        ));
         let adapter = BatchAdapterFactory::new(projected_schema).make_adapter(&source_schema)?;
 
         let dataset = if projection.len() < file_schema.fields().len() {
@@ -384,13 +388,11 @@ impl NetCDFOpener {
             dataset
         };
 
-        let pushdown_filter = predicate.map(PushdownFilter::new);
-        let stream = any_dataset_as_record_batch_stream(dataset, batch_size, pushdown_filter, metrics)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Error reading NetCDF as Arrow stream: {e}"
-                ))
-            })
+        // Emit nd-encoded batches (decoded/broadcast by the NdSourceExec /
+        // NdBroadcastExec above the scan), adapted onto the projected encoded
+        // schema.
+        let _ = metrics;
+        let stream = any_dataset_as_encoded_stream(dataset, batch_size)
             .and_then(move |batch| {
                 let mapped = adapter.adapt_batch(&batch).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(

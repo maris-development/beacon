@@ -308,8 +308,14 @@ impl FileFormat for NetcdfFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // The scan carries nd data as `beacon.nd`-encoded struct columns, so
+        // the file source's schema is the encoded form of the logical table
+        // schema. `NdSourceExec` decodes it and `NdBroadcastExec` broadcasts it
+        // back to the logical schema above the scan.
+        let encoded_file_schema =
+            Arc::new(beacon_datafusion_ext::nd::encoded_schema(conf.file_schema()));
         let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            conf.file_schema().clone(),
+            encoded_file_schema,
             conf.table_partition_cols().clone(),
         );
         // Preserve a projection that the scan pushed down into the incoming
@@ -325,7 +331,12 @@ impl FileFormat for NetcdfFormat {
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
             .build();
-        Ok(DataSourceExec::from_data_source(conf))
+
+        let data_source: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(conf);
+        let nd_source =
+            Arc::new(beacon_datafusion_ext::nd::exec::NdSourceExec::try_new(data_source)?);
+        let broadcast = beacon_datafusion_ext::nd::exec::NdBroadcastExec::try_new(nd_source)?;
+        Ok(Arc::new(broadcast))
     }
 
     async fn create_writer_physical_plan(
@@ -627,9 +638,10 @@ mod tests {
             .await
             .expect("schema");
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            table_schema.clone(),
-        );
+        // The opener emits nd-encoded batches, so its source schema is encoded.
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&table_schema),
+        ));
         let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -667,9 +679,9 @@ mod tests {
             .await
             .expect("schema");
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            table_schema.clone(),
-        );
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&table_schema),
+        ));
         let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -710,9 +722,9 @@ mod tests {
         // Project to only the first column.
         let projected_schema: SchemaRef = Arc::new(table_schema.project(&[0]).expect("project"));
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            table_schema.clone(),
-        );
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&table_schema),
+        ));
         let opener = source::NetCDFSource::new(store, None, ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -785,7 +797,9 @@ mod tests {
         let missing_idx = merged.index_of(&missing).unwrap();
 
         // No projection pushed → the opener reads under the full merged schema.
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(merged.clone());
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&merged),
+        ));
         let opener = source::NetCDFSource::new(store, None, ts);
         let conf = FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
@@ -841,9 +855,9 @@ mod tests {
         .await
         .expect("dim schema");
 
-        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(
-            dim_schema.clone(),
-        );
+        let ts = datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+            beacon_datafusion_ext::nd::encoded_schema(&dim_schema),
+        ));
         let opener = source::NetCDFSource::new(store, Some(vec!["time".to_string()]), ts);
         let file_opener = {
             let conf = FileScanConfigBuilder::new(
@@ -1009,5 +1023,175 @@ mod tests {
         }
         assert!(kept > 0, "midpoint predicate should keep some rows");
         assert!(kept < total, "midpoint predicate should drop some rows");
+    }
+
+    /// `scale_factor`/`add_offset` are actually applied: the decoded
+    /// `analysed_sst` (packed int16 with scale 0.01, offset 273.15 kelvin) lands
+    /// in a physical sea-surface-temperature range, which raw packed values
+    /// never would.
+    #[tokio::test]
+    async fn scale_offset_decodes_to_physical_range() {
+        use arrow::array::Float64Array;
+
+        let store = test_store().await;
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx, store).await;
+
+        let batches = ctx
+            .sql("SELECT min(analysed_sst) AS mn, max(analysed_sst) AS mx FROM gridded_nc")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let f = |i: usize| {
+            batches[0]
+                .column(i)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0)
+        };
+        let (mn, mx) = (f(0), f(1));
+        assert!(
+            (250.0..350.0).contains(&mn) && (250.0..350.0).contains(&mx),
+            "decoded SST must be in a physical kelvin range, got [{mn}, {mx}]"
+        );
+        assert!(mx > mn, "SST must span a range");
+    }
+
+    // ── nd pipeline: plan shape + variables & attributes end-to-end ──────
+
+    /// The physical plan for an nd scan is the nd spine on top of the standard
+    /// file scan: `NdBroadcastExec` → `NdSourceExec` → `DataSourceExec`, in that
+    /// nesting order (parent above child in the indented render).
+    #[tokio::test]
+    async fn physical_plan_is_nd_spine_over_scan() {
+        use datafusion::physical_plan::displayable;
+
+        let store = test_store().await;
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx, store).await;
+
+        let plan = ctx
+            .sql("SELECT analysed_sst FROM gridded_nc")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+
+        let broadcast = rendered.find("NdBroadcastExec");
+        let source = rendered.find("NdSourceExec");
+        let scan = rendered.find("DataSourceExec");
+        assert!(
+            broadcast.is_some() && source.is_some() && scan.is_some(),
+            "plan must contain the nd spine over a DataSourceExec:\n{rendered}"
+        );
+        assert!(
+            broadcast < source && source < scan,
+            "expected NdBroadcastExec → NdSourceExec → DataSourceExec nesting:\n{rendered}"
+        );
+    }
+
+    /// End-to-end through DataFusion: a gridded data variable comes back decoded
+    /// (scale/offset applied → Float64), and its rank-0 attributes — a variable
+    /// attribute (`analysed_sst.units`) and a global attribute (`.Conventions`) —
+    /// ride the `beacon.nd` encoding as constant columns on every row.
+    #[tokio::test]
+    async fn end_to_end_reads_variable_with_attributes() {
+        use arrow::array::StringArray;
+        use arrow::datatypes::DataType;
+
+        let store = test_store().await;
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx, store).await;
+
+        let batches = ctx
+            .sql(
+                r#"SELECT analysed_sst,
+                          "analysed_sst.units" AS units,
+                          ".Conventions"       AS conventions
+                   FROM gridded_nc LIMIT 4"#,
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 4, "LIMIT 4 should yield exactly 4 rows");
+
+        let batch = &batches[0];
+        // The data variable is decoded via scale_factor/add_offset → Float64,
+        // consistent with the zarr reader.
+        assert_eq!(
+            batch.column_by_name("analysed_sst").unwrap().data_type(),
+            &DataType::Float64
+        );
+
+        let units = batch
+            .column_by_name("units")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let conventions = batch
+            .column_by_name("conventions")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert_eq!(units.value(i), "kelvin", "variable attribute must be constant");
+            assert_eq!(conventions.value(i), "CF-1.4", "global attribute must be constant");
+        }
+    }
+
+    /// The strongest constant-column check: co-selected with a gridded variable
+    /// (`lat`, which establishes the broadcast target), a rank-0 attribute is
+    /// present on *every* grid row and has exactly one distinct value across all
+    /// of them. Referencing a gridded variable matters — projecting to only the
+    /// scalar attribute would collapse the grid to a single row.
+    #[tokio::test]
+    async fn attribute_is_single_distinct_value_across_grid() {
+        use arrow::array::Int64Array;
+
+        let store = test_store().await;
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx, store).await;
+
+        let batches = ctx
+            .sql(
+                r#"SELECT COUNT(DISTINCT "analysed_sst.units") AS distinct_units,
+                          COUNT("analysed_sst.units")          AS attr_rows,
+                          COUNT(lat)                           AS grid_rows
+                   FROM gridded_nc"#,
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let int = |name: &str| {
+            batches[0]
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0)
+        };
+        assert_eq!(int("distinct_units"), 1, "attribute must be a single constant");
+        assert!(int("grid_rows") > 1, "gridded variable must define a multi-row grid");
+        assert_eq!(
+            int("attr_rows"),
+            int("grid_rows"),
+            "attribute must be broadcast (non-null) onto every grid row"
+        );
     }
 }

@@ -412,7 +412,7 @@ fn run_length_expand(
     arrow::compute::take(array.as_ref(), &indices_array, None)
 }
 
-fn extract_dataset_layout(
+pub(crate) fn extract_dataset_layout(
     dataset: &Dataset,
 ) -> anyhow::Result<(Vec<String>, Vec<usize>, Vec<usize>)> {
     for (array_name, array) in &dataset.arrays {
@@ -463,7 +463,7 @@ fn extract_dataset_layout(
     Ok((dims, shape.clone(), shape))
 }
 
-fn build_dataset_schema(arrays: &IndexMap<String, Arc<dyn NdArrayD>>) -> Arc<Schema> {
+pub(crate) fn build_dataset_schema(arrays: &IndexMap<String, Arc<dyn NdArrayD>>) -> Arc<Schema> {
     Arc::new(Schema::new(
         arrays
             .iter()
@@ -610,7 +610,7 @@ pub fn dataset_as_record_batch_stream(
 
 /// For a given chunk subset (expressed in max_dims space), compute the corresponding
 /// subset for an individual array that may have fewer dimensions.
-fn generate_array_subset_from_chunk(
+pub(crate) fn generate_array_subset_from_chunk(
     subset: &ArraySubset,
     chunk_dimensions: &[String],
     array: &dyn NdArrayD,
@@ -631,7 +631,7 @@ fn generate_array_subset_from_chunk(
 
 /// Compute a C-memory-ordered chunk shape targeting approximately `batch_size` elements.
 /// Inner dimensions are kept whole; only the outermost axis is cut.
-fn c_order_chunk_shape(shape: &[usize], batch_size: usize) -> Vec<usize> {
+pub(crate) fn c_order_chunk_shape(shape: &[usize], batch_size: usize) -> Vec<usize> {
     if shape.is_empty() {
         return vec![];
     }
@@ -644,7 +644,7 @@ fn c_order_chunk_shape(shape: &[usize], batch_size: usize) -> Vec<usize> {
 
 /// Generate all chunk subsets for iterating over `shape` in chunks of `chunk_shape`.
 /// Boundary chunks are automatically shrunk to fit the remaining elements.
-fn generate_chunk_subsets(shape: &[usize], chunk_shape: &[usize]) -> Vec<ArraySubset> {
+pub(crate) fn generate_chunk_subsets(shape: &[usize], chunk_shape: &[usize]) -> Vec<ArraySubset> {
     if shape.is_empty() {
         return vec![ArraySubset::new(vec![], vec![])];
     }
