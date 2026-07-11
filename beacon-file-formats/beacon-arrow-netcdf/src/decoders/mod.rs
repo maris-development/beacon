@@ -7,6 +7,8 @@ use netcdf::{Extents, NcTypeDescriptor};
 
 /// Decoders for CF-style time units.
 pub mod cf_time;
+/// Decoders for CF `scale_factor` / `add_offset` packing.
+pub mod scale_offset;
 /// Decoders for NetCDF string and fixed-size char-string representations.
 pub mod strings;
 

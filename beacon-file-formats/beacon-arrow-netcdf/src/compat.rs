@@ -4,16 +4,38 @@ use std::{collections::HashMap, sync::Arc};
 
 use beacon_nd_array::{datatypes::NdArrayType, NdArray, NdArrayD};
 use netcdf::AttributeValue;
+use num_traits::AsPrimitive;
 
 use crate::{
     backend::{AttributeBackend, VariableBackend},
     decoders::{
         cf_time::{parse_time_units, CFTimeVariableDecoder},
+        scale_offset::ScaleOffsetVariableDecoder,
         strings::StringVariableDecoder,
         DefaultVariableDecoder,
     },
     NcChar,
 };
+
+/// Interpret a scalar NetCDF attribute (e.g. `scale_factor`, `add_offset`) as
+/// an `f64`. Returns `None` for non-numeric or multi-valued attributes.
+fn attribute_as_f64(attr: &AttributeValue) -> Option<f64> {
+    match attr {
+        AttributeValue::Float(v) => Some(*v as f64),
+        AttributeValue::Double(v) => Some(*v),
+        AttributeValue::Floats(v) if v.len() == 1 => Some(v[0] as f64),
+        AttributeValue::Doubles(v) if v.len() == 1 => Some(v[0]),
+        AttributeValue::Schar(v) => Some(*v as f64),
+        AttributeValue::Uchar(v) => Some(*v as f64),
+        AttributeValue::Short(v) => Some(*v as f64),
+        AttributeValue::Ushort(v) => Some(*v as f64),
+        AttributeValue::Int(v) => Some(*v as f64),
+        AttributeValue::Uint(v) => Some(*v as f64),
+        AttributeValue::Longlong(v) => Some(*v as f64),
+        AttributeValue::Ulonglong(v) => Some(*v as f64),
+        _ => None,
+    }
+}
 
 fn numeric_variable_to_nd_array<T>(
     nc_file: Arc<netcdf::File>,
@@ -22,6 +44,7 @@ fn numeric_variable_to_nd_array<T>(
     dimensions: Vec<String>,
     fill_value: Option<T>,
     cf_time_epoch_unit: Option<(hifitime::Epoch, hifitime::Unit)>,
+    scale_offset: Option<(f64, f64)>,
 ) -> anyhow::Result<Arc<dyn NdArrayD>>
 where
     T: NdArrayType
@@ -36,6 +59,28 @@ where
     let default_decoder: Arc<dyn crate::decoders::VariableDecoder<T>> = Arc::new(
         DefaultVariableDecoder::<T>::new(variable_name.to_string(), fill_value),
     );
+
+    // CF `scale_factor` / `add_offset` packing → decoded `f64`. Takes precedence
+    // over CF-time (a variable carries one or the other, never both), mirroring
+    // the zarr reader.
+    if let Some((scale, offset)) = scale_offset {
+        let raw_fill = fill_value.map(|f| f.as_());
+        let scale_offset_decoder = VariableBackend::new(
+            Arc::new(ScaleOffsetVariableDecoder::new(
+                variable_name.to_string(),
+                default_decoder,
+                scale,
+                offset,
+                raw_fill,
+            )),
+            nc_file,
+            shape,
+            dimensions,
+        );
+
+        let nd_array = NdArray::new_with_backend(scale_offset_decoder)?;
+        return Ok(Arc::new(nd_array));
+    }
 
     if let Some((epoch, unit)) = cf_time_epoch_unit {
         let time_backend = VariableBackend::new(
@@ -205,6 +250,14 @@ pub fn variable_to_nd_array(
         _ => None,
     };
 
+    // CF `scale_factor` / `add_offset` packing. When either is present the
+    // numeric variable is decoded to `f64` as `raw * scale + offset`; a missing
+    // factor defaults to the identity (scale 1.0, offset 0.0).
+    let scale = attributes.get("scale_factor").and_then(attribute_as_f64);
+    let offset = attributes.get("add_offset").and_then(attribute_as_f64);
+    let scale_offset =
+        (scale.is_some() || offset.is_some()).then(|| (scale.unwrap_or(1.0), offset.unwrap_or(0.0)));
+
     match var_type {
         netcdf::types::NcVariableType::String => {
             let string_fill_attr =
@@ -238,6 +291,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
             netcdf::types::IntType::U16 => numeric_variable_to_nd_array::<u16>(
                 nc_file.clone(),
@@ -249,6 +303,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
             netcdf::types::IntType::U32 => numeric_variable_to_nd_array::<u32>(
                 nc_file.clone(),
@@ -260,6 +315,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
             netcdf::types::IntType::U64 => numeric_variable_to_nd_array::<u64>(
                 nc_file.clone(),
@@ -271,6 +327,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
             netcdf::types::IntType::I8 => numeric_variable_to_nd_array::<i8>(
                 nc_file.clone(),
@@ -282,6 +339,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
             netcdf::types::IntType::I16 => numeric_variable_to_nd_array::<i16>(
                 nc_file.clone(),
@@ -293,6 +351,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
             netcdf::types::IntType::I32 => numeric_variable_to_nd_array::<i32>(
                 nc_file.clone(),
@@ -304,6 +363,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
             netcdf::types::IntType::I64 => numeric_variable_to_nd_array::<i64>(
                 nc_file.clone(),
@@ -315,6 +375,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
         },
         netcdf::types::NcVariableType::Float(float_type) => match float_type {
@@ -328,6 +389,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
             netcdf::types::FloatType::F64 => numeric_variable_to_nd_array::<f64>(
                 nc_file.clone(),
@@ -339,6 +401,7 @@ pub fn variable_to_nd_array(
                     _ => None,
                 },
                 cf_time_epoch_unit,
+                scale_offset,
             ),
         },
         netcdf::types::NcVariableType::Char => {
