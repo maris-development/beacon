@@ -404,6 +404,66 @@ mod tests {
         ctx.register_table("gridded", Arc::new(table)).unwrap();
     }
 
+    /// A session with the nd projection-pushdown rule registered — the same
+    /// wiring beacon-core installs, so a `SELECT`-with-computed-column plan gets
+    /// the projection sunk below the broadcast.
+    fn ctx_with_pushdown() -> SessionContext {
+        use datafusion::execution::session_state::SessionStateBuilder;
+
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .with_physical_optimizer_rule(Arc::new(
+                beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
+            ))
+            .build();
+        SessionContext::new_with_state(state)
+    }
+
+    /// End-to-end: with the rule registered, `SELECT lat * 2` plans with an
+    /// `NdProjectionExec` *below* the `NdBroadcastExec`, and produces the same
+    /// values as the unoptimized session.
+    #[tokio::test]
+    async fn projection_pushdown_fires_end_to_end() {
+        use arrow::compute::concat_batches;
+        use datafusion::physical_plan::displayable;
+
+        let ctx = ctx_with_pushdown();
+        register_example(&ctx).await;
+
+        let df = ctx
+            .sql("SELECT lat * 2 AS lat2 FROM gridded")
+            .await
+            .unwrap();
+        let plan = df.clone().create_physical_plan().await.unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+
+        let broadcast = rendered.find("NdBroadcastExec");
+        let projection = rendered.find("NdProjectionExec");
+        let source = rendered.find("NdSourceExec");
+        assert!(
+            broadcast < projection && projection < source,
+            "projection must be pushed below the broadcast:\n{rendered}"
+        );
+
+        // Same result as a session without the rule.
+        let bare = SessionContext::new();
+        register_example(&bare).await;
+        let expected = bare
+            .sql("SELECT lat * 2 AS lat2 FROM gridded")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let actual = df.collect().await.unwrap();
+
+        let schema = actual[0].schema();
+        assert_eq!(
+            concat_batches(&schema, &actual).unwrap(),
+            concat_batches(&schema, &expected).unwrap(),
+        );
+    }
+
     #[tokio::test]
     async fn factory_discovers_gridded_example() {
         use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;

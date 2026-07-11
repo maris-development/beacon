@@ -1061,6 +1061,60 @@ mod tests {
         assert!(mx > mn, "SST must span a range");
     }
 
+    /// End-to-end: with the nd projection-pushdown rule registered (as
+    /// beacon-core does), `SELECT lat * 2` plans with an `NdProjectionExec`
+    /// *below* the `NdBroadcastExec`, and yields the same values as a plain
+    /// session.
+    #[tokio::test]
+    async fn projection_pushdown_fires_end_to_end() {
+        use arrow::compute::concat_batches;
+        use datafusion::execution::session_state::SessionStateBuilder;
+        use datafusion::physical_plan::displayable;
+
+        let store = test_store().await;
+
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .with_physical_optimizer_rule(Arc::new(
+                beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
+            ))
+            .build();
+        let ctx = datafusion::prelude::SessionContext::new_with_state(state);
+        register_example(&ctx, store.clone()).await;
+
+        let df = ctx
+            .sql("SELECT lat * 2 AS lat2 FROM gridded_nc")
+            .await
+            .unwrap();
+        let plan = df.clone().create_physical_plan().await.unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+
+        let broadcast = rendered.find("NdBroadcastExec");
+        let projection = rendered.find("NdProjectionExec");
+        let source = rendered.find("NdSourceExec");
+        assert!(
+            broadcast < projection && projection < source,
+            "projection must be pushed below the broadcast:\n{rendered}"
+        );
+
+        let bare = datafusion::prelude::SessionContext::new();
+        register_example(&bare, store).await;
+        let expected = bare
+            .sql("SELECT lat * 2 AS lat2 FROM gridded_nc")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let actual = df.collect().await.unwrap();
+
+        let schema = actual[0].schema();
+        assert_eq!(
+            concat_batches(&schema, &actual).unwrap(),
+            concat_batches(&schema, &expected).unwrap(),
+        );
+    }
+
     // ── nd pipeline: plan shape + variables & attributes end-to-end ──────
 
     /// The physical plan for an nd scan is the nd spine on top of the standard

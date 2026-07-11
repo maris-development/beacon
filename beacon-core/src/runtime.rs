@@ -433,6 +433,13 @@ impl Runtime {
             // sub-plans rooted at remote tables get pushed down. The matching
             // `FederatedPlanner` lives in `BeaconQueryPlanner`'s extension planners.
             .with_optimizer_rules(datafusion_federation::default_optimizer_rules())
+            // Sink element-wise projections below the nd broadcast so they run
+            // on un-broadcast coordinate axes instead of the full grid. Appended
+            // after the default physical rules, so it sees the planned
+            // `ProjectionExec` above `NdBroadcastExec`.
+            .with_physical_optimizer_rule(Arc::new(
+                beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
+            ))
             .with_query_planner(Arc::new(crate::statement_plan::BeaconQueryPlanner::new(
                 session_cell.clone(),
             )))

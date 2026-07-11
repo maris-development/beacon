@@ -23,6 +23,7 @@ pub mod broadcast;
 pub mod dimensions;
 pub mod encoding;
 pub mod exec;
+pub mod optimizer;
 
 pub use array::NdArrowArray;
 pub use batch::NdRecordBatch;
@@ -32,6 +33,7 @@ pub use encoding::{
     decode_nd_record_batch, encode_flat_batch_as_nd, encode_nd_record_batch, encoded_schema,
     is_nd_encoded, logical_schema, nd_encoded_field, nd_encoded_type,
 };
+pub use optimizer::{NdProjectionPushdown, is_pushable_expr};
 
 #[cfg(test)]
 mod tests {
@@ -201,5 +203,174 @@ mod tests {
         let broadcast = Arc::new(NdBroadcastExec::try_new(test_source()).unwrap());
         // Wrapping a broadcast (which is not nd-aware) must fail.
         assert!(NdBroadcastExec::try_new(broadcast).is_err());
+    }
+
+    // ── projection pushdown ──────────────────────────────────────────────
+
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::PhysicalExpr;
+    use datafusion::physical_expr::expressions::{binary, col, lit};
+    use datafusion::physical_plan::projection::{ProjectionExec, ProjectionExpr};
+
+    use super::exec::NdProjectionExec;
+
+    /// A mix of projection expressions with different footprints:
+    /// `lat*2` (footprint {lat}), `lon+1` ({lon}), `sst` passthrough
+    /// ({time,lat,lon}), and a constant ({}).
+    fn projection_exprs(schema: &arrow::datatypes::SchemaRef) -> Vec<(Arc<dyn PhysicalExpr>, String)> {
+        vec![
+            (
+                binary(col("lat", schema).unwrap(), Operator::Multiply, lit(2i32), schema).unwrap(),
+                "lat2".to_string(),
+            ),
+            (
+                binary(col("lon", schema).unwrap(), Operator::Plus, lit(1i32), schema).unwrap(),
+                "lon1".to_string(),
+            ),
+            (col("sst", schema).unwrap(), "sst".to_string()),
+            (lit(7i32), "seven".to_string()),
+        ]
+    }
+
+    /// Evaluating a projection *before* broadcast (on footprint sub-grids) yields
+    /// byte-identical output to evaluating it *after* broadcasting the full grid.
+    #[tokio::test]
+    async fn projection_before_broadcast_matches_after() {
+        let schema = test_source().schema();
+        let exprs = projection_exprs(&schema);
+
+        // Reference: broadcast the full grid, then project (plain ProjectionExec).
+        let reference = Arc::new(
+            ProjectionExec::try_new(
+                exprs
+                    .iter()
+                    .cloned()
+                    .map(|(expr, alias)| ProjectionExpr { expr, alias }),
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let expected = run(reference).await.unwrap();
+
+        // Optimized: project on footprints first, then broadcast.
+        let nd_proj = Arc::new(NdProjectionExec::try_new(test_source(), exprs).unwrap());
+        let optimized = Arc::new(NdBroadcastExec::try_new(nd_proj).unwrap());
+        let actual = run(optimized).await.unwrap();
+
+        assert_eq!(actual.num_rows(), 24);
+        assert_eq!(actual, expected);
+    }
+
+    /// The rule rewrites `ProjectionExec → NdBroadcastExec` into
+    /// `NdBroadcastExec → NdProjectionExec`, preserving schema and results.
+    #[tokio::test]
+    async fn pushdown_rule_sinks_projection_below_broadcast() {
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+
+        let schema = test_source().schema();
+        let exprs = projection_exprs(&schema);
+
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            ProjectionExec::try_new(
+                exprs
+                    .iter()
+                    .cloned()
+                    .map(|(expr, alias)| ProjectionExpr { expr, alias }),
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let original_schema = original.schema();
+        let expected = run(original.clone()).await.unwrap();
+
+        let optimized = NdProjectionPushdown::new()
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+
+        // Schema is preserved (the rule reports schema_check = true).
+        assert_eq!(optimized.schema(), original_schema);
+
+        // The projection now sits *below* the broadcast.
+        let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+        let broadcast = rendered.find("NdBroadcastExec");
+        let projection = rendered.find("NdProjectionExec");
+        let source = rendered.find("NdSourceExec");
+        assert!(
+            broadcast < projection && projection < source,
+            "expected NdBroadcastExec → NdProjectionExec → NdSourceExec:\n{rendered}"
+        );
+
+        // Results are unchanged by the rewrite.
+        let actual = run(optimized).await.unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    /// The rule leaves a projection in place when any expression is not
+    /// element-wise (here a volatile scalar function): no `NdProjectionExec`.
+    #[tokio::test]
+    async fn pushdown_rule_skips_non_elementwise() {
+        use std::any::Any;
+
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::logical_expr::{
+            ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+        };
+        use datafusion::physical_expr::ScalarFunctionExpr;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+        use datafusion::scalar::ScalarValue;
+
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        struct VolatileUdf {
+            signature: Signature,
+        }
+        impl ScalarUDFImpl for VolatileUdf {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn name(&self) -> &str {
+                "test_volatile"
+            }
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+            fn return_type(&self, _: &[arrow::datatypes::DataType]) -> Result<arrow::datatypes::DataType> {
+                Ok(arrow::datatypes::DataType::Float64)
+            }
+            fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
+                Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(0.0))))
+            }
+        }
+
+        let schema = test_source().schema();
+        let udf = Arc::new(ScalarUDF::new_from_impl(VolatileUdf {
+            signature: Signature::exact(vec![], Volatility::Volatile),
+        }));
+        let volatile: Arc<dyn PhysicalExpr> = Arc::new(
+            ScalarFunctionExpr::try_new(udf, vec![], &schema, Arc::new(ConfigOptions::default()))
+                .unwrap(),
+        );
+
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            ProjectionExec::try_new(
+                [ProjectionExpr {
+                    expr: volatile,
+                    alias: "r".to_string(),
+                }],
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+
+        let optimized = NdProjectionPushdown::new()
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+        let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+        assert!(
+            !rendered.contains("NdProjectionExec"),
+            "volatile projection must not be pushed below the broadcast:\n{rendered}"
+        );
     }
 }

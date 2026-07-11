@@ -8,6 +8,7 @@
 //! also a correct plan on its own.
 
 mod broadcast_exec;
+mod projection_exec;
 mod source_exec;
 
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use futures::stream::BoxStream;
 use super::batch::NdRecordBatch;
 
 pub use broadcast_exec::NdBroadcastExec;
+pub use projection_exec::NdProjectionExec;
 pub use source_exec::NdSourceExec;
 
 /// Stream of nd batches exchanged between nd-aware operators.
@@ -45,6 +47,9 @@ pub fn as_nd_plan(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn NdExecutionPl
     let any = plan.as_any();
     if let Some(source) = any.downcast_ref::<NdSourceExec>() {
         return Some(Arc::new(source.clone()));
+    }
+    if let Some(projection) = any.downcast_ref::<NdProjectionExec>() {
+        return Some(Arc::new(projection.clone()));
     }
     None
 }
