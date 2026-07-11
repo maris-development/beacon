@@ -1025,6 +1025,42 @@ mod tests {
         assert!(kept < total, "midpoint predicate should drop some rows");
     }
 
+    /// `scale_factor`/`add_offset` are actually applied: the decoded
+    /// `analysed_sst` (packed int16 with scale 0.01, offset 273.15 kelvin) lands
+    /// in a physical sea-surface-temperature range, which raw packed values
+    /// never would.
+    #[tokio::test]
+    async fn scale_offset_decodes_to_physical_range() {
+        use arrow::array::Float64Array;
+
+        let store = test_store().await;
+        let ctx = datafusion::prelude::SessionContext::new();
+        register_example(&ctx, store).await;
+
+        let batches = ctx
+            .sql("SELECT min(analysed_sst) AS mn, max(analysed_sst) AS mx FROM gridded_nc")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let f = |i: usize| {
+            batches[0]
+                .column(i)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0)
+        };
+        let (mn, mx) = (f(0), f(1));
+        assert!(
+            (250.0..350.0).contains(&mn) && (250.0..350.0).contains(&mx),
+            "decoded SST must be in a physical kelvin range, got [{mn}, {mx}]"
+        );
+        assert!(mx > mn, "SST must span a range");
+    }
+
     // ── nd pipeline: plan shape + variables & attributes end-to-end ──────
 
     /// The physical plan for an nd scan is the nd spine on top of the standard
@@ -1090,12 +1126,11 @@ mod tests {
         assert_eq!(total, 4, "LIMIT 4 should yield exactly 4 rows");
 
         let batch = &batches[0];
-        // The data variable flows through the nd spine. NetCDF surfaces it as the
-        // raw packed type (Int16); scale_factor/add_offset are not applied here
-        // (unlike the zarr reader, which decodes to Float64).
+        // The data variable is decoded via scale_factor/add_offset → Float64,
+        // consistent with the zarr reader.
         assert_eq!(
             batch.column_by_name("analysed_sst").unwrap().data_type(),
-            &DataType::Int16
+            &DataType::Float64
         );
 
         let units = batch
