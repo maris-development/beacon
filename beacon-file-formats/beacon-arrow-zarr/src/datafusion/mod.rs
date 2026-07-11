@@ -627,6 +627,133 @@ mod tests {
         assert!(kept > 0, "midpoint predicate should keep some rows");
         assert!(kept < total, "midpoint predicate should drop some rows");
     }
+
+    // ── nd pipeline: plan shape + variables & attributes end-to-end ──────
+
+    /// The physical plan is the nd spine over the standard file scan:
+    /// `NdBroadcastExec` → `NdSourceExec` → `DataSourceExec`, in that nesting
+    /// order (parent above child in the indented render).
+    #[tokio::test]
+    async fn physical_plan_is_nd_spine_over_scan() {
+        use datafusion::physical_plan::displayable;
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let plan = ctx
+            .sql("SELECT analysed_sst FROM gridded")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+
+        let broadcast = rendered.find("NdBroadcastExec");
+        let source = rendered.find("NdSourceExec");
+        let scan = rendered.find("DataSourceExec");
+        assert!(
+            broadcast.is_some() && source.is_some() && scan.is_some(),
+            "plan must contain the nd spine over a DataSourceExec:\n{rendered}"
+        );
+        assert!(
+            broadcast < source && source < scan,
+            "expected NdBroadcastExec → NdSourceExec → DataSourceExec nesting:\n{rendered}"
+        );
+    }
+
+    /// End-to-end through DataFusion: a gridded data variable comes back decoded
+    /// (scale/offset applied → Float64), and its rank-0 attributes — a variable
+    /// attribute (`analysed_sst.units`) and a global attribute (`.Conventions`) —
+    /// ride the `beacon.nd` encoding as constant columns on every row.
+    #[tokio::test]
+    async fn end_to_end_reads_variable_with_attributes() {
+        use arrow::array::StringArray;
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let batches = ctx
+            .sql(
+                r#"SELECT analysed_sst,
+                          "analysed_sst.units" AS units,
+                          ".Conventions"       AS conventions
+                   FROM gridded LIMIT 4"#,
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 4, "LIMIT 4 should yield exactly 4 rows");
+
+        let batch = &batches[0];
+        assert_eq!(
+            batch.column_by_name("analysed_sst").unwrap().data_type(),
+            &DataType::Float64
+        );
+
+        let units = batch
+            .column_by_name("units")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let conventions = batch
+            .column_by_name("conventions")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert_eq!(units.value(i), "kelvin", "variable attribute must be constant");
+            assert_eq!(conventions.value(i), "CF-1.4", "global attribute must be constant");
+        }
+    }
+
+    /// Co-selected with a gridded variable (`lat`, which establishes the
+    /// broadcast target), a rank-0 attribute is present on every grid row and
+    /// has exactly one distinct value across all of them. Projecting to only the
+    /// scalar attribute would collapse the grid to a single row.
+    #[tokio::test]
+    async fn attribute_is_single_distinct_value_across_grid() {
+        use arrow::array::Int64Array;
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let batches = ctx
+            .sql(
+                r#"SELECT COUNT(DISTINCT "analysed_sst.units") AS distinct_units,
+                          COUNT("analysed_sst.units")          AS attr_rows,
+                          COUNT(lat)                           AS grid_rows
+                   FROM gridded"#,
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let int = |name: &str| {
+            batches[0]
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0)
+        };
+        assert_eq!(int("distinct_units"), 1, "attribute must be a single constant");
+        assert!(int("grid_rows") > 1, "gridded variable must define a multi-row grid");
+        assert_eq!(
+            int("attr_rows"),
+            int("grid_rows"),
+            "attribute must be broadcast (non-null) onto every grid row"
+        );
+    }
 }
 
 pub mod table_function;
