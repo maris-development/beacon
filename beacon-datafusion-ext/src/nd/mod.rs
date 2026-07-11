@@ -261,6 +261,48 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    /// An expression combining two columns on *different* axes (`lat + lon`,
+    /// dims {lat} and {lon}) co-broadcasts both onto their union footprint
+    /// {lat, lon} before evaluating — matching a post-broadcast projection.
+    #[tokio::test]
+    async fn projection_combines_columns_of_different_dims() {
+        let schema = test_source().schema();
+        // lat{lat} + lon{lon}  → footprint {lat, lon}, evaluated over 3·2 = 6
+        // cells, then broadcast across time to the full 24-row grid.
+        let exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = vec![(
+            binary(
+                col("lat", &schema).unwrap(),
+                Operator::Plus,
+                col("lon", &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
+            "lat_plus_lon".to_string(),
+        )];
+
+        let reference = Arc::new(
+            ProjectionExec::try_new(
+                exprs
+                    .iter()
+                    .cloned()
+                    .map(|(expr, alias)| ProjectionExpr { expr, alias }),
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let expected = run(reference).await.unwrap();
+
+        let nd_proj = Arc::new(NdProjectionExec::try_new(test_source(), exprs).unwrap());
+        let optimized = Arc::new(NdBroadcastExec::try_new(nd_proj).unwrap());
+        let actual = run(optimized).await.unwrap();
+
+        assert_eq!(actual.num_rows(), 24);
+        assert_eq!(actual, expected);
+        // Spot-check the outer-product semantics: first (lat,lon) cell is
+        // lat[-30] + lon[5] = -25.
+        assert_eq!(actual.column(0).as_primitive::<Int32Type>().value(0), -25);
+    }
+
     /// The rule rewrites `ProjectionExec → NdBroadcastExec` into
     /// `NdBroadcastExec → NdProjectionExec`, preserving schema and results.
     #[tokio::test]
