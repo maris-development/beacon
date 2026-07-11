@@ -197,4 +197,81 @@ mod tests {
             assert_eq!(actual.num_rows(), 12);
         }
     }
+
+    /// A gridded dataset carrying rank-0 metadata attributes — a variable
+    /// attribute (`sst.units`) and a global attribute (`.title`) — surfaced as
+    /// scalar arrays. Each rides the `beacon.nd` encoding as a rank-0 column and
+    /// broadcasts (replicates) its single value across every row of the grid.
+    async fn test_dataset_with_attrs() -> Dataset {
+        let base = test_dataset().await;
+
+        // A NetCDF attribute is surfaced as a scalar (rank-0) array: no
+        // dimensions, one element — exactly what `AttributeBackend` produces.
+        let units = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["celsius".to_string()],
+            vec![],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+        let title = NdArray::<String>::try_new_from_vec_in_mem(
+            vec!["demo".to_string()],
+            vec![],
+            vec![] as Vec<String>,
+            None,
+        )
+        .unwrap();
+
+        let mut arrays = base.arrays.clone();
+        arrays.insert("sst.units".to_string(), Arc::new(units));
+        arrays.insert(".title".to_string(), Arc::new(title));
+        Dataset::new("with-attrs".to_string(), arrays).await
+    }
+
+    /// Rank-0 attributes decode and broadcast to a constant column spanning the
+    /// full grid — one `"celsius"` / `"demo"` per row, across every chunk size.
+    #[tokio::test]
+    async fn scalar_attributes_broadcast_across_grid() {
+        use arrow::array::StringArray;
+
+        for batch_size in [usize::MAX, 6, 3] {
+            let ds = test_dataset_with_attrs().await;
+            let schema = build_dataset_schema(&ds.arrays);
+
+            let encoded: Vec<RecordBatch> =
+                any_dataset_as_encoded_stream(AnyDataset::Regular(ds), batch_size)
+                    .try_collect()
+                    .await
+                    .unwrap();
+            let materialized: Vec<RecordBatch> = encoded
+                .iter()
+                .map(|b| decode_nd_record_batch(b).unwrap().materialize().unwrap())
+                .collect();
+            let actual = concat_batches(&schema, &materialized).unwrap();
+
+            assert_eq!(actual.num_rows(), 12, "batch_size={batch_size}");
+
+            let units = actual
+                .column_by_name("sst.units")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let title = actual
+                .column_by_name(".title")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+
+            assert!(
+                (0..12).all(|i| units.value(i) == "celsius"),
+                "batch_size={batch_size}: sst.units not replicated"
+            );
+            assert!(
+                (0..12).all(|i| title.value(i) == "demo"),
+                "batch_size={batch_size}: .title not replicated"
+            );
+        }
+    }
 }
