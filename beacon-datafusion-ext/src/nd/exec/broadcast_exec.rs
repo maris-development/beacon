@@ -7,7 +7,9 @@ use std::sync::Arc;
 use datafusion::common::plan_err;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
 };
@@ -89,7 +91,19 @@ impl ExecutionPlan for NdBroadcastExec {
             .expect("validated in try_new")
             .execute_nd(partition, context)?;
         let baseline = BaselineMetrics::new(&self.metrics, partition);
-        Ok(materialize_nd_stream(self.input.schema(), stream, baseline))
+        // Per-column materialization outcome: a real broadcast gather, or a
+        // zero-copy pass-through of an already-full-rank column.
+        let broadcasts =
+            MetricBuilder::new(&self.metrics).counter("implicit_broadcasts", partition);
+        let passthroughs =
+            MetricBuilder::new(&self.metrics).counter("passthrough_columns", partition);
+        Ok(materialize_nd_stream(
+            self.input.schema(),
+            stream,
+            baseline,
+            broadcasts,
+            passthroughs,
+        ))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {

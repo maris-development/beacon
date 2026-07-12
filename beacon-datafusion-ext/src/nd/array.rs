@@ -54,6 +54,14 @@ impl NdArrowArray {
     /// zero-copy clone when the broadcast is the identity).
     pub fn materialize(&self, target: &Dimensions) -> Result<ArrayRef> {
         let map = self.broadcast_map(target)?;
+        self.materialize_with_map(&map)
+    }
+
+    /// Materialize using a precomputed [`BroadcastMap`] (from
+    /// [`broadcast_map`](Self::broadcast_map)). Zero-copy when the map is the
+    /// identity; otherwise a single gather. Lets callers inspect the map first
+    /// (e.g. to count implicit broadcasts) without recomputing it.
+    pub fn materialize_with_map(&self, map: &BroadcastMap) -> Result<ArrayRef> {
         if map.is_identity() {
             return Ok(self.values.clone());
         }
