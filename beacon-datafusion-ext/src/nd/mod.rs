@@ -185,6 +185,21 @@ mod tests {
         let broadcast_metrics = broadcast.metrics().unwrap();
         assert_eq!(broadcast_metrics.output_rows(), Some(24));
 
+        // Each chunk broadcasts time/lat/lon (3) and passes sst through (1);
+        // two chunks → 6 implicit broadcasts, 2 pass-throughs.
+        assert_eq!(
+            broadcast_metrics
+                .sum_by_name("implicit_broadcasts")
+                .map(|v| v.as_usize()),
+            Some(6)
+        );
+        assert_eq!(
+            broadcast_metrics
+                .sum_by_name("passthrough_columns")
+                .map(|v| v.as_usize()),
+            Some(2)
+        );
+
         // Source reports the grid rows it decoded (12 + 12) and the number of
         // nd batches.
         let source_metrics = source.metrics().unwrap();
@@ -301,6 +316,39 @@ mod tests {
         // Spot-check the outer-product semantics: first (lat,lon) cell is
         // lat[-30] + lon[5] = -25.
         assert_eq!(actual.column(0).as_primitive::<Int32Type>().value(0), -25);
+    }
+
+    /// NdProjectionExec reports the work it did and saved: elements evaluated on
+    /// footprints, elements avoided versus the full grid, and implicit
+    /// co-broadcasts.
+    #[tokio::test]
+    async fn projection_reports_metrics() {
+        let schema = test_source().schema();
+        // lat{lat} + lon{lon} → footprint {lat, lon}; both inputs co-broadcast.
+        let exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = vec![(
+            binary(
+                col("lat", &schema).unwrap(),
+                Operator::Plus,
+                col("lon", &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
+            "lat_plus_lon".to_string(),
+        )];
+
+        let projection = Arc::new(NdProjectionExec::try_new(test_source(), exprs).unwrap());
+        let broadcast = Arc::new(NdBroadcastExec::try_new(projection.clone()).unwrap());
+        let out = run(broadcast).await.unwrap();
+        assert_eq!(out.num_rows(), 24);
+
+        let m = projection.metrics().unwrap();
+        let count = |name: &str| m.sum_by_name(name).map(|v| v.as_usize());
+        // Per chunk: full grid = 2·3·2 = 12, footprint {lat=3, lon=2} = 6; two
+        // chunks. Evaluated 6·2 = 12, saved (12−6)·2 = 12.
+        assert_eq!(count("elements_evaluated"), Some(12));
+        assert_eq!(count("elements_saved"), Some(12));
+        // Both referenced columns gather onto the footprint: 2 per chunk · 2 = 4.
+        assert_eq!(count("implicit_broadcasts"), Some(4));
     }
 
     /// The rule rewrites `ProjectionExec → NdBroadcastExec` into

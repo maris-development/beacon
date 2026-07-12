@@ -80,15 +80,34 @@ impl NdRecordBatch {
     /// column onto the target grid (a single gather per column, or a zero-copy
     /// pass-through for a column already at full rank).
     pub fn materialize(&self) -> Result<RecordBatch> {
+        Ok(self.materialize_with_stats()?.0)
+    }
+
+    /// Like [`materialize`](Self::materialize), but also returns how many columns
+    /// required an actual broadcast gather versus passed through zero-copy (an
+    /// identity broadcast, i.e. already at full rank). Used to report implicit
+    /// broadcasts as plan metrics.
+    pub fn materialize_with_stats(&self) -> Result<(RecordBatch, usize, usize)> {
+        let mut broadcasts = 0usize;
+        let mut passthroughs = 0usize;
         let arrays: Vec<ArrayRef> = self
             .columns
             .iter()
-            .map(|column| column.materialize(&self.target))
+            .map(|column| {
+                let map = column.broadcast_map(&self.target)?;
+                if map.is_identity() {
+                    passthroughs += 1;
+                } else {
+                    broadcasts += 1;
+                }
+                column.materialize_with_map(&map)
+            })
             .collect::<Result<_>>()?;
 
         let options = RecordBatchOptions::new().with_row_count(Some(self.num_rows()));
-        RecordBatch::try_new_with_options(self.schema.clone(), arrays, &options)
-            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+        let batch = RecordBatch::try_new_with_options(self.schema.clone(), arrays, &options)
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        Ok((batch, broadcasts, passthroughs))
     }
 }
 

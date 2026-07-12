@@ -24,7 +24,9 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::utils::{collect_columns, reassign_expr_columns};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
 };
@@ -35,6 +37,16 @@ use crate::nd::batch::NdRecordBatch;
 use crate::nd::dimensions::Dimensions;
 
 use super::{NdBroadcastExec, NdExecutionPlan, SendableNdBatchStream, as_nd_plan};
+
+/// Per-partition metric counters recorded while projecting.
+struct ProjectionMetrics {
+    /// Total elements the expressions were evaluated over (∑ footprint sizes).
+    elements_evaluated: Count,
+    /// Elements avoided versus evaluating on the full grid (∑ target − footprint).
+    elements_saved: Count,
+    /// Implicit gathers to co-broadcast referenced columns onto their footprint.
+    broadcasts: Count,
+}
 
 /// One output column: an expression rewritten to reference only the columns it
 /// uses, plus the indices of those columns in the child's schema.
@@ -172,8 +184,14 @@ impl NdProjectionExec {
         &self.exprs
     }
 
-    /// Project one nd batch: evaluate every output column on its footprint grid.
-    fn project_batch(&self, batch: &NdRecordBatch) -> Result<NdRecordBatch> {
+    /// Project one nd batch: evaluate every output column on its footprint grid,
+    /// recording the work done (elements evaluated, elements saved versus the
+    /// full grid, and implicit co-broadcasts) into `metrics`.
+    fn project_batch(
+        &self,
+        batch: &NdRecordBatch,
+        metrics: &ProjectionMetrics,
+    ) -> Result<NdRecordBatch> {
         let target = batch.target();
         let mut projected = Vec::with_capacity(self.columns.len());
 
@@ -183,12 +201,28 @@ impl NdProjectionExec {
             // with the full grid.
             let footprint = footprint_of(target, batch, &column.input_indices)?;
 
+            // The expression runs over the footprint instead of the full grid;
+            // the difference is the work the pushdown avoided.
+            metrics.elements_evaluated.add(footprint.num_elements());
+            metrics
+                .elements_saved
+                .add(target.num_elements().saturating_sub(footprint.num_elements()));
+
             // Co-broadcast the referenced columns onto the footprint so they
-            // align element-wise, then evaluate.
+            // align element-wise, then evaluate. A referenced column on fewer
+            // axes than the footprint needs a real gather (an implicit
+            // broadcast); one already spanning the footprint passes through.
             let arrays: Vec<ArrayRef> = column
                 .input_indices
                 .iter()
-                .map(|&i| batch.column(i).materialize(&footprint))
+                .map(|&i| {
+                    let source = batch.column(i);
+                    let map = source.broadcast_map(&footprint)?;
+                    if !map.is_identity() {
+                        metrics.broadcasts.add(1);
+                    }
+                    source.materialize_with_map(&map)
+                })
                 .collect::<Result<_>>()?;
             let options =
                 RecordBatchOptions::new().with_row_count(Some(footprint.num_elements()));
@@ -295,6 +329,14 @@ impl NdExecutionPlan for NdProjectionExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableNdBatchStream> {
         let baseline = BaselineMetrics::new(&self.metrics, partition);
+        let projection_metrics = ProjectionMetrics {
+            elements_evaluated: MetricBuilder::new(&self.metrics)
+                .counter("elements_evaluated", partition),
+            elements_saved: MetricBuilder::new(&self.metrics)
+                .counter("elements_saved", partition),
+            broadcasts: MetricBuilder::new(&self.metrics)
+                .counter("implicit_broadcasts", partition),
+        };
         let this = self.clone();
         let stream = as_nd_plan(&self.input)
             .expect("validated in try_new")
@@ -302,7 +344,7 @@ impl NdExecutionPlan for NdProjectionExec {
             .map(move |item| {
                 let _timer = baseline.elapsed_compute().timer();
                 let batch = item?;
-                let projected = this.project_batch(&batch)?;
+                let projected = this.project_batch(&batch, &projection_metrics)?;
                 baseline.record_output(projected.num_rows());
                 Ok(projected)
             });
