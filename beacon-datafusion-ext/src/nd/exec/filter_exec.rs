@@ -391,4 +391,114 @@ mod tests {
         let pred = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(15i32), &schema).unwrap();
         assert_eq!(select(&schema, &batch, vec![pred]), vec![2, 4]);
     }
+
+    /// Two conjuncts on the *same* axis form a range: `lat > 10 AND lat < 30`
+    /// keeps lat = 20, i.e. cells 2 and 3.
+    #[test]
+    fn same_axis_conjuncts_form_a_range() {
+        let (schema, batch) = test_batch();
+        let lo = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(10i32), &schema).unwrap();
+        let hi = binary(col("lat", &schema).unwrap(), Operator::Lt, lit(30i32), &schema).unwrap();
+        assert_eq!(select(&schema, &batch, vec![lo, hi]), vec![2, 3]);
+    }
+
+    /// A predicate on the *inner* axis only (`lon = 2`) tiles across lat: cells
+    /// 1, 3, 5.
+    #[test]
+    fn inner_axis_predicate_tiles() {
+        let (schema, batch) = test_batch();
+        let pred = binary(col("lon", &schema).unwrap(), Operator::Eq, lit(2i32), &schema).unwrap();
+        assert_eq!(select(&schema, &batch, vec![pred]), vec![1, 3, 5]);
+    }
+
+    /// A predicate on a full-rank data variable (`temp >= 3`) selects an
+    /// arbitrary subset directly on the grid: cells 3, 4, 5.
+    #[test]
+    fn data_variable_predicate_selects_cells() {
+        let (schema, batch) = test_batch();
+        let pred =
+            binary(col("temp", &schema).unwrap(), Operator::GtEq, lit(3i32), &schema).unwrap();
+        assert_eq!(select(&schema, &batch, vec![pred]), vec![3, 4, 5]);
+    }
+
+    /// A single conjunct containing an `OR` (not split) unions its branches:
+    /// `lat < 15 OR lon = 2` keeps cells 0,1 (lat=10) ∪ 1,3,5 (lon=2) = {0,1,3,5}.
+    #[test]
+    fn or_predicate_unions_branches() {
+        let (schema, batch) = test_batch();
+        let pred = binary(
+            binary(col("lat", &schema).unwrap(), Operator::Lt, lit(15i32), &schema).unwrap(),
+            Operator::Or,
+            binary(col("lon", &schema).unwrap(), Operator::Eq, lit(2i32), &schema).unwrap(),
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(select(&schema, &batch, vec![pred]), vec![0, 1, 3, 5]);
+    }
+
+    /// A cross-axis conjunct intersected with a single-axis one:
+    /// `lat + lon > 22 AND lon = 1` keeps only cell 4.
+    #[test]
+    fn cross_axis_and_single_axis_intersect() {
+        let (schema, batch) = test_batch();
+        let cross = binary(
+            binary(
+                col("lat", &schema).unwrap(),
+                Operator::Plus,
+                col("lon", &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
+            Operator::Gt,
+            lit(22i32),
+            &schema,
+        )
+        .unwrap();
+        let inner = binary(col("lon", &schema).unwrap(), Operator::Eq, lit(1i32), &schema).unwrap();
+        assert_eq!(select(&schema, &batch, vec![cross, inner]), vec![4]);
+    }
+
+    /// A predicate no cell satisfies yields an empty selection.
+    #[test]
+    fn predicate_selecting_nothing_is_empty() {
+        let (schema, batch) = test_batch();
+        let pred = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(100i32), &schema).unwrap();
+        assert_eq!(select(&schema, &batch, vec![pred]), Vec::<u64>::new());
+    }
+
+    /// A predicate every cell satisfies retains the whole grid, in order.
+    #[test]
+    fn predicate_selecting_everything_keeps_all() {
+        let (schema, batch) = test_batch();
+        let pred = binary(col("lat", &schema).unwrap(), Operator::GtEq, lit(10i32), &schema).unwrap();
+        assert_eq!(select(&schema, &batch, vec![pred]), vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    /// A cell where the predicate evaluates to NULL is excluded (SQL `WHERE`
+    /// keeps only TRUE). With `lat = [10, null, 30]`, `lat > 15` drops the null
+    /// slice and keeps only the lat=30 cells.
+    #[test]
+    fn null_predicate_value_excludes_cell() {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("lat", DataType::Int32, true),
+            Field::new("lon", DataType::Int32, true),
+        ]));
+        let lat = NdArrowArray::try_new(
+            Arc::new(Int32Array::from(vec![Some(10), None, Some(30)])),
+            dims(&[("lat", 3)]),
+        )
+        .unwrap();
+        let lon =
+            NdArrowArray::try_new(Arc::new(Int32Array::from(vec![1, 2])), dims(&[("lon", 2)]))
+                .unwrap();
+        let batch = NdRecordBatch::try_new(
+            schema.clone(),
+            vec![lat, lon],
+            dims(&[("lat", 3), ("lon", 2)]),
+        )
+        .unwrap();
+
+        let pred = binary(col("lat", &schema).unwrap(), Operator::Gt, lit(15i32), &schema).unwrap();
+        assert_eq!(select(&schema, &batch, vec![pred]), vec![4, 5]);
+    }
 }

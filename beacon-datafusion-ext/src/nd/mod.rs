@@ -524,6 +524,18 @@ mod tests {
         let predicates: Vec<Arc<dyn PhysicalExpr>> = vec![
             // Coordinate axis: keeps lat ∈ {0, 30}.
             binary(col("lat", &schema).unwrap(), Operator::Gt, lit(-1i32), &schema).unwrap(),
+            // Single-axis range as one ANDed conjunct: time ∈ {101, 102}.
+            binary(
+                binary(col("time", &schema).unwrap(), Operator::GtEq, lit(101i32), &schema)
+                    .unwrap(),
+                Operator::And,
+                binary(col("time", &schema).unwrap(), Operator::LtEq, lit(102i32), &schema)
+                    .unwrap(),
+                &schema,
+            )
+            .unwrap(),
+            // Inequality on a coordinate axis: drops the time=101 slices.
+            binary(col("time", &schema).unwrap(), Operator::NotEq, lit(101i32), &schema).unwrap(),
             // Cross-axis: footprint {lat, lon}.
             binary(
                 binary(
@@ -538,8 +550,24 @@ mod tests {
                 &schema,
             )
             .unwrap(),
+            // Disjunction across two axes: footprint {lat, lon}.
+            binary(
+                binary(col("lat", &schema).unwrap(), Operator::Lt, lit(0i32), &schema).unwrap(),
+                Operator::Or,
+                binary(col("lon", &schema).unwrap(), Operator::Eq, lit(15i32), &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
             // Full-rank data variable: footprint {time, lat, lon}.
             binary(col("sst", &schema).unwrap(), Operator::Gt, lit(5.0f64), &schema).unwrap(),
+            // Coordinate axis combined with a data variable in one conjunct.
+            binary(
+                binary(col("lat", &schema).unwrap(), Operator::Gt, lit(-30i32), &schema).unwrap(),
+                Operator::And,
+                binary(col("sst", &schema).unwrap(), Operator::Lt, lit(20.0f64), &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
         ];
 
         for predicate in predicates {
@@ -561,6 +589,87 @@ mod tests {
 
             assert_eq!(actual, expected, "mismatch for predicate {predicate}");
         }
+    }
+
+    /// Several *separate* conjuncts across different axes handed to one
+    /// `NdFilterExec` intersect correctly, matching a single `FilterExec` whose
+    /// predicate is their `AND`.
+    #[tokio::test]
+    async fn multiple_conjuncts_across_axes_match_reference() {
+        let schema = test_source().schema();
+        let c1 = binary(col("time", &schema).unwrap(), Operator::Gt, lit(100i32), &schema).unwrap();
+        let c2 = binary(col("lat", &schema).unwrap(), Operator::GtEq, lit(0i32), &schema).unwrap();
+        let c3 = binary(col("lon", &schema).unwrap(), Operator::Eq, lit(5i32), &schema).unwrap();
+
+        // Reference: one FilterExec over `c1 AND c2 AND c3`.
+        let combined: Arc<dyn PhysicalExpr> = binary(
+            binary(c1.clone(), Operator::And, c2.clone(), &schema).unwrap(),
+            Operator::And,
+            c3.clone(),
+            &schema,
+        )
+        .unwrap();
+        let reference = Arc::new(
+            FilterExec::try_new(
+                combined,
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let expected = run(reference).await.unwrap();
+
+        // Optimized: the three conjuncts as separate selections.
+        let nd_filter =
+            Arc::new(NdFilterExec::try_new(test_source(), vec![c1, c2, c3]).unwrap());
+        let optimized = Arc::new(NdBroadcastExec::try_new(nd_filter).unwrap());
+        let actual = run(optimized).await.unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    /// A predicate no cell satisfies yields an empty result — the broadcast emits
+    /// nothing, matching a `FilterExec` that drops every row.
+    #[tokio::test]
+    async fn filter_selecting_no_rows_is_empty() {
+        let schema = test_source().schema();
+        let predicate: Arc<dyn PhysicalExpr> =
+            binary(col("time", &schema).unwrap(), Operator::Gt, lit(1000i32), &schema).unwrap();
+
+        let reference = Arc::new(
+            FilterExec::try_new(
+                predicate.clone(),
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let expected = run(reference).await.unwrap();
+
+        let nd_filter = Arc::new(NdFilterExec::try_new(test_source(), vec![predicate]).unwrap());
+        let optimized = Arc::new(NdBroadcastExec::try_new(nd_filter).unwrap());
+        let actual = run(optimized).await.unwrap();
+
+        assert_eq!(actual.num_rows(), 0);
+        assert_eq!(actual, expected);
+    }
+
+    /// A predicate every cell satisfies retains the whole grid, byte-identical to
+    /// the unfiltered broadcast.
+    #[tokio::test]
+    async fn filter_selecting_all_rows_matches_unfiltered() {
+        let schema = test_source().schema();
+        // time is always ≥ 100, so `time > 0` keeps every cell.
+        let predicate: Arc<dyn PhysicalExpr> =
+            binary(col("time", &schema).unwrap(), Operator::Gt, lit(0i32), &schema).unwrap();
+
+        let unfiltered =
+            run(Arc::new(NdBroadcastExec::try_new(test_source()).unwrap())).await.unwrap();
+
+        let nd_filter = Arc::new(NdFilterExec::try_new(test_source(), vec![predicate]).unwrap());
+        let optimized = Arc::new(NdBroadcastExec::try_new(nd_filter).unwrap());
+        let actual = run(optimized).await.unwrap();
+
+        assert_eq!(actual.num_rows(), 24);
+        assert_eq!(actual, unfiltered);
     }
 
     /// A filter below a projection: the selection accumulated by the nd filter is
