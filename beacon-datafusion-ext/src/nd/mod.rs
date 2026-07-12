@@ -33,7 +33,7 @@ pub use encoding::{
     decode_nd_record_batch, encode_flat_batch_as_nd, encode_nd_record_batch, encoded_schema,
     is_nd_encoded, logical_schema, nd_encoded_field, nd_encoded_type,
 };
-pub use optimizer::{NdProjectionPushdown, is_pushable_expr};
+pub use optimizer::{NdFilterPushdown, NdProjectionPushdown, is_pushable_expr};
 
 #[cfg(test)]
 mod tests {
@@ -506,6 +506,245 @@ mod tests {
         assert!(
             !rendered.contains("NdProjectionExec"),
             "volatile projection must not be pushed below the broadcast:\n{rendered}"
+        );
+    }
+
+    // ── filter pushdown ──────────────────────────────────────────────────
+
+    use datafusion::physical_plan::filter::FilterExec;
+
+    use super::exec::NdFilterExec;
+
+    /// Filtering *before* broadcast (as a grid selection applied by the broadcast)
+    /// yields byte-identical output to filtering *after* broadcasting the full
+    /// grid — for coordinate-axis, cross-axis, and data-variable predicates.
+    #[tokio::test]
+    async fn filter_before_broadcast_matches_after() {
+        let schema = test_source().schema();
+        let predicates: Vec<Arc<dyn PhysicalExpr>> = vec![
+            // Coordinate axis: keeps lat ∈ {0, 30}.
+            binary(col("lat", &schema).unwrap(), Operator::Gt, lit(-1i32), &schema).unwrap(),
+            // Cross-axis: footprint {lat, lon}.
+            binary(
+                binary(
+                    col("lat", &schema).unwrap(),
+                    Operator::Plus,
+                    col("lon", &schema).unwrap(),
+                    &schema,
+                )
+                .unwrap(),
+                Operator::Gt,
+                lit(10i32),
+                &schema,
+            )
+            .unwrap(),
+            // Full-rank data variable: footprint {time, lat, lon}.
+            binary(col("sst", &schema).unwrap(), Operator::Gt, lit(5.0f64), &schema).unwrap(),
+        ];
+
+        for predicate in predicates {
+            // Reference: broadcast the full grid, then filter (plain FilterExec).
+            let reference = Arc::new(
+                FilterExec::try_new(
+                    predicate.clone(),
+                    Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+                )
+                .unwrap(),
+            );
+            let expected = run(reference).await.unwrap();
+
+            // Optimized: filter on footprints first (as a selection), then broadcast.
+            let nd_filter =
+                Arc::new(NdFilterExec::try_new(test_source(), vec![predicate.clone()]).unwrap());
+            let optimized = Arc::new(NdBroadcastExec::try_new(nd_filter).unwrap());
+            let actual = run(optimized).await.unwrap();
+
+            assert_eq!(actual, expected, "mismatch for predicate {predicate}");
+        }
+    }
+
+    /// A filter below a projection: the selection accumulated by the nd filter is
+    /// carried through the nd projection and applied by the terminal broadcast,
+    /// matching `Projection(Filter(full grid))`.
+    #[tokio::test]
+    async fn filter_then_projection_matches_reference() {
+        let schema = test_source().schema();
+        let predicate: Arc<dyn PhysicalExpr> =
+            binary(col("lat", &schema).unwrap(), Operator::Gt, lit(-1i32), &schema).unwrap();
+        let exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = vec![
+            (
+                binary(col("lat", &schema).unwrap(), Operator::Multiply, lit(2i32), &schema)
+                    .unwrap(),
+                "lat2".to_string(),
+            ),
+            (col("sst", &schema).unwrap(), "sst".to_string()),
+        ];
+
+        // Reference: project over filter over the broadcast full grid.
+        let reference = Arc::new(
+            ProjectionExec::try_new(
+                exprs
+                    .iter()
+                    .cloned()
+                    .map(|(expr, alias)| ProjectionExpr { expr, alias }),
+                Arc::new(
+                    FilterExec::try_new(
+                        predicate.clone(),
+                        Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap(),
+        );
+        let expected = run(reference).await.unwrap();
+
+        // Optimized: nd filter → nd projection → broadcast.
+        let nd_filter = Arc::new(NdFilterExec::try_new(test_source(), vec![predicate]).unwrap());
+        let nd_proj = Arc::new(NdProjectionExec::try_new(nd_filter, exprs).unwrap());
+        let optimized = Arc::new(NdBroadcastExec::try_new(nd_proj).unwrap());
+        let actual = run(optimized).await.unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    /// The rule rewrites `FilterExec → NdBroadcastExec` into
+    /// `NdBroadcastExec → NdFilterExec`, dropping the filter when every conjunct
+    /// is element-wise, and preserving schema and results.
+    #[tokio::test]
+    async fn pushdown_rule_sinks_filter_below_broadcast() {
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+
+        let schema = test_source().schema();
+        // `lat > -1 AND lon = 5`: two element-wise conjuncts.
+        let predicate: Arc<dyn PhysicalExpr> = binary(
+            binary(col("lat", &schema).unwrap(), Operator::Gt, lit(-1i32), &schema).unwrap(),
+            Operator::And,
+            binary(col("lon", &schema).unwrap(), Operator::Eq, lit(5i32), &schema).unwrap(),
+            &schema,
+        )
+        .unwrap();
+
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            FilterExec::try_new(
+                predicate,
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let original_schema = original.schema();
+        let expected = run(original.clone()).await.unwrap();
+
+        let optimized = NdFilterPushdown::new()
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+
+        assert_eq!(optimized.schema(), original_schema);
+
+        // Every conjunct is pushable, so no FilterExec remains and the nd filter
+        // sits below the broadcast, above the source.
+        let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+        assert!(
+            !rendered
+                .lines()
+                .any(|l| l.trim_start().starts_with("FilterExec:")),
+            "all-pushable filter should leave no residual FilterExec:\n{rendered}"
+        );
+        let broadcast = rendered.find("NdBroadcastExec");
+        let filter = rendered.find("NdFilterExec");
+        let source = rendered.find("NdSourceExec");
+        assert!(
+            broadcast < filter && filter < source,
+            "expected NdBroadcastExec → NdFilterExec → NdSourceExec:\n{rendered}"
+        );
+
+        let actual = run(optimized).await.unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    /// A non-element-wise conjunct (a volatile function) stays in a residual
+    /// `FilterExec` above the broadcast, while the element-wise conjunct sinks
+    /// into an `NdFilterExec` below it.
+    #[tokio::test]
+    async fn pushdown_rule_splits_mixed_predicate() {
+        use std::any::Any;
+
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::logical_expr::{
+            ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+        };
+        use datafusion::physical_expr::ScalarFunctionExpr;
+        use datafusion::physical_optimizer::PhysicalOptimizerRule;
+        use datafusion::physical_plan::displayable;
+        use datafusion::scalar::ScalarValue;
+
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        struct VolatilePred {
+            signature: Signature,
+        }
+        impl ScalarUDFImpl for VolatilePred {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn name(&self) -> &str {
+                "test_volatile_pred"
+            }
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+            fn return_type(&self, _: &[arrow::datatypes::DataType]) -> Result<arrow::datatypes::DataType> {
+                Ok(arrow::datatypes::DataType::Boolean)
+            }
+            fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
+                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(true))))
+            }
+        }
+
+        let schema = test_source().schema();
+        let udf = Arc::new(ScalarUDF::new_from_impl(VolatilePred {
+            signature: Signature::exact(vec![], Volatility::Volatile),
+        }));
+        let volatile: Arc<dyn PhysicalExpr> = Arc::new(
+            ScalarFunctionExpr::try_new(udf, vec![], &schema, Arc::new(ConfigOptions::default()))
+                .unwrap(),
+        );
+        // `lat > -1 AND volatile()`: one pushable, one not.
+        let predicate: Arc<dyn PhysicalExpr> = binary(
+            binary(col("lat", &schema).unwrap(), Operator::Gt, lit(-1i32), &schema).unwrap(),
+            Operator::And,
+            volatile,
+            &schema,
+        )
+        .unwrap();
+
+        let original: Arc<dyn ExecutionPlan> = Arc::new(
+            FilterExec::try_new(
+                predicate,
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+
+        let optimized = NdFilterPushdown::new()
+            .optimize(original, &ConfigOptions::default())
+            .unwrap();
+        let rendered = displayable(optimized.as_ref()).indent(true).to_string();
+
+        // Residual FilterExec on top, nd filter below the broadcast. Match the
+        // residual by a line starting with `FilterExec:` (not `NdFilterExec:`).
+        let line_of = |needle: &str| {
+            rendered
+                .lines()
+                .position(|l| l.trim_start().starts_with(needle))
+        };
+        let residual = line_of("FilterExec:");
+        let broadcast = line_of("NdBroadcastExec");
+        let nd_filter = line_of("NdFilterExec:");
+        assert!(
+            residual.is_some() && residual < broadcast && broadcast < nd_filter,
+            "expected FilterExec → NdBroadcastExec → NdFilterExec:\n{rendered}"
         );
     }
 }

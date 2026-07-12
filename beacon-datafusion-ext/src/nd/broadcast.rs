@@ -88,6 +88,37 @@ impl BroadcastMap {
         true
     }
 
+    /// Source take-indices for a *subset* of target cells, given their
+    /// row-major target linear indices. For each `t`, decompose it into per-axis
+    /// target coordinates and dot them with the source strides — the same
+    /// mapping [`gather_indices`](Self::gather_indices) applies to every cell,
+    /// evaluated only for the retained ones. This is how a broadcast composes
+    /// with an accumulated selection into a single gather: the un-broadcast
+    /// cross-product of filtered-out cells is never built.
+    pub fn gather_indices_at(&self, targets: &UInt64Array) -> UInt64Array {
+        let rank = self.target_shape.len();
+        let out: Vec<u64> = targets
+            .values()
+            .iter()
+            .map(|&t| {
+                let mut rem = t as usize;
+                let mut source = 0usize;
+                // Decode C-order coordinates from the innermost axis outward.
+                for axis in (0..rank).rev() {
+                    let size = self.target_shape[axis];
+                    if size == 0 {
+                        continue;
+                    }
+                    let coord = rem % size;
+                    rem /= size;
+                    source += coord * self.strides[axis];
+                }
+                source as u64
+            })
+            .collect();
+        UInt64Array::from(out)
+    }
+
     /// Take indices for the broadcast view, in row-major target order.
     pub fn gather_indices(&self) -> UInt64Array {
         let rank = self.target_shape.len();
@@ -208,6 +239,21 @@ mod tests {
         // source flat layout: (l0,t0),(l0,t1),(l1,t0),(l1,t1),(l2,t0),(l2,t1)
         assert_eq!(indices(&map), vec![0, 2, 4, 1, 3, 5]);
         assert!(!map.is_identity());
+    }
+
+    #[test]
+    fn gather_indices_at_selects_subset() {
+        // lat[3] onto (time=2, lat=3): full gather tiles the lat pattern.
+        let map = BroadcastMap::try_new(&dims(&[("lat", 3)]), &dims(&[("time", 2), ("lat", 3)]))
+            .unwrap();
+        let full = indices(&map);
+        assert_eq!(full, vec![0, 1, 2, 0, 1, 2]);
+
+        // Selecting a subset of target cells returns exactly those source offsets.
+        let targets = UInt64Array::from(vec![0u64, 2, 4, 5]);
+        let picked = map.gather_indices_at(&targets).values().to_vec();
+        assert_eq!(picked, vec![full[0], full[2], full[4], full[5]]);
+        assert_eq!(picked, vec![0, 2, 1, 2]);
     }
 
     #[test]
