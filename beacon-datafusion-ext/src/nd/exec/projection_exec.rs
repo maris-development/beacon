@@ -392,17 +392,75 @@ impl NdExecutionPlan for NdProjectionExec {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::sync::Arc;
 
     use arrow::array::{ArrayRef, AsArray, Int32Array};
     use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef};
-    use datafusion::logical_expr::Operator;
+    use datafusion::common::config::ConfigOptions;
+    use datafusion::logical_expr::{
+        ColumnarValue, Operator, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+        Volatility,
+    };
+    use datafusion::physical_expr::ScalarFunctionExpr;
     use datafusion::physical_expr::expressions::{binary, col, lit};
     use datafusion::physical_plan::metrics::Count;
 
     use crate::nd::dimensions::Dimension;
 
     use super::*;
+
+    /// A minimal element-wise scalar function that sums all its Int32 arguments
+    /// (arrays and/or scalars) row-wise — enough to exercise projection over
+    /// functions without pulling in datafusion-functions.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct SumUdf {
+        signature: Signature,
+    }
+
+    impl SumUdf {
+        fn new() -> Self {
+            Self {
+                signature: Signature::variadic_any(Volatility::Immutable),
+            }
+        }
+    }
+
+    impl ScalarUDFImpl for SumUdf {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn name(&self) -> &str {
+            "test_sum"
+        }
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+        fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+            Ok(DataType::Int32)
+        }
+        fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+            let n = args.number_rows;
+            let mut sums = vec![0i32; n];
+            for arg in &args.args {
+                let array = arg.clone().into_array(n)?;
+                let column = array.as_primitive::<Int32Type>();
+                for (i, s) in sums.iter_mut().enumerate() {
+                    *s += column.value(i);
+                }
+            }
+            Ok(ColumnarValue::Array(Arc::new(Int32Array::from(sums))))
+        }
+    }
+
+    /// Build `test_sum(args...)` as a physical expression against `schema`.
+    fn sum_fn(args: Vec<Arc<dyn PhysicalExpr>>, schema: &Schema) -> Arc<dyn PhysicalExpr> {
+        let udf = Arc::new(ScalarUDF::new_from_impl(SumUdf::new()));
+        Arc::new(
+            ScalarFunctionExpr::try_new(udf, args, schema, Arc::new(ConfigOptions::default()))
+                .unwrap(),
+        )
+    }
 
     fn dims(spec: &[(&str, usize)]) -> Dimensions {
         Dimensions::try_new(
@@ -531,5 +589,79 @@ mod tests {
         assert_eq!(m.broadcasts.value(), 2);
         assert_eq!(m.elements_evaluated.value(), 6);
         assert_eq!(m.elements_saved.value(), 0); // footprint == full grid
+    }
+
+    // ── scalar functions ────────────────────────────────────────────────
+
+    /// A function over a single column takes the fast path: footprint is that
+    /// column's own dims, no co-broadcast.
+    #[test]
+    fn function_of_single_column_does_not_broadcast() {
+        let (schema, batch) = test_batch();
+        let expr = sum_fn(vec![col("lat", &schema).unwrap()], &schema);
+        let column = ProjectionColumn::build(&schema, &expr).unwrap();
+        let m = metrics();
+
+        let out = column.project(&batch, batch.target(), &m).unwrap();
+        assert_eq!(out.dims(), &dims(&[("lat", 3)]));
+        assert_eq!(ints(out.values()), vec![10, 20, 30]);
+        assert_eq!(m.broadcasts.value(), 0);
+        assert_eq!(m.elements_evaluated.value(), 3);
+    }
+
+    /// A function over two columns on different axes unions their footprint and
+    /// co-broadcasts both onto it before evaluating.
+    #[test]
+    fn function_of_two_columns_co_broadcasts() {
+        let (schema, batch) = test_batch();
+        let expr = sum_fn(
+            vec![col("lat", &schema).unwrap(), col("lon", &schema).unwrap()],
+            &schema,
+        );
+        let column = ProjectionColumn::build(&schema, &expr).unwrap();
+        let m = metrics();
+
+        let out = column.project(&batch, batch.target(), &m).unwrap();
+        assert_eq!(out.dims(), &dims(&[("lat", 3), ("lon", 2)]));
+        assert_eq!(ints(out.values()), vec![11, 12, 21, 22, 31, 32]);
+        assert_eq!(m.broadcasts.value(), 2);
+        assert_eq!(m.elements_evaluated.value(), 6);
+    }
+
+    /// A function over one column plus a scalar literal references only that one
+    /// column, so it stays on the fast path — the literal adds no dimensions and
+    /// nothing is broadcast up front.
+    #[test]
+    fn function_of_column_and_scalar_does_not_broadcast() {
+        let (schema, batch) = test_batch();
+        let expr = sum_fn(vec![col("lat", &schema).unwrap(), lit(100i32)], &schema);
+        let column = ProjectionColumn::build(&schema, &expr).unwrap();
+        // Only `lat` is a referenced column; the literal is folded into the expr.
+        assert_eq!(column.input_indices, vec![0]);
+        let m = metrics();
+
+        let out = column.project(&batch, batch.target(), &m).unwrap();
+        assert_eq!(out.dims(), &dims(&[("lat", 3)])); // footprint = lat's dims
+        assert_eq!(ints(out.values()), vec![110, 120, 130]);
+        assert_eq!(m.broadcasts.value(), 0); // no up-front broadcast
+        assert_eq!(m.elements_evaluated.value(), 3); // evaluated over |lat|, not the grid
+    }
+
+    /// A function over only literals references no columns: it evaluates once on
+    /// a rank-0 scalar footprint and broadcasts to a constant column.
+    #[test]
+    fn function_of_only_scalars_is_rank_zero() {
+        let (schema, batch) = test_batch();
+        let expr = sum_fn(vec![lit(1i32), lit(2i32)], &schema);
+        let column = ProjectionColumn::build(&schema, &expr).unwrap();
+        assert!(column.input_indices.is_empty());
+        let m = metrics();
+
+        let out = column.project(&batch, batch.target(), &m).unwrap();
+        assert_eq!(out.dims().rank(), 0); // scalar
+        assert_eq!(ints(out.values()), vec![3]);
+        assert_eq!(m.broadcasts.value(), 0);
+        assert_eq!(m.elements_evaluated.value(), 1);
+        assert_eq!(m.elements_saved.value(), 5); // 6-cell grid minus the 1 scalar
     }
 }
