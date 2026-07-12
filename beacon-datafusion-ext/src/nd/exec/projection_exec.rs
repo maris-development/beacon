@@ -269,8 +269,17 @@ impl ExecutionPlan for NdProjectionExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // Standalone: borrow NdBroadcastExec's materialization rather than
-        // duplicating it.
+        // This node's real output is the un-broadcast `NdRecordBatch` stream from
+        // `execute_nd`; the generic `ExecutionPlan::execute` must instead yield
+        // flat Arrow `RecordBatch`es, and broadcasting is the only thing that
+        // flattens them. So a standalone execution wraps this node in an
+        // `NdBroadcastExec` to materialize.
+        //
+        // This is *not* structural coupling: it is only the fallback for when the
+        // node is a plan root with nothing broadcasting above it. In a real plan
+        // an `NdBroadcastExec` sits at the top and pulls this node's `execute_nd`
+        // directly (through any nd operators in between), so this path is never
+        // taken — the broadcast stays a separate, single terminal node.
         NdBroadcastExec::try_new(Arc::new(self.clone()))?.execute(partition, context)
     }
 
