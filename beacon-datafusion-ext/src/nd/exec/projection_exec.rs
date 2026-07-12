@@ -49,6 +49,16 @@ struct ProjectionMetrics {
     broadcasts: Count,
 }
 
+impl ProjectionMetrics {
+    /// Record one output column: `evaluated` elements over its footprint (out of
+    /// `target` on the full grid), and `broadcasts` implicit co-broadcasts.
+    fn record(&self, evaluated: usize, target: usize, broadcasts: usize) {
+        self.elements_evaluated.add(evaluated);
+        self.elements_saved.add(target.saturating_sub(evaluated));
+        self.broadcasts.add(broadcasts);
+    }
+}
+
 /// One output column: an expression rewritten to reference only the columns it
 /// uses, plus the indices of those columns in the child's schema.
 #[derive(Debug, Clone)]
@@ -63,6 +73,91 @@ struct ProjectionColumn {
     /// True when `expr` is a bare column reference — the input nd column can be
     /// reused directly, skipping evaluation entirely.
     passthrough: bool,
+}
+
+impl ProjectionColumn {
+    /// Analyze one expression against the child schema: collect the columns it
+    /// references, build a compact schema of just those, and reindex the
+    /// expression's `Column`s onto it so it can be evaluated against a batch of
+    /// only the referenced columns.
+    fn build(input_schema: &SchemaRef, expr: &Arc<dyn PhysicalExpr>) -> Result<Self> {
+        let mut input_indices: Vec<usize> =
+            collect_columns(expr).iter().map(|c| c.index()).collect();
+        input_indices.sort_unstable();
+        input_indices.dedup();
+        let compact_schema = Arc::new(Schema::new(
+            input_indices
+                .iter()
+                .map(|&i| input_schema.field(i).clone())
+                .collect::<Vec<_>>(),
+        ));
+        let expr = reassign_expr_columns(expr.clone(), &compact_schema)?;
+        let passthrough = expr.as_any().is::<Column>();
+        Ok(Self {
+            expr,
+            compact_schema,
+            input_indices,
+            passthrough,
+        })
+    }
+
+    /// Project this column from one nd batch onto the minimal footprint grid,
+    /// returning an nd column and recording work into `metrics`.
+    fn project(
+        &self,
+        batch: &NdRecordBatch,
+        target: &Dimensions,
+        metrics: &ProjectionMetrics,
+    ) -> Result<NdArrowArray> {
+        // Fast path: a single referenced column needs no co-broadcast — its
+        // footprint is its own dimensions. Evaluate on the native (un-broadcast)
+        // values and leave the one gather onto the full grid to NdBroadcastExec.
+        if self.input_indices.len() == 1 {
+            let source = batch.column(self.input_indices[0]);
+            let n = source.values().len();
+            metrics.record(n, target.num_elements(), 0);
+
+            // A bare column reference reuses the nd array as-is.
+            if self.passthrough {
+                return Ok(source.clone());
+            }
+            let values = self.evaluate(vec![source.values().clone()], n)?;
+            return NdArrowArray::try_new(values, source.dims().clone());
+        }
+
+        // General path: union the referenced columns' footprint (in target
+        // order) and co-broadcast each input onto it before evaluating. A column
+        // on fewer axes than the footprint needs a real gather (implicit
+        // broadcast); one already spanning it passes through.
+        let footprint = footprint_of(target, batch, &self.input_indices)?;
+        let n = footprint.num_elements();
+        let mut broadcasts = 0usize;
+        let arrays: Vec<ArrayRef> = self
+            .input_indices
+            .iter()
+            .map(|&i| {
+                let source = batch.column(i);
+                let map = source.broadcast_map(&footprint)?;
+                if !map.is_identity() {
+                    broadcasts += 1;
+                }
+                source.materialize_with_map(&map)
+            })
+            .collect::<Result<_>>()?;
+        metrics.record(n, target.num_elements(), broadcasts);
+        let values = self.evaluate(arrays, n)?;
+        NdArrowArray::try_new(values, footprint)
+    }
+
+    /// Evaluate the (reindexed) expression on a compact batch of `arrays` with
+    /// `rows` rows, returning the result array.
+    fn evaluate(&self, arrays: Vec<ArrayRef>, rows: usize) -> Result<ArrayRef> {
+        let options = RecordBatchOptions::new().with_row_count(Some(rows));
+        let compact =
+            RecordBatch::try_new_with_options(self.compact_schema.clone(), arrays, &options)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        self.expr.evaluate(&compact)?.into_array(rows)
+    }
 }
 
 /// Projects a list of element-wise expressions over un-broadcast nd batches,
@@ -120,28 +215,7 @@ impl NdProjectionExec {
                 expr.data_type(&input_schema)?,
                 expr.nullable(&input_schema)?,
             ));
-
-            // Referenced input columns, sorted by their child-schema index, form
-            // a compact schema; reindex the expression's `Column`s onto it so it
-            // can be evaluated against a batch of just those columns.
-            let mut input_indices: Vec<usize> =
-                collect_columns(expr).iter().map(|c| c.index()).collect();
-            input_indices.sort_unstable();
-            input_indices.dedup();
-            let compact_schema = Arc::new(Schema::new(
-                input_indices
-                    .iter()
-                    .map(|&i| input_schema.field(i).clone())
-                    .collect::<Vec<_>>(),
-            ));
-            let expr = reassign_expr_columns(expr.clone(), &compact_schema)?;
-            let passthrough = expr.as_any().is::<Column>();
-            columns.push(ProjectionColumn {
-                expr,
-                compact_schema,
-                input_indices,
-                passthrough,
-            });
+            columns.push(ProjectionColumn::build(&input_schema, expr)?);
         }
 
         let derived = Arc::new(Schema::new(fields));
@@ -191,93 +265,19 @@ impl NdProjectionExec {
     }
 
     /// Project one nd batch: evaluate every output column on its footprint grid,
-    /// recording the work done (elements evaluated, elements saved versus the
-    /// full grid, and implicit co-broadcasts) into `metrics`.
+    /// recording work into `metrics`. Per-column logic lives in
+    /// [`ProjectionColumn::project`].
     fn project_batch(
         &self,
         batch: &NdRecordBatch,
         metrics: &ProjectionMetrics,
     ) -> Result<NdRecordBatch> {
         let target = batch.target();
-        let mut projected = Vec::with_capacity(self.columns.len());
-
-        for column in &self.columns {
-            // Fast path: an expression over a single input column needs no
-            // co-broadcast — its footprint is exactly that column's own
-            // dimensions. Evaluate directly on the column's native (un-broadcast)
-            // values and leave the one gather onto the full grid to the terminal
-            // NdBroadcastExec.
-            if column.input_indices.len() == 1 {
-                let source = batch.column(column.input_indices[0]);
-                let n = source.values().len();
-                metrics.elements_evaluated.add(n);
-                metrics
-                    .elements_saved
-                    .add(target.num_elements().saturating_sub(n));
-
-                // A bare column reference reuses the nd array as-is — no
-                // evaluation, no allocation.
-                if column.passthrough {
-                    projected.push(source.clone());
-                    continue;
-                }
-
-                let options = RecordBatchOptions::new().with_row_count(Some(n));
-                let compact = RecordBatch::try_new_with_options(
-                    column.compact_schema.clone(),
-                    vec![source.values().clone()],
-                    &options,
-                )
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                let values = column.expr.evaluate(&compact)?.into_array(n)?;
-                projected.push(NdArrowArray::try_new(values, source.dims().clone())?);
-                continue;
-            }
-
-            // General path: an expression spanning multiple columns unions their
-            // footprint (the target axes they reference, in target order) and
-            // co-broadcasts the inputs onto it before evaluating.
-            let footprint = footprint_of(target, batch, &column.input_indices)?;
-
-            // The expression runs over the footprint instead of the full grid;
-            // the difference is the work the pushdown avoided.
-            metrics.elements_evaluated.add(footprint.num_elements());
-            metrics
-                .elements_saved
-                .add(target.num_elements().saturating_sub(footprint.num_elements()));
-
-            // Co-broadcast the referenced columns onto the footprint so they
-            // align element-wise, then evaluate. A referenced column on fewer
-            // axes than the footprint needs a real gather (an implicit
-            // broadcast); one already spanning the footprint passes through.
-            let arrays: Vec<ArrayRef> = column
-                .input_indices
-                .iter()
-                .map(|&i| {
-                    let source = batch.column(i);
-                    let map = source.broadcast_map(&footprint)?;
-                    if !map.is_identity() {
-                        metrics.broadcasts.add(1);
-                    }
-                    source.materialize_with_map(&map)
-                })
-                .collect::<Result<_>>()?;
-            let options =
-                RecordBatchOptions::new().with_row_count(Some(footprint.num_elements()));
-            let compact = RecordBatch::try_new_with_options(
-                column.compact_schema.clone(),
-                arrays,
-                &options,
-            )
-            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-
-            let values = column
-                .expr
-                .evaluate(&compact)?
-                .into_array(footprint.num_elements())?;
-            projected.push(NdArrowArray::try_new(values, footprint)?);
-        }
-
+        let projected = self
+            .columns
+            .iter()
+            .map(|column| column.project(batch, target, metrics))
+            .collect::<Result<Vec<_>>>()?;
         NdRecordBatch::try_new(self.schema.clone(), projected, target.clone())
     }
 }
@@ -387,5 +387,149 @@ impl NdExecutionPlan for NdProjectionExec {
                 Ok(projected)
             });
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, AsArray, Int32Array};
+    use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef};
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::expressions::{binary, col, lit};
+    use datafusion::physical_plan::metrics::Count;
+
+    use crate::nd::dimensions::Dimension;
+
+    use super::*;
+
+    fn dims(spec: &[(&str, usize)]) -> Dimensions {
+        Dimensions::try_new(
+            spec.iter()
+                .map(|(name, size)| Dimension::new(*name, *size))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// Grid (lat=3, lon=2): a `lat` coord, a `lon` coord, and a full-rank
+    /// `temp{lat,lon}` data variable.
+    fn test_batch() -> (SchemaRef, NdRecordBatch) {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("lat", DataType::Int32, true),
+            Field::new("lon", DataType::Int32, true),
+            Field::new("temp", DataType::Int32, true),
+        ]));
+        let lat = NdArrowArray::try_new(
+            Arc::new(Int32Array::from(vec![10, 20, 30])),
+            dims(&[("lat", 3)]),
+        )
+        .unwrap();
+        let lon =
+            NdArrowArray::try_new(Arc::new(Int32Array::from(vec![1, 2])), dims(&[("lon", 2)]))
+                .unwrap();
+        let temp = NdArrowArray::try_new(
+            Arc::new(Int32Array::from(vec![0, 1, 2, 3, 4, 5])),
+            dims(&[("lat", 3), ("lon", 2)]),
+        )
+        .unwrap();
+        let batch = NdRecordBatch::try_new(
+            schema.clone(),
+            vec![lat, lon, temp],
+            dims(&[("lat", 3), ("lon", 2)]),
+        )
+        .unwrap();
+        (schema, batch)
+    }
+
+    fn metrics() -> ProjectionMetrics {
+        ProjectionMetrics {
+            elements_evaluated: Count::new(),
+            elements_saved: Count::new(),
+            broadcasts: Count::new(),
+        }
+    }
+
+    fn ints(array: &ArrayRef) -> Vec<i32> {
+        array.as_primitive::<Int32Type>().values().to_vec()
+    }
+
+    #[test]
+    fn build_collects_columns_and_flags_passthrough() {
+        let (schema, _) = test_batch();
+
+        // `lat * 2` references only `lat` (index 0) and is not a bare column.
+        let expr =
+            binary(col("lat", &schema).unwrap(), Operator::Multiply, lit(2i32), &schema).unwrap();
+        let column = ProjectionColumn::build(&schema, &expr).unwrap();
+        assert_eq!(column.input_indices, vec![0]);
+        assert!(!column.passthrough);
+
+        // A bare `temp` reference (index 2) is a passthrough.
+        let bare = col("temp", &schema).unwrap();
+        let column = ProjectionColumn::build(&schema, &bare).unwrap();
+        assert_eq!(column.input_indices, vec![2]);
+        assert!(column.passthrough);
+    }
+
+    #[test]
+    fn footprint_is_ordered_by_target() {
+        let (_, batch) = test_batch();
+        // Reference lon (idx 1) then lat (idx 0): footprint keeps target order.
+        let footprint = footprint_of(batch.target(), &batch, &[0, 1]).unwrap();
+        assert_eq!(footprint, dims(&[("lat", 3), ("lon", 2)]));
+    }
+
+    #[test]
+    fn project_single_column_evaluates_on_native_footprint() {
+        let (schema, batch) = test_batch();
+        let expr =
+            binary(col("lat", &schema).unwrap(), Operator::Multiply, lit(2i32), &schema).unwrap();
+        let column = ProjectionColumn::build(&schema, &expr).unwrap();
+        let m = metrics();
+
+        let out = column.project(&batch, batch.target(), &m).unwrap();
+        assert_eq!(out.dims(), &dims(&[("lat", 3)])); // footprint = lat's own dims
+        assert_eq!(ints(out.values()), vec![20, 40, 60]);
+        // No co-broadcast; evaluated over |lat|=3, saved 6-3.
+        assert_eq!(m.broadcasts.value(), 0);
+        assert_eq!(m.elements_evaluated.value(), 3);
+        assert_eq!(m.elements_saved.value(), 3);
+    }
+
+    #[test]
+    fn project_passthrough_reuses_the_nd_array() {
+        let (schema, batch) = test_batch();
+        let column = ProjectionColumn::build(&schema, &col("temp", &schema).unwrap()).unwrap();
+        let m = metrics();
+
+        let out = column.project(&batch, batch.target(), &m).unwrap();
+        assert_eq!(out.dims(), &dims(&[("lat", 3), ("lon", 2)]));
+        assert_eq!(ints(out.values()), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(m.broadcasts.value(), 0);
+    }
+
+    #[test]
+    fn project_multi_column_co_broadcasts_onto_footprint() {
+        let (schema, batch) = test_batch();
+        // lat + lon → footprint {lat, lon}; each input gathered onto it.
+        let expr = binary(
+            col("lat", &schema).unwrap(),
+            Operator::Plus,
+            col("lon", &schema).unwrap(),
+            &schema,
+        )
+        .unwrap();
+        let column = ProjectionColumn::build(&schema, &expr).unwrap();
+        let m = metrics();
+
+        let out = column.project(&batch, batch.target(), &m).unwrap();
+        assert_eq!(out.dims(), &dims(&[("lat", 3), ("lon", 2)]));
+        // C-order over {lat, lon}: lat replicated over lon, lon tiled over lat.
+        assert_eq!(ints(out.values()), vec![11, 12, 21, 22, 31, 32]);
+        assert_eq!(m.broadcasts.value(), 2);
+        assert_eq!(m.elements_evaluated.value(), 6);
+        assert_eq!(m.elements_saved.value(), 0); // footprint == full grid
     }
 }
