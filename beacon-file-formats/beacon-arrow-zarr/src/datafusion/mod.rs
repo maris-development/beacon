@@ -409,8 +409,12 @@ mod tests {
     /// the projection sunk below the broadcast.
     fn ctx_with_pushdown() -> SessionContext {
         use datafusion::execution::session_state::SessionStateBuilder;
+        use datafusion::prelude::SessionConfig;
 
+        // Single partition so row order is deterministic (the differential tests
+        // compare results positionally).
         let state = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_target_partitions(1))
             .with_default_features()
             .with_physical_optimizer_rule(Arc::new(
                 beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
@@ -500,6 +504,105 @@ mod tests {
             .map(|b| b.num_rows())
             .sum();
         assert!(rows > 0, "base pipeline must still produce rows");
+    }
+
+    // ── nd projection pushdown: differential integration tests ───────────
+    //
+    // For each projection, plan it with the optimizer ON and assert the
+    // projection sank below the broadcast, then execute it with the optimizer ON
+    // and OFF and assert byte-identical results — using DataFusion's own
+    // (post-broadcast) evaluation as the correctness oracle.
+
+    /// Assert that `SELECT {select_exprs} FROM gridded` (a) pushes the projection
+    /// below the broadcast and (b) yields identical rows with the optimizer on
+    /// and off.
+    async fn check_pushdown(select_exprs: &str) {
+        use arrow::compute::concat_batches;
+        use datafusion::physical_plan::displayable;
+        use datafusion::prelude::SessionConfig;
+
+        let shape_sql = format!("SELECT {select_exprs} FROM gridded");
+        // Bounded so the differential comparison stays cheap; row order is
+        // deterministic (single-file scan) and identical on both paths.
+        let data_sql = format!("SELECT {select_exprs} FROM gridded LIMIT 200");
+
+        // Optimizer ON: the projection must sink below the broadcast.
+        let on = ctx_with_pushdown();
+        register_example(&on).await;
+        let plan = on
+            .sql(&shape_sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+        let broadcast = rendered.find("NdBroadcastExec");
+        let projection = rendered.find("NdProjectionExec");
+        let source = rendered.find("NdSourceExec");
+        assert!(
+            projection.is_some() && broadcast < projection && projection < source,
+            "expected NdBroadcastExec → NdProjectionExec → NdSourceExec for `{shape_sql}`:\n{rendered}"
+        );
+        let actual = on.sql(&data_sql).await.unwrap().collect().await.unwrap();
+
+        // Optimizer OFF: reference result (projection stays above the broadcast).
+        // Same single-partition config so row order matches positionally.
+        let off = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+        register_example(&off).await;
+        let expected = off.sql(&data_sql).await.unwrap().collect().await.unwrap();
+
+        let schema = expected
+            .first()
+            .map(|b| b.schema())
+            .unwrap_or_else(|| actual[0].schema());
+        assert_eq!(
+            concat_batches(&schema, &actual).unwrap(),
+            concat_batches(&schema, &expected).unwrap(),
+            "results differ with/without the optimizer for `{data_sql}`"
+        );
+    }
+
+    #[tokio::test]
+    async fn pushdown_arithmetic_and_casts() {
+        // Arithmetic with scalars, and two coordinates on different axes.
+        check_pushdown("lat * 2 + 1 AS a, lon - 10 AS b, lat + lon AS s").await;
+        // Casts to wider/narrower and to integer types.
+        check_pushdown(
+            "CAST(lat AS DOUBLE) AS a, CAST(analysed_sst AS INTEGER) AS b, \
+             CAST(time AS BIGINT) AS t",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pushdown_scalar_functions() {
+        // Single-column functions on a coordinate and on a data variable.
+        check_pushdown("abs(lat) AS a, floor(analysed_sst) AS b, round(analysed_sst) AS c").await;
+        // Column + scalar function, and a function over two cross-axis columns.
+        check_pushdown("power(lat, 2) AS p, abs(lat - lon) AS d").await;
+    }
+
+    #[tokio::test]
+    async fn pushdown_booleans_and_case() {
+        check_pushdown("lat > 40 AS hi, (lat > 40 AND lon > 30) AS both").await;
+        check_pushdown("CASE WHEN lat > 40 THEN 1 ELSE 0 END AS c").await;
+    }
+
+    #[tokio::test]
+    async fn pushdown_attributes_and_mixed() {
+        // A string function over a rank-0 attribute, co-selected with a gridded
+        // coordinate so the attribute broadcasts across the grid.
+        check_pushdown("lat, upper(\"analysed_sst.units\") AS u").await;
+        check_pushdown("lat, (\"analysed_sst.units\" = 'kelvin') AS is_k").await;
+        // Mixed: passthrough columns + a computed column + an attribute function.
+        check_pushdown("lat, lon, lat * 2 AS d, upper(\"analysed_sst.units\") AS u").await;
+    }
+
+    #[tokio::test]
+    async fn pushdown_nested_expressions() {
+        check_pushdown("CAST(round(analysed_sst) AS INTEGER) AS r").await;
+        check_pushdown("abs(CAST(lat AS DOUBLE)) * 2 AS x").await;
     }
 
     #[tokio::test]
