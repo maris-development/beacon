@@ -318,6 +318,51 @@ mod tests {
         assert_eq!(actual.column(0).as_primitive::<Int32Type>().value(0), -25);
     }
 
+    /// Single-column expressions take the fast path: the projection does no
+    /// co-broadcast (footprint == the column's own dims), leaving the single
+    /// gather to the terminal broadcast. `lat * 2` (single column) and `sst`
+    /// (bare passthrough) both report zero implicit broadcasts, with unchanged
+    /// results.
+    #[tokio::test]
+    async fn single_column_projection_skips_broadcast() {
+        let schema = test_source().schema();
+        let exprs: Vec<(Arc<dyn PhysicalExpr>, String)> = vec![
+            (
+                binary(col("lat", &schema).unwrap(), Operator::Multiply, lit(2i32), &schema)
+                    .unwrap(),
+                "lat2".to_string(),
+            ),
+            (col("sst", &schema).unwrap(), "sst".to_string()),
+        ];
+
+        let reference = Arc::new(
+            ProjectionExec::try_new(
+                exprs
+                    .iter()
+                    .cloned()
+                    .map(|(expr, alias)| ProjectionExpr { expr, alias }),
+                Arc::new(NdBroadcastExec::try_new(test_source()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let expected = run(reference).await.unwrap();
+
+        let projection = Arc::new(NdProjectionExec::try_new(test_source(), exprs).unwrap());
+        let broadcast = Arc::new(NdBroadcastExec::try_new(projection.clone()).unwrap());
+        let actual = run(broadcast).await.unwrap();
+
+        assert_eq!(actual, expected);
+        // The projection performed no gather; only the terminal broadcast did.
+        assert_eq!(
+            projection
+                .metrics()
+                .unwrap()
+                .sum_by_name("implicit_broadcasts")
+                .map(|v| v.as_usize()),
+            Some(0)
+        );
+    }
+
     /// NdProjectionExec reports the work it did and saved: elements evaluated on
     /// footprints, elements avoided versus the full grid, and implicit
     /// co-broadcasts.

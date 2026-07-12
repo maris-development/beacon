@@ -22,6 +22,7 @@ use arrow::array::{ArrayRef, RecordBatch, RecordBatchOptions};
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
+use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::utils::{collect_columns, reassign_expr_columns};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::metrics::{
@@ -59,6 +60,9 @@ struct ProjectionColumn {
     /// Indices (into the child batch) of the referenced input columns, aligned
     /// with `compact_schema`.
     input_indices: Vec<usize>,
+    /// True when `expr` is a bare column reference — the input nd column can be
+    /// reused directly, skipping evaluation entirely.
+    passthrough: bool,
 }
 
 /// Projects a list of element-wise expressions over un-broadcast nd batches,
@@ -131,10 +135,12 @@ impl NdProjectionExec {
                     .collect::<Vec<_>>(),
             ));
             let expr = reassign_expr_columns(expr.clone(), &compact_schema)?;
+            let passthrough = expr.as_any().is::<Column>();
             columns.push(ProjectionColumn {
                 expr,
                 compact_schema,
                 input_indices,
+                passthrough,
             });
         }
 
@@ -196,9 +202,41 @@ impl NdProjectionExec {
         let mut projected = Vec::with_capacity(self.columns.len());
 
         for column in &self.columns {
-            // Footprint = the target axes referenced by this expression's input
-            // columns, kept in target order so the sub-grid is C-order-consistent
-            // with the full grid.
+            // Fast path: an expression over a single input column needs no
+            // co-broadcast — its footprint is exactly that column's own
+            // dimensions. Evaluate directly on the column's native (un-broadcast)
+            // values and leave the one gather onto the full grid to the terminal
+            // NdBroadcastExec.
+            if column.input_indices.len() == 1 {
+                let source = batch.column(column.input_indices[0]);
+                let n = source.values().len();
+                metrics.elements_evaluated.add(n);
+                metrics
+                    .elements_saved
+                    .add(target.num_elements().saturating_sub(n));
+
+                // A bare column reference reuses the nd array as-is — no
+                // evaluation, no allocation.
+                if column.passthrough {
+                    projected.push(source.clone());
+                    continue;
+                }
+
+                let options = RecordBatchOptions::new().with_row_count(Some(n));
+                let compact = RecordBatch::try_new_with_options(
+                    column.compact_schema.clone(),
+                    vec![source.values().clone()],
+                    &options,
+                )
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                let values = column.expr.evaluate(&compact)?.into_array(n)?;
+                projected.push(NdArrowArray::try_new(values, source.dims().clone())?);
+                continue;
+            }
+
+            // General path: an expression spanning multiple columns unions their
+            // footprint (the target axes they reference, in target order) and
+            // co-broadcasts the inputs onto it before evaluating.
             let footprint = footprint_of(target, batch, &column.input_indices)?;
 
             // The expression runs over the footprint instead of the full grid;
