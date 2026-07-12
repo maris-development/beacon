@@ -464,6 +464,44 @@ mod tests {
         );
     }
 
+    /// With the nd optimizer *off* (a plain session, as when
+    /// `BEACON_ENABLE_ND_PIPELINE=false`), the base pipeline still works: the
+    /// broadcast and source nodes are present, the projection simply stays above
+    /// the broadcast, and results are correct.
+    #[tokio::test]
+    async fn base_pipeline_works_without_nd_optimizer() {
+        use datafusion::physical_plan::displayable;
+
+        let ctx = SessionContext::new();
+        register_example(&ctx).await;
+
+        let df = ctx
+            .sql("SELECT lat * 2 AS lat2 FROM gridded")
+            .await
+            .unwrap();
+        let plan = df.clone().create_physical_plan().await.unwrap();
+        let rendered = displayable(plan.as_ref()).indent(true).to_string();
+
+        // The base nd pipeline is always present…
+        assert!(rendered.contains("NdBroadcastExec"), "{rendered}");
+        assert!(rendered.contains("NdSourceExec"), "{rendered}");
+        // …but without the rule the projection is not sunk below the broadcast.
+        assert!(
+            !rendered.contains("NdProjectionExec"),
+            "projection must stay above the broadcast when the optimizer is off:\n{rendered}"
+        );
+
+        // It still executes and returns rows.
+        let rows: usize = df
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert!(rows > 0, "base pipeline must still produce rows");
+    }
+
     #[tokio::test]
     async fn factory_discovers_gridded_example() {
         use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;

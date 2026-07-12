@@ -363,6 +363,9 @@ impl Runtime {
         // (always-local) one used for each table's `table.json`.
         let lance_warehouse = Arc::new(beacon_lance::LanceWarehouse::new(tables_store));
 
+        // Captured before `app_config` is moved into the session config below.
+        let enable_nd_pipeline = app_config.sql.enable_nd_pipeline;
+
         let mut config = SessionConfig::new()
             .with_batch_size(app_config.runtime.batch_size)
             .with_coalesce_batches(true)
@@ -424,7 +427,7 @@ impl Runtime {
         // the state is built, so it is created with an empty cell that is filled
         // immediately afterwards (a `Weak`, to avoid a reference cycle).
         let session_cell = crate::statement_plan::new_session_cell();
-        let session_state = SessionStateBuilder::new()
+        let mut state_builder = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(runtime_env)
             .with_default_features()
@@ -432,14 +435,22 @@ impl Runtime {
             // optimizer rule set with the `FederationOptimizerRule` inserted, so
             // sub-plans rooted at remote tables get pushed down. The matching
             // `FederatedPlanner` lives in `BeaconQueryPlanner`'s extension planners.
-            .with_optimizer_rules(datafusion_federation::default_optimizer_rules())
-            // Sink element-wise projections below the nd broadcast so they run
-            // on un-broadcast coordinate axes instead of the full grid. Appended
-            // after the default physical rules, so it sees the planned
-            // `ProjectionExec` above `NdBroadcastExec`.
-            .with_physical_optimizer_rule(Arc::new(
+            .with_optimizer_rules(datafusion_federation::default_optimizer_rules());
+
+        // Opt-in nd-pipeline optimizer (BEACON_ENABLE_ND_PIPELINE): sink
+        // element-wise projections below the nd broadcast so they run on
+        // un-broadcast coordinate axes instead of the full grid. Appended after
+        // the default physical rules, so it sees the planned `ProjectionExec`
+        // above `NdBroadcastExec`. The base pipeline (`NdSourceExec` →
+        // `NdBroadcastExec`) is emitted by the formats and always runs; only this
+        // node-rewriting rule is gated.
+        if enable_nd_pipeline {
+            state_builder = state_builder.with_physical_optimizer_rule(Arc::new(
                 beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
-            ))
+            ));
+        }
+
+        let session_state = state_builder
             .with_query_planner(Arc::new(crate::statement_plan::BeaconQueryPlanner::new(
                 session_cell.clone(),
             )))

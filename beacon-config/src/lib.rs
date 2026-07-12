@@ -99,6 +99,12 @@ pub struct SqlConfig {
     pub enable: bool,
     pub default_table: String,
     pub enable_pushdown_projection: bool,
+    /// Enable the N-dimensional pipeline optimizer: the physical rule that
+    /// replaces plan nodes above the nd broadcast (e.g. sinking element-wise
+    /// projections into an `NdProjectionExec`) when it can. The base nd pipeline
+    /// (`NdSourceExec` → `NdBroadcastExec`) always runs regardless; this only
+    /// gates the node-rewriting optimizations.
+    pub enable_nd_pipeline: bool,
     pub stream_coalesce: SqlStreamCoalesceConfig,
     /// Storage engine used for managed `CREATE TABLE` when the statement does not
     /// override it (via `SET beacon.table_engine = '…'`).
@@ -375,6 +381,8 @@ struct RawConfig {
     max_age: u64,
     #[envconfig(from = "BEACON_ENABLE_PUSHDOWN_PROJECTION", default = "true")]
     enable_pushdown_projection: bool,
+    #[envconfig(from = "BEACON_ENABLE_ND_PIPELINE", default = "false")]
+    enable_nd_pipeline: bool,
 
     /// Root directory for Beacon's local data (datasets, tables, tmp, etc.).
     #[envconfig(from = "BEACON_DATA_DIR", default = "./data")]
@@ -475,6 +483,7 @@ impl From<RawConfig> for Config {
                 enable: raw.enable_sql,
                 default_table: raw.default_table,
                 enable_pushdown_projection: raw.enable_pushdown_projection,
+                enable_nd_pipeline: raw.enable_nd_pipeline,
                 stream_coalesce: SqlStreamCoalesceConfig {
                     enabled: raw.sql_stream_coalesce_enabled,
                     target_rows: raw.sql_stream_coalesce_target_rows,
