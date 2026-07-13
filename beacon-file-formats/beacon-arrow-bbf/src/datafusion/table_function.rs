@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
@@ -18,14 +18,14 @@ const BBF_FORMAT: &str = "bbf";
 pub struct ReadBBFFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
 }
 
 impl ReadBBFFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
     ) -> Self {
         Self {
@@ -82,7 +82,10 @@ impl TableFunctionImpl for ReadBBFFunc {
         // Build the file format from the factory registered on the session, so the
         // table function shares the runtime's configured format.
         let format_options: HashMap<String, String> = HashMap::new();
-        let state = self.session_ctx.state();
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
+        let state = session_ctx.state();
         let factory = state.get_file_format_factory(BBF_FORMAT).ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(
                 "read_bbf: the BBF file format is not registered on the session".to_string(),
@@ -92,7 +95,7 @@ impl TableFunctionImpl for ReadBBFFunc {
 
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async {
-                SuperListingTable::new(&self.session_ctx.state(), file_format, listing_urls).await
+                SuperListingTable::new(&session_ctx.state(), file_format, listing_urls).await
             })
         })?;
 

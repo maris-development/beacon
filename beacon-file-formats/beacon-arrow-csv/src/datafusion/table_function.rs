@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
@@ -16,14 +16,14 @@ use beacon_common::table_function::BeaconTableFunctionImpl;
 pub struct ReadCsvFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
 }
 
 impl ReadCsvFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
     ) -> Self {
         Self {
@@ -112,10 +112,13 @@ impl TableFunctionImpl for ReadCsvFunc {
         }
 
         let file_format = CsvFormat::new(delimeter, infer_records);
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(
-                    &self.session_ctx.state(),
+                    &session_ctx.state(),
                     Arc::new(file_format),
                     listing_urls,
                 )

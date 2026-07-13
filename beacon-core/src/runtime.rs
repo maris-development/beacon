@@ -8,7 +8,7 @@ use arrow::{
     datatypes::{SchemaRef, UInt64Type},
 };
 use beacon_data_lake::{
-    PersistentSchemaProvider, DATASETS_OBJECT_STORE_URL, TABLES_OBJECT_STORE_URL,
+    PersistentSchemaProvider, DATASETS_OBJECT_STORE_URL, DB_OBJECT_STORE_URL,
 };
 use beacon_datafusion_ext::{
     format_ext::{DatasetMetadata, FileFormatFactoryExt},
@@ -58,6 +58,21 @@ pub struct Runtime {
     upload_manager: Arc<crate::dataset_uploads::UploadManager>,
 }
 
+/// A unique temp path for a test's `beacon.db`. Each call returns a fresh
+/// path (process id + an atomic counter), so parallel tests never share the
+/// exclusively-locked tables store. A test that deliberately restarts a runtime
+/// should capture one path and reuse it across both boots.
+#[cfg(any(test, feature = "test-util"))]
+pub fn test_db_path() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "beacon-test-db-{}-{}.db",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 impl Runtime {
     /// Boots the Beacon execution environment with the given configuration.
     ///
@@ -67,31 +82,79 @@ impl Runtime {
     /// metadata UDFs) that cannot otherwise reach it.
     ///
     /// Auth state is persisted in the SQLite directory under [`beacon_config::USERS_DIR`].
+    ///
+    /// The tables/Lance store follows [`config.storage.db_path`], DuckDB-style: a
+    /// redb file when `Some`, or an ephemeral in-memory store when `None`. Use
+    /// [`Self::new_with_db_path`] / [`Self::new_in_memory`] to choose explicitly.
     pub async fn new(config: Arc<beacon_config::Config>) -> anyhow::Result<Self> {
+        let db_path = config.storage.db_path.clone();
         let auth = Self::init_auth(&config)?;
-        Self::new_with_auth(config, auth).await
+        Self::new_with_auth(config, auth, db_path).await
     }
 
-    /// Boots a runtime with an ephemeral in-memory auth context (no on-disk SQLite directory).
-    /// Used by tests so they don't contend on the shared persistent auth database.
+    /// Boot with the tables/Lance store persisted to the redb file at `db_path`
+    /// (DuckDB-style "open this database file"), overriding `config.storage.db_path`.
+    /// The file is exclusively locked for the runtime's lifetime, so only one
+    /// runtime per file.
+    pub async fn new_with_db_path(
+        config: Arc<beacon_config::Config>,
+        db_path: impl Into<std::path::PathBuf>,
+    ) -> anyhow::Result<Self> {
+        let auth = Self::init_auth(&config)?;
+        Self::new_with_auth(config, auth, Some(db_path.into())).await
+    }
+
+    /// Boot with an ephemeral in-memory tables/Lance store (DuckDB-style
+    /// `:memory:`): nothing persists to disk and no file lock is taken, so many
+    /// runtimes can coexist in one process.
+    pub async fn new_in_memory(config: Arc<beacon_config::Config>) -> anyhow::Result<Self> {
+        let auth = Self::init_auth(&config)?;
+        Self::new_with_auth(config, auth, None).await
+    }
+
+    /// Test helper: in-memory auth *and* an in-memory tables store, so parallel
+    /// tests share neither the persistent auth database nor a locked tables file.
+    /// Use [`Self::new_with_in_memory_auth_at`] when a test must persist to (and
+    /// reopen) a real file.
     #[cfg(any(test, feature = "test-util"))]
     pub async fn new_with_in_memory_auth(
         config: Arc<beacon_config::Config>,
     ) -> anyhow::Result<Self> {
         let auth = Self::init_in_memory_auth(&config)?;
-        Self::new_with_auth(config, auth).await
+        Self::new_with_auth(config, auth, None).await
     }
 
-    /// Boots the Beacon execution environment around an already-built authorization context.
+    /// Like [`Self::new_with_in_memory_auth`], but persists the tables/Lance store
+    /// to the redb file at `db_path` — for tests that reopen the same store
+    /// across a restart.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn new_with_in_memory_auth_at(
+        config: Arc<beacon_config::Config>,
+        db_path: impl Into<std::path::PathBuf>,
+    ) -> anyhow::Result<Self> {
+        let auth = Self::init_in_memory_auth(&config)?;
+        Self::new_with_auth(config, auth, Some(db_path.into())).await
+    }
+
+    /// Boots the Beacon execution environment around an already-built authorization
+    /// context. `db_path` selects the tables/Lance backend: `Some(path)` → a redb
+    /// file, `None` → an in-memory store.
     async fn new_with_auth(
         config: Arc<beacon_config::Config>,
         auth: Arc<beacon_auth::AuthContext>,
+        db_path: Option<std::path::PathBuf>,
     ) -> anyhow::Result<Self> {
         let memory_pool = Arc::new(FairSpillPool::new(
             config.runtime.vm_memory_size * 1024 * 1024,
         ));
 
-        let object_stores = beacon_object_storage::ObjectStores::new(&config.storage).await?;
+        // Select the tables store backend (redb file or in-memory), leaving the
+        // rest of the storage config intact.
+        let storage = beacon_object_storage::StorageConfig {
+            db_path,
+            ..config.storage.clone()
+        };
+        let object_stores = beacon_object_storage::ObjectStores::new(&storage).await?;
         let datasets_store = object_stores.datasets.clone();
         let upload_manager = crate::dataset_uploads::UploadManager::new(
             config.storage.upload_part_size,
@@ -148,23 +211,12 @@ impl Runtime {
         let schema_provider = Arc::new(PersistentSchemaProvider::new(
             tokio::runtime::Handle::current(),
             session_ctx.clone(),
-            TABLES_OBJECT_STORE_URL.clone(),
+            DB_OBJECT_STORE_URL.clone(),
         ));
         session_ctx
             .catalog("beacon")
             .unwrap()
             .register_schema("public", schema_provider.clone())?;
-
-        // Build the shared Iceberg catalog before discovering tables: startup
-        // table discovery rebuilds Iceberg providers via the catalog, and the
-        // CREATE/DROP handlers need it too. The warehouse lives in the datasets
-        // store's internal area (`__beacon__/iceberg`), so it follows the same
-        // local/S3 backend as the datasets.
-        beacon_iceberg::catalog::init_datasets_warehouse(
-            object_stores.datasets.clone(),
-            &config.storage,
-        )
-        .await?;
 
         geodatafusion::register(&session_ctx);
 
@@ -198,7 +250,11 @@ impl Runtime {
             events_available,
         );
         crawler_manager.init().await?;
-        let _ = crawler_handle.set(crawler_manager.clone());
+        // Register only a weak reference in the shared handle: the runtime owns the
+        // sole strong `Arc<CrawlerManager>`, so dropping the runtime tears the
+        // manager down (and, with it, the session-context references that keep the
+        // tables store — and its exclusive lock — alive).
+        let _ = crawler_handle.set(Arc::downgrade(&crawler_manager));
 
         Ok(Self {
             session_ctx,
@@ -386,12 +442,6 @@ impl Runtime {
             .with_extension(auth);
 
         config.options_mut().sql_parser.enable_ident_normalization = false;
-        // Register beacon's session-scoped SQL options so `SET beacon.table_engine`
-        // can override the managed-table engine per session.
-        config
-            .options_mut()
-            .extensions
-            .insert(crate::statement_plan::table_engine::BeaconSqlOptions::default());
         config
             .options_mut()
             .execution
@@ -1455,9 +1505,11 @@ mod client_query_tests {
     /// end, and an extension referencing a missing column is rejected.
     #[tokio::test(flavor = "multi_thread")]
     async fn table_extensions_sql_round_trip() {
-        let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
-            .await
-            .expect("runtime should start");
+        let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(
+            beacon_config::Config::load().unwrap(),
+        ))
+        .await
+        .expect("runtime should start");
         let suffix = uuid::Uuid::new_v4().simple();
         let table = format!("ext_{suffix}");
 
@@ -1860,18 +1912,24 @@ mod restart_tests {
     /// rebuilt in dependency order so it resolves the base table registered ahead
     /// of it. This exercises the persist-on-register + startup-recovery round trip
     /// that replaces the old `TableManager` registry.
+    ///
+    /// Also a regression guard for the store-lock lifecycle: reopening the *same*
+    /// redb file in one process only works because dropping the first runtime
+    /// releases its exclusive lock — the `SessionContext` cycles are broken in
+    /// `Drop for Runtime` plus the schema/crawler `Weak` back-references.
     #[tokio::test(flavor = "multi_thread")]
     async fn persisted_tables_survive_a_restart() {
         let suffix = uuid::Uuid::new_v4().simple();
         let base = format!("restart_base_{suffix}");
         let view = format!("restart_view_{suffix}");
 
-        // Both runtimes share one config so they resolve the same on-disk tables
-        // store; the restart must rebuild from what the first runtime persisted.
+        // Both runtimes share one config and one tables-store path so the restart
+        // reopens the same store and rebuilds from what the first runtime persisted.
         let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
+        let db_path = super::test_db_path();
 
         // First runtime: create a base table with data and a view over it.
-        let runtime = Runtime::new_with_in_memory_auth(config.clone())
+        let runtime = Runtime::new_with_in_memory_auth_at(config.clone(), db_path.clone())
             .await
             .expect("runtime should start");
         run_sql(&runtime, &format!("CREATE TABLE {base} (a BIGINT)")).await;
@@ -1884,8 +1942,8 @@ mod restart_tests {
         drop(runtime);
 
         // A fresh runtime rebuilds the catalog purely from the persisted
-        // `tables://<name>/table.json` definitions.
-        let restarted = Runtime::new_with_in_memory_auth(config)
+        // `db://<name>/table.json` definitions.
+        let restarted = Runtime::new_with_in_memory_auth_at(config, db_path)
             .await
             .expect("runtime should restart");
 

@@ -36,6 +36,7 @@ __pycache__/
 .DS_Store
 mpio.log
 CLAUDE.md
+AGENTS.md
 .claude/
 beacon-arrow-tiff/test-files/TEMP_AVG_20201201.tif
 beacon-binary-format-toolbox/test-files/000043_CFPOINT_100098_V0.nc

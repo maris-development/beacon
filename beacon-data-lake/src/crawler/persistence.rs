@@ -114,7 +114,7 @@ mod tests {
     fn service() -> CrawlerPersistence {
         let ctx = Arc::new(SessionContext::new());
         let store = Arc::new(InMemory::new());
-        let url = ObjectStoreUrl::parse("tables://").unwrap();
+        let url = ObjectStoreUrl::parse("db://").unwrap();
         ctx.register_object_store(&Url::parse(url.as_str()).unwrap(), store);
         CrawlerPersistence::new(ctx, url)
     }

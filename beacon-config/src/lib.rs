@@ -106,42 +106,6 @@ pub struct SqlConfig {
     /// gates the node-rewriting optimizations.
     pub enable_nd_pipeline: bool,
     pub stream_coalesce: SqlStreamCoalesceConfig,
-    /// Storage engine used for managed `CREATE TABLE` when the statement does not
-    /// override it (via `SET beacon.table_engine = '…'`).
-    pub default_table_engine: TableEngine,
-}
-
-/// The storage engine backing a beacon-managed table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TableEngine {
-    /// Lance: local-filesystem, columnar, versioned (default).
-    #[default]
-    Lance,
-    /// Apache Iceberg: object-store-backed lakehouse table.
-    Iceberg,
-}
-
-impl TableEngine {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TableEngine::Lance => "lance",
-            TableEngine::Iceberg => "iceberg",
-        }
-    }
-}
-
-impl std::str::FromStr for TableEngine {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "lance" => Ok(TableEngine::Lance),
-            "iceberg" => Ok(TableEngine::Iceberg),
-            other => Err(format!(
-                "unknown table engine '{other}', expected 'lance' or 'iceberg'"
-            )),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -275,8 +239,6 @@ struct RawConfig {
     vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     default_table: String,
-    #[envconfig(from = "BEACON_DEFAULT_TABLE_ENGINE", default = "lance")]
-    default_table_engine: String,
     #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
     sanitize_schema: bool,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "true")]
@@ -490,13 +452,6 @@ impl From<RawConfig> for Config {
                     flush_timeout_ms: raw.sql_stream_coalesce_flush_timeout_ms,
                     max_rows: raw.sql_stream_coalesce_max_rows,
                 },
-                default_table_engine: match raw.default_table_engine.parse() {
-                    Ok(engine) => engine,
-                    Err(e) => {
-                        tracing::warn!("invalid BEACON_DEFAULT_TABLE_ENGINE: {e}; defaulting to lance");
-                        TableEngine::default()
-                    }
-                },
             },
             flight_sql: FlightSqlConfig {
                 enable: raw.flight_sql_enable,
@@ -523,7 +478,10 @@ impl From<RawConfig> for Config {
                 };
                 StorageConfig {
                     datasets_dir: root.join("datasets"),
-                    tables_dir: root.join("tables"),
+                    // The tables catalog + managed Lance data live in one redb file
+                    // (the server persists across restarts). `None` here would make
+                    // the store ephemeral/in-memory.
+                    db_path: Some(root.join("beacon.db")),
                     tmp_dir: root.join("tmp"),
                     data_dir: root,
                     enable_fs_events: raw.enable_fs_events,
@@ -644,11 +602,12 @@ impl Config {
                 ));
             }
         }
-        // Create the configured data directories (idempotent).
+        // Create the configured data directories (idempotent). The tables store is
+        // a single file (`storage.db_path`) inside `data_dir`, so it needs no
+        // directory of its own — its parent is created here.
         for dir in [
             &config.storage.data_dir,
             &config.storage.datasets_dir,
-            &config.storage.tables_dir,
             &config.storage.tmp_dir,
             &config.data.indexes,
             &config.data.cache,
@@ -771,7 +730,7 @@ lazy_static! {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_master_key, normalize_base_path, TableEngine};
+    use super::{decode_master_key, normalize_base_path};
 
     #[test]
     fn empty_and_blank_serve_at_root() {
@@ -812,24 +771,6 @@ mod tests {
     #[test]
     fn rejects_empty_internal_segment() {
         assert!(normalize_base_path("a//b").is_err());
-    }
-
-    #[test]
-    fn table_engine_parses_case_insensitively_and_trims() {
-        assert_eq!("lance".parse::<TableEngine>(), Ok(TableEngine::Lance));
-        assert_eq!("ICEBERG".parse::<TableEngine>(), Ok(TableEngine::Iceberg));
-        assert_eq!("  Iceberg  ".parse::<TableEngine>(), Ok(TableEngine::Iceberg));
-        assert!("postgres".parse::<TableEngine>().is_err());
-    }
-
-    #[test]
-    fn table_engine_as_str_round_trips_and_defaults_to_lance() {
-        assert_eq!(TableEngine::Lance.as_str(), "lance");
-        assert_eq!(TableEngine::Iceberg.as_str(), "iceberg");
-        assert_eq!(TableEngine::default(), TableEngine::Lance);
-        for e in [TableEngine::Lance, TableEngine::Iceberg] {
-            assert_eq!(e.as_str().parse::<TableEngine>(), Ok(e));
-        }
     }
 
     #[test]

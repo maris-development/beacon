@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use crate::datafusion::{GeoParquetFormat, GeoParquetOptions};
@@ -12,14 +12,14 @@ use beacon_common::table_function::BeaconTableFunctionImpl;
 pub struct ReadGeoParquetFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
 }
 
 impl ReadGeoParquetFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
     ) -> Self {
         Self {
@@ -81,10 +81,13 @@ impl TableFunctionImpl for ReadGeoParquetFunc {
             longitude_column: None,
             latitude_column: None,
         });
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
                 SuperListingTable::new(
-                    &self.session_ctx.state(),
+                    &session_ctx.state(),
                     Arc::new(file_format),
                     listing_urls,
                 )

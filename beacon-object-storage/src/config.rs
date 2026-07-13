@@ -18,8 +18,12 @@ pub struct StorageConfig {
     /// Local root of the datasets store. Also used for NetCDF URL translation of
     /// local datasets.
     pub datasets_dir: PathBuf,
-    /// Local root of the tables store.
-    pub tables_dir: PathBuf,
+    /// Where the tables store — the catalog (`table.json`, `extensions.json`,
+    /// crawlers) and managed Lance data — lives. DuckDB-style:
+    /// - `None` → an ephemeral in-memory store (nothing persists to disk);
+    /// - `Some(path)` → a single-file [`beacon_redb_store::RedbStore`] at `path`,
+    ///   held under an exclusive lock for the process lifetime.
+    pub db_path: Option<PathBuf>,
     /// Local root of the temporary-files store.
     pub tmp_dir: PathBuf,
     /// Watch the local datasets directory for changes (local backend only).

@@ -21,7 +21,7 @@
 //!
 //! [`FileStatisticsCache`]: datafusion::execution::cache::cache_manager::FileStatisticsCache
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::{
     array::{BooleanArray, RecordBatch, StringArray},
@@ -59,11 +59,11 @@ fn output_schema() -> SchemaRef {
 
 pub struct ViewDatasetStatisticsFunc {
     runtime_handle: tokio::runtime::Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
 }
 
 impl ViewDatasetStatisticsFunc {
-    pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Arc<SessionContext>) -> Self {
+    pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
         Self {
             runtime_handle,
             session_ctx,
@@ -109,7 +109,9 @@ impl TableFunctionImpl for ViewDatasetStatisticsFunc {
             _ => return plan_err!("view_dataset_statistics requires a single Utf8 path argument"),
         };
 
-        let session_ctx = self.session_ctx.clone();
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            plan_datafusion_err!("session context has been dropped")
+        })?;
 
         let (schema, stats) = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

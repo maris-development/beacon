@@ -20,7 +20,7 @@
 //!
 //! [`BeaconFileStatisticsCache`]: beacon_datafusion_ext::stats_cache::BeaconFileStatisticsCache
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::{
     array::{BooleanArray, BooleanBuilder, RecordBatch, StringArray, UInt64Array},
@@ -63,12 +63,12 @@ fn output_schema() -> SchemaRef {
 pub struct ViewExternalTableStatisticsFunc {
     cache: Arc<BeaconFileStatisticsCache>,
     runtime_handle: Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
 }
 
 impl ViewExternalTableStatisticsFunc {
     pub fn new(
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         cache: Arc<BeaconFileStatisticsCache>,
         runtime_handle: Handle,
     ) -> Self {
@@ -128,7 +128,9 @@ impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
             }
         };
 
-        let session_ctx = self.session_ctx.clone();
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            plan_datafusion_err!("session context has been dropped")
+        })?;
 
         let (schema, files) = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

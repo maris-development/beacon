@@ -41,11 +41,11 @@ fn scalar_string(batches: &[RecordBatch]) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn lance_create_insert_update_delete() {
-    let runtime = Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+    let runtime = Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
         .await
         .expect("runtime should boot");
 
-    // Lance is the default engine, so no `SET beacon.table_engine` is needed.
+    // Lance is the only managed-table engine, so no engine selection is needed.
     let table = format!("lance_e2e_{}", std::process::id());
     let _ = runtime
         .run_query(

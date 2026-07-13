@@ -271,6 +271,74 @@ async fn state_persists_across_reopen() {
     assert_eq!(got.as_ref(), b"durable");
 }
 
+/// A rewrite vacuum reclaims dead heap blobs (and redb pages), shrinking the
+/// file, while every live object survives byte-identical with its etag intact.
+#[tokio::test]
+async fn vacuum_reclaims_space_and_preserves_live_objects() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("beacon.db");
+    let store = RedbStore::open(&file).unwrap();
+
+    let big = |b: u8| vec![b; super::HEAP_THRESHOLD * 4];
+    let keep = Path::from("data/keep.lance");
+    let churn = Path::from("data/churn.lance");
+    let meta = Path::from("tables/t/table.json");
+    let gone = Path::from("data/gone.lance");
+
+    store.put(&keep, big(7).into()).await.unwrap();
+    // Overwrite `churn` repeatedly, leaking a dead heap blob each time.
+    for i in 0..5u8 {
+        store.put(&churn, big(i).into()).await.unwrap();
+    }
+    store.put(&meta, "hi".into()).await.unwrap(); // small -> inline
+    store.put(&gone, big(1).into()).await.unwrap();
+    store.delete(&gone).await.unwrap(); // leaks its heap blob too
+
+    let keep_etag = store.head(&keep).await.unwrap().e_tag;
+    let size_before = std::fs::metadata(&file).unwrap().len();
+
+    let store = store.vacuum(VacuumMode::Rewrite).await.unwrap();
+
+    let size_after = std::fs::metadata(&file).unwrap().len();
+    assert!(
+        size_after < size_before,
+        "vacuum should shrink the file: {size_before} -> {size_after}"
+    );
+
+    // Live objects: byte-identical, etag preserved, still heap-stored.
+    let got = store.get(&keep).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), big(7).as_slice());
+    assert_eq!(store.head(&keep).await.unwrap().e_tag, keep_etag);
+    assert!(store.is_heap(&keep).unwrap());
+    let got = store.get(&churn).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), big(4).as_slice(), "keeps the last overwrite");
+    assert_eq!(store.get(&meta).await.unwrap().bytes().await.unwrap().as_ref(), b"hi");
+
+    // Deleted object stays gone.
+    let err = store.get(&gone).await.unwrap_err();
+    assert!(matches!(err, object_store::Error::NotFound { .. }), "{err}");
+
+    // The etag counter carried forward: a fresh put gets a new, larger etag.
+    let after = store.put(&keep, big(8).into()).await.unwrap();
+    assert_ne!(after.e_tag, keep_etag);
+}
+
+/// Vacuum consumes the store and needs exclusive ownership: an outstanding clone
+/// makes it fail rather than silently rewrite under a live handle.
+#[tokio::test]
+async fn vacuum_requires_exclusive_access() {
+    let (_dir, store) = store();
+    store.put(&Path::from("a"), "x".into()).await.unwrap();
+
+    let clone = store.clone();
+    let err = store.vacuum(VacuumMode::Rewrite).await.unwrap_err();
+    assert!(matches!(err, object_store::Error::Generic { .. }), "{err}");
+
+    // The clone is still usable — vacuum didn't touch the file.
+    let got = clone.get(&Path::from("a")).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), b"x");
+}
+
 // ---- object_store conformance suite ---------------------------------------
 
 mod conformance {

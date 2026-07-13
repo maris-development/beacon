@@ -17,17 +17,17 @@ pub fn register_metadata_functions(
     vec![
         Arc::new(view_dataset_statistics::ViewDatasetStatisticsFunc::new(
             runtime_handle.clone(),
-            session_ctx.clone(),
+            Arc::downgrade(&session_ctx),
         )),
         Arc::new(
             view_external_table_statistics::ViewExternalTableStatisticsFunc::new(
-                session_ctx.clone(),
+                Arc::downgrade(&session_ctx),
                 beacon_file_statistics_cache(),
                 runtime_handle.clone(),
             ),
         ),
         Arc::new(view_statistics_cache::ViewStatisticsCacheFunc::new(
-            session_ctx,
+            Arc::downgrade(&session_ctx),
             beacon_file_statistics_cache(),
             runtime_handle,
         )),

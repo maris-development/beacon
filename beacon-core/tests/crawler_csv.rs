@@ -46,7 +46,7 @@ async fn crawler_discovers_partitioned_csv() {
     std::env::set_var("BEACON_ENABLE_FS_EVENTS", "false");
     std::env::set_var("BEACON_FLIGHT_SQL_ENABLE", "false");
 
-    let runtime = Runtime::new(Arc::new(beacon_config::Config::load().unwrap()))
+    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
         .await
         .expect("runtime should boot");
     let datasets = runtime.config().storage.datasets_dir.clone();

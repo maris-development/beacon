@@ -26,8 +26,8 @@ pub mod prelude {
 
 pub static DATASETS_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
     LazyLock::new(|| ObjectStoreUrl::parse("datasets://").expect("Failed to parse datasets URL"));
-pub static TABLES_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
-    LazyLock::new(|| ObjectStoreUrl::parse("tables://").expect("Failed to parse tables URL"));
+pub static DB_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
+    LazyLock::new(|| ObjectStoreUrl::parse("db://").expect("Failed to parse db URL"));
 pub static TMP_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
     LazyLock::new(|| ObjectStoreUrl::parse("tmp://").expect("Failed to parse tmp URL"));
 pub static INDEX_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
@@ -37,8 +37,9 @@ pub static INDEX_OBJECT_STORE_URL: LazyLock<ObjectStoreUrl> =
 ///
 /// The runtime owns the [`ObjectStores`] (built from the storage config, not a
 /// process-global) and passes them in; this registers the `datasets://`,
-/// `internal://` (materialized-view data), `tables://` (table definitions) and
-/// `tmp://` (query output) URLs so DataFusion can resolve them. Must be called
+/// `internal://` (materialized-view data), `db://` (the redb store: table
+/// definitions and managed Lance data) and `tmp://` (query output) URLs so
+/// DataFusion can resolve them. Must be called
 /// before any table or dataset access.
 pub fn register_object_stores(
     session_context: &SessionContext,
@@ -57,9 +58,9 @@ pub fn register_object_stores(
         &Url::parse(DATASETS_OBJECT_STORE_URL.as_str()).unwrap(),
         datasets_object_store,
     );
-    // Register tables object store
+    // Register the redb (db://) object store: table definitions + Lance data.
     session_context.register_object_store(
-        &Url::parse(TABLES_OBJECT_STORE_URL.as_str()).unwrap(),
+        &Url::parse(DB_OBJECT_STORE_URL.as_str()).unwrap(),
         object_stores.tables.clone(),
     );
     // Register tmp object store

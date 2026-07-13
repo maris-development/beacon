@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
@@ -20,14 +20,14 @@ const ATLAS_FORMAT: &str = "atlas";
 pub struct ReadAtlasFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
 }
 
 impl ReadAtlasFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
     ) -> Self {
         Self {
@@ -124,7 +124,10 @@ impl TableFunctionImpl for ReadAtlasFunc {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));
         }
 
-        let state = self.session_ctx.state();
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
+        let state = session_ctx.state();
         let factory = state.get_file_format_factory(ATLAS_FORMAT).ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(
                 "read_atlas: the atlas file format is not registered on the session".to_string(),
@@ -134,7 +137,7 @@ impl TableFunctionImpl for ReadAtlasFunc {
 
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async {
-                SuperListingTable::new(&self.session_ctx.state(), file_format, listing_urls).await
+                SuperListingTable::new(&session_ctx.state(), file_format, listing_urls).await
             })
         })?;
 

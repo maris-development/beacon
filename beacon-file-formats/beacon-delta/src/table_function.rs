@@ -5,7 +5,7 @@
 //! string argument selects a snapshot for time travel: an integer is treated as a
 //! version, anything else as an RFC-3339 timestamp.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::table_function::BeaconTableFunctionImpl;
@@ -22,7 +22,7 @@ use crate::provider::{open_delta_provider, TimeTravel};
 
 pub struct ReadDeltaFunc {
     runtime_handle: tokio::runtime::Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
     #[allow(dead_code)]
     data_object_store_url: ObjectStoreUrl,
     datasets_object_store: Arc<DatasetsStore>,
@@ -31,7 +31,7 @@ pub struct ReadDeltaFunc {
 impl ReadDeltaFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
         datasets_object_store: Arc<DatasetsStore>,
     ) -> Self {
@@ -106,7 +106,9 @@ impl TableFunctionImpl for ReadDeltaFunc {
             },
         };
 
-        let ctx = self.session_ctx.clone();
+        let ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
         let datasets_store = self.datasets_object_store.clone();
         let provider = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {

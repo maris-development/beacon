@@ -3,7 +3,7 @@
 //! Rather than raw filesystem paths, managed Lance datasets are read/written
 //! through the same `object_store` instance beacon uses for the tables store. We
 //! do this with Lance's [`ObjectStoreProvider`]/[`ObjectStoreRegistry`]: a
-//! provider that hands Lance our store for a custom `beacon-tables://` scheme is
+//! provider that hands Lance our store for a custom `db://` scheme is
 //! registered in a registry, which travels to Lance through a [`Session`]. Reads
 //! (`DatasetBuilder::with_session`) and writes (`WriteParams.session`) both pull
 //! the registry from that session.
@@ -30,21 +30,23 @@ use url::Url;
 /// the Iceberg integration so table layouts are predictable).
 pub const BEACON_NAMESPACE: &str = "beacon";
 
-/// Custom URI scheme used to route managed Lance datasets through beacon's tables
-/// object store via the registered [`BeaconTablesProvider`].
-const SCHEME: &str = "beacon-tables";
+/// Custom URI scheme used to route managed Lance datasets through beacon's redb
+/// (`db://`) object store via the registered [`BeaconTablesProvider`]. Lance
+/// resolves this through its own session registry, separate from DataFusion's
+/// `db://` registration for the catalog — both name the same physical store.
+const SCHEME: &str = "db";
 
 /// Sub-prefix within the tables store under which managed Lance datasets live.
 const PREFIX: &str = "lance";
 
 /// The namespace beacon uses, in the `Vec<String>` form the rest of the crate
-/// expects (mirrors `beacon_iceberg::beacon_namespace`).
+/// expects.
 pub fn beacon_namespace() -> Vec<String> {
     vec![BEACON_NAMESPACE.to_string()]
 }
 
-/// A Lance object-store provider that hands Lance beacon's tables store for the
-/// `beacon-tables://` scheme.
+/// A Lance object-store provider that hands Lance beacon's redb store for the
+/// `db://` scheme.
 #[derive(Debug)]
 struct BeaconTablesProvider {
     inner: Arc<DynObjectStore>,
@@ -89,7 +91,7 @@ impl ObjectStoreProvider for BeaconTablesProvider {
 pub struct LanceWarehouse {
     /// The tables object store (used directly for `DROP` cleanup).
     store: Arc<DynObjectStore>,
-    /// Lance session carrying the registry that resolves `beacon-tables://`.
+    /// Lance session carrying the registry that resolves `db://`.
     session: Arc<Session>,
     /// Per-dataset write locks, keyed by dataset URI.
     locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -125,8 +127,8 @@ impl LanceWarehouse {
         &self.store
     }
 
-    /// The `beacon-tables://` URI of a managed table:
-    /// `beacon-tables:///lance/<namespace>/<name>.lance`.
+    /// The `db://` URI of a managed table:
+    /// `db:///lance/<namespace>/<name>.lance`.
     pub fn table_uri(&self, namespace: &[String], name: &str) -> String {
         let ns = namespace.join("/");
         format!("{SCHEME}:///{PREFIX}/{ns}/{name}.lance")

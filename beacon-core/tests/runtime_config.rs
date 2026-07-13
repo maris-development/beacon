@@ -15,7 +15,7 @@ fn config_with(default_table: &str, tag: &str) -> Arc<beacon_config::Config> {
 
     let root = std::env::temp_dir().join(format!("beacon-runtime-config-test-{tag}"));
     config.storage.datasets_dir = root.join("datasets");
-    config.storage.tables_dir = root.join("tables");
+    config.storage.db_path = None; // in-memory tables store: independent per runtime
     config.storage.tmp_dir = root.join("tmp");
     config.data.indexes = root.join("indexes");
     config.data.cache = root.join("cache");
@@ -23,7 +23,6 @@ fn config_with(default_table: &str, tag: &str) -> Arc<beacon_config::Config> {
     for dir in [
         &config.storage.data_dir,
         &config.storage.datasets_dir,
-        &config.storage.tables_dir,
         &config.storage.tmp_dir,
         &config.data.indexes,
         &config.data.cache,

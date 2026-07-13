@@ -40,16 +40,19 @@
 //! exclusive file lock. Blocking file/redb work runs on
 //! [`tokio::task::spawn_blocking`] so it never stalls the async runtime.
 //!
-//! # Not yet implemented
+//! # Space reclamation
 //!
-//! Deleted or overwritten heap blobs leak their space until a future compaction
-//! pass (`VacuumMode::Rewrite`) reclaims it. redb's own pages are reclaimed by
-//! redb.
+//! Deleted or overwritten heap blobs leak their space until a compaction pass
+//! reclaims it. [`RedbStore::vacuum`] with [`VacuumMode::Rewrite`] rewrites every
+//! live object into a fresh file and atomically renames it back, reclaiming both
+//! the dead heap blobs and redb's free pages in one shot. redb's own pages are
+//! otherwise reclaimed incrementally by redb's freelist.
 
 mod container;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path as FsPath;
+use std::io;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -117,6 +120,20 @@ pub struct RedbStore {
 struct Inner {
     db: Database,
     container: Arc<Container>,
+    /// The container file's path — kept so [`RedbStore::vacuum`] can rewrite the
+    /// store into a sibling temp file and atomically rename it back.
+    path: PathBuf,
+}
+
+/// How [`RedbStore::vacuum`] reclaims space.
+#[derive(Debug, Clone, Copy)]
+pub enum VacuumMode {
+    /// Rewrite every live object into a fresh file, then atomically replace the
+    /// original. Reclaims all space held by deleted or overwritten objects (dead
+    /// heap blobs *and* redb's free pages) and produces a minimal, shippable
+    /// file. Always correct, but needs ~2× the live size in free disk during the
+    /// pass and exclusive access to the store (see [`RedbStore::vacuum`]).
+    Rewrite,
 }
 
 impl RedbStore {
@@ -124,7 +141,8 @@ impl RedbStore {
     ///
     /// Takes an exclusive lock on the file for the store's lifetime.
     pub fn open(path: impl AsRef<FsPath>) -> OsResult<Self> {
-        let container = Container::open(path).map_err(generic)?;
+        let path = path.as_ref().to_path_buf();
+        let container = Container::open(&path).map_err(generic)?;
         let db = redb::Builder::new()
             .create_with_backend(RegionBackend::new(container.clone()))
             .map_err(generic)?;
@@ -137,19 +155,58 @@ impl RedbStore {
         }
         txn.commit().map_err(generic)?;
         Ok(Self {
-            inner: Arc::new(Inner { db, container }),
+            inner: Arc::new(Inner { db, container, path }),
         })
+    }
+
+    /// Compact the store, reclaiming space held by deleted or overwritten
+    /// objects and shrinking the file to (roughly) its live size.
+    ///
+    /// Consumes the store and returns a freshly opened, compacted one:
+    ///
+    /// ```no_run
+    /// # async fn f(store: beacon_redb_store::RedbStore) -> object_store::Result<()> {
+    /// use beacon_redb_store::VacuumMode;
+    /// let store = store.vacuum(VacuumMode::Rewrite).await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Taking `self` by value enforces the *exclusive access* the rewrite needs:
+    /// it errors if any other clone of the store is still alive. Object bytes
+    /// handed out by an earlier `get` stay valid (they pin their own view of the
+    /// old file), but on Windows an outstanding read can block the rename — run
+    /// vacuum from a maintenance window with no reads in flight.
+    ///
+    /// Etags and modification times are preserved, so clients holding an etag
+    /// keep working across a vacuum.
+    pub async fn vacuum(self, mode: VacuumMode) -> OsResult<Self> {
+        let VacuumMode::Rewrite = mode;
+        let inner = Arc::into_inner(self.inner).ok_or_else(|| {
+            generic(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "cannot vacuum: the store still has outstanding clones",
+            ))
+        })?;
+        block(move || inner.rewrite()).await
     }
 
     /// Write `payload`, routing large objects to the heap (durable before the
     /// redb transaction records them) and small ones inline.
-    async fn write(&self, location: &Path, payload: PutPayload, mode: WriteMode) -> OsResult<PutResult> {
+    async fn write(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        mode: WriteMode,
+    ) -> OsResult<PutResult> {
         let size = payload.content_length();
         let stored = if size > HEAP_THRESHOLD {
             let chunks: Vec<Bytes> = payload.iter().cloned().collect();
             let container = self.inner.container.clone();
             let extent = block(move || container.heap_write(&chunks).map_err(generic)).await?;
-            StoredPayload::Heap { extent, size: size as u64 }
+            StoredPayload::Heap {
+                extent,
+                size: size as u64,
+            }
         } else {
             let mut buf = Vec::with_capacity(size);
             for chunk in &payload {
@@ -163,7 +220,12 @@ impl RedbStore {
     }
 
     /// Write pre-buffered `bytes` (used by multipart `complete`).
-    async fn write_bytes(&self, location: &Path, bytes: Vec<u8>, mode: WriteMode) -> OsResult<PutResult> {
+    async fn write_bytes(
+        &self,
+        location: &Path,
+        bytes: Vec<u8>,
+        mode: WriteMode,
+    ) -> OsResult<PutResult> {
         let stored = if bytes.len() > HEAP_THRESHOLD {
             let chunks = vec![Bytes::from(bytes)];
             let size = chunks[0].len() as u64;
@@ -236,7 +298,12 @@ impl Inner {
                 },
             }
 
-            let seq = state.get(SEQ_KEY).map_err(generic)?.map(|g| g.value()).unwrap_or(0) + 1;
+            let seq = state
+                .get(SEQ_KEY)
+                .map_err(generic)?
+                .map(|g| g.value())
+                .unwrap_or(0)
+                + 1;
             state.insert(SEQ_KEY, seq).map_err(generic)?;
             e_tag = seq.to_string();
 
@@ -250,7 +317,9 @@ impl Inner {
                 last_modified_millis: Utc::now().timestamp_millis(),
                 payload: ploc,
             };
-            metas.insert(path, encode_meta(&meta)?.as_slice()).map_err(generic)?;
+            metas
+                .insert(path, encode_meta(&meta)?.as_slice())
+                .map_err(generic)?;
             match payload {
                 StoredPayload::Inline(data) => {
                     datas.insert(path, data.as_slice()).map_err(generic)?;
@@ -283,7 +352,10 @@ impl Inner {
             .ok_or_else(|| not_found(path))?;
         let inline = if want_data && matches!(meta.payload, PayloadLoc::Inline) {
             let datas = txn.open_table(DATA_TABLE).map_err(generic)?;
-            let guard = datas.get(path).map_err(generic)?.ok_or_else(|| not_found(path))?;
+            let guard = datas
+                .get(path)
+                .map_err(generic)?
+                .ok_or_else(|| not_found(path))?;
             Some(guard.value().to_vec())
         } else {
             None
@@ -341,7 +413,12 @@ impl Inner {
                 });
             }
 
-            let seq = state.get(SEQ_KEY).map_err(generic)?.map(|g| g.value()).unwrap_or(0) + 1;
+            let seq = state
+                .get(SEQ_KEY)
+                .map_err(generic)?
+                .map(|g| g.value())
+                .unwrap_or(0)
+                + 1;
             state.insert(SEQ_KEY, seq).map_err(generic)?;
             let dst_meta = StoredMeta {
                 size: src_meta.size,
@@ -349,7 +426,9 @@ impl Inner {
                 last_modified_millis: Utc::now().timestamp_millis(),
                 payload: src_meta.payload.clone(),
             };
-            metas.insert(to, encode_meta(&dst_meta)?.as_slice()).map_err(generic)?;
+            metas
+                .insert(to, encode_meta(&dst_meta)?.as_slice())
+                .map_err(generic)?;
             match &src_inline {
                 Some(bytes) => {
                     datas.insert(to, bytes.as_slice()).map_err(generic)?;
@@ -400,6 +479,98 @@ impl Inner {
             }
         }
         Ok(out)
+    }
+
+    /// Rewrite every live object into a fresh sibling file and atomically rename
+    /// it over the original. Dead heap blobs and redb free pages are left behind,
+    /// so the new file is (roughly) the live size.
+    ///
+    /// Crash-safe: the original is untouched until the final `rename`, which is
+    /// the single commit point. A crash mid-vacuum leaves the original intact and
+    /// only orphans the temp file (cleaned up by the next vacuum).
+    fn rewrite(self) -> OsResult<RedbStore> {
+        let Inner { db, container, path } = self;
+
+        // 1. Snapshot every live object. Heap payloads are read zero-copy from the
+        //    old mmap; we hold those slices only until they're copied below.
+        let (prepared, max_seq, new_container, new_db) = {
+            let rtxn = db.begin_read().map_err(generic)?;
+            let metas = rtxn.open_table(META_TABLE).map_err(generic)?;
+            let datas = rtxn.open_table(DATA_TABLE).map_err(generic)?;
+
+            // Open the compacted target as a sibling temp file. Clear any orphan
+            // from a previously-aborted vacuum first.
+            let tmp = temp_sibling(&path);
+            let _ = std::fs::remove_file(&tmp);
+            let new_container = Container::open(&tmp).map_err(generic)?;
+            let new_db = redb::Builder::new()
+                .create_with_backend(RegionBackend::new(new_container.clone()))
+                .map_err(generic)?;
+
+            // Copy each object's bytes into the new file (heap blobs are fsync'd by
+            // `heap_write`), capturing its new payload locator. Etags are preserved.
+            let mut prepared: Vec<(String, StoredMeta, Option<Vec<u8>>)> = Vec::new();
+            let mut max_seq = 0u64;
+            for entry in metas.iter().map_err(generic)? {
+                let (key, value) = entry.map_err(generic)?;
+                let path = key.value().to_string();
+                let StoredMeta { size, e_tag, last_modified_millis, payload } =
+                    decode_meta(value.value())?;
+                if let Ok(seq) = e_tag.parse::<u64>() {
+                    max_seq = max_seq.max(seq);
+                }
+                let (payload, inline) = match payload {
+                    PayloadLoc::Inline => {
+                        let bytes = datas
+                            .get(path.as_str())
+                            .map_err(generic)?
+                            .ok_or_else(|| not_found(&path))?
+                            .value()
+                            .to_vec();
+                        (PayloadLoc::Inline, Some(bytes))
+                    }
+                    PayloadLoc::Heap(extent) => {
+                        let slices = container.read_extents(std::slice::from_ref(&extent));
+                        let new_extent = new_container.heap_write(&slices).map_err(generic)?;
+                        (PayloadLoc::Heap(new_extent), None)
+                    }
+                };
+                let meta = StoredMeta { size, e_tag, last_modified_millis, payload };
+                prepared.push((path, meta, inline));
+            }
+            (prepared, max_seq, new_container, new_db)
+        };
+
+        // 2. Record all metadata (and inline bodies) in one transaction, carrying
+        //    the etag counter forward so future puts don't reuse an etag.
+        let wtxn = new_db.begin_write().map_err(generic)?;
+        {
+            let mut nmetas = wtxn.open_table(META_TABLE).map_err(generic)?;
+            let mut ndatas = wtxn.open_table(DATA_TABLE).map_err(generic)?;
+            let mut nstate = wtxn.open_table(STATE_TABLE).map_err(generic)?;
+            nstate.insert(SEQ_KEY, max_seq).map_err(generic)?;
+            for (path, meta, inline) in &prepared {
+                nmetas
+                    .insert(path.as_str(), encode_meta(meta)?.as_slice())
+                    .map_err(generic)?;
+                if let Some(bytes) = inline {
+                    ndatas.insert(path.as_str(), bytes.as_slice()).map_err(generic)?;
+                }
+            }
+        }
+        wtxn.commit().map_err(generic)?;
+
+        // 3. Fully close both files before the rename: the new one so it can be
+        //    moved, the old one so it can be replaced (and its lock released).
+        let tmp = temp_sibling(&path);
+        drop(new_db);
+        drop(new_container);
+        drop(db);
+        drop(container);
+
+        // 4. Atomically swap the compacted file in, then reopen it.
+        std::fs::rename(&tmp, &path).map_err(generic)?;
+        RedbStore::open(&path)
     }
 }
 
@@ -470,7 +641,11 @@ impl ObjectStore for RedbStore {
         })
     }
 
-    async fn get_ranges(&self, location: &Path, ranges: &[std::ops::Range<u64>]) -> OsResult<Vec<Bytes>> {
+    async fn get_ranges(
+        &self,
+        location: &Path,
+        ranges: &[std::ops::Range<u64>],
+    ) -> OsResult<Vec<Bytes>> {
         let (full, _meta) = self.fetch(location).await?;
         let len = full.len();
         let mut out = Vec::with_capacity(ranges.len());
@@ -677,6 +852,13 @@ fn generic<E: std::error::Error + Send + Sync + 'static>(e: E) -> object_store::
         store: STORE,
         source: Box::new(e),
     }
+}
+
+/// The temp path a vacuum rewrites into: a hidden sibling of the container file
+/// in the same directory (so `rename` stays on one filesystem and is atomic).
+fn temp_sibling(path: &FsPath) -> PathBuf {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("beacon.db");
+    path.with_file_name(format!(".{name}.vacuum-tmp"))
 }
 
 fn not_found(path: &str) -> object_store::Error {

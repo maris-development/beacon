@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::prelude::SessionContext;
 
-use crate::{DATASETS_OBJECT_STORE_URL, TABLES_OBJECT_STORE_URL};
+use crate::{DATASETS_OBJECT_STORE_URL, DB_OBJECT_STORE_URL};
 
 pub mod loading;
 pub mod ordering;
@@ -14,7 +14,7 @@ pub use persistent_schema_provider::PersistentSchemaProvider;
 
 /// Rebuild the catalog from the persisted table definitions.
 ///
-/// Loads every `tables://<name>/table.json`, orders the definitions so a table
+/// Loads every `db://<name>/table.json`, orders the definitions so a table
 /// is registered after the tables it depends on (base tables, then temporary
 /// definitions, then views in dependency order), builds each provider against
 /// the live session — so a view's defining query resolves the tables already
@@ -27,8 +27,8 @@ pub async fn init_tables(
     tracing::info!("Initializing tables from object store");
     let tables_object_store = session_ctx
         .runtime_env()
-        .object_store(&*TABLES_OBJECT_STORE_URL)
-        .map_err(|error| anyhow::anyhow!("Failed to get tables object store: {}", error))?;
+        .object_store(&*DB_OBJECT_STORE_URL)
+        .map_err(|error| anyhow::anyhow!("Failed to get db object store: {}", error))?;
 
     let discovered = loading::load_tables_from_object_store(tables_object_store).await;
     let table_map = discovered

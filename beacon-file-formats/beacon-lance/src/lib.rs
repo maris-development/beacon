@@ -3,7 +3,7 @@
 //! Provides a columnar, transactionally-versioned table engine for beacon's
 //! `CREATE TABLE`, backed by beacon's tables object store:
 //! - a [`warehouse`] that routes Lance through that object store (via a
-//!   `beacon-tables://` scheme + [`warehouse::LanceWarehouse`]),
+//!   `db://` scheme + [`warehouse::LanceWarehouse`]),
 //! - a [`LanceTable`] `TableProvider` wrapper, and
 //! - a [`LanceTableDefinition`] for persisting tables as `table.json`.
 //!
@@ -226,7 +226,7 @@ mod tests {
             SessionConfig::new().with_extension(warehouse.clone()),
         ));
         let provider = restored
-            .build_provider(build_ctx, &ObjectStoreUrl::parse("tables://").unwrap())
+            .build_provider(build_ctx, &ObjectStoreUrl::parse("db://").unwrap())
             .await
             .expect("provider should rebuild from disk");
 

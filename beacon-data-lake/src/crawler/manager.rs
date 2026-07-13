@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
-use crate::TABLES_OBJECT_STORE_URL;
+use crate::DB_OBJECT_STORE_URL;
 
 use super::definition::CrawlerDefinition;
 use super::engine::{CrawlEngine, CrawlReport};
@@ -26,7 +26,13 @@ use super::persistence::CrawlerPersistence;
 /// DDL actions (`CREATE/RUN/DROP CRAWLER`) can reach it. Mirrors the `SessionCell`
 /// pattern: the manager is built after the session context, so the cell is
 /// registered empty during context init and filled once the manager exists.
-pub type CrawlerManagerHandle = Arc<OnceLock<Arc<CrawlerManager>>>;
+///
+/// Holds a [`Weak`] reference so this handle — reachable from the session context
+/// it is registered on — does not form a strong cycle through the manager (which
+/// holds the session context). The runtime owns the only strong reference, so
+/// dropping the runtime drops the manager and releases the session context (and
+/// the tables store it registers). Consumers [`Weak::upgrade`] before use.
+pub type CrawlerManagerHandle = Arc<OnceLock<Weak<CrawlerManager>>>;
 
 /// Create an empty manager handle to register as a session extension.
 pub fn new_crawler_manager_handle() -> CrawlerManagerHandle {
@@ -63,7 +69,7 @@ impl CrawlerManager {
         events_available: bool,
     ) -> Arc<Self> {
         let engine = CrawlEngine::new(session_ctx.clone(), file_formats);
-        let persistence = CrawlerPersistence::new(session_ctx, TABLES_OBJECT_STORE_URL.clone());
+        let persistence = CrawlerPersistence::new(session_ctx, DB_OBJECT_STORE_URL.clone());
         Arc::new(Self {
             engine,
             persistence,

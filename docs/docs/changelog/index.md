@@ -20,13 +20,12 @@ changes), and **Fixed** (bug fixes).
   (`BEACON_AUTH_ANONYMOUS_ENABLED`), and **OIDC** bearer tokens are supported
   (`BEACON_OIDC_*`) with Beacon still owning the grant model. See the
   [Access Control guide](/docs/1.8.0/security/access-control).
-- **Lance-backed managed tables — the new default engine.** Managed tables
-  (`CREATE TABLE`) are now backed by [Lance](https://lancedb.github.io/lance/) by
-  default: fast local CRUD, native updates/deletes via deletion vectors, and
-  secondary `INDEX`es (btree, bitmap, full-text). [Apache Iceberg](https://iceberg.apache.org/)
-  remains available for object-store/cloud deployments. Pick the engine per
-  session with `SET beacon.table_engine = 'lance' | 'iceberg'`, or set the
-  deployment-wide default with `BEACON_DEFAULT_TABLE_ENGINE`. See
+- **Lance-backed managed tables.** Managed tables (`CREATE TABLE`) are now backed
+  by [Lance](https://lancedb.github.io/lance/): fast local CRUD, native
+  updates/deletes via deletion vectors, and secondary `INDEX`es (btree, bitmap,
+  full-text). Lance is the sole managed-table engine — the short-lived Apache
+  Iceberg managed engine has been removed (Iceberg will return as an external,
+  read-in-place source). See
   [CREATE TABLE (Managed)](/docs/1.8.0/sql/managed-tables).
 - **Delta Lake tables.** Read [Delta Lake](https://delta.io/) tables in place with
   `read_delta()` or `CREATE EXTERNAL TABLE … STORED AS DELTA`, including time
@@ -73,8 +72,7 @@ changes), and **Fixed** (bug fixes).
 - **`table-config` is now an admin-only REST endpoint** (`GET /api/admin/table-config`).
 - **Legacy logical tables are read as external tables**, so tables created by
   older versions keep resolving.
-- **Reduced dependencies and tuned the build** for faster compile times; the
-  `beacon-iceberg` crate moved under `beacon-file-formats/`.
+- **Reduced dependencies and tuned the build** for faster compile times.
 - **File-format table functions accept a single path/glob string** in addition to
   a list, and the dataset-schema endpoint now accepts `.tif` as well as `.tiff`.
 - **Enriched OpenAPI / Swagger documentation** for the REST API.

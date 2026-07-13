@@ -24,13 +24,13 @@ fn temp_config(dir: &std::path::Path, max_upload_bytes: u64) -> Arc<beacon_confi
     config.sql.enable = true;
     config.storage.data_dir = dir.to_path_buf();
     config.storage.datasets_dir = dir.join("datasets");
-    config.storage.tables_dir = dir.join("tables");
+    config.storage.db_path = None; // in-memory tables store (runtime uses in-memory auth)
     config.storage.tmp_dir = dir.join("tmp");
     config.storage.enable_fs_events = false;
     config.storage.max_upload_bytes = max_upload_bytes;
     // The local object stores canonicalize their root, so the directories must
     // exist before the runtime builds them.
-    for sub in ["datasets", "tables", "tmp"] {
+    for sub in ["datasets", "tmp"] {
         std::fs::create_dir_all(dir.join(sub)).expect("create storage dir");
     }
     Arc::new(config)

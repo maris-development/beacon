@@ -66,7 +66,7 @@ pub(crate) async fn create_materialized_view(
         .await?;
 
     // Registering through the session context persists the definition to the
-    // catalog (tables://<name>/table.json) via the schema provider.
+    // catalog (db://<name>/table.json) via the schema provider.
     session_ctx.register_table(table_ref, provider)?;
 
     tracing::info!("Created materialized view '{name}'");

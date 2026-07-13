@@ -8,10 +8,13 @@
 //!   config). See [`DatasetsStore`], which additionally hides Beacon-internal
 //!   objects, serves listings from an optional event-driven cache, exposes a
 //!   prefix-scoped event subscription, and provides NetCDF URL translation.
-//! - **Tables** / **tmp**: local filesystem.
+//! - **Tables**: a single-file [`beacon_redb_store::RedbStore`] (`beacon.db`)
+//!   holding the catalog and managed Lance data.
+//! - **Tmp**: local filesystem.
 
 use std::sync::Arc;
 
+use beacon_redb_store::RedbStore;
 use object_store::{ObjectStore, local::LocalFileSystem};
 
 pub mod config;
@@ -48,9 +51,19 @@ impl ObjectStores {
     pub async fn new(storage: &StorageConfig) -> StorageResult<Self> {
         let datasets = Arc::new(datasets_store::create_datasets_store(storage).await?);
 
-        let tables = Arc::new(
-            LocalFileSystem::new_with_prefix(&storage.tables_dir)?.with_automatic_cleanup(true),
-        ) as Arc<dyn ObjectStore>;
+        // The tables store — the catalog (`table.json`, …) and managed Lance data
+        // — is either a redb single-file (persistent, exclusively locked) or an
+        // ephemeral in-memory store, DuckDB-style.
+        let tables: Arc<dyn ObjectStore> = match &storage.db_path {
+            Some(path) => {
+                tracing::info!(path = %path.display(), "tables store: redb single-file");
+                Arc::new(RedbStore::open(path)?)
+            }
+            None => {
+                tracing::info!("tables store: in-memory (ephemeral)");
+                Arc::new(object_store::memory::InMemory::new())
+            }
+        };
 
         let tmp =
             Arc::new(LocalFileSystem::new_with_prefix(&storage.tmp_dir)?) as Arc<dyn ObjectStore>;

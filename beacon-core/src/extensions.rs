@@ -2,7 +2,7 @@
 //!
 //! Extensions are metadata *about how to use* a table — distinct from its storage
 //! definition and from format `options`. They are stored decoupled from the table
-//! definition in a `tables://<name>/extensions.json` sidecar, so they:
+//! definition in a `db://<name>/extensions.json` sidecar, so they:
 //!
 //! - apply uniformly to every table type (listing/Iceberg/Delta/SQL/remote/view),
 //! - can be edited without rebuilding the provider,
@@ -19,7 +19,7 @@ use anyhow::Context;
 use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use beacon_data_lake::{SchemaPersistenceService, TABLES_OBJECT_STORE_URL};
+use beacon_data_lake::{SchemaPersistenceService, DB_OBJECT_STORE_URL};
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -352,7 +352,7 @@ async fn table_schema(ctx: &Arc<SessionContext>, name: &str) -> anyhow::Result<S
 }
 
 fn persistence(ctx: &Arc<SessionContext>) -> SchemaPersistenceService {
-    SchemaPersistenceService::new(ctx.clone(), TABLES_OBJECT_STORE_URL.clone())
+    SchemaPersistenceService::new(ctx.clone(), DB_OBJECT_STORE_URL.clone())
 }
 
 /// Load a table's extensions, returning an empty set if none are stored.

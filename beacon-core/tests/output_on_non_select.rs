@@ -9,7 +9,7 @@ use beacon_core::query_result::QueryOutput;
 use beacon_core::runtime::Runtime;
 
 async fn boot() -> Runtime {
-    Runtime::new(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
+    Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
         .await
         .expect("runtime should boot")
 }
@@ -45,7 +45,7 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
     // CREATE TABLE (DDL) and SET (statement) both return no rows.
     let cases = [
         format!("CREATE TABLE {table} (id BIGINT)"),
-        "SET beacon.table_engine = 'lance'".to_string(),
+        "SET datafusion.execution.batch_size = 4096".to_string(),
     ];
     for sql in cases {
         let message = expect_output_error(&runtime, &sql).await;

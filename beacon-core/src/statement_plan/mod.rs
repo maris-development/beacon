@@ -21,7 +21,6 @@ pub(crate) mod materialized_view;
 mod physical;
 mod query_planner;
 mod stream_coalescer;
-pub(crate) mod table_engine;
 
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -272,9 +271,10 @@ pub(crate) async fn execute_statement_plan(
 ) -> anyhow::Result<SendableRecordBatchStream> {
     use futures::TryStreamExt;
 
-    // Statements (e.g. `SET beacon.table_engine = '…'`) cannot be physical-planned;
-    // DataFusion applies them to the session via `execute_logical_plan`. Route them
-    // there so the session config actually changes, then drain the (empty) result.
+    // Statements (e.g. `SET datafusion.execution.batch_size = …`) cannot be
+    // physical-planned; DataFusion applies them to the session via
+    // `execute_logical_plan`. Route them there so the session config actually
+    // changes, then drain the (empty) result.
     if matches!(plan, LogicalPlan::Statement(_)) {
         let schema: arrow::datatypes::SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
         session_ctx

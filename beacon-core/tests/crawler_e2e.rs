@@ -66,7 +66,7 @@ async fn crawler_discovers_partitioned_parquet() {
     std::env::set_var("BEACON_ENABLE_FS_EVENTS", "false");
     std::env::set_var("BEACON_FLIGHT_SQL_ENABLE", "false");
 
-    let runtime = Runtime::new(Arc::new(beacon_config::Config::load().unwrap()))
+    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
         .await
         .expect("runtime should boot");
 
@@ -105,7 +105,7 @@ async fn crawler_discovers_partitioned_parquet() {
     // Restart over the same data dir: both the crawled table (as a normal external
     // table) and the crawler definition must reload from disk.
     drop(runtime);
-    let runtime = Runtime::new(Arc::new(beacon_config::Config::load().unwrap()))
+    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
         .await
         .expect("runtime should reboot");
 

@@ -37,7 +37,7 @@ impl SchemaPersistenceService {
             .await
     }
 
-    /// Persist a table's extensions sidecar to `tables://<name>/extensions.json`.
+    /// Persist a table's extensions sidecar to `db://<name>/extensions.json`.
     ///
     /// Extensions are stored separately from `table.json` so they apply to every
     /// table type uniformly and can be edited without rebuilding the provider.
@@ -107,7 +107,7 @@ impl SchemaPersistenceService {
         }
     }
 
-    /// Resolve the object store backing `tables://` table definitions.
+    /// Resolve the object store backing `db://` table definitions.
     fn table_object_store(
         &self,
         table_name: &str,
@@ -220,9 +220,7 @@ pub fn definition_from_provider(
     table_name: &str,
     table: &dyn TableProvider,
 ) -> datafusion::error::Result<Arc<dyn TableDefinition>> {
-    if let Some(table) = table.as_any().downcast_ref::<beacon_iceberg::IcebergTable>() {
-        Ok(Arc::new(table.definition().clone()))
-    } else if let Some(table) = table.as_any().downcast_ref::<beacon_lance::LanceTable>() {
+    if let Some(table) = table.as_any().downcast_ref::<beacon_lance::LanceTable>() {
         Ok(Arc::new(table.definition().clone()))
     } else if let Some(table) = table.as_any().downcast_ref::<ExternalTable>() {
         Ok(Arc::new(table.definition().clone()))
@@ -271,10 +269,10 @@ mod tests {
     ) {
         let session_context = Arc::new(SessionContext::new());
         let table_store = Arc::new(InMemory::new());
-        let tables_url = ObjectStoreUrl::parse("tables://").expect("tables url should parse");
+        let tables_url = ObjectStoreUrl::parse("db://").expect("db url should parse");
 
         session_context.register_object_store(
-            &Url::parse(tables_url.as_str()).expect("tables url should be valid"),
+            &Url::parse(tables_url.as_str()).expect("db url should be valid"),
             table_store.clone(),
         );
 

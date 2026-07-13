@@ -89,7 +89,7 @@ impl From<WriteKind> for WriteMode {
     }
 }
 
-/// Stream `rows` into the Lance dataset at `uri` (a `beacon-tables://` URI),
+/// Stream `rows` into the Lance dataset at `uri` (a `db://` URI),
 /// resolved through `session`'s object-store registry. The input stream is fed
 /// directly into Lance's [`InsertBuilder`] (no full-table buffering); each batch
 /// is coerced to a Lance-writable schema (Arrow view types widened) on the fly.

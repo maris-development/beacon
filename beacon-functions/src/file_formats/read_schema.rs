@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_arrow_netcdf::datafusion::NetcdfFormat;
@@ -27,7 +27,7 @@ use crate::file_formats::BeaconTableFunctionImpl;
 pub struct ReadSchemaFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
     datasets_object_store: Arc<DatasetsStore>,
 }
@@ -35,7 +35,7 @@ pub struct ReadSchemaFunc {
 impl ReadSchemaFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
         datasets_object_store: Arc<DatasetsStore>,
     ) -> Self {
@@ -130,9 +130,12 @@ impl TableFunctionImpl for ReadSchemaFunc {
             tracing::debug!("read_schema processing path: {}", path);
             listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
         }
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            plan_datafusion_err!("session context has been dropped")
+        })?;
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                SuperListingTable::new(&self.session_ctx.state(), file_format, listing_urls).await
+                SuperListingTable::new(&session_ctx.state(), file_format, listing_urls).await
             })
         })?;
 

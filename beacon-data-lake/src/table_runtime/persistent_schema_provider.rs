@@ -3,11 +3,14 @@
 //! This is a thin wrapper around DataFusion's native [`MemorySchemaProvider`]:
 //! the in-memory catalog (register/lookup/deregister) is delegated to it
 //! verbatim. The wrapper exists only to add one side effect — persisting and
-//! removing each table's `tables://<name>/table.json` definition as it is
+//! removing each table's `db://<name>/table.json` definition as it is
 //! registered or deregistered — so that the catalog survives restarts (it is
 //! rebuilt at startup by [`crate::init_tables`]).
 
-use std::{any::Any, sync::Arc};
+use std::{
+    any::Any,
+    sync::{Arc, Weak},
+};
 
 use arrow::datatypes::Schema;
 use datafusion::{
@@ -25,7 +28,12 @@ use super::schema_persistence::SchemaPersistenceService;
 pub struct PersistentSchemaProvider {
     inner: Arc<MemorySchemaProvider>,
     runtime_handle: tokio::runtime::Handle,
-    session_context: Arc<SessionContext>,
+    /// A [`Weak`] back-reference: this provider is registered *in* the session
+    /// context's catalog, so a strong reference would form a cycle that leaks the
+    /// context (and the tables store it registers, holding its exclusive lock)
+    /// for the process lifetime. Every use upgrades; during a live runtime the
+    /// context always outlives this provider.
+    session_context: Weak<SessionContext>,
     table_directory_store_url: ObjectStoreUrl,
 }
 
@@ -47,16 +55,19 @@ impl PersistentSchemaProvider {
         Self {
             inner: Arc::new(MemorySchemaProvider::new()),
             runtime_handle,
-            session_context,
+            session_context: Arc::downgrade(&session_context),
             table_directory_store_url,
         }
     }
 
-    fn schema_persistence_service(&self) -> SchemaPersistenceService {
-        SchemaPersistenceService::new(
-            self.session_context.clone(),
+    /// The persistence side-effect service, or `None` if the session context has
+    /// been torn down (in which case there is no tables store to persist to). In
+    /// practice the context always outlives register/deregister on a live runtime.
+    fn schema_persistence_service(&self) -> Option<SchemaPersistenceService> {
+        Some(SchemaPersistenceService::new(
+            self.session_context.upgrade()?,
             self.table_directory_store_url.clone(),
-        )
+        ))
     }
 
     /// Register a provider that was loaded from a persisted definition, without
@@ -105,17 +116,18 @@ impl SchemaProvider for PersistentSchemaProvider {
         name: String,
         table: Arc<dyn TableProvider>,
     ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
-        let handle = self.runtime_handle.clone();
-        let persistence = self.schema_persistence_service();
-        let persist_name = name.clone();
-        let persist_table = table.clone();
-        tokio::task::block_in_place(|| {
-            handle.block_on(async move {
-                persistence
-                    .persist_provider_definition(&persist_name, persist_table.as_ref())
-                    .await
-            })
-        })?;
+        if let Some(persistence) = self.schema_persistence_service() {
+            let handle = self.runtime_handle.clone();
+            let persist_name = name.clone();
+            let persist_table = table.clone();
+            tokio::task::block_in_place(|| {
+                handle.block_on(async move {
+                    persistence
+                        .persist_provider_definition(&persist_name, persist_table.as_ref())
+                        .await
+                })
+            })?;
+        }
 
         // DataFusion's `MemorySchemaProvider` refuses to overwrite an existing
         // entry, but beacon registers a fresh provider over an existing name to
@@ -130,12 +142,14 @@ impl SchemaProvider for PersistentSchemaProvider {
         &self,
         name: &str,
     ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
-        let handle = self.runtime_handle.clone();
-        let persistence = self.schema_persistence_service();
-        let remove_name = name.to_string();
-        tokio::task::block_in_place(|| {
-            handle.block_on(async move { persistence.remove_persisted_table(&remove_name).await })
-        })?;
+        if let Some(persistence) = self.schema_persistence_service() {
+            let handle = self.runtime_handle.clone();
+            let remove_name = name.to_string();
+            tokio::task::block_in_place(|| {
+                handle
+                    .block_on(async move { persistence.remove_persisted_table(&remove_name).await })
+            })?;
+        }
 
         self.inner.deregister_table(name)
     }
@@ -154,9 +168,9 @@ mod tests {
     fn fixture() -> (PersistentSchemaProvider, Arc<SessionContext>, Arc<InMemory>) {
         let session_context = Arc::new(SessionContext::new());
         let tables_store = Arc::new(InMemory::new());
-        let tables_url = ObjectStoreUrl::parse("tables://").expect("tables url should parse");
+        let tables_url = ObjectStoreUrl::parse("db://").expect("db url should parse");
         session_context.register_object_store(
-            &Url::parse(tables_url.as_str()).expect("tables url should be valid"),
+            &Url::parse(tables_url.as_str()).expect("db url should be valid"),
             tables_store.clone(),
         );
         let provider = PersistentSchemaProvider::new(

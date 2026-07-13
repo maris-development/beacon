@@ -40,7 +40,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::fs::FileExt;
 use std::path::Path as FsPath;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -56,7 +55,7 @@ const NUM_SLOTS: u64 = 2;
 /// First byte available for extents (after both slots).
 const DATA_START: u64 = SLOT_SIZE * NUM_SLOTS;
 /// Slot framing magic.
-const SLOT_MAGIC: u64 = 0x4245_4143_4f4e_5342; // "BEACONSB"
+const SLOT_MAGIC: u64 = u64::from_be_bytes(*b"BEACONSB");
 /// Minimum growth when extending redb's region.
 const REDB_MIN_GROW: u64 = 1 << 20; // 1 MiB
 
@@ -317,6 +316,76 @@ impl Container {
 
 /// Bytes in the slot before the payload: magic(8) + seq(8) + checksum(8) + len(4).
 const SLOT_HEADER: usize = 28;
+
+/// Cross-platform positioned I/O — read/write a whole buffer at an explicit
+/// offset without touching (or relying on) the file's seek cursor.
+///
+/// On Unix these are `pread`/`pwrite` via [`std::os::unix::fs::FileExt`]. Windows
+/// has no `read_exact_at`/`write_all_at`, only `seek_read`/`seek_write`, which
+/// take an offset but may transfer fewer bytes than requested, so we loop. Every
+/// caller passes an explicit offset and the container serializes access behind
+/// its state `Mutex`, so the cursor side effect of the Windows calls is benign.
+trait PositionedIo {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()>;
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()>;
+}
+
+#[cfg(unix)]
+impl PositionedIo for File {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        std::os::unix::fs::FileExt::read_exact_at(self, buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        std::os::unix::fs::FileExt::write_all_at(self, buf, offset)
+    }
+}
+
+#[cfg(windows)]
+impl PositionedIo for File {
+    fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_read(buf, offset) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let tmp = buf;
+                    buf = &mut tmp[n..];
+                    offset += n as u64;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if buf.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ))
+        }
+    }
+    fn write_all_at(&self, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buf.is_empty() {
+            match self.seek_write(buf, offset) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+                Ok(n) => {
+                    buf = &buf[n..];
+                    offset += n as u64;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
 
 /// A zero-copy view into a shared memory map. Keeps the mapping alive.
 struct MmapSlice {

@@ -20,7 +20,7 @@
 //!
 //! [`BeaconFileStatisticsCache`]: beacon_datafusion_ext::stats_cache::BeaconFileStatisticsCache
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::{
     array::{BooleanArray, BooleanBuilder, RecordBatch, StringArray, UInt64Array},
@@ -60,12 +60,12 @@ fn output_schema() -> SchemaRef {
 pub struct ViewStatisticsCacheFunc {
     cache: Arc<BeaconFileStatisticsCache>,
     runtime_handle: Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
 }
 
 impl ViewStatisticsCacheFunc {
     pub fn new(
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         cache: Arc<BeaconFileStatisticsCache>,
         runtime_handle: Handle,
     ) -> Self {
@@ -120,8 +120,10 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
         let entries = self.cache.list_entries();
         let schema = output_schema();
-        let store = self
-            .session_ctx
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            plan_datafusion_err!("session context has been dropped")
+        })?;
+        let store = session_ctx
             .state()
             .config()
             .get_extension::<beacon_object_storage::DatasetsStore>()

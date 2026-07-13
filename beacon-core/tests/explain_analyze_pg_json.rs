@@ -28,7 +28,7 @@ fn sql_query(sql: &str) -> Query {
 /// actual row count, and a nested `Plans` array of children.
 #[tokio::test(flavor = "multi_thread")]
 async fn explain_analyze_returns_pg_json_with_metrics() {
-    let runtime = Runtime::new(Arc::new(beacon_config::Config::load().unwrap()))
+    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
         .await
         .expect("runtime should boot");
 
@@ -83,7 +83,7 @@ async fn explain_analyze_returns_pg_json_with_metrics() {
 /// the `/api/query` permission gate.
 #[tokio::test(flavor = "multi_thread")]
 async fn explain_analyze_gates_ddl_by_privilege() {
-    let runtime = Runtime::new(Arc::new(beacon_config::Config::load().unwrap()))
+    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
         .await
         .expect("runtime should boot");
 

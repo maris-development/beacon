@@ -4,7 +4,7 @@
 //! a late-filled handle in `Runtime::init_ctx`) and delegate to it.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use arrow::array::{ArrayRef, BooleanArray, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
@@ -18,11 +18,11 @@ fn crawler_manager(session: &Arc<SessionContext>) -> anyhow::Result<Arc<CrawlerM
     let handle = session
         .state()
         .config()
-        .get_extension::<OnceLock<Arc<CrawlerManager>>>()
+        .get_extension::<OnceLock<Weak<CrawlerManager>>>()
         .ok_or_else(|| anyhow::anyhow!("crawler subsystem is not available"))?;
     handle
         .get()
-        .cloned()
+        .and_then(Weak::upgrade)
         .ok_or_else(|| anyhow::anyhow!("crawler manager is not initialized yet"))
 }
 

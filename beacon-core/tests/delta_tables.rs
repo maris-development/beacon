@@ -66,7 +66,7 @@ async fn write_fixture(rel: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn delta_external_table_read_insert_time_travel_drop() {
-    let runtime = Runtime::new(Arc::new(beacon_config::Config::load().unwrap()))
+    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
         .await
         .expect("runtime should boot");
 

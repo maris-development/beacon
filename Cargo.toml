@@ -2,7 +2,7 @@
 # Edition-2024 members imply resolver 3; set it explicitly so features aren't
 # over-unified across normal/build/dev deps (fewer features compiled).
 resolver = "3"
-members = ["beacon-api", "beacon-mcp", "beacon-auth", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-redb-store", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-iceberg", "beacon-file-formats/beacon-lance", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
+members = ["beacon-api", "beacon-mcp", "beacon-auth", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-redb-store", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-lance", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
 exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
@@ -82,10 +82,6 @@ geodatafusion = "0.4.0"
 object_store = { version = "0.13.1", features = ["aws"] }
 tonic = "0.14.1"
 
-iceberg-rust = "0.10"
-datafusion_iceberg = "0.10"
-iceberg-file-catalog = "0.10"
-
 # Lance managed-table engine. 7.0.0 pins arrow 58 / datafusion 53 / object_store
 # 0.13, matching our versions. Provides `lance::datafusion::LanceTableProvider`
 # plus the `Dataset` write/append/delete API used by beacon-lance. Requires
@@ -94,7 +90,7 @@ iceberg-file-catalog = "0.10"
 # default-features = false drops the bundled cloud backends (aws/azure/gcp/oss/
 # tencent/huggingface SDKs + the aws-config/aws-smithy stack) and `geo`: beacon
 # routes Lance through its own injected object store via a custom
-# `beacon-tables://` scheme, so Lance's native cloud schemes are never used.
+# `db://` scheme, so Lance's native cloud schemes are never used.
 lance = { version = "=7.0.0", default-features = false }
 # Lance index types (IndexType, ScalarIndexParams) for managed-table indexing.
 # Version-locked to `lance` so the shared types are a single compilation.

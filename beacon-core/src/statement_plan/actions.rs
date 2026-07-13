@@ -52,12 +52,6 @@ pub(crate) async fn drop_table(
             .downcast_ref::<MaterializedView>()
             .map(|mv| mv.base_storage_prefix())
     });
-    let iceberg_definition = provider.as_ref().and_then(|provider| {
-        provider
-            .as_any()
-            .downcast_ref::<beacon_iceberg::IcebergTable>()
-            .map(|table| table.definition().clone())
-    });
     let lance_location = provider.as_ref().and_then(|provider| {
         provider
             .as_any()
@@ -69,11 +63,6 @@ pub(crate) async fn drop_table(
 
     if let Some(prefix) = materialized_prefix {
         delete_datasets_prefix(session, &prefix).await;
-    }
-
-    if let Some(definition) = iceberg_definition {
-        let store = beacon_iceberg::get_warehouse_store()?;
-        beacon_iceberg::drop_iceberg_table(&store, &definition.namespace, &definition.name).await?;
     }
 
     if let Some(location) = lance_location {
@@ -330,35 +319,14 @@ pub(crate) async fn create_table(
 
     let arrow_schema = child.schema();
 
-    // Pick the storage engine: a session `SET beacon.table_engine` overrides the
-    // global default (Lance unless configured otherwise).
-    let engine = super::table_engine::resolve_table_engine(session)?;
-    let provider: Arc<dyn datafusion::catalog::TableProvider> = match engine {
-        beacon_config::TableEngine::Lance => {
-            // Lance managed tables live in the local tables directory, alongside
-            // their `table.json`. Beacon always backs the tables store with a
-            // local filesystem (S3 only ever applies to the datasets store), so
-            // this works regardless of the datasets backend.
-            let warehouse = lance_warehouse(session)?;
-            let namespace = beacon_lance::beacon_namespace();
-            let table =
-                beacon_lance::create_lance_table(warehouse, &namespace, &table_name, &arrow_schema)
-                    .await?;
-            Arc::new(table)
-        }
-        beacon_config::TableEngine::Iceberg => {
-            let catalog = beacon_iceberg::get_catalog()?;
-            let namespace = beacon_iceberg::beacon_namespace();
-            let table = beacon_iceberg::create_iceberg_table(
-                &catalog,
-                &namespace,
-                &table_name,
-                &arrow_schema,
-            )
-            .await?;
-            Arc::new(table)
-        }
-    };
+    // Beacon-managed tables are Lance. They live in the redb (`db://`) store
+    // alongside their `table.json`, so this works regardless of the datasets
+    // backend (S3 only ever applies to the datasets store).
+    let warehouse = lance_warehouse(session)?;
+    let namespace = beacon_lance::beacon_namespace();
+    let table =
+        beacon_lance::create_lance_table(warehouse, &namespace, &table_name, &arrow_schema).await?;
+    let provider: Arc<dyn datafusion::catalog::TableProvider> = Arc::new(table);
 
     // Registration persists the table's `table.json` pointer via the PersistentSchemaProvider.
     session.register_table(name.clone(), provider)?;
@@ -386,10 +354,9 @@ pub(crate) async fn insert_into(
     Ok(stream)
 }
 
-/// Apply a `DELETE`/`UPDATE` to a managed table. Lance uses native row mutations
+/// Apply a `DELETE`/`UPDATE` to a managed (Lance) table: native row mutations
 /// (deletion vectors / fragment rewrite) when a [`Mutation`] spec was derived,
-/// else copy-on-write overwrite with `child`'s rows. Iceberg always uses
-/// copy-on-write (then rebuilds its provider). Rejects non-managed targets.
+/// else copy-on-write overwrite with `child`'s rows. Rejects non-managed targets.
 pub(crate) async fn replace_table_contents(
     session: &Arc<SessionContext>,
     table: &TableReference,
@@ -429,41 +396,15 @@ pub(crate) async fn replace_table_contents(
         return Ok(());
     }
 
-    let definition = provider
-        .as_any()
-        .downcast_ref::<beacon_iceberg::IcebergTable>()
-        .map(|table| table.definition().clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Row mutations are only supported on managed tables, but '{}' is not one",
-                table.table()
-            )
-        })?;
-
-    let stream = execute_stream(child, task_ctx.clone())?;
-
-    let catalog = beacon_iceberg::get_catalog()?;
-    beacon_iceberg::replace_table_contents(
-        &catalog,
-        &definition.namespace,
-        &definition.name,
-        stream,
-        task_ctx,
-    )
-    .await?;
-
-    // The registered provider caches its snapshot; rebuild it to see the replace.
-    let fresh = definition
-        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
-        .await?;
-    session.register_table(table.clone(), fresh)?;
-
-    Ok(())
+    Err(anyhow::anyhow!(
+        "Row mutations are only supported on managed (Lance) tables, but '{}' is not one",
+        table.table()
+    ))
 }
 
-/// Apply `ALTER TABLE` operations to a managed table by mapping them to schema
-/// changes. Lance applies them natively (each an atomic version); Iceberg
-/// rebuilds the table under the new schema.
+/// Apply `ALTER TABLE` operations to a managed (Lance) table, mapping each to a
+/// native Lance schema change (each its own atomic version), then rebuild the
+/// provider so its cached schema reflects the evolution.
 pub(crate) async fn alter_table(
     session: &Arc<SessionContext>,
     spec: &AlterTableSpec,
@@ -471,34 +412,29 @@ pub(crate) async fn alter_table(
     let table_ref = TableReference::parse_str(&spec.name.to_string());
 
     let provider = session.table_provider(table_ref.clone()).await?;
-    let lance_definition = provider
+    let definition = provider
         .as_any()
         .downcast_ref::<beacon_lance::LanceTable>()
-        .map(|table| table.definition().clone());
-    let iceberg_definition = provider
-        .as_any()
-        .downcast_ref::<beacon_iceberg::IcebergTable>()
-        .map(|table| table.definition().clone());
-
-    if lance_definition.is_none() && iceberg_definition.is_none() {
-        anyhow::bail!(
-            "ALTER TABLE is only supported on managed tables, but '{}' is not one",
-            table_ref.table()
-        );
-    }
+        .map(|table| table.definition().clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ALTER TABLE is only supported on managed (Lance) tables, but '{}' is not one",
+                table_ref.table()
+            )
+        })?;
 
     let mut changes = Vec::new();
     for operation in &spec.operations {
         match operation {
             AlterTableOperation::AddColumn { column_def, .. } => {
-                changes.push(beacon_iceberg::SchemaChange::AddColumn {
+                changes.push(beacon_lance::SchemaChange::AddColumn {
                     name: column_def.name.value.clone(),
                     data_type: sql_column_type_to_arrow(column_def)?,
                 });
             }
             AlterTableOperation::DropColumn { column_names, .. } => {
                 for column_name in column_names {
-                    changes.push(beacon_iceberg::SchemaChange::DropColumn {
+                    changes.push(beacon_lance::SchemaChange::DropColumn {
                         name: column_name.value.clone(),
                     });
                 }
@@ -507,7 +443,7 @@ pub(crate) async fn alter_table(
                 old_column_name,
                 new_column_name,
             } => {
-                changes.push(beacon_iceberg::SchemaChange::RenameColumn {
+                changes.push(beacon_lance::SchemaChange::RenameColumn {
                     from: old_column_name.value.clone(),
                     to: new_column_name.value.clone(),
                 });
@@ -519,7 +455,7 @@ pub(crate) async fn alter_table(
                         data_type: data_type.clone(),
                         options: Vec::new(),
                     };
-                    changes.push(beacon_iceberg::SchemaChange::AlterColumnType {
+                    changes.push(beacon_lance::SchemaChange::AlterColumnType {
                         name: column_name.value.clone(),
                         data_type: sql_column_type_to_arrow(&column_def)?,
                     });
@@ -534,63 +470,9 @@ pub(crate) async fn alter_table(
         }
     }
 
-    // Lance: apply the changes natively (each is its own atomic version), then
-    // rebuild the provider so its cached schema reflects the evolution.
-    if let Some(definition) = lance_definition {
-        let lance_changes = changes
-            .iter()
-            .map(|change| match change {
-                beacon_iceberg::SchemaChange::AddColumn { name, data_type } => {
-                    Ok(beacon_lance::SchemaChange::AddColumn {
-                        name: name.clone(),
-                        data_type: data_type.clone(),
-                    })
-                }
-                beacon_iceberg::SchemaChange::DropColumn { name } => {
-                    Ok(beacon_lance::SchemaChange::DropColumn { name: name.clone() })
-                }
-                beacon_iceberg::SchemaChange::RenameColumn { from, to } => {
-                    Ok(beacon_lance::SchemaChange::RenameColumn {
-                        from: from.clone(),
-                        to: to.clone(),
-                    })
-                }
-                beacon_iceberg::SchemaChange::AlterColumnType { name, data_type } => {
-                    Ok(beacon_lance::SchemaChange::AlterColumnType {
-                        name: name.clone(),
-                        data_type: data_type.clone(),
-                    })
-                }
-                #[allow(unreachable_patterns)]
-                _ => Err(anyhow::anyhow!(
-                    "unsupported ALTER operation for a Lance-backed table"
-                )),
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+    let warehouse = lance_warehouse(session)?;
+    beacon_lance::alter_table(&warehouse, &definition.location, &changes).await?;
 
-        let warehouse = lance_warehouse(session)?;
-        beacon_lance::alter_table(&warehouse, &definition.location, &lance_changes).await?;
-
-        let fresh = definition
-            .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
-            .await?;
-        session.register_table(table_ref, fresh)?;
-        return Ok(());
-    }
-
-    let definition = iceberg_definition.expect("a managed table definition was found above");
-    let catalog = beacon_iceberg::get_catalog()?;
-    let store = beacon_iceberg::get_warehouse_store()?;
-    beacon_iceberg::alter_table_schema(
-        &catalog,
-        &store,
-        &definition.namespace,
-        &definition.name,
-        &changes,
-    )
-    .await?;
-
-    // Rebuild the registered provider so subsequent queries see the new schema.
     let fresh = definition
         .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
         .await?;

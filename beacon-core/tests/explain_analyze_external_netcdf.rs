@@ -33,7 +33,9 @@ async fn explain_analyze_over_external_netcdf_returns_metrics() {
     // which can differ from the global `DATASETS_DIR_PATH` (e.g. when
     // `BEACON_DATA_DIR` is set), so the fixture must land where the runtime looks.
     let datasets_dir = config.storage.datasets_dir.clone();
-    let runtime = Runtime::new(config).await.expect("runtime should boot");
+    let runtime = Runtime::new_with_in_memory_auth(config)
+        .await
+        .expect("runtime should boot");
 
     // Copy the WOD CTD fixture into the datasets dir so it can back an external
     // table addressed by a datasets-relative location.

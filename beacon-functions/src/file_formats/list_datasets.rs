@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use arrow::{
     array::StringArray,
@@ -19,7 +19,7 @@ use crate::file_formats::BeaconTableFunctionImpl;
 
 pub struct ListDatasetsFunc {
     runtime_handle: tokio::runtime::Handle,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: Weak<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 }
@@ -27,7 +27,7 @@ pub struct ListDatasetsFunc {
 impl ListDatasetsFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
         file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
     ) -> Self {
@@ -63,7 +63,9 @@ impl BeaconTableFunctionImpl for ListDatasetsFunc {
 impl TableFunctionImpl for ListDatasetsFunc {
     fn call(&self, _args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
         let file_formats = self.file_formats.clone();
-        let session_ctx = self.session_ctx.clone();
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
         let data_object_store_url = self.data_object_store_url.clone();
 
         let datasets: Vec<DatasetMetadata> = tokio::task::block_in_place(|| {

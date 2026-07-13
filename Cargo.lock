@@ -119,30 +119,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "apache-avro"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36fa98bc79671c7981272d91a8753a928ff6a1cd8e4f20a44c45bd5d313840bf"
-dependencies = [
- "bigdecimal",
- "bon",
- "digest 0.10.7",
- "log",
- "miniz_oxide",
- "num-bigint",
- "quad-rand",
- "rand 0.9.4",
- "regex-lite",
- "serde",
- "serde_bytes",
- "serde_json",
- "strum 0.27.2",
- "strum_macros 0.27.2",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1082,15 +1058,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89cbf775b137e9b968e67227ef7f775587cde3fd31b0d8599dbd0f598a48340"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "atomic-polyfill"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1656,7 +1623,6 @@ dependencies = [
  "beacon-datafusion-ext",
  "beacon-delta",
  "beacon-functions",
- "beacon-iceberg",
  "beacon-lance",
  "beacon-object-storage",
  "beacon-sql-databases",
@@ -1703,7 +1669,6 @@ dependencies = [
  "beacon-config",
  "beacon-datafusion-ext",
  "beacon-delta",
- "beacon-iceberg",
  "beacon-lance",
  "beacon-object-storage",
  "beacon-sql-databases",
@@ -1811,30 +1776,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-iceberg"
-version = "1.7.3"
-dependencies = [
- "anyhow",
- "arrow 58.3.0",
- "async-trait",
- "beacon-config",
- "beacon-datafusion-ext",
- "beacon-object-storage",
- "datafusion",
- "datafusion_iceberg",
- "futures",
- "iceberg-file-catalog",
- "iceberg-rust",
- "object_store 0.13.2",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "typetag",
-]
-
-[[package]]
 name = "beacon-lance"
 version = "0.1.0"
 dependencies = [
@@ -1926,6 +1867,7 @@ name = "beacon-object-storage"
 version = "1.7.3"
 dependencies = [
  "async-trait",
+ "beacon-redb-store",
  "chrono",
  "flume",
  "futures",
@@ -1992,7 +1934,6 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
- "serde",
 ]
 
 [[package]]
@@ -2102,31 +2043,6 @@ dependencies = [
  "pkg-config",
  "snap",
  "zstd",
-]
-
-[[package]]
-name = "bon"
-version = "3.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f47dbe92550676ee653353c310dfb9cf6ba17ee70396e1f7cf0a2020ad49b2fe"
-dependencies = [
- "bon-macros",
- "rustversion",
-]
-
-[[package]]
-name = "bon-macros"
-version = "3.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "519bd3116aeeb42d5372c29d982d16d0170d3d4a5ed85fc7dd91642ffff3c67c"
-dependencies = [
- "darling 0.23.0",
- "ident_case",
- "prettyplease",
- "proc-macro2",
- "quote",
- "rustversion",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -3755,33 +3671,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "datafusion_iceberg"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af27efb5d42e4706b84d4692bc7641b155532a34077b906c8f18ece9f18f7519"
-dependencies = [
- "async-trait",
- "chrono",
- "dashmap",
- "datafusion",
- "datafusion-expr",
- "derive_builder",
- "futures",
- "iceberg-rust",
- "itertools 0.14.0",
- "lru 0.16.4",
- "object_store 0.13.2",
- "pin-project-lite",
- "regex",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "debugid"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3931,17 +3820,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive-getters"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74ef43543e701c01ad77d3a5922755c6a1d71b22d942cb8042be4994b380caff"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "derive_arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3949,37 +3827,6 @@ checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "derive_builder"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947"
-dependencies = [
- "derive_builder_macro",
-]
-
-[[package]]
-name = "derive_builder_core"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
-dependencies = [
- "darling 0.20.11",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "derive_builder_macro"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
-dependencies = [
- "derive_builder_core",
  "syn 2.0.117",
 ]
 
@@ -5293,85 +5140,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "iceberg-file-catalog"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "322fc1fa46e97ae4cf9f61e35d90020606a9d81483d86bdf08cab9af080590f4"
-dependencies = [
- "async-trait",
- "futures",
- "iceberg-rust",
- "object_store 0.13.2",
- "serde_json",
- "thiserror 2.0.18",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "iceberg-rust"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f28513696595ea087a33a8a9cb0d795c912569c398a08226a8fcc9bb12d2b898"
-dependencies = [
- "apache-avro",
- "arrow 58.3.0",
- "async-trait",
- "bytes",
- "derive-getters",
- "derive_builder",
- "flate2",
- "futures",
- "getrandom 0.4.2",
- "iceberg-rust-spec",
- "itertools 0.14.0",
- "lazy_static",
- "lru 0.16.4",
- "murmur3",
- "object_store 0.13.2",
- "parquet",
- "pin-project-lite",
- "regex",
- "serde",
- "serde_derive",
- "serde_json",
- "smallvec",
- "sqlparser",
- "thiserror 2.0.18",
- "thrift",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "iceberg-rust-spec"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72d1777b6a77e205857d034da0e07c9de391e126a2caaa343adbe89471b72de9"
-dependencies = [
- "apache-avro",
- "arrow-schema 58.3.0",
- "chrono",
- "derive-getters",
- "derive_builder",
- "getrandom 0.4.2",
- "itertools 0.14.0",
- "murmur3",
- "ordered-float 5.3.0",
- "rust_decimal",
- "serde",
- "serde_bytes",
- "serde_derive",
- "serde_json",
- "serde_repr",
- "thiserror 2.0.18",
- "url",
- "uuid",
 ]
 
 [[package]]
@@ -6819,12 +6587,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "murmur3"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9252111cf132ba0929b6f8e030cac2a24b507f3a4d6db6fb2896f27b354c714b"
-
-[[package]]
 name = "mysql-common-derive"
 version = "0.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7089,7 +6851,6 @@ checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
  "num-traits",
- "serde",
 ]
 
 [[package]]
@@ -7952,12 +7713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quad-rand"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a651516ddc9168ebd67b24afd085a718be02f8858fe406591b013d101ce2f40"
-
-[[package]]
 name = "quick-xml"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8342,12 +8097,6 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
-
-[[package]]
-name = "regex-lite"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"
@@ -9026,16 +8775,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde_bytes"
-version = "0.11.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
-dependencies = [
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -10368,7 +10107,6 @@ version = "1.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7"
 dependencies = [
- "atomic",
  "getrandom 0.4.2",
  "js-sys",
  "rand 0.10.1",
