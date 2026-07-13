@@ -1,0 +1,31 @@
+[package]
+name = "beacon-redb-store"
+version = "0.1.0"
+edition = "2024"
+
+[lints.clippy]
+# A future object_store bump must not silently fall back to a broken default
+# trait method — force us to implement each one explicitly.
+missing_trait_methods = "deny"
+
+[dependencies]
+object_store = { workspace = true }
+redb = { workspace = true }
+memmap2 = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The `integration` feature exposes object_store's own conformance suite
+# (put/get/delete/list, conditional puts, delimiter listing, copy/rename).
+object_store = { workspace = true, features = ["integration"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

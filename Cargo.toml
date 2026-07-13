@@ -2,7 +2,7 @@
 # Edition-2024 members imply resolver 3; set it explicitly so features aren't
 # over-unified across normal/build/dev deps (fewer features compiled).
 resolver = "3"
-members = ["beacon-api", "beacon-mcp", "beacon-auth", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-iceberg", "beacon-file-formats/beacon-lance", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
+members = ["beacon-api", "beacon-mcp", "beacon-auth", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-redb-store", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-iceberg", "beacon-file-formats/beacon-lance", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
 exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
@@ -52,6 +52,15 @@ lazy_static = "1.5.0"
 base64 = "0.22"
 bloomfilter = { version = "1", features = ["serde"] }
 bincode = "1"
+# Embedded, transactional, single-file key-value store backing beacon-redb-store
+# (the redb-backed `object_store::ObjectStore`). redb is copy-on-write with a
+# dual-slot header — no WAL/-shm sidecars — which is what lets a whole Beacon
+# deployment live in one file. Pinned exactly to 4.1.0.
+# Requires rustc >= 1.89 (we ship 1.91).
+redb = "=4.1.0"
+# mmap for zero-copy reads of the blob heap that lives inside the same single
+# file as redb. 0.9.10 matches the version already resolved in the tree.
+memmap2 = "=0.9.10"
 
 # Delta Lake support. 0.32.x pins datafusion 53 / arrow 58 / object_store 0.13,
 # matching our versions. We keep default features (`rustls`, required by the
