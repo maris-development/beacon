@@ -437,17 +437,21 @@ impl Runtime {
             // `FederatedPlanner` lives in `BeaconQueryPlanner`'s extension planners.
             .with_optimizer_rules(datafusion_federation::default_optimizer_rules());
 
-        // Opt-in nd-pipeline optimizer (BEACON_ENABLE_ND_PIPELINE): sink
-        // element-wise projections below the nd broadcast so they run on
-        // un-broadcast coordinate axes instead of the full grid. Appended after
-        // the default physical rules, so it sees the planned `ProjectionExec`
-        // above `NdBroadcastExec`. The base pipeline (`NdSourceExec` →
-        // `NdBroadcastExec`) is emitted by the formats and always runs; only this
-        // node-rewriting rule is gated.
+        // Opt-in nd-pipeline optimizers (BEACON_ENABLE_ND_PIPELINE): sink
+        // element-wise projections and filter predicates below the nd broadcast
+        // so they run on un-broadcast coordinate axes instead of the full grid.
+        // Appended after the default physical rules, so they see the planned
+        // `ProjectionExec`/`FilterExec` above `NdBroadcastExec`. The base pipeline
+        // (`NdSourceExec` → `NdBroadcastExec`) is emitted by the formats and
+        // always runs; only these node-rewriting rules are gated.
         if enable_nd_pipeline {
-            state_builder = state_builder.with_physical_optimizer_rule(Arc::new(
-                beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
-            ));
+            state_builder = state_builder
+                .with_physical_optimizer_rule(Arc::new(
+                    beacon_datafusion_ext::nd::NdFilterPushdown::new(),
+                ))
+                .with_physical_optimizer_rule(Arc::new(
+                    beacon_datafusion_ext::nd::NdProjectionPushdown::new(),
+                ));
         }
 
         let session_state = state_builder
