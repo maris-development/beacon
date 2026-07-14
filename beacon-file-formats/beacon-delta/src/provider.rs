@@ -23,6 +23,7 @@ use std::sync::{Arc, Once};
 use anyhow::Context;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::execution::context::SessionState;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use deltalake::logstore::{
     default_logstore, logstore_factories, LogStore, LogStoreFactory, LogStoreRef, ObjectStoreRef,
@@ -239,7 +240,10 @@ fn location_to_prefix(location: &str) -> anyhow::Result<String> {
         None => location,
     };
     let trimmed = without_scheme.trim_matches('/');
-    anyhow::ensure!(!trimmed.is_empty(), "Delta table location must not be empty");
+    anyhow::ensure!(
+        !trimmed.is_empty(),
+        "Delta table location must not be empty"
+    );
     Ok(trimmed.to_string())
 }
 
@@ -259,7 +263,7 @@ fn table_url(prefix: &str) -> anyhow::Result<Url> {
 /// The returned table's `log_store` already carries the prefixed store, so the
 /// caller registers it with the session and turns it into a provider.
 async fn load_delta_table(
-    datasets_store: Arc<DatasetsStore>,
+    store: Arc<dyn ObjectStore>,
     location: &str,
     time_travel: Option<TimeTravel>,
 ) -> anyhow::Result<deltalake::DeltaTable> {
@@ -275,9 +279,8 @@ async fn load_delta_table(
     // Use the raw backing store, not the cached `DatasetsStore` view: Delta's log
     // replay needs read-after-write listing consistency, which the async metadata
     // cache cannot guarantee right after a commit.
-    let backend = datasets_store.backing_store();
     let prefixed: Arc<dyn ObjectStore> =
-        Arc::new(PrefixStore::new(backend, ObjectPath::from(prefix.as_str())));
+        Arc::new(PrefixStore::new(store, ObjectPath::from(prefix.as_str())));
     // Ensure log listings come back sorted so delta-rs's log replay is correct on
     // local-FS-backed stores (S3 already returns sorted listings).
     let sorted: Arc<dyn ObjectStore> = Arc::new(SortedListStore { inner: prefixed });
@@ -315,11 +318,11 @@ async fn load_delta_table(
 /// work without extra configuration.
 pub async fn open_delta_provider(
     ctx: Arc<SessionContext>,
-    datasets_store: Arc<DatasetsStore>,
+    store_url: ObjectStoreUrl,
     location: &str,
     time_travel: Option<TimeTravel>,
 ) -> anyhow::Result<Arc<dyn TableProvider>> {
-    reopen_delta_provider(&ctx.state(), datasets_store, location, time_travel).await
+    reopen_delta_provider(&ctx.state(), store_url, location, time_travel).await
 }
 
 /// Re-open a Delta table from an active query [`Session`] and return a fresh
@@ -331,7 +334,7 @@ pub async fn open_delta_provider(
 /// pinned version/timestamp is re-resolved instead.
 pub async fn reopen_delta_provider(
     session: &dyn Session,
-    datasets_store: Arc<DatasetsStore>,
+    store_url: ObjectStoreUrl,
     location: &str,
     time_travel: Option<TimeTravel>,
 ) -> anyhow::Result<Arc<dyn TableProvider>> {
@@ -340,7 +343,12 @@ pub async fn reopen_delta_provider(
         .downcast_ref::<SessionState>()
         .context("Delta table requires a DataFusion SessionState")?;
 
-    let table = load_delta_table(datasets_store, location, time_travel).await?;
+    let store = session_state
+        .runtime_env()
+        .object_store(store_url.clone())
+        .with_context(|| format!("failed to resolve object store for {store_url:?}"))?;
+
+    let table = load_delta_table(store, location, time_travel).await?;
 
     // Register the table's (prefixed) object store under its unique synthetic URL
     // so the scan plan can resolve data-file URLs at execution time. Keyed by
@@ -365,7 +373,10 @@ mod tests {
 
     #[test]
     fn location_to_prefix_strips_scheme_and_slashes() {
-        assert_eq!(location_to_prefix("datasets://argo/tbl").unwrap(), "argo/tbl");
+        assert_eq!(
+            location_to_prefix("datasets://argo/tbl").unwrap(),
+            "argo/tbl"
+        );
         assert_eq!(location_to_prefix("/argo/tbl/").unwrap(), "argo/tbl");
         assert_eq!(location_to_prefix("argo/tbl").unwrap(), "argo/tbl");
         assert!(location_to_prefix("datasets://").is_err());
@@ -390,7 +401,10 @@ mod tests {
         );
 
         let mut opts = HashMap::new();
-        opts.insert("format.timestamp".to_string(), "2026-01-01T00:00:00Z".to_string());
+        opts.insert(
+            "format.timestamp".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+        );
         assert_eq!(
             TimeTravel::from_options(&opts).unwrap(),
             Some(TimeTravel::Timestamp("2026-01-01T00:00:00Z".to_string()))

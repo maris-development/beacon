@@ -25,7 +25,6 @@ pub struct ReadDeltaFunc {
     session_ctx: Weak<SessionContext>,
     #[allow(dead_code)]
     data_object_store_url: ObjectStoreUrl,
-    datasets_object_store: Arc<DatasetsStore>,
 }
 
 impl ReadDeltaFunc {
@@ -33,13 +32,11 @@ impl ReadDeltaFunc {
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
-        datasets_object_store: Arc<DatasetsStore>,
     ) -> Self {
         Self {
             runtime_handle,
             session_ctx,
             data_object_store_url,
-            datasets_object_store,
         }
     }
 }
@@ -109,10 +106,15 @@ impl TableFunctionImpl for ReadDeltaFunc {
         let ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
-        let datasets_store = self.datasets_object_store.clone();
         let provider = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                open_delta_provider(ctx, datasets_store, &location, time_travel).await
+                open_delta_provider(
+                    ctx,
+                    self.data_object_store_url.clone(),
+                    &location,
+                    time_travel,
+                )
+                .await
             })
         })
         .map_err(|e| datafusion::error::DataFusionError::External(e.into()))?;

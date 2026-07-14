@@ -12,7 +12,6 @@ pub use beacon_common::table_function::{parse_glob_paths_arg, BeaconTableFunctio
 
 // Cross-format table functions that don't belong to a single format crate.
 pub mod list_datasets;
-pub mod read_schema;
 
 /// Build the `read_*` table functions. The per-format functions are constructed
 /// from their respective `beacon-arrow-*` crate; the cross-format ones
@@ -21,7 +20,6 @@ pub fn register_table_functions(
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
     data_object_store_url: ObjectStoreUrl,
-    datasets_object_store: Arc<DatasetsStore>,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 ) -> Vec<Arc<dyn BeaconTableFunctionImpl>> {
     vec![
@@ -30,11 +28,13 @@ pub fn register_table_functions(
             Arc::downgrade(&session_ctx),
             data_object_store_url.clone(),
         )),
-        Arc::new(beacon_arrow_geoparquet::datafusion::ReadGeoParquetFunc::new(
-            runtime_handle.clone(),
-            Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
-        )),
+        Arc::new(
+            beacon_arrow_geoparquet::datafusion::ReadGeoParquetFunc::new(
+                runtime_handle.clone(),
+                Arc::downgrade(&session_ctx),
+                data_object_store_url.clone(),
+            ),
+        ),
         Arc::new(beacon_arrow_ipc::datafusion::ReadArrowFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
@@ -59,18 +59,11 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
             data_object_store_url.clone(),
-            datasets_object_store.clone(),
         )),
         Arc::new(beacon_arrow_bbf::datafusion::ReadBBFFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
             data_object_store_url.clone(),
-        )),
-        Arc::new(read_schema::ReadSchemaFunc::new(
-            runtime_handle.clone(),
-            Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
-            datasets_object_store.clone(),
         )),
         Arc::new(beacon_arrow_odv::datafusion::ReadOdvAsciiFunc::new(
             runtime_handle.clone(),
@@ -86,7 +79,6 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
             data_object_store_url.clone(),
-            datasets_object_store.clone(),
         )),
         Arc::new(list_datasets::ListDatasetsFunc::new(
             runtime_handle,

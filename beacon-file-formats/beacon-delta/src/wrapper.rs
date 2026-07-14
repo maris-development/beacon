@@ -12,15 +12,16 @@ use std::any::Any;
 use std::sync::Arc;
 
 use beacon_object_storage::DatasetsStore;
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{Constraints, Statistics};
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
-use datafusion::arrow::datatypes::SchemaRef;
 
 use crate::definition::DeltaTableDefinition;
 use crate::provider::{reopen_delta_provider, TimeTravel};
@@ -36,22 +37,22 @@ use crate::provider::{reopen_delta_provider, TimeTravel};
 #[derive(Debug)]
 pub struct BeaconDeltaTable {
     inner: Arc<dyn TableProvider>,
+    store_url: ObjectStoreUrl,
     definition: DeltaTableDefinition,
-    datasets_store: Arc<DatasetsStore>,
     time_travel: Option<TimeTravel>,
 }
 
 impl BeaconDeltaTable {
     pub fn new(
         inner: Arc<dyn TableProvider>,
+        store_url: ObjectStoreUrl,
         definition: DeltaTableDefinition,
-        datasets_store: Arc<DatasetsStore>,
         time_travel: Option<TimeTravel>,
     ) -> Self {
         Self {
             inner,
+            store_url,
             definition,
-            datasets_store,
             time_travel,
         }
     }
@@ -67,7 +68,7 @@ impl BeaconDeltaTable {
     ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
         reopen_delta_provider(
             session,
-            self.datasets_store.clone(),
+            self.store_url.clone(),
             &self.definition.location,
             self.time_travel.clone(),
         )

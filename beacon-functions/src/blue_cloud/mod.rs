@@ -18,3 +18,9 @@ pub fn blue_cloud_udfs() -> Vec<datafusion::logical_expr::ScalarUDF> {
     udfs.extend(world_ocean_database::world_ocean_database_udfs());
     udfs
 }
+
+pub fn register_blue_cloud_udfs(session_context: &datafusion::prelude::SessionContext) {
+    for udf in blue_cloud_udfs() {
+        session_context.register_udf(udf);
+    }
+}

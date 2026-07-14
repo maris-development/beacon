@@ -34,3 +34,9 @@ pub fn util_udfs() -> Vec<ScalarUDF> {
         beacon_version::beacon_version(),
     ]
 }
+
+pub fn register_util_udfs(session_context: &datafusion::prelude::SessionContext) {
+    for udf in util_udfs() {
+        session_context.register_udf(udf);
+    }
+}

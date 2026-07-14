@@ -79,7 +79,7 @@ datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 # feature that enables the matching `<engine>-federation` feature (pushdown).
 datafusion-table-providers = { version = "=0.11.0", default-features = false }
 geodatafusion = "0.4.0"
-object_store = { version = "0.13.1", features = ["aws"] }
+object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 tonic = "0.14.1"
 
 # Lance managed-table engine. 7.0.0 pins arrow 58 / datafusion 53 / object_store

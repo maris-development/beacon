@@ -1635,6 +1635,7 @@ dependencies = [
  "futures",
  "geodatafusion",
  "geojson",
+ "num_cpus",
  "object_store 0.13.2",
  "parking_lot",
  "serde",
@@ -1692,6 +1693,7 @@ dependencies = [
  "anyhow",
  "arrow 58.3.0",
  "arrow-flight",
+ "arrow-schema 58.3.0",
  "async-trait",
  "beacon-common",
  "beacon-object-storage",
@@ -1699,6 +1701,7 @@ dependencies = [
  "datafusion",
  "datafusion-federation",
  "futures",
+ "glob",
  "indexmap 2.14.0",
  "moka",
  "object_store 0.13.2",
@@ -1711,6 +1714,7 @@ dependencies = [
  "tonic",
  "tracing",
  "typetag",
+ "url",
 ]
 
 [[package]]
@@ -1760,6 +1764,7 @@ dependencies = [
  "datafusion",
  "futures",
  "geo",
+ "geodatafusion",
  "geojson",
  "gsw",
  "lazy_static",

@@ -13,3 +13,12 @@ pub fn geo_udfs(st_within_point_cache_size: usize) -> Vec<ScalarUDF> {
         )),
     ]
 }
+
+pub fn register_geo_udfs(
+    session_context: &datafusion::prelude::SessionContext,
+    st_within_point_cache_size: usize,
+) {
+    for udf in geo_udfs(st_within_point_cache_size) {
+        session_context.register_udf(udf);
+    }
+}

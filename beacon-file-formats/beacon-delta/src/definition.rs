@@ -38,7 +38,7 @@ impl TableDefinition for DeltaTableDefinition {
     async fn build_provider(
         &self,
         context: Arc<SessionContext>,
-        _data_store_url: &ObjectStoreUrl,
+        store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
         // The runtime threads its datasets store through the session config as an
         // extension (see `Runtime::init_ctx`); recover it to back the Delta table.
@@ -52,7 +52,7 @@ impl TableDefinition for DeltaTableDefinition {
 
         let provider = open_delta_provider(
             context.clone(),
-            datasets_store.clone(),
+            store_url.clone(),
             &self.location,
             time_travel.clone(),
         )
@@ -63,8 +63,8 @@ impl TableDefinition for DeltaTableDefinition {
         // target are kept so reads/writes re-open at the latest version.
         Ok(Arc::new(crate::wrapper::BeaconDeltaTable::new(
             provider,
+            store_url.clone(),
             self.clone(),
-            datasets_store,
             time_travel,
         )))
     }

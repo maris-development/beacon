@@ -1,7 +1,7 @@
 use std::sync::{Arc, Weak};
 
-use arrow::datatypes::{DataType, Field};
 use crate::datafusion::TiffFormat;
+use arrow::datatypes::{DataType, Field};
 use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use beacon_object_storage::DatasetsStore;
 use datafusion::{
@@ -21,7 +21,6 @@ impl ReadTiffFunc {
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Weak<SessionContext>,
         data_object_store_url: ObjectStoreUrl,
-        _datasets_object_store: Arc<DatasetsStore>,
     ) -> Self {
         Self {
             runtime_handle,
@@ -77,12 +76,8 @@ impl TableFunctionImpl for ReadTiffFunc {
         })?;
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                SuperListingTable::new(
-                    &session_ctx.state(),
-                    Arc::new(file_format),
-                    listing_urls,
-                )
-                .await
+                SuperListingTable::new(&session_ctx.state(), Arc::new(file_format), listing_urls)
+                    .await
             })
         })?;
 
