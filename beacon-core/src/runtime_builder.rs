@@ -7,11 +7,16 @@ use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
+use beacon_auth::{AuthContext, BasicAuthProvider};
 use beacon_data_lake::{init_tables, PersistentSchemaProvider, DB_OBJECT_STORE_URL};
 use beacon_datafusion_ext::{
-    format_ext::FileFormatFactoryExt, listing_table_factory_ext::ListingTableFactoryExt,
-    nd::NdProjectionPushdown, object_store_registry::LazyObjectStoreRegistry, secrets::SecretStore,
+    format_ext::FileFormatFactoryExt,
+    listing_table_factory_ext::ListingTableFactoryExt,
+    nd::NdProjectionPushdown,
+    object_store_registry::LazyObjectStoreRegistry,
+    secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
+    type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening},
 };
 use beacon_functions::register_functions;
 use datafusion::{
@@ -29,6 +34,7 @@ use datafusion::{
 };
 use object_store::ObjectStore;
 use parking_lot::Mutex;
+use tempfile::env::temp_dir;
 use tokio::runtime::Handle;
 
 use crate::{
@@ -45,10 +51,9 @@ pub struct RuntimeBuilder {
     pub admin_username: Option<String>,
     pub admin_password: Option<String>,
 
+    pub tmp_dir_path: Option<PathBuf>,
     pub vm_memory_limit: Option<usize>,
     pub vm_cpu_limit: Option<usize>,
-
-    pub sys_info: bool,
 
     pub batch_size: Option<usize>,
     pub nd_pipeline: bool,
@@ -61,7 +66,7 @@ pub struct RuntimeBuilder {
     pub auth_provider: Option<Arc<dyn beacon_auth::AuthProvider>>,
     pub secrets_encryption_key: Option<[u8; 32]>,
 
-    pub type_widening: bool,
+    pub type_widening: Option<Arc<dyn ArrowTypeWideningStrategy>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -116,11 +121,6 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_sys_info(mut self) -> Self {
-        self.sys_info = true;
-        self
-    }
-
     pub fn with_batch_size(mut self, size: usize) -> Self {
         self.batch_size = Some(size);
         self
@@ -156,8 +156,13 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_type_widening(mut self) -> Self {
-        self.type_widening = true;
+    pub fn with_type_widening(mut self, strategy: Arc<dyn ArrowTypeWideningStrategy>) -> Self {
+        self.type_widening = Some(strategy);
+        self
+    }
+
+    pub fn with_tmp_dir_path(mut self, path: PathBuf) -> Self {
+        self.tmp_dir_path = Some(path);
         self
     }
 
@@ -175,9 +180,12 @@ impl RuntimeBuilder {
 
         let listing_table_factory = Arc::new(ListingTableFactoryExt::new(
             self.default_store_url
+                .clone()
                 .unwrap_or(ObjectStoreUrl::local_filesystem()),
             Arc::downgrade(&session_ctx),
         ));
+
+        let auth_context = Arc::new(init_auth_context(&self).await?);
 
         Ok(Runtime {
             session_ctx,
@@ -185,8 +193,20 @@ impl RuntimeBuilder {
             table_function_docs: vec![],
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
             crawler_manager: None,
-            auth: None,
+            auth: auth_context,
+
+            tmp_dir: self.tmp_dir_path.unwrap_or_else(temp_dir),
         })
+    }
+}
+
+async fn init_auth_context(builder: &RuntimeBuilder) -> anyhow::Result<AuthContext> {
+    if let Some(auth_provider) = &builder.auth_provider {
+        // Initialize the auth provider with the session context if needed
+        // For example, you might want to set up any necessary state or configuration here
+        Ok(AuthContext::new(auth_provider.clone()))
+    } else {
+        Ok(AuthContext::new(Arc::new(BasicAuthProvider::new())))
     }
 }
 
@@ -204,7 +224,7 @@ async fn init_session_ctx(
 
     let session_ctx = Arc::new(SessionContext::new_with_state(session_state));
 
-    let file_formats = register_file_formats(&session_ctx);
+    let file_formats = register_file_formats(&session_ctx)?;
 
     register_functions(
         session_ctx.clone(),
@@ -213,7 +233,7 @@ async fn init_session_ctx(
         builder
             .default_store_url
             .clone()
-            .unwrap_or_else(|| ObjectStoreUrl::local_filesystem()),
+            .unwrap_or_else(ObjectStoreUrl::local_filesystem),
     );
 
     let schema_provider = Arc::new(PersistentSchemaProvider::new(
@@ -224,15 +244,17 @@ async fn init_session_ctx(
 
     session_ctx
         .catalog("beacon")
-        .unwrap()
-        .register_schema("public", schema_provider.clone());
+        .ok_or(anyhow::anyhow!("Failed to get catalog 'beacon'"))?
+        .register_schema("public", schema_provider.clone())?;
 
     init_tables(&session_ctx, &schema_provider).await?;
 
     Ok(session_ctx)
 }
 
-fn register_file_formats(session_ctx: &Arc<SessionContext>) -> Vec<Arc<dyn FileFormatFactoryExt>> {
+fn register_file_formats(
+    session_ctx: &Arc<SessionContext>,
+) -> anyhow::Result<Vec<Arc<dyn FileFormatFactoryExt>>> {
     let state_ref = session_ctx.state_ref();
     let mut state = state_ref.write();
 
@@ -256,10 +278,10 @@ fn register_file_formats(session_ctx: &Arc<SessionContext>) -> Vec<Arc<dyn FileF
         Arc::new(GeoParquetFormatFactory::default()),
     ];
     for format in &formats {
-        state.register_file_format(format.clone(), true);
+        state.register_file_format(format.clone(), true)?;
     }
 
-    formats
+    Ok(formats)
 }
 
 fn build_session_state(
@@ -301,7 +323,14 @@ fn build_session_config(
         .with_information_schema(true)
         .with_collect_statistics(true)
         .with_spill_compression(datafusion::config::SpillCompression::Lz4Frame)
-        .with_extension(secrets_store.clone());
+        .with_extension(secrets_store.clone())
+        .with_extension(Arc::new(ArrowTypeWidening::new(
+            builder
+                .type_widening
+                .clone()
+                .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening)),
+        )))
+        .with_extension(Arc::new(ListingTableFactoryExt));
 
     config.options_mut().sql_parser.enable_ident_normalization = false;
     config
@@ -317,6 +346,45 @@ fn build_session_config(
     config.options_mut().sql_parser.map_string_types_to_utf8view = false;
 
     Ok(config)
+}
+
+/// Default query memory pool size: 80% of usable RAM.
+///
+/// Under a cgroup (any containerized deployment) `/proc/meminfo` still reports
+/// the host's RAM, so the cgroup limit takes precedence where one is set.
+fn default_vm_memory_limit() -> usize {
+    const DEFAULT_MEMORY_LIMIT_FRACTION: f64 = 0.8;
+    const FALLBACK_MEMORY_LIMIT: usize = 8 * 1024 * 1024 * 1024;
+
+    let system = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing()
+            .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()),
+    );
+
+    let total_memory = system
+        .cgroup_limits()
+        .map(|limits| limits.total_memory.min(system.total_memory()))
+        .unwrap_or_else(|| system.total_memory());
+
+    if total_memory == 0 {
+        tracing::warn!(
+            "could not determine usable memory, defaulting query memory pool to {} bytes",
+            FALLBACK_MEMORY_LIMIT
+        );
+        return FALLBACK_MEMORY_LIMIT;
+    }
+
+    let limit = (total_memory as f64 * DEFAULT_MEMORY_LIMIT_FRACTION) as u64;
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+
+    tracing::info!(
+        "query memory pool defaulting to {} bytes ({:.0}% of {} bytes usable memory)",
+        limit,
+        DEFAULT_MEMORY_LIMIT_FRACTION * 100.0,
+        total_memory
+    );
+
+    limit
 }
 
 fn runtime_env_builder(
@@ -335,8 +403,11 @@ fn runtime_env_builder(
 
     let runtime_env_builder = RuntimeEnvBuilder::new()
         .with_disk_manager_builder(DiskManagerBuilder::default())
+        .with_temp_file_path(builder.tmp_dir_path.clone().unwrap_or_else(temp_dir))
         .with_memory_pool(Arc::new(FairSpillPool::new(
-            builder.vm_memory_limit.unwrap_or(8 * 1024 * 1024 * 1024), // 8GB default
+            builder
+                .vm_memory_limit
+                .unwrap_or_else(default_vm_memory_limit),
         )))
         .with_cache_manager(CacheManagerConfig {
             table_files_statistics_cache: Some(Arc::new(BeaconFileStatisticsCache::default())),

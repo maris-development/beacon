@@ -84,14 +84,14 @@ pub struct ExternalTableRebuild {
 /// schema falls back to empty, so a table whose objects are all deleted reports
 /// an empty schema rather than failing.
 pub(crate) async fn build_listing_table(
-    state: &SessionState,
+    session: &dyn Session,
     spec: &ExternalTableRebuild,
 ) -> datafusion::error::Result<ListingTable> {
     let resolved_schema = match &spec.provided_schema {
         Some(schema) => Arc::clone(schema),
         None => match spec
             .options
-            .infer_schema(state, &spec.listing_table_url)
+            .infer_schema(session, &spec.listing_table_url)
             .await
         {
             Ok(schema) => schema,
@@ -107,7 +107,12 @@ pub(crate) async fn build_listing_table(
         .with_schema(resolved_schema);
 
     let table = ListingTable::try_new(config)?
-        .with_cache(state.runtime_env().cache_manager.get_file_statistic_cache())
+        .with_cache(
+            session
+                .runtime_env()
+                .cache_manager
+                .get_file_statistic_cache(),
+        )
         .with_definition(spec.definition_sql.clone())
         .with_constraints(spec.constraints.clone())
         .with_column_defaults(spec.column_defaults.clone());
@@ -195,19 +200,15 @@ fn path_under_prefix(prefix: &ObjectPath, event: &ObjectPath) -> bool {
 async fn rebuild_into(
     inner: &Arc<RwLock<Arc<ListingTable>>>,
     rebuild: &ExternalTableRebuild,
-    ctx: &Weak<SessionContext>,
+    session: Arc<dyn Session>,
 ) -> anyhow::Result<()> {
-    let Some(context) = ctx.upgrade() else {
-        return Ok(());
-    };
-    let state = context.state();
     // DataFusion caches directory listings per session (enabled by default in
     // the SessionContext). Drop them so the rebuild re-lists the current
     // objects — otherwise a refresh never observes newly added or removed files.
-    if let Some(cache) = state.runtime_env().cache_manager.get_list_files_cache() {
+    if let Some(cache) = session.runtime_env().cache_manager.get_list_files_cache() {
         cache.clear();
     }
-    let table = build_listing_table(&state, rebuild).await?;
+    let table = build_listing_table(session.as_ref(), rebuild).await?;
     *inner.write() = Arc::new(table);
     Ok(())
 }
@@ -217,7 +218,7 @@ pub struct ExternalTable {
     definition: ExternalTableDefinition,
     inner: Arc<RwLock<Arc<ListingTable>>>,
     rebuild: Arc<ExternalTableRebuild>,
-    ctx: Weak<SessionContext>,
+    session: Arc<dyn Session>,
     _listener: Option<Arc<RefreshListener>>,
 }
 
@@ -248,7 +249,7 @@ impl ExternalTable {
         let listener = events.map(|mut rx| {
             let inner = inner.clone();
             let rebuild = rebuild.clone();
-            let ctx = ctx.clone();
+            let session = session.clone();
             let table_name = definition.name.clone();
             let handle = tokio::spawn(async move {
                 loop {
@@ -256,7 +257,7 @@ impl ExternalTable {
                         Ok(event) => {
                             let path = event_path(&event);
                             if prefixes.iter().any(|prefix| path_under_prefix(prefix, path)) {
-                                if let Err(error) = rebuild_into(&inner, &rebuild, &ctx).await {
+                                if let Err(error) = rebuild_into(&inner, &rebuild, &session).await {
                                     tracing::warn!(
                                         table = %table_name,
                                         %error,
@@ -285,7 +286,7 @@ impl ExternalTable {
             definition,
             inner,
             rebuild,
-            ctx,
+            session,
             _listener: listener,
         }
     }
@@ -301,7 +302,7 @@ impl ExternalTable {
 
     /// Re-infer the schema over all current objects and swap in a fresh listing.
     pub async fn refresh(&self) -> anyhow::Result<()> {
-        rebuild_into(&self.inner, &self.rebuild, &self.ctx).await
+        rebuild_into(&self.inner, &self.rebuild, self.session.clone()).await
     }
 }
 
@@ -793,7 +794,10 @@ impl TableDefinition for ViewTableDefinition {
             LogicalPlan::Ddl(DdlStatement::CreateView(plan)) => plan.input.as_ref().clone(),
             plan => plan,
         };
-        Ok(Arc::new(ViewTable::new(input, Some(self.definition.clone()))))
+        Ok(Arc::new(ViewTable::new(
+            input,
+            Some(self.definition.clone()),
+        )))
     }
 
     fn table_name(&self) -> &str {
@@ -926,12 +930,13 @@ impl TableDefinition for MaterializedViewDefinition {
         _data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
         let session_state = context.state();
-        let file_format_factory = session_state
-            .get_file_format_factory("parquet")
-            .ok_or(config_datafusion_err!(
-                "Unable to build materialized view '{}': parquet FileFormat not found.",
-                self.name
-            ))?;
+        let file_format_factory =
+            session_state
+                .get_file_format_factory("parquet")
+                .ok_or(config_datafusion_err!(
+                    "Unable to build materialized view '{}': parquet FileFormat not found.",
+                    self.name
+                ))?;
         let file_format =
             file_format_factory.create(&session_state, &std::collections::HashMap::new())?;
 
@@ -993,7 +998,11 @@ mod self_refresh_tests {
     fn write_parquet_i64(disk_path: &std::path::Path, values: &[i64]) {
         std::fs::create_dir_all(disk_path.parent().expect("path has parent"))
             .expect("create parent dirs");
-        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Int64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(values.to_vec()))],
@@ -1055,7 +1064,13 @@ mod self_refresh_tests {
             options: HashMap::new(),
             if_not_exists: false,
         };
-        ExternalTable::new_self_refreshing(definition, initial, rebuild, Arc::downgrade(ctx), events)
+        ExternalTable::new_self_refreshing(
+            definition,
+            initial,
+            rebuild,
+            Arc::downgrade(ctx),
+            events,
+        )
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1065,7 +1080,8 @@ mod self_refresh_tests {
         let ctx = ctx_with_datasets(dir.path());
 
         let external = build_external(&ctx, None).await;
-        ctx.register_table("obs", Arc::new(external.clone())).unwrap();
+        ctx.register_table("obs", Arc::new(external.clone()))
+            .unwrap();
         assert_eq!(count_rows(&ctx).await, 1);
 
         // A new file appears; manual refresh re-lists and picks it up.

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use beacon_common::listing_url::parse_listing_table_url;
 use datafusion::arrow::datatypes::Schema;
@@ -16,7 +16,9 @@ use datafusion::{
     catalog::{Session, TableProvider, TableProviderFactory},
 };
 
-use crate::table_ext::{ExternalTable, ExternalTableDefinition, ExternalTableRebuild, build_listing_table};
+use crate::table_ext::{
+    ExternalTable, ExternalTableDefinition, ExternalTableRebuild, build_listing_table,
+};
 
 type PartitionCols = Vec<(String, DataType)>;
 
@@ -24,18 +26,12 @@ type PartitionCols = Vec<(String, DataType)>;
 #[derive(Debug)]
 pub struct ListingTableFactoryExt {
     store_url: ObjectStoreUrl,
-    /// Weak link to the owning session context so created external tables can
-    /// re-infer their schema on refresh without forming a reference cycle.
-    session_ctx: Weak<SessionContext>,
 }
 
 impl ListingTableFactoryExt {
     /// Creates a new `ListingTableFactoryExt`
-    pub fn new(store_url: ObjectStoreUrl, session_ctx: Weak<SessionContext>) -> Self {
-        Self {
-            store_url,
-            session_ctx,
-        }
+    pub fn new(store_url: ObjectStoreUrl) -> Self {
+        Self { store_url }
     }
 }
 
@@ -47,6 +43,7 @@ impl TableProviderFactory for ListingTableFactoryExt {
         cmd: &CreateExternalTable,
     ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
         let session_state = as_session_state(state)?;
+
         let file_format_factory = session_state
             .get_file_format_factory(cmd.file_type.to_lowercase().as_str())
             .ok_or(config_datafusion_err!(
@@ -123,14 +120,7 @@ impl TableProviderFactory for ListingTableFactoryExt {
 
         // Resolve the runtime's datasets store from the session config extension
         // so self-refreshing tables can subscribe to its change events.
-        let datasets_store = self
-            .session_ctx
-            .upgrade()
-            .and_then(|ctx| {
-                ctx.state()
-                    .config()
-                    .get_extension::<beacon_object_storage::DatasetsStore>()
-            });
+        let datasets_store = session_state.config().get_extension();
         let events = crate::table_ext::datasets_store_events(&self.store_url, datasets_store);
 
         let external_table = ExternalTable::new_self_refreshing(

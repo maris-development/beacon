@@ -9,7 +9,6 @@ pub mod query_result;
 pub mod runtime;
 pub mod runtime_builder;
 mod statement_plan;
-pub mod sys;
 
 // Re-export the auth types the transports (HTTP, Flight SQL) need, so they depend
 // on the auth model through beacon-core rather than directly on beacon-auth.

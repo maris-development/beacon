@@ -9,4 +9,5 @@ pub mod remote;
 pub mod secrets;
 pub mod stats_cache;
 pub mod table_ext;
+pub mod type_widening;
 pub mod unique_values;

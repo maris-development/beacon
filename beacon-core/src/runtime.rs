@@ -1,6 +1,6 @@
 //! High-level Beacon runtime shared by the API transports.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
 use arrow::{
@@ -23,7 +23,6 @@ use crate::{
     },
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
     query_result::{ArrowOutputStream, QueryOutput, QueryOutputFile, QueryResult},
-    sys::{self, SystemInfo},
 };
 
 /// Beacon's single execution layer: startup, catalog access, queries, SQL, and files.
@@ -36,13 +35,17 @@ pub struct Runtime {
     /// Documentation for the registered table-valued functions, captured at
     /// startup (DataFusion's UDTF registry is not enumerable with metadata).
     /// Authentication + authorization context (users, roles, grants). Shared, owned by the runtime.
-    pub(crate) auth: Option<Arc<beacon_auth::AuthContext>>,
+    pub(crate) auth: Arc<beacon_auth::AuthContext>,
 
-    /// Enable system info
-    pub(crate) enable_sys_info: bool,
+    /// tmp directory for storing temporary files (e.g. for query output)
+    pub(crate) tmp_dir: PathBuf,
 }
 
 impl Runtime {
+    pub fn version() -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     /// Execute a client query (JSON or SQL) and return a metrics-tracked result.
     ///
     /// The single entry point for query execution: the JSON form is compiled by
@@ -70,7 +73,7 @@ impl Runtime {
             &self.session_ctx,
             &self.auth,
             &identity,
-            self.config.auth.enforce,
+            true, //ToDo - make this configurable, adjust the implementation.
         )?;
 
         match output {
@@ -126,11 +129,7 @@ impl Runtime {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
         let (copy_plan, output_file) = output
-            .parse(
-                self.session_ctx.as_ref(),
-                &self.config.storage.tmp_dir,
-                plan,
-            )
+            .parse(self.session_ctx.as_ref(), &self.tmp_dir, plan)
             .await?;
         let output_file = QueryOutputFile::from(output_file);
 
@@ -215,10 +214,6 @@ impl Runtime {
         }
     }
 
-    pub fn system_info(&self) -> SystemInfo {
-        sys::SystemInfo::new(self.enable_sys_info)
-    }
-
     pub fn get_query_metrics(&self, query_id: uuid::Uuid) -> Option<QueryMetricsView> {
         self.query_metrics
             .lock()
@@ -246,7 +241,7 @@ impl Runtime {
             &self.session_ctx,
             &self.auth,
             &identity,
-            self.config.auth.enforce,
+            true, //ToDo - make this configurable, adjust the implementation.
         )?;
         let json = plan.display_pg_json().to_string();
         Ok(json)
@@ -275,7 +270,7 @@ impl Runtime {
             &self.session_ctx,
             &self.auth,
             &identity,
-            self.config.auth.enforce,
+            true, //ToDo - make this configurable, adjust the implementation.
         )?;
 
         // Build the physical plan and keep the `Arc` so its metrics can be read
@@ -342,482 +337,10 @@ impl Runtime {
         functions
     }
 
-    pub fn list_tables(&self) -> Vec<String> {
-        self.session_ctx
-            .catalog("beacon")
-            .and_then(|catalog| catalog.schema("public"))
-            .map(|schema| schema.table_names())
-            .unwrap_or_default()
-    }
-
-    /// Lists SQL catalogs visible to Flight SQL and other SQL-based clients.
-    pub fn list_sql_catalogs(&self) -> Vec<String> {
-        let mut catalog_names = self.session_ctx.catalog_names();
-        catalog_names.sort();
-        catalog_names.dedup();
-        catalog_names
-    }
-
-    /// Lists SQL schemas visible to Flight SQL and other SQL-based clients.
-    pub fn list_sql_schemas(&self) -> Vec<(String, String)> {
-        let mut schemas = Vec::new();
-
-        for catalog_name in self.list_sql_catalogs() {
-            let Some(catalog) = self.session_ctx.catalog(&catalog_name) else {
-                continue;
-            };
-
-            let mut schema_names = catalog.schema_names();
-            schema_names.sort();
-            schema_names.dedup();
-
-            schemas.extend(
-                schema_names
-                    .into_iter()
-                    .map(|schema_name| (catalog_name.clone(), schema_name)),
-            );
-        }
-
-        schemas.sort();
-        schemas.dedup();
-        schemas
-    }
-
-    /// Lists SQL tables visible to Flight SQL and other SQL-based clients.
-    pub fn list_sql_tables(&self) -> Vec<(String, String, String)> {
-        let mut tables = Vec::new();
-
-        for (catalog_name, schema_name) in self.list_sql_schemas() {
-            let Some(catalog) = self.session_ctx.catalog(&catalog_name) else {
-                continue;
-            };
-            let Some(schema) = catalog.schema(&schema_name) else {
-                continue;
-            };
-
-            let mut table_names = schema.table_names();
-            table_names.sort();
-            table_names.dedup();
-
-            tables.extend(
-                table_names
-                    .into_iter()
-                    .map(|table_name| (catalog_name.clone(), schema_name.clone(), table_name)),
-            );
-        }
-
-        tables.sort();
-        tables.dedup();
-        tables
-    }
-
-    pub fn default_table(&self) -> String {
-        self.config.sql.default_table.clone()
-    }
-
-    pub async fn list_table_config(&self, table_name: String) -> Option<TableConfigView> {
-        let provider = self
-            .session_ctx
-            .table_provider(table_name.as_str())
-            .await
-            .ok()?;
-        let config =
-            beacon_data_lake::definition_from_provider(&table_name, provider.as_ref()).ok()?;
-        match TableConfigView::try_from(config) {
-            Ok(config) => Some(config),
-            Err(error) => {
-                tracing::error!(?error, "failed to map table config into API contract");
-                None
-            }
-        }
-    }
-
-    /// Load a table's downstream extensions (MCP descriptor, query presets).
-    /// Returns an empty set if the table has none.
-    pub async fn get_table_extensions(
-        &self,
-        table_name: String,
-    ) -> anyhow::Result<crate::extensions::TableExtensions> {
-        crate::extensions::get_table_extensions(&self.session_ctx, &table_name).await
-    }
-
-    /// Replace a table's extensions document, validating it against the table
-    /// schema. An empty document removes the stored extensions.
-    pub async fn set_table_extensions(
-        &self,
-        table_name: String,
-        extensions: crate::extensions::TableExtensions,
-    ) -> anyhow::Result<()> {
-        crate::extensions::set_table_extensions(&self.session_ctx, &table_name, extensions).await
-    }
-
-    /// Remove all of a table's extensions.
-    pub async fn delete_table_extensions(&self, table_name: String) -> anyhow::Result<()> {
-        crate::extensions::delete_table_extensions(&self.session_ctx, &table_name).await
-    }
-
-    pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
-        self.session_ctx
-            .table(table_name)
-            .await
-            .map(|table| Arc::new(table.schema().as_arrow().to_owned()))
-            .ok()
-    }
-
-    pub async fn list_table_schema_view(&self, table_name: String) -> Option<SchemaView> {
-        self.list_table_schema(table_name)
-            .await
-            .map(|schema| SchemaView::from(schema.as_ref()))
-    }
-
-    pub async fn list_default_table_schema(&self) -> SchemaRef {
-        let table = self
-            .session_ctx
-            .table(self.config.sql.default_table.as_str())
-            .await
-            .expect("Default table not found");
-        Arc::new(table.schema().as_arrow().to_owned())
-    }
-
-    pub async fn list_default_table_schema_view(&self) -> SchemaView {
-        let schema = self.list_default_table_schema().await;
-        SchemaView::from(schema.as_ref())
-    }
-
-    pub async fn list_datasets(
-        &self,
-        pattern: Option<String>,
-        offset: Option<usize>,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<DatasetInfo>> {
-        Ok(self
-            .list_runtime_datasets(pattern, offset, limit)
-            .await?
-            .into_iter()
-            .map(DatasetInfo::from)
-            .collect())
-    }
-
-    async fn list_runtime_datasets(
-        &self,
-        pattern: Option<String>,
-        offset: Option<usize>,
-        limit: Option<usize>,
-    ) -> anyhow::Result<Vec<DatasetMetadata>> {
-        // List against the datasets store's *backing* store (disk/S3 truth) rather
-        // than the cache-backed facade. The cache is kept warm asynchronously by
-        // the filesystem watcher, which on some platforms lags or replays stale
-        // events — so a freshly uploaded or just-deleted file would otherwise be
-        // missing from / lingering in the listing until the watcher caught up.
-        Ok(beacon_data_lake::list_datasets(
-            &self.session_ctx,
-            self.datasets_store.backing_store(),
-            &self.file_formats,
-            offset,
-            limit,
-            pattern,
-        )
-        .await?)
-    }
-
-    pub async fn total_datasets(&self) -> anyhow::Result<usize> {
-        self.list_runtime_datasets(None, None, None)
-            .await
-            .map(|datasets| datasets.len())
-    }
-
-    pub async fn list_dataset_schema(&self, file: String) -> anyhow::Result<SchemaRef> {
-        Ok(
-            beacon_data_lake::list_dataset_schema(&self.session_ctx, &self.file_formats, &file)
-                .await?,
-        )
-    }
-
-    pub async fn list_dataset_schema_view(&self, file: String) -> anyhow::Result<SchemaView> {
-        let schema = self.list_dataset_schema(file).await?;
-        Ok(SchemaView::from(schema.as_ref()))
-    }
-
-    /// Define (or replace) a crawler. Mirrors `CREATE CRAWLER` but takes a
-    /// structured request; delegates to the crawler manager, which persists the
-    /// definition and (re)starts its scheduled/event triggers.
-    pub async fn create_crawler(&self, req: CreateCrawlerRequest) -> anyhow::Result<()> {
-        self.crawler_manager.create(req.into()).await
-    }
-
-    /// List all defined crawlers. Mirrors `SHOW CRAWLERS`.
-    pub fn list_crawlers(&self) -> Vec<CrawlerView> {
-        self.crawler_manager
-            .list()
-            .into_iter()
-            .map(CrawlerView::from)
-            .collect()
-    }
-
-    /// Return a single crawler definition by name, or `None` if it is not defined.
-    pub fn get_crawler(&self, name: &str) -> Option<CrawlerView> {
-        self.crawler_manager
-            .list()
-            .into_iter()
-            .find(|crawler| crawler.name == name)
-            .map(CrawlerView::from)
-    }
-
-    /// Run a crawler once on demand and return its report. Mirrors `RUN CRAWLER`.
-    pub async fn run_crawler(&self, name: &str) -> anyhow::Result<CrawlReportView> {
-        Ok(self.crawler_manager.run(name).await?.into())
-    }
-
-    /// Remove a crawler definition and stop its triggers (crawled tables are left
-    /// in place). Mirrors `DROP CRAWLER`.
-    pub async fn drop_crawler(&self, name: &str) -> anyhow::Result<()> {
-        self.crawler_manager.drop_crawler(name).await
-    }
-
-    /// Create an external table from structured fields. Assembles the equivalent
-    /// `CREATE EXTERNAL TABLE` statement and runs it through the same super-user DDL
-    /// path as SQL, so all `STORED AS` variants (listing/Delta/Remote) and catalog
-    /// persistence are reused. The statement produces an empty result stream that is
-    /// drained here to drive the registration to completion.
-    pub async fn create_external_table(
-        &self,
-        req: CreateExternalTableRequest,
-    ) -> anyhow::Result<()> {
-        let sql = build_create_external_table_sql(&req)?;
-        self.run_query(
-            crate::query::Query::sql(sql),
-            beacon_auth::AuthIdentity::system(),
-        )
-        .await?
-        .into_record_stream()?
-        .try_collect::<Vec<_>>()
-        .await?;
-        Ok(())
-    }
-
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
         let mut parser = BeaconParser::new(sql)?;
         parser.parse_statement().map_err(Into::into)
     }
-
-    /// The set of filename extensions an uploaded dataset may carry, derived from
-    /// the formats this runtime can actually read. Keeping the allowlist in sync
-    /// with the registry means an upload only succeeds if it could be queried.
-    pub fn dataset_upload_extensions(&self) -> Vec<String> {
-        let mut exts: Vec<String> = self
-            .file_formats
-            .iter()
-            .flat_map(|f| f.file_extensions())
-            .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
-            .filter(|e| !e.is_empty())
-            .collect();
-        exts.sort();
-        exts.dedup();
-        exts
-    }
-
-    /// Stream an uploaded file into the datasets store. The path is validated
-    /// (anti-traversal, internal-prefix guard) and its extension checked against
-    /// [`Self::dataset_upload_extensions`] before any bytes are written. The size
-    /// cap comes from `BEACON_MAX_UPLOAD_BYTES`.
-    pub async fn upload_dataset<S>(
-        &self,
-        raw_path: &str,
-        overwrite: bool,
-        body: S,
-    ) -> Result<crate::dataset_files::UploadResult, crate::dataset_files::FileError>
-    where
-        S: futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
-    {
-        let path = crate::dataset_files::validate_dataset_path(raw_path)?;
-        crate::dataset_files::validate_extension(&path, &self.dataset_upload_extensions())?;
-        let max_bytes = self.config.storage.max_upload_bytes;
-        crate::dataset_files::upload_dataset(
-            &self.datasets_store,
-            &path,
-            overwrite,
-            max_bytes,
-            body,
-        )
-        .await
-    }
-
-    /// Begin a chunked (resumable) upload for a large file. Validates the path and
-    /// extension and the overwrite policy, opens a multipart upload, and returns
-    /// the new session id plus the part size clients should slice the file into.
-    pub async fn initiate_dataset_upload(
-        &self,
-        raw_path: &str,
-        overwrite: bool,
-    ) -> Result<(uuid::Uuid, usize), crate::dataset_files::FileError> {
-        let path = crate::dataset_files::validate_dataset_path(raw_path)?;
-        crate::dataset_files::validate_extension(&path, &self.dataset_upload_extensions())?;
-
-        if !overwrite {
-            use object_store::ObjectStoreExt;
-            match self.datasets_store.head(&path).await {
-                Ok(_) => {
-                    return Err(crate::dataset_files::FileError::AlreadyExists(
-                        path.to_string(),
-                    ))
-                }
-                Err(object_store::Error::NotFound { .. }) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        let max_bytes = self.config.storage.max_upload_bytes;
-        let id = self
-            .upload_manager
-            .initiate(&self.datasets_store, path, max_bytes)
-            .await?;
-        Ok((id, self.upload_manager.part_size()))
-    }
-
-    /// Submit one part of a chunked upload (1-based `part_number`, in order).
-    pub async fn upload_dataset_part(
-        &self,
-        upload_id: uuid::Uuid,
-        part_number: u32,
-        data: bytes::Bytes,
-    ) -> Result<(), crate::dataset_files::FileError> {
-        self.upload_manager
-            .put_part(upload_id, part_number, data)
-            .await
-    }
-
-    /// Finalize a chunked upload, returning the resulting object's key and size.
-    pub async fn complete_dataset_upload(
-        &self,
-        upload_id: uuid::Uuid,
-    ) -> Result<crate::dataset_files::UploadResult, crate::dataset_files::FileError> {
-        self.upload_manager.complete(upload_id).await
-    }
-
-    /// Abort and discard an in-progress chunked upload.
-    pub async fn abort_dataset_upload(
-        &self,
-        upload_id: uuid::Uuid,
-    ) -> Result<(), crate::dataset_files::FileError> {
-        self.upload_manager.abort(upload_id).await
-    }
-
-    /// Open a streaming read of a dataset file for download. The path is validated
-    /// before the store is touched.
-    pub async fn download_dataset(
-        &self,
-        raw_path: &str,
-    ) -> Result<object_store::GetResult, crate::dataset_files::FileError> {
-        let path = crate::dataset_files::validate_dataset_path(raw_path)?;
-        crate::dataset_files::download_dataset(&self.datasets_store, &path).await
-    }
-
-    /// Delete a dataset file. The path is validated, then a best-effort dependency
-    /// check refuses the delete (with [`crate::dataset_files::FileError::InUse`]) if
-    /// any registered table references the file, so a query is not silently broken.
-    pub async fn delete_dataset(
-        &self,
-        raw_path: &str,
-    ) -> Result<(), crate::dataset_files::FileError> {
-        let path = crate::dataset_files::validate_dataset_path(raw_path)?;
-
-        let dependents = self.dataset_dependents(path.as_ref()).await;
-        if !dependents.is_empty() {
-            return Err(crate::dataset_files::FileError::InUse {
-                path: path.to_string(),
-                dependents,
-            });
-        }
-
-        crate::dataset_files::delete_dataset(&self.datasets_store, &path).await
-    }
-
-    /// Best-effort discovery of registered tables that reference a dataset path.
-    ///
-    /// Each table's flattened config is serialized and scanned for the path
-    /// substring (the same shape exposed by the admin table-config endpoint). This
-    /// catches external tables pointed directly at a file or its parent directory;
-    /// it is intentionally conservative — a hit blocks the delete so the caller can
-    /// drop the table first.
-    async fn dataset_dependents(&self, path: &str) -> Vec<String> {
-        let mut dependents = Vec::new();
-        for table in self.list_tables() {
-            if let Some(view) = self.list_table_config(table.clone()).await {
-                if let Ok(json) = serde_json::to_string(&view.config) {
-                    if json.contains(path) {
-                        dependents.push(table);
-                    }
-                }
-            }
-        }
-        dependents
-    }
-}
-
-/// Assemble an injection-safe `CREATE EXTERNAL TABLE` statement from a structured
-/// request. Identifiers (table name, `STORED AS` type, partition columns) are
-/// validated as bare words; `LOCATION` and `OPTIONS` values are emitted as escaped
-/// string literals. Options are rendered in sorted key order so the output is stable.
-fn build_create_external_table_sql(req: &CreateExternalTableRequest) -> anyhow::Result<String> {
-    ensure_bare_ident("table name", &req.name)?;
-    ensure_bare_ident("file_type", &req.file_type)?;
-    for col in &req.partition_cols {
-        ensure_bare_ident("partition column", col)?;
-    }
-
-    let mut sql = String::from("CREATE EXTERNAL TABLE ");
-    if req.if_not_exists {
-        sql.push_str("IF NOT EXISTS ");
-    }
-    sql.push_str(&req.name);
-    sql.push_str(" STORED AS ");
-    sql.push_str(&req.file_type);
-    sql.push_str(" LOCATION ");
-    sql.push_str(&sql_string_literal(&req.location));
-
-    if !req.partition_cols.is_empty() {
-        sql.push_str(" PARTITIONED BY (");
-        sql.push_str(&req.partition_cols.join(", "));
-        sql.push(')');
-    }
-
-    if !req.options.is_empty() {
-        let mut opts: Vec<(&String, &String)> = req.options.iter().collect();
-        opts.sort_by(|a, b| a.0.cmp(b.0));
-        let rendered = opts
-            .iter()
-            .map(|(key, value)| {
-                format!("{} {}", sql_string_literal(key), sql_string_literal(value))
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        sql.push_str(" OPTIONS (");
-        sql.push_str(&rendered);
-        sql.push(')');
-    }
-
-    Ok(sql)
-}
-
-/// Validate that `value` is a safe bare SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`),
-/// so it can be interpolated into generated DDL without quoting or injection risk.
-fn ensure_bare_ident(kind: &str, value: &str) -> anyhow::Result<()> {
-    let mut chars = value.chars();
-    let valid = match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {
-            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        }
-        _ => false,
-    };
-    if !valid {
-        anyhow::bail!("invalid {kind} '{value}': must match [A-Za-z_][A-Za-z0-9_]*");
-    }
-    Ok(())
-}
-
-/// Render a SQL single-quoted string literal, escaping embedded quotes by doubling.
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// A unique temp path for a test's `beacon.db`. Each call returns a fresh
