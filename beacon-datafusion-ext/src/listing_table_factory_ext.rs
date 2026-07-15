@@ -127,7 +127,7 @@ impl TableProviderFactory for ListingTableFactoryExt {
             definition,
             table,
             rebuild,
-            self.session_ctx.clone(),
+            Arc::new(session_state.clone()),
             events,
         );
 

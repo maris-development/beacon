@@ -213,13 +213,23 @@ async fn rebuild_into(
     Ok(())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ExternalTable {
     definition: ExternalTableDefinition,
     inner: Arc<RwLock<Arc<ListingTable>>>,
     rebuild: Arc<ExternalTableRebuild>,
     session: Arc<dyn Session>,
     _listener: Option<Arc<RefreshListener>>,
+}
+
+impl Debug for ExternalTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalTable")
+            .field("definition", &self.definition)
+            .field("inner", &self.inner)
+            .field("rebuild", &self.rebuild)
+            .finish()
+    }
 }
 
 impl ExternalTable {
@@ -247,9 +257,10 @@ impl ExternalTable {
         let rebuild = Arc::new(rebuild);
         let session = Arc::clone(&session);
 
-        let listener = events.map(move |mut rx| {
+        let listener = events.map(|mut rx| {
             let inner = inner.clone();
             let rebuild = rebuild.clone();
+            let session = Arc::clone(&session);
             let table_name = definition.name.clone();
             let handle = tokio::spawn(async move {
                 loop {
@@ -622,7 +633,7 @@ impl TableDefinition for ExternalTableDefinition {
             self.clone(),
             initial,
             rebuild,
-            Arc::downgrade(&context),
+            Arc::new(session_state),
             events,
         )))
     }
@@ -1064,13 +1075,7 @@ mod self_refresh_tests {
             options: HashMap::new(),
             if_not_exists: false,
         };
-        ExternalTable::new_self_refreshing(
-            definition,
-            initial,
-            rebuild,
-            Arc::downgrade(ctx),
-            events,
-        )
+        ExternalTable::new_self_refreshing(definition, initial, rebuild, Arc::new(state), events)
     }
 
     #[tokio::test(flavor = "multi_thread")]

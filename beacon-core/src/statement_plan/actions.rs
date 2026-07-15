@@ -10,7 +10,7 @@ use std::sync::Arc;
 use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
 use beacon_datafusion_ext::{
     listing_table_factory_ext::ListingTableFactoryExt,
-    remote::{RemoteTableDefinition, unresolved_schema},
+    remote::{unresolved_schema, RemoteTableDefinition},
     table_ext::{MaterializedView, TableDefinition},
 };
 use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
@@ -98,9 +98,11 @@ pub(crate) async fn create_external_table(
         return create_sql_db_table(session, cmd, engine).await;
     }
 
-    let factory =
-        ListingTableFactoryExt::new(DATASETS_OBJECT_STORE_URL.clone(), Arc::downgrade(session));
     let state = session.state();
+    let factory = state
+        .config()
+        .get_extension::<ListingTableFactoryExt>()
+        .ok_or_else(|| anyhow::anyhow!("Listing-table factory is not registered on the session"))?;
     let created = factory.create(&state, cmd).await?;
     session.register_table(cmd.name.clone(), created)?;
     Ok(())
@@ -170,8 +172,14 @@ fn parse_remote_location(
         )
     })?;
 
-    anyhow::ensure!(!authority.is_empty(), "remote table LOCATION missing host:port");
-    anyhow::ensure!(!table.is_empty(), "remote table LOCATION missing table name");
+    anyhow::ensure!(
+        !authority.is_empty(),
+        "remote table LOCATION missing host:port"
+    );
+    anyhow::ensure!(
+        !table.is_empty(),
+        "remote table LOCATION missing table name"
+    );
 
     let tls = tls_option
         .map(|v| v.eq_ignore_ascii_case("true"))
@@ -461,11 +469,15 @@ pub(crate) async fn alter_table(
                     });
                 }
                 other => {
-                    return Err(anyhow::anyhow!("Unsupported ALTER COLUMN operation: {other}"));
+                    return Err(anyhow::anyhow!(
+                        "Unsupported ALTER COLUMN operation: {other}"
+                    ));
                 }
             },
             other => {
-                return Err(anyhow::anyhow!("Unsupported ALTER TABLE operation: {other}"));
+                return Err(anyhow::anyhow!(
+                    "Unsupported ALTER TABLE operation: {other}"
+                ));
             }
         }
     }

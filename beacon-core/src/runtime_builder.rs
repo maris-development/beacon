@@ -178,18 +178,10 @@ impl RuntimeBuilder {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
 
-        let listing_table_factory = Arc::new(ListingTableFactoryExt::new(
-            self.default_store_url
-                .clone()
-                .unwrap_or(ObjectStoreUrl::local_filesystem()),
-            Arc::downgrade(&session_ctx),
-        ));
-
         let auth_context = Arc::new(init_auth_context(&self).await?);
 
         Ok(Runtime {
             session_ctx,
-            listing_table_factory,
             table_function_docs: vec![],
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
             crawler_manager: None,
@@ -330,7 +322,12 @@ fn build_session_config(
                 .clone()
                 .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening)),
         )))
-        .with_extension(Arc::new(ListingTableFactoryExt));
+        .with_extension(Arc::new(ListingTableFactoryExt::new(
+            builder
+                .default_store_url
+                .clone()
+                .unwrap_or(ObjectStoreUrl::local_filesystem()),
+        )));
 
     config.options_mut().sql_parser.enable_ident_normalization = false;
     config
