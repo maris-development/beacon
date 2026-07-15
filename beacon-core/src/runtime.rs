@@ -7,21 +7,12 @@ use arrow::{
     array::AsArray,
     datatypes::{SchemaRef, UInt64Type},
 };
-use beacon_data_lake::{PersistentSchemaProvider, DATASETS_OBJECT_STORE_URL, DB_OBJECT_STORE_URL};
 use beacon_datafusion_ext::{
     format_ext::{DatasetMetadata, FileFormatFactoryExt},
     listing_table_factory_ext::ListingTableFactoryExt,
-    stats_cache::beacon_file_statistics_cache,
 };
 use beacon_functions::function_doc::FunctionDoc;
-use datafusion::{
-    catalog::TableFunctionImpl,
-    execution::{
-        disk_manager::DiskManagerBuilder, memory_pool::FairSpillPool,
-        runtime_env::RuntimeEnvBuilder, SessionStateBuilder,
-    },
-    prelude::{SessionConfig, SessionContext},
-};
+use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
 use parking_lot::Mutex;
 
@@ -35,11 +26,6 @@ use crate::{
     sys::{self, SystemInfo},
 };
 
-pub struct RuntimeConfig {
-    pub db_path: Option<std::path::PathBuf>,
-    pub default_store_url: Option<datafusion::execution::object_store::ObjectStoreUrl>,
-}
-
 /// Beacon's single execution layer: startup, catalog access, queries, SQL, and files.
 pub struct Runtime {
     pub(crate) session_ctx: Arc<SessionContext>,
@@ -51,21 +37,9 @@ pub struct Runtime {
     /// startup (DataFusion's UDTF registry is not enumerable with metadata).
     /// Authentication + authorization context (users, roles, grants). Shared, owned by the runtime.
     pub(crate) auth: Option<Arc<beacon_auth::AuthContext>>,
-}
 
-/// A unique temp path for a test's `beacon.db`. Each call returns a fresh
-/// path (process id + an atomic counter), so parallel tests never share the
-/// exclusively-locked tables store. A test that deliberately restarts a runtime
-/// should capture one path and reuse it across both boots.
-#[cfg(any(test, feature = "test-util"))]
-pub fn test_db_path() -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!(
-        "beacon-test-db-{}-{}.db",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ))
+    /// Enable system info
+    pub(crate) enable_sys_info: bool,
 }
 
 impl Runtime {
@@ -242,7 +216,7 @@ impl Runtime {
     }
 
     pub fn system_info(&self) -> SystemInfo {
-        sys::SystemInfo::new(self.config.runtime.enable_sys_info)
+        sys::SystemInfo::new(self.enable_sys_info)
     }
 
     pub fn get_query_metrics(&self, query_id: uuid::Uuid) -> Option<QueryMetricsView> {
@@ -844,6 +818,21 @@ fn ensure_bare_ident(kind: &str, value: &str) -> anyhow::Result<()> {
 /// Render a SQL single-quoted string literal, escaping embedded quotes by doubling.
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+/// A unique temp path for a test's `beacon.db`. Each call returns a fresh
+/// path (process id + an atomic counter), so parallel tests never share the
+/// exclusively-locked tables store. A test that deliberately restarts a runtime
+/// should capture one path and reuse it across both boots.
+#[cfg(any(test, feature = "test-util"))]
+pub fn test_db_path() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "beacon-test-db-{}-{}.db",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 #[cfg(test)]
