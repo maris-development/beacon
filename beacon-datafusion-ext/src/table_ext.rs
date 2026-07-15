@@ -234,7 +234,7 @@ impl ExternalTable {
         definition: ExternalTableDefinition,
         initial: ListingTable,
         rebuild: ExternalTableRebuild,
-        ctx: Weak<SessionContext>,
+        session: Arc<dyn Session>,
         events: Option<Receiver<ObjectEvent>>,
     ) -> Self {
         let prefixes: Vec<ObjectPath> = initial
@@ -245,11 +245,11 @@ impl ExternalTable {
 
         let inner = Arc::new(RwLock::new(Arc::new(initial)));
         let rebuild = Arc::new(rebuild);
+        let session = Arc::clone(&session);
 
-        let listener = events.map(|mut rx| {
+        let listener = events.map(move |mut rx| {
             let inner = inner.clone();
             let rebuild = rebuild.clone();
-            let session = session.clone();
             let table_name = definition.name.clone();
             let handle = tokio::spawn(async move {
                 loop {
@@ -257,7 +257,7 @@ impl ExternalTable {
                         Ok(event) => {
                             let path = event_path(&event);
                             if prefixes.iter().any(|prefix| path_under_prefix(prefix, path)) {
-                                if let Err(error) = rebuild_into(&inner, &rebuild, &session).await {
+                                if let Err(error) = rebuild_into(&inner, &rebuild, session.clone()).await {
                                     tracing::warn!(
                                         table = %table_name,
                                         %error,
