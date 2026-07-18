@@ -3,8 +3,8 @@
 //! A Delta table is a directory with a `_delta_log` transaction log plus Parquet
 //! data files — not a file glob — so it cannot use Beacon's listing-table
 //! machinery. Instead this crate builds a Delta `TableProvider` via the
-//! `deltalake` (delta-rs) crate, reusing Beacon's [`DatasetsStore`] as the
-//! object-store backend so local-FS and S3 both work transparently.
+//! `deltalake` (delta-rs) crate, resolving Beacon's datasets store from the
+//! session's object-store registry so local-FS and S3 both work transparently.
 //!
 //! Two surfaces are exposed:
 //! - [`ReadDeltaFunc`], the `read_delta(...)` table function for ad-hoc queries.
@@ -13,8 +13,6 @@
 //!
 //! The provider returned by [`open_delta_provider`] supports reads, time travel,
 //! and `INSERT INTO` (append/overwrite) natively.
-//!
-//! [`DatasetsStore`]: beacon_object_storage::DatasetsStore
 
 pub mod definition;
 pub mod provider;

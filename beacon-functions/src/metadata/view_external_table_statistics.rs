@@ -31,7 +31,7 @@ use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
     common::{plan_datafusion_err, plan_err},
     datasource::MemTable,
-    execution::cache::CacheAccessor,
+    execution::{cache::CacheAccessor, object_store::ObjectStoreUrl},
     logical_expr::{Signature, Volatility},
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
@@ -64,6 +64,9 @@ pub struct ViewExternalTableStatisticsFunc {
     cache: Arc<BeaconFileStatisticsCache>,
     runtime_handle: Handle,
     session_ctx: Weak<SessionContext>,
+    /// URL the datasets store is registered under, resolved from the session's
+    /// object-store registry at call time.
+    datasets_url: ObjectStoreUrl,
 }
 
 impl ViewExternalTableStatisticsFunc {
@@ -71,11 +74,13 @@ impl ViewExternalTableStatisticsFunc {
         session_ctx: Weak<SessionContext>,
         cache: Arc<BeaconFileStatisticsCache>,
         runtime_handle: Handle,
+        datasets_url: ObjectStoreUrl,
     ) -> Self {
         Self {
             cache,
             runtime_handle,
             session_ctx,
+            datasets_url,
         }
     }
 }
@@ -131,6 +136,7 @@ impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             plan_datafusion_err!("session context has been dropped")
         })?;
+        let datasets_url = self.datasets_url.clone();
 
         let (schema, files) = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
@@ -151,10 +157,10 @@ impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
                 let schema = listing_table.schema();
                 let store = session_ctx
                     .state()
-                    .config()
-                    .get_extension::<beacon_object_storage::DatasetsStore>()
-                    .ok_or_else(|| {
-                        plan_datafusion_err!("datasets object store missing from session config")
+                    .runtime_env()
+                    .object_store(datasets_url)
+                    .map_err(|e| {
+                        plan_datafusion_err!("failed to resolve datasets object store: {e}")
                     })?;
 
                 // List every file that belongs to this listing table.

@@ -11,3 +11,10 @@ pub mod stats_cache;
 pub mod table_ext;
 pub mod type_widening;
 pub mod unique_values;
+
+// The listing-URL parser (resolve a path/glob under a datasets object store into a
+// `ListingTableUrl`) lives in `beacon-common`; re-exported here so beacon-core and
+// other consumers reach it through this crate rather than depending on
+// `beacon-common` directly. Distinct from `listing_url_resolver::parse_listing_table_url`,
+// which additionally registers a scheme-carrying store on demand.
+pub use beacon_common::listing_url::parse_listing_table_url;

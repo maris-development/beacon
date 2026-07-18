@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use arrow::array::{ArrayRef, BooleanArray, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
-use beacon_data_lake::crawler::{CrawlerDefinition, CrawlerManager, TableNaming};
+use crate::crawler::{CrawlerDefinition, CrawlerManager, TableNaming};
 use datafusion::prelude::SessionContext;
 
 use super::logical::show_crawlers_arrow_schema;

@@ -8,14 +8,13 @@
 //! and partition pruning.  Arrays for which a range cannot be determined
 //! (multi-dimensional, String, Binary) get [`ColumnStatistics::new_unknown`].
 
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use beacon_nd_array::{
     arrow::compute::value_range,
     dataset::{ragged::RaggedArray, AnyDataset, Dataset, RaggedDataset},
     NdArrayD,
 };
-use beacon_object_storage::DatasetsStore;
 use datafusion::{
     common::{stats::Precision, ColumnStatistics, Statistics},
     scalar::ScalarValue,
@@ -28,11 +27,11 @@ use crate::reader::open_dataset;
 /// Open the NetCDF file at `object` and return DataFusion [`Statistics`] for
 /// the columns in `table_schema`.
 pub async fn generate_statistics(
-    store: Arc<DatasetsStore>,
+    datasets_root: PathBuf,
     object: &object_store::ObjectMeta,
     table_schema: &arrow::datatypes::Schema,
 ) -> anyhow::Result<Statistics> {
-    let netcdf_path = store.translate_netcdf_url_path(&object.location)?;
+    let netcdf_path = beacon_object_storage::local_object_path(&datasets_root, &object.location)?;
     let dataset = open_dataset(netcdf_path).await?;
 
     match dataset {

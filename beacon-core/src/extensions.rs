@@ -19,7 +19,8 @@ use anyhow::Context;
 use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use beacon_data_lake::{SchemaPersistenceService, DB_OBJECT_STORE_URL};
+use crate::settings::ObjectStoreUrls;
+use crate::schema_persistence::SchemaPersistenceService;
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -352,7 +353,8 @@ async fn table_schema(ctx: &Arc<SessionContext>, name: &str) -> anyhow::Result<S
 }
 
 fn persistence(ctx: &Arc<SessionContext>) -> SchemaPersistenceService {
-    SchemaPersistenceService::new(ctx.clone(), DB_OBJECT_STORE_URL.clone())
+    let tables_url = ObjectStoreUrls::from_session(ctx).tables().clone();
+    SchemaPersistenceService::new(ctx.clone(), tables_url)
 }
 
 /// Load a table's extensions, returning an empty set if none are stored.

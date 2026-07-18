@@ -134,9 +134,9 @@ impl AuthContext {
 
     /// Enumerate all stored local users with their assigned roles. Returns empty when the
     /// authentication provider has no manageable user directory (e.g. an OIDC-only deployment).
-    pub fn list_users(&self) -> anyhow::Result<Vec<UserRecord>> {
+    pub async fn list_users(&self) -> anyhow::Result<Vec<UserRecord>> {
         match self.auth_provider.user_directory() {
-            Some(dir) => dir.list_users(),
+            Some(dir) => dir.list_users().await,
             None => Ok(Vec::new()),
         }
     }
@@ -148,6 +148,19 @@ impl AuthContext {
 
     pub fn role_provider(&self) -> &RoleProvider {
         &self.role_provider
+    }
+
+    /// Rebuilds the in-memory working copies (roles and users) from durable storage.
+    ///
+    /// Called once at startup, after the backing session and its tables exist — the role/user
+    /// stores are attached unhydrated at construction because the session they read through does
+    /// not exist yet (see `runtime_builder`). A no-op for providers without a persistent backend.
+    pub async fn hydrate(&self) -> anyhow::Result<()> {
+        self.role_provider.hydrate().await?;
+        if let Some(directory) = self.auth_provider.user_directory() {
+            directory.hydrate().await?;
+        }
+        Ok(())
     }
 
     pub fn auth_provider(&self) -> &Arc<dyn AuthProvider> {
@@ -198,26 +211,31 @@ impl AuthContext {
     // Roles are strictly read-only: only `SELECT` may be granted or denied. Write/management access
     // is reserved to the configured super-user and is never expressible as a role grant.
 
-    pub fn create_role(&self, name: &str) -> anyhow::Result<()> {
-        self.role_provider.create_role(name)
+    pub async fn create_role(&self, name: &str) -> anyhow::Result<()> {
+        self.role_provider.create_role(name).await
     }
 
-    pub fn drop_role(&self, name: &str) -> anyhow::Result<()> {
-        self.role_provider.drop_role(name)
+    pub async fn drop_role(&self, name: &str) -> anyhow::Result<()> {
+        self.role_provider.drop_role(name).await
     }
 
-    pub fn grant(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
+    pub async fn grant(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
         Self::ensure_read_only(&rule)?;
-        self.role_provider.grant(role, rule)
+        self.role_provider.grant(role, rule).await
     }
 
-    pub fn deny(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
+    pub async fn deny(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
         Self::ensure_read_only(&rule)?;
-        self.role_provider.deny(role, rule)
+        self.role_provider.deny(role, rule).await
     }
 
-    pub fn revoke(&self, role: &str, rule: &PrivilegeRule, is_deny: bool) -> anyhow::Result<()> {
-        self.role_provider.revoke(role, rule, is_deny)
+    pub async fn revoke(
+        &self,
+        role: &str,
+        rule: &PrivilegeRule,
+        is_deny: bool,
+    ) -> anyhow::Result<()> {
+        self.role_provider.revoke(role, rule, is_deny).await
     }
 
     /// Rejects any non-`SELECT` privilege: roles can only grant read access.
@@ -241,19 +259,19 @@ impl AuthContext {
     }
 
     /// Whether a user exists in the active provider's directory (false if it has none).
-    pub fn user_exists(&self, username: &str) -> bool {
-        self.auth_provider
-            .user_directory()
-            .map(|dir| dir.user_exists(username))
-            .unwrap_or(false)
+    pub async fn user_exists(&self, username: &str) -> bool {
+        match self.auth_provider.user_directory() {
+            Some(dir) => dir.user_exists(username).await,
+            None => false,
+        }
     }
 
-    pub fn create_user(&self, username: &str, password: &str) -> anyhow::Result<()> {
+    pub async fn create_user(&self, username: &str, password: &str) -> anyhow::Result<()> {
         self.ensure_not_super_user_name(username)?;
-        self.user_directory()?.create_user(username, password)
+        self.user_directory()?.create_user(username, password).await
     }
 
-    pub fn drop_user(&self, username: &str) -> anyhow::Result<()> {
+    pub async fn drop_user(&self, username: &str) -> anyhow::Result<()> {
         self.ensure_not_super_user_name(username)?;
         // The anonymous user is Beacon-managed: while anonymous access is enabled it
         // must always exist, so it can't be deleted (disable it with
@@ -264,7 +282,7 @@ impl AuthContext {
                  is enabled (set BEACON_AUTH_ANONYMOUS_ENABLED=false to disable it)"
             );
         }
-        self.user_directory()?.drop_user(username)
+        self.user_directory()?.drop_user(username).await
     }
 
     /// Rejects operations on the reserved super-user username: the super-user is config-defined and
@@ -279,15 +297,15 @@ impl AuthContext {
         Ok(())
     }
 
-    pub fn grant_role_to_user(&self, username: &str, role: &str) -> anyhow::Result<()> {
+    pub async fn grant_role_to_user(&self, username: &str, role: &str) -> anyhow::Result<()> {
         if !self.role_provider.role_exists(role) {
             anyhow::bail!("role '{role}' does not exist");
         }
-        self.user_directory()?.grant_role(username, role)
+        self.user_directory()?.grant_role(username, role).await
     }
 
-    pub fn revoke_role_from_user(&self, username: &str, role: &str) -> anyhow::Result<()> {
-        self.user_directory()?.revoke_role(username, role)
+    pub async fn revoke_role_from_user(&self, username: &str, role: &str) -> anyhow::Result<()> {
+        self.user_directory()?.revoke_role(username, role).await
     }
 }
 
@@ -308,33 +326,35 @@ mod tests {
         ctx
     }
 
-    #[test]
-    fn anonymous_user_cannot_be_dropped_while_enabled() {
+    #[tokio::test]
+    async fn anonymous_user_cannot_be_dropped_while_enabled() {
         let mut ctx = admin_context();
-        ctx.create_user("anonymous", "").unwrap();
-        ctx.create_user("alice", "pw").unwrap();
+        ctx.create_user("anonymous", "").await.unwrap();
+        ctx.create_user("alice", "pw").await.unwrap();
         ctx.set_anonymous_user("anonymous");
 
         // The anonymous user is protected; a regular user is not.
-        assert!(ctx.drop_user("anonymous").is_err());
-        assert!(ctx.user_exists("anonymous"));
-        ctx.drop_user("alice").unwrap();
-        assert!(!ctx.user_exists("alice"));
+        assert!(ctx.drop_user("anonymous").await.is_err());
+        assert!(ctx.user_exists("anonymous").await);
+        ctx.drop_user("alice").await.unwrap();
+        assert!(!ctx.user_exists("alice").await);
 
         // With anonymous access disabled, the user is droppable again.
         let mut ctx = admin_context();
-        ctx.create_user("anonymous", "").unwrap();
-        ctx.drop_user("anonymous").unwrap();
-        assert!(!ctx.user_exists("anonymous"));
+        ctx.create_user("anonymous", "").await.unwrap();
+        ctx.drop_user("anonymous").await.unwrap();
+        assert!(!ctx.user_exists("anonymous").await);
     }
 
     #[tokio::test]
     async fn end_to_end_user_role_flow() {
         let ctx = admin_context();
-        ctx.create_role("reader").unwrap();
-        ctx.create_user("alice", "secret").unwrap();
-        ctx.grant_role_to_user("alice", "reader").unwrap();
-        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None)).unwrap();
+        ctx.create_role("reader").await.unwrap();
+        ctx.create_user("alice", "secret").await.unwrap();
+        ctx.grant_role_to_user("alice", "reader").await.unwrap();
+        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .await
+            .unwrap();
         ctx.deny(
             "reader",
             PrivilegeRule::new(
@@ -342,6 +362,7 @@ mod tests {
                 Some(PrivilegeTarget::Path("example/*".to_string())),
             ),
         )
+        .await
         .unwrap();
 
         let identity = ctx.authenticate(&Credential::basic("alice", "secret")).await.unwrap();
@@ -378,10 +399,12 @@ mod tests {
     async fn created_users_and_roles_are_never_super_user() {
         let ctx = context_with_super_user();
         // A normal user with a normal role is never a super-user, whatever roles they hold.
-        ctx.create_role("reader").unwrap();
-        ctx.create_user("alice", "pw").unwrap();
-        ctx.grant_role_to_user("alice", "reader").unwrap();
-        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None)).unwrap();
+        ctx.create_role("reader").await.unwrap();
+        ctx.create_user("alice", "pw").await.unwrap();
+        ctx.grant_role_to_user("alice", "reader").await.unwrap();
+        ctx.grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .await
+            .unwrap();
 
         let identity = ctx.authenticate(&Credential::basic("alice", "pw")).await.unwrap();
         assert!(!identity.is_super_user);
@@ -396,14 +419,14 @@ mod tests {
             Privilege::All,
         ] {
             assert!(
-                ctx.grant("reader", PrivilegeRule::new(privilege, None)).is_err(),
+                ctx.grant("reader", PrivilegeRule::new(privilege, None)).await.is_err(),
                 "granting {privilege} to a role must be rejected"
             );
         }
 
         // The super-user username is reserved: it cannot be created or dropped as a stored user.
-        assert!(ctx.create_user("root", "pw").is_err());
-        assert!(ctx.drop_user("root").is_err());
+        assert!(ctx.create_user("root", "pw").await.is_err());
+        assert!(ctx.drop_user("root").await.is_err());
     }
 
     #[tokio::test]
@@ -414,19 +437,19 @@ mod tests {
         assert!(ctx.authenticate(&Credential::bearer("root")).await.is_err());
     }
 
-    #[test]
-    fn grant_role_to_user_requires_existing_role() {
+    #[tokio::test]
+    async fn grant_role_to_user_requires_existing_role() {
         let ctx = admin_context();
-        ctx.create_user("alice", "secret").unwrap();
-        assert!(ctx.grant_role_to_user("alice", "ghost").is_err());
+        ctx.create_user("alice", "secret").await.unwrap();
+        assert!(ctx.grant_role_to_user("alice", "ghost").await.is_err());
     }
 
     #[tokio::test]
     async fn anonymous_user_resolves_to_its_roles() {
         let mut ctx = admin_context();
-        ctx.create_role("public").unwrap();
-        ctx.create_user(ANONYMOUS_USERNAME, "").unwrap();
-        ctx.grant_role_to_user(ANONYMOUS_USERNAME, "public").unwrap();
+        ctx.create_role("public").await.unwrap();
+        ctx.create_user(ANONYMOUS_USERNAME, "").await.unwrap();
+        ctx.grant_role_to_user(ANONYMOUS_USERNAME, "public").await.unwrap();
         ctx.set_anonymous_user(ANONYMOUS_USERNAME);
 
         assert!(ctx.anonymous_enabled());
@@ -447,7 +470,7 @@ mod tests {
     async fn super_user_is_not_stored_so_cannot_be_changed_via_sql() {
         // The super-user is not a stored user — `user_exists` is false even though it authenticates.
         let ctx = context_with_super_user();
-        assert!(!ctx.user_exists("root"));
+        assert!(!ctx.user_exists("root").await);
         assert!(ctx.authenticate(&Credential::basic("root", "secret")).await.unwrap().is_super_user);
     }
 }

@@ -17,7 +17,6 @@ mod oidc;
 mod password;
 mod provider;
 mod role;
-mod sqlite;
 
 pub use basic::{BasicAuthProvider, InMemoryUserStore};
 pub use composite::CompositeAuthProvider;
@@ -25,8 +24,8 @@ pub use context::{AuthContext, AuthIdentity, ANONYMOUS_USERNAME};
 pub use credential::Credential;
 pub use oidc::{OidcAuthProvider, OidcConfig};
 pub use password::{hash_password, verify_password};
-pub use provider::{AuthProvider, Authenticated, UserDirectory, UserRecord};
+pub use provider::{AuthProvider, Authenticated, StoredUser, UserDirectory, UserRecord};
 pub use role::{
-    ConcreteTarget, Privilege, PrivilegeRule, PrivilegeTarget, Role, RoleProvider, RoleStore,
+    decode_target, encode_target, rule_kind, ConcreteTarget, Privilege, PrivilegeRule,
+    PrivilegeTarget, Role, RoleProvider, RoleStore,
 };
-pub use sqlite::{SqliteAuthProvider, SqliteStore};

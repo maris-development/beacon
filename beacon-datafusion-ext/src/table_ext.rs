@@ -10,14 +10,13 @@ use std::fmt::Debug;
 use std::sync::{Arc, Weak};
 
 use beacon_common::listing_url::parse_listing_table_url;
-use beacon_object_storage::event::ObjectEvent;
 
 use crate::file_collection::FileCollection;
-use datafusion::catalog::Session;
+use datafusion::catalog::{MemoryCatalogProviderList, Session};
 use datafusion::common::{Constraints, DataFusionError, Statistics, not_impl_err};
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::datasource::{TableType, ViewTable};
-use datafusion::execution::SessionState;
+use datafusion::execution::{SessionState, SessionStateBuilder};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{DdlStatement, LogicalPlan, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
@@ -32,9 +31,6 @@ use datafusion::{
 };
 use object_store::path::Path as ObjectPath;
 use parking_lot::RwLock;
-use tokio::sync::broadcast::Receiver;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::task::JoinHandle;
 
 #[typetag::serde(tag = "definition_type")]
 #[async_trait::async_trait]
@@ -120,59 +116,35 @@ pub(crate) async fn build_listing_table(
     Ok(table)
 }
 
-/// Aborts the background refresh task when the last clone of the owning
-/// [`ExternalTable`] is dropped.
-#[derive(Debug)]
-pub struct RefreshListener {
-    handle: JoinHandle<()>,
-}
+/// Reserved prefix in the tables store under which materialized-view Parquet
+/// data is persisted, keeping it clear of user tables (which live at
+/// `<name>/table.json` in the same store). Mirrors the crawler definitions'
+/// `__crawlers__/` prefix convention.
+pub const MATERIALIZED_VIEW_PREFIX: &str = "__materialized__";
 
-impl Drop for RefreshListener {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
+/// Reserved prefix for beacon's internal auth tables (`__beacon_users`,
+/// `__beacon_user_roles`, `__beacon_roles`, `__beacon_role_rules`), held in the
+/// tables store. They carry Argon2 password hashes, so they are hidden from
+/// user-facing catalog listings (`SHOW TABLES` / `information_schema`) and are
+/// readable only by the super-user (an unconditional gate in beacon-core's
+/// `statement_plan::authz`, independent of grant enforcement). The write path and
+/// super-users still resolve them by name.
+pub const INTERNAL_TABLE_PREFIX: &str = "__beacon_";
 
-/// The object-store URL whose events drive external-table self-refresh.
-const DATASETS_STORE_URL: &str = "datasets://";
-
-/// Object store URL for Beacon-internal storage rooted at the `__beacon__`
-/// prefix. Materialized views persist and read their Parquet data here. The
-/// runtime registers the backing store against this URL (see `beacon-data-lake`);
-/// routing through a dedicated store keeps internal data readable by Beacon while
-/// it stays hidden from user-facing dataset listings, and bypasses the datasets
-/// store's metadata cache so freshly written data is immediately visible.
-pub const INTERNAL_STORE_URL: &str = "internal://";
-
-/// Parsed form of [`INTERNAL_STORE_URL`].
-pub fn internal_object_store_url() -> ObjectStoreUrl {
-    ObjectStoreUrl::parse(INTERNAL_STORE_URL).expect("internal store url is valid")
-}
-
-/// Subscribe to datasets-store events for a table on `data_store_url`.
+/// Scheme of the redb tables store (`db://`), where materialized views persist
+/// and read their data (under [`MATERIALIZED_VIEW_PREFIX`]) alongside managed
+/// table definitions and Lance data. Declared here rather than reusing
+/// `beacon-data-lake`'s `DB_OBJECT_STORE_URL` because this crate sits below
+/// `beacon-data-lake`; the scheme is a fixed constant so the two cannot drift.
 ///
-/// Only the datasets store emits events, so tables on any other store (e.g. the
-/// `file://` store used in tests) get `None` and rely on manual `REFRESH`.
-/// Returns `None` as well when no datasets store was provided (the caller could
-/// not resolve it from the session).
-pub(crate) fn datasets_store_events(
-    data_store_url: &ObjectStoreUrl,
-    datasets_store: Option<Arc<beacon_object_storage::DatasetsStore>>,
-) -> Option<Receiver<ObjectEvent>> {
-    if data_store_url.as_str() != DATASETS_STORE_URL {
-        return None;
-    }
-    // Subscribe at the store root; events are filtered per-table by
-    // `path_under_prefix` below, since a table may span multiple prefixes.
-    datasets_store.map(|store| store.subscribe_events(""))
-}
+/// A materialized view must resolve its data against this store regardless of the
+/// caller's default (datasets) store, because the catalog-reload path
+/// (`init_tables`) rebuilds every provider against the datasets URL.
+pub const TABLES_STORE_URL: &str = "db://";
 
-/// Returns the object path an event refers to.
-fn event_path(event: &ObjectEvent) -> &ObjectPath {
-    match event {
-        ObjectEvent::Created(meta) | ObjectEvent::Modified(meta) => &meta.location,
-        ObjectEvent::Deleted(path) => path,
-    }
+/// Parsed form of [`TABLES_STORE_URL`].
+pub fn tables_object_store_url() -> ObjectStoreUrl {
+    ObjectStoreUrl::parse(TABLES_STORE_URL).expect("tables store url is valid")
 }
 
 /// Returns `true` when `event` points at a file located strictly under `prefix`.
@@ -195,12 +167,10 @@ fn path_under_prefix(prefix: &ObjectPath, event: &ObjectPath) -> bool {
 }
 
 /// Rebuild the inner listing table from `rebuild` and swap it in.
-///
-/// A no-op (returning `Ok`) when the owning session context has been dropped.
 async fn rebuild_into(
     inner: &Arc<RwLock<Arc<ListingTable>>>,
     rebuild: &ExternalTableRebuild,
-    session: Arc<dyn Session>,
+    session: &dyn Session,
 ) -> anyhow::Result<()> {
     // DataFusion caches directory listings per session (enabled by default in
     // the SessionContext). Drop them so the rebuild re-lists the current
@@ -208,7 +178,7 @@ async fn rebuild_into(
     if let Some(cache) = session.runtime_env().cache_manager.get_list_files_cache() {
         cache.clear();
     }
-    let table = build_listing_table(session.as_ref(), rebuild).await?;
+    let table = build_listing_table(session, rebuild).await?;
     *inner.write() = Arc::new(table);
     Ok(())
 }
@@ -218,8 +188,6 @@ pub struct ExternalTable {
     definition: ExternalTableDefinition,
     inner: Arc<RwLock<Arc<ListingTable>>>,
     rebuild: Arc<ExternalTableRebuild>,
-    session: Arc<dyn Session>,
-    _listener: Option<Arc<RefreshListener>>,
 }
 
 impl Debug for ExternalTable {
@@ -233,72 +201,24 @@ impl Debug for ExternalTable {
 }
 
 impl ExternalTable {
-    /// Create a self-refreshing external table.
+    /// Create an external table over `initial`.
     ///
-    /// When `events` is `Some`, a background task re-infers the schema and
-    /// re-lists files whenever a create/modify/delete event lands under one of
-    /// the table's storage prefixes. When `None` (the datasets store does not
-    /// emit events) the table only updates on manual `REFRESH` or the periodic
-    /// table rescan.
-    pub fn new_self_refreshing(
+    /// The table is a passive provider: it never holds a session and never refreshes
+    /// itself. Re-listing needs a session, and the only components that own one are
+    /// the caller of `REFRESH` and the runtime's storage-event refresher — both of
+    /// which pass one to [`refresh`](Self::refresh). Retaining a session here would
+    /// instead form a cycle (this table lives *in* the session's catalog), leaking
+    /// the session's object-store registry — and the exclusive lock the redb tables
+    /// store holds on `beacon.db` — for the process lifetime.
+    pub fn new(
         definition: ExternalTableDefinition,
         initial: ListingTable,
         rebuild: ExternalTableRebuild,
-        session: Arc<dyn Session>,
-        events: Option<Receiver<ObjectEvent>>,
     ) -> Self {
-        let prefixes: Vec<ObjectPath> = initial
-            .table_paths()
-            .iter()
-            .map(|url| url.prefix().clone())
-            .collect();
-
-        let inner = Arc::new(RwLock::new(Arc::new(initial)));
-        let rebuild = Arc::new(rebuild);
-        let session = Arc::clone(&session);
-
-        let listener = events.map(|mut rx| {
-            let inner = inner.clone();
-            let rebuild = rebuild.clone();
-            let session = Arc::clone(&session);
-            let table_name = definition.name.clone();
-            let handle = tokio::spawn(async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(event) => {
-                            let path = event_path(&event);
-                            if prefixes.iter().any(|prefix| path_under_prefix(prefix, path)) {
-                                if let Err(error) = rebuild_into(&inner, &rebuild, session.clone()).await {
-                                    tracing::warn!(
-                                        table = %table_name,
-                                        %error,
-                                        "external table self-refresh failed"
-                                    );
-                                } else {
-                                    tracing::info!(table = %table_name, path = %path, "external table refreshed after storage event");
-                                }
-                            }
-                        }
-                        Err(RecvError::Lagged(skipped)) => {
-                            tracing::warn!(
-                                table = %table_name,
-                                skipped,
-                                "external table event subscriber lagged; some changes may only appear after the next refresh"
-                            );
-                        }
-                        Err(RecvError::Closed) => break,
-                    }
-                }
-            });
-            Arc::new(RefreshListener { handle })
-        });
-
         Self {
             definition,
-            inner,
-            rebuild,
-            session,
-            _listener: listener,
+            inner: Arc::new(RwLock::new(Arc::new(initial))),
+            rebuild: Arc::new(rebuild),
         }
     }
 
@@ -311,9 +231,27 @@ impl ExternalTable {
         self.inner.read().clone()
     }
 
+    /// The storage prefixes this table lists over.
+    pub fn prefixes(&self) -> Vec<ObjectPath> {
+        self.inner
+            .read()
+            .table_paths()
+            .iter()
+            .map(|url| url.prefix().clone())
+            .collect()
+    }
+
+    /// Whether `path` lies under one of this table's prefixes, i.e. a change to it
+    /// makes this table's listing stale.
+    pub fn covers(&self, path: &ObjectPath) -> bool {
+        self.prefixes()
+            .iter()
+            .any(|prefix| path_under_prefix(prefix, path))
+    }
+
     /// Re-infer the schema over all current objects and swap in a fresh listing.
-    pub async fn refresh(&self) -> anyhow::Result<()> {
-        rebuild_into(&self.inner, &self.rebuild, self.session.clone()).await
+    pub async fn refresh(&self, session: &dyn Session) -> anyhow::Result<()> {
+        rebuild_into(&self.inner, &self.rebuild, session).await
     }
 }
 
@@ -623,19 +561,7 @@ impl TableDefinition for ExternalTableDefinition {
 
         let initial = build_listing_table(&session_state, &rebuild).await?;
 
-        let datasets_store = context
-            .state()
-            .config()
-            .get_extension::<beacon_object_storage::DatasetsStore>();
-        let events = datasets_store_events(data_store_url, datasets_store);
-
-        Ok(Arc::new(ExternalTable::new_self_refreshing(
-            self.clone(),
-            initial,
-            rebuild,
-            Arc::new(session_state),
-            events,
-        )))
+        Ok(Arc::new(ExternalTable::new(self.clone(), initial, rebuild)))
     }
 
     fn table_name(&self) -> &str {
@@ -845,11 +771,11 @@ impl MaterializedView {
         &self.definition
     }
 
-    /// Storage prefix (relative to the internal object store, see
-    /// [`INTERNAL_STORE_URL`]) that holds all versioned data directories for this
-    /// materialized view.
+    /// Storage prefix (relative to the tables store, see [`TABLES_STORE_URL`])
+    /// that holds all versioned data directories for this materialized view, i.e.
+    /// `__materialized__/<name>`. Dropping the view reclaims everything under it.
     pub fn base_storage_prefix(&self) -> String {
-        self.definition.name.clone()
+        format!("{MATERIALIZED_VIEW_PREFIX}/{}", self.definition.name)
     }
 }
 
@@ -918,9 +844,9 @@ pub struct MaterializedViewDefinition {
     pub definition: String,
     /// Output schema of the query, recorded for catalog/metadata purposes.
     pub schema: SchemaRef,
-    /// Active data directory (relative to the internal object store, see
-    /// [`INTERNAL_STORE_URL`]) holding the persisted Parquet files, e.g.
-    /// `<name>/<uuid>/`.
+    /// Active data directory (relative to the tables store, see
+    /// [`TABLES_STORE_URL`]) holding the persisted Parquet files, e.g.
+    /// `__materialized__/<name>/<uuid>/`.
     pub storage_location: String,
     /// Creation timestamp (Unix epoch milliseconds).
     pub created_at: i64,
@@ -951,11 +877,13 @@ impl TableDefinition for MaterializedViewDefinition {
         let file_format =
             file_format_factory.create(&session_state, &std::collections::HashMap::new())?;
 
-        // Materialized views always read from the Beacon-internal store, where
-        // their data is written, irrespective of the caller's default store.
-        let internal_store_url = internal_object_store_url();
+        // Materialized views always read from the tables store, where their data
+        // is written, irrespective of the caller's default store (the reload path
+        // rebuilds every provider against the datasets URL). `storage_location`
+        // already carries the `__materialized__/` prefix.
+        let tables_store_url = tables_object_store_url();
         let mut listing_table_url =
-            parse_listing_table_url(&internal_store_url, &self.storage_location)?;
+            parse_listing_table_url(&tables_store_url, &self.storage_location)?;
 
         let options = ListingOptions::new(file_format)
             .with_file_extension("")
@@ -1006,6 +934,10 @@ mod self_refresh_tests {
     use std::time::Duration;
     use tokio::sync::broadcast;
 
+    /// An arbitrary store URL for these tests; the code under test resolves the
+    /// URL it is handed and has no built-in scheme of its own.
+    const TEST_STORE_URL: &str = "datasets://";
+
     fn write_parquet_i64(disk_path: &std::path::Path, values: &[i64]) {
         std::fs::create_dir_all(disk_path.parent().expect("path has parent"))
             .expect("create parent dirs");
@@ -1038,17 +970,14 @@ mod self_refresh_tests {
 
     fn ctx_with_datasets(dir: &std::path::Path) -> Arc<SessionContext> {
         let ctx = Arc::new(SessionContext::new());
-        let store_url = ObjectStoreUrl::parse(DATASETS_STORE_URL).unwrap();
+        let store_url = ObjectStoreUrl::parse(TEST_STORE_URL).unwrap();
         let store = Arc::new(LocalFileSystem::new_with_prefix(dir).expect("local store"));
         ctx.register_object_store(store_url.as_ref(), store);
         ctx
     }
 
-    async fn build_external(
-        ctx: &Arc<SessionContext>,
-        events: Option<Receiver<ObjectEvent>>,
-    ) -> ExternalTable {
-        let store_url = ObjectStoreUrl::parse(DATASETS_STORE_URL).unwrap();
+    async fn build_external(ctx: &Arc<SessionContext>) -> ExternalTable {
+        let store_url = ObjectStoreUrl::parse(TEST_STORE_URL).unwrap();
         let listing_table_url =
             parse_listing_table_url(&store_url, "obs/**/*.parquet").expect("listing url");
         let options =
@@ -1075,7 +1004,7 @@ mod self_refresh_tests {
             options: HashMap::new(),
             if_not_exists: false,
         };
-        ExternalTable::new_self_refreshing(definition, initial, rebuild, Arc::new(state), events)
+        ExternalTable::new(definition, initial, rebuild)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1084,57 +1013,38 @@ mod self_refresh_tests {
         write_parquet_i64(&dir.path().join("obs/a.parquet"), &[1]);
         let ctx = ctx_with_datasets(dir.path());
 
-        let external = build_external(&ctx, None).await;
+        let external = build_external(&ctx).await;
         ctx.register_table("obs", Arc::new(external.clone()))
             .unwrap();
         assert_eq!(count_rows(&ctx).await, 1);
 
         // A new file appears; manual refresh re-lists and picks it up.
         write_parquet_i64(&dir.path().join("obs/b.parquet"), &[2, 3]);
-        external.refresh().await.unwrap();
+        external.refresh(&ctx.state()).await.unwrap();
         assert_eq!(count_rows(&ctx).await, 3);
 
         // All files removed; schema falls back to empty.
         std::fs::remove_file(dir.path().join("obs/a.parquet")).unwrap();
         std::fs::remove_file(dir.path().join("obs/b.parquet")).unwrap();
-        external.refresh().await.unwrap();
+        external.refresh(&ctx.state()).await.unwrap();
         assert!(external.schema().fields().is_empty());
         assert_eq!(count_rows(&ctx).await, 0);
     }
 
+    /// Which tables a storage event selects. The refresh itself is driven by the
+    /// runtime (it owns the session); this is the matching rule it applies.
     #[tokio::test(flavor = "multi_thread")]
-    async fn storage_event_triggers_self_refresh() {
+    async fn covers_only_paths_under_the_tables_prefix() {
         let dir = tempfile::tempdir().unwrap();
         write_parquet_i64(&dir.path().join("obs/a.parquet"), &[1]);
-        write_parquet_i64(&dir.path().join("obs/b.parquet"), &[2, 3]);
         let ctx = ctx_with_datasets(dir.path());
+        let external = build_external(&ctx).await;
 
-        let (tx, rx) = broadcast::channel::<ObjectEvent>(16);
-        let external = build_external(&ctx, Some(rx)).await;
-        ctx.register_table("obs", Arc::new(external)).unwrap();
-        assert_eq!(count_rows(&ctx).await, 3);
-
-        // A file under the table prefix is removed; the table's own listener
-        // refreshes it without any table-manager involvement.
-        std::fs::remove_file(dir.path().join("obs/b.parquet")).unwrap();
-        tx.send(ObjectEvent::Deleted(ObjectPath::from("obs/b.parquet")))
-            .unwrap();
-
-        let mut count = count_rows(&ctx).await;
-        for _ in 0..50 {
-            if count == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            count = count_rows(&ctx).await;
-        }
-        assert_eq!(count, 1, "deletion under prefix should refresh the table");
-
-        // An event under an unrelated prefix must not trigger a refresh.
-        tx.send(ObjectEvent::Deleted(ObjectPath::from("other/x.parquet")))
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        assert_eq!(count_rows(&ctx).await, 1);
+        assert!(external.covers(&ObjectPath::from("obs/b.parquet")));
+        assert!(external.covers(&ObjectPath::from("obs/nested/c.parquet")));
+        // A sibling prefix sharing a name prefix must not match.
+        assert!(!external.covers(&ObjectPath::from("obs_2/x.parquet")));
+        assert!(!external.covers(&ObjectPath::from("other/x.parquet")));
     }
 }
 
@@ -1444,7 +1354,7 @@ mod tests {
             name: "mv".to_string(),
             definition: "SELECT 1 AS a".to_string(),
             schema: Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)])),
-            storage_location: "__beacon__/mv/abc/".to_string(),
+            storage_location: "__materialized__/mv/abc/".to_string(),
             created_at: 42,
             last_refreshed: Some(43),
         };
@@ -1487,16 +1397,16 @@ mod tests {
             last_refreshed: None,
         };
 
-        // Materialized views always read from the internal store; register it
+        // Materialized views always read from the tables store; register it
         // rooted at the temp directory so `storage_location` resolves under it.
         let context = Arc::new(SessionContext::new());
-        let internal_store_url = super::internal_object_store_url();
-        let internal_store =
+        let tables_store_url = super::tables_object_store_url();
+        let tables_store =
             Arc::new(object_store::local::LocalFileSystem::new_with_prefix(&root).unwrap());
-        context.register_object_store(internal_store_url.as_ref(), internal_store);
+        context.register_object_store(tables_store_url.as_ref(), tables_store);
 
         let provider = definition
-            .build_provider(context.clone(), &internal_store_url)
+            .build_provider(context.clone(), &tables_store_url)
             .await
             .expect("materialized view provider should be built");
 
@@ -1504,7 +1414,7 @@ mod tests {
             .as_any()
             .downcast_ref::<MaterializedView>()
             .expect("provider should be a MaterializedView");
-        assert_eq!(materialized.base_storage_prefix(), "mv");
+        assert_eq!(materialized.base_storage_prefix(), "__materialized__/mv");
 
         let schema = provider.schema();
         assert_eq!(schema.fields().len(), 2);

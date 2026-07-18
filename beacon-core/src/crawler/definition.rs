@@ -56,7 +56,11 @@ pub struct CrawlerDefinition {
     /// Periodic crawl interval, in seconds. `None` means no timer.
     #[serde(default)]
     pub schedule_secs: Option<u64>,
-    /// Subscribe to datasets-store events under `target_prefix` for incremental crawls.
+    /// Reserved for event-driven (incremental) crawling. That is **not currently
+    /// implemented**, so on its own this flag subscribes to nothing; it is accepted
+    /// and preserved for forward compatibility. As a convenience, an `event_driven`
+    /// crawler with no explicit `schedule` is run at the default poll interval (see
+    /// [`beacon_common::CrawlerConfig::default_interval_secs`]) so it is not inert.
     #[serde(default)]
     pub event_driven: bool,
     /// Extra format options forwarded into every discovered table's `OPTIONS`.

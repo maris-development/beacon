@@ -1,22 +1,20 @@
 //! Owns crawler definitions and their background triggers.
 //!
 //! The manager loads persisted crawlers at startup, runs them on demand, and (when
-//! enabled) drives scheduled and event-driven crawls. Background tasks hold a
-//! [`Weak`] back-reference so the manager can be dropped; [`Drop`] aborts them.
+//! enabled) drives scheduled crawls. Background tasks hold a [`Weak`]
+//! back-reference so the manager can be dropped; [`Drop`] aborts them.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
+use beacon_common::CrawlerConfig;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
-use beacon_object_storage::event::ObjectEvent;
-use beacon_object_storage::DatasetsStore;
-use datafusion::prelude::SessionContext;
+use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 use parking_lot::Mutex;
-use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
-use crate::DB_OBJECT_STORE_URL;
 
 use super::definition::CrawlerDefinition;
 use super::engine::{CrawlEngine, CrawlReport};
@@ -39,24 +37,18 @@ pub fn new_crawler_manager_handle() -> CrawlerManagerHandle {
     Arc::new(OnceLock::new())
 }
 
-/// Debounce window for coalescing a burst of storage events into one crawl.
-const EVENT_DEBOUNCE: Duration = Duration::from_secs(2);
-
 struct CrawlerEntry {
     def: CrawlerDefinition,
-    /// Serializes runs of this crawler so scheduled + event triggers never race.
+    /// Serializes runs of this crawler so scheduled + manual triggers never race.
     run_lock: Arc<AsyncMutex<()>>,
-    /// Background trigger tasks (scheduled and/or event-driven).
+    /// Background trigger tasks (scheduled).
     tasks: Vec<JoinHandle<()>>,
 }
 
 pub struct CrawlerManager {
     engine: CrawlEngine,
     persistence: CrawlerPersistence,
-    datasets_store: Arc<DatasetsStore>,
-    config: beacon_config::CrawlerConfig,
-    /// Whether storage change events can actually fire (so `event_driven` is real).
-    events_available: bool,
+    config: CrawlerConfig,
     crawlers: Mutex<HashMap<String, CrawlerEntry>>,
 }
 
@@ -64,18 +56,16 @@ impl CrawlerManager {
     pub fn new(
         session_ctx: Arc<SessionContext>,
         file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-        datasets_store: Arc<DatasetsStore>,
-        config: beacon_config::CrawlerConfig,
-        events_available: bool,
+        datasets_url: ObjectStoreUrl,
+        tables_url: ObjectStoreUrl,
+        config: CrawlerConfig,
     ) -> Arc<Self> {
-        let engine = CrawlEngine::new(session_ctx.clone(), file_formats);
-        let persistence = CrawlerPersistence::new(session_ctx, DB_OBJECT_STORE_URL.clone());
+        let engine = CrawlEngine::new(session_ctx.clone(), file_formats, datasets_url);
+        let persistence = CrawlerPersistence::new(session_ctx, tables_url);
         Arc::new(Self {
             engine,
             persistence,
-            datasets_store,
             config,
-            events_available,
             crawlers: Mutex::new(HashMap::new()),
         })
     }
@@ -84,7 +74,7 @@ impl CrawlerManager {
     pub async fn init(self: &Arc<Self>) -> anyhow::Result<()> {
         let persisted = self.persistence.load_all().await?;
         for mut def in persisted {
-            self.apply_availability_guard(&mut def);
+            self.apply_event_driven_fallback(&mut def);
             self.insert_and_start(def);
         }
         tracing::info!(
@@ -96,7 +86,7 @@ impl CrawlerManager {
 
     /// Define (or replace) a crawler: persist it and (re)start its triggers.
     pub async fn create(self: &Arc<Self>, mut def: CrawlerDefinition) -> anyhow::Result<()> {
-        self.apply_availability_guard(&mut def);
+        self.apply_event_driven_fallback(&mut def);
         self.persistence.save(&def).await?;
         self.stop_tasks(&def.name);
         self.insert_and_start(def);
@@ -141,13 +131,15 @@ impl CrawlerManager {
         out
     }
 
-    /// If a crawler wants event-driven crawls but events cannot fire and it has no
-    /// schedule, fall back to a default poll interval rather than going inert.
-    fn apply_availability_guard(&self, def: &mut CrawlerDefinition) {
-        if def.event_driven && !self.events_available && def.schedule_secs.is_none() {
-            tracing::warn!(
-                "crawler '{}' is event-driven but storage events are unavailable and no \
-                 schedule is set; falling back to a {}s poll interval",
+    /// Event-driven crawling is not currently implemented (`event_driven` is preserved
+    /// as a forward-compatibility placeholder — see [`CrawlerDefinition::event_driven`]).
+    /// So that an `event_driven` crawler with no explicit schedule is not silently
+    /// inert, run it at the default poll interval instead.
+    fn apply_event_driven_fallback(&self, def: &mut CrawlerDefinition) {
+        if def.event_driven && def.schedule_secs.is_none() {
+            tracing::info!(
+                "crawler '{}' requests event-driven crawling, which is not currently \
+                 implemented; running it at the default {}s poll interval instead",
                 def.name,
                 self.config.default_interval_secs
             );
@@ -161,9 +153,6 @@ impl CrawlerManager {
         if self.config.enable {
             if let Some(secs) = def.schedule_secs {
                 tasks.push(self.spawn_scheduled(def.name.clone(), secs));
-            }
-            if def.event_driven && self.events_available {
-                tasks.push(self.spawn_event_driven(def.name.clone(), def.target_prefix.clone()));
             }
         }
         self.crawlers.lock().insert(
@@ -185,28 +174,6 @@ impl CrawlerManager {
                 ticker.tick().await;
                 if !run_via_weak(&weak, &name).await {
                     break; // manager dropped
-                }
-            }
-        })
-    }
-
-    fn spawn_event_driven(self: &Arc<Self>, name: String, prefix: String) -> JoinHandle<()> {
-        let weak = Arc::downgrade(self);
-        let mut rx: broadcast::Receiver<ObjectEvent> =
-            self.datasets_store.subscribe_events(&prefix);
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(_) => {
-                        // Debounce: pause, then drain the rest of the burst.
-                        tokio::time::sleep(EVENT_DEBOUNCE).await;
-                        while rx.try_recv().is_ok() {}
-                        if !run_via_weak(&weak, &name).await {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         })
@@ -238,7 +205,7 @@ async fn run_via_weak(weak: &Weak<CrawlerManager>, name: &str) -> bool {
         return false;
     };
     if let Err(error) = manager.run(name).await {
-        tracing::warn!("scheduled/event crawl of '{name}' failed: {error}");
+        tracing::warn!("scheduled crawl of '{name}' failed: {error}");
     }
     true
 }

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context as _};
+use beacon_datafusion_ext::secrets::SecretStore;
 use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::TableProvider;
 use datafusion::execution::object_store::ObjectStoreUrl;
@@ -50,24 +51,22 @@ pub struct SqlDatabaseTableDefinition {
 }
 
 impl SqlDatabaseTableDefinition {
-    /// Decrypt the stored credential using the deployment master key from the
-    /// session's [`beacon_config::Config`] extension. Errors (fails closed) if a
-    /// secret is present but no `BEACON_SECRETS_KEY` is configured.
-    fn decrypt_password(
-        &self,
-        context: &SessionContext,
-    ) -> anyhow::Result<Option<SecretString>> {
+    /// Decrypt the stored credential using the deployment master key carried by the
+    /// session's [`SecretStore`] extension. Errors (fails closed) if a secret is
+    /// present but no master key is configured.
+    fn decrypt_password(&self, context: &SessionContext) -> anyhow::Result<Option<SecretString>> {
         let Some(secret) = &self.secret else {
             return Ok(None);
         };
-        let config = context
+        let secret_store = context
             .state()
             .config()
-            .get_extension::<beacon_config::Config>()
-            .ok_or_else(|| anyhow!("Beacon configuration is unavailable; cannot decrypt credentials"))?;
-        let key = config.secrets.master_key().ok_or_else(|| {
+            .get_extension::<SecretStore>()
+            .ok_or_else(|| anyhow!("secret store is unavailable; cannot decrypt credentials"))?;
+        let key = secret_store.master_key().ok_or_else(|| {
             anyhow!(
-                "BEACON_SECRETS_KEY is not set; cannot decrypt stored credentials for table '{}'",
+                "no secrets encryption key is configured; cannot decrypt stored credentials for \
+                 table '{}'",
                 self.name
             )
         })?;

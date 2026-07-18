@@ -11,7 +11,6 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use beacon_object_storage::DatasetsStore;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{Constraints, Statistics};

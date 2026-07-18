@@ -5,9 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Context;
 use beacon_datafusion_ext::table_ext::TableDefinition;
-use beacon_object_storage::DatasetsStore;
 use datafusion::catalog::TableProvider;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
@@ -40,14 +38,8 @@ impl TableDefinition for DeltaTableDefinition {
         context: Arc<SessionContext>,
         store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
-        // The runtime threads its datasets store through the session config as an
-        // extension (see `Runtime::init_ctx`); recover it to back the Delta table.
-        let datasets_store = context
-            .state()
-            .config()
-            .get_extension::<DatasetsStore>()
-            .context("datasets store extension is not registered on the session")?;
-
+        // The datasets store is resolved from the session's object-store registry by
+        // `store_url` inside `open_delta_provider`; nothing extra is needed here.
         let time_travel = TimeTravel::from_options(&self.options)?;
 
         let provider = open_delta_provider(

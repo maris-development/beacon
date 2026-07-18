@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
-use beacon_object_storage::DatasetsStore;
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 
 // The shared table-function trait and the glob-arg parser now live in

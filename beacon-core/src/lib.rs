@@ -1,6 +1,6 @@
 pub mod api;
-pub mod dataset_files;
-pub mod dataset_uploads;
+mod auth_store;
+pub mod crawler;
 pub mod extensions;
 pub mod metrics;
 pub mod parser;
@@ -8,6 +8,8 @@ pub mod query;
 pub mod query_result;
 pub mod runtime;
 pub mod runtime_builder;
+pub mod schema_persistence;
+pub mod settings;
 mod statement_plan;
 
 // Re-export the auth types the transports (HTTP, Flight SQL) need, so they depend

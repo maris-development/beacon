@@ -4,6 +4,8 @@
 //! for exporting query results in various formats.
 
 use std::sync::Arc;
+use crate::query::temp_object::TempObject;
+use crate::query_result::{OutputFileKind, QueryOutputFile};
 
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
@@ -15,10 +17,9 @@ use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use datafusion::{
     common::file_options::file_type::FileType,
     datasource::file_format::format_as_file_type,
+    error::DataFusionError,
     logical_expr::{LogicalPlan, LogicalPlanBuilder},
-    prelude::SessionContext,
 };
-use tempfile::NamedTempFile;
 use utoipa::ToSchema;
 
 /// Represents the output configuration for a query.
@@ -32,41 +33,45 @@ impl Output {
     /// Parses the logical plan and prepares an output file in the specified format.
     ///
     /// # Arguments
-    /// * `session_context` - DataFusion session context (provides the datasets store).
-    /// * `tmp_dir` - Directory the temporary output file is created in (the tmp store root).
+    /// * `datasets_root` - Local root of the datasets store (used by the NetCDF writer's
+    ///   sibling reader path; ignored by other formats).
+    /// * `tmp_dir` - Directory the temporary output file is created in (the tmp store root),
+    ///   also where the NetCDF writer emits its file.
+    /// * `tmp_store_url` - The URL the tmp store is registered under; the COPY target is
+    ///   `<tmp_store_url><object_name>`. Read from the session's `ObjectStoreUrls`
+    ///   extension by the caller so it matches the URL the store was registered at.
     /// * `input_plan` - The logical plan to export.
     ///
     /// # Returns
     /// Tuple of the new logical plan and the output file wrapper.
     pub async fn parse(
         &self,
-        session_context: &SessionContext,
+        datasets_root: &std::path::Path,
         tmp_dir: &std::path::Path,
+        tmp_store_url: &datafusion::execution::object_store::ObjectStoreUrl,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
-        let datasets_store = session_context
-            .state()
-            .config()
-            .get_extension::<beacon_object_storage::DatasetsStore>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Internal(
-                    "datasets object store missing from session config".to_string(),
-                )
-            })?;
-        let file_type = self.format.file_type(datasets_store).await;
-        let temp_output = beacon_data_lake::create_temp_output_file(tmp_dir, ".tmp");
+        let kind = self.format.file_kind();
+        let file_type = self.format.file_type(datasets_root, tmp_dir).await;
+
+        // Reserve a unique name under `tmp_dir` (the tmp store's root). The COPY
+        // target is `<tmp_store_url><object_name>`; object-store writers resolve that
+        // under the tmp store, and the native NetCDF/ODV sinks reconstruct
+        // `output_dir.join(<object_name>)` — with `output_dir == tmp_dir` (see the
+        // call site in `runtime.rs`), both land at `temp.path()`. One name, no
+        // path↔URL pair to keep in sync.
+        let temp = TempObject::create_in(tmp_dir, kind.suggested_extension())
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let location = format!("{}{}", tmp_store_url.as_str(), temp.object_path());
         let plan = LogicalPlanBuilder::copy_to(
             input_plan,
-            temp_output.output_url(),
+            location,
             file_type,
             Default::default(),
             vec![],
         )?;
 
-        Ok((
-            plan.build()?,
-            self.format.output_file(temp_output.into_temp_file()),
-        ))
+        Ok((plan.build()?, QueryOutputFile::new(kind, temp)))
     }
 }
 
@@ -104,26 +109,29 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    /// Wraps a temporary file in the appropriate output file enum variant.
-    pub fn output_file(&self, temp_file: NamedTempFile) -> QueryOutputFile {
+    /// The [`OutputFileKind`] the result file is tagged with (drives the download
+    /// transport's MIME type / filename; both NetCDF variants share one kind).
+    pub fn file_kind(&self) -> OutputFileKind {
         match self {
-            OutputFormat::Csv => QueryOutputFile::Csv(temp_file),
-            OutputFormat::Ipc => QueryOutputFile::Ipc(temp_file),
-            OutputFormat::Parquet => QueryOutputFile::Parquet(temp_file),
-            OutputFormat::GeoParquet { .. } => QueryOutputFile::GeoParquet(temp_file),
-            OutputFormat::NetCDF => QueryOutputFile::NetCDF(temp_file),
-            OutputFormat::NdNetCDF { .. } => QueryOutputFile::NetCDF(temp_file),
-            OutputFormat::Odv(_) => QueryOutputFile::Odv(temp_file),
+            OutputFormat::Csv => OutputFileKind::Csv,
+            OutputFormat::Ipc => OutputFileKind::Ipc,
+            OutputFormat::Parquet => OutputFileKind::Parquet,
+            OutputFormat::GeoParquet { .. } => OutputFileKind::GeoParquet,
+            OutputFormat::NetCDF => OutputFileKind::NetCDF,
+            OutputFormat::NdNetCDF { .. } => OutputFileKind::NetCDF,
+            OutputFormat::Odv(_) => OutputFileKind::Odv,
         }
     }
 
     /// Returns the DataFusion file type for this output format.
     ///
-    /// `datasets_store` is the runtime's datasets store, used by the NetCDF
-    /// writers; it is ignored by the other formats.
+    /// `datasets_root` (the datasets store's local root) and `output_dir` (where
+    /// the NetCDF writer emits its file) are used by the NetCDF writers; both are
+    /// ignored by the other formats.
     pub async fn file_type(
         &self,
-        datasets_store: Arc<beacon_object_storage::DatasetsStore>,
+        datasets_root: &std::path::Path,
+        output_dir: &std::path::Path,
     ) -> Arc<dyn FileType> {
         match self {
             OutputFormat::Csv => format_as_file_type(Arc::new(CsvFormatFactory)),
@@ -142,7 +150,8 @@ impl OutputFormat {
                 // Writing NetCDF: the reader cache / statistics config is
                 // irrelevant here, so the defaults suffice.
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
-                    datasets_store.clone(),
+                    datasets_root.to_path_buf(),
+                    output_dir.to_path_buf(),
                     options,
                     NetcdfConfig::default(),
                 )))
@@ -153,7 +162,8 @@ impl OutputFormat {
                 options.write_dimensions = Some(dimension_columns.clone());
 
                 format_as_file_type(Arc::new(NetCDFFormatFactory::new(
-                    datasets_store.clone(),
+                    datasets_root.to_path_buf(),
+                    output_dir.to_path_buf(),
                     options,
                     NetcdfConfig::default(),
                 )))
@@ -161,52 +171,6 @@ impl OutputFormat {
             OutputFormat::Odv(options) => {
                 format_as_file_type(Arc::new(OdvFileFormatFactory::new(Some(options.clone()))))
             }
-        }
-    }
-}
-
-/// Wrapper for temporary output files in various formats.
-#[derive(Debug)]
-pub enum QueryOutputFile {
-    /// CSV output file.
-    Csv(NamedTempFile),
-    /// Arrow IPC output file.
-    Ipc(NamedTempFile),
-    /// JSON output file.
-    Json(NamedTempFile),
-    /// Parquet output file.
-    Parquet(NamedTempFile),
-    /// NetCDF output file.
-    NetCDF(NamedTempFile),
-    /// ODV output file.
-    Odv(NamedTempFile),
-    /// GeoParquet output file.
-    GeoParquet(NamedTempFile),
-}
-
-impl QueryOutputFile {
-    /// Returns the size of the output file in bytes.
-    pub fn size(&self) -> anyhow::Result<u64> {
-        match self {
-            QueryOutputFile::Csv(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Ipc(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Json(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Parquet(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::NetCDF(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Odv(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
-        }
-    }
-
-    pub fn path(&self) -> &std::path::Path {
-        match self {
-            QueryOutputFile::Csv(file) => file.path(),
-            QueryOutputFile::Ipc(file) => file.path(),
-            QueryOutputFile::Json(file) => file.path(),
-            QueryOutputFile::Parquet(file) => file.path(),
-            QueryOutputFile::NetCDF(file) => file.path(),
-            QueryOutputFile::Odv(file) => file.path(),
-            QueryOutputFile::GeoParquet(file) => file.path(),
         }
     }
 }

@@ -22,31 +22,36 @@ fn auth_context(session: &Arc<SessionContext>) -> anyhow::Result<Arc<AuthContext
 }
 
 /// Apply an auth-management statement to the shared [`AuthContext`].
-pub(crate) fn apply_auth_statement(
+pub(crate) async fn apply_auth_statement(
     session: &Arc<SessionContext>,
     statement: &AuthStatement,
 ) -> anyhow::Result<()> {
     let auth = auth_context(session)?;
 
     match statement {
-        AuthStatement::CreateUser { username, password } => auth.create_user(username, password),
-        AuthStatement::DropUser { username } => auth.drop_user(username),
-        AuthStatement::CreateRole { role } => auth.create_role(role),
-        AuthStatement::DropRole { role } => auth.drop_role(role),
+        AuthStatement::CreateUser { username, password } => {
+            auth.create_user(username, password).await
+        }
+        AuthStatement::DropUser { username } => auth.drop_user(username).await,
+        AuthStatement::CreateRole { role } => auth.create_role(role).await,
+        AuthStatement::DropRole { role } => auth.drop_role(role).await,
         AuthStatement::GrantRoleToUser { role, username } => {
-            auth.grant_role_to_user(username, role)
+            auth.grant_role_to_user(username, role).await
         }
         AuthStatement::RevokeRoleFromUser { role, username } => {
-            auth.revoke_role_from_user(username, role)
+            auth.revoke_role_from_user(username, role).await
         }
         AuthStatement::GrantPrivilege { privilege, target, role } => {
             auth.grant(role, PrivilegeRule::new(*privilege, target.clone()))
+                .await
         }
         AuthStatement::DenyPrivilege { privilege, target, role } => {
             auth.deny(role, PrivilegeRule::new(*privilege, target.clone()))
+                .await
         }
         AuthStatement::RevokePrivilege { privilege, target, role, deny } => {
             auth.revoke(role, &PrivilegeRule::new(*privilege, target.clone()), *deny)
+                .await
         }
     }
 }

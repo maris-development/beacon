@@ -18,6 +18,8 @@ use datafusion::{
 };
 use utoipa::ToSchema;
 
+use crate::settings::ObjectStoreUrls;
+
 /// Specifies the source of data for a query.
 ///
 /// Can be either a named table or a file format with associated paths.
@@ -122,7 +124,7 @@ impl FromFormat {
         session_context: &SessionContext,
     ) -> datafusion::error::Result<Arc<dyn TableSource>> {
         let file_format = self.file_format(session_context).await?;
-        let urls = self.listing_table_urls()?;
+        let urls = self.listing_table_urls(session_context)?;
 
         // Create a FileCollection as the table provider.
         let table =
@@ -158,8 +160,12 @@ impl FromFormat {
         }
     }
 
-    /// Resolves file paths to [`ListingTableUrl`]s under the datasets store.
-    fn listing_table_urls(&self) -> datafusion::error::Result<Vec<ListingTableUrl>> {
+    /// Resolves file paths to [`ListingTableUrl`]s under the session's configured
+    /// datasets store.
+    fn listing_table_urls(
+        &self,
+        session_context: &SessionContext,
+    ) -> datafusion::error::Result<Vec<ListingTableUrl>> {
         let paths = match self {
             FromFormat::Csv { paths, .. }
             | FromFormat::Parquet { paths }
@@ -171,9 +177,10 @@ impl FromFormat {
             FromFormat::Bbf { paths } => paths,
         };
 
+        let urls = ObjectStoreUrls::from_session(session_context);
         let mut listing_table_urls = Vec::with_capacity(paths.len());
         for path in paths {
-            let url = beacon_data_lake::create_listing_url(path.to_string())?;
+            let url = beacon_datafusion_ext::parse_listing_table_url(urls.datasets(), path)?;
             listing_table_urls.push(url);
         }
         Ok(listing_table_urls)
@@ -205,13 +212,9 @@ mod tests {
     /// (variant, the factory it should resolve) for every store/listing format
     /// that `file_format` builds via a session-registered factory.
     async fn factory_cases() -> Vec<(FromFormat, Arc<dyn FileFormatFactory>)> {
-        let store = Arc::new(
-            beacon_object_storage::local_datasets_store(
-                beacon_config::DATASETS_DIR_PATH.to_path_buf(),
-            )
-            .await
-            .expect("local datasets store"),
-        );
+        // Only used to resolve the registered format factories, so any readable
+        // directory will do; no dataset is ever read through it.
+        let datasets_root = std::env::temp_dir();
         vec![
             (
                 FromFormat::Parquet { paths: vec![] },
@@ -224,7 +227,8 @@ mod tests {
             (
                 FromFormat::NetCDF { paths: vec![] },
                 Arc::new(beacon_arrow_netcdf::datafusion::NetCDFFormatFactory::new(
-                    store.clone(),
+                    datasets_root.clone(),
+                    std::env::temp_dir(),
                     Default::default(),
                     Default::default(),
                 )),

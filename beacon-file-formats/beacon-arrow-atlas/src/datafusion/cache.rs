@@ -6,10 +6,10 @@
 //! The cache is owned per-runtime ([`AtlasReaderCache`]) rather than being a
 //! process-global static; passing `None` opens directly with no caching.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use atlas::Atlas;
-use beacon_object_storage::DatasetsStore;
 use moka::future::Cache;
 use object_store::ObjectMeta;
 use object_store::path::Path as OsPath;
@@ -61,11 +61,11 @@ impl std::fmt::Debug for AtlasReaderCache {
 /// [`moka::future::Cache::try_get_with`].
 pub async fn get_or_open_atlas(
     cache: Option<&AtlasReaderCache>,
-    store: Arc<DatasetsStore>,
+    datasets_root: PathBuf,
     marker: &ObjectMeta,
 ) -> datafusion::error::Result<Arc<Atlas>> {
     let Some(cache) = cache else {
-        return reader::open_atlas_store(store, &marker.location).await;
+        return reader::open_atlas_store(datasets_root, &marker.location).await;
     };
 
     let key = CacheKey {
@@ -77,7 +77,9 @@ pub async fn get_or_open_atlas(
 
     cache
         .cache
-        .try_get_with(key, async move { reader::open_atlas_store(store, &path).await })
+        .try_get_with(key, async move {
+            reader::open_atlas_store(datasets_root, &path).await
+        })
         .await
         .map_err(|e: Arc<datafusion::error::DataFusionError>| {
             datafusion::error::DataFusionError::Execution(format!(

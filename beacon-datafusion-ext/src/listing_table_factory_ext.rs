@@ -118,18 +118,7 @@ impl TableProviderFactory for ListingTableFactoryExt {
             },
         };
 
-        // Resolve the runtime's datasets store from the session config extension
-        // so self-refreshing tables can subscribe to its change events.
-        let datasets_store = session_state.config().get_extension();
-        let events = crate::table_ext::datasets_store_events(&self.store_url, datasets_store);
-
-        let external_table = ExternalTable::new_self_refreshing(
-            definition,
-            table,
-            rebuild,
-            Arc::new(session_state.clone()),
-            events,
-        );
+        let external_table = ExternalTable::new(definition, table, rebuild);
 
         Ok(Arc::new(external_table))
     }

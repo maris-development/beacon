@@ -125,16 +125,7 @@ impl SchemaPersistenceService {
 
     pub async fn remove_persisted_table(&self, table_name: &str) -> datafusion::error::Result<()> {
         let path = object_store::path::Path::from(table_name);
-        let table_object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.table_directory_store_url)
-            .map_err(|error| {
-                DataFusionError::Plan(format!(
-                    "Failed to get table object store for deregistering table {}: {}",
-                    table_name, error
-                ))
-            })?;
+        let table_object_store = self.table_object_store(table_name)?;
 
         let mut removable_files = table_object_store.list(Some(&path));
         while let Some(file) = removable_files.next().await {
@@ -184,16 +175,7 @@ impl SchemaPersistenceService {
         table_json: String,
     ) -> datafusion::error::Result<()> {
         let path = object_store::path::Path::from(format!("{}/table.json", table_name));
-        let table_object_store = self
-            .session_context
-            .runtime_env()
-            .object_store(&self.table_directory_store_url)
-            .map_err(|error| {
-                DataFusionError::Plan(format!(
-                    "Failed to get table object store for registering table {}: {}",
-                    table_name, error
-                ))
-            })?;
+        let table_object_store = self.table_object_store(table_name)?;
 
         table_object_store
             .put(&path, table_json.into_bytes().into())

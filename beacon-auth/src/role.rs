@@ -130,29 +130,45 @@ impl Role {
     }
 }
 
-/// Durable backend for the role model. Implemented by a persistent store (e.g. the SQLite auth
-/// directory) so role/grant changes survive restarts. Mutations are written through after the
-/// in-memory state is validated; [`load_roles`](RoleStore::load_roles) hydrates the cache at startup.
+/// Durable backend for the role model. Implemented by a persistent store (the internal
+/// `__beacon_roles` / `__beacon_role_rules` tables) so role/grant changes survive restarts.
+/// Mutations are written through after the in-memory state is validated;
+/// [`load_roles`](RoleStore::load_roles) hydrates the cache at startup.
+#[async_trait::async_trait]
 pub trait RoleStore: std::fmt::Debug + Send + Sync {
     /// Loads all roles and their grant/deny rules from durable storage.
-    fn load_roles(&self) -> anyhow::Result<HashMap<String, Role>>;
-    fn persist_create_role(&self, name: &str) -> anyhow::Result<()>;
-    fn persist_drop_role(&self, name: &str) -> anyhow::Result<()>;
-    fn persist_insert_rule(&self, role: &str, is_deny: bool, rule: &PrivilegeRule)
-        -> anyhow::Result<()>;
-    fn persist_remove_rule(&self, role: &str, is_deny: bool, rule: &PrivilegeRule)
-        -> anyhow::Result<()>;
+    async fn load_roles(&self) -> anyhow::Result<HashMap<String, Role>>;
+    async fn persist_create_role(&self, name: &str) -> anyhow::Result<()>;
+    async fn persist_drop_role(&self, name: &str) -> anyhow::Result<()>;
+    async fn persist_insert_rule(
+        &self,
+        role: &str,
+        is_deny: bool,
+        rule: &PrivilegeRule,
+    ) -> anyhow::Result<()>;
+    async fn persist_remove_rule(
+        &self,
+        role: &str,
+        is_deny: bool,
+        rule: &PrivilegeRule,
+    ) -> anyhow::Result<()>;
 }
 
 /// In-memory registry of roles, with interior mutability for SQL-driven management.
 ///
-/// When constructed with [`with_persistence`](RoleProvider::with_persistence) the in-memory map is
-/// hydrated from durable storage and every mutation is written through. The default constructor has
-/// no backend (used by tests and ephemeral contexts).
+/// When a [`RoleStore`] is attached the in-memory map is hydrated from durable storage
+/// ([`hydrate`](RoleProvider::hydrate)) and every mutation is written through. The default
+/// constructor has no backend (used by tests and ephemeral contexts).
 #[derive(Debug, Default)]
 pub struct RoleProvider {
     roles: RwLock<HashMap<String, Role>>,
     persistence: Option<Arc<dyn RoleStore>>,
+    /// Serializes mutations so each validate -> persist -> apply sequence is atomic.
+    ///
+    /// The `roles` guard cannot span the persist `.await` (a `parking_lot` guard is `!Send`), so it
+    /// is taken only for the validate and apply steps; this async mutex closes the window between
+    /// them. Reads (`is_allowed`) never take it and stay lock-free of the write path.
+    write_lock: futures::lock::Mutex<()>,
 }
 
 impl RoleProvider {
@@ -160,81 +176,123 @@ impl RoleProvider {
         Self::default()
     }
 
-    /// Builds a role provider hydrated from `store`, writing every later mutation through to it.
-    pub fn with_persistence(store: Arc<dyn RoleStore>) -> anyhow::Result<Self> {
-        let roles = store.load_roles()?;
-        Ok(Self {
-            roles: RwLock::new(roles),
+    /// Attaches `store` without reading it: every later mutation is written through, but the
+    /// in-memory map stays empty until [`hydrate`](RoleProvider::hydrate) runs.
+    ///
+    /// Split from hydration because the tables-backed store reaches its tables through the session,
+    /// which does not exist yet when the auth context is built (see `runtime_builder`).
+    pub fn with_store(store: Arc<dyn RoleStore>) -> Self {
+        Self {
+            roles: RwLock::new(HashMap::new()),
             persistence: Some(store),
-        })
+            write_lock: futures::lock::Mutex::new(()),
+        }
+    }
+
+    /// Builds a role provider hydrated from `store`, writing every later mutation through to it.
+    pub async fn with_persistence(store: Arc<dyn RoleStore>) -> anyhow::Result<Self> {
+        let provider = Self::with_store(store);
+        provider.hydrate().await?;
+        Ok(provider)
+    }
+
+    /// Replaces the in-memory map with the durable store's contents. No-op without a store.
+    pub async fn hydrate(&self) -> anyhow::Result<()> {
+        let Some(store) = &self.persistence else {
+            return Ok(());
+        };
+        let _write = self.write_lock.lock().await;
+        let loaded = store.load_roles().await?;
+        *self.roles.write() = loaded;
+        Ok(())
     }
 
     pub fn role_exists(&self, name: &str) -> bool {
         self.roles.read().contains_key(name)
     }
 
-    pub fn create_role(&self, name: &str) -> anyhow::Result<()> {
-        let mut roles = self.roles.write();
-        if roles.contains_key(name) {
+    pub async fn create_role(&self, name: &str) -> anyhow::Result<()> {
+        let _write = self.write_lock.lock().await;
+        if self.roles.read().contains_key(name) {
             anyhow::bail!("role '{name}' already exists");
         }
         if let Some(store) = &self.persistence {
-            store.persist_create_role(name)?;
+            store.persist_create_role(name).await?;
         }
-        roles.insert(name.to_string(), Role::new(name));
+        self.roles.write().insert(name.to_string(), Role::new(name));
         Ok(())
     }
 
-    pub fn drop_role(&self, name: &str) -> anyhow::Result<()> {
-        let mut roles = self.roles.write();
-        if !roles.contains_key(name) {
+    pub async fn drop_role(&self, name: &str) -> anyhow::Result<()> {
+        let _write = self.write_lock.lock().await;
+        if !self.roles.read().contains_key(name) {
             anyhow::bail!("role '{name}' does not exist");
         }
         if let Some(store) = &self.persistence {
-            store.persist_drop_role(name)?;
+            store.persist_drop_role(name).await?;
         }
-        roles.remove(name);
+        self.roles.write().remove(name);
         Ok(())
     }
 
-    pub fn grant(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
-        let mut roles = self.roles.write();
-        let entry = roles
-            .get_mut(role)
-            .ok_or_else(|| anyhow::anyhow!("role '{role}' does not exist"))?;
+    pub async fn grant(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
+        let _write = self.write_lock.lock().await;
+        self.assert_role_exists(role)?;
         if let Some(store) = &self.persistence {
-            store.persist_insert_rule(role, false, &rule)?;
+            store.persist_insert_rule(role, false, &rule).await?;
         }
-        entry.grants.insert(rule);
-        Ok(())
+        self.with_role(role, |entry| {
+            entry.grants.insert(rule);
+        })
     }
 
-    pub fn deny(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
-        let mut roles = self.roles.write();
-        let entry = roles
-            .get_mut(role)
-            .ok_or_else(|| anyhow::anyhow!("role '{role}' does not exist"))?;
+    pub async fn deny(&self, role: &str, rule: PrivilegeRule) -> anyhow::Result<()> {
+        let _write = self.write_lock.lock().await;
+        self.assert_role_exists(role)?;
         if let Some(store) = &self.persistence {
-            store.persist_insert_rule(role, true, &rule)?;
+            store.persist_insert_rule(role, true, &rule).await?;
         }
-        entry.denies.insert(rule);
-        Ok(())
+        self.with_role(role, |entry| {
+            entry.denies.insert(rule);
+        })
     }
 
     /// Removes a grant (`is_deny == false`) or deny (`is_deny == true`) rule from a role.
-    pub fn revoke(&self, role: &str, rule: &PrivilegeRule, is_deny: bool) -> anyhow::Result<()> {
+    pub async fn revoke(
+        &self,
+        role: &str,
+        rule: &PrivilegeRule,
+        is_deny: bool,
+    ) -> anyhow::Result<()> {
+        let _write = self.write_lock.lock().await;
+        self.assert_role_exists(role)?;
+        if let Some(store) = &self.persistence {
+            store.persist_remove_rule(role, is_deny, rule).await?;
+        }
+        self.with_role(role, |entry| {
+            if is_deny {
+                entry.denies.remove(rule);
+            } else {
+                entry.grants.remove(rule);
+            }
+        })
+    }
+
+    fn assert_role_exists(&self, role: &str) -> anyhow::Result<()> {
+        if !self.roles.read().contains_key(role) {
+            anyhow::bail!("role '{role}' does not exist");
+        }
+        Ok(())
+    }
+
+    /// Applies `apply` to a role under a short-lived write guard. Callers hold `write_lock`, so the
+    /// role cannot have disappeared since `assert_role_exists`.
+    fn with_role(&self, role: &str, apply: impl FnOnce(&mut Role)) -> anyhow::Result<()> {
         let mut roles = self.roles.write();
         let entry = roles
             .get_mut(role)
             .ok_or_else(|| anyhow::anyhow!("role '{role}' does not exist"))?;
-        if let Some(store) = &self.persistence {
-            store.persist_remove_rule(role, is_deny, rule)?;
-        }
-        if is_deny {
-            entry.denies.remove(rule);
-        } else {
-            entry.grants.remove(rule);
-        }
+        apply(entry);
         Ok(())
     }
 
@@ -286,6 +344,41 @@ impl RoleProvider {
     }
 }
 
+/// The `kind` column value for a grant/deny rule.
+pub fn rule_kind(is_deny: bool) -> &'static str {
+    if is_deny {
+        "deny"
+    } else {
+        "grant"
+    }
+}
+
+/// Encodes a rule target into `(target_type, target_value)` columns. `None` (rule applies to every
+/// target) is stored as the `"none"` sentinel rather than NULL so the rule's identity stays a plain
+/// column tuple and dedupes.
+pub fn encode_target(target: &Option<PrivilegeTarget>) -> (&'static str, String) {
+    match target {
+        None => ("none", String::new()),
+        Some(PrivilegeTarget::All) => ("all", String::new()),
+        Some(PrivilegeTarget::Table(name)) => ("table", name.clone()),
+        Some(PrivilegeTarget::Path(pattern)) => ("path", pattern.clone()),
+    }
+}
+
+/// Inverse of [`encode_target`].
+pub fn decode_target(
+    target_type: &str,
+    target_value: String,
+) -> anyhow::Result<Option<PrivilegeTarget>> {
+    Ok(match target_type {
+        "none" => None,
+        "all" => Some(PrivilegeTarget::All),
+        "table" => Some(PrivilegeTarget::Table(target_value)),
+        "path" => Some(PrivilegeTarget::Path(target_value)),
+        other => anyhow::bail!("unknown target_type '{other}'"),
+    })
+}
+
 /// Segment-aware glob match: `*` does not cross `/`, so `example/*` does not match
 /// `example_2/file.parquet` nor `example/sub/file.parquet`.
 fn path_matches(pattern: &str, path: &str) -> bool {
@@ -311,31 +404,33 @@ mod tests {
         ConcreteTarget::Table(t.to_string())
     }
 
-    #[test]
-    fn create_and_drop_role() {
+    #[tokio::test]
+    async fn create_and_drop_role() {
         let provider = RoleProvider::new();
-        provider.create_role("reader").unwrap();
+        provider.create_role("reader").await.unwrap();
         assert!(provider.role_exists("reader"));
-        assert!(provider.create_role("reader").is_err());
-        provider.drop_role("reader").unwrap();
+        assert!(provider.create_role("reader").await.is_err());
+        provider.drop_role("reader").await.unwrap();
         assert!(!provider.role_exists("reader"));
-        assert!(provider.drop_role("reader").is_err());
+        assert!(provider.drop_role("reader").await.is_err());
     }
 
-    #[test]
-    fn grant_requires_existing_role() {
+    #[tokio::test]
+    async fn grant_requires_existing_role() {
         let provider = RoleProvider::new();
         assert!(provider
             .grant("missing", PrivilegeRule::new(Privilege::Select, None))
+            .await
             .is_err());
     }
 
-    #[test]
-    fn global_grant_allows_any_target() {
+    #[tokio::test]
+    async fn global_grant_allows_any_target() {
         let provider = RoleProvider::new();
-        provider.create_role("reader").unwrap();
+        provider.create_role("reader").await.unwrap();
         provider
             .grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .await
             .unwrap();
         let roles = vec!["reader".to_string()];
         assert!(provider.is_allowed(&roles, Privilege::Select, &path("example/file.parquet")));
@@ -343,12 +438,13 @@ mod tests {
         assert!(!provider.is_allowed(&roles, Privilege::Insert, &table("observations")));
     }
 
-    #[test]
-    fn deny_wins_over_grant() {
+    #[tokio::test]
+    async fn deny_wins_over_grant() {
         let provider = RoleProvider::new();
-        provider.create_role("reader").unwrap();
+        provider.create_role("reader").await.unwrap();
         provider
             .grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .await
             .unwrap();
         provider
             .deny(
@@ -358,6 +454,7 @@ mod tests {
                     Some(PrivilegeTarget::Path("example/*".to_string())),
                 ),
             )
+            .await
             .unwrap();
 
         let roles = vec!["reader".to_string()];
@@ -373,12 +470,13 @@ mod tests {
         assert!(path_matches("example/**", "example/sub/file.parquet"));
     }
 
-    #[test]
-    fn privilege_all_grants_everything() {
+    #[tokio::test]
+    async fn privilege_all_grants_everything() {
         let provider = RoleProvider::new();
-        provider.create_role("admin").unwrap();
+        provider.create_role("admin").await.unwrap();
         provider
             .grant("admin", PrivilegeRule::new(Privilege::All, None))
+            .await
             .unwrap();
         let roles = vec!["admin".to_string()];
         assert!(provider.is_allowed(&roles, Privilege::Drop, &table("observations")));
@@ -386,10 +484,10 @@ mod tests {
         assert!(provider.has_global_all_grant(&roles));
     }
 
-    #[test]
-    fn table_target_is_scoped() {
+    #[tokio::test]
+    async fn table_target_is_scoped() {
         let provider = RoleProvider::new();
-        provider.create_role("writer").unwrap();
+        provider.create_role("writer").await.unwrap();
         provider
             .grant(
                 "writer",
@@ -398,39 +496,54 @@ mod tests {
                     Some(PrivilegeTarget::Table("observations".to_string())),
                 ),
             )
+            .await
             .unwrap();
         let roles = vec!["writer".to_string()];
         assert!(provider.is_allowed(&roles, Privilege::Insert, &table("observations")));
         assert!(!provider.is_allowed(&roles, Privilege::Insert, &table("other")));
     }
 
-    #[test]
-    fn revoke_removes_grant_and_deny() {
+    #[tokio::test]
+    async fn revoke_removes_grant_and_deny() {
         let provider = RoleProvider::new();
-        provider.create_role("reader").unwrap();
+        provider.create_role("reader").await.unwrap();
         let grant = PrivilegeRule::new(Privilege::Select, None);
         let deny = PrivilegeRule::new(
             Privilege::Select,
             Some(PrivilegeTarget::Path("example/*".to_string())),
         );
-        provider.grant("reader", grant.clone()).unwrap();
-        provider.deny("reader", deny.clone()).unwrap();
+        provider.grant("reader", grant.clone()).await.unwrap();
+        provider.deny("reader", deny.clone()).await.unwrap();
 
         let roles = vec!["reader".to_string()];
         assert!(!provider.is_allowed(&roles, Privilege::Select, &path("example/f.parquet")));
 
-        provider.revoke("reader", &deny, true).unwrap();
+        provider.revoke("reader", &deny, true).await.unwrap();
         assert!(provider.is_allowed(&roles, Privilege::Select, &path("example/f.parquet")));
 
-        provider.revoke("reader", &grant, false).unwrap();
+        provider.revoke("reader", &grant, false).await.unwrap();
         assert!(!provider.is_allowed(&roles, Privilege::Select, &path("anything.parquet")));
     }
 
-    #[test]
-    fn default_deny_without_rules() {
+    #[tokio::test]
+    async fn default_deny_without_rules() {
         let provider = RoleProvider::new();
-        provider.create_role("empty").unwrap();
+        provider.create_role("empty").await.unwrap();
         let roles = vec!["empty".to_string()];
         assert!(!provider.is_allowed(&roles, Privilege::Select, &table("x")));
+    }
+
+    #[test]
+    fn target_round_trips_through_columns() {
+        for target in [
+            None,
+            Some(PrivilegeTarget::All),
+            Some(PrivilegeTarget::Table("obs".to_string())),
+            Some(PrivilegeTarget::Path("example/*".to_string())),
+        ] {
+            let (target_type, target_value) = encode_target(&target);
+            assert_eq!(decode_target(target_type, target_value).unwrap(), target);
+        }
+        assert!(decode_target("bogus", String::new()).is_err());
     }
 }

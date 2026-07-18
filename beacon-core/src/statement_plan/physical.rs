@@ -333,7 +333,9 @@ side_effect_exec!(AuthExec, "AuthExec", |exec: &AuthExec| {
     let session = upgrade_session(&exec.session)?;
     let statement = exec.statement.clone();
     Ok(side_effect_stream(async move {
-        super::auth::apply_auth_statement(&session, &statement).map_err(to_df_err)
+        super::auth::apply_auth_statement(&session, &statement)
+            .await
+            .map_err(to_df_err)
     }))
 });
 

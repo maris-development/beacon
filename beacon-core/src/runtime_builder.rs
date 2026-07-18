@@ -1,14 +1,22 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, OnceLock, Weak},
+};
 
+use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
+use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
 use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
+use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
-use beacon_auth::{AuthContext, BasicAuthProvider};
-use beacon_data_lake::{init_tables, PersistentSchemaProvider, DB_OBJECT_STORE_URL};
+use beacon_auth::{
+    AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, UserDirectory,
+};
 use beacon_datafusion_ext::{
     format_ext::FileFormatFactoryExt,
     listing_table_factory_ext::ListingTableFactoryExt,
@@ -18,18 +26,18 @@ use beacon_datafusion_ext::{
     stats_cache::BeaconFileStatisticsCache,
     type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening},
 };
-use beacon_functions::register_functions;
+use beacon_functions::{function_doc::FunctionDoc, register_functions};
+use beacon_object_storage::{ObjectStores, StorageConfig};
 use datafusion::{
     execution::{
         cache::cache_manager::CacheManagerConfig,
         disk_manager::DiskManagerBuilder,
         memory_pool::FairSpillPool,
-        object_store::{ObjectStoreRegistry, ObjectStoreUrl},
+        object_store::ObjectStoreUrl,
         runtime_env::{RuntimeEnv, RuntimeEnvBuilder},
         SessionStateBuilder,
     },
     optimizer::OptimizerRule,
-    physical_optimizer,
     prelude::{SessionConfig, SessionContext},
 };
 use object_store::ObjectStore;
@@ -38,14 +46,22 @@ use tempfile::env::temp_dir;
 use tokio::runtime::Handle;
 
 use crate::{
+    auth_store::TablesAuthStore,
     runtime::Runtime,
+    settings::{CoreSettings, ObjectStoreUrls, SqlSettings},
     statement_plan::{new_session_cell, BeaconQueryPlanner, SessionCell},
 };
 
+#[derive(Default)]
 pub struct RuntimeBuilder {
     pub runtime_handle: Option<Handle>,
-    pub db_path: Option<PathBuf>,
+    /// The URL relative dataset paths resolve against, and the URL the datasets
+    /// store is registered under. `None` => the `datasets://` default (see
+    /// [`ObjectStoreUrls::default`]).
     pub default_store_url: Option<ObjectStoreUrl>,
+    pub db_store_url: Option<ObjectStoreUrl>,
+    /// Backs [`Self::default_store_url`]. `None` => the store described by
+    /// [`Self::storage`] (by default a local filesystem rooted at the cwd).
     pub default_store: Option<Arc<dyn ObjectStore>>,
 
     pub admin_username: Option<String>,
@@ -58,35 +74,30 @@ pub struct RuntimeBuilder {
     pub batch_size: Option<usize>,
     pub nd_pipeline: bool,
 
-    pub crawler_default_interval_secs: Option<u64>,
+    pub crawler: CrawlerConfig,
 
-    pub netcdf_reader_cache_size: Option<usize>,
-    pub netcdf_statistics: bool,
+    pub netcdf: NetcdfConfig,
 
     pub auth_provider: Option<Arc<dyn beacon_auth::AuthProvider>>,
     pub secrets_encryption_key: Option<[u8; 32]>,
 
-    pub type_widening: Option<Arc<dyn ArrowTypeWideningStrategy>>,
-}
+    /// Username resolving unauthenticated access. `None` disables anonymous access.
+    pub anonymous_username: Option<String>,
+    /// Whether table-level grants are enforced for non-super-users.
+    pub auth_enforce: bool,
 
-impl Default for RuntimeBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub settings: CoreSettings,
+
+    pub type_widening: Option<Arc<dyn ArrowTypeWideningStrategy>>,
 }
 
 impl RuntimeBuilder {
     pub fn new() -> Self {
-        Self {
-            ..Default::default()
-        }
+        Self::default()
     }
 
     pub fn new_with_path(db_path: PathBuf) -> Self {
-        Self {
-            db_path: Some(db_path),
-            ..Default::default()
-        }
+        Self::new().with_db_path(db_path)
     }
 
     pub fn with_runtime_handle(mut self, handle: Handle) -> Self {
@@ -94,14 +105,73 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_db_path(mut self, db_path: PathBuf) -> Self {
-        self.db_path = Some(db_path);
+    /// Where the datasets / tables / tmp stores live.
+    pub fn with_storage(mut self, storage: StorageConfig) -> Self {
+        self.storage = storage;
         self
     }
 
+    /// Persists the tables store (catalog + managed data) to a single redb file at
+    /// `db_path`. Without this the tables store is in-memory and nothing persists.
+    pub fn with_db_path(mut self, db_path: PathBuf) -> Self {
+        self.storage.db_path = Some(db_path);
+        self
+    }
+
+    /// Resolves dataset paths against `url`, backed by `store`, in place of the
+    /// datasets store [`Self::storage`] would otherwise describe.
+    ///
+    /// `store` is a plain [`ObjectStore`], registered as the datasets store as-is.
+    /// Two consequences, since a raw store cannot describe itself: it emits no change
+    /// notifications, so external tables over it become current on an explicit
+    /// `REFRESH` only; and the netCDF/Atlas readers open files natively under
+    /// `storage.datasets_dir` (a local root), so an embedder injecting a *local*
+    /// store that it wants to read natively must point `storage.datasets_dir` at that
+    /// store's root (an S3-backed store cannot be read natively at all).
     pub fn with_default_store(mut self, url: ObjectStoreUrl, store: Arc<dyn ObjectStore>) -> Self {
         self.default_store_url = Some(url);
         self.default_store = Some(store);
+        self
+    }
+
+    /// Registers the tables store (table definitions, managed Lance data,
+    /// materialized-view data) under `url` in place of the `db://` default. The
+    /// backing store still comes from [`Self::storage`] / [`Self::with_object_stores`];
+    /// this only changes the URL it is registered under and read back from.
+    pub fn with_tables_store_url(mut self, url: ObjectStoreUrl) -> Self {
+        self.db_store_url = Some(url);
+        self
+    }
+
+    /// Registers the tmp store (query output) under `url` in place of the `tmp://`
+    /// default. The backing store still comes from [`Self::storage`] /
+    /// [`Self::with_object_stores`]; this only changes the URL it is registered under
+    /// and read back from.
+    pub fn with_tmp_store_url(mut self, url: ObjectStoreUrl) -> Self {
+        self.tmp_store_url = Some(url);
+        self
+    }
+
+    /// Injects the whole set of object stores (datasets + tables + tmp), so the
+    /// embedder owns storage rather than beacon-core building it from
+    /// [`StorageConfig`]. The datasets store is registered at the configured
+    /// datasets URL (`default_store_url`, else `datasets://`) — the same URL
+    /// plan-time code resolves dataset paths against — so there is still exactly
+    /// one datasets store per runtime.
+    ///
+    /// Precedence: if set, this wins over [`Self::with_default_store`] (which
+    /// supplies only the datasets backend) and over the [`StorageConfig`]-derived
+    /// default; when both are set, the injected [`ObjectStores`] is used whole and
+    /// `with_default_store`'s backend is ignored.
+    ///
+    /// Caveat (same as [`Self::with_default_store`]): injecting stores does **not**
+    /// supply the local roots the native readers/writers need. netCDF/Atlas read via
+    /// `storage.datasets_dir` and the tmp output writer + netCDF sink write under
+    /// `storage.tmp_dir`; an embedder injecting stores it also wants read/written
+    /// natively must keep `storage.datasets_dir` / `storage.tmp_dir` pointing at the
+    /// matching local roots.
+    pub fn with_object_stores(mut self, stores: ObjectStores) -> Self {
+        self.object_stores = Some(stores);
         self
     }
 
@@ -131,18 +201,27 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_crawler(mut self, default_interval_secs: Option<u64>) -> Self {
-        self.crawler_default_interval_secs = default_interval_secs;
+    /// Configures the crawler subsystem. `CrawlerConfig::enable = false` builds a
+    /// runtime with no crawler at all (crawler DDL then errors).
+    pub fn with_crawler(mut self, crawler: CrawlerConfig) -> Self {
+        self.crawler = crawler;
         self
     }
 
     pub fn with_netcdf_reader_cache(mut self, cache_size: usize) -> Self {
-        self.netcdf_reader_cache_size = Some(cache_size);
+        self.netcdf.use_reader_cache = true;
+        self.netcdf.reader_cache_size = cache_size;
         self
     }
 
     pub fn with_netcdf_statistics(mut self) -> Self {
-        self.netcdf_statistics = true;
+        self.netcdf.enable_statistics = true;
+        self
+    }
+
+    /// Replaces the whole NetCDF reader configuration.
+    pub fn with_netcdf_config(mut self, netcdf: NetcdfConfig) -> Self {
+        self.netcdf = netcdf;
         self
     }
 
@@ -166,7 +245,28 @@ impl RuntimeBuilder {
         self
     }
 
-    pub async fn build(self) -> anyhow::Result<Runtime> {
+    /// Enables anonymous access, resolving unauthenticated callers to `username`.
+    /// The user is created (password-less, roleless) at build time if absent.
+    pub fn with_anonymous_user(mut self, username: impl Into<String>) -> Self {
+        self.anonymous_username = Some(username.into());
+        self
+    }
+
+    /// Enables table-level grant enforcement for non-super-users. Off by default:
+    /// without it, any authenticated identity may read any table.
+    pub fn with_auth_enforcement(mut self, enforce: bool) -> Self {
+        self.auth_enforce = enforce;
+        self
+    }
+
+    /// Replaces the plan-time SQL settings (default table, projection pushdown,
+    /// output-stream coalescing).
+    pub fn with_sql_settings(mut self, sql: SqlSettings) -> Self {
+        self.settings.sql = sql;
+        self
+    }
+
+    pub async fn build(mut self) -> anyhow::Result<Runtime> {
         let runtime_handle = match &self.runtime_handle {
             Some(handle) => handle.clone(),
             None => Handle::try_current().map_err(|_| {
@@ -174,64 +274,252 @@ impl RuntimeBuilder {
             })?,
         };
 
-        let session_ctx = init_session_ctx(&self, runtime_handle)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
+        // The URLs beacon's stores are registered under and that plan-time code
+        // resolves against. Each defaults to its conventional scheme; the builder
+        // overrides any of them. The same value is both registered (in
+        // `register_object_stores`) and published as the `ObjectStoreUrls` session
+        // extension, so a store's registration URL cannot drift from the URL its
+        // consumers read.
+        let mut object_store_urls = ObjectStoreUrls::default();
+        if let Some(url) = self.default_store_url.clone() {
+            object_store_urls.datasets = url;
+        }
+        if let Some(url) = self.db_store_url.clone() {
+            object_store_urls.tables = url;
+        }
+        if let Some(url) = self.tmp_store_url.clone() {
+            object_store_urls.tmp = url;
+        }
 
-        let auth_context = Arc::new(init_auth_context(&self).await?);
+        // The stores are built once and shared: the session resolves the datasets
+        // URL, `db://` and `tmp://` through them, and the crawler walks the datasets
+        // store. There is exactly one datasets store per runtime — an injected
+        // backend is registered directly — so queries, the crawler and `init_tables`
+        // all address the same object at `datasets_url`.
+        //
+        // Precedence: a whole injected `ObjectStores` (`with_object_stores`) wins; else
+        // a `with_default_store` backend wraps the `StorageConfig`-derived stores; else
+        // everything is built from `StorageConfig`.
+        let object_stores = match self.object_stores.take() {
+            Some(stores) => stores,
+            None => match &self.default_store {
+                Some(store) => {
+                    ObjectStores::new_with_datasets_backend(&self.storage, store.clone()).await
+                }
+                None => ObjectStores::new(&self.storage).await,
+            }
+            .map_err(|e| anyhow::anyhow!("Failed to initialize object stores: {e}"))?,
+        };
+
+        // The planner's late-filled weak handle to the session. Created here so both the auth store
+        // and the query planner share the same cell; it is filled once the session exists.
+        let session_cell = new_session_cell();
+
+        // Built before the session so it can be published as a session extension: the `AuthExec`
+        // node recovers it from there to apply auth DDL. Unhydrated — the tables-backed store
+        // reaches its tables through `session_cell`, which does not yet point anywhere.
+        let AuthSetup {
+            context: auth_context,
+            store: auth_store,
+        } = init_auth_context(&self, session_cell.clone()).await?;
+        let auth_context = Arc::new(auth_context);
+
+        let (session_ctx, file_formats, table_function_docs) = init_session_ctx(
+            &self,
+            runtime_handle,
+            &object_stores,
+            &object_store_urls,
+            auth_context.clone(),
+            session_cell,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
+
+        // The session and its tables now exist and the session cell is filled, so the auth store can
+        // reach its tables. Ensure they exist, hydrate the in-memory user/role copies from whatever
+        // is already there (spawning from an already-populated store across a restart), then
+        // bootstrap. All idempotent, so this is safe on every start.
+        auth_store.ensure_tables().await?;
+        auth_context.hydrate().await?;
+        bootstrap_auth(&self, &auth_context).await?;
+
+        let crawler_manager =
+            init_crawler_manager(&self, &session_ctx, file_formats, &object_store_urls).await?;
+
+        // Event-driven external-table refresh was removed; external tables become
+        // current on an explicit `REFRESH` only.
+
+        let tmp_dir = self.tmp_dir_path.unwrap_or_else(temp_dir);
+        // Best-effort cleanup of query-output files a previous process crashed
+        // before their `TempObject` could delete them. The happy path is RAII.
+        crate::query::temp_object::sweep_stale_outputs(&tmp_dir);
 
         Ok(Runtime {
             session_ctx,
-            table_function_docs: vec![],
+            table_function_docs,
             query_metrics: Arc::new(Mutex::new(HashMap::new())),
-            crawler_manager: None,
+            crawler_manager,
             auth: auth_context,
+            auth_enforce: self.auth_enforce,
 
-            tmp_dir: self.tmp_dir_path.unwrap_or_else(temp_dir),
+            datasets_dir: self.storage.datasets_dir.clone(),
+            tmp_dir,
         })
     }
 }
 
-async fn init_auth_context(builder: &RuntimeBuilder) -> anyhow::Result<AuthContext> {
-    if let Some(auth_provider) = &builder.auth_provider {
-        // Initialize the auth provider with the session context if needed
-        // For example, you might want to set up any necessary state or configuration here
-        Ok(AuthContext::new(auth_provider.clone()))
-    } else {
-        Ok(AuthContext::new(Arc::new(BasicAuthProvider::new())))
+/// Builds the crawler manager, loads persisted crawlers and starts their triggers,
+/// then publishes it through the session-extension handle so `CREATE/RUN/DROP
+/// CRAWLER` can reach it. Returns `None` when the crawler subsystem is disabled.
+async fn init_crawler_manager(
+    builder: &RuntimeBuilder,
+    session_ctx: &Arc<SessionContext>,
+    file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
+    urls: &ObjectStoreUrls,
+) -> anyhow::Result<Option<Arc<CrawlerManager>>> {
+    if !builder.crawler.enable {
+        return Ok(None);
     }
+
+    let crawler_manager = CrawlerManager::new(
+        session_ctx.clone(),
+        file_formats,
+        urls.datasets().clone(),
+        urls.tables().clone(),
+        builder.crawler.clone(),
+    );
+    crawler_manager.init().await?;
+
+    // The handle registered on the session holds a Weak, so the runtime keeps the
+    // only strong reference and dropping it releases the session context. The
+    // extension is keyed on the inner type: `CrawlerManagerHandle` is itself an Arc.
+    if let Some(handle) = session_ctx
+        .state()
+        .config()
+        .get_extension::<OnceLock<Weak<CrawlerManager>>>()
+    {
+        let _ = handle.set(Arc::downgrade(&crawler_manager));
+    }
+
+    Ok(Some(crawler_manager))
+}
+
+/// The auth context plus the tables-backed store that has to be brought online once the session
+/// (and its tables) exist. Kept separate so `build` can drive the ordering: build unhydrated →
+/// create session → ensure tables → hydrate → bootstrap.
+struct AuthSetup {
+    context: AuthContext,
+    store: Arc<TablesAuthStore>,
+}
+
+/// Builds the auth context around the tables-backed store, **unhydrated**.
+///
+/// The store persists users, roles and grants in the internal managed tables and reaches them
+/// through `session_cell` — which is filled only after the session exists — so the in-memory copies
+/// stay empty until `build` hydrates them. Roles are always tables-backed; the user store is
+/// tables-backed only for the default Basic provider (a custom provider, e.g. OIDC, owns its own
+/// user directory, which beacon does not persist).
+///
+/// The config-defined super-user is set here (it is never stored in the tables — the only way to be
+/// a super-user is the `BEACON_ADMIN_*` credential), and anonymous access is recorded so
+/// `anonymous_enabled` reflects config immediately; the anonymous *user* is seeded in
+/// [`bootstrap_auth`], after the tables are reachable.
+async fn init_auth_context(
+    builder: &RuntimeBuilder,
+    session_cell: SessionCell,
+) -> anyhow::Result<AuthSetup> {
+    let store = Arc::new(TablesAuthStore::new(session_cell));
+    let role_provider = RoleProvider::with_store(store.clone() as Arc<dyn RoleStore>);
+
+    let provider: Arc<dyn beacon_auth::AuthProvider> = match &builder.auth_provider {
+        Some(auth_provider) => auth_provider.clone(),
+        None => {
+            let user_store = Arc::new(InMemoryUserStore::with_store(
+                store.clone() as Arc<dyn UserDirectory>
+            ));
+            Arc::new(BasicAuthProvider::with_user_store(user_store))
+        }
+    };
+
+    let mut context = AuthContext::with_role_provider(provider, role_provider);
+
+    if let (Some(username), Some(password)) = (&builder.admin_username, &builder.admin_password) {
+        context.set_super_user(username, password);
+    }
+
+    if let Some(anonymous) = &builder.anonymous_username {
+        context.set_anonymous_user(anonymous);
+    }
+
+    Ok(AuthSetup { context, store })
+}
+
+/// Idempotent bootstrap, run on every start once the tables are hydrated: seed the anonymous
+/// principal (password-less, roleless) when anonymous access is enabled. Admins can later grant it
+/// read-only roles via `GRANT ROLE <role> TO USER <anonymous>`. Re-running against a populated store
+/// is a no-op (the user already exists in the hydrated copy).
+async fn bootstrap_auth(builder: &RuntimeBuilder, auth: &Arc<AuthContext>) -> anyhow::Result<()> {
+    if let Some(anonymous) = &builder.anonymous_username {
+        if !auth.user_exists(anonymous).await {
+            auth.create_user(anonymous, "").await?;
+        }
+    }
+    Ok(())
 }
 
 async fn init_session_ctx(
     builder: &RuntimeBuilder,
     tokio_handle: Handle,
-) -> anyhow::Result<Arc<SessionContext>> {
-    let secrets_store = Arc::new(SecretStore::new());
+    object_stores: &ObjectStores,
+    urls: &ObjectStoreUrls,
+    auth_context: Arc<AuthContext>,
+    session_cell: SessionCell,
+) -> anyhow::Result<(
+    Arc<SessionContext>,
+    Vec<Arc<dyn FileFormatFactoryExt>>,
+    Vec<FunctionDoc>,
+)> {
+    let secrets_store = Arc::new(SecretStore::new_with_master_key(
+        builder.secrets_encryption_key,
+    ));
 
-    let config = build_session_config(builder, secrets_store.clone())?;
+    let config = build_session_config(
+        builder,
+        secrets_store.clone(),
+        auth_context,
+        object_stores,
+        urls,
+    )?;
     let runtime_env = runtime_env_builder(builder, secrets_store.clone())?;
 
-    let session_cell = new_session_cell();
     let session_state = build_session_state(builder, config, runtime_env, session_cell.clone())?;
 
     let session_ctx = Arc::new(SessionContext::new_with_state(session_state));
 
-    let file_formats = register_file_formats(&session_ctx)?;
+    // The query planner holds this cell (a Weak, to avoid a cycle through the
+    // session state it is registered on) and upgrades it when executing a
+    // statement plan. Fill it as soon as the context exists.
+    let _ = session_cell.set(Arc::downgrade(&session_ctx));
 
-    register_functions(
+    // Must precede `init_tables` (and any dataset access): it registers the
+    // datasets, tables and tmp URLs the catalog is read through.
+    register_object_stores(&session_ctx, object_stores, urls)?;
+
+    let file_formats = register_file_formats(builder, &session_ctx)?;
+
+    // Returns the table-function docs: the UDTF registry cannot be enumerated with
+    // metadata afterwards, so this snapshot backs `Runtime::list_table_functions`.
+    let table_function_docs = register_functions(
         session_ctx.clone(),
         tokio_handle,
         file_formats.clone(),
-        builder
-            .default_store_url
-            .clone()
-            .unwrap_or_else(ObjectStoreUrl::local_filesystem),
+        urls.datasets().clone(),
     );
 
     let schema_provider = Arc::new(PersistentSchemaProvider::new(
         tokio::runtime::Handle::current(),
         session_ctx.clone(),
-        DB_OBJECT_STORE_URL.clone(),
+        urls.tables().clone(),
     ));
 
     session_ctx
@@ -239,12 +527,19 @@ async fn init_session_ctx(
         .ok_or(anyhow::anyhow!("Failed to get catalog 'beacon'"))?
         .register_schema("public", schema_provider.clone())?;
 
-    init_tables(&session_ctx, &schema_provider).await?;
+    init_tables(
+        &session_ctx,
+        &schema_provider,
+        urls.tables(),
+        urls.datasets(),
+    )
+    .await?;
 
-    Ok(session_ctx)
+    Ok((session_ctx, file_formats, table_function_docs))
 }
 
 fn register_file_formats(
+    builder: &RuntimeBuilder,
     session_ctx: &Arc<SessionContext>,
 ) -> anyhow::Result<Vec<Arc<dyn FileFormatFactoryExt>>> {
     let state_ref = session_ctx.state_ref();
@@ -254,16 +549,15 @@ fn register_file_formats(
         Arc::new(ParquetFormatFactory),
         Arc::new(CsvFormatFactory),
         Arc::new(ArrowFormatFactory),
-        // Arc::new(NetCDFFormatFactory::new(
-        //     datasets_object_store.clone(),
-        //     NetcdfOptions::default(),
-        //     config.netcdf.clone(),
-        // )),
-        // Arc::new(AtlasFormatFactory::new(
-        //     datasets_object_store.clone(),
-        //     AtlasOptions::default(),
-        //     config.atlas.clone(),
-        // )),
+        // NetCDF opens files natively rather than through `object_store`, so it joins
+        // object paths under the datasets store's local root; writes go to the tmp
+        // store root. Native reads therefore require a local-filesystem datasets store.
+        Arc::new(NetCDFFormatFactory::new(
+            builder.storage.datasets_dir.clone(),
+            builder.storage.tmp_dir.clone(),
+            NetcdfOptions::default(),
+            builder.netcdf.clone(),
+        )),
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory),
         Arc::new(BBFFormatFactory::new(Default::default())),
@@ -283,23 +577,28 @@ fn build_session_state(
     session_cell: SessionCell,
 ) -> anyhow::Result<datafusion::execution::context::SessionState> {
     let mut optimizer_rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> = vec![];
+    // This is DataFusion's default logical rule set with `FederationOptimizerRule`
+    // inserted, so replacing the defaults with it is intentional: sub-plans rooted
+    // at remote tables get pushed down. The matching `FederatedPlanner` lives in
+    // `BeaconQueryPlanner`'s extension planners.
     optimizer_rules.extend(datafusion_federation::default_optimizer_rules());
 
-    let mut physical_optimizer_rules: Vec<
-        Arc<dyn physical_optimizer::PhysicalOptimizerRule + Send + Sync>,
-    > = vec![];
-
-    if builder.nd_pipeline {
-        physical_optimizer_rules.push(Arc::new(NdProjectionPushdown::new()));
-    }
-
-    let state_builder = SessionStateBuilder::new()
+    let mut state_builder = SessionStateBuilder::new()
         .with_config(session_config)
         .with_runtime_env(runtime_env)
         .with_default_features()
         .with_optimizer_rules(optimizer_rules)
-        .with_physical_optimizer_rules(physical_optimizer_rules)
         .with_query_planner(Arc::new(BeaconQueryPlanner::new(session_cell.clone())));
+
+    // Opt-in nd-pipeline optimizer. Appended to (never replacing) the default
+    // physical rules: it must see the planned `ProjectionExec` above
+    // `NdBroadcastExec`, and dropping the defaults would remove
+    // `EnforceDistribution` — without which a Final aggregate never merges its
+    // partitions and `count(*)` returns one row per file group.
+    if builder.nd_pipeline {
+        state_builder =
+            state_builder.with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
+    }
 
     Ok(state_builder.build())
 }
@@ -307,14 +606,36 @@ fn build_session_state(
 fn build_session_config(
     builder: &RuntimeBuilder,
     secrets_store: Arc<SecretStore>,
+    auth_context: Arc<AuthContext>,
+    object_stores: &ObjectStores,
+    urls: &ObjectStoreUrls,
 ) -> anyhow::Result<SessionConfig> {
+    // Plan-time code reaches these settings through the SessionConfig extensions,
+    // where no `Runtime` handle is available.
+    let settings = Arc::new(CoreSettings {
+        sql: builder.settings.sql.clone(),
+    });
+
     let mut config = SessionConfig::new()
+        // Beacon's tables live in `beacon.public`; the schema is later replaced by
+        // the PersistentSchemaProvider.
+        .with_default_catalog_and_schema("beacon", "public")
         .with_batch_size(builder.batch_size.unwrap_or(64 * 1024))
         .with_coalesce_batches(true)
         .with_target_partitions(builder.vm_cpu_limit.unwrap_or(num_cpus::get()))
         .with_information_schema(true)
         .with_collect_statistics(true)
         .with_spill_compression(datafusion::config::SpillCompression::Lz4Frame)
+        .with_extension(settings)
+        // Recovered by the `AuthExec` node to apply auth DDL (CREATE USER/ROLE, GRANT, ...).
+        .with_extension(auth_context)
+        // Routes managed Lance tables through beacon's tables store. Per-runtime (no
+        // process globals), so managed-table CRUD stays isolated.
+        .with_extension(Arc::new(beacon_lance::LanceWarehouse::new(
+            object_stores.tables.clone(),
+        )))
+        // Late-filled by `init_crawler_manager` once the data lake and tables exist.
+        .with_extension(new_crawler_manager_handle())
         .with_extension(secrets_store.clone())
         .with_extension(Arc::new(ArrowTypeWidening::new(
             builder
@@ -322,11 +643,15 @@ fn build_session_config(
                 .clone()
                 .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening)),
         )))
+        // The URLs plan-time code resolves against (datasets / tables / tmp), each
+        // the same URL its store above is registered under.
+        .with_extension(Arc::new(urls.clone()))
+        // The store a `CREATE EXTERNAL TABLE` LOCATION is resolved against. Built
+        // from the datasets URL, not the local filesystem: a bare `LOCATION 'obs/'`
+        // means "in the datasets store", and resolving it against `file://` silently
+        // yields an empty table instead of an error.
         .with_extension(Arc::new(ListingTableFactoryExt::new(
-            builder
-                .default_store_url
-                .clone()
-                .unwrap_or(ObjectStoreUrl::local_filesystem()),
+            urls.datasets().clone(),
         )));
 
     config.options_mut().sql_parser.enable_ident_normalization = false;
@@ -388,15 +713,10 @@ fn runtime_env_builder(
     builder: &RuntimeBuilder,
     secrets_store: Arc<SecretStore>,
 ) -> anyhow::Result<Arc<RuntimeEnv>> {
+    // An injected default store is *not* registered here: it is registered by
+    // `register_object_stores` under the configured datasets URL, so queries, the
+    // crawler and `init_tables` all address the same object.
     let object_store_registry = LazyObjectStoreRegistry::new(secrets_store);
-
-    if let Some(default_store_url) = &builder.default_store_url {
-        if let Some(default_store) = &builder.default_store {
-            object_store_registry.register_store(default_store_url.as_ref(), default_store.clone());
-        } else {
-            anyhow::bail!("default_store_url is set but default_store is None");
-        }
-    }
 
     let runtime_env_builder = RuntimeEnvBuilder::new()
         .with_disk_manager_builder(DiskManagerBuilder::default())

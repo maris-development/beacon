@@ -1,7 +1,7 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use beacon_nd_array::dataset::AnyDataset;
-use beacon_object_storage::DatasetsStore;
 use object_store::ObjectMeta;
 
 use crate::reader;
@@ -42,7 +42,7 @@ struct CacheKey {
 /// out of caching).
 pub async fn open_dataset(
     cache: Option<&NetcdfReaderCache>,
-    object_store: Arc<DatasetsStore>,
+    datasets_root: PathBuf,
     object: ObjectMeta,
 ) -> anyhow::Result<AnyDataset> {
     let key = CacheKey {
@@ -56,7 +56,7 @@ pub async fn open_dataset(
         }
     }
 
-    let netcdf_path = object_store.translate_netcdf_url_path(&object.location)?;
+    let netcdf_path = beacon_object_storage::local_object_path(&datasets_root, &object.location)?;
 
     let dataset = reader::open_dataset(netcdf_path).await?;
 
@@ -77,13 +77,13 @@ pub async fn open_dataset(
 /// so the schema matches
 /// what `SELECT *` can actually return.
 pub async fn fetch_schema(
-    object_store: Arc<DatasetsStore>,
+    datasets_root: PathBuf,
     object: ObjectMeta,
     read_dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
     // Schema inference does not consult the reader cache; the cache benefits
     // repeated data scans, which flow through `NetCDFSource`.
-    let dataset = open_dataset(None, object_store, object)
+    let dataset = open_dataset(None, datasets_root, object)
         .await
         .map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(

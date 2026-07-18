@@ -12,7 +12,6 @@ postgres = ["datafusion-table-providers/postgres-federation"]
 mysql = ["datafusion-table-providers/mysql-federation"]
 
 [dependencies]
-beacon-config = { path = "../beacon-config" }
 beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
 
 datafusion = { workspace = true }

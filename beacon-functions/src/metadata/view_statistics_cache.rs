@@ -31,10 +31,11 @@ use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_datafusion_err,
     datasource::MemTable,
+    execution::object_store::ObjectStoreUrl,
     logical_expr::{Signature, Volatility},
     prelude::{Expr, SessionContext},
 };
-use object_store::{ObjectStore, ObjectStoreExt};
+use object_store::ObjectStoreExt;
 use tokio::runtime::Handle;
 
 use crate::file_formats::BeaconTableFunctionImpl;
@@ -61,6 +62,9 @@ pub struct ViewStatisticsCacheFunc {
     cache: Arc<BeaconFileStatisticsCache>,
     runtime_handle: Handle,
     session_ctx: Weak<SessionContext>,
+    /// URL the datasets store is registered under, resolved from the session's
+    /// object-store registry at call time.
+    datasets_url: ObjectStoreUrl,
 }
 
 impl ViewStatisticsCacheFunc {
@@ -68,11 +72,13 @@ impl ViewStatisticsCacheFunc {
         session_ctx: Weak<SessionContext>,
         cache: Arc<BeaconFileStatisticsCache>,
         runtime_handle: Handle,
+        datasets_url: ObjectStoreUrl,
     ) -> Self {
         Self {
             cache,
             runtime_handle,
             session_ctx,
+            datasets_url,
         }
     }
 }
@@ -125,12 +131,10 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
         })?;
         let store = session_ctx
             .state()
-            .config()
-            .get_extension::<beacon_object_storage::DatasetsStore>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Internal(
-                    "datasets object store missing from session config".to_string(),
-                )
+            .runtime_env()
+            .object_store(self.datasets_url.clone())
+            .map_err(|e| {
+                plan_datafusion_err!("failed to resolve datasets object store: {e}")
             })?;
 
         // Validate each cached entry against the live object store by calling head().

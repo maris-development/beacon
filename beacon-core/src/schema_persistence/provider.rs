@@ -5,7 +5,7 @@
 //! verbatim. The wrapper exists only to add one side effect — persisting and
 //! removing each table's `db://<name>/table.json` definition as it is
 //! registered or deregistered — so that the catalog survives restarts (it is
-//! rebuilt at startup by [`crate::init_tables`]).
+//! rebuilt at startup by [`super::init_tables`]).
 
 use std::{
     any::Any,
@@ -21,7 +21,9 @@ use datafusion::{
     prelude::SessionContext,
 };
 
-use super::schema_persistence::SchemaPersistenceService;
+use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
+
+use super::service::SchemaPersistenceService;
 
 /// Schema provider for `beacon.public` that persists table definitions on
 /// registration and removes them on deregistration.
@@ -70,8 +72,23 @@ impl PersistentSchemaProvider {
         ))
     }
 
+    /// Run a persistence side effect to completion from the sync `SchemaProvider`
+    /// trait methods. A no-op when the session context is gone. Requires a
+    /// multi-threaded runtime (`block_in_place`).
+    fn run_persistence<F, Fut>(&self, side_effect: F) -> datafusion::error::Result<()>
+    where
+        F: FnOnce(SchemaPersistenceService) -> Fut,
+        Fut: std::future::Future<Output = datafusion::error::Result<()>>,
+    {
+        let Some(persistence) = self.schema_persistence_service() else {
+            return Ok(());
+        };
+        let handle = self.runtime_handle.clone();
+        tokio::task::block_in_place(|| handle.block_on(side_effect(persistence)))
+    }
+
     /// Register a provider that was loaded from a persisted definition, without
-    /// re-persisting it. Used by [`crate::init_tables`] during startup recovery.
+    /// re-persisting it. Used by [`super::init_tables`] during startup recovery.
     pub fn insert_loaded(
         &self,
         name: String,
@@ -100,7 +117,15 @@ impl SchemaProvider for PersistentSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        self.inner.table_names()
+        // Beacon's internal auth tables are hidden from user-facing listings
+        // (this backs both `SHOW TABLES` and `information_schema`); they hold
+        // password hashes and are super-user-only. `table`/`table_exist` still
+        // resolve them so the auth write path and super-users reach them.
+        self.inner
+            .table_names()
+            .into_iter()
+            .filter(|name| !name.starts_with(INTERNAL_TABLE_PREFIX))
+            .collect()
     }
 
     fn table_exist(&self, name: &str) -> bool {
@@ -116,18 +141,15 @@ impl SchemaProvider for PersistentSchemaProvider {
         name: String,
         table: Arc<dyn TableProvider>,
     ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
-        if let Some(persistence) = self.schema_persistence_service() {
-            let handle = self.runtime_handle.clone();
+        self.run_persistence(|persistence| {
             let persist_name = name.clone();
             let persist_table = table.clone();
-            tokio::task::block_in_place(|| {
-                handle.block_on(async move {
-                    persistence
-                        .persist_provider_definition(&persist_name, persist_table.as_ref())
-                        .await
-                })
-            })?;
-        }
+            async move {
+                persistence
+                    .persist_provider_definition(&persist_name, persist_table.as_ref())
+                    .await
+            }
+        })?;
 
         // DataFusion's `MemorySchemaProvider` refuses to overwrite an existing
         // entry, but beacon registers a fresh provider over an existing name to
@@ -142,14 +164,10 @@ impl SchemaProvider for PersistentSchemaProvider {
         &self,
         name: &str,
     ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
-        if let Some(persistence) = self.schema_persistence_service() {
-            let handle = self.runtime_handle.clone();
+        self.run_persistence(|persistence| {
             let remove_name = name.to_string();
-            tokio::task::block_in_place(|| {
-                handle
-                    .block_on(async move { persistence.remove_persisted_table(&remove_name).await })
-            })?;
-        }
+            async move { persistence.remove_persisted_table(&remove_name).await }
+        })?;
 
         self.inner.deregister_table(name)
     }

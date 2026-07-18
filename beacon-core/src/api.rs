@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema};
-use beacon_data_lake::crawler::{CrawlReport, CrawlerDefinition, TableNaming};
+use crate::crawler::{CrawlReport, CrawlerDefinition, TableNaming};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use beacon_functions::function_doc::FunctionDoc;
@@ -555,6 +555,38 @@ mod table_config_redaction_tests {
         assert!(!json.contains("ciphertext"));
         assert_eq!(view.config.get("secret"), Some(&Value::String("***".to_string())));
         // Non-secret connection options remain visible.
+        assert!(json.contains("db.internal"));
+    }
+
+    /// Internal double-underscore options — e.g. the crawler ownership marker a
+    /// crawled table carries — are an implementation detail of the definition and
+    /// must not surface in the user-facing config view.
+    #[test]
+    fn internal_option_keys_are_hidden_from_config_view() {
+        let mut options = BTreeMap::new();
+        options.insert("host".to_string(), "db.internal".to_string());
+        options.insert(
+            crate::crawler::CRAWLER_OWNER_OPTION.to_string(),
+            "my_crawler".to_string(),
+        );
+        let definition: Arc<dyn TableDefinition> = Arc::new(SqlDatabaseTableDefinition {
+            name: "crawled".to_string(),
+            engine: SqlEngine::Postgres,
+            remote_table: "public.crawled".to_string(),
+            schema: beacon_sql_databases::unresolved_schema(),
+            options,
+            secret: None,
+        });
+
+        let view = TableConfigView::try_from(definition).unwrap();
+        let json = serde_json::to_string(&view).unwrap();
+
+        assert!(
+            !json.contains(crate::crawler::CRAWLER_OWNER_OPTION),
+            "internal ownership marker must be hidden from table config: {json}"
+        );
+        assert!(!json.contains("my_crawler"));
+        // Ordinary options are untouched.
         assert!(json.contains("db.internal"));
     }
 }

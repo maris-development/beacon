@@ -14,6 +14,7 @@ pub mod compiler;
 pub mod filter;
 pub mod from;
 pub mod output;
+pub mod temp_object;
 
 pub use compiler::compile_json_query;
 

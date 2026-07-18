@@ -48,12 +48,13 @@ mod tests {
     use crate::{basic::BasicAuthProvider, oidc::{OidcAuthProvider, OidcConfig}};
     use std::time::Duration;
 
-    fn composite() -> CompositeAuthProvider {
+    async fn composite() -> CompositeAuthProvider {
         let local = Arc::new(BasicAuthProvider::new());
         local
             .user_directory()
             .unwrap()
             .create_user("alice", "secret")
+            .await
             .unwrap();
         let oidc = Arc::new(OidcAuthProvider::new(OidcConfig {
             issuer: "https://issuer.example".to_string(),
@@ -68,7 +69,7 @@ mod tests {
 
     #[tokio::test]
     async fn basic_is_routed_to_local() {
-        let provider = composite();
+        let provider = composite().await;
         let authed = provider
             .authenticate(&Credential::basic("alice", "secret"))
             .await
@@ -80,7 +81,7 @@ mod tests {
     async fn bearer_is_routed_to_oidc() {
         // A bogus token reaches the OIDC provider and fails validation there (not at the local
         // store), confirming the routing.
-        let provider = composite();
+        let provider = composite().await;
         let err = provider
             .authenticate(&Credential::bearer("not-a-jwt"))
             .await
@@ -89,10 +90,10 @@ mod tests {
         assert!(err.contains("token header") || err.contains("invalid"), "got: {err}");
     }
 
-    #[test]
-    fn user_directory_is_the_local_one() {
-        let provider = composite();
+    #[tokio::test]
+    async fn user_directory_is_the_local_one() {
+        let provider = composite().await;
         assert!(provider.user_directory().is_some());
-        assert!(provider.user_directory().unwrap().user_exists("alice"));
+        assert!(provider.user_directory().unwrap().user_exists("alice").await);
     }
 }

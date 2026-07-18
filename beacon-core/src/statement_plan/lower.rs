@@ -15,8 +15,9 @@
 
 use std::sync::Arc;
 
-use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
+use crate::settings::ObjectStoreUrls;
 use datafusion::{
+    execution::object_store::ObjectStoreUrl,
     logical_expr::{
         dml::CopyTo, not, when, DmlStatement, Expr, Extension, Filter, LogicalPlan,
         LogicalPlanBuilder, WriteOp,
@@ -78,17 +79,20 @@ pub(crate) async fn lower_df_statement(
 
     let state = session_ctx.state();
     let plan = state.statement_to_plan(statement).await?;
-    rewrite_logical_plan(plan)
+    rewrite_logical_plan(plan, ObjectStoreUrls::from_session(session_ctx).datasets())
 }
 
 /// Rewrite only the statements the planner cannot handle from their standard
 /// form (copy-on-write `DELETE`/`UPDATE`, and `COPY`'s output path); pass
 /// everything else (DDL, `INSERT`, `SELECT`, ...) through unchanged.
-fn rewrite_logical_plan(plan: LogicalPlan) -> anyhow::Result<LogicalPlan> {
+fn rewrite_logical_plan(
+    plan: LogicalPlan,
+    datasets_url: &ObjectStoreUrl,
+) -> anyhow::Result<LogicalPlan> {
     match plan {
         LogicalPlan::Dml(dml) if matches!(dml.op, WriteOp::Delete) => delete_plan(dml),
         LogicalPlan::Dml(dml) if matches!(dml.op, WriteOp::Update) => update_plan(dml),
-        LogicalPlan::Copy(copy) => Ok(rewrite_copy(copy)),
+        LogicalPlan::Copy(copy) => Ok(rewrite_copy(copy, datasets_url)),
         other => Ok(other),
     }
 }
@@ -234,7 +238,7 @@ fn replace_contents_plan(
 
 /// `COPY ... TO` stays a standard DataFusion node (which it can plan + execute);
 /// only the output path is rewritten into the datasets object store.
-fn rewrite_copy(mut copy: CopyTo) -> LogicalPlan {
-    copy.output_url = format!("{}{}", *DATASETS_OBJECT_STORE_URL, copy.output_url);
+fn rewrite_copy(mut copy: CopyTo, datasets_url: &ObjectStoreUrl) -> LogicalPlan {
+    copy.output_url = format!("{}{}", datasets_url, copy.output_url);
     LogicalPlan::Copy(copy)
 }

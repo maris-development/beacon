@@ -1,16 +1,24 @@
+//! Schema management: the persistent catalog and everything that rebuilds it.
+//!
+//! Beacon's catalog is the source of truth for which tables exist. This module owns:
+//! - [`PersistentSchemaProvider`] — the `beacon.public` schema provider that persists
+//!   a table's definition on registration and removes it on deregistration;
+//! - [`SchemaPersistenceService`] — the durable `db://<name>/table.json` read/write path;
+//! - [`init_tables`] — startup recovery that rebuilds every provider from those files;
+//! - the private `loading`/`ordering` helpers `init_tables` drives.
+
 use std::{collections::HashMap, sync::Arc};
 
 use beacon_datafusion_ext::table_ext::TableDefinition;
-use datafusion::prelude::SessionContext;
+use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 
-use crate::{DATASETS_OBJECT_STORE_URL, DB_OBJECT_STORE_URL};
+mod loading;
+mod ordering;
+pub mod provider;
+pub mod service;
 
-pub mod loading;
-pub mod ordering;
-pub mod persistent_schema_provider;
-pub mod schema_persistence;
-
-pub use persistent_schema_provider::PersistentSchemaProvider;
+pub use provider::PersistentSchemaProvider;
+pub use service::{definition_from_provider, SchemaPersistenceService};
 
 /// Rebuild the catalog from the persisted table definitions.
 ///
@@ -20,15 +28,24 @@ pub use persistent_schema_provider::PersistentSchemaProvider;
 /// the live session — so a view's defining query resolves the tables already
 /// registered ahead of it — and inserts it into `schema` without re-persisting.
 /// Finishes by ensuring the empty `default` table exists.
+///
+/// `tables_store_url` is the store the persisted `<name>/table.json` definitions
+/// are read from (the caller supplies it — the runtime uses its tables store).
+///
+/// `datasets_url` is the store a persisted definition's relative location is
+/// resolved against; it must match the URL the definition was created under, or
+/// the rebuilt provider lists a different (likely empty) set of files.
 pub async fn init_tables(
     session_ctx: &Arc<SessionContext>,
     schema: &PersistentSchemaProvider,
+    tables_store_url: &ObjectStoreUrl,
+    datasets_url: &ObjectStoreUrl,
 ) -> anyhow::Result<()> {
     tracing::info!("Initializing tables from object store");
     let tables_object_store = session_ctx
         .runtime_env()
-        .object_store(&*DB_OBJECT_STORE_URL)
-        .map_err(|error| anyhow::anyhow!("Failed to get db object store: {}", error))?;
+        .object_store(tables_store_url)
+        .map_err(|error| anyhow::anyhow!("Failed to get tables object store: {}", error))?;
 
     let discovered = loading::load_tables_from_object_store(tables_object_store).await;
     let table_map = discovered
@@ -40,7 +57,7 @@ pub async fn init_tables(
     for definition in ordered {
         let table_name = definition.table_name().to_string();
         match definition
-            .build_provider(session_ctx.clone(), &DATASETS_OBJECT_STORE_URL)
+            .build_provider(session_ctx.clone(), datasets_url)
             .await
         {
             Ok(provider) => {

@@ -1,7 +1,8 @@
 //! The crawl engine: turn a [`CrawlerDefinition`] into registered external tables.
 //!
 //! Reuses Beacon's existing primitives end-to-end:
-//! - [`crate::list_datasets`] for scan + per-format classification,
+//! - [`beacon_functions::file_formats::list_datasets::list_datasets`] for scan +
+//!   per-format classification,
 //! - [`ExternalTableDefinition::build_provider`] for schema inference + partition
 //!   validation (the same code path used when loading persisted tables),
 //! - `SessionContext::register_table` (backed by `PersistentSchemaProvider`) for
@@ -16,10 +17,10 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, TableDefinition};
-use datafusion::prelude::SessionContext;
+use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 use serde::{Deserialize, Serialize};
 
-use crate::{list_datasets, DATASETS_OBJECT_STORE_URL};
+use beacon_functions::file_formats::list_datasets::list_datasets;
 
 use super::definition::{CrawlerDefinition, CRAWLER_OWNER_OPTION};
 use super::discovery::{assign_table_names, group_into_tables};
@@ -47,16 +48,20 @@ pub struct CrawlReport {
 pub struct CrawlEngine {
     session_ctx: Arc<SessionContext>,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
+    /// The store crawled prefixes and the tables built from them resolve against.
+    datasets_url: ObjectStoreUrl,
 }
 
 impl CrawlEngine {
     pub fn new(
         session_ctx: Arc<SessionContext>,
         file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
+        datasets_url: ObjectStoreUrl,
     ) -> Self {
         Self {
             session_ctx,
             file_formats,
+            datasets_url,
         }
     }
 
@@ -73,12 +78,13 @@ impl CrawlEngine {
         let object_store = self
             .session_ctx
             .runtime_env()
-            .object_store(&*DATASETS_OBJECT_STORE_URL)
+            .object_store(&self.datasets_url)
             .map_err(|e| {
                 anyhow::anyhow!("crawler '{}' could not resolve datasets store: {e}", def.name)
             })?;
         let datasets = list_datasets(
             &self.session_ctx,
+            &self.datasets_url,
             object_store,
             &self.file_formats,
             None,
@@ -137,7 +143,7 @@ impl CrawlEngine {
             // build_provider infers schema and validates partitions; failures are
             // per-table and must not abort the whole crawl.
             let provider = match table_def
-                .build_provider(self.session_ctx.clone(), &DATASETS_OBJECT_STORE_URL)
+                .build_provider(self.session_ctx.clone(), &self.datasets_url)
                 .await
             {
                 Ok(provider) => provider,

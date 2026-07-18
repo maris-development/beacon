@@ -12,9 +12,10 @@
 //! To give each table a unique registry key we mint a synthetic
 //! `beacon-delta://<hash>/` URL per table location and register a matching
 //! [`LogStoreFactory`] for the `beacon-delta` scheme. The object store we hand to
-//! delta-rs is Beacon's [`DatasetsStore`] wrapped in a [`PrefixStore`] scoped to
-//! the table directory, so local-FS and S3 both work transparently and commit
-//! safety derives from the underlying store (conditional-put), not the scheme.
+//! delta-rs is Beacon's datasets store (resolved from the session's object-store
+//! registry) wrapped in a [`PrefixStore`] scoped to the table directory, so
+//! local-FS and S3 both work transparently and commit safety derives from the
+//! underlying store (conditional-put), not the scheme.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -38,8 +39,6 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use url::Url;
-
-use beacon_object_storage::DatasetsStore;
 
 /// URL scheme used for Beacon-backed Delta tables. Registered with delta-rs so
 /// `DeltaTableBuilder` can resolve a log store for it; the authority is a
@@ -275,10 +274,6 @@ async fn load_delta_table(
     // Scope Beacon's datasets store to the table directory. The synthetic URL has
     // an empty path, so delta-rs adds no further prefix and resolves data files
     // relative to this store's root (the table directory).
-    //
-    // Use the raw backing store, not the cached `DatasetsStore` view: Delta's log
-    // replay needs read-after-write listing consistency, which the async metadata
-    // cache cannot guarantee right after a commit.
     let prefixed: Arc<dyn ObjectStore> =
         Arc::new(PrefixStore::new(store, ObjectPath::from(prefix.as_str())));
     // Ensure log listings come back sorted so delta-rs's log replay is correct on

@@ -35,7 +35,6 @@ COPY beacon-file-formats/beacon-binary-format/ /beacon-file-formats/beacon-binar
 COPY beacon-common/ /beacon-common/
 COPY beacon-config/ /beacon-config/
 COPY beacon-core/ /beacon-core/
-COPY beacon-data-lake/ /beacon-data-lake/
 COPY beacon-datafusion-ext/ /beacon-datafusion-ext/
 COPY beacon-file-formats/beacon-arrow-ipc/ /beacon-file-formats/beacon-arrow-ipc/
 COPY beacon-file-formats/beacon-arrow-csv/ /beacon-file-formats/beacon-arrow-csv/

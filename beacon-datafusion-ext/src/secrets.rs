@@ -74,14 +74,34 @@ impl fmt::Debug for Secret {
 }
 
 /// In-memory, thread-safe secret store.
+///
+/// Also carries the deployment master key used to encrypt/decrypt credentials at
+/// rest (e.g. external-database passwords). The store is published as a session
+/// extension, so plan-time code reaches the key through it rather than through a
+/// configuration type — keeping the lower layers free of a config dependency.
 #[derive(Default)]
 pub struct SecretStore {
     secrets: RwLock<HashMap<String, Secret>>,
+    master_key: Option<[u8; 32]>,
 }
 
 impl SecretStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build a store carrying the deployment master key. `None` leaves credential
+    /// encryption unavailable (storing an encrypted secret then fails closed).
+    pub fn new_with_master_key(master_key: Option<[u8; 32]>) -> Self {
+        Self {
+            master_key,
+            ..Default::default()
+        }
+    }
+
+    /// The deployment master key, or `None` when credential encryption is disabled.
+    pub fn master_key(&self) -> Option<&[u8; 32]> {
+        self.master_key.as_ref()
     }
 
     /// Insert (or replace) a secret, returning the previous one with that name.

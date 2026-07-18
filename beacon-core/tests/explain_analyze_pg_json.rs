@@ -1,23 +1,10 @@
 //! Tests for `explain_analyze_client_query`: running a query and returning its
 //! physical plan as pgjson annotated with per-node runtime metrics.
 
-use std::sync::Arc;
+mod common;
 
 use beacon_core::query::Query;
-use beacon_core::runtime::Runtime;
-use futures::TryStreamExt;
-
-async fn run_sql(runtime: &Runtime, sql: &str) {
-    runtime
-        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
-        .await
-        .expect("sql should run")
-        .into_record_stream()
-        .expect("streamed result")
-        .try_collect::<Vec<_>>()
-        .await
-        .expect("sql should drain");
-}
+use common::{runtime, runtime_with, ANONYMOUS_USERNAME};
 
 fn sql_query(sql: &str) -> Query {
     Query::sql(sql.to_string())
@@ -28,17 +15,19 @@ fn sql_query(sql: &str) -> Query {
 /// actual row count, and a nested `Plans` array of children.
 #[tokio::test(flavor = "multi_thread")]
 async fn explain_analyze_returns_pg_json_with_metrics() {
-    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
-        .await
-        .expect("runtime should boot");
+    let rt = runtime("explain-analyze-pgjson").await;
 
-    let suffix = uuid::Uuid::new_v4().simple();
-    let table = format!("explain_analyze_pgjson_{suffix}");
-    run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
-    run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2), (3)")).await;
+    let table = "explain_analyze_pgjson";
+    rt.sql(&format!("CREATE TABLE {table} (a BIGINT)")).await;
+    rt.sql(&format!("INSERT INTO {table} VALUES (1), (2), (3)"))
+        .await;
 
-    let json_str = runtime
-        .explain_analyze_client_query(sql_query(&format!("SELECT a FROM {table}")), beacon_core::AuthIdentity::empty())
+    let json_str = rt
+        .runtime
+        .explain_analyze_client_query(
+            sql_query(&format!("SELECT a FROM {table}")),
+            beacon_core::AuthIdentity::empty(),
+        )
         .await
         .expect("explain analyze should succeed");
 
@@ -74,8 +63,6 @@ async fn explain_analyze_returns_pg_json_with_metrics() {
         has_actual_rows(plan),
         "annotated plan should include `Actual Rows` metrics, got:\n{json_str}"
     );
-
-    let _ = run_sql(&runtime, &format!("DROP TABLE {table}")).await;
 }
 
 /// The endpoint honors admin vs anonymous: an anonymous (non-super-user) call
@@ -83,20 +70,32 @@ async fn explain_analyze_returns_pg_json_with_metrics() {
 /// the `/api/query` permission gate.
 #[tokio::test(flavor = "multi_thread")]
 async fn explain_analyze_gates_ddl_by_privilege() {
-    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
-        .await
-        .expect("runtime should boot");
+    // Anonymous access on, and grants enforced for non-super-users: the runtime
+    // this mirrors (`/api/query`) resolves unauthenticated callers to the
+    // anonymous principal and gates them.
+    let rt = runtime_with("explain-analyze-ddl", |b| {
+        b.with_anonymous_user(ANONYMOUS_USERNAME)
+            .with_auth_enforcement(true)
+    })
+    .await;
 
-    let suffix = uuid::Uuid::new_v4().simple();
-    let table = format!("explain_analyze_ddl_{suffix}");
+    let table = "explain_analyze_ddl";
+
+    let anonymous = rt
+        .runtime
+        .authenticate_anonymous()
+        .await
+        .expect("anonymous should resolve");
+    assert!(
+        !anonymous.is_super_user,
+        "the anonymous principal must never be a super-user"
+    );
 
     // Anonymous (read-only): standard DDL is gated by DataFusion's `verify_plan`,
     // which rejects it before any execution with a "DDL not supported" error.
-    let err = runtime
-        .explain_analyze_client_query(
-            sql_query(&format!("CREATE TABLE {table} (a BIGINT)")),
-            beacon_core::AuthIdentity::empty(),
-        )
+    let err = rt
+        .runtime
+        .explain_analyze_client_query(sql_query(&format!("CREATE TABLE {table} (a BIGINT)")), anonymous)
         .await
         .err()
         .expect("anonymous explain analyze of DDL should be rejected");
@@ -106,13 +105,11 @@ async fn explain_analyze_gates_ddl_by_privilege() {
     );
 
     // Super-user: the same DDL passes the gate and is analyzed (and executed).
-    runtime
+    rt.runtime
         .explain_analyze_client_query(
             sql_query(&format!("CREATE TABLE {table} (a BIGINT)")),
-            beacon_core::AuthIdentity::system(),
+            rt.admin().await,
         )
         .await
         .expect("super-user explain analyze of DDL should be permitted");
-
-    let _ = run_sql(&runtime, &format!("DROP TABLE {table}")).await;
 }

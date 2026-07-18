@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use beacon_data_lake::DATASETS_OBJECT_STORE_URL;
 use beacon_datafusion_ext::{
     listing_table_factory_ext::ListingTableFactoryExt,
     remote::{unresolved_schema, RemoteTableDefinition},
@@ -30,7 +29,8 @@ use datafusion::{
 };
 
 use super::logical::{AlterTableSpec, Mutation};
-use super::materialized_view::delete_datasets_prefix;
+use super::materialized_view::delete_tables_prefix;
+use crate::settings::ObjectStoreUrls;
 
 /// Drop a managed table, reclaiming its backing storage. Materialized views
 /// persist Parquet under a data prefix; Iceberg tables own metadata+data in the
@@ -62,7 +62,7 @@ pub(crate) async fn drop_table(
     session.deregister_table(name.clone())?;
 
     if let Some(prefix) = materialized_prefix {
-        delete_datasets_prefix(session, &prefix).await;
+        delete_tables_prefix(session, &prefix).await;
     }
 
     if let Some(location) = lance_location {
@@ -145,7 +145,7 @@ async fn create_remote_table(
 
     // `build_provider` pins the resolved schema; registration persists table.json.
     let provider = definition
-        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+        .build_provider(session.clone(), ObjectStoreUrls::from_session(session).datasets())
         .await?;
     session.register_table(cmd.name.clone(), provider)?;
     Ok(())
@@ -207,7 +207,7 @@ async fn create_delta_table(
     // `build_provider` resolves the schema from the Delta log; registration
     // persists `table.json` via the TableManager.
     let provider = definition
-        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+        .build_provider(session.clone(), ObjectStoreUrls::from_session(session).datasets())
         .await?;
     session.register_table(cmd.name.clone(), provider)?;
     Ok(())
@@ -251,15 +251,16 @@ async fn create_sql_db_table(
     // Encrypt the password eagerly so the persisted definition holds ciphertext.
     let secret = match password {
         Some(password) => {
-            let config = session
+            let secret_store = session
                 .state()
                 .config()
-                .get_extension::<beacon_config::Config>()
-                .ok_or_else(|| anyhow::anyhow!("Beacon configuration is unavailable"))?;
-            let key = config.secrets.master_key().ok_or_else(|| {
+                .get_extension::<beacon_datafusion_ext::secrets::SecretStore>()
+                .ok_or_else(|| anyhow::anyhow!("secret store is unavailable"))?;
+            let key = secret_store.master_key().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Cannot store credentials for '{}': set BEACON_SECRETS_KEY (base64 32-byte \
-                     key) to enable encrypted external-database credentials",
+                    "Cannot store credentials for '{}': no secrets encryption key is configured \
+                     (set BEACON_SECRETS_KEY to a base64 32-byte key) to enable encrypted \
+                     external-database credentials",
                     cmd.name
                 )
             })?;
@@ -287,7 +288,7 @@ async fn create_sql_db_table(
 
     // `build_provider` resolves+pins the schema; registration persists table.json.
     let provider = definition
-        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+        .build_provider(session.clone(), ObjectStoreUrls::from_session(session).datasets())
         .await?;
     session.register_table(cmd.name.clone(), provider)?;
     Ok(())
@@ -486,7 +487,7 @@ pub(crate) async fn alter_table(
     beacon_lance::alter_table(&warehouse, &definition.location, &changes).await?;
 
     let fresh = definition
-        .build_provider(session.clone(), &DATASETS_OBJECT_STORE_URL)
+        .build_provider(session.clone(), ObjectStoreUrls::from_session(session).datasets())
         .await?;
     session.register_table(table_ref, fresh)?;
 

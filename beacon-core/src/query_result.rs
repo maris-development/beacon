@@ -2,10 +2,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
 use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
+use crate::query::temp_object::TempObject;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::Stream;
 use parking_lot::Mutex;
-use tempfile::NamedTempFile;
 
 pub struct QueryResult {
     pub query_output: QueryOutput,
@@ -30,54 +30,72 @@ pub enum QueryOutput {
     Stream(ArrowOutputStream),
 }
 
+/// The concrete format a [`QueryOutputFile`] was written in. Carried for the
+/// transport (MIME type / download filename); the path and size are format-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFileKind {
+    Csv,
+    Ipc,
+    Json,
+    Parquet,
+    GeoParquet,
+    NetCDF,
+    Odv,
+}
+
+impl OutputFileKind {
+    /// The MIME type a download transport reports for this format.
+    pub fn content_type(&self) -> &'static str {
+        match self {
+            OutputFileKind::Csv => "text/csv",
+            OutputFileKind::Ipc => "application/vnd.apache.arrow.file",
+            OutputFileKind::Json => "application/json",
+            OutputFileKind::Parquet => "application/vnd.apache.parquet",
+            OutputFileKind::GeoParquet => "application/vnd.apache.parquet",
+            OutputFileKind::NetCDF => "application/x-netcdf",
+            OutputFileKind::Odv => "application/zip",
+        }
+    }
+
+    /// The file extension (including the leading dot) for this format's output.
+    pub fn suggested_extension(&self) -> &'static str {
+        match self {
+            OutputFileKind::Csv => ".csv",
+            OutputFileKind::Ipc => ".arrow",
+            OutputFileKind::Json => ".json",
+            OutputFileKind::Parquet => ".parquet",
+            OutputFileKind::GeoParquet => ".parquet",
+            OutputFileKind::NetCDF => ".nc",
+            OutputFileKind::Odv => ".zip",
+        }
+    }
+}
+
+/// A query result written to a temporary file, tagged by its format.
+///
+/// The [`TempObject`] owns the file's lifetime (removed on drop) and reconciles the
+/// COPY write location with the read-back path; `kind` is metadata for the transport.
 #[derive(Debug)]
-pub enum QueryOutputFile {
-    Csv(NamedTempFile),
-    Ipc(NamedTempFile),
-    Json(NamedTempFile),
-    Parquet(NamedTempFile),
-    NetCDF(NamedTempFile),
-    Odv(NamedTempFile),
-    GeoParquet(NamedTempFile),
+pub struct QueryOutputFile {
+    kind: OutputFileKind,
+    temp: TempObject,
 }
 
 impl QueryOutputFile {
-    pub fn size(&self) -> anyhow::Result<u64> {
-        match self {
-            QueryOutputFile::Csv(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Ipc(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Json(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Parquet(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::NetCDF(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::Odv(file) => Ok(file.path().metadata()?.len()),
-            QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
-        }
+    pub fn new(kind: OutputFileKind, temp: TempObject) -> Self {
+        Self { kind, temp }
+    }
+
+    pub fn kind(&self) -> OutputFileKind {
+        self.kind
+    }
+
+    pub fn size(&self) -> std::io::Result<u64> {
+        Ok(self.temp.path().metadata()?.len())
     }
 
     pub fn path(&self) -> &std::path::Path {
-        match self {
-            QueryOutputFile::Csv(file) => file.path(),
-            QueryOutputFile::Ipc(file) => file.path(),
-            QueryOutputFile::Json(file) => file.path(),
-            QueryOutputFile::Parquet(file) => file.path(),
-            QueryOutputFile::NetCDF(file) => file.path(),
-            QueryOutputFile::Odv(file) => file.path(),
-            QueryOutputFile::GeoParquet(file) => file.path(),
-        }
-    }
-}
-
-impl From<crate::query::output::QueryOutputFile> for QueryOutputFile {
-    fn from(value: crate::query::output::QueryOutputFile) -> Self {
-        match value {
-            crate::query::output::QueryOutputFile::Csv(file) => Self::Csv(file),
-            crate::query::output::QueryOutputFile::Ipc(file) => Self::Ipc(file),
-            crate::query::output::QueryOutputFile::Json(file) => Self::Json(file),
-            crate::query::output::QueryOutputFile::Parquet(file) => Self::Parquet(file),
-            crate::query::output::QueryOutputFile::NetCDF(file) => Self::NetCDF(file),
-            crate::query::output::QueryOutputFile::Odv(file) => Self::Odv(file),
-            crate::query::output::QueryOutputFile::GeoParquet(file) => Self::GeoParquet(file),
-        }
+        self.temp.path()
     }
 }
 

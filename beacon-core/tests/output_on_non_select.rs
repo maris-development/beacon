@@ -3,16 +3,13 @@
 //! `COPY TO` wrapping fail with a cryptic planner error — while still honoring an
 //! output format on a row-producing `SELECT`.
 
+mod common;
+
 use beacon_core::query::output::{Output, OutputFormat};
 use beacon_core::query::{InnerQuery, Query};
 use beacon_core::query_result::QueryOutput;
 use beacon_core::runtime::Runtime;
-
-async fn boot() -> Runtime {
-    Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_config::Config::load().unwrap()))
-        .await
-        .expect("runtime should boot")
-}
+use common::TestRuntime;
 
 fn csv_query(sql: &str) -> Query {
     Query {
@@ -26,7 +23,10 @@ fn csv_query(sql: &str) -> Query {
 /// Run a CSV-output query expecting it to fail, returning the error message.
 /// (`QueryResult` is not `Debug`, so `Result::expect_err` is unavailable.)
 async fn expect_output_error(runtime: &Runtime, sql: &str) -> String {
-    match runtime.run_query(csv_query(sql), beacon_core::AuthIdentity::system()).await {
+    match runtime
+        .run_query(csv_query(sql), beacon_core::AuthIdentity::system())
+        .await
+    {
         Ok(_) => panic!("expected an error for: {sql}"),
         Err(error) => error.to_string(),
     }
@@ -36,10 +36,14 @@ async fn expect_output_error(runtime: &Runtime, sql: &str) -> String {
 /// actionable message rather than a `COPY TO` planner error.
 #[tokio::test(flavor = "multi_thread")]
 async fn output_on_non_row_producing_statement_is_a_clear_error() {
-    let runtime = boot().await;
+    let rt: TestRuntime = common::runtime("output-guard").await;
+    let runtime = &rt.runtime;
     let table = format!("output_guard_{}", std::process::id());
     let _ = runtime
-        .run_query(Query::sql(format!("DROP TABLE IF EXISTS {table}")), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(format!("DROP TABLE IF EXISTS {table}")),
+            beacon_core::AuthIdentity::system(),
+        )
         .await;
 
     // CREATE TABLE (DDL) and SET (statement) both return no rows.
@@ -48,7 +52,7 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
         "SET datafusion.execution.batch_size = 4096".to_string(),
     ];
     for sql in cases {
-        let message = expect_output_error(&runtime, &sql).await;
+        let message = expect_output_error(runtime, &sql).await;
         assert!(
             message.contains("output format can only be applied to queries that return rows"),
             "unexpected error for `{sql}`: {message}"
@@ -63,23 +67,30 @@ async fn output_on_non_row_producing_statement_is_a_clear_error() {
         )
         .await
         .expect("create table should succeed without output");
-    let message = expect_output_error(&runtime, &format!("INSERT INTO {table} VALUES (1)")).await;
+    let message = expect_output_error(runtime, &format!("INSERT INTO {table} VALUES (1)")).await;
     assert!(
         message.contains("output format can only be applied to queries that return rows"),
         "unexpected error for INSERT: {message}"
     );
 
     let _ = runtime
-        .run_query(Query::sql(format!("DROP TABLE IF EXISTS {table}")), beacon_core::AuthIdentity::system())
+        .run_query(
+            Query::sql(format!("DROP TABLE IF EXISTS {table}")),
+            beacon_core::AuthIdentity::system(),
+        )
         .await;
 }
 
 /// A row-producing `SELECT` with an output format still succeeds and yields a file.
 #[tokio::test(flavor = "multi_thread")]
 async fn output_on_select_still_succeeds() {
-    let runtime = boot().await;
-    let result = runtime
-        .run_query(csv_query("SELECT 1 AS a"), beacon_core::AuthIdentity::system())
+    let rt: TestRuntime = common::runtime("output-select").await;
+    let result = rt
+        .runtime
+        .run_query(
+            csv_query("SELECT 1 AS a"),
+            beacon_core::AuthIdentity::system(),
+        )
         .await
         .expect("SELECT with output should succeed");
     assert!(

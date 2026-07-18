@@ -16,29 +16,17 @@ struct SqlStreamCoalesceOptions {
 }
 
 impl SqlStreamCoalesceOptions {
-    /// Read the coalesce options from the runtime config published on the
+    /// Read the coalesce options from the runtime settings published on the
     /// session, falling back to defaults if the extension is absent.
     fn from_session(session_ctx: &SessionContext) -> Self {
-        match session_ctx
-            .state()
-            .config()
-            .get_extension::<beacon_config::Config>()
-        {
-            Some(config) => {
-                let coalesce = &config.sql.stream_coalesce;
-                Self {
-                    enabled: coalesce.enabled,
-                    target_rows: coalesce.target_rows,
-                    flush_timeout_ms: coalesce.flush_timeout_ms,
-                    max_rows: coalesce.max_rows,
-                }
-            }
-            None => Self {
-                enabled: true,
-                target_rows: 65536,
-                flush_timeout_ms: 25,
-                max_rows: 262144,
-            },
+        let coalesce = &crate::settings::CoreSettings::from_session(session_ctx)
+            .sql
+            .stream_coalesce;
+        Self {
+            enabled: coalesce.enabled,
+            target_rows: coalesce.target_rows,
+            flush_timeout_ms: coalesce.flush_timeout_ms,
+            max_rows: coalesce.max_rows,
         }
     }
 

@@ -29,7 +29,6 @@ use arrow::{
 };
 use beacon_arrow_netcdf::datafusion::{reader, statistics};
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
-use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::{plan_datafusion_err, plan_err, Statistics},
@@ -38,7 +37,7 @@ use datafusion::{
         listing::ListingTable,
         MemTable,
     },
-    execution::cache::CacheAccessor,
+    execution::{cache::CacheAccessor, object_store::ObjectStoreUrl},
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
 };
@@ -60,13 +59,21 @@ fn output_schema() -> SchemaRef {
 pub struct ViewDatasetStatisticsFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
+    /// URL the datasets store is registered under, resolved from the session's
+    /// object-store registry at call time.
+    datasets_url: ObjectStoreUrl,
 }
 
 impl ViewDatasetStatisticsFunc {
-    pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
+    pub fn new(
+        runtime_handle: tokio::runtime::Handle,
+        session_ctx: Weak<SessionContext>,
+        datasets_url: ObjectStoreUrl,
+    ) -> Self {
         Self {
             runtime_handle,
             session_ctx,
+            datasets_url,
         }
     }
 }
@@ -112,6 +119,7 @@ impl TableFunctionImpl for ViewDatasetStatisticsFunc {
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             plan_datafusion_err!("session context has been dropped")
         })?;
+        let datasets_url = self.datasets_url.clone();
 
         let (schema, stats) = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
@@ -119,10 +127,10 @@ impl TableFunctionImpl for ViewDatasetStatisticsFunc {
                     .map_err(|e| plan_datafusion_err!("Invalid path '{path_str}': {e}"))?;
                 let store = session_ctx
                     .state()
-                    .config()
-                    .get_extension::<DatasetsStore>()
-                    .ok_or_else(|| {
-                        plan_datafusion_err!("datasets object store missing from session config")
+                    .runtime_env()
+                    .object_store(datasets_url)
+                    .map_err(|e| {
+                        plan_datafusion_err!("failed to resolve datasets object store: {e}")
                     })?;
 
                 // Head the object to get size + last_modified for cache validation.

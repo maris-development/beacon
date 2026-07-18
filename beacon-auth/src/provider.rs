@@ -42,14 +42,39 @@ pub struct UserRecord {
     pub roles: Vec<String>,
 }
 
+/// A user as held in durable storage, including the password hash.
+///
+/// Only used to hydrate an in-memory working copy at startup; the hash never leaves the auth
+/// subsystem ([`UserRecord`] is the shape exposed to callers).
+#[derive(Debug, Clone)]
+pub struct StoredUser {
+    pub username: String,
+    pub password_hash: String,
+    pub roles: Vec<String>,
+}
+
 /// SQL-managed user lifecycle and role assignment, exposed by providers that own their user store.
-pub trait UserDirectory: Send + Sync {
-    fn create_user(&self, username: &str, password: &str) -> anyhow::Result<()>;
-    fn drop_user(&self, username: &str) -> anyhow::Result<()>;
-    fn grant_role(&self, username: &str, role: &str) -> anyhow::Result<()>;
-    fn revoke_role(&self, username: &str, role: &str) -> anyhow::Result<()>;
+///
+/// Implemented both by the in-memory working copy ([`InMemoryUserStore`](crate::InMemoryUserStore))
+/// and by the durable backend it writes through to, so the same shape covers both ends.
+#[async_trait::async_trait]
+pub trait UserDirectory: std::fmt::Debug + Send + Sync {
+    async fn create_user(&self, username: &str, password: &str) -> anyhow::Result<()>;
+    async fn drop_user(&self, username: &str) -> anyhow::Result<()>;
+    async fn grant_role(&self, username: &str, role: &str) -> anyhow::Result<()>;
+    async fn revoke_role(&self, username: &str, role: &str) -> anyhow::Result<()>;
     /// Whether a user with `username` exists. Used for idempotent bootstrap.
-    fn user_exists(&self, username: &str) -> bool;
+    async fn user_exists(&self, username: &str) -> bool;
     /// Enumerate all stored users with their assigned roles.
-    fn list_users(&self) -> anyhow::Result<Vec<UserRecord>>;
+    async fn list_users(&self) -> anyhow::Result<Vec<UserRecord>>;
+    /// Loads every user with their password hash, to hydrate an in-memory working copy at startup.
+    async fn load_users(&self) -> anyhow::Result<Vec<StoredUser>>;
+
+    /// Rebuilds this directory's in-memory working copy from its durable backend. The default is a
+    /// no-op: a durable backend has nothing to hydrate *from*, and only the in-memory working copy
+    /// ([`InMemoryUserStore`](crate::InMemoryUserStore)) overrides it. Called once at startup by
+    /// [`AuthContext::hydrate`](crate::AuthContext::hydrate).
+    async fn hydrate(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }

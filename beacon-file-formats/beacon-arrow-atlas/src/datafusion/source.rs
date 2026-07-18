@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
@@ -6,7 +7,7 @@ use beacon_nd_array::arrow::{
     batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,
     pushdown_filter::PushdownFilter,
 };
-use beacon_object_storage::DatasetsStore;
+
 use crate::datafusion::cache::AtlasReaderCache;
 use datafusion::physical_expr_adapter::BatchAdapterFactory;
 use datafusion::{
@@ -54,7 +55,7 @@ impl AtlasStreamDatasets {
 /// DataFusion [`FileSource`] for atlas stores.
 #[derive(Debug, Clone)]
 pub struct AtlasSource {
-    datasets_object_store: Arc<DatasetsStore>,
+    datasets_root: PathBuf,
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
@@ -71,12 +72,12 @@ pub struct AtlasSource {
 
 impl AtlasSource {
     pub fn new(
-        datasets_object_store: Arc<DatasetsStore>,
+        datasets_root: PathBuf,
         read_dimensions: Option<Vec<String>>,
         table_schema: TableSchema,
     ) -> Self {
         Self {
-            datasets_object_store,
+            datasets_root,
             schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
@@ -115,7 +116,7 @@ impl FileSource for AtlasSource {
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(AtlasOpener {
-            datasets_object_store: self.datasets_object_store.clone(),
+            datasets_root: self.datasets_root.clone(),
             projected_schema,
             batch_size: self.batch_size,
             metrics: self.execution_plan_metrics.clone(),
@@ -205,7 +206,7 @@ impl FileSource for AtlasSource {
 // ─── FileOpener ────────────────────────────────────────────────────────────
 
 struct AtlasOpener {
-    datasets_object_store: Arc<DatasetsStore>,
+    datasets_root: PathBuf,
     projected_schema: SchemaRef,
     batch_size: usize,
     metrics: ExecutionPlanMetricsSet,
@@ -220,7 +221,7 @@ struct AtlasOpener {
 impl AtlasOpener {
     #[allow(clippy::too_many_arguments)]
     async fn read_task(
-        datasets_object_store: Arc<DatasetsStore>,
+        datasets_root: PathBuf,
         object_meta: ObjectMeta,
         stream_cache: Arc<Mutex<HashMap<String, AtlasStreamDatasets>>>,
         projected_schema: SchemaRef,
@@ -232,7 +233,7 @@ impl AtlasOpener {
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
         let atlas = crate::datafusion::cache::get_or_open_atlas(
             cache.as_ref(),
-            datasets_object_store,
+            datasets_root,
             &object_meta,
         )
         .await?;
@@ -365,7 +366,7 @@ impl FileOpener for AtlasOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::error::Result<FileOpenFuture> {
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
-            self.datasets_object_store.clone(),
+            self.datasets_root.clone(),
             file.object_meta,
             self.stream_cache.clone(),
             self.projected_schema.clone(),

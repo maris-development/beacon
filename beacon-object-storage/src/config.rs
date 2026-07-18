@@ -11,7 +11,7 @@ use object_store::aws::AmazonS3Builder;
 
 /// How Beacon's object storage is configured: where data lives on local disk and
 /// whether the datasets store is backed by S3 instead of the local filesystem.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct StorageConfig {
     /// Root data directory (parent of the stores below).
     pub data_dir: PathBuf,
@@ -45,6 +45,30 @@ pub struct StorageConfig {
     /// S3 backing for the datasets store. `None` => local filesystem; `Some` =>
     /// the datasets store is backed by S3, configured from these settings.
     pub s3: Option<S3Config>,
+}
+
+impl Default for StorageConfig {
+    /// Rooted at the current working directory, DuckDB-style: a runtime built from a
+    /// default builder reads and writes relative to where the process was started,
+    /// creates nothing implicitly, and persists nothing (`db_path: None` => an
+    /// in-memory tables store). Embedders override this wholesale.
+    fn default() -> Self {
+        // A process without a readable cwd is pathological; fall back to `.` rather
+        // than panic, and let the store surface any real error.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self {
+            data_dir: cwd.clone(),
+            datasets_dir: cwd,
+            db_path: None,
+            tmp_dir: std::env::temp_dir(),
+            enable_fs_events: false,
+            enable_s3_events: false,
+            max_upload_bytes: 0,
+            upload_part_size: 0,
+            upload_session_ttl_secs: 0,
+            s3: None,
+        }
+    }
 }
 
 /// S3 settings for the datasets store, present only when datasets are backed by

@@ -1,48 +1,39 @@
-//! Verifies the crawler's **event-driven** trigger: with filesystem events
-//! enabled, dropping a new file under the watched prefix triggers an incremental
-//! crawl (debounced) with no `RUN CRAWLER` and no schedule.
+//! Verifies the fallback behaviour of an `event_driven` crawler.
 //!
-//! In its own test binary because it needs `BEACON_ENABLE_FS_EVENTS=true`, which
-//! the other crawler integration tests turn off.
+//! Event-driven crawling (a crawler that subscribes to storage events and runs the
+//! instant a file lands) is **not currently implemented** — the storage-event source
+//! went away with `DatasetsStore` (see `docs/design/datasets-store-removal-decisions.md`),
+//! and `event_driven` is preserved only as a forward-compatibility placeholder. So an
+//! `event_driven` crawler with no explicit schedule subscribes to nothing; the manager
+//! runs it at the crawler subsystem's `default_interval_secs` poll instead (see
+//! `apply_event_driven_fallback` in `beacon-core/src/crawler/manager.rs`).
+//!
+//! This test pins that fallback: a runtime configured with a short
+//! `default_interval_secs` picks up files dropped under an `event_driven` crawler's
+//! prefix on the next poll tick, with no `RUN CRAWLER` and no `WITH ('schedule' ...)`.
+//! It is deliberately distinct from `crawler_scheduled.rs`, which exercises an
+//! explicit SQL `'schedule'` rather than the event-driven fallback path.
+
+mod common;
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use beacon_core::query::Query;
-use beacon_core::runtime::Runtime;
+use beacon_core::crawler::CrawlerConfig;
+use common::{runtime_with, scalar_i64, TestRuntime};
 use datafusion::arrow::array::{Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
-use futures::TryStreamExt;
 
-async fn run(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
-    runtime
-        .run_query(Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
-        .await
-        .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
-        .into_record_stream()
-        .unwrap_or_else(|e| panic!("expected stream: {sql}\n{e}"))
-        .try_collect()
-        .await
-        .unwrap_or_else(|e| panic!("stream failed: {sql}\n{e}"))
-}
-
-async fn try_count(runtime: &Runtime, table: &str) -> Option<i64> {
-    let result = runtime
-        .run_query(Query::sql(format!("SELECT count(*) FROM {table}")), beacon_core::AuthIdentity::system())
+async fn try_count(rt: &TestRuntime, table: &str) -> Option<i64> {
+    let identity = rt.admin().await;
+    let batches = rt
+        .try_sql_as(&format!("SELECT count(*) FROM {table}"), identity)
         .await
         .ok()?;
-    let batches: Vec<RecordBatch> = result.into_record_stream().ok()?.try_collect().await.ok()?;
-    Some(
-        batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("count is Int64")
-            .value(0),
-    )
+    Some(scalar_i64(&batches))
 }
 
 fn write_parquet(path: &Path, schema: &Arc<Schema>) {
@@ -62,45 +53,41 @@ fn write_parquet(path: &Path, schema: &Arc<Schema>) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn event_driven_crawler_runs_on_new_files() {
-    let tmp = std::env::temp_dir().join(format!("beacon_crawl_events_{}", std::process::id()));
-    std::env::set_var("BEACON_DATA_DIR", &tmp);
-    std::env::set_var("BEACON_ENABLE_FS_EVENTS", "true"); // events must be able to fire
-    std::env::set_var("BEACON_FLIGHT_SQL_ENABLE", "false");
-
-    let runtime = Runtime::new_with_in_memory_auth(Arc::new(beacon_config::Config::load().unwrap()))
-        .await
-        .expect("runtime should boot");
-    let datasets = runtime.config().storage.datasets_dir.clone();
+async fn event_driven_crawler_falls_back_to_default_interval() {
+    // A short default poll interval is what an `event_driven` crawler falls back to
+    // now that storage events are gone.
+    let rt = runtime_with("crawl-events", |b| {
+        b.with_crawler(CrawlerConfig {
+            enable: true,
+            default_interval_secs: 1,
+        })
+    })
+    .await;
+    let datasets = rt.datasets_dir().to_path_buf();
     let schema = Arc::new(Schema::new(vec![
         Field::new("v", DataType::Int64, false),
         Field::new("name", DataType::Utf8, false),
     ]));
 
-    // Event-driven crawler with NO schedule: it only acts on storage events.
-    run(
-        &runtime,
-        "CREATE CRAWLER ev ON 'ev_src/' WITH ('event_driven' 'true')",
-    )
-    .await;
+    // Event-driven crawler with NO schedule: with events removed, the manager falls
+    // back to a `default_interval_secs` (1s) poll.
+    rt.sql("CREATE CRAWLER ev ON 'ev_src/' WITH ('event_driven' 'true')")
+        .await;
 
-    // Drop a file under the watched prefix -> FS event -> debounce -> incremental crawl.
+    // Drop a file under the watched prefix; the fallback poll must discover it.
     write_parquet(&datasets.join("ev_src/a.parquet"), &schema);
 
-    // Poll for the event-triggered crawl to register the table (debounce is ~2s,
-    // plus FS-event latency). No RUN CRAWLER and no schedule were used, so the
-    // table can only appear because the storage event drove the crawl.
+    // Poll for the fallback crawl to register the table. No RUN CRAWLER and no SQL
+    // schedule were used, so the table can only appear via the interval fallback.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if let Some(1) = try_count(&runtime, "ev_src").await {
+        if let Some(1) = try_count(&rt, "ev_src").await {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "event-driven crawler did not register the table within 30s"
+            "event-driven crawler did not fall back to interval polling within 30s"
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }

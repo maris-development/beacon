@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::{
@@ -13,7 +14,6 @@ use beacon_nd_array::{
     },
     projection::DatasetProjection,
 };
-use beacon_object_storage::DatasetsStore;
 use datafusion::{
     common::{pruning::PrunableStatistics, Statistics},
     config::ConfigOptions,
@@ -43,7 +43,7 @@ use super::reader::{self, NetcdfReaderCache};
 /// pipeline via a [`FileOpener`].
 #[derive(Debug, Clone)]
 pub struct NetCDFSource {
-    datasets_object_store: Arc<DatasetsStore>,
+    datasets_root: PathBuf,
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
@@ -58,12 +58,12 @@ pub struct NetCDFSource {
 
 impl NetCDFSource {
     pub fn new(
-        datasets_object_store: Arc<DatasetsStore>,
+        datasets_root: PathBuf,
         read_dimensions: Option<Vec<String>>,
         table_schema: TableSchema,
     ) -> Self {
         Self {
-            datasets_object_store,
+            datasets_root,
             schema_adapter_factory: None,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
@@ -102,7 +102,7 @@ impl FileSource for NetCDFSource {
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(NetCDFOpener::new(
-            self.datasets_object_store.clone(),
+            self.datasets_root.clone(),
             projected_schema,
             self.read_dimensions.clone(),
             self.batch_size,
@@ -198,7 +198,7 @@ impl FileSource for NetCDFSource {
 /// Opens a single NetCDF file and streams its contents as Arrow
 /// [`RecordBatch`]es via [`any_dataset_as_record_batch_stream`].
 struct NetCDFOpener {
-    datasets_object_store: Arc<DatasetsStore>,
+    datasets_root: PathBuf,
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
@@ -213,7 +213,7 @@ struct NetCDFOpener {
 impl NetCDFOpener {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        datasets_object_store: Arc<DatasetsStore>,
+        datasets_root: PathBuf,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
@@ -228,7 +228,7 @@ impl NetCDFOpener {
             .and_then(|pred| PruningPredicate::try_new(pred.clone(), table_schema.clone()).ok());
 
         Self {
-            datasets_object_store,
+            datasets_root,
             projected_schema,
             read_dimensions,
             batch_size,
@@ -244,7 +244,7 @@ impl NetCDFOpener {
     #[allow(clippy::too_many_arguments)]
     async fn read_task(
         object: ObjectMeta,
-        datasets_object_store: Arc<DatasetsStore>,
+        datasets_root: PathBuf,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
@@ -252,7 +252,7 @@ impl NetCDFOpener {
         cache: Option<NetcdfReaderCache>,
         metrics: Option<DatasetReadMetrics>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let dataset = reader::open_dataset(cache.as_ref(), datasets_object_store, object.clone())
+        let dataset = reader::open_dataset(cache.as_ref(), datasets_root, object.clone())
             .await
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -429,7 +429,7 @@ impl FileOpener for NetCDFOpener {
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
             file.object_meta,
-            self.datasets_object_store.clone(),
+            self.datasets_root.clone(),
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
             self.batch_size,

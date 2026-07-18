@@ -7,7 +7,10 @@
 
 use beacon_auth::{AuthContext, AuthIdentity, ConcreteTarget, Privilege};
 use beacon_common::super_table::SuperListingTable;
-use beacon_datafusion_ext::{file_collection::FileCollection, table_ext::ExternalTable};
+use beacon_datafusion_ext::{
+    file_collection::FileCollection,
+    table_ext::{ExternalTable, INTERNAL_TABLE_PREFIX},
+};
 use datafusion::{
     common::tree_node::TreeNodeRecursion,
     datasource::{
@@ -29,6 +32,18 @@ pub(crate) fn authorize_logical_plan(
     identity: &AuthIdentity,
     enforce: bool,
 ) -> anyhow::Result<()> {
+    // Unconditional gate on beacon's internal auth tables, checked BEFORE the enforcement/super-user
+    // early return below. Those tables hold Argon2 password hashes, and grant enforcement defaults
+    // OFF — so a gate that relied on `enforce` would let any user `SELECT * FROM __beacon_users` on a
+    // default runtime. Only the super-user may touch them, always. `tests/auth_persistence.rs` pins
+    // that this fails closed with enforcement off.
+    if !identity.is_super_user && plan_touches_internal_tables(plan) {
+        anyhow::bail!(
+            "permission denied: the internal '{}*' tables are restricted to the super-user",
+            INTERNAL_TABLE_PREFIX
+        );
+    }
+
     if !enforce || identity.is_super_user {
         return Ok(());
     }
@@ -50,6 +65,23 @@ pub(crate) fn authorize_logical_plan(
     }
 
     Ok(())
+}
+
+/// Whether any table scan in `plan` (including subqueries and write inputs) references one of
+/// beacon's reserved `__beacon_*` internal tables. Name-based so it catches the table however it is
+/// reached; the write path uses the session directly and never goes through this check.
+fn plan_touches_internal_tables(plan: &LogicalPlan) -> bool {
+    let mut touches = false;
+    let _ = plan.apply_with_subqueries(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            if scan.table_name.table().starts_with(INTERNAL_TABLE_PREFIX) {
+                touches = true;
+                return Ok(TreeNodeRecursion::Stop);
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    touches
 }
 
 /// Resolves the concrete resource(s) a table scan touches.
@@ -165,11 +197,11 @@ mod tests {
         ctx.sql(sql).await.unwrap().into_unoptimized_plan()
     }
 
-    fn auth_with_reader_grant(grant: Option<PrivilegeRule>) -> AuthContext {
+    async fn auth_with_reader_grant(grant: Option<PrivilegeRule>) -> AuthContext {
         let auth = AuthContext::new(Arc::new(BasicAuthProvider::new()));
-        auth.create_role("reader").unwrap();
+        auth.create_role("reader").await.unwrap();
         if let Some(rule) = grant {
-            auth.grant("reader", rule).unwrap();
+            auth.grant("reader", rule).await.unwrap();
         }
         auth
     }
@@ -179,10 +211,10 @@ mod tests {
         let ctx = ctx_with_table("observations").await;
         let plan = plan_for(&ctx, "SELECT * FROM observations").await;
 
-        let denied = auth_with_reader_grant(None);
+        let denied = auth_with_reader_grant(None).await;
         assert!(authorize_logical_plan(&plan, &ctx, &denied, &identity(&["reader"]), true).is_err());
 
-        let allowed = auth_with_reader_grant(Some(PrivilegeRule::new(Privilege::Select, None)));
+        let allowed = auth_with_reader_grant(Some(PrivilegeRule::new(Privilege::Select, None))).await;
         assert!(authorize_logical_plan(&plan, &ctx, &allowed, &identity(&["reader"]), true).is_ok());
     }
 
@@ -190,7 +222,7 @@ mod tests {
     async fn enforce_off_and_super_user_bypass() {
         let ctx = ctx_with_table("observations").await;
         let plan = plan_for(&ctx, "SELECT * FROM observations").await;
-        let auth = auth_with_reader_grant(None);
+        let auth = auth_with_reader_grant(None).await;
 
         // enforce=false bypasses.
         assert!(authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), false).is_ok());
@@ -205,7 +237,7 @@ mod tests {
     async fn information_schema_is_exempt() {
         let ctx = ctx_with_table("observations").await;
         let plan = plan_for(&ctx, "SELECT table_name FROM information_schema.tables").await;
-        let auth = auth_with_reader_grant(None);
+        let auth = auth_with_reader_grant(None).await;
         assert!(authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), true).is_ok());
     }
 }

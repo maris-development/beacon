@@ -22,7 +22,7 @@ use crate::{
         DatasetInfo, FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView,
     },
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
-    query_result::{ArrowOutputStream, QueryOutput, QueryOutputFile, QueryResult},
+    query_result::{ArrowOutputStream, QueryOutput, QueryResult},
 };
 
 /// Beacon's single execution layer: startup, catalog access, queries, SQL, and files.
@@ -30,11 +30,18 @@ pub struct Runtime {
     pub(crate) session_ctx: Arc<SessionContext>,
     pub(crate) table_function_docs: Vec<FunctionDoc>,
     pub(crate) query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
-    pub(crate) crawler_manager: Option<Arc<beacon_data_lake::crawler::CrawlerManager>>,
+    pub(crate) crawler_manager: Option<Arc<crate::crawler::CrawlerManager>>,
     /// Documentation for the registered table-valued functions, captured at
     /// startup (DataFusion's UDTF registry is not enumerable with metadata).
     /// Authentication + authorization context (users, roles, grants). Shared, owned by the runtime.
     pub(crate) auth: Arc<beacon_auth::AuthContext>,
+
+    /// Whether table-level grants are enforced for non-super-users.
+    pub(crate) auth_enforce: bool,
+
+    /// Local root of the datasets store. Threaded to the NetCDF output writer,
+    /// which opens files natively rather than through `object_store`.
+    pub(crate) datasets_dir: PathBuf,
 
     /// tmp directory for storing temporary files (e.g. for query output)
     pub(crate) tmp_dir: PathBuf,
@@ -43,6 +50,29 @@ pub struct Runtime {
 impl Runtime {
     pub fn version() -> &'static str {
         env!("CARGO_PKG_VERSION")
+    }
+
+    /// The runtime's auth context (users, roles, grants).
+    pub fn auth(&self) -> &Arc<beacon_auth::AuthContext> {
+        &self.auth
+    }
+
+    /// Resolves a credential to an identity, erroring when it is not valid.
+    pub async fn authenticate(
+        &self,
+        credential: &beacon_auth::Credential,
+    ) -> anyhow::Result<beacon_auth::AuthIdentity> {
+        self.auth.authenticate(credential).await
+    }
+
+    /// Resolves the anonymous principal's identity, erroring when anonymous access is disabled.
+    pub async fn authenticate_anonymous(&self) -> anyhow::Result<beacon_auth::AuthIdentity> {
+        self.auth.authenticate_anonymous().await
+    }
+
+    /// Whether anonymous access is enabled.
+    pub fn anonymous_enabled(&self) -> bool {
+        self.auth.anonymous_enabled()
     }
 
     /// Execute a client query (JSON or SQL) and return a metrics-tracked result.
@@ -72,7 +102,7 @@ impl Runtime {
             &self.session_ctx,
             &self.auth,
             &identity,
-            true, //ToDo - make this configurable, adjust the implementation.
+            self.auth_enforce,
         )?;
 
         match output {
@@ -127,10 +157,19 @@ impl Runtime {
     ) -> anyhow::Result<QueryResult> {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
+        //
+        // `self.tmp_dir` is load-bearing coupling: it is both the tmp object store's
+        // root (where object-store writers land `tmp://<name>`) and the NetCDF/ODV
+        // factory's `output_dir` (registered from `storage.tmp_dir` in
+        // `register_file_formats`, where the native sinks reconstruct
+        // `output_dir.join(<name>)`). They MUST be the same directory or the written
+        // bytes are invisible to the returned `QueryOutputFile`.
+        let tmp_store_url = crate::settings::ObjectStoreUrls::from_session(&self.session_ctx)
+            .tmp()
+            .clone();
         let (copy_plan, output_file) = output
-            .parse(self.session_ctx.as_ref(), &self.tmp_dir, plan)
+            .parse(&self.datasets_dir, &self.tmp_dir, &tmp_store_url, plan)
             .await?;
-        let output_file = QueryOutputFile::from(output_file);
 
         let metrics = MetricsTracker::new(query_json, query_id);
         let mut stream =
@@ -240,7 +279,7 @@ impl Runtime {
             &self.session_ctx,
             &self.auth,
             &identity,
-            true, //ToDo - make this configurable, adjust the implementation.
+            self.auth_enforce,
         )?;
         let json = plan.display_pg_json().to_string();
         Ok(json)
@@ -269,7 +308,7 @@ impl Runtime {
             &self.session_ctx,
             &self.auth,
             &identity,
-            true, //ToDo - make this configurable, adjust the implementation.
+            self.auth_enforce,
         )?;
 
         // Build the physical plan and keep the `Arc` so its metrics can be read

@@ -1,10 +1,10 @@
 use std::any::Any;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
-use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::{Session, memory::DataSourceExec},
     common::{GetExt, Statistics, exec_datafusion_err},
@@ -125,7 +125,10 @@ fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> 
 
 #[derive(Debug, Clone)]
 pub struct AtlasFormatFactory {
-    pub datasets_object_store: Arc<DatasetsStore>,
+    /// Local root of the datasets store. Atlas opens files natively (not through
+    /// `object_store`), so object paths are joined under this root; reads therefore
+    /// require a local-filesystem datasets store.
+    pub datasets_root: PathBuf,
     pub options: AtlasOptions,
     pub config: AtlasConfig,
     /// Shared reader cache for this runtime, sized from `config`.
@@ -133,14 +136,10 @@ pub struct AtlasFormatFactory {
 }
 
 impl AtlasFormatFactory {
-    pub fn new(
-        datasets_object_store: Arc<DatasetsStore>,
-        options: AtlasOptions,
-        config: AtlasConfig,
-    ) -> Self {
+    pub fn new(datasets_root: PathBuf, options: AtlasOptions, config: AtlasConfig) -> Self {
         let cache = AtlasReaderCache::new(config.reader_cache_size);
         Self {
-            datasets_object_store,
+            datasets_root,
             options,
             config,
             cache,
@@ -151,7 +150,7 @@ impl AtlasFormatFactory {
     /// wiring in the shared reader cache when caching is enabled.
     fn build_format(&self, options: AtlasOptions, use_reader_cache: bool) -> AtlasFormat {
         let cache = use_reader_cache.then(|| self.cache.clone());
-        AtlasFormat::new(self.datasets_object_store.clone(), options).with_cache(cache)
+        AtlasFormat::new(self.datasets_root.clone(), options).with_cache(cache)
     }
 }
 
@@ -212,27 +211,18 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
             // dataset names, not the full atlas open path (which is async
             // and would deadlock when discover_datasets is called from
             // inside a tokio runtime).
-            let local_path = match self
-                .datasets_object_store
-                .translate_netcdf_url_path(&marker.location)
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to translate atlas marker path {}: {e}",
-                        marker.location
-                    );
-                    continue;
-                }
-            };
-
-            if local_path.starts_with("http://") || local_path.starts_with("https://") {
-                tracing::warn!(
-                    "Skipping atlas marker at {} — remote object stores are not yet supported",
-                    marker.location
-                );
-                continue;
-            }
+            let local_path =
+                match beacon_object_storage::local_object_path(&self.datasets_root, &marker.location)
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to resolve atlas marker path {}: {e}",
+                            marker.location
+                        );
+                        continue;
+                    }
+                };
 
             let dataset_names = match read_atlas_dataset_names(&local_path) {
                 Ok(names) => names,
@@ -352,16 +342,18 @@ fn marker_parent(p: &object_store::path::Path) -> Option<String> {
 
 #[derive(Debug, Clone)]
 pub struct AtlasFormat {
-    pub datasets_object_store: Arc<DatasetsStore>,
+    /// Local root of the datasets store; object paths are joined under it to open
+    /// files natively (see [`AtlasFormatFactory::datasets_root`]).
+    pub datasets_root: PathBuf,
     pub options: AtlasOptions,
     /// Reader cache to consult, or `None` to bypass caching for this format.
     cache: Option<AtlasReaderCache>,
 }
 
 impl AtlasFormat {
-    pub fn new(datasets_object_store: Arc<DatasetsStore>, options: AtlasOptions) -> Self {
+    pub fn new(datasets_root: PathBuf, options: AtlasOptions) -> Self {
         Self {
-            datasets_object_store,
+            datasets_root,
             options,
             cache: None,
         }
@@ -410,7 +402,7 @@ impl FileFormat for AtlasFormat {
         for marker in markers {
             let atlas = cache::get_or_open_atlas(
                 self.cache.as_ref(),
-                self.datasets_object_store.clone(),
+                self.datasets_root.clone(),
                 &marker,
             )
             .await?;
@@ -472,7 +464,7 @@ impl FileFormat for AtlasFormat {
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = AtlasSource::new(
-            self.datasets_object_store.clone(),
+            self.datasets_root.clone(),
             self.options.read_dimensions.clone(),
             table_schema,
         )
@@ -502,7 +494,7 @@ impl FileFormat for AtlasFormat {
     ) -> Arc<dyn FileSource> {
         Arc::new(
             AtlasSource::new(
-                self.datasets_object_store.clone(),
+                self.datasets_root.clone(),
                 self.options.read_dimensions.clone(),
                 table_schema,
             )
@@ -517,9 +509,8 @@ pub(crate) mod test_support {
 
     use super::ATLAS_MARKER;
     use crate::reader::test_support::build_two_dataset_store;
-    use beacon_object_storage::DatasetsStore;
     use object_store::{ObjectMeta, path::Path as OsPath};
-    use std::sync::Arc;
+    use std::path::PathBuf;
 
     /// Fixture directory under [`beacon_config::DATASETS_DIR_PATH`].
     pub const FIXTURE_DIR: &str = "beacon-arrow-atlas-tests/two_datasets.atlas";
@@ -547,15 +538,12 @@ pub(crate) mod test_support {
             .clone()
     }
 
-    pub async fn test_store() -> Arc<DatasetsStore> {
+    /// The datasets local root the reader translates object paths under. Named
+    /// `store` at call sites for brevity, but it is a plain filesystem root now
+    /// that Atlas opens files natively rather than through `object_store`.
+    pub async fn test_store() -> PathBuf {
         ensure_fixture().await;
-        Arc::new(
-            beacon_object_storage::local_datasets_store(
-                beacon_config::DATASETS_DIR_PATH.to_path_buf(),
-            )
-            .await
-            .expect("local datasets store"),
-        )
+        beacon_config::DATASETS_DIR_PATH.to_path_buf()
     }
 
     /// `ObjectMeta` for the fixture's `atlas.json` marker.
@@ -1032,17 +1020,22 @@ mod tests {
 
     /// Register the `two_datasets.atlas` fixture as a DataFusion table backed by
     /// [`AtlasFormat`] over the `datasets://` object store.
-    async fn register_example(ctx: &SessionContext, store: Arc<DatasetsStore>) {
+    async fn register_example(ctx: &SessionContext, datasets_root: std::path::PathBuf) {
         use beacon_common::super_table::SuperListingTable;
         use datafusion::datasource::file_format::FileFormat;
         use datafusion::datasource::listing::ListingTableUrl;
         use datafusion::execution::object_store::ObjectStoreUrl;
 
+        // The `datasets://` store lists the files; the format opens them natively
+        // under `datasets_root`.
+        let store = beacon_object_storage::local_datasets_store(datasets_root.clone())
+            .await
+            .expect("local datasets store");
         let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
-        ctx.register_object_store(store_url.as_ref(), store.clone());
+        ctx.register_object_store(store_url.as_ref(), store);
 
         let format: Arc<dyn FileFormat> =
-            Arc::new(AtlasFormat::new(store, AtlasOptions::default()));
+            Arc::new(AtlasFormat::new(datasets_root, AtlasOptions::default()));
         let url = ListingTableUrl::parse(
             "datasets:///beacon-arrow-atlas-tests/two_datasets.atlas/atlas.json",
         )

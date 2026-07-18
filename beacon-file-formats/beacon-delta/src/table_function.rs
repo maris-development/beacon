@@ -9,7 +9,6 @@ use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::table_function::BeaconTableFunctionImpl;
-use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
     common::plan_err,

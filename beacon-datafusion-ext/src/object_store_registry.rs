@@ -3,7 +3,7 @@
 //!
 //! [`LazyObjectStoreRegistry`] wraps a [`DefaultObjectStoreRegistry`] (which
 //! holds beacon's eagerly-registered stores — `datasets://`, `db://`, `tmp://`,
-//! `internal://`, and the built-in `file://`). On a lookup **miss** for a
+//! and the built-in `file://`). On a lookup **miss** for a
 //! supported remote scheme (`s3`/`gs`/`az`/`http`…), it builds the backing
 //! store from the environment, layering in credentials from a matching
 //! [`Secret`] (see [`crate::secrets`]), caches it in the inner registry, and

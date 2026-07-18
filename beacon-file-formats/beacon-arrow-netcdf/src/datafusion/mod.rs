@@ -1,11 +1,11 @@
 use std::any::Any;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
-use beacon_object_storage::DatasetsStore;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
     common::{exec_datafusion_err, GetExt, Statistics},
@@ -79,7 +79,13 @@ fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> 
 
 #[derive(Debug, Clone)]
 pub struct NetCDFFormatFactory {
-    pub datasets_object_store: Arc<DatasetsStore>,
+    /// Local root of the datasets store. NetCDF opens files natively (not through
+    /// `object_store`), so object paths are joined under this root; reads therefore
+    /// require a local-filesystem datasets store.
+    pub datasets_root: PathBuf,
+    /// Local directory the netcdf-c writer emits output files into (it cannot stream
+    /// to an object store).
+    pub output_dir: PathBuf,
     pub options: NetcdfOptions,
     pub config: NetcdfConfig,
     /// Shared reader cache for this runtime, sized from `config`.
@@ -88,13 +94,15 @@ pub struct NetCDFFormatFactory {
 
 impl NetCDFFormatFactory {
     pub fn new(
-        datasets_object_store: Arc<DatasetsStore>,
+        datasets_root: PathBuf,
+        output_dir: PathBuf,
         options: NetcdfOptions,
         config: NetcdfConfig,
     ) -> Self {
         let cache = NetcdfReaderCache::new(config.reader_cache_size);
         Self {
-            datasets_object_store,
+            datasets_root,
+            output_dir,
             options,
             config,
             cache,
@@ -110,9 +118,10 @@ impl NetCDFFormatFactory {
         enable_statistics: bool,
     ) -> NetcdfFormat {
         let cache = use_reader_cache.then(|| self.cache.clone());
-        NetcdfFormat::new(self.datasets_object_store.clone(), options)
+        NetcdfFormat::new(self.datasets_root.clone(), options)
             .with_cache(cache)
             .with_enable_statistics(enable_statistics)
+            .with_output_dir(self.output_dir.clone())
     }
 }
 
@@ -195,21 +204,26 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 
 #[derive(Debug, Clone)]
 pub struct NetcdfFormat {
-    pub datasets_object_store: Arc<DatasetsStore>,
+    /// Local root of the datasets store; object paths are joined under it to open
+    /// files natively (see [`NetCDFFormatFactory::datasets_root`]).
+    pub datasets_root: PathBuf,
     pub options: NetcdfOptions,
     /// Reader cache to consult, or `None` to bypass caching for this format.
     cache: Option<NetcdfReaderCache>,
     /// Whether to generate per-file statistics during planning.
     enable_statistics: bool,
+    /// Local directory the netcdf-c writer emits output files into.
+    output_dir: PathBuf,
 }
 
 impl NetcdfFormat {
-    pub fn new(datasets_object_store: Arc<DatasetsStore>, options: NetcdfOptions) -> Self {
+    pub fn new(datasets_root: PathBuf, options: NetcdfOptions) -> Self {
         Self {
-            datasets_object_store,
+            datasets_root,
             options,
             cache: None,
             enable_statistics: false,
+            output_dir: std::env::temp_dir(),
         }
     }
 
@@ -222,6 +236,13 @@ impl NetcdfFormat {
     /// Set whether per-file statistics are generated during planning.
     pub fn with_enable_statistics(mut self, enable_statistics: bool) -> Self {
         self.enable_statistics = enable_statistics;
+        self
+    }
+
+    /// Set the local directory the writer emits output files into (defaults to the
+    /// OS temp dir).
+    pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
+        self.output_dir = output_dir;
         self
     }
 }
@@ -256,7 +277,7 @@ impl FileFormat for NetcdfFormat {
         let mut tasks = vec![];
         for object in objects {
             let task = reader::fetch_schema(
-                self.datasets_object_store.clone(),
+                self.datasets_root.clone(),
                 object.clone(),
                 self.options.read_dimensions.clone(),
             );
@@ -285,7 +306,7 @@ impl FileFormat for NetcdfFormat {
     ) -> datafusion::error::Result<Statistics> {
         if self.enable_statistics {
             Ok(statistics::generate_statistics(
-                self.datasets_object_store.clone(),
+                self.datasets_root.clone(),
                 object,
                 &table_schema,
             )
@@ -322,7 +343,7 @@ impl FileFormat for NetcdfFormat {
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = NetCDFSource::new(
-            self.datasets_object_store.clone(),
+            self.datasets_root.clone(),
             self.options.read_dimensions.clone(),
             table_schema,
         )
@@ -347,9 +368,9 @@ impl FileFormat for NetcdfFormat {
         order_requirements: Option<LexRequirement>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         // NetCDF needs a real local path (the netcdf-c writer cannot stream to an
-        // object store). Write into the configured tmp store root, threaded in via
-        // the datasets store's `StorageConfig`, rather than the OS temp dir.
-        let output_dir = self.datasets_object_store.storage().tmp_dir.clone();
+        // object store). Write into the configured output directory (the tmp store
+        // root), threaded in by the runtime, rather than the OS temp dir.
+        let output_dir = self.output_dir.clone();
         match &self.options.write_dimensions {
             Some(dim_columns) if !dim_columns.is_empty() => {
                 let unique_columns = dim_columns.clone();
@@ -403,7 +424,7 @@ impl FileFormat for NetcdfFormat {
     ) -> Arc<dyn FileSource> {
         Arc::new(
             NetCDFSource::new(
-                self.datasets_object_store.clone(),
+                self.datasets_root.clone(),
                 self.options.read_dimensions.clone(),
                 table_schema,
             )
@@ -463,19 +484,16 @@ mod tests {
         }
     }
 
-    async fn test_store() -> Arc<DatasetsStore> {
+    /// The datasets local root the readers translate object paths under. Named
+    /// `store` at call sites for brevity, but it is a plain filesystem root now
+    /// that NetCDF opens files natively rather than through `object_store`.
+    async fn test_store() -> PathBuf {
         ensure_test_fixtures();
-        Arc::new(
-            beacon_object_storage::local_datasets_store(
-                beacon_config::DATASETS_DIR_PATH.to_path_buf(),
-            )
-            .await
-            .expect("local datasets store"),
-        )
+        beacon_config::DATASETS_DIR_PATH.to_path_buf()
     }
 
-    fn test_format(store: Arc<DatasetsStore>) -> NetcdfFormat {
-        NetcdfFormat::new(store, NetcdfOptions::default())
+    fn test_format(datasets_root: PathBuf) -> NetcdfFormat {
+        NetcdfFormat::new(datasets_root, NetcdfOptions::default())
     }
 
     // ── fetch_schema ───────────────────────────────────────────────────
@@ -605,8 +623,12 @@ mod tests {
         use std::collections::HashMap;
 
         let store = test_store().await;
-        let factory =
-            NetCDFFormatFactory::new(store, NetcdfOptions::default(), NetcdfConfig::default());
+        let factory = NetCDFFormatFactory::new(
+            store,
+            std::env::temp_dir(),
+            NetcdfOptions::default(),
+            NetcdfConfig::default(),
+        );
         let ctx = datafusion::prelude::SessionContext::new();
 
         let mut options = HashMap::new();
@@ -896,19 +918,21 @@ mod tests {
 
     /// Register `gridded-example.nc` as a DataFusion table backed by
     /// [`NetcdfFormat`] over the `datasets://` object store.
-    async fn register_example(
-        ctx: &datafusion::prelude::SessionContext,
-        store: Arc<beacon_object_storage::DatasetsStore>,
-    ) {
+    async fn register_example(ctx: &datafusion::prelude::SessionContext, datasets_root: PathBuf) {
         use beacon_common::super_table::SuperListingTable;
         use datafusion::datasource::file_format::FileFormat;
         use datafusion::datasource::listing::ListingTableUrl;
 
+        // The `datasets://` store lists the files; the format opens them natively
+        // under `datasets_root`.
+        let store = beacon_object_storage::local_datasets_store(datasets_root.clone())
+            .await
+            .expect("local datasets store");
         let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
-        ctx.register_object_store(store_url.as_ref(), store.clone());
+        ctx.register_object_store(store_url.as_ref(), store);
 
         let format: Arc<dyn FileFormat> =
-            Arc::new(NetcdfFormat::new(store, NetcdfOptions::default()));
+            Arc::new(NetcdfFormat::new(datasets_root, NetcdfOptions::default()));
         let url =
             ListingTableUrl::parse("datasets:///beacon-arrow-netcdf-tests/gridded-example.nc")
                 .unwrap();

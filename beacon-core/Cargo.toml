@@ -27,17 +27,17 @@ chrono = { workspace = true }
 cast = {workspace = true}
 geojson = {workspace = true}
 num_cpus = {workspace = true}
+url = { workspace = true }
+typetag = { workspace = true }
 
 tracing = { workspace=true}
 # Local dependencies
 beacon-auth = { path = "../beacon-auth" }
 beacon-common = { path = "../beacon-common" }
-beacon-config = { path = "../beacon-config" }
 beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
 beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
 beacon-functions = { path = "../beacon-functions" }
-beacon-data-lake = { path = "../beacon-data-lake" }
 beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
 beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
 beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
@@ -50,14 +50,5 @@ beacon-lance = { path = "../beacon-file-formats/beacon-lance" }
 beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
 beacon-sql-databases = { path = "../beacon-sql-databases" }
 
-[features]
-# Exposes Runtime::new_with_in_memory_auth so other crates' tests can build a
-# runtime with an ephemeral (non-persistent) auth context.
-test-util = []
-
 [dev-dependencies]
 deltalake = { workspace = true }
-url = {workspace = true}
-# Self-reference enabling `test-util` for this crate's own integration tests
-# (tests/), so they can build an ephemeral in-memory-auth runtime.
-beacon-core = { path = ".", features = ["test-util"] }

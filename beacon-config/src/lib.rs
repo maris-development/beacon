@@ -14,6 +14,7 @@ use error::Result;
 pub use beacon_arrow_atlas::datafusion::AtlasConfig;
 pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
+pub use beacon_common::CrawlerConfig;
 pub use beacon_object_storage::{S3Config, StorageConfig};
 
 #[derive(Debug, Clone)]
@@ -154,17 +155,6 @@ pub struct ApiDocsConfig {
     pub license_name: Option<String>,
     pub license_url: Option<String>,
     pub license_identifier: Option<String>,
-}
-
-/// Settings for the Glue-style crawler subsystem.
-#[derive(Debug, Clone)]
-pub struct CrawlerConfig {
-    /// Master switch for crawler scheduling/event triggers. When false, crawlers
-    /// can still be defined and run on demand, but no background tasks are spawned.
-    pub enable: bool,
-    /// Fallback poll interval (seconds) applied to a crawler that requests
-    /// event-driven crawling on a deployment where storage events are unavailable.
-    pub default_interval_secs: u64,
 }
 
 /// Master key material for encrypting secrets (e.g. external-database

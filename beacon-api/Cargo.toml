@@ -48,9 +48,9 @@ beacon-core = { path = "../beacon-core" }
 beacon-mcp = { path = "../beacon-mcp" }
 
 [dev-dependencies]
-# Enable beacon-core's test-only helper (ephemeral in-memory auth runtime) for the
-# Flight SQL integration tests so they don't contend on the shared SQLite directory.
-beacon-core = { path = "../beacon-core", features = ["test-util"] }
+# Tests build runtimes directly via `RuntimeBuilder` (ephemeral temp dirs + an
+# in-memory auth provider), so no test-only feature is needed.
+beacon-core = { path = "../beacon-core" }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
 tower = { version = "0.5", features = ["util"] }
 # Temp storage roots for the admin dataset file-management HTTP tests.

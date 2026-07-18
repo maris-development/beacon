@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use futures::StreamExt;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 pub async fn load_tables_from_object_store(
     tables_object_store: Arc<dyn ObjectStore>,
@@ -30,13 +30,36 @@ pub async fn load_tables_from_object_store(
         .collect();
 
     for table_json in table_json_paths {
-        match crate::table::try_open(tables_object_store.clone(), table_json).await {
+        match open_table_definition(&tables_object_store, &table_json).await {
             Ok(table) => discovered_tables.push(table),
             Err(error) => tracing::error!("Failed to load table from object store: {}", error),
         }
     }
 
     discovered_tables
+}
+
+/// Read a `table.json` and parse it as a serializable [`TableDefinition`] (the
+/// typetag format every managed definition is persisted in).
+async fn open_table_definition(
+    store: &Arc<dyn ObjectStore>,
+    table_json: &object_store::path::Path,
+) -> anyhow::Result<Arc<dyn TableDefinition>> {
+    let json_bytes = store
+        .get(table_json)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read table config: {:?}", e))?
+        .bytes()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read table config bytes: {:?}", e))?;
+
+    serde_json::from_slice::<Arc<dyn TableDefinition>>(&json_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse table config at {}: {}",
+            table_json,
+            e
+        )
+    })
 }
 
 #[cfg(test)]
@@ -85,24 +108,5 @@ mod tests {
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].table_name(), "ok_table");
-    }
-
-    #[tokio::test]
-    async fn load_tables_reads_legacy_logical_envelope() {
-        let store = InMemory::new();
-
-        let legacy = br#"{
-            "table_name": "default",
-            "table_type": { "logical": { "paths": ["**/*.bbf"], "file_format": "bbf" } }
-        }"#;
-        store
-            .put(&Path::from("default/table.json"), legacy.to_vec().into())
-            .await
-            .expect("legacy table.json should be written");
-
-        let loaded = load_tables_from_object_store(Arc::new(store)).await;
-
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].table_name(), "default");
     }
 }

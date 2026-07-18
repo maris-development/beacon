@@ -1,74 +1,36 @@
 //! Integration tests for the authentication + authorization layer, exercised end to end through
 //! the real [`Runtime`] (`run_query` with `AuthIdentity`s).
 //!
-//! Each test builds its own runtime with an ephemeral in-memory auth context
-//! (`new_with_in_memory_auth`), bootstrapped from the config's admin credentials, so auth state is
-//! isolated per test. The rest of the runtime (object stores, tables dir) is shared on disk, so
-//! table names are suffixed with a uuid to avoid cross-test collisions.
+//! Each test builds its own runtime through [`RuntimeBuilder`] with an ephemeral in-memory auth
+//! context and an isolated storage root, so auth state and tables are per-test. Table names are
+//! still suffixed with a uuid so a scenario's own statements never collide.
+
+mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use arrow::record_batch::RecordBatch;
-use beacon_config::Config;
-use beacon_core::{runtime::Runtime, AuthIdentity, Credential};
-use futures::TryStreamExt;
+use beacon_core::{AuthIdentity, Credential};
+use common::{
+    runtime_with, total_rows, TestRuntime, ADMIN_PASSWORD, ADMIN_USERNAME, ANONYMOUS_USERNAME,
+};
 
-/// Builds a config with explicit auth settings (otherwise defaults from the environment).
-fn config(enforce: bool, anonymous_enabled: bool) -> Arc<Config> {
-    let mut config = Config::load().expect("load config");
-    config.auth.enforce = enforce;
-    config.auth.anonymous_enabled = anonymous_enabled;
-    Arc::new(config)
+/// Builds a runtime with explicit auth settings. `enforce` gates table/path grants for
+/// non-super-users; `anonymous_enabled` seeds and enables the anonymous principal.
+async fn auth_runtime(tag: &str, enforce: bool, anonymous_enabled: bool) -> TestRuntime {
+    runtime_with(tag, move |builder| {
+        let builder = builder.with_auth_enforcement(enforce);
+        if anonymous_enabled {
+            builder.with_anonymous_user(ANONYMOUS_USERNAME)
+        } else {
+            builder
+        }
+    })
+    .await
 }
 
-async fn runtime_with(config: Arc<Config>) -> (Runtime, Arc<Config>) {
-    let runtime = Runtime::new_with_in_memory_auth(config.clone())
-        .await
-        .expect("runtime should start");
-    (runtime, config)
-}
-
-/// A unique-per-test table name so concurrent tests don't collide on the shared tables dir.
+/// A unique-per-test name so a scenario's statements never collide.
 fn unique(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
-}
-
-/// Authenticates the bootstrapped admin (super-user) for the given config.
-async fn admin_identity(runtime: &Runtime, config: &Config) -> AuthIdentity {
-    runtime
-        .authenticate(&Credential::basic(
-            config.admin.username.clone(),
-            config.admin.password.clone(),
-        ))
-        .await
-        .expect("admin should authenticate")
-}
-
-/// Runs a statement and collects its rows.
-async fn exec(
-    runtime: &Runtime,
-    sql: &str,
-    identity: AuthIdentity,
-) -> anyhow::Result<Vec<RecordBatch>> {
-    let batches = runtime
-        .run_query(beacon_core::query::Query::sql(sql.to_string()), identity)
-        .await?
-        .into_record_stream()?
-        .try_collect::<Vec<_>>()
-        .await?;
-    Ok(batches)
-}
-
-/// Runs a statement as a super-user and asserts it succeeds (test setup helper).
-async fn exec_admin(runtime: &Runtime, sql: &str) -> Vec<RecordBatch> {
-    exec(runtime, sql, AuthIdentity::system())
-        .await
-        .unwrap_or_else(|err| panic!("super-user statement failed: {sql}: {err}"))
-}
-
-fn total_rows(batches: &[RecordBatch]) -> usize {
-    batches.iter().map(RecordBatch::num_rows).sum()
 }
 
 // --------------------------------------------------------------------------------------------
@@ -77,20 +39,25 @@ fn total_rows(batches: &[RecordBatch]) -> usize {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn admin_credentials_authenticate_as_super_user() {
-    let (runtime, config) = runtime_with(config(false, true)).await;
-    let identity = admin_identity(&runtime, &config).await;
-    assert_eq!(identity.username, config.admin.username);
-    assert!(identity.is_super_user, "the bootstrapped admin is a super-user");
+    let rt = auth_runtime("auth-admin", false, true).await;
+    let identity = rt.admin().await;
+    assert_eq!(identity.username, ADMIN_USERNAME);
+    assert!(
+        identity.is_super_user,
+        "the bootstrapped admin is a super-user"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_password_and_unknown_user_are_rejected() {
-    let (runtime, config) = runtime_with(config(false, true)).await;
-    assert!(runtime
-        .authenticate(&Credential::basic(config.admin.username.clone(), "wrong"))
+    let rt = auth_runtime("auth-reject", false, true).await;
+    assert!(rt
+        .runtime
+        .authenticate(&Credential::basic(ADMIN_USERNAME, "wrong"))
         .await
         .is_err());
-    assert!(runtime
+    assert!(rt
+        .runtime
         .authenticate(&Credential::basic("ghost", "whatever"))
         .await
         .is_err());
@@ -99,8 +66,9 @@ async fn wrong_password_and_unknown_user_are_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bearer_credential_without_oidc_is_rejected() {
     // OIDC is disabled by default, so the local provider rejects bearer tokens.
-    let (runtime, _config) = runtime_with(config(false, true)).await;
-    assert!(runtime
+    let rt = auth_runtime("auth-bearer", false, true).await;
+    assert!(rt
+        .runtime
         .authenticate(&Credential::bearer("not-a-jwt"))
         .await
         .is_err());
@@ -108,9 +76,10 @@ async fn bearer_credential_without_oidc_is_rejected() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn anonymous_enabled_resolves_to_roleless_identity() {
-    let (runtime, _config) = runtime_with(config(false, true)).await;
-    assert!(runtime.anonymous_enabled());
-    let identity = runtime
+    let rt = auth_runtime("auth-anon-on", false, true).await;
+    assert!(rt.runtime.anonymous_enabled());
+    let identity = rt
+        .runtime
         .authenticate_anonymous()
         .await
         .expect("anonymous should resolve");
@@ -120,9 +89,9 @@ async fn anonymous_enabled_resolves_to_roleless_identity() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn anonymous_disabled_errors() {
-    let (runtime, _config) = runtime_with(config(false, false)).await;
-    assert!(!runtime.anonymous_enabled());
-    assert!(runtime.authenticate_anonymous().await.is_err());
+    let rt = auth_runtime("auth-anon-off", false, false).await;
+    assert!(!rt.runtime.anonymous_enabled());
+    assert!(rt.runtime.authenticate_anonymous().await.is_err());
 }
 
 // --------------------------------------------------------------------------------------------
@@ -131,12 +100,15 @@ async fn anonymous_disabled_errors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_user_role_and_grant_then_authenticate() {
-    let (runtime, _config) = runtime_with(config(false, true)).await;
-    exec_admin(&runtime, "CREATE ROLE reader").await;
-    exec_admin(&runtime, "CREATE USER alice WITH PASSWORD 'pw'").await;
-    exec_admin(&runtime, "GRANT ROLE reader TO USER alice").await;
+    let rt = auth_runtime("auth-lifecycle", false, true).await;
+    rt.sql_as("CREATE ROLE reader", AuthIdentity::system()).await;
+    rt.sql_as("CREATE USER alice WITH PASSWORD 'pw'", AuthIdentity::system())
+        .await;
+    rt.sql_as("GRANT ROLE reader TO USER alice", AuthIdentity::system())
+        .await;
 
-    let identity = runtime
+    let identity = rt
+        .runtime
         .authenticate(&Credential::basic("alice", "pw"))
         .await
         .expect("alice should authenticate");
@@ -147,15 +119,18 @@ async fn create_user_role_and_grant_then_authenticate() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn drop_user_revokes_authentication() {
-    let (runtime, _config) = runtime_with(config(false, true)).await;
-    exec_admin(&runtime, "CREATE USER bob WITH PASSWORD 'pw'").await;
-    assert!(runtime
+    let rt = auth_runtime("auth-drop-user", false, true).await;
+    rt.sql_as("CREATE USER bob WITH PASSWORD 'pw'", AuthIdentity::system())
+        .await;
+    assert!(rt
+        .runtime
         .authenticate(&Credential::basic("bob", "pw"))
         .await
         .is_ok());
 
-    exec_admin(&runtime, "DROP USER bob").await;
-    assert!(runtime
+    rt.sql_as("DROP USER bob", AuthIdentity::system()).await;
+    assert!(rt
+        .runtime
         .authenticate(&Credential::basic("bob", "pw"))
         .await
         .is_err());
@@ -163,13 +138,16 @@ async fn drop_user_revokes_authentication() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn created_users_and_roles_are_never_super_user() {
-    let (runtime, _config) = runtime_with(config(false, true)).await;
-    exec_admin(&runtime, "CREATE ROLE owners").await;
-    exec_admin(&runtime, "CREATE USER root WITH PASSWORD 'pw'").await;
-    exec_admin(&runtime, "GRANT ROLE owners TO USER root").await;
+    let rt = auth_runtime("auth-no-escalate", false, true).await;
+    rt.sql_as("CREATE ROLE owners", AuthIdentity::system()).await;
+    rt.sql_as("CREATE USER root WITH PASSWORD 'pw'", AuthIdentity::system())
+        .await;
+    rt.sql_as("GRANT ROLE owners TO USER root", AuthIdentity::system())
+        .await;
 
     // No SQL-created user is ever a super-user, whatever roles they hold.
-    let identity = runtime
+    let identity = rt
+        .runtime
         .authenticate(&Credential::basic("root", "pw"))
         .await
         .unwrap();
@@ -182,7 +160,7 @@ async fn created_users_and_roles_are_never_super_user() {
         "GRANT INSERT ON TABLE t TO ROLE owners",
         "GRANT DROP ON TABLE t TO ROLE owners",
     ] {
-        let err = exec(&runtime, sql, AuthIdentity::system()).await;
+        let err = rt.try_sql_as(sql, AuthIdentity::system()).await;
         assert!(
             err.is_err_and(|e| e.to_string().contains("read-only")),
             "granting write privileges to a role should be rejected: {sql}"
@@ -192,31 +170,30 @@ async fn created_users_and_roles_are_never_super_user() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_super_user_is_config_defined_and_reserved() {
-    let (runtime, config) = runtime_with(config(false, true)).await;
-    let admin = &config.admin.username;
+    let rt = auth_runtime("auth-reserved", false, true).await;
 
     // The configured admin credential is the one and only super-user.
-    assert!(admin_identity(&runtime, &config).await.is_super_user);
+    assert!(rt.admin().await.is_super_user);
 
     // Its username is reserved: it cannot be created or dropped as a stored user via SQL.
-    // (Quoted because the default admin username contains a hyphen.)
-    let created = exec(
-        &runtime,
-        &format!("CREATE USER \"{admin}\" WITH PASSWORD 'x'"),
-        AuthIdentity::system(),
-    )
-    .await;
+    // (Quoted because the admin username contains a hyphen.)
+    let created = rt
+        .try_sql_as(
+            &format!("CREATE USER \"{ADMIN_USERNAME}\" WITH PASSWORD 'x'"),
+            AuthIdentity::system(),
+        )
+        .await;
     assert!(
         created.is_err_and(|e| e.to_string().contains("reserved super-user")),
         "creating the super-user as a stored user should be rejected"
     );
 
-    let dropped = exec(
-        &runtime,
-        &format!("DROP USER \"{admin}\""),
-        AuthIdentity::system(),
-    )
-    .await;
+    let dropped = rt
+        .try_sql_as(
+            &format!("DROP USER \"{ADMIN_USERNAME}\""),
+            AuthIdentity::system(),
+        )
+        .await;
     assert!(
         dropped.is_err_and(|e| e.to_string().contains("reserved super-user")),
         "dropping the super-user should be rejected"
@@ -224,27 +201,45 @@ async fn the_super_user_is_config_defined_and_reserved() {
 }
 
 // --------------------------------------------------------------------------------------------
-// Read enforcement (BEACON_AUTH_ENFORCE = true)
+// Read enforcement (auth enforcement on)
 // --------------------------------------------------------------------------------------------
 
 /// Seeds two tables and a `reader` role/user, granting SELECT only on `t1`. Returns
 /// `(t1, t2, alice_identity)`.
-async fn seed_two_tables_and_reader(runtime: &Runtime) -> (String, String, AuthIdentity) {
+async fn seed_two_tables_and_reader(rt: &TestRuntime) -> (String, String, AuthIdentity) {
     let t1 = unique("t1");
     let t2 = unique("t2");
-    exec_admin(runtime, &format!("CREATE TABLE {t1} (a BIGINT)")).await;
-    exec_admin(runtime, &format!("INSERT INTO {t1} VALUES (1), (2)")).await;
-    exec_admin(runtime, &format!("CREATE TABLE {t2} (a BIGINT)")).await;
-    exec_admin(runtime, &format!("INSERT INTO {t2} VALUES (3)")).await;
+    rt.sql_as(&format!("CREATE TABLE {t1} (a BIGINT)"), AuthIdentity::system())
+        .await;
+    rt.sql_as(&format!("INSERT INTO {t1} VALUES (1), (2)"), AuthIdentity::system())
+        .await;
+    rt.sql_as(&format!("CREATE TABLE {t2} (a BIGINT)"), AuthIdentity::system())
+        .await;
+    rt.sql_as(&format!("INSERT INTO {t2} VALUES (3)"), AuthIdentity::system())
+        .await;
 
     let role = unique("reader");
     let user = unique("alice");
-    exec_admin(runtime, &format!("CREATE ROLE {role}")).await;
-    exec_admin(runtime, &format!("CREATE USER {user} WITH PASSWORD 'pw'")).await;
-    exec_admin(runtime, &format!("GRANT ROLE {role} TO USER {user}")).await;
-    exec_admin(runtime, &format!("GRANT SELECT ON TABLE {t1} TO ROLE {role}")).await;
+    rt.sql_as(&format!("CREATE ROLE {role}"), AuthIdentity::system())
+        .await;
+    rt.sql_as(
+        &format!("CREATE USER {user} WITH PASSWORD 'pw'"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(
+        &format!("GRANT ROLE {role} TO USER {user}"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(
+        &format!("GRANT SELECT ON TABLE {t1} TO ROLE {role}"),
+        AuthIdentity::system(),
+    )
+    .await;
 
-    let identity = runtime
+    let identity = rt
+        .runtime
         .authenticate(&Credential::basic(user, "pw"))
         .await
         .unwrap();
@@ -253,13 +248,13 @@ async fn seed_two_tables_and_reader(runtime: &Runtime) -> (String, String, AuthI
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_table_grant_allows_only_the_granted_table() {
-    let (runtime, _config) = runtime_with(config(true, true)).await;
-    let (t1, t2, alice) = seed_two_tables_and_reader(&runtime).await;
+    let rt = auth_runtime("auth-table-grant", true, true).await;
+    let (t1, t2, alice) = seed_two_tables_and_reader(&rt).await;
 
-    let allowed = exec(&runtime, &format!("SELECT * FROM {t1}"), alice.clone()).await;
+    let allowed = rt.try_sql_as(&format!("SELECT * FROM {t1}"), alice.clone()).await;
     assert_eq!(total_rows(&allowed.expect("granted table is readable")), 2);
 
-    let denied = exec(&runtime, &format!("SELECT * FROM {t2}"), alice).await;
+    let denied = rt.try_sql_as(&format!("SELECT * FROM {t2}"), alice).await;
     assert!(
         denied.is_err_and(|e| e.to_string().contains("permission denied")),
         "ungranted table must be denied"
@@ -268,33 +263,53 @@ async fn enforced_table_grant_allows_only_the_granted_table() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_deny_wins_over_grant() {
-    let (runtime, _config) = runtime_with(config(true, true)).await;
+    let rt = auth_runtime("auth-deny-wins", true, true).await;
     let t1 = unique("t1");
     let t2 = unique("t2");
-    exec_admin(&runtime, &format!("CREATE TABLE {t1} (a BIGINT)")).await;
-    exec_admin(&runtime, &format!("INSERT INTO {t1} VALUES (1)")).await;
-    exec_admin(&runtime, &format!("CREATE TABLE {t2} (a BIGINT)")).await;
-    exec_admin(&runtime, &format!("INSERT INTO {t2} VALUES (2)")).await;
+    rt.sql_as(&format!("CREATE TABLE {t1} (a BIGINT)"), AuthIdentity::system())
+        .await;
+    rt.sql_as(&format!("INSERT INTO {t1} VALUES (1)"), AuthIdentity::system())
+        .await;
+    rt.sql_as(&format!("CREATE TABLE {t2} (a BIGINT)"), AuthIdentity::system())
+        .await;
+    rt.sql_as(&format!("INSERT INTO {t2} VALUES (2)"), AuthIdentity::system())
+        .await;
 
     let role = unique("reader");
     let user = unique("alice");
-    exec_admin(&runtime, &format!("CREATE ROLE {role}")).await;
-    exec_admin(&runtime, &format!("CREATE USER {user} WITH PASSWORD 'pw'")).await;
-    exec_admin(&runtime, &format!("GRANT ROLE {role} TO USER {user}")).await;
+    rt.sql_as(&format!("CREATE ROLE {role}"), AuthIdentity::system())
+        .await;
+    rt.sql_as(
+        &format!("CREATE USER {user} WITH PASSWORD 'pw'"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(
+        &format!("GRANT ROLE {role} TO USER {user}"),
+        AuthIdentity::system(),
+    )
+    .await;
     // Grant SELECT on everything, then deny one table — deny must win.
-    exec_admin(&runtime, &format!("GRANT SELECT TO ROLE {role}")).await;
-    exec_admin(&runtime, &format!("DENY SELECT ON TABLE {t2} TO ROLE {role}")).await;
+    rt.sql_as(&format!("GRANT SELECT TO ROLE {role}"), AuthIdentity::system())
+        .await;
+    rt.sql_as(
+        &format!("DENY SELECT ON TABLE {t2} TO ROLE {role}"),
+        AuthIdentity::system(),
+    )
+    .await;
 
-    let alice = runtime
+    let alice = rt
+        .runtime
         .authenticate(&Credential::basic(user, "pw"))
         .await
         .unwrap();
 
-    assert!(exec(&runtime, &format!("SELECT * FROM {t1}"), alice.clone())
+    assert!(rt
+        .try_sql_as(&format!("SELECT * FROM {t1}"), alice.clone())
         .await
         .is_ok());
     assert!(
-        exec(&runtime, &format!("SELECT * FROM {t2}"), alice)
+        rt.try_sql_as(&format!("SELECT * FROM {t2}"), alice)
             .await
             .is_err_and(|e| e.to_string().contains("permission denied")),
         "the denied table must be rejected even with a broad grant"
@@ -303,53 +318,82 @@ async fn enforced_deny_wins_over_grant() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_revoke_removes_access() {
-    let (runtime, _config) = runtime_with(config(true, true)).await;
-    let (t1, _t2, alice) = seed_two_tables_and_reader(&runtime).await;
+    let rt = auth_runtime("auth-revoke", true, true).await;
+    let (t1, _t2, alice) = seed_two_tables_and_reader(&rt).await;
 
-    // Re-derive the role name from the grant: seed_* used unique names, so grant via a fresh role.
-    // Simpler: build a self-contained scenario here.
+    // A self-contained scenario: seed_* used unique names, so grant via a fresh role.
     let role = unique("r");
     let user = unique("u");
     let table = unique("tg");
-    exec_admin(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
-    exec_admin(&runtime, &format!("INSERT INTO {table} VALUES (1)")).await;
-    exec_admin(&runtime, &format!("CREATE ROLE {role}")).await;
-    exec_admin(&runtime, &format!("CREATE USER {user} WITH PASSWORD 'pw'")).await;
-    exec_admin(&runtime, &format!("GRANT ROLE {role} TO USER {user}")).await;
-    exec_admin(&runtime, &format!("GRANT SELECT ON TABLE {table} TO ROLE {role}")).await;
-    let u = runtime
+    rt.sql_as(
+        &format!("CREATE TABLE {table} (a BIGINT)"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(&format!("INSERT INTO {table} VALUES (1)"), AuthIdentity::system())
+        .await;
+    rt.sql_as(&format!("CREATE ROLE {role}"), AuthIdentity::system())
+        .await;
+    rt.sql_as(
+        &format!("CREATE USER {user} WITH PASSWORD 'pw'"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(
+        &format!("GRANT ROLE {role} TO USER {user}"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(
+        &format!("GRANT SELECT ON TABLE {table} TO ROLE {role}"),
+        AuthIdentity::system(),
+    )
+    .await;
+    let u = rt
+        .runtime
         .authenticate(&Credential::basic(user, "pw"))
         .await
         .unwrap();
 
-    assert!(exec(&runtime, &format!("SELECT * FROM {table}"), u.clone())
+    assert!(rt
+        .try_sql_as(&format!("SELECT * FROM {table}"), u.clone())
         .await
         .is_ok());
 
-    exec_admin(&runtime, &format!("REVOKE SELECT ON TABLE {table} FROM ROLE {role}")).await;
+    rt.sql_as(
+        &format!("REVOKE SELECT ON TABLE {table} FROM ROLE {role}"),
+        AuthIdentity::system(),
+    )
+    .await;
     assert!(
-        exec(&runtime, &format!("SELECT * FROM {table}"), u)
+        rt.try_sql_as(&format!("SELECT * FROM {table}"), u)
             .await
             .is_err(),
         "access must be gone after REVOKE"
     );
 
     // (t1/alice from the shared helper remain readable — sanity that seeding is independent.)
-    assert!(exec(&runtime, &format!("SELECT * FROM {t1}"), alice)
+    assert!(rt
+        .try_sql_as(&format!("SELECT * FROM {t1}"), alice)
         .await
         .is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_anonymous_has_no_read_access() {
-    let (runtime, _config) = runtime_with(config(true, true)).await;
+    let rt = auth_runtime("auth-anon-denied", true, true).await;
     let table = unique("t");
-    exec_admin(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
-    exec_admin(&runtime, &format!("INSERT INTO {table} VALUES (1)")).await;
+    rt.sql_as(
+        &format!("CREATE TABLE {table} (a BIGINT)"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(&format!("INSERT INTO {table} VALUES (1)"), AuthIdentity::system())
+        .await;
 
-    let anon = runtime.authenticate_anonymous().await.unwrap();
+    let anon = rt.runtime.authenticate_anonymous().await.unwrap();
     assert!(
-        exec(&runtime, &format!("SELECT * FROM {table}"), anon)
+        rt.try_sql_as(&format!("SELECT * FROM {table}"), anon)
             .await
             .is_err(),
         "a role-less anonymous user must be denied under enforcement"
@@ -358,41 +402,56 @@ async fn enforced_anonymous_has_no_read_access() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn super_user_bypasses_enforcement() {
-    let (runtime, config) = runtime_with(config(true, true)).await;
-    let (_t1, t2, _alice) = seed_two_tables_and_reader(&runtime).await;
-    let admin = admin_identity(&runtime, &config).await;
+    let rt = auth_runtime("auth-super-bypass", true, true).await;
+    let (_t1, t2, _alice) = seed_two_tables_and_reader(&rt).await;
+    let admin = rt.admin().await;
     // The admin can read the table the reader was never granted.
-    assert!(exec(&runtime, &format!("SELECT * FROM {t2}"), admin)
+    assert!(rt
+        .try_sql_as(&format!("SELECT * FROM {t2}"), admin)
         .await
         .is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforcement_off_allows_ungranted_reads() {
-    let (runtime, _config) = runtime_with(config(false, true)).await;
+    let rt = auth_runtime("auth-enforce-off", false, true).await;
     let table = unique("t");
-    exec_admin(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
-    exec_admin(&runtime, &format!("INSERT INTO {table} VALUES (1)")).await;
+    rt.sql_as(
+        &format!("CREATE TABLE {table} (a BIGINT)"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(&format!("INSERT INTO {table} VALUES (1)"), AuthIdentity::system())
+        .await;
 
     // A role-less identity can still read when enforcement is off (backwards-compatible default).
-    let result = exec(&runtime, &format!("SELECT * FROM {table}"), AuthIdentity::empty()).await;
+    let result = rt
+        .try_sql_as(&format!("SELECT * FROM {table}"), AuthIdentity::empty())
+        .await;
     assert_eq!(total_rows(&result.expect("read allowed when enforce=off")), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn information_schema_is_exempt_from_enforcement() {
-    let (runtime, _config) = runtime_with(config(true, true)).await;
+    let rt = auth_runtime("auth-info-schema", true, true).await;
     let table = unique("t");
-    exec_admin(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
-
-    // A role-less user can still introspect information_schema even with enforcement on.
-    let result = exec(
-        &runtime,
-        "SELECT table_name FROM information_schema.tables",
-        AuthIdentity::empty(),
+    rt.sql_as(
+        &format!("CREATE TABLE {table} (a BIGINT)"),
+        AuthIdentity::system(),
     )
     .await;
-    assert!(result.is_ok(), "information_schema must be readable: {result:?}");
+
+    // A role-less user can still introspect information_schema even with enforcement on.
+    let result = rt
+        .try_sql_as(
+            "SELECT table_name FROM information_schema.tables",
+            AuthIdentity::empty(),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "information_schema must be readable: {result:?}"
+    );
 }
 
 // --------------------------------------------------------------------------------------------
@@ -401,11 +460,14 @@ async fn information_schema_is_exempt_from_enforcement() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn non_super_user_cannot_manage_auth_or_run_ddl() {
-    let (runtime, _config) = runtime_with(config(true, true)).await;
-    exec_admin(&runtime, "CREATE ROLE reader").await;
-    exec_admin(&runtime, "CREATE USER alice WITH PASSWORD 'pw'").await;
-    exec_admin(&runtime, "GRANT ROLE reader TO USER alice").await;
-    let alice = runtime
+    let rt = auth_runtime("auth-gate-ddl", true, true).await;
+    rt.sql_as("CREATE ROLE reader", AuthIdentity::system()).await;
+    rt.sql_as("CREATE USER alice WITH PASSWORD 'pw'", AuthIdentity::system())
+        .await;
+    rt.sql_as("GRANT ROLE reader TO USER alice", AuthIdentity::system())
+        .await;
+    let alice = rt
+        .runtime
         .authenticate(&Credential::basic("alice", "pw"))
         .await
         .unwrap();
@@ -417,7 +479,8 @@ async fn non_super_user_cannot_manage_auth_or_run_ddl() {
         "CREATE USER bob WITH PASSWORD 'pw'",
         "DROP USER alice",
     ] {
-        let err = exec(&runtime, sql, alice.clone())
+        let err = rt
+            .try_sql_as(sql, alice.clone())
             .await
             .err()
             .unwrap_or_else(|| panic!("non-super should be rejected: {sql}"));
@@ -428,7 +491,11 @@ async fn non_super_user_cannot_manage_auth_or_run_ddl() {
     }
 
     // Standard DDL is also rejected for a non-super-user.
-    assert!(exec(&runtime, &format!("CREATE TABLE {} (a BIGINT)", unique("x")), alice)
+    assert!(rt
+        .try_sql_as(
+            &format!("CREATE TABLE {} (a BIGINT)", unique("x")),
+            alice
+        )
         .await
         .is_err());
 }
@@ -455,14 +522,24 @@ fn place_dataset(datasets_dir: &Path, rel: &str) {
     std::fs::copy(parquet_fixture(), &dst).expect("copy parquet fixture");
 }
 
-/// Seeds a `reader` role assigned to a fresh user, returning `(role, user, alice_identity)`.
-async fn seed_reader(runtime: &Runtime) -> (String, AuthIdentity) {
+/// Seeds a role assigned to a fresh user, returning `(role, alice_identity)`.
+async fn seed_reader(rt: &TestRuntime) -> (String, AuthIdentity) {
     let role = unique("preader");
     let user = unique("palice");
-    exec_admin(runtime, &format!("CREATE ROLE {role}")).await;
-    exec_admin(runtime, &format!("CREATE USER {user} WITH PASSWORD 'pw'")).await;
-    exec_admin(runtime, &format!("GRANT ROLE {role} TO USER {user}")).await;
-    let identity = runtime
+    rt.sql_as(&format!("CREATE ROLE {role}"), AuthIdentity::system())
+        .await;
+    rt.sql_as(
+        &format!("CREATE USER {user} WITH PASSWORD 'pw'"),
+        AuthIdentity::system(),
+    )
+    .await;
+    rt.sql_as(
+        &format!("GRANT ROLE {role} TO USER {user}"),
+        AuthIdentity::system(),
+    )
+    .await;
+    let identity = rt
+        .runtime
         .authenticate(&Credential::basic(user, "pw"))
         .await
         .unwrap();
@@ -471,79 +548,75 @@ async fn seed_reader(runtime: &Runtime) -> (String, AuthIdentity) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_path_grant_matches_only_granted_prefix() {
-    let config = config(true, true);
-    let datasets = config.storage.datasets_dir.clone();
+    let rt = auth_runtime("auth-path-grant", true, true).await;
     let root = unique("pathauth");
-    place_dataset(&datasets, &format!("{root}/allowed/data.parquet"));
-    place_dataset(&datasets, &format!("{root}/blocked/data.parquet"));
+    place_dataset(rt.datasets_dir(), &format!("{root}/allowed/data.parquet"));
+    place_dataset(rt.datasets_dir(), &format!("{root}/blocked/data.parquet"));
 
-    let (runtime, _config) = runtime_with(config).await;
-    let (role, alice) = seed_reader(&runtime).await;
-    exec_admin(
-        &runtime,
+    let (role, alice) = seed_reader(&rt).await;
+    rt.sql_as(
         &format!("GRANT SELECT ON PATH '{root}/allowed/*' TO ROLE {role}"),
+        AuthIdentity::system(),
     )
     .await;
 
-    let allowed = exec(
-        &runtime,
-        &format!("SELECT * FROM read_parquet('{root}/allowed/*.parquet')"),
-        alice.clone(),
-    )
-    .await;
-    assert!(allowed.is_ok(), "granted path should be readable: {allowed:?}");
+    let allowed = rt
+        .try_sql_as(
+            &format!("SELECT * FROM read_parquet('{root}/allowed/*.parquet')"),
+            alice.clone(),
+        )
+        .await;
+    assert!(
+        allowed.is_ok(),
+        "granted path should be readable: {allowed:?}"
+    );
 
-    let denied = exec(
-        &runtime,
-        &format!("SELECT * FROM read_parquet('{root}/blocked/*.parquet')"),
-        alice,
-    )
-    .await;
+    let denied = rt
+        .try_sql_as(
+            &format!("SELECT * FROM read_parquet('{root}/blocked/*.parquet')"),
+            alice,
+        )
+        .await;
     assert!(
         denied.is_err_and(|e| e.to_string().contains("permission denied")),
         "a different path prefix must be denied"
     );
-
-    let _ = std::fs::remove_dir_all(datasets.join(&root));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_path_glob_is_segment_aware() {
-    let config = config(true, true);
-    let datasets = config.storage.datasets_dir.clone();
+    let rt = auth_runtime("auth-path-seg", true, true).await;
     let root = unique("pathseg");
-    place_dataset(&datasets, &format!("{root}/data/top.parquet"));
-    place_dataset(&datasets, &format!("{root}/data/sub/nested.parquet"));
-    place_dataset(&datasets, &format!("{root}/rec/sub/nested.parquet"));
+    place_dataset(rt.datasets_dir(), &format!("{root}/data/top.parquet"));
+    place_dataset(rt.datasets_dir(), &format!("{root}/data/sub/nested.parquet"));
+    place_dataset(rt.datasets_dir(), &format!("{root}/rec/sub/nested.parquet"));
 
-    let (runtime, _config) = runtime_with(config).await;
-    let (role, alice) = seed_reader(&runtime).await;
+    let (role, alice) = seed_reader(&rt).await;
     // Single-segment grant: `*` does not cross `/`.
-    exec_admin(
-        &runtime,
+    rt.sql_as(
         &format!("GRANT SELECT ON PATH '{root}/data/*' TO ROLE {role}"),
+        AuthIdentity::system(),
     )
     .await;
     // Recursive grant: `**` crosses `/`.
-    exec_admin(
-        &runtime,
+    rt.sql_as(
         &format!("GRANT SELECT ON PATH '{root}/rec/**' TO ROLE {role}"),
+        AuthIdentity::system(),
     )
     .await;
 
     // Top-level file under the single-segment grant is allowed.
-    assert!(exec(
-        &runtime,
-        &format!("SELECT * FROM read_parquet('{root}/data/*.parquet')"),
-        alice.clone(),
-    )
-    .await
-    .is_ok());
+    assert!(rt
+        .try_sql_as(
+            &format!("SELECT * FROM read_parquet('{root}/data/*.parquet')"),
+            alice.clone(),
+        )
+        .await
+        .is_ok());
 
     // A nested path is NOT covered by the single-`*` grant.
     assert!(
-        exec(
-            &runtime,
+        rt.try_sql_as(
             &format!("SELECT * FROM read_parquet('{root}/data/sub/*.parquet')"),
             alice.clone(),
         )
@@ -553,46 +626,42 @@ async fn enforced_path_glob_is_segment_aware() {
     );
 
     // The recursive `**` grant does cover a nested path.
-    assert!(exec(
-        &runtime,
-        &format!("SELECT * FROM read_parquet('{root}/rec/sub/*.parquet')"),
-        alice,
-    )
-    .await
-    .is_ok());
-
-    let _ = std::fs::remove_dir_all(datasets.join(&root));
+    assert!(rt
+        .try_sql_as(
+            &format!("SELECT * FROM read_parquet('{root}/rec/sub/*.parquet')"),
+            alice,
+        )
+        .await
+        .is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_path_deny_wins_over_broad_grant() {
-    let config = config(true, true);
-    let datasets = config.storage.datasets_dir.clone();
+    let rt = auth_runtime("auth-path-deny", true, true).await;
     let root = unique("pathdeny");
-    place_dataset(&datasets, &format!("{root}/public/data.parquet"));
-    place_dataset(&datasets, &format!("{root}/secret/data.parquet"));
+    place_dataset(rt.datasets_dir(), &format!("{root}/public/data.parquet"));
+    place_dataset(rt.datasets_dir(), &format!("{root}/secret/data.parquet"));
 
-    let (runtime, _config) = runtime_with(config).await;
-    let (role, alice) = seed_reader(&runtime).await;
+    let (role, alice) = seed_reader(&rt).await;
     // Broad SELECT grant, then deny one subtree — the deny must win.
-    exec_admin(&runtime, &format!("GRANT SELECT TO ROLE {role}")).await;
-    exec_admin(
-        &runtime,
+    rt.sql_as(&format!("GRANT SELECT TO ROLE {role}"), AuthIdentity::system())
+        .await;
+    rt.sql_as(
         &format!("DENY SELECT ON PATH '{root}/secret/*' TO ROLE {role}"),
+        AuthIdentity::system(),
     )
     .await;
 
-    assert!(exec(
-        &runtime,
-        &format!("SELECT * FROM read_parquet('{root}/public/*.parquet')"),
-        alice.clone(),
-    )
-    .await
-    .is_ok());
+    assert!(rt
+        .try_sql_as(
+            &format!("SELECT * FROM read_parquet('{root}/public/*.parquet')"),
+            alice.clone(),
+        )
+        .await
+        .is_ok());
 
     assert!(
-        exec(
-            &runtime,
+        rt.try_sql_as(
             &format!("SELECT * FROM read_parquet('{root}/secret/*.parquet')"),
             alice,
         )
@@ -600,6 +669,4 @@ async fn enforced_path_deny_wins_over_broad_grant() {
         .is_err_and(|e| e.to_string().contains("permission denied")),
         "the denied subtree must be rejected despite the broad grant"
     );
-
-    let _ = std::fs::remove_dir_all(datasets.join(&root));
 }
