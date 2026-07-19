@@ -49,80 +49,81 @@ pub async fn dataset_from_atlas(
     dataset_name: &str,
     projected_names: Option<&[String]>,
 ) -> anyhow::Result<AnyDataset> {
-    let view = atlas
-        .open_dataset(dataset_name)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to open atlas dataset '{}': {}", dataset_name, e))?;
+    // let view = atlas
+    //     .open_dataset(dataset_name)
+    //     .await
+    //     .map_err(|e| anyhow::anyhow!("Failed to open atlas dataset '{}': {}", dataset_name, e))?;
 
-    let included = |name: &str| projected_names.map_or(true, |names| names.iter().any(|n| n == name));
+    // let included = |name: &str| projected_names.map_or(true, |names| names.iter().any(|n| n == name));
 
-    let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
+    // let mut arrays: IndexMap<String, Arc<dyn NdArrayD>> = IndexMap::new();
 
-    for array_name in view.list_arrays() {
-        if !included(&array_name) {
-            continue;
-        }
-        let schema = view.array_meta(&array_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Atlas schema missing for array '{}' in dataset '{}'",
-                array_name,
-                dataset_name,
-            )
-        })?;
-        let fill_value = view.array_fill_value(&array_name).await.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to read fill value for atlas array '{}' in dataset '{}': {}",
-                array_name,
-                dataset_name,
-                e
-            )
-        })?;
-        match compat::array_to_nd_array(
-            atlas.clone(),
-            dataset_name,
-            &array_name,
-            &schema,
-            fill_value,
-        ) {
-            Ok(nd) => {
-                arrays.insert(array_name, nd);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping atlas array '{}' in dataset '{}': {}",
-                    array_name,
-                    dataset_name,
-                    e
-                );
-            }
-        }
-    }
+    // for array_name in view.list_arrays() {
+    //     if !included(&array_name) {
+    //         continue;
+    //     }
+    //     let schema = view.array_meta(&array_name).ok_or_else(|| {
+    //         anyhow::anyhow!(
+    //             "Atlas schema missing for array '{}' in dataset '{}'",
+    //             array_name,
+    //             dataset_name,
+    //         )
+    //     })?;
+    //     let fill_value = view.array_fill_value(&array_name).await.map_err(|e| {
+    //         anyhow::anyhow!(
+    //             "Failed to read fill value for atlas array '{}' in dataset '{}': {}",
+    //             array_name,
+    //             dataset_name,
+    //             e
+    //         )
+    //     })?;
+    //     match compat::array_to_nd_array(
+    //         atlas.clone(),
+    //         dataset_name,
+    //         &array_name,
+    //         &schema,
+    //         fill_value,
+    //     ) {
+    //         Ok(nd) => {
+    //             arrays.insert(array_name, nd);
+    //         }
+    //         Err(e) => {
+    //             tracing::warn!(
+    //                 "Skipping atlas array '{}' in dataset '{}': {}",
+    //                 array_name,
+    //                 dataset_name,
+    //                 e
+    //             );
+    //         }
+    //     }
+    // }
 
-    for (attr_name, attr_value) in view.meta().attributes {
-        if !included(&attr_name) {
-            continue;
-        }
-        match compat::attribute_to_nd_array(&attr_name, attr_value) {
-            Ok(nd) => {
-                arrays.insert(attr_name, nd);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping atlas attribute '{}' in dataset '{}': {}",
-                    attr_name,
-                    dataset_name,
-                    e
-                );
-            }
-        }
-    }
+    // for (attr_name, attr_value) in view.meta().attributes {
+    //     if !included(&attr_name) {
+    //         continue;
+    //     }
+    //     match compat::attribute_to_nd_array(&attr_name, attr_value) {
+    //         Ok(nd) => {
+    //             arrays.insert(attr_name, nd);
+    //         }
+    //         Err(e) => {
+    //             tracing::warn!(
+    //                 "Skipping atlas attribute '{}' in dataset '{}': {}",
+    //                 attr_name,
+    //                 dataset_name,
+    //                 e
+    //             );
+    //         }
+    //     }
+    // }
 
-    arrays.sort_keys();
+    // arrays.sort_keys();
 
-    let dataset = Dataset::new(dataset_name.to_string(), arrays).await;
-    AnyDataset::try_from_dataset(dataset)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to wrap atlas dataset as AnyDataset: {}", e))
+    // let dataset = Dataset::new(dataset_name.to_string(), arrays).await;
+    // AnyDataset::try_from_dataset(dataset)
+    //     .await
+    //     .map_err(|e| anyhow::anyhow!("Failed to wrap atlas dataset as AnyDataset: {}", e))
+    todo!()
 }
 
 #[cfg(test)]

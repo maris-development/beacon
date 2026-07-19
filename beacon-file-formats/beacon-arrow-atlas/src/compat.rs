@@ -38,9 +38,43 @@ pub fn atlas_array_dtype_to_arrow(dtype: &DType) -> Option<DataType> {
 pub fn atlas_attr_to_arrow(attr: &Attr) -> DataType {
     match attr {
         Attr::Bool(_) => DataType::Boolean,
+        Attr::BoolList(_) => DataType::List(Arc::new(Field::new("item", DataType::Boolean, false))),
+        Attr::Int8(_) => DataType::Int8,
+        Attr::Int16(_) => DataType::Int16,
+        Attr::Int32(_) => DataType::Int32,
         Attr::Int64(_) => DataType::Int64,
+        Attr::UInt8(_) => DataType::UInt8,
+        Attr::UInt16(_) => DataType::UInt16,
+        Attr::UInt32(_) => DataType::UInt32,
+        Attr::UInt64(_) => DataType::UInt64,
+        Attr::Float32(_) => DataType::Float32,
         Attr::Float64(_) => DataType::Float64,
+        Attr::Int8List(_) => DataType::List(Arc::new(Field::new("item", DataType::Int8, false))),
+        Attr::Int16List(_) => DataType::List(Arc::new(Field::new("item", DataType::Int16, false))),
+        Attr::Int32List(_) => DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
+        Attr::Int64List(_) => DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
+        Attr::UInt8List(_) => DataType::List(Arc::new(Field::new("item", DataType::UInt8, false))),
+        Attr::UInt16List(_) => {
+            DataType::List(Arc::new(Field::new("item", DataType::UInt16, false)))
+        }
+        Attr::UInt32List(_) => {
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false)))
+        }
+        Attr::UInt64List(_) => {
+            DataType::List(Arc::new(Field::new("item", DataType::UInt64, false)))
+        }
+        Attr::Float32List(_) => {
+            DataType::List(Arc::new(Field::new("item", DataType::Float32, false)))
+        }
+        Attr::Float64List(_) => {
+            DataType::List(Arc::new(Field::new("item", DataType::Float64, false)))
+        }
         Attr::String(_) => DataType::Utf8,
+        Attr::StringList(_) => DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
+        Attr::Binary(_) => DataType::Binary,
+        Attr::BinaryList(_) => {
+            DataType::List(Arc::new(Field::new("item", DataType::Binary, false)))
+        }
         Attr::TimestampNanoseconds(_) => DataType::Timestamp(TimeUnit::Nanosecond, None),
     }
 }
@@ -66,47 +100,51 @@ pub fn atlas_view_arrow_schema(
     view: &atlas::DatasetView,
     read_dimensions: Option<&[String]>,
 ) -> anyhow::Result<Schema> {
-    let meta = view.meta();
+    // let meta = view.schema();
 
-    if let Some(requested) = read_dimensions {
-        let available: std::collections::HashSet<&str> = meta
-            .arrays
-            .values()
-            .flat_map(|s| s.dimension_names.iter().map(String::as_str))
-            .collect();
-        for dim in requested {
-            if !available.contains(dim.as_str()) {
-                anyhow::bail!(
-                    "dimension '{dim}' not found in atlas dataset '{}'",
-                    view.name()
-                );
-            }
-        }
-    }
+    // if let Some(requested) = read_dimensions {
+    //     let available: std::collections::HashSet<&str> = meta
+    //         .arrays
+    //         .values()
+    //         .flat_map(|s| s.dimension_names.iter().map(String::as_str))
+    //         .collect();
+    //     for dim in requested {
+    //         if !available.contains(dim.as_str()) {
+    //             anyhow::bail!(
+    //                 "dimension '{dim}' not found in atlas dataset '{}'",
+    //                 view.name()
+    //             );
+    //         }
+    //     }
+    // }
 
-    let mut fields: Vec<Field> = Vec::with_capacity(meta.arrays.len() + meta.attributes.len());
+    // let mut fields: Vec<Field> = Vec::with_capacity(meta.arrays.len());
 
-    for (name, schema) in &meta.arrays {
-        let Some(dtype) = atlas_array_dtype_to_arrow(&schema.dtype) else {
-            continue;
-        };
-        if let Some(requested) = read_dimensions {
-            if !schema
-                .dimension_names
-                .iter()
-                .all(|d| requested.iter().any(|r| r == d))
-            {
-                continue;
-            }
-        }
-        fields.push(Field::new(name, dtype, true));
-    }
-    for (name, attr) in &meta.attributes {
-        fields.push(Field::new(name, atlas_attr_to_arrow(attr), true));
-    }
+    // for (name, schema) in &meta.arrays {
+    //     let Some(dtype) = atlas_array_dtype_to_arrow(&schema.dtype) else {
+    //         continue;
+    //     };
+    //     if let Some(requested) = read_dimensions {
+    //         if !schema
+    //             .dimension_names
+    //             .iter()
+    //             .all(|d| requested.iter().any(|r| r == d))
+    //         {
+    //             continue;
+    //         }
+    //     }
+    //     fields.push(Field::new(name, dtype, true));
+    // }
+    // for (name, attr) in &meta.array_attrs {
+    //     fields.push(Field::new(name, atlas_attr_to_arrow(attr), true));
+    // }
+    // for (name, attr) in &meta.attrs {
+    //     fields.push(Field::new(name, atlas_attr_to_arrow(attr), true));
+    // }
 
-    fields.sort_by(|a, b| a.name().cmp(b.name()));
-    Ok(Schema::new(fields))
+    // fields.sort_by(|a, b| a.name().cmp(b.name()));
+    // Ok(Schema::new(fields))
+    todo!()
 }
 
 /// Convert an atlas array (described by its [`atlas::ArraySchema`]) into a
@@ -180,15 +218,24 @@ pub fn array_to_nd_array(
 
 /// Convert an atlas attribute value into a rank-0 ND array.
 pub fn attribute_to_nd_array(_name: &str, attr: Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
-    match attr {
-        Attr::Bool(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(v))?)),
-        Attr::Int64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(v))?)),
-        Attr::Float64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(v))?)),
-        Attr::String(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(v))?)),
-        Attr::TimestampNanoseconds(v) => Ok(Arc::new(NdArray::new_with_backend(
-            AttributeBackend::new(TimestampNanosecond(v)),
-        )?)),
-    }
+    // match attr {
+    //     Attr::Bool(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+    //         v,
+    //     ))?)),
+    //     Attr::Int64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+    //         v,
+    //     ))?)),
+    //     Attr::Float64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+    //         v,
+    //     ))?)),
+    //     Attr::String(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+    //         v,
+    //     ))?)),
+    //     Attr::TimestampNanoseconds(v) => Ok(Arc::new(NdArray::new_with_backend(
+    //         AttributeBackend::new(TimestampNanosecond(v)),
+    //     )?)),
+    // }
+    todo!()
 }
 
 #[cfg(test)]
@@ -288,7 +335,10 @@ mod tests {
         let nd = attribute_to_nd_array("flag", Attr::Bool(true)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::Bool);
         assert!(nd.shape().is_empty());
-        let typed = nd.as_any().downcast_ref::<NdArray<bool>>().expect("downcast");
+        let typed = nd
+            .as_any()
+            .downcast_ref::<NdArray<bool>>()
+            .expect("downcast");
         assert_eq!(typed.clone_into_raw_vec().await, vec![true]);
     }
 
@@ -296,7 +346,10 @@ mod tests {
     async fn attribute_int64_round_trips() {
         let nd = attribute_to_nd_array("count", Attr::Int64(42)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::I64);
-        let typed = nd.as_any().downcast_ref::<NdArray<i64>>().expect("downcast");
+        let typed = nd
+            .as_any()
+            .downcast_ref::<NdArray<i64>>()
+            .expect("downcast");
         assert_eq!(typed.clone_into_raw_vec().await, vec![42i64]);
     }
 
@@ -304,7 +357,10 @@ mod tests {
     async fn attribute_float64_round_trips() {
         let nd = attribute_to_nd_array("scale", Attr::Float64(1.5)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::F64);
-        let typed = nd.as_any().downcast_ref::<NdArray<f64>>().expect("downcast");
+        let typed = nd
+            .as_any()
+            .downcast_ref::<NdArray<f64>>()
+            .expect("downcast");
         assert_eq!(typed.clone_into_raw_vec().await, vec![1.5f64]);
     }
 

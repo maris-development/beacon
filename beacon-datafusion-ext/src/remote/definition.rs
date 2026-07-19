@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::TableProvider;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::TableReference;
 use datafusion_federation::FederatedTableProviderAdaptor;
@@ -46,7 +45,6 @@ impl TableDefinition for RemoteTableDefinition {
     async fn build_provider(
         &self,
         _context: Arc<SessionContext>,
-        _data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
         let connection = self.connection();
 

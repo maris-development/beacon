@@ -5,9 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use beacon_datafusion_ext::table_ext::TableDefinition;
+use beacon_datafusion_ext::{listing_factory::ListingFactory, table_ext::TableDefinition};
 use datafusion::catalog::TableProvider;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 
 use crate::provider::{open_delta_provider, TimeTravel};
@@ -21,8 +20,7 @@ use crate::provider::{open_delta_provider, TimeTravel};
 pub struct DeltaTableDefinition {
     /// Logical table name.
     pub name: String,
-    /// Delta table location, relative to the datasets store (optionally with a
-    /// `datasets://` scheme), e.g. `datasets://argo/delta-tbl`.
+    /// Location of the Delta table, e.g. `file:///argo/delta-tbl` or `https://s3.amazonaws.com/bucket-name/path/to/root` or 'test/delta-tbl'.
     pub location: String,
     /// Table OPTIONS, including `version` / `timestamp` for time travel.
     pub options: HashMap<String, String>,
@@ -36,15 +34,26 @@ impl TableDefinition for DeltaTableDefinition {
     async fn build_provider(
         &self,
         context: Arc<SessionContext>,
-        store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
+        let state = context.state();
+        let listing_factory = state
+            .config()
+            .get_extension::<ListingFactory>()
+            .expect("Delta table requires a ListingFactory extension");
+        let store_url = listing_factory
+            .parse_to_store(&state, &self.location)
+            .ok_or(anyhow::anyhow!(
+                "Delta table requires a resolvable object store for location {}",
+                self.location
+            ))?;
         // The datasets store is resolved from the session's object-store registry by
         // `store_url` inside `open_delta_provider`; nothing extra is needed here.
         let time_travel = TimeTravel::from_options(&self.options)?;
+        let store = state.runtime_env().object_store(store_url)?;
 
         let provider = open_delta_provider(
             context.clone(),
-            store_url.clone(),
+            store.clone(),
             &self.location,
             time_travel.clone(),
         )
@@ -55,7 +64,6 @@ impl TableDefinition for DeltaTableDefinition {
         // target are kept so reads/writes re-open at the latest version.
         Ok(Arc::new(crate::wrapper::BeaconDeltaTable::new(
             provider,
-            store_url.clone(),
             self.clone(),
             time_travel,
         )))

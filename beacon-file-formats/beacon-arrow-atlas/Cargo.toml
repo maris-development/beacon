@@ -20,11 +20,10 @@ rmp-serde = {workspace = true}
 zstd = {workspace = true}
 lz4_flex = {workspace = true}
 ndarray = {workspace = true}
-atlas = { package = "atlas-rust", git = "https://github.com/maris-development/atlas.git", version = "0.9.1" }
+atlas-rust = "0.12.0"
 crossbeam = { workspace = true }
 moka = { workspace = true }
 
-beacon-object-storage = { path = "../../beacon-object-storage" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-common = { path = "../../beacon-common" }

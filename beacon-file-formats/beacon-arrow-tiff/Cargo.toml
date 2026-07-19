@@ -23,7 +23,6 @@ beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-array = { path = "../beacon-nd-array" }
 ndarray = {workspace = true}
-beacon-object-storage = { path = "../../beacon-object-storage" }
 
 [dev-dependencies]
 tokio = { workspace = true }

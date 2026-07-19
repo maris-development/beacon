@@ -27,7 +27,6 @@ futures = { workspace = true }
 chrono = { workspace = true }
 
 beacon-common = { path = "../beacon-common" }
-beacon-object-storage = { path = "../beacon-object-storage" }
 beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
 beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }

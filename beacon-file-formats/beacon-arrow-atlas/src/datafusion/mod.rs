@@ -206,49 +206,49 @@ impl FileFormatFactoryExt for AtlasFormatFactory {
         let mut out = Vec::new();
 
         for marker in markers {
-            // Read atlas.json directly with sync I/O. This is the cheap
-            // shape we want for the catalog scan — we only need the
-            // dataset names, not the full atlas open path (which is async
-            // and would deadlock when discover_datasets is called from
-            // inside a tokio runtime).
-            let local_path =
-                match beacon_object_storage::local_object_path(&self.datasets_root, &marker.location)
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to resolve atlas marker path {}: {e}",
-                            marker.location
-                        );
-                        continue;
-                    }
-                };
+            // // Read atlas.json directly with sync I/O. This is the cheap
+            // // shape we want for the catalog scan — we only need the
+            // // dataset names, not the full atlas open path (which is async
+            // // and would deadlock when discover_datasets is called from
+            // // inside a tokio runtime).
+            // let local_path =
+            //     match beacon_object_storage::local_object_path(&self.datasets_root, &marker.location)
+            //     {
+            //         Ok(p) => p,
+            //         Err(e) => {
+            //             tracing::warn!(
+            //                 "Failed to resolve atlas marker path {}: {e}",
+            //                 marker.location
+            //             );
+            //             continue;
+            //         }
+            //     };
 
-            let dataset_names = match read_atlas_dataset_names(&local_path) {
-                Ok(names) => names,
-                Err(e) => {
-                    tracing::warn!("Failed to read atlas marker at {local_path}: {e}");
-                    continue;
-                }
-            };
+            // let dataset_names = match read_atlas_dataset_names(&local_path) {
+            //     Ok(names) => names,
+            //     Err(e) => {
+            //         tracing::warn!("Failed to read atlas marker at {local_path}: {e}");
+            //         continue;
+            //     }
+            // };
 
-            let marker_name = atlas_marker_filename(&marker.location)
-                .expect("top_level_atlas_markers only yields recognized markers");
-            let store_path = marker
-                .location
-                .as_ref()
-                .strip_suffix(marker_name)
-                .unwrap_or(marker.location.as_ref())
-                .trim_end_matches('/');
+            // let marker_name = atlas_marker_filename(&marker.location)
+            //     .expect("top_level_atlas_markers only yields recognized markers");
+            // let store_path = marker
+            //     .location
+            //     .as_ref()
+            //     .strip_suffix(marker_name)
+            //     .unwrap_or(marker.location.as_ref())
+            //     .trim_end_matches('/');
 
-            for dataset_name in dataset_names {
-                let file_path = if store_path.is_empty() {
-                    format!("{marker_name}/{dataset_name}")
-                } else {
-                    format!("{store_path}/{marker_name}/{dataset_name}")
-                };
-                out.push(DatasetMetadata::new(file_path, ext.clone()));
-            }
+            // for dataset_name in dataset_names {
+            //     let file_path = if store_path.is_empty() {
+            //         format!("{marker_name}/{dataset_name}")
+            //     } else {
+            //         format!("{store_path}/{marker_name}/{dataset_name}")
+            //     };
+            //     out.push(DatasetMetadata::new(file_path, ext.clone()));
+            // }
         }
 
         Ok(out)
@@ -400,12 +400,9 @@ impl FileFormat for AtlasFormat {
 
         let mut schemas = Vec::new();
         for marker in markers {
-            let atlas = cache::get_or_open_atlas(
-                self.cache.as_ref(),
-                self.datasets_root.clone(),
-                &marker,
-            )
-            .await?;
+            let atlas =
+                cache::get_or_open_atlas(self.cache.as_ref(), self.datasets_root.clone(), &marker)
+                    .await?;
             let read_dimensions = self.options.read_dimensions.as_deref();
             for dataset_name in atlas.list_datasets() {
                 let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
@@ -629,7 +626,8 @@ mod tests {
     #[tokio::test]
     async fn factory_get_ext_returns_atlas() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+        let factory =
+            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
         // `get_ext` is the format identity used to register and resolve
         // external tables (`STORED AS ATLAS`), not the marker filename
         // (`atlas.json`).
@@ -640,7 +638,8 @@ mod tests {
     #[tokio::test]
     async fn discover_datasets_emits_one_entry_per_atlas_dataset() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+        let factory =
+            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
 
         let objects = vec![fixture_marker_object_meta()];
         let datasets = factory.discover_datasets(&objects).expect("discover");
@@ -659,7 +658,8 @@ mod tests {
     #[tokio::test]
     async fn discover_datasets_ignores_non_marker_objects() {
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+        let factory =
+            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
         let objects = vec![ObjectMeta {
             location: object_store::path::Path::from("some/other.nc"),
             last_modified: chrono::Utc::now(),
@@ -750,8 +750,7 @@ mod tests {
             insert_op: datafusion::logical_expr::dml::InsertOp::Append,
             keep_partition_by_columns: false,
             file_extension: "atlas.json".to_string(),
-            file_output_mode:
-                datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
+            file_output_mode: datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
         };
         let err = format
             .create_writer_physical_plan(input, &ctx.state(), conf, None)
@@ -988,7 +987,8 @@ mod tests {
     async fn discover_datasets_finds_msgpack_zst_store() {
         ensure_msgpack_zst_fixture().await;
         let store = test_store().await;
-        let factory = AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+        let factory =
+            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
 
         let marker = ObjectMeta {
             location: OsPath::from(format!("{MSGPACK_ZST_FIXTURE_DIR}/atlas.msgpack.zst")),
@@ -1108,18 +1108,21 @@ mod tests {
             .unwrap();
         let mut temps: Vec<f32> = vec![];
         for b in &batches {
-            let col = b
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap();
+            let col = b.column(0).as_any().downcast_ref::<Float32Array>().unwrap();
             for i in 0..col.len() {
-                assert!(col.value(i) > 10.0, "every returned temperature must satisfy the predicate");
+                assert!(
+                    col.value(i) > 10.0,
+                    "every returned temperature must satisfy the predicate"
+                );
                 temps.push(col.value(i));
             }
         }
         temps.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert_eq!(temps, vec![20.0f32, 21.0, 22.0], "only summer's temperatures remain");
+        assert_eq!(
+            temps,
+            vec![20.0f32, 21.0, 22.0],
+            "only summer's temperatures remain"
+        );
     }
 }
 

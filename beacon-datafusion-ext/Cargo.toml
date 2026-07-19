@@ -32,7 +32,6 @@ url = {workspace = true}
 glob = {workspace = true}
 
 beacon-common = { path = "../beacon-common" }
-beacon-object-storage = { path = "../beacon-object-storage" }
 
 [dev-dependencies]
 tokio = { workspace = true }

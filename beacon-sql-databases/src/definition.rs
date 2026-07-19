@@ -8,11 +8,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context as _};
-use beacon_datafusion_ext::secrets::SecretStore;
+use anyhow::anyhow;
 use arrow::datatypes::{Schema, SchemaRef};
+use beacon_datafusion_ext::secrets::SecretStore;
 use datafusion::catalog::TableProvider;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::TableReference;
 use datafusion_federation::sql::{SQLTable, SQLTableSource};
@@ -80,7 +79,6 @@ impl TableDefinition for SqlDatabaseTableDefinition {
     async fn build_provider(
         &self,
         context: Arc<SessionContext>,
-        _data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
         let password = self.decrypt_password(&context)?;
         let params = build_pool_params(self.engine, &self.options, password);

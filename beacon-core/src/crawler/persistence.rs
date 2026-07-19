@@ -21,21 +21,21 @@ const CRAWLERS_PREFIX: &str = "__crawlers__";
 #[derive(Clone)]
 pub struct CrawlerPersistence {
     session_context: Arc<SessionContext>,
-    tables_store_url: ObjectStoreUrl,
+    db_store_url: ObjectStoreUrl,
 }
 
 impl CrawlerPersistence {
-    pub fn new(session_context: Arc<SessionContext>, tables_store_url: ObjectStoreUrl) -> Self {
+    pub fn new(session_context: Arc<SessionContext>, db_store_url: ObjectStoreUrl) -> Self {
         Self {
             session_context,
-            tables_store_url,
+            db_store_url,
         }
     }
 
     fn store(&self) -> Result<Arc<dyn ObjectStore>, DataFusionError> {
         self.session_context
             .runtime_env()
-            .object_store(&self.tables_store_url)
+            .object_store(&self.db_store_url)
             .map_err(|e| DataFusionError::Plan(format!("crawler store unavailable: {e}")))
     }
 

@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
-beacon-object-storage = { path = "../../beacon-object-storage" }
 
 deltalake = { workspace = true }
 datafusion = { workspace = true }

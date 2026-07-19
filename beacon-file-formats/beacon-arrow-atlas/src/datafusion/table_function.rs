@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
-use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
+use beacon_common::super_table::SuperListingTable;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
@@ -21,19 +21,13 @@ pub struct ReadAtlasFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
-    data_object_store_url: ObjectStoreUrl,
 }
 
 impl ReadAtlasFunc {
-    pub fn new(
-        runtime_handle: tokio::runtime::Handle,
-        session_ctx: Weak<SessionContext>,
-        data_object_store_url: ObjectStoreUrl,
-    ) -> Self {
+    pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
         Self {
             runtime_handle,
             session_ctx,
-            data_object_store_url,
         }
     }
 }
@@ -110,10 +104,23 @@ impl TableFunctionImpl for ReadAtlasFunc {
 
         tracing::debug!("read_atlas glob paths: {:?}", glob_paths);
 
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
+        let state = session_ctx.state();
+        let listing_factory = state
+            .config()
+            .get_extension::<beacon_datafusion_ext::listing_factory::ListingFactory>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "read_atlas: the listing factory is not registered on the session".to_string(),
+                )
+            })?;
+
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_atlas processing path: {}", path);
-            listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
+            listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
         // Build the file format from the factory registered on the session, so the

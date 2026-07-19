@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
-use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
+use beacon_common::super_table::SuperListingTable;
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
@@ -21,7 +22,6 @@ pub struct ReadNetCDFFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
-    data_object_store_url: ObjectStoreUrl,
 }
 
 impl ReadNetCDFFunc {
@@ -33,7 +33,6 @@ impl ReadNetCDFFunc {
         Self {
             runtime_handle,
             session_ctx,
-            data_object_store_url,
         }
     }
 }
@@ -71,6 +70,18 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
+        let state = session_ctx.state();
+        let listing_factory = state
+            .config()
+            .get_extension::<ListingFactory>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "read_netcdf: the ListingFactory is not registered on the session".to_string(),
+                )
+            })?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_netcdf")?;
         let mut dimensions: Vec<String> = vec![];
         if let Some(dimensions_arg) = args.get(1) {
@@ -100,7 +111,7 @@ impl TableFunctionImpl for ReadNetCDFFunc {
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_netcdf processing path: {}", path);
-            listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
+            listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
         tracing::debug!("read_netcdf listing urls: {:?}", listing_urls);
@@ -113,15 +124,14 @@ impl TableFunctionImpl for ReadNetCDFFunc {
             format_options.insert("read_dimensions".to_string(), dimensions.join(","));
         }
 
-        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
-            datafusion::common::plan_datafusion_err!("session context has been dropped")
-        })?;
-        let state = session_ctx.state();
-        let factory = state.get_file_format_factory(NETCDF_FORMAT).ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "read_netcdf: the NetCDF file format is not registered on the session".to_string(),
-            )
-        })?;
+        let factory = state
+            .get_file_format_factory(NETCDF_FORMAT)
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "read_netcdf: the NetCDF file format is not registered on the session"
+                        .to_string(),
+                )
+            })?;
         let file_format = factory.create(&state, &format_options)?;
 
         let super_listing_table = tokio::task::block_in_place(|| {

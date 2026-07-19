@@ -1,8 +1,9 @@
 use std::sync::{Arc, Weak};
 
-use arrow::datatypes::{DataType, Field};
-use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
 use crate::datafusion::ArrowFormat;
+use arrow::datatypes::{DataType, Field};
+use beacon_common::super_table::SuperListingTable;
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
@@ -63,6 +64,18 @@ impl TableFunctionImpl for ReadArrowFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
+        let state = session_ctx.state();
+        let listing_factory = state
+            .config()
+            .get_extension::<ListingFactory>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "read_arrow: the listing factory is not registered on the session".to_string(),
+                )
+            })?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_arrow")?;
 
         tracing::debug!("read_arrow glob paths: {:?}", glob_paths);
@@ -70,21 +83,15 @@ impl TableFunctionImpl for ReadArrowFunc {
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_arrow processing path: {}", path);
-            listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
+            listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
         let file_format = ArrowFormat::default();
-        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
-            datafusion::common::plan_datafusion_err!("session context has been dropped")
-        })?;
+
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                SuperListingTable::new(
-                    &session_ctx.state(),
-                    Arc::new(file_format),
-                    listing_urls,
-                )
-                .await
+                SuperListingTable::new(&session_ctx.state(), Arc::new(file_format), listing_urls)
+                    .await
             })
         })?;
 

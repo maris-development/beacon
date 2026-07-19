@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, UInt64Array};
+use arrow::array::{ArrayRef, BooleanArray, ListArray, ListBuilder, UInt64Array};
 use arrow::datatypes::{DataType, SchemaRef};
 use atlas::{Atlas, Attr, StatValue};
 use datafusion::common::Column;
@@ -27,123 +27,124 @@ pub async fn pushdown_with_statistics(
     predicate: Arc<dyn PhysicalExpr>,
     table_schema: SchemaRef,
 ) -> datafusion::error::Result<Vec<String>> {
-    let dataset_names = store.list_datasets();
-    if dataset_names.is_empty() {
-        return Ok(dataset_names);
-    }
+    // let dataset_names = store.list_datasets();
+    // if dataset_names.is_empty() {
+    //     return Ok(dataset_names);
+    // }
 
-    let mut views = Vec::with_capacity(dataset_names.len());
-    for name in &dataset_names {
-        let view = store.open_dataset(name).await.map_err(|e| {
-            tracing::debug!(dataset = %name, error = %e, "failed to open atlas dataset for predicate pruning");
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to open atlas dataset '{name}' for pruning: {e}"
-            ))
-        })?;
-        views.push(view);
-    }
+    // let mut views = Vec::with_capacity(dataset_names.len());
+    // for name in &dataset_names {
+    //     let view = store.open_dataset(name).await.map_err(|e| {
+    //         tracing::debug!(dataset = %name, error = %e, "failed to open atlas dataset for predicate pruning");
+    //         datafusion::error::DataFusionError::Execution(format!(
+    //             "Failed to open atlas dataset '{name}' for pruning: {e}"
+    //         ))
+    //     })?;
+    //     views.push(view);
+    // }
 
-    let pruning_predicate = match PruningPredicate::try_new(predicate, table_schema.clone()) {
-        Ok(p) => p,
-        Err(_) => return Ok(dataset_names),
-    };
+    // let pruning_predicate = match PruningPredicate::try_new(predicate, table_schema.clone()) {
+    //     Ok(p) => p,
+    //     Err(_) => return Ok(dataset_names),
+    // };
 
-    let referenced = collect_columns(pruning_predicate.orig_expr());
+    // let referenced = collect_columns(pruning_predicate.orig_expr());
 
-    let mut columns: HashMap<String, ColumnPackedStats> = HashMap::new();
-    for col in &referenced {
-        let col_name = col.name();
-        let Ok(field) = table_schema.field_with_name(col_name) else {
-            continue;
-        };
-        let target_dtype = field.data_type().clone();
-        let null_scalar = ScalarValue::try_from(&target_dtype).unwrap_or(ScalarValue::Null);
+    // let mut columns: HashMap<String, ColumnPackedStats> = HashMap::new();
+    // for col in &referenced {
+    //     let col_name = col.name();
+    //     let Ok(field) = table_schema.field_with_name(col_name) else {
+    //         continue;
+    //     };
+    //     let target_dtype = field.data_type().clone();
+    //     let null_scalar = ScalarValue::try_from(&target_dtype).unwrap_or(ScalarValue::Null);
 
-        let mut mins: Vec<ScalarValue> = Vec::with_capacity(views.len());
-        let mut maxes: Vec<ScalarValue> = Vec::with_capacity(views.len());
-        let mut null_counts: Vec<Option<u64>> = Vec::with_capacity(views.len());
-        let mut row_counts: Vec<Option<u64>> = Vec::with_capacity(views.len());
+    //     let mut mins: Vec<ScalarValue> = Vec::with_capacity(views.len());
+    //     let mut maxes: Vec<ScalarValue> = Vec::with_capacity(views.len());
+    //     let mut null_counts: Vec<Option<u64>> = Vec::with_capacity(views.len());
+    //     let mut row_counts: Vec<Option<u64>> = Vec::with_capacity(views.len());
 
-        for view in &views {
-            let meta = view.meta();
-            if meta.arrays.contains_key(col_name) {
-                match view.array_stats(col_name).await {
-                    Some(stats) => {
-                        mins.push(stat_value_to_scalar(
-                            stats.min.as_ref(),
-                            &target_dtype,
-                            &null_scalar,
-                        ));
-                        maxes.push(stat_value_to_scalar(
-                            stats.max.as_ref(),
-                            &target_dtype,
-                            &null_scalar,
-                        ));
-                        null_counts.push(Some(stats.null_count));
-                        row_counts.push(Some(stats.row_count));
-                    }
-                    None => {
-                        // Stats not computed (e.g. unflushed write). Treat
-                        // as "unknown" so the predicate cannot prune this
-                        // dataset on this column.
-                        mins.push(null_scalar.clone());
-                        maxes.push(null_scalar.clone());
-                        null_counts.push(None);
-                        row_counts.push(None);
-                    }
-                }
-            } else if let Some(attr) = meta.attributes.get(col_name) {
-                let scalar = attr_to_scalar(attr, &target_dtype, &null_scalar);
-                mins.push(scalar.clone());
-                maxes.push(scalar);
-                null_counts.push(Some(0));
-                row_counts.push(Some(1));
-            } else {
-                // Column is absent from this dataset — at read time the
-                // SchemaAdapter fills it with NULLs, so the dataset's
-                // contribution for this column really is "all null".
-                mins.push(null_scalar.clone());
-                maxes.push(null_scalar.clone());
-                null_counts.push(Some(1));
-                row_counts.push(Some(1));
-            }
-        }
+    //     for view in &views {
+    //         let meta = view.array_stats();
+    //         if meta.arrays.contains_key(col_name) {
+    //             match view.array_stats(col_name).await {
+    //                 Some(stats) => {
+    //                     mins.push(stat_value_to_scalar(
+    //                         stats.min.as_ref(),
+    //                         &target_dtype,
+    //                         &null_scalar,
+    //                     ));
+    //                     maxes.push(stat_value_to_scalar(
+    //                         stats.max.as_ref(),
+    //                         &target_dtype,
+    //                         &null_scalar,
+    //                     ));
+    //                     null_counts.push(Some(stats.null_count));
+    //                     row_counts.push(Some(stats.row_count));
+    //                 }
+    //                 None => {
+    //                     // Stats not computed (e.g. unflushed write). Treat
+    //                     // as "unknown" so the predicate cannot prune this
+    //                     // dataset on this column.
+    //                     mins.push(null_scalar.clone());
+    //                     maxes.push(null_scalar.clone());
+    //                     null_counts.push(None);
+    //                     row_counts.push(None);
+    //                 }
+    //             }
+    //         } else if let Some(attr) = meta.attributes.get(col_name) {
+    //             let scalar = attr_to_scalar(attr, &target_dtype, &null_scalar);
+    //             mins.push(scalar.clone());
+    //             maxes.push(scalar);
+    //             null_counts.push(Some(0));
+    //             row_counts.push(Some(1));
+    //         } else {
+    //             // Column is absent from this dataset — at read time the
+    //             // SchemaAdapter fills it with NULLs, so the dataset's
+    //             // contribution for this column really is "all null".
+    //             mins.push(null_scalar.clone());
+    //             maxes.push(null_scalar.clone());
+    //             null_counts.push(Some(1));
+    //             row_counts.push(Some(1));
+    //         }
+    //     }
 
-        let Ok(min_arr) = ScalarValue::iter_to_array(mins) else {
-            continue;
-        };
-        let Ok(max_arr) = ScalarValue::iter_to_array(maxes) else {
-            continue;
-        };
-        let null_arr: ArrayRef = Arc::new(UInt64Array::from(null_counts));
-        let row_arr: ArrayRef = Arc::new(UInt64Array::from(row_counts));
+    //     let Ok(min_arr) = ScalarValue::iter_to_array(mins) else {
+    //         continue;
+    //     };
+    //     let Ok(max_arr) = ScalarValue::iter_to_array(maxes) else {
+    //         continue;
+    //     };
+    //     let null_arr: ArrayRef = Arc::new(UInt64Array::from(null_counts));
+    //     let row_arr: ArrayRef = Arc::new(UInt64Array::from(row_counts));
 
-        columns.insert(
-            col_name.to_string(),
-            ColumnPackedStats {
-                min: min_arr,
-                max: max_arr,
-                null_count: null_arr,
-                row_count: row_arr,
-            },
-        );
-    }
+    //     columns.insert(
+    //         col_name.to_string(),
+    //         ColumnPackedStats {
+    //             min: min_arr,
+    //             max: max_arr,
+    //             null_count: null_arr,
+    //             row_count: row_arr,
+    //         },
+    //     );
+    // }
 
-    let pruning_stats = AtlasDatasetPruningStatistics {
-        num_datasets: views.len(),
-        columns,
-    };
-    let mask = pruning_predicate.prune(&pruning_stats).map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!(
-            "Failed to prune atlas datasets: {e}"
-        ))
-    })?;
+    // let pruning_stats = AtlasDatasetPruningStatistics {
+    //     num_datasets: views.len(),
+    //     columns,
+    // };
+    // let mask = pruning_predicate.prune(&pruning_stats).map_err(|e| {
+    //     datafusion::error::DataFusionError::Execution(format!(
+    //         "Failed to prune atlas datasets: {e}"
+    //     ))
+    // })?;
 
-    Ok(dataset_names
-        .into_iter()
-        .zip(mask)
-        .filter_map(|(name, keep)| keep.then_some(name))
-        .collect())
+    // Ok(dataset_names
+    //     .into_iter()
+    //     .zip(mask)
+    //     .filter_map(|(name, keep)| keep.then_some(name))
+    //     .collect())
+    todo!()
 }
 
 struct ColumnPackedStats {
@@ -220,9 +221,130 @@ fn stat_value_to_scalar(
 fn attr_to_scalar(attr: &Attr, target: &DataType, null_scalar: &ScalarValue) -> ScalarValue {
     let canonical = match attr {
         Attr::Bool(v) => ScalarValue::Boolean(Some(*v)),
+        Attr::BoolList(v) => {
+            let mut builder = ListBuilder::new(arrow::array::BooleanBuilder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+        Attr::Int8(v) => ScalarValue::Int8(Some(*v)),
+        Attr::Int16(v) => ScalarValue::Int16(Some(*v)),
+        Attr::Int32(v) => ScalarValue::Int32(Some(*v)),
         Attr::Int64(v) => ScalarValue::Int64(Some(*v)),
+        Attr::UInt8(v) => ScalarValue::UInt8(Some(*v)),
+        Attr::UInt16(v) => ScalarValue::UInt16(Some(*v)),
+        Attr::UInt32(v) => ScalarValue::UInt32(Some(*v)),
+        Attr::UInt64(v) => ScalarValue::UInt64(Some(*v)),
+        Attr::Float32(v) => ScalarValue::Float32(Some(*v)),
         Attr::Float64(v) => ScalarValue::Float64(Some(*v)),
+        Attr::Int8List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::Int8Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+        Attr::Int16List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::Int16Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+        Attr::Int32List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::Int32Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+        Attr::Int64List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::Int64Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+
+        Attr::UInt8List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::UInt8Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+
+        Attr::UInt16List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::UInt16Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+
+        Attr::UInt32List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::UInt32Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+
+        Attr::UInt64List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::UInt64Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+
+        Attr::Float32List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::Float32Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+
+        Attr::Float64List(v) => {
+            let mut builder = ListBuilder::new(arrow::array::Float64Builder::new());
+            for x in v {
+                builder.values().append_value(*x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+
         Attr::String(v) => ScalarValue::Utf8(Some(v.clone())),
+        Attr::StringList(v) => {
+            let mut builder = ListBuilder::new(arrow::array::StringBuilder::new());
+            for x in v {
+                builder.values().append_value(x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+        Attr::Binary(v) => ScalarValue::Binary(Some(v.clone())),
+        Attr::BinaryList(v) => {
+            let mut builder = ListBuilder::new(arrow::array::BinaryBuilder::new());
+            for x in v {
+                builder.values().append_value(x);
+                builder.append(true);
+            }
+            ScalarValue::List(Arc::new(builder.finish()))
+        }
+
         Attr::TimestampNanoseconds(v) => ScalarValue::TimestampNanosecond(Some(*v), None),
     };
     canonical

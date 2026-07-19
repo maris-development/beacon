@@ -15,7 +15,6 @@ use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
-
 use super::definition::CrawlerDefinition;
 use super::engine::{CrawlEngine, CrawlReport};
 use super::persistence::CrawlerPersistence;
@@ -56,12 +55,11 @@ impl CrawlerManager {
     pub fn new(
         session_ctx: Arc<SessionContext>,
         file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-        datasets_url: ObjectStoreUrl,
-        tables_url: ObjectStoreUrl,
+        db_store_url: ObjectStoreUrl,
         config: CrawlerConfig,
     ) -> Arc<Self> {
-        let engine = CrawlEngine::new(session_ctx.clone(), file_formats, datasets_url);
-        let persistence = CrawlerPersistence::new(session_ctx, tables_url);
+        let engine = CrawlEngine::new(session_ctx.clone(), file_formats);
+        let persistence = CrawlerPersistence::new(session_ctx, db_store_url);
         Arc::new(Self {
             engine,
             persistence,

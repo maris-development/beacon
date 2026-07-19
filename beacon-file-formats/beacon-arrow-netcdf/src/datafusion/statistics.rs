@@ -31,7 +31,7 @@ pub async fn generate_statistics(
     object: &object_store::ObjectMeta,
     table_schema: &arrow::datatypes::Schema,
 ) -> anyhow::Result<Statistics> {
-    let netcdf_path = beacon_object_storage::local_object_path(&datasets_root, &object.location)?;
+    let netcdf_path: PathBuf = todo!(); //beacon_object_storage::local_object_path(&datasets_root, &object.location)?;
     let dataset = open_dataset(netcdf_path).await?;
 
     match dataset {

@@ -2,12 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
-use beacon_common::{listing_url::parse_listing_table_url, super_table::SuperListingTable};
+use beacon_common::super_table::SuperListingTable;
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
-    catalog::TableFunctionImpl,
-    datasource::file_format::FileFormatFactory,
-    execution::object_store::ObjectStoreUrl,
-    prelude::SessionContext,
+    catalog::TableFunctionImpl, datasource::file_format::FileFormatFactory,
+    execution::object_store::ObjectStoreUrl, prelude::SessionContext,
 };
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
@@ -19,19 +18,13 @@ pub struct ReadBBFFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
-    data_object_store_url: ObjectStoreUrl,
 }
 
 impl ReadBBFFunc {
-    pub fn new(
-        runtime_handle: tokio::runtime::Handle,
-        session_ctx: Weak<SessionContext>,
-        data_object_store_url: ObjectStoreUrl,
-    ) -> Self {
+    pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
         Self {
             runtime_handle,
             session_ctx,
-            data_object_store_url,
         }
     }
 }
@@ -69,6 +62,18 @@ impl TableFunctionImpl for ReadBBFFunc {
         &self,
         args: &[datafusion::prelude::Expr],
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
+        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!("session context has been dropped")
+        })?;
+        let state = session_ctx.state();
+        let listing_factory = state
+            .config()
+            .get_extension::<ListingFactory>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "read_bbf: the listing factory is not registered on the session".to_string(),
+                )
+            })?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_bbf")?;
 
         tracing::debug!("read_bbf glob paths: {:?}", glob_paths);
@@ -76,16 +81,13 @@ impl TableFunctionImpl for ReadBBFFunc {
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_bbf processing path: {}", path);
-            listing_urls.push(parse_listing_table_url(&self.data_object_store_url, path)?);
+            listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
         // Build the file format from the factory registered on the session, so the
         // table function shares the runtime's configured format.
         let format_options: HashMap<String, String> = HashMap::new();
-        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
-            datafusion::common::plan_datafusion_err!("session context has been dropped")
-        })?;
-        let state = session_ctx.state();
+
         let factory = state.get_file_format_factory(BBF_FORMAT).ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(
                 "read_bbf: the BBF file format is not registered on the session".to_string(),

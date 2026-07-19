@@ -36,13 +36,13 @@ pub struct PersistentSchemaProvider {
     /// for the process lifetime. Every use upgrades; during a live runtime the
     /// context always outlives this provider.
     session_context: Weak<SessionContext>,
-    table_directory_store_url: ObjectStoreUrl,
+    db_store_url: ObjectStoreUrl,
 }
 
 impl std::fmt::Debug for PersistentSchemaProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PersistentSchemaProvider")
-            .field("table_directory_store_url", &self.table_directory_store_url)
+            .field("table_directory_store_url", &self.db_store_url)
             .field("table_count", &self.inner.table_names().len())
             .finish()
     }
@@ -52,13 +52,13 @@ impl PersistentSchemaProvider {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
         session_context: Arc<SessionContext>,
-        table_directory_store_url: ObjectStoreUrl,
+        db_store_url: ObjectStoreUrl,
     ) -> Self {
         Self {
             inner: Arc::new(MemorySchemaProvider::new()),
             runtime_handle,
             session_context: Arc::downgrade(&session_context),
-            table_directory_store_url,
+            db_store_url,
         }
     }
 
@@ -68,7 +68,7 @@ impl PersistentSchemaProvider {
     fn schema_persistence_service(&self) -> Option<SchemaPersistenceService> {
         Some(SchemaPersistenceService::new(
             self.session_context.upgrade()?,
-            self.table_directory_store_url.clone(),
+            self.db_store_url.clone(),
         ))
     }
 
@@ -216,7 +216,10 @@ mod tests {
             .register_table("v".to_string(), view(&ctx, "SELECT 1 AS x").await)
             .expect("registration should succeed");
 
-        assert!(previous.is_none(), "first registration has no previous table");
+        assert!(
+            previous.is_none(),
+            "first registration has no previous table"
+        );
         assert!(provider.table_exist("v"));
         assert!(
             store.get(&Path::from("v/table.json")).await.is_ok(),
@@ -238,7 +241,10 @@ mod tests {
             .register_table("v".to_string(), view(&ctx, "SELECT 2 AS y").await)
             .expect("re-registering an existing name should overwrite, not error");
 
-        assert!(previous.is_some(), "overwrite returns the replaced provider");
+        assert!(
+            previous.is_some(),
+            "overwrite returns the replaced provider"
+        );
         let table = provider
             .table("v")
             .await

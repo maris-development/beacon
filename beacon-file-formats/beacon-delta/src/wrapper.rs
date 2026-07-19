@@ -16,7 +16,6 @@ use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{Constraints, Statistics};
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
@@ -36,7 +35,6 @@ use crate::provider::{reopen_delta_provider, TimeTravel};
 #[derive(Debug)]
 pub struct BeaconDeltaTable {
     inner: Arc<dyn TableProvider>,
-    store_url: ObjectStoreUrl,
     definition: DeltaTableDefinition,
     time_travel: Option<TimeTravel>,
 }
@@ -44,13 +42,11 @@ pub struct BeaconDeltaTable {
 impl BeaconDeltaTable {
     pub fn new(
         inner: Arc<dyn TableProvider>,
-        store_url: ObjectStoreUrl,
         definition: DeltaTableDefinition,
         time_travel: Option<TimeTravel>,
     ) -> Self {
         Self {
             inner,
-            store_url,
             definition,
             time_travel,
         }

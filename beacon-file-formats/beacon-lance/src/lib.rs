@@ -30,13 +30,13 @@ use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt};
 
-pub use alter::{alter_table, SchemaChange};
+pub use alter::{SchemaChange, alter_table};
 pub use definition::LanceTableDefinition;
-pub use index::{create_index, drop_index, list_indices, IndexInfo, ScalarIndexKind};
+pub use index::{IndexInfo, ScalarIndexKind, create_index, drop_index, list_indices};
 pub use io::WriteKind;
 pub use mutate::{delete_rows, update_rows};
 pub use provider::LanceTable;
-pub use warehouse::{beacon_namespace, LanceWarehouse, BEACON_NAMESPACE};
+pub use warehouse::{BEACON_NAMESPACE, LanceWarehouse, beacon_namespace};
 
 /// Create a new, empty Lance table at the warehouse location for
 /// `namespace`/`name` and return a ready [`LanceTable`] provider. The empty
@@ -175,7 +175,11 @@ mod tests {
             .collect()
             .await
             .unwrap();
-        assert_eq!(count(&ctx, "orders").await, 3, "three inserted rows visible");
+        assert_eq!(
+            count(&ctx, "orders").await,
+            3,
+            "three inserted rows visible"
+        );
 
         // DELETE WHERE id = 1 -> keep id <> 1.
         let keep = ctx
@@ -188,7 +192,11 @@ mod tests {
         replace_table_contents(&warehouse, &location, keep)
             .await
             .expect("replace should succeed");
-        assert_eq!(count(&ctx, "orders").await, 2, "one row removed, two survive");
+        assert_eq!(
+            count(&ctx, "orders").await,
+            2,
+            "one row removed, two survive"
+        );
     }
 
     #[tokio::test]
@@ -200,9 +208,14 @@ mod tests {
         let warehouse = test_warehouse(&dir);
         let namespace = beacon_namespace();
 
-        let table = create_lance_table(warehouse.clone(), &namespace, "discovered", &sample_schema())
-            .await
-            .unwrap();
+        let table = create_lance_table(
+            warehouse.clone(),
+            &namespace,
+            "discovered",
+            &sample_schema(),
+        )
+        .await
+        .unwrap();
         let ctx = SessionContext::new();
         ctx.register_table("discovered", Arc::new(table)).unwrap();
         ctx.sql("INSERT INTO discovered VALUES (7, 'g')")
@@ -214,8 +227,11 @@ mod tests {
 
         // Simulate restart: round-trip the definition through JSON and rebuild.
         let location = warehouse.table_uri(&namespace, "discovered");
-        let definition: Arc<dyn TableDefinition> =
-            Arc::new(LanceTableDefinition::new("discovered", namespace, location.clone()));
+        let definition: Arc<dyn TableDefinition> = Arc::new(LanceTableDefinition::new(
+            "discovered",
+            namespace,
+            location.clone(),
+        ));
         let json = serde_json::to_string(&definition).unwrap();
         assert!(json.contains("\"lance\""), "typetag tag present: {json}");
         let restored: Arc<dyn TableDefinition> = serde_json::from_str(&json).unwrap();
@@ -226,13 +242,17 @@ mod tests {
             SessionConfig::new().with_extension(warehouse.clone()),
         ));
         let provider = restored
-            .build_provider(build_ctx, &ObjectStoreUrl::parse("db://").unwrap())
+            .build_provider(build_ctx)
             .await
             .expect("provider should rebuild from disk");
 
         let ctx2 = SessionContext::new();
         ctx2.register_table("discovered", provider).unwrap();
-        assert_eq!(count(&ctx2, "discovered").await, 1, "row survives discovery");
+        assert_eq!(
+            count(&ctx2, "discovered").await,
+            1,
+            "row survives discovery"
+        );
     }
 
     #[tokio::test]
@@ -340,11 +360,19 @@ mod tests {
             .await
             .unwrap();
 
-        create_index(&warehouse, &location, "id", "id_idx", ScalarIndexKind::BTree)
-            .await
-            .expect("create index should succeed");
+        create_index(
+            &warehouse,
+            &location,
+            "id",
+            "id_idx",
+            ScalarIndexKind::BTree,
+        )
+        .await
+        .expect("create index should succeed");
 
-        let listed = list_indices(&warehouse, &location).await.expect("list indices");
+        let listed = list_indices(&warehouse, &location)
+            .await
+            .expect("list indices");
         assert_eq!(listed.len(), 1, "one index present");
         assert_eq!(listed[0].name, "id_idx");
         assert_eq!(listed[0].columns, vec!["id".to_string()]);
@@ -353,7 +381,10 @@ mod tests {
             .await
             .expect("drop index should succeed");
         assert!(
-            list_indices(&warehouse, &location).await.unwrap().is_empty(),
+            list_indices(&warehouse, &location)
+                .await
+                .unwrap()
+                .is_empty(),
             "no indices after drop"
         );
     }
@@ -404,7 +435,11 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(name, "Z", "row 2 should be updated");
-        assert_eq!(count(&ctx, "orders").await, 3, "UPDATE must not change row count");
+        assert_eq!(
+            count(&ctx, "orders").await,
+            3,
+            "UPDATE must not change row count"
+        );
 
         // Native DELETE WHERE id = 1.
         delete_rows(&warehouse, &location, Some("id = 1"))
@@ -416,6 +451,10 @@ mod tests {
         delete_rows(&warehouse, &location, None)
             .await
             .expect("delete-all should succeed");
-        assert_eq!(count(&ctx, "orders").await, 0, "delete-all empties the table");
+        assert_eq!(
+            count(&ctx, "orders").await,
+            0,
+            "delete-all empties the table"
+        );
     }
 }

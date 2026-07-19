@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, TableDefinition};
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 use serde::{Deserialize, Serialize};
@@ -48,20 +49,16 @@ pub struct CrawlReport {
 pub struct CrawlEngine {
     session_ctx: Arc<SessionContext>,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-    /// The store crawled prefixes and the tables built from them resolve against.
-    datasets_url: ObjectStoreUrl,
 }
 
 impl CrawlEngine {
     pub fn new(
         session_ctx: Arc<SessionContext>,
         file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-        datasets_url: ObjectStoreUrl,
     ) -> Self {
         Self {
             session_ctx,
             file_formats,
-            datasets_url,
         }
     }
 
@@ -74,13 +71,22 @@ impl CrawlEngine {
 
         // 1. Scan + classify (reuses list_datasets + per-format discover_datasets).
         // Crawlers run periodically, so the cache-backed registered store is fine.
+        let listing_factory = self
+            .session_ctx
+            .state()
+            .config()
+            .get_extension::<ListingFactory>()
+            .expect("Listing Factory Should always be populated...");
         let pattern = scan_pattern(&def.target_prefix);
         let object_store = self
             .session_ctx
             .runtime_env()
             .object_store(&self.datasets_url)
             .map_err(|e| {
-                anyhow::anyhow!("crawler '{}' could not resolve datasets store: {e}", def.name)
+                anyhow::anyhow!(
+                    "crawler '{}' could not resolve datasets store: {e}",
+                    def.name
+                )
             })?;
         let datasets = list_datasets(
             &self.session_ctx,
@@ -142,10 +148,7 @@ impl CrawlEngine {
 
             // build_provider infers schema and validates partitions; failures are
             // per-table and must not abort the whole crawl.
-            let provider = match table_def
-                .build_provider(self.session_ctx.clone(), &self.datasets_url)
-                .await
-            {
+            let provider = match table_def.build_provider(self.session_ctx.clone()).await {
                 Ok(provider) => provider,
                 Err(error) => {
                     report.failed.push((name, error.to_string()));

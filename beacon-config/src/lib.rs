@@ -15,7 +15,6 @@ pub use beacon_arrow_atlas::datafusion::AtlasConfig;
 pub use beacon_arrow_bbf::datafusion::BbfConfig;
 pub use beacon_arrow_netcdf::datafusion::NetcdfConfig;
 pub use beacon_common::CrawlerConfig;
-pub use beacon_object_storage::{S3Config, StorageConfig};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -26,7 +25,6 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     pub sql: SqlConfig,
     pub flight_sql: FlightSqlConfig,
-    pub storage: StorageConfig,
     pub cors: CorsConfig,
     pub netcdf: NetcdfConfig,
     pub atlas: AtlasConfig,
@@ -322,10 +320,7 @@ struct RawConfig {
         default = "Content-Type,Authorization"
     )]
     allowed_headers: String,
-    #[envconfig(
-        from = "BEACON_CORS_EXPOSE_HEADERS",
-        default = "x-beacon-query-id"
-    )]
+    #[envconfig(from = "BEACON_CORS_EXPOSE_HEADERS", default = "x-beacon-query-id")]
     expose_headers: String,
     #[envconfig(from = "BEACON_CORS_ALLOWED_CREDENTIALS", default = "false")]
     allowed_credentials: bool,
@@ -452,36 +447,6 @@ impl From<RawConfig> for Config {
                 statement_ttl_secs: raw.flight_sql_statement_ttl_secs,
                 prepared_statement_ttl_secs: raw.flight_sql_prepared_statement_ttl_secs,
             },
-            storage: {
-                let root = PathBuf::from(&raw.data_dir);
-                // S3 presence *is* the backend switch: `Some` => datasets on S3.
-                let s3 = if raw.s3_data_lake {
-                    Some(S3Config {
-                        bucket: raw.s3_bucket.unwrap_or_default(),
-                        endpoint: raw.aws_endpoint,
-                        region: raw.aws_region,
-                        enable_virtual_hosting: raw.s3_enable_virtual_hosting,
-                        allow_http: raw.s3_allow_http,
-                    })
-                } else {
-                    None
-                };
-                StorageConfig {
-                    datasets_dir: root.join("datasets"),
-                    // The tables catalog + managed Lance data live in one redb file
-                    // (the server persists across restarts). `None` here would make
-                    // the store ephemeral/in-memory.
-                    db_path: Some(root.join("beacon.db")),
-                    tmp_dir: root.join("tmp"),
-                    data_dir: root,
-                    enable_fs_events: raw.enable_fs_events,
-                    enable_s3_events: raw.enable_s3_events,
-                    max_upload_bytes: raw.max_upload_bytes,
-                    upload_part_size: raw.upload_part_size,
-                    upload_session_ttl_secs: raw.upload_session_ttl_secs,
-                    s3,
-                }
-            },
             cors: CorsConfig {
                 allowed_methods: raw.allowed_methods,
                 allowed_origins: raw.allowed_origins,
@@ -583,25 +548,10 @@ impl Config {
         }
         config.server.base_path =
             normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
-        // S3 always needs a bucket (object_store requires it; it is never inferred
-        // from the endpoint).
-        if let Some(s3) = &config.storage.s3 {
-            if s3.bucket.trim().is_empty() {
-                return Err(ConfigError::InvalidStorage(
-                    "BEACON_S3_BUCKET is required when BEACON_S3_DATA_LAKE=true".to_string(),
-                ));
-            }
-        }
         // Create the configured data directories (idempotent). The tables store is
         // a single file (`storage.db_path`) inside `data_dir`, so it needs no
         // directory of its own — its parent is created here.
-        for dir in [
-            &config.storage.data_dir,
-            &config.storage.datasets_dir,
-            &config.storage.tmp_dir,
-            &config.data.indexes,
-            &config.data.cache,
-        ] {
+        for dir in [&config.data.indexes, &config.data.cache] {
             create_dir(dir)?;
         }
         tracing::debug!(

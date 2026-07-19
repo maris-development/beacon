@@ -43,8 +43,8 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 
+use super::helpers::{column_stat_rows, ColumnStatRow};
 use crate::file_formats::BeaconTableFunctionImpl;
-use super::helpers::{ColumnStatRow, column_stat_rows};
 
 fn output_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -59,21 +59,13 @@ fn output_schema() -> SchemaRef {
 pub struct ViewDatasetStatisticsFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
-    /// URL the datasets store is registered under, resolved from the session's
-    /// object-store registry at call time.
-    datasets_url: ObjectStoreUrl,
 }
 
 impl ViewDatasetStatisticsFunc {
-    pub fn new(
-        runtime_handle: tokio::runtime::Handle,
-        session_ctx: Weak<SessionContext>,
-        datasets_url: ObjectStoreUrl,
-    ) -> Self {
+    pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
         Self {
             runtime_handle,
             session_ctx,
-            datasets_url,
         }
     }
 }
@@ -111,80 +103,82 @@ impl TableFunctionImpl for ViewDatasetStatisticsFunc {
         &self,
         args: &[Expr],
     ) -> datafusion::error::Result<Arc<dyn datafusion::catalog::TableProvider>> {
-        let path_str = match args.first() {
-            Some(Expr::Literal(ScalarValue::Utf8(Some(s)), _)) => s.clone(),
-            _ => return plan_err!("view_dataset_statistics requires a single Utf8 path argument"),
-        };
+        // let path_str = match args.first() {
+        //     Some(Expr::Literal(ScalarValue::Utf8(Some(s)), _)) => s.clone(),
+        //     _ => return plan_err!("view_dataset_statistics requires a single Utf8 path argument"),
+        // };
 
-        let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
-            plan_datafusion_err!("session context has been dropped")
-        })?;
-        let datasets_url = self.datasets_url.clone();
+        // let session_ctx = self
+        //     .session_ctx
+        //     .upgrade()
+        //     .ok_or_else(|| plan_datafusion_err!("session context has been dropped"))?;
+        // let datasets_url = self.datasets_url.clone();
 
-        let (schema, stats) = tokio::task::block_in_place(|| {
-            self.runtime_handle.block_on(async move {
-                let path = object_store::path::Path::parse(&path_str)
-                    .map_err(|e| plan_datafusion_err!("Invalid path '{path_str}': {e}"))?;
-                let store = session_ctx
-                    .state()
-                    .runtime_env()
-                    .object_store(datasets_url)
-                    .map_err(|e| {
-                        plan_datafusion_err!("failed to resolve datasets object store: {e}")
-                    })?;
+        // let (schema, stats) = tokio::task::block_in_place(|| {
+        //     self.runtime_handle.block_on(async move {
+        //         let path = object_store::path::Path::parse(&path_str)
+        //             .map_err(|e| plan_datafusion_err!("Invalid path '{path_str}': {e}"))?;
+        //         let store = session_ctx
+        //             .state()
+        //             .runtime_env()
+        //             .object_store(datasets_url)
+        //             .map_err(|e| {
+        //                 plan_datafusion_err!("failed to resolve datasets object store: {e}")
+        //             })?;
 
-                // Head the object to get size + last_modified for cache validation.
-                let meta = store
-                    .head(&path)
-                    .await
-                    .map_err(|e| plan_datafusion_err!("Failed to stat '{path}': {e}"))?;
-                let file_format = infer_file_format(session_ctx.clone(), &meta)?;
+        //         // Head the object to get size + last_modified for cache validation.
+        //         let meta = store
+        //             .head(&path)
+        //             .await
+        //             .map_err(|e| plan_datafusion_err!("Failed to stat '{path}': {e}"))?;
+        //         let file_format = infer_file_format(session_ctx.clone(), &meta)?;
 
-                // ── Cache lookup ─────────────────────────────────────────────
-                let state = session_ctx.state();
-                let cache = state.runtime_env().cache_manager.get_file_statistic_cache();
-                let schema = file_schema(
-                    session_ctx.clone(),
-                    store.clone(),
-                    file_format.clone(),
-                    &meta,
-                )
-                .await?;
+        //         // ── Cache lookup ─────────────────────────────────────────────
+        //         let state = session_ctx.state();
+        //         let cache = state.runtime_env().cache_manager.get_file_statistic_cache();
+        //         let schema = file_schema(
+        //             session_ctx.clone(),
+        //             store.clone(),
+        //             file_format.clone(),
+        //             &meta,
+        //         )
+        //         .await?;
 
-                if let Some(ref cache) = cache {
-                    if let Some(cached) = cache
-                        .get(&meta.location)
-                        .filter(|cached| cached.is_valid_for(&meta))
-                    {
-                        return Ok::<_, datafusion::error::DataFusionError>((
-                            schema.clone(),
-                            Arc::clone(&cached.statistics),
-                        ));
-                    }
-                }
+        //         if let Some(ref cache) = cache {
+        //             if let Some(cached) = cache
+        //                 .get(&meta.location)
+        //                 .filter(|cached| cached.is_valid_for(&meta))
+        //             {
+        //                 return Ok::<_, datafusion::error::DataFusionError>((
+        //                     schema.clone(),
+        //                     Arc::clone(&cached.statistics),
+        //                 ));
+        //             }
+        //         }
 
-                let stats = Arc::new(
-                    file_stats(session_ctx, store, file_format, schema.clone(), &meta).await?,
-                );
+        //         let stats = Arc::new(
+        //             file_stats(session_ctx, store, file_format, schema.clone(), &meta).await?,
+        //         );
 
-                if let Some(cache) = cache {
-                    cache.put(
-                        &meta.location,
-                        datafusion::execution::cache::cache_manager::CachedFileMetadata::new(
-                            meta.clone(),
-                            Arc::clone(&stats),
-                            None,
-                        ),
-                    );
-                }
+        //         if let Some(cache) = cache {
+        //             cache.put(
+        //                 &meta.location,
+        //                 datafusion::execution::cache::cache_manager::CachedFileMetadata::new(
+        //                     meta.clone(),
+        //                     Arc::clone(&stats),
+        //                     None,
+        //                 ),
+        //             );
+        //         }
 
-                Ok((schema, stats))
-            })
-        })?;
+        //         Ok((schema, stats))
+        //     })
+        // })?;
 
-        let batch = build_record_batch(&schema, &stats)?;
-        let mem_table = MemTable::try_new(output_schema(), vec![vec![batch]])?;
-        Ok(Arc::new(mem_table))
+        // let batch = build_record_batch(&schema, &stats)?;
+        // let mem_table = MemTable::try_new(output_schema(), vec![vec![batch]])?;
+        // Ok(Arc::new(mem_table))
+        todo!()
     }
 }
 
@@ -196,11 +190,21 @@ fn build_record_batch(
     RecordBatch::try_new(
         output_schema(),
         vec![
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.column_name.as_deref()))),
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.data_type.as_deref()))),
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.min_value.as_deref()))),
-            Arc::new(StringArray::from_iter(rows.iter().map(|r| r.max_value.as_deref()))),
-            Arc::new(BooleanArray::from(rows.iter().map(|r| r.is_exact).collect::<Vec<_>>())),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.column_name.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.data_type.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.min_value.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.max_value.as_deref()),
+            )),
+            Arc::new(BooleanArray::from(
+                rows.iter().map(|r| r.is_exact).collect::<Vec<_>>(),
+            )),
         ],
     )
     .map_err(|e| plan_datafusion_err!("Failed to build statistics record batch: {e}"))

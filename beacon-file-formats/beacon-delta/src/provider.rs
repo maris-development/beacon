@@ -22,6 +22,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Once};
 
 use anyhow::Context;
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::execution::context::SessionState;
 use datafusion::execution::object_store::ObjectStoreUrl;
@@ -313,11 +314,11 @@ async fn load_delta_table(
 /// work without extra configuration.
 pub async fn open_delta_provider(
     ctx: Arc<SessionContext>,
-    store_url: ObjectStoreUrl,
+    store: Arc<dyn ObjectStore>,
     location: &str,
     time_travel: Option<TimeTravel>,
 ) -> anyhow::Result<Arc<dyn TableProvider>> {
-    reopen_delta_provider(&ctx.state(), store_url, location, time_travel).await
+    reopen_delta_provider(&ctx.state(), store, location, time_travel).await
 }
 
 /// Re-open a Delta table from an active query [`Session`] and return a fresh
@@ -329,7 +330,7 @@ pub async fn open_delta_provider(
 /// pinned version/timestamp is re-resolved instead.
 pub async fn reopen_delta_provider(
     session: &dyn Session,
-    store_url: ObjectStoreUrl,
+    store: Arc<dyn ObjectStore>,
     location: &str,
     time_travel: Option<TimeTravel>,
 ) -> anyhow::Result<Arc<dyn TableProvider>> {
@@ -337,11 +338,6 @@ pub async fn reopen_delta_provider(
         .as_any()
         .downcast_ref::<SessionState>()
         .context("Delta table requires a DataFusion SessionState")?;
-
-    let store = session_state
-        .runtime_env()
-        .object_store(store_url.clone())
-        .with_context(|| format!("failed to resolve object store for {store_url:?}"))?;
 
     let table = load_delta_table(store, location, time_travel).await?;
 

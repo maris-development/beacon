@@ -56,7 +56,7 @@ pub async fn open_dataset(
         }
     }
 
-    let netcdf_path = beacon_object_storage::local_object_path(&datasets_root, &object.location)?;
+    let netcdf_path: PathBuf = todo!(); // beacon_object_storage::local_object_path(&datasets_root, &object.location)?;
 
     let dataset = reader::open_dataset(netcdf_path).await?;
 

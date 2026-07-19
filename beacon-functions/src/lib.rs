@@ -27,7 +27,6 @@ pub fn register_functions(
     session_context: Arc<datafusion::prelude::SessionContext>,
     runtime_handle: Handle,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-    default_store_url: ObjectStoreUrl,
 ) -> Vec<FunctionDoc> {
     geodatafusion::register(session_context.as_ref());
     register_util_udfs(session_context.as_ref());
@@ -39,17 +38,14 @@ pub fn register_functions(
 
     // Both builders only *construct* their functions; registering them on the session
     // is this function's job.
-    let mut table_functions = register_metadata_functions(
-        session_context.clone(),
-        runtime_handle.clone(),
-        default_store_url.clone(),
-    );
-    table_functions.extend(register_table_functions(
-        runtime_handle,
-        session_context.clone(),
-        default_store_url,
-        file_formats,
-    ));
+    let mut table_functions =
+        register_metadata_functions(session_context.clone(), runtime_handle.clone());
+    // table_functions.extend(register_table_functions(
+    //     runtime_handle,
+    //     session_context.clone(),
+    //     default_store_url,
+    //     file_formats,
+    // ));
 
     for table_function in table_functions.iter() {
         session_context.register_udtf(

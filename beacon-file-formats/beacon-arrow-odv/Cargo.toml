@@ -12,6 +12,7 @@ arrow-csv = {workspace = true}
 datafusion = { workspace = true }
 tracing = { workspace = true }
 beacon-common = { path = "../../beacon-common" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 anyhow = { workspace=true}
 async-trait = { workspace=true}
 futures = { workspace=true}

@@ -155,7 +155,11 @@ impl RedbStore {
         }
         txn.commit().map_err(generic)?;
         Ok(Self {
-            inner: Arc::new(Inner { db, container, path }),
+            inner: Arc::new(Inner {
+                db,
+                container,
+                path,
+            }),
         })
     }
 
@@ -489,7 +493,11 @@ impl Inner {
     /// the single commit point. A crash mid-vacuum leaves the original intact and
     /// only orphans the temp file (cleaned up by the next vacuum).
     fn rewrite(self) -> OsResult<RedbStore> {
-        let Inner { db, container, path } = self;
+        let Inner {
+            db,
+            container,
+            path,
+        } = self;
 
         // 1. Snapshot every live object. Heap payloads are read zero-copy from the
         //    old mmap; we hold those slices only until they're copied below.
@@ -514,8 +522,12 @@ impl Inner {
             for entry in metas.iter().map_err(generic)? {
                 let (key, value) = entry.map_err(generic)?;
                 let path = key.value().to_string();
-                let StoredMeta { size, e_tag, last_modified_millis, payload } =
-                    decode_meta(value.value())?;
+                let StoredMeta {
+                    size,
+                    e_tag,
+                    last_modified_millis,
+                    payload,
+                } = decode_meta(value.value())?;
                 if let Ok(seq) = e_tag.parse::<u64>() {
                     max_seq = max_seq.max(seq);
                 }
@@ -535,7 +547,12 @@ impl Inner {
                         (PayloadLoc::Heap(new_extent), None)
                     }
                 };
-                let meta = StoredMeta { size, e_tag, last_modified_millis, payload };
+                let meta = StoredMeta {
+                    size,
+                    e_tag,
+                    last_modified_millis,
+                    payload,
+                };
                 prepared.push((path, meta, inline));
             }
             (prepared, max_seq, new_container, new_db)
@@ -554,7 +571,9 @@ impl Inner {
                     .insert(path.as_str(), encode_meta(meta)?.as_slice())
                     .map_err(generic)?;
                 if let Some(bytes) = inline {
-                    ndatas.insert(path.as_str(), bytes.as_slice()).map_err(generic)?;
+                    ndatas
+                        .insert(path.as_str(), bytes.as_slice())
+                        .map_err(generic)?;
                 }
             }
         }
@@ -857,7 +876,10 @@ fn generic<E: std::error::Error + Send + Sync + 'static>(e: E) -> object_store::
 /// The temp path a vacuum rewrites into: a hidden sibling of the container file
 /// in the same directory (so `rename` stays on one filesystem and is atomic).
 fn temp_sibling(path: &FsPath) -> PathBuf {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("beacon.db");
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("beacon.db");
     path.with_file_name(format!(".{name}.vacuum-tmp"))
 }
 

@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use beacon_common::listing_url::parse_listing_table_url;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::common::{
     DataFusionError, ToDFSchema, arrow_datafusion_err, config_datafusion_err, plan_err,
@@ -16,6 +15,7 @@ use datafusion::{
     catalog::{Session, TableProvider, TableProviderFactory},
 };
 
+use crate::listing_factory::ListingFactory;
 use crate::table_ext::{
     ExternalTable, ExternalTableDefinition, ExternalTableRebuild, build_listing_table,
 };
@@ -24,16 +24,7 @@ type PartitionCols = Vec<(String, DataType)>;
 
 /// A `TableProviderFactory` capable of creating new `ListingTable`s
 #[derive(Debug)]
-pub struct ListingTableFactoryExt {
-    store_url: ObjectStoreUrl,
-}
-
-impl ListingTableFactoryExt {
-    /// Creates a new `ListingTableFactoryExt`
-    pub fn new(store_url: ObjectStoreUrl) -> Self {
-        Self { store_url }
-    }
-}
+pub struct ListingTableFactoryExt;
 
 #[async_trait::async_trait]
 impl TableProviderFactory for ListingTableFactoryExt {
@@ -56,7 +47,9 @@ impl TableProviderFactory for ListingTableFactoryExt {
         let (provided_schema, table_partition_cols) = resolve_schema_and_partition_cols(cmd)?;
         let schema_inferred = provided_schema.is_none();
 
-        let mut listing_table_url = parse_listing_table_url(&self.store_url, &cmd.location)?;
+        let listing_factory = session_state.config().get_extension::<ListingFactory>().expect("Listing Factory should be registered at startup. If you are seeing this error, please report it to the Beacon team.");
+        let mut listing_table_url =
+            listing_factory.parse_listing_table_url(state, &cmd.location)?;
 
         let options = ListingOptions::new(file_format)
             .with_file_extension("") // file extension is not needed for listing table factory since the file format will handle it in `infer_schema` and `infer_partition_schema`

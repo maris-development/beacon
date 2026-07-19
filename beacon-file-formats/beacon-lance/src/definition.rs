@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use beacon_datafusion_ext::table_ext::TableDefinition;
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::TableType;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +31,11 @@ pub struct LanceTableDefinition {
 }
 
 impl LanceTableDefinition {
-    pub fn new(name: impl Into<String>, namespace: Vec<String>, location: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        namespace: Vec<String>,
+        location: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             namespace,
@@ -47,7 +50,6 @@ impl TableDefinition for LanceTableDefinition {
     async fn build_provider(
         &self,
         context: Arc<SessionContext>,
-        _data_store_url: &ObjectStoreUrl,
     ) -> anyhow::Result<Arc<dyn TableProvider>> {
         let warehouse = context
             .state()
