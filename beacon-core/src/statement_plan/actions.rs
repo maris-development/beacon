@@ -30,7 +30,6 @@ use datafusion::{
 
 use super::logical::{AlterTableSpec, Mutation};
 use super::materialized_view::delete_tables_prefix;
-use crate::settings::ObjectStoreUrls;
 
 /// Drop a managed table, reclaiming its backing storage. Materialized views
 /// persist Parquet under a data prefix; Iceberg tables own metadata+data in the
@@ -144,9 +143,7 @@ async fn create_remote_table(
     };
 
     // `build_provider` pins the resolved schema; registration persists table.json.
-    let provider = definition
-        .build_provider(session.clone(), ObjectStoreUrls::from_session(session).datasets())
-        .await?;
+    let provider = definition.build_provider(session.clone()).await?;
     session.register_table(cmd.name.clone(), provider)?;
     Ok(())
 }
@@ -206,9 +203,7 @@ async fn create_delta_table(
 
     // `build_provider` resolves the schema from the Delta log; registration
     // persists `table.json` via the TableManager.
-    let provider = definition
-        .build_provider(session.clone(), ObjectStoreUrls::from_session(session).datasets())
-        .await?;
+    let provider = definition.build_provider(session.clone()).await?;
     session.register_table(cmd.name.clone(), provider)?;
     Ok(())
 }
@@ -287,9 +282,7 @@ async fn create_sql_db_table(
     };
 
     // `build_provider` resolves+pins the schema; registration persists table.json.
-    let provider = definition
-        .build_provider(session.clone(), ObjectStoreUrls::from_session(session).datasets())
-        .await?;
+    let provider = definition.build_provider(session.clone()).await?;
     session.register_table(cmd.name.clone(), provider)?;
     Ok(())
 }
@@ -486,9 +479,7 @@ pub(crate) async fn alter_table(
     let warehouse = lance_warehouse(session)?;
     beacon_lance::alter_table(&warehouse, &definition.location, &changes).await?;
 
-    let fresh = definition
-        .build_provider(session.clone(), ObjectStoreUrls::from_session(session).datasets())
-        .await?;
+    let fresh = definition.build_provider(session.clone()).await?;
     session.register_table(table_ref, fresh)?;
 
     Ok(())

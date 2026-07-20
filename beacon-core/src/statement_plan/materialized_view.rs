@@ -9,10 +9,12 @@
 use std::sync::Arc;
 
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
-use crate::settings::ObjectStoreUrls;
-use beacon_datafusion_ext::table_ext::{
-    ExternalTable, MaterializedView, MaterializedViewDefinition, TableDefinition,
-    MATERIALIZED_VIEW_PREFIX,
+use beacon_datafusion_ext::{
+    consts::DEFAULT_DB_STORE_URL_OBJECT_URL,
+    table_ext::{
+        ExternalTable, MaterializedView, MaterializedViewDefinition, TableDefinition,
+        MATERIALIZED_VIEW_PREFIX,
+    },
 };
 use datafusion::{
     dataframe::DataFrameWriteOptions,
@@ -49,7 +51,11 @@ pub(crate) async fn create_materialized_view(
     // Execute the defining query and persist its result as a single Parquet file
     // under the reserved materialized-view prefix in the tables store.
     let df = session_ctx.sql(query_sql).await?;
-    let dir_path = format!("{MATERIALIZED_VIEW_PREFIX}/{}/{}", name, uuid::Uuid::new_v4());
+    let dir_path = format!(
+        "{MATERIALIZED_VIEW_PREFIX}/{}/{}",
+        name,
+        uuid::Uuid::new_v4()
+    );
     let schema = write_query_to_tables_parquet(session_ctx, df, &dir_path).await?;
     let storage_location = format!("{dir_path}/");
 
@@ -63,10 +69,7 @@ pub(crate) async fn create_materialized_view(
         last_refreshed: Some(now),
     };
 
-    let store_url = ObjectStoreUrls::from_session(session_ctx).tables().clone();
-    let provider = definition
-        .build_provider(session_ctx.clone(), &store_url)
-        .await?;
+    let provider = definition.build_provider(session_ctx.clone()).await?;
 
     // Registering through the session context persists the definition to the
     // catalog (db://<name>/table.json) via the schema provider.
@@ -113,9 +116,8 @@ pub(crate) async fn write_query_to_tables_parquet(
     df: DataFrame,
     dir_path: &str,
 ) -> anyhow::Result<SchemaRef> {
-    let store_url = ObjectStoreUrls::from_session(session_ctx).tables().clone();
     let output_schema: SchemaRef = Arc::new(df.schema().as_arrow().clone());
-
+    let store_url = DEFAULT_DB_STORE_URL_OBJECT_URL.clone();
     // Write the result as a single Parquet file inside the version directory. The
     // view reads it back by listing `dir_path/`, which round-trips cleanly (unlike
     // a bare single-file path).
@@ -158,7 +160,7 @@ pub(crate) async fn write_query_to_tables_parquet(
 /// store. Failures are logged rather than propagated, since this is only used to
 /// reclaim space for replaced/dropped materialized-view data.
 pub(crate) async fn delete_tables_prefix(session_ctx: &SessionContext, prefix: &str) {
-    let store_url = ObjectStoreUrls::from_session(session_ctx).tables().clone();
+    let store_url = DEFAULT_DB_STORE_URL_OBJECT_URL.clone();
     let store = match session_ctx.runtime_env().object_store(&store_url) {
         Ok(store) => store,
         Err(error) => {
@@ -214,7 +216,11 @@ pub(crate) async fn refresh_materialized_view(
         .clone();
 
     let df = session_ctx.sql(&old_definition.definition).await?;
-    let dir_path = format!("{MATERIALIZED_VIEW_PREFIX}/{}/{}", name, uuid::Uuid::new_v4());
+    let dir_path = format!(
+        "{MATERIALIZED_VIEW_PREFIX}/{}/{}",
+        name,
+        uuid::Uuid::new_v4()
+    );
     let schema = write_query_to_tables_parquet(session_ctx, df, &dir_path).await?;
 
     let new_definition = MaterializedViewDefinition {
@@ -226,10 +232,7 @@ pub(crate) async fn refresh_materialized_view(
         last_refreshed: Some(now_millis()),
     };
 
-    let store_url = ObjectStoreUrls::from_session(session_ctx).tables().clone();
-    let new_provider = new_definition
-        .build_provider(session_ctx.clone(), &store_url)
-        .await?;
+    let new_provider = new_definition.build_provider(session_ctx.clone()).await?;
 
     session_ctx.register_table(table_ref, new_provider)?;
 

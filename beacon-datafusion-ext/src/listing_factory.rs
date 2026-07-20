@@ -6,11 +6,17 @@ use datafusion::{
 
 use crate::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 
+#[derive(Debug, Clone)]
 pub enum RootStore {
     FileSystem(PathBuf), // File System full path, e.g. /path/to/root
     HttpsStore(String), // Object Store full path, e.g. https://s3.amazonaws.com/bucket-name/path/to/root
 }
 
+pub fn try_listing_factory_from_session(session: &dyn Session) -> Option<Arc<ListingFactory>> {
+    session.config().get_extension::<ListingFactory>().clone()
+}
+
+#[derive(Debug, Clone)]
 pub struct ListingFactory {
     default_store_url: Option<ObjectStoreUrl>,
     root_store: Option<RootStore>,
@@ -97,6 +103,19 @@ impl ListingFactory {
         match &self.default_store_url {
             Some(store) => Some(store.clone()),
             None => None, // ToDo: We can try to resolve this using the scheme of the path or returning the file:// scheme for local files. But for now, we just return None.
+        }
+    }
+
+    pub fn rewrite_path(&self, path: &str) -> String {
+        match &self.root_store {
+            Some(RootStore::FileSystem(root_path)) => {
+                let full_path = root_path.join(path);
+                full_path.to_string_lossy().to_string()
+            }
+            Some(RootStore::HttpsStore(root_url)) => {
+                format!("{}/{}", root_url.trim_end_matches('/'), path)
+            }
+            None => path.to_string(),
         }
     }
 

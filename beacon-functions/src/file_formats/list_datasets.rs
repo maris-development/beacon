@@ -1,45 +1,59 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Weak};
 
 use arrow::{
     array::StringArray,
-    datatypes::{DataType, Field, Schema, SchemaRef},
+    datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
-use beacon_common::listing_url::parse_listing_table_url;
-use beacon_datafusion_ext::file_collection::FileCollection;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::{MemTable, TableFunctionImpl, TableProvider},
-    datasource::file_format::FileFormatFactory,
     error::DataFusionError,
-    execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
 };
 use futures::StreamExt;
 
 use crate::file_formats::BeaconTableFunctionImpl;
 
-/// Discover the datasets matching `pattern` (default `*`) under the datasets
+/// Discover the datasets matching `pattern` (default `**/*`) under the datasets
 /// object store at `datasets_url`, asking each registered file format which
 /// objects it owns.
 pub async fn list_datasets(
     session_ctx: &SessionContext,
-    datasets_url: &ObjectStoreUrl,
-    object_store: Arc<dyn object_store::ObjectStore>,
     file_formats: &[Arc<dyn FileFormatFactoryExt>],
     offset: Option<usize>,
     limit: Option<usize>,
-    pattern: Option<String>,
+    search_pattern: Option<String>,
 ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
     let state = session_ctx.state();
+    let listing_factory = state
+        .config()
+        .get_extension::<ListingFactory>()
+        .ok_or_else(|| {
+            DataFusionError::Execution(
+                "list_datasets: the listing factory is not registered on the session".to_string(),
+            )
+        })?;
 
-    let listing_url =
-        parse_listing_table_url(datasets_url, &pattern.unwrap_or_else(|| "*".to_string()))?;
+    let listing_url = listing_factory.parse_listing_table_url(
+        &state,
+        &search_pattern.unwrap_or_else(|| "**/*".to_string()),
+    )?;
+    let store_url = listing_url.object_store();
+    let store = state
+        .runtime_env()
+        .object_store(store_url.clone())
+        .map_err(|e| {
+            DataFusionError::Execution(format!(
+                "list_datasets: failed to get object store for {}: {}",
+                store_url, e
+            ))
+        })?;
 
     let mut objects = Vec::new();
-    let mut entry_stream = listing_url.list_all_files(&state, &object_store, "").await?;
+    let mut entry_stream = listing_url.list_all_files(&state, &store, "").await?;
 
     while let Some(entry) = entry_stream.next().await {
         if let Ok(entry) = entry {
@@ -92,60 +106,9 @@ pub async fn list_datasets(
     Ok(datasets)
 }
 
-/// Infer the Arrow schema of the dataset(s) matching `file_pattern` by resolving
-/// the file format from the extension and reading the matching files.
-pub async fn list_dataset_schema(
-    session_ctx: &SessionContext,
-    datasets_url: &ObjectStoreUrl,
-    file_formats: &[Arc<dyn FileFormatFactoryExt>],
-    file_pattern: &str,
-) -> datafusion::error::Result<SchemaRef> {
-    let session_state = session_ctx.state();
-    let extension = if file_pattern.ends_with("zarr.json") {
-        "zarr.json".to_string()
-    } else if file_pattern.contains("/atlas.json") {
-        "atlas.json".to_string()
-    } else {
-        match Path::new(file_pattern).extension() {
-            Some(ext) => ext.to_string_lossy().to_string(),
-            None => {
-                return Err(DataFusionError::Plan(format!(
-                    "No file extension found for {}. No file type information available.",
-                    file_pattern
-                )));
-            }
-        }
-    };
-
-    tracing::debug!("Interpreted file extension: {}", extension);
-    let listing_url = parse_listing_table_url(datasets_url, file_pattern)?;
-
-    // Resolve the format from the raw filename extension. The session registry
-    // keys each format only under its canonical extension, so aliases (e.g.
-    // `.tif` for the `tiff` format) are matched against each factory's declared
-    // `file_extensions()` first, falling back to the registry for anything not
-    // in the format list.
-    let file_format_factory = file_formats
-        .iter()
-        .find(|factory| factory.file_extensions().iter().any(|ext| ext == &extension))
-        .map(|factory| factory.clone() as Arc<dyn FileFormatFactory>)
-        .or_else(|| session_state.get_file_format_factory(&extension))
-        .ok_or_else(|| {
-            DataFusionError::Plan(format!("No file format reader found for {}", extension))
-        })?;
-    let file_format = file_format_factory.create(&session_state, &HashMap::new())?;
-    tracing::debug!("Using file format: {:?}", file_format);
-
-    let file_collection =
-        FileCollection::new(&session_state, file_format, vec![listing_url]).await?;
-
-    Ok(file_collection.schema())
-}
-
 pub struct ListDatasetsFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
-    data_object_store_url: ObjectStoreUrl,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 }
 
@@ -153,13 +116,11 @@ impl ListDatasetsFunc {
     pub fn new(
         runtime_handle: tokio::runtime::Handle,
         session_ctx: Weak<SessionContext>,
-        data_object_store_url: ObjectStoreUrl,
         file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
     ) -> Self {
         Self {
             runtime_handle,
             session_ctx,
-            data_object_store_url,
             file_formats,
         }
     }
@@ -191,20 +152,13 @@ impl TableFunctionImpl for ListDatasetsFunc {
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
-        let data_object_store_url = self.data_object_store_url.clone();
 
         let datasets: Vec<DatasetMetadata> = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                let object_store = session_ctx
-                    .runtime_env()
-                    .object_store(data_object_store_url.clone())?;
-
                 // Recursive scan (`**/*`), unpaginated — the historical UDTF
                 // behaviour — reusing the shared discovery helper.
                 list_datasets(
                     &session_ctx,
-                    &data_object_store_url,
-                    object_store,
                     &file_formats,
                     None,
                     None,

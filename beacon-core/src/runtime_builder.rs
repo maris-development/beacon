@@ -18,7 +18,7 @@ use beacon_auth::{
     AuthContext, BasicAuthProvider, InMemoryUserStore, RoleProvider, RoleStore, UserDirectory,
 };
 use beacon_datafusion_ext::{
-    consts::DEFAULT_DB_STORE_URL_OBJECT_URL,
+    consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
     format_ext::FileFormatFactoryExt,
     listing_table_factory_ext::ListingTableFactoryExt,
     nd::NdProjectionPushdown,
@@ -27,7 +27,7 @@ use beacon_datafusion_ext::{
     stats_cache::BeaconFileStatisticsCache,
     type_widening::{ArrowTypeWidening, ArrowTypeWideningStrategy, DefaultArrowTypeWidening},
 };
-use beacon_functions::{function_doc::FunctionDoc, register_functions};
+use beacon_functions::register_functions;
 use beacon_redb_store::RedbStore;
 use datafusion::{
     execution::{
@@ -49,7 +49,6 @@ use tokio::runtime::Handle;
 use crate::{
     auth_store::TablesAuthStore,
     runtime::Runtime,
-    settings::{CoreSettings, ObjectStoreUrls, SqlSettings},
     statement_plan::{new_session_cell, BeaconQueryPlanner, SessionCell},
 };
 
@@ -59,7 +58,6 @@ pub struct RuntimeBuilder {
 
     pub db_path: Option<PathBuf>,
     pub tmp_dir_path: Option<PathBuf>,
-    pub datasets_dir: Option<PathBuf>,
     /// The URL relative dataset paths resolve against, and the URL the datasets
     /// store is registered under. `None` => the `datasets://` default (see
     /// [`ObjectStoreUrls::default`]).
@@ -88,8 +86,6 @@ pub struct RuntimeBuilder {
     pub anonymous_username: Option<String>,
     /// Whether table-level grants are enforced for non-super-users.
     pub auth_enforce: bool,
-
-    pub settings: CoreSettings,
 
     pub type_widening: Option<Arc<dyn ArrowTypeWideningStrategy>>,
 }
@@ -215,13 +211,6 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Replaces the plan-time SQL settings (default table, projection pushdown,
-    /// output-stream coalescing).
-    pub fn with_sql_settings(mut self, sql: SqlSettings) -> Self {
-        self.settings.sql = sql;
-        self
-    }
-
     pub async fn build(mut self) -> anyhow::Result<Runtime> {
         let runtime_handle = match &self.runtime_handle {
             Some(handle) => handle.clone(),
@@ -282,7 +271,6 @@ impl RuntimeBuilder {
             auth: auth_context,
             auth_enforce: self.auth_enforce,
 
-            datasets_dir: self.storage.datasets_dir.clone(),
             tmp_dir,
         })
     }
@@ -532,10 +520,6 @@ fn build_session_config(
 ) -> anyhow::Result<SessionConfig> {
     // Plan-time code reaches these settings through the SessionConfig extensions,
     // where no `Runtime` handle is available.
-    let settings = Arc::new(CoreSettings {
-        sql: builder.settings.sql.clone(),
-    });
-
     let mut config = SessionConfig::new()
         // Beacon's tables live in `beacon.public`; the schema is later replaced by
         // the PersistentSchemaProvider.
@@ -546,7 +530,6 @@ fn build_session_config(
         .with_information_schema(true)
         .with_collect_statistics(true)
         .with_spill_compression(datafusion::config::SpillCompression::Lz4Frame)
-        .with_extension(settings)
         // Recovered by the `AuthExec` node to apply auth DDL (CREATE USER/ROLE, GRANT, ...).
         .with_extension(auth_context)
         // Routes managed Lance tables through beacon's tables store. Per-runtime (no

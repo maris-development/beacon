@@ -15,7 +15,6 @@ pub async fn compile_json_query(
 ) -> anyhow::Result<LogicalPlan> {
     // The runtime settings are published as a SessionConfig extension; fall back to
     // defaults if absent (e.g. a bare session in a unit test).
-    let settings = crate::settings::CoreSettings::from_session(session);
     let enable_pushdown_projection = settings.sql.enable_pushdown_projection;
     let from = query_body
         .from
@@ -29,11 +28,9 @@ pub async fn compile_json_query(
             all_columns.extend(select_cols);
         }
 
-        from.init_builder(session, Some(&all_columns))
-            .await?
+        from.init_builder(session, Some(&all_columns)).await?
     } else {
-        from.init_builder(session, None)
-            .await?
+        from.init_builder(session, None).await?
     };
 
     let session_state = session.state();

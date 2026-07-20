@@ -11,6 +11,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{Constraints, Statistics};
@@ -61,9 +62,24 @@ impl BeaconDeltaTable {
         &self,
         session: &dyn Session,
     ) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+        let listing_factory = session
+            .config()
+            .get_extension::<ListingFactory>()
+            .expect("");
+        let store_url = listing_factory
+            .parse_to_store(session, &self.definition.location)
+            .ok_or(datafusion::error::DataFusionError::External(
+                "failed to parse location to store".into(),
+            ))?;
+        let store = session
+            .runtime_env()
+            .object_store_registry
+            .get_store(store_url.as_ref())
+            .map_err(|e| datafusion::error::DataFusionError::External(e.into()))?;
+
         reopen_delta_provider(
             session,
-            self.store_url.clone(),
+            store,
             &self.definition.location,
             self.time_travel.clone(),
         )

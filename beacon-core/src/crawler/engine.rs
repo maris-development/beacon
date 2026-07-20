@@ -11,14 +11,13 @@
 //! The only crawler-specific behaviour is grouping (`super::discovery`) and an
 //! ownership guard so a crawl never overwrites a hand-created table.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, TableDefinition};
-use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
+use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
 use beacon_functions::file_formats::list_datasets::list_datasets;

@@ -15,9 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::settings::ObjectStoreUrls;
 use datafusion::{
-    execution::object_store::ObjectStoreUrl,
     logical_expr::{
         dml::CopyTo, not, when, DmlStatement, Expr, Extension, Filter, LogicalPlan,
         LogicalPlanBuilder, WriteOp,
@@ -73,26 +71,26 @@ pub(crate) async fn lower_df_statement(
     // DataFusion has no `ALTER TABLE` planning, so build the node from the AST.
     if let datafusion::sql::parser::Statement::Statement(sql_stmt) = &statement {
         if let SqlAstStatement::AlterTable(alter) = sql_stmt.as_ref() {
-            return Ok(alter_table_plan(alter.name.clone(), alter.operations.clone()));
+            return Ok(alter_table_plan(
+                alter.name.clone(),
+                alter.operations.clone(),
+            ));
         }
     }
 
     let state = session_ctx.state();
     let plan = state.statement_to_plan(statement).await?;
-    rewrite_logical_plan(plan, ObjectStoreUrls::from_session(session_ctx).datasets())
+    rewrite_logical_plan(plan)
 }
 
 /// Rewrite only the statements the planner cannot handle from their standard
 /// form (copy-on-write `DELETE`/`UPDATE`, and `COPY`'s output path); pass
 /// everything else (DDL, `INSERT`, `SELECT`, ...) through unchanged.
-fn rewrite_logical_plan(
-    plan: LogicalPlan,
-    datasets_url: &ObjectStoreUrl,
-) -> anyhow::Result<LogicalPlan> {
+fn rewrite_logical_plan(plan: LogicalPlan) -> anyhow::Result<LogicalPlan> {
     match plan {
         LogicalPlan::Dml(dml) if matches!(dml.op, WriteOp::Delete) => delete_plan(dml),
         LogicalPlan::Dml(dml) if matches!(dml.op, WriteOp::Update) => update_plan(dml),
-        LogicalPlan::Copy(copy) => Ok(rewrite_copy(copy, datasets_url)),
+        LogicalPlan::Copy(copy) => Ok(rewrite_copy(copy)),
         other => Ok(other),
     }
 }
@@ -186,7 +184,11 @@ fn update_plan(dml: DmlStatement) -> anyhow::Result<LogicalPlan> {
     };
 
     let mutation = update_mutation(projection);
-    Ok(replace_contents_plan(dml.table_name, new_contents, mutation))
+    Ok(replace_contents_plan(
+        dml.table_name,
+        new_contents,
+        mutation,
+    ))
 }
 
 /// Derive a native `UPDATE` spec from the planned projection (best-effort):
@@ -238,7 +240,6 @@ fn replace_contents_plan(
 
 /// `COPY ... TO` stays a standard DataFusion node (which it can plan + execute);
 /// only the output path is rewritten into the datasets object store.
-fn rewrite_copy(mut copy: CopyTo, datasets_url: &ObjectStoreUrl) -> LogicalPlan {
-    copy.output_url = format!("{}{}", datasets_url, copy.output_url);
+fn rewrite_copy(mut copy: CopyTo) -> LogicalPlan {
     LogicalPlan::Copy(copy)
 }

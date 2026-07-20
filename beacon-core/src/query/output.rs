@@ -3,17 +3,22 @@
 //! This module defines output formats, temporary file management, and utilities
 //! for exporting query results in various formats.
 
-use std::sync::Arc;
 use crate::query::temp_object::TempObject;
 use crate::query_result::{OutputFileKind, QueryOutputFile};
+use std::sync::Arc;
 
+use beacon_arrow_csv::datafusion::DEFAULT_CSV_EXTENSION;
+use beacon_arrow_geoparquet::datafusion::{
+    GeoParquetFormatFactory, GeoParquetOptions, GEOPARQUET_EXTENSION,
+};
+use beacon_arrow_ipc::datafusion::{ArrowFormatFactory, DEFAULT_ARROW_EXTENSION};
+use beacon_arrow_netcdf::datafusion::NETCDF_EXTENSION;
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
 use beacon_arrow_odv::writer::OdvOptions;
-use beacon_arrow_csv::datafusion::CsvFormatFactory;
-use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
-use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
+use datafusion::catalog::Session;
+use datafusion::prelude::SessionContext;
 use datafusion::{
     common::file_options::file_type::FileType,
     datasource::file_format::format_as_file_type,
@@ -46,13 +51,12 @@ impl Output {
     /// Tuple of the new logical plan and the output file wrapper.
     pub async fn parse(
         &self,
-        datasets_root: &std::path::Path,
         tmp_dir: &std::path::Path,
         tmp_store_url: &datafusion::execution::object_store::ObjectStoreUrl,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
         let kind = self.format.file_kind();
-        let file_type = self.format.file_type(datasets_root, tmp_dir).await;
+        let file_type = self.format.file_type(tmp_dir).await;
 
         // Reserve a unique name under `tmp_dir` (the tmp store's root). The COPY
         // target is `<tmp_store_url><object_name>`; object-store writers resolve that
@@ -128,49 +132,90 @@ impl OutputFormat {
     /// `datasets_root` (the datasets store's local root) and `output_dir` (where
     /// the NetCDF writer emits its file) are used by the NetCDF writers; both are
     /// ignored by the other formats.
-    pub async fn file_type(
-        &self,
-        datasets_root: &std::path::Path,
-        output_dir: &std::path::Path,
-    ) -> Arc<dyn FileType> {
+    pub fn file_type(&self, session: &SessionContext) -> anyhow::Result<Arc<dyn FileType>> {
         match self {
-            OutputFormat::Csv => format_as_file_type(Arc::new(CsvFormatFactory)),
-            OutputFormat::Ipc => format_as_file_type(Arc::new(ArrowFormatFactory)),
-            OutputFormat::Parquet => format_as_file_type(Arc::new(ParquetFormatFactory)),
+            OutputFormat::Csv => Ok(format_as_file_type(
+                session
+                    .state()
+                    .get_file_format_factory(DEFAULT_CSV_EXTENSION)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "CSV format factory not registered under extension '{}'",
+                            DEFAULT_CSV_EXTENSION
+                        )
+                    })?,
+            )),
+            OutputFormat::Ipc => Ok(format_as_file_type(
+                session
+                    .state()
+                    .get_file_format_factory(DEFAULT_ARROW_EXTENSION)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Arrow IPC format factory not registered under extension '{}'",
+                            DEFAULT_ARROW_EXTENSION
+                        )
+                    })?,
+            )),
+            OutputFormat::Parquet => Ok(format_as_file_type(
+                session
+                    .state()
+                    .get_file_format_factory("parquet")
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Parquet format factory not registered under extension 'parquet'"
+                        )
+                    })?,
+            )),
             OutputFormat::GeoParquet {
                 longitude_column,
                 latitude_column,
-            } => format_as_file_type(Arc::new(GeoParquetFormatFactory::new(GeoParquetOptions {
-                longitude_column: longitude_column.clone(),
-                latitude_column: latitude_column.clone(),
-            }))),
+            } => Ok(format_as_file_type(
+                session
+                    .state()
+                    .get_file_format_factory(GEOPARQUET_EXTENSION)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                        "GeoParquet format factory not registered under extension 'geo_parquet'"
+                    )
+                    })?,
+            )),
             OutputFormat::NetCDF => {
                 let options = NetcdfOptions::default();
 
                 // Writing NetCDF: the reader cache / statistics config is
                 // irrelevant here, so the defaults suffice.
-                format_as_file_type(Arc::new(NetCDFFormatFactory::new(
-                    datasets_root.to_path_buf(),
-                    output_dir.to_path_buf(),
-                    options,
-                    NetcdfConfig::default(),
-                )))
+                Ok(format_as_file_type(
+                    session
+                        .state()
+                        .get_file_format_factory(NETCDF_EXTENSION)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "NetCDF format factory not registered under extension '{}'",
+                                NETCDF_EXTENSION
+                            )
+                        })?,
+                ))
             }
             OutputFormat::NdNetCDF { dimension_columns } => {
                 let mut options = NetcdfOptions::default();
                 options.unique_value_columns = dimension_columns.clone();
                 options.write_dimensions = Some(dimension_columns.clone());
 
-                format_as_file_type(Arc::new(NetCDFFormatFactory::new(
-                    datasets_root.to_path_buf(),
-                    output_dir.to_path_buf(),
-                    options,
-                    NetcdfConfig::default(),
-                )))
+                Ok(format_as_file_type(
+                    session
+                        .state()
+                        .get_file_format_factory(NETCDF_EXTENSION)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "NetCDF format factory not registered under extension '{}'",
+                                NETCDF_EXTENSION
+                            )
+                        })?,
+                ))
             }
-            OutputFormat::Odv(options) => {
-                format_as_file_type(Arc::new(OdvFileFormatFactory::new(Some(options.clone()))))
-            }
+            OutputFormat::Odv(options) => Ok(format_as_file_type(Arc::new(
+                OdvFileFormatFactory::new(Some(options.clone())),
+            ))),
         }
     }
 }

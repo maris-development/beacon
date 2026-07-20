@@ -9,6 +9,7 @@ pub mod query_result;
 pub mod runtime;
 pub mod runtime_builder;
 pub mod schema_persistence;
+pub mod settings;
 mod statement_plan;
 
 // Re-export the auth types the transports (HTTP, Flight SQL) need, so they depend

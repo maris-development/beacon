@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_nd_array::dataset::AnyDataset;
 use object_store::ObjectMeta;
 
@@ -41,8 +42,8 @@ struct CacheKey {
 /// opened directly with no caching (e.g. schema inference or a table that opted
 /// out of caching).
 pub async fn open_dataset(
+    listing_factory: &ListingFactory,
     cache: Option<&NetcdfReaderCache>,
-    datasets_root: PathBuf,
     object: ObjectMeta,
 ) -> anyhow::Result<AnyDataset> {
     let key = CacheKey {
@@ -77,13 +78,13 @@ pub async fn open_dataset(
 /// so the schema matches
 /// what `SELECT *` can actually return.
 pub async fn fetch_schema(
-    datasets_root: PathBuf,
+    listing_factory: &ListingFactory,
     object: ObjectMeta,
     read_dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
     // Schema inference does not consult the reader cache; the cache benefits
     // repeated data scans, which flow through `NetCDFSource`.
-    let dataset = open_dataset(None, datasets_root, object)
+    let dataset = open_dataset(listing_factory, None, object)
         .await
         .map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(

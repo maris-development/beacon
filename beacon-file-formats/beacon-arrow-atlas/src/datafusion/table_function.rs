@@ -6,8 +6,6 @@ use beacon_common::super_table::SuperListingTable;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
-    datasource::file_format::FileFormatFactory,
-    execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
 };

@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use beacon_datafusion_ext::listing_factory;
 use beacon_nd_array::{
     arrow::compute::value_range,
     dataset::{ragged::RaggedArray, AnyDataset, Dataset, RaggedDataset},
@@ -27,7 +28,7 @@ use crate::reader::open_dataset;
 /// Open the NetCDF file at `object` and return DataFusion [`Statistics`] for
 /// the columns in `table_schema`.
 pub async fn generate_statistics(
-    datasets_root: PathBuf,
+    listing_factory: &listing_factory::ListingFactory,
     object: &object_store::ObjectMeta,
     table_schema: &arrow::datatypes::Schema,
 ) -> anyhow::Result<Statistics> {

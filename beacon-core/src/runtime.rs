@@ -8,6 +8,7 @@ use arrow::{
     datatypes::{SchemaRef, UInt64Type},
 };
 use beacon_datafusion_ext::{
+    consts::TMP_STORE_URL_OBJECT_URL,
     format_ext::{DatasetMetadata, FileFormatFactoryExt},
     listing_table_factory_ext::ListingTableFactoryExt,
 };
@@ -38,10 +39,6 @@ pub struct Runtime {
 
     /// Whether table-level grants are enforced for non-super-users.
     pub(crate) auth_enforce: bool,
-
-    /// Local root of the datasets store. Threaded to the NetCDF output writer,
-    /// which opens files natively rather than through `object_store`.
-    pub(crate) datasets_dir: PathBuf,
 
     /// tmp directory for storing temporary files (e.g. for query output)
     pub(crate) tmp_dir: PathBuf,
@@ -164,11 +161,13 @@ impl Runtime {
         // `register_file_formats`, where the native sinks reconstruct
         // `output_dir.join(<name>)`). They MUST be the same directory or the written
         // bytes are invisible to the returned `QueryOutputFile`.
-        let tmp_store_url = crate::settings::ObjectStoreUrls::from_session(&self.session_ctx)
-            .tmp()
-            .clone();
         let (copy_plan, output_file) = output
-            .parse(&self.datasets_dir, &self.tmp_dir, &tmp_store_url, plan)
+            .parse(
+                &self.datasets_dir,
+                &self.tmp_dir,
+                &TMP_STORE_URL_OBJECT_URL,
+                plan,
+            )
             .await?;
 
         let metrics = MetricsTracker::new(query_json, query_id);

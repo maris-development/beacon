@@ -7,8 +7,6 @@ use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_err,
-    datasource::file_format::FileFormatFactory,
-    execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
 };
@@ -25,11 +23,7 @@ pub struct ReadNetCDFFunc {
 }
 
 impl ReadNetCDFFunc {
-    pub fn new(
-        runtime_handle: tokio::runtime::Handle,
-        session_ctx: Weak<SessionContext>,
-        data_object_store_url: ObjectStoreUrl,
-    ) -> Self {
+    pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
         Self {
             runtime_handle,
             session_ctx,

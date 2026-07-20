@@ -20,6 +20,8 @@ use futures::{StreamExt, TryStreamExt, stream};
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 
+pub const DEFAULT_ARROW_EXTENSION: &str = "arrow";
+
 #[derive(Debug)]
 pub struct ArrowFormatFactory;
 
@@ -43,7 +45,7 @@ impl FileFormatFactory for ArrowFormatFactory {
 
 impl GetExt for ArrowFormatFactory {
     fn get_ext(&self) -> String {
-        "arrow".to_string()
+        DEFAULT_ARROW_EXTENSION.to_string()
     }
 }
 
@@ -57,10 +59,15 @@ impl FileFormatFactoryExt for ArrowFormatFactory {
             .filter(|obj| {
                 obj.location
                     .extension()
-                    .map(|ext| ext == "arrow" || ext == "feather")
+                    .map(|ext| ext == DEFAULT_ARROW_EXTENSION || ext == "feather")
                     .unwrap_or(false)
             })
-            .map(|obj| DatasetMetadata::new(obj.location.to_string(), self.get_ext()))
+            .map(|obj| {
+                DatasetMetadata::new(
+                    obj.location.to_string(),
+                    DEFAULT_ARROW_EXTENSION.to_string(),
+                )
+            })
             .collect();
         Ok(datasets)
     }
@@ -174,7 +181,10 @@ impl FileFormat for ArrowFormat {
             .await
     }
 
-    fn file_source(&self, table_schema: datafusion::datasource::table_schema::TableSchema) -> Arc<dyn FileSource> {
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
         self.inner_format.file_source(table_schema)
     }
 }

@@ -9,10 +9,10 @@ use std::sync::{Arc, Weak};
 
 use arrow::datatypes::{DataType, Field};
 use beacon_common::table_function::BeaconTableFunctionImpl;
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
     common::plan_err,
-    execution::object_store::ObjectStoreUrl,
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
 };
@@ -22,20 +22,13 @@ use crate::provider::{open_delta_provider, TimeTravel};
 pub struct ReadDeltaFunc {
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
-    #[allow(dead_code)]
-    data_object_store_url: ObjectStoreUrl,
 }
 
 impl ReadDeltaFunc {
-    pub fn new(
-        runtime_handle: tokio::runtime::Handle,
-        session_ctx: Weak<SessionContext>,
-        data_object_store_url: ObjectStoreUrl,
-    ) -> Self {
+    pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
         Self {
             runtime_handle,
             session_ctx,
-            data_object_store_url,
         }
     }
 }
@@ -105,15 +98,21 @@ impl TableFunctionImpl for ReadDeltaFunc {
         let ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
         })?;
+        let state = ctx.state();
+        let listing_factory = state.config().get_extension::<ListingFactory>().expect("");
+        let store_url = listing_factory.parse_to_store(&state, &location).ok_or(
+            datafusion::error::DataFusionError::External(
+                "failed to parse location to store".into(),
+            ),
+        )?;
+        let store = state
+            .runtime_env()
+            .object_store_registry
+            .get_store(store_url.as_ref())
+            .map_err(|e| datafusion::error::DataFusionError::External(e.into()))?;
         let provider = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                open_delta_provider(
-                    ctx,
-                    self.data_object_store_url.clone(),
-                    &location,
-                    time_travel,
-                )
-                .await
+                open_delta_provider(ctx, store, &location, time_travel).await
             })
         })
         .map_err(|e| datafusion::error::DataFusionError::External(e.into()))?;

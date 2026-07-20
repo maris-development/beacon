@@ -5,6 +5,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use beacon_common::super_typing::super_type_schema;
 use beacon_datafusion_ext::format_ext::{DatasetMetadata, FileFormatFactoryExt};
+use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::unique_values::UniqueValuesExec;
 use datafusion::{
     catalog::{memory::DataSourceExec, Session},
@@ -28,7 +29,7 @@ use crate::datafusion::{
     source::NetCDFSource,
 };
 
-const NETCDF_EXTENSION: &str = "nc";
+pub const NETCDF_EXTENSION: &str = "nc";
 
 pub mod options;
 pub mod reader;
@@ -79,12 +80,7 @@ fn parse_bool_option(key: &str, value: &str) -> datafusion::error::Result<bool> 
 
 #[derive(Debug, Clone)]
 pub struct NetCDFFormatFactory {
-    /// Local root of the datasets store. NetCDF opens files natively (not through
-    /// `object_store`), so object paths are joined under this root; reads therefore
-    /// require a local-filesystem datasets store.
-    pub datasets_root: PathBuf,
-    /// Local directory the netcdf-c writer emits output files into (it cannot stream
-    /// to an object store).
+    pub listing_factory: Arc<ListingFactory>,
     pub output_dir: PathBuf,
     pub options: NetcdfOptions,
     pub config: NetcdfConfig,
@@ -94,14 +90,14 @@ pub struct NetCDFFormatFactory {
 
 impl NetCDFFormatFactory {
     pub fn new(
-        datasets_root: PathBuf,
+        listing_factory: Arc<ListingFactory>,
         output_dir: PathBuf,
         options: NetcdfOptions,
         config: NetcdfConfig,
     ) -> Self {
         let cache = NetcdfReaderCache::new(config.reader_cache_size);
         Self {
-            datasets_root,
+            listing_factory,
             output_dir,
             options,
             config,
@@ -118,7 +114,7 @@ impl NetCDFFormatFactory {
         enable_statistics: bool,
     ) -> NetcdfFormat {
         let cache = use_reader_cache.then(|| self.cache.clone());
-        NetcdfFormat::new(self.datasets_root.clone(), options)
+        NetcdfFormat::new(self.listing_factory.clone(), options)
             .with_cache(cache)
             .with_enable_statistics(enable_statistics)
             .with_output_dir(self.output_dir.clone())
@@ -204,9 +200,7 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
 
 #[derive(Debug, Clone)]
 pub struct NetcdfFormat {
-    /// Local root of the datasets store; object paths are joined under it to open
-    /// files natively (see [`NetCDFFormatFactory::datasets_root`]).
-    pub datasets_root: PathBuf,
+    pub listing_factory: Arc<ListingFactory>,
     pub options: NetcdfOptions,
     /// Reader cache to consult, or `None` to bypass caching for this format.
     cache: Option<NetcdfReaderCache>,
@@ -217,9 +211,9 @@ pub struct NetcdfFormat {
 }
 
 impl NetcdfFormat {
-    pub fn new(datasets_root: PathBuf, options: NetcdfOptions) -> Self {
+    pub fn new(listing_factory: Arc<ListingFactory>, options: NetcdfOptions) -> Self {
         Self {
-            datasets_root,
+            listing_factory,
             options,
             cache: None,
             enable_statistics: false,
@@ -277,7 +271,7 @@ impl FileFormat for NetcdfFormat {
         let mut tasks = vec![];
         for object in objects {
             let task = reader::fetch_schema(
-                self.datasets_root.clone(),
+                &self.listing_factory,
                 object.clone(),
                 self.options.read_dimensions.clone(),
             );
@@ -306,7 +300,7 @@ impl FileFormat for NetcdfFormat {
     ) -> datafusion::error::Result<Statistics> {
         if self.enable_statistics {
             Ok(
-                statistics::generate_statistics(self.datasets_root.clone(), object, &table_schema)
+                statistics::generate_statistics(&self.listing_factory, object, &table_schema)
                     .await
                     .unwrap_or_else(|e| {
                         tracing::warn!(
@@ -342,7 +336,7 @@ impl FileFormat for NetcdfFormat {
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = NetCDFSource::new(
-            self.datasets_root.clone(),
+            self.listing_factory.clone(),
             self.options.read_dimensions.clone(),
             table_schema,
         )
@@ -424,7 +418,7 @@ impl FileFormat for NetcdfFormat {
     ) -> Arc<dyn FileSource> {
         Arc::new(
             NetCDFSource::new(
-                self.datasets_root.clone(),
+                self.listing_factory.clone(),
                 self.options.read_dimensions.clone(),
                 table_schema,
             )

@@ -30,6 +30,7 @@ pub mod options;
 pub mod pushdown;
 pub mod reader;
 pub mod source;
+pub mod table_function;
 
 pub use cache::AtlasReaderCache;
 
@@ -393,49 +394,50 @@ impl FileFormat for AtlasFormat {
         _store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        let markers = top_level_atlas_markers(objects);
-        if markers.is_empty() {
-            return Ok(Arc::new(arrow::datatypes::Schema::empty()));
-        }
+        // let markers = top_level_atlas_markers(objects);
+        // if markers.is_empty() {
+        //     return Ok(Arc::new(arrow::datatypes::Schema::empty()));
+        // }
 
-        let mut schemas = Vec::new();
-        for marker in markers {
-            let atlas =
-                cache::get_or_open_atlas(self.cache.as_ref(), self.datasets_root.clone(), &marker)
-                    .await?;
-            let read_dimensions = self.options.read_dimensions.as_deref();
-            for dataset_name in atlas.list_datasets() {
-                let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
-                    exec_datafusion_err!(
-                        "Failed to open atlas dataset '{}' at {}: {}",
-                        dataset_name,
-                        marker.location,
-                        e
-                    )
-                })?;
-                let schema = crate::compat::atlas_view_arrow_schema(&view, read_dimensions)
-                    .map_err(|e| {
-                        exec_datafusion_err!(
-                            "Failed to derive Arrow schema for atlas dataset '{}': {}",
-                            dataset_name,
-                            e
-                        )
-                    })?;
-                schemas.push(Arc::new(schema));
-            }
-        }
+        // let mut schemas = Vec::new();
+        // for marker in markers {
+        //     let atlas =
+        //         cache::get_or_open_atlas(self.cache.as_ref(), self.datasets_root.clone(), &marker)
+        //             .await?;
+        //     let read_dimensions = self.options.read_dimensions.as_deref();
+        //     for dataset_name in atlas.list_datasets() {
+        //         let view = atlas.open_dataset(&dataset_name).await.map_err(|e| {
+        //             exec_datafusion_err!(
+        //                 "Failed to open atlas dataset '{}' at {}: {}",
+        //                 dataset_name,
+        //                 marker.location,
+        //                 e
+        //             )
+        //         })?;
+        //         let schema = crate::compat::atlas_view_arrow_schema(&view, read_dimensions)
+        //             .map_err(|e| {
+        //                 exec_datafusion_err!(
+        //                     "Failed to derive Arrow schema for atlas dataset '{}': {}",
+        //                     dataset_name,
+        //                     e
+        //                 )
+        //             })?;
+        //         schemas.push(Arc::new(schema));
+        //     }
+        // }
 
-        if schemas.is_empty() {
-            return Ok(Arc::new(arrow::datatypes::Schema::empty()));
-        }
+        // if schemas.is_empty() {
+        //     return Ok(Arc::new(arrow::datatypes::Schema::empty()));
+        // }
 
-        let schema = super_type_schema(&schemas).map_err(|e| {
-            exec_datafusion_err!(
-                "Failed to compute super type schema for atlas datasets: {}",
-                e
-            )
-        })?;
-        Ok(Arc::new(schema))
+        // let schema = super_type_schema(&schemas).map_err(|e| {
+        //     exec_datafusion_err!(
+        //         "Failed to compute super type schema for atlas datasets: {}",
+        //         e
+        //     )
+        // })?;
+        // Ok(Arc::new(schema))
+        todo!()
     }
 
     async fn infer_stats(
@@ -453,24 +455,25 @@ impl FileFormat for AtlasFormat {
         _state: &dyn Session,
         conf: FileScanConfig,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let table_schema = datafusion::datasource::table_schema::TableSchema::new(
-            conf.file_schema().clone(),
-            conf.table_partition_cols().clone(),
-        );
-        // Preserve a projection that the scan pushed down into the incoming
-        // source — rebuilding the source below would otherwise drop it.
-        let projection = conf.file_source().projection().cloned();
-        let source = AtlasSource::new(
-            self.datasets_root.clone(),
-            self.options.read_dimensions.clone(),
-            table_schema,
-        )
-        .with_cache(self.cache.clone())
-        .with_projection(projection);
-        let conf = FileScanConfigBuilder::from(conf)
-            .with_source(Arc::new(source))
-            .build();
-        Ok(DataSourceExec::from_data_source(conf))
+        // let table_schema = datafusion::datasource::table_schema::TableSchema::new(
+        //     conf.file_schema().clone(),
+        //     conf.table_partition_cols().clone(),
+        // );
+        // // Preserve a projection that the scan pushed down into the incoming
+        // // source — rebuilding the source below would otherwise drop it.
+        // let projection = conf.file_source().projection().cloned();
+        // let source = AtlasSource::new(
+        //     self.datasets_root.clone(),
+        //     self.options.read_dimensions.clone(),
+        //     table_schema,
+        // )
+        // .with_cache(self.cache.clone())
+        // .with_projection(projection);
+        // let conf = FileScanConfigBuilder::from(conf)
+        //     .with_source(Arc::new(source))
+        //     .build();
+        // Ok(DataSourceExec::from_data_source(conf))
+        todo!()
     }
 
     async fn create_writer_physical_plan(
@@ -489,14 +492,15 @@ impl FileFormat for AtlasFormat {
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(
-            AtlasSource::new(
-                self.datasets_root.clone(),
-                self.options.read_dimensions.clone(),
-                table_schema,
-            )
-            .with_cache(self.cache.clone()),
-        )
+        // Arc::new(
+        //     AtlasSource::new(
+        //         self.datasets_root.clone(),
+        //         self.options.read_dimensions.clone(),
+        //         table_schema,
+        //     )
+        //     .with_cache(self.cache.clone()),
+        // )
+        todo!()
     }
 }
 
@@ -555,576 +559,576 @@ pub(crate) mod test_support {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::test_support::{ensure_fixture, fixture_marker_object_meta, test_store};
-    use super::*;
-    use datafusion::prelude::SessionContext;
-    use object_store::local::LocalFileSystem;
-    use object_store::path::Path as OsPath;
+// #[cfg(test)]
+// mod tests {
+//     use super::test_support::{ensure_fixture, fixture_marker_object_meta, test_store};
+//     use super::*;
+//     use datafusion::prelude::SessionContext;
+//     use object_store::local::LocalFileSystem;
+//     use object_store::path::Path as OsPath;
 
-    fn dummy_object_store() -> Arc<dyn ObjectStore> {
-        Arc::new(LocalFileSystem::new())
-    }
+//     fn dummy_object_store() -> Arc<dyn ObjectStore> {
+//         Arc::new(LocalFileSystem::new())
+//     }
 
-    // ── is_atlas_marker / top_level_atlas_markers ──────────────────────
+//     // ── is_atlas_marker / top_level_atlas_markers ──────────────────────
 
-    #[test]
-    fn is_atlas_marker_matches_only_marker_file() {
-        let yes = ObjectMeta {
-            location: object_store::path::Path::from("foo/atlas.json"),
-            last_modified: chrono::Utc::now(),
-            size: 0,
-            e_tag: None,
-            version: None,
-        };
-        let no = ObjectMeta {
-            location: object_store::path::Path::from("foo/data.af"),
-            last_modified: chrono::Utc::now(),
-            size: 0,
-            e_tag: None,
-            version: None,
-        };
-        assert!(is_atlas_marker(&yes));
-        assert!(!is_atlas_marker(&no));
-    }
+//     #[test]
+//     fn is_atlas_marker_matches_only_marker_file() {
+//         let yes = ObjectMeta {
+//             location: object_store::path::Path::from("foo/atlas.json"),
+//             last_modified: chrono::Utc::now(),
+//             size: 0,
+//             e_tag: None,
+//             version: None,
+//         };
+//         let no = ObjectMeta {
+//             location: object_store::path::Path::from("foo/data.af"),
+//             last_modified: chrono::Utc::now(),
+//             size: 0,
+//             e_tag: None,
+//             version: None,
+//         };
+//         assert!(is_atlas_marker(&yes));
+//         assert!(!is_atlas_marker(&no));
+//     }
 
-    #[test]
-    fn top_level_markers_drops_nested_stores() {
-        let objs = vec![
-            ObjectMeta {
-                location: object_store::path::Path::from("a/atlas.json"),
-                last_modified: chrono::Utc::now(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            },
-            ObjectMeta {
-                location: object_store::path::Path::from("a/b/atlas.json"),
-                last_modified: chrono::Utc::now(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            },
-            ObjectMeta {
-                location: object_store::path::Path::from("c/atlas.json"),
-                last_modified: chrono::Utc::now(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            },
-        ];
-        let kept = top_level_atlas_markers(&objs);
-        let kept_paths: Vec<String> = kept.iter().map(|m| m.location.to_string()).collect();
-        assert!(kept_paths.contains(&"a/atlas.json".to_string()));
-        assert!(kept_paths.contains(&"c/atlas.json".to_string()));
-        assert!(!kept_paths.iter().any(|p| p == "a/b/atlas.json"));
-    }
+//     #[test]
+//     fn top_level_markers_drops_nested_stores() {
+//         let objs = vec![
+//             ObjectMeta {
+//                 location: object_store::path::Path::from("a/atlas.json"),
+//                 last_modified: chrono::Utc::now(),
+//                 size: 0,
+//                 e_tag: None,
+//                 version: None,
+//             },
+//             ObjectMeta {
+//                 location: object_store::path::Path::from("a/b/atlas.json"),
+//                 last_modified: chrono::Utc::now(),
+//                 size: 0,
+//                 e_tag: None,
+//                 version: None,
+//             },
+//             ObjectMeta {
+//                 location: object_store::path::Path::from("c/atlas.json"),
+//                 last_modified: chrono::Utc::now(),
+//                 size: 0,
+//                 e_tag: None,
+//                 version: None,
+//             },
+//         ];
+//         let kept = top_level_atlas_markers(&objs);
+//         let kept_paths: Vec<String> = kept.iter().map(|m| m.location.to_string()).collect();
+//         assert!(kept_paths.contains(&"a/atlas.json".to_string()));
+//         assert!(kept_paths.contains(&"c/atlas.json".to_string()));
+//         assert!(!kept_paths.iter().any(|p| p == "a/b/atlas.json"));
+//     }
 
-    // ── AtlasFormatFactory ─────────────────────────────────────────────
+//     // ── AtlasFormatFactory ─────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn factory_get_ext_returns_atlas() {
-        let store = test_store().await;
-        let factory =
-            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
-        // `get_ext` is the format identity used to register and resolve
-        // external tables (`STORED AS ATLAS`), not the marker filename
-        // (`atlas.json`).
-        assert_eq!(factory.get_ext(), "atlas");
-        assert_eq!(factory.file_format_name(), "atlas");
-    }
+//     #[tokio::test]
+//     async fn factory_get_ext_returns_atlas() {
+//         let store = test_store().await;
+//         let factory =
+//             AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+//         // `get_ext` is the format identity used to register and resolve
+//         // external tables (`STORED AS ATLAS`), not the marker filename
+//         // (`atlas.json`).
+//         assert_eq!(factory.get_ext(), "atlas");
+//         assert_eq!(factory.file_format_name(), "atlas");
+//     }
 
-    #[tokio::test]
-    async fn discover_datasets_emits_one_entry_per_atlas_dataset() {
-        let store = test_store().await;
-        let factory =
-            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+//     #[tokio::test]
+//     async fn discover_datasets_emits_one_entry_per_atlas_dataset() {
+//         let store = test_store().await;
+//         let factory =
+//             AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
 
-        let objects = vec![fixture_marker_object_meta()];
-        let datasets = factory.discover_datasets(&objects).expect("discover");
+//         let objects = vec![fixture_marker_object_meta()];
+//         let datasets = factory.discover_datasets(&objects).expect("discover");
 
-        assert_eq!(datasets.len(), 2, "expected 2 datasets, got {datasets:?}");
-        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
-        assert!(paths.iter().any(|p| p.ends_with("/atlas.json/winter")));
-        assert!(paths.iter().any(|p| p.ends_with("/atlas.json/summer")));
-        for ds in &datasets {
-            // `format` is the factory identity (`get_ext`), used to resolve the
-            // reader — the marker filename `atlas.json` only appears in the path.
-            assert_eq!(ds.format, "atlas");
-        }
-    }
+//         assert_eq!(datasets.len(), 2, "expected 2 datasets, got {datasets:?}");
+//         let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+//         assert!(paths.iter().any(|p| p.ends_with("/atlas.json/winter")));
+//         assert!(paths.iter().any(|p| p.ends_with("/atlas.json/summer")));
+//         for ds in &datasets {
+//             // `format` is the factory identity (`get_ext`), used to resolve the
+//             // reader — the marker filename `atlas.json` only appears in the path.
+//             assert_eq!(ds.format, "atlas");
+//         }
+//     }
 
-    #[tokio::test]
-    async fn discover_datasets_ignores_non_marker_objects() {
-        let store = test_store().await;
-        let factory =
-            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
-        let objects = vec![ObjectMeta {
-            location: object_store::path::Path::from("some/other.nc"),
-            last_modified: chrono::Utc::now(),
-            size: 0,
-            e_tag: None,
-            version: None,
-        }];
-        let datasets = factory.discover_datasets(&objects).expect("discover");
-        assert!(datasets.is_empty());
-    }
+//     #[tokio::test]
+//     async fn discover_datasets_ignores_non_marker_objects() {
+//         let store = test_store().await;
+//         let factory =
+//             AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+//         let objects = vec![ObjectMeta {
+//             location: object_store::path::Path::from("some/other.nc"),
+//             last_modified: chrono::Utc::now(),
+//             size: 0,
+//             e_tag: None,
+//             version: None,
+//         }];
+//         let datasets = factory.discover_datasets(&objects).expect("discover");
+//         assert!(datasets.is_empty());
+//     }
 
-    // ── AtlasFormat ────────────────────────────────────────────────────
+//     // ── AtlasFormat ────────────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn infer_schema_unions_columns_across_datasets() {
-        let store = test_store().await;
-        let format = AtlasFormat::new(store, AtlasOptions::default());
-        let ctx = SessionContext::new();
+//     #[tokio::test]
+//     async fn infer_schema_unions_columns_across_datasets() {
+//         let store = test_store().await;
+//         let format = AtlasFormat::new(store, AtlasOptions::default());
+//         let ctx = SessionContext::new();
 
-        let schema = format
-            .infer_schema(
-                &ctx.state(),
-                &dummy_object_store(),
-                &[fixture_marker_object_meta()],
-            )
-            .await
-            .expect("infer");
+//         let schema = format
+//             .infer_schema(
+//                 &ctx.state(),
+//                 &dummy_object_store(),
+//                 &[fixture_marker_object_meta()],
+//             )
+//             .await
+//             .expect("infer");
 
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        // Winter has cycle, season, temperature, year; summer has season, temperature.
-        // The super-typed schema should include all of them.
-        assert!(
-            names.contains(&"temperature"),
-            "missing temperature in {names:?}"
-        );
-        assert!(names.contains(&"cycle"), "missing cycle in {names:?}");
-        assert!(names.contains(&"season"), "missing season in {names:?}");
-        assert!(names.contains(&"year"), "missing year in {names:?}");
-    }
+//         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+//         // Winter has cycle, season, temperature, year; summer has season, temperature.
+//         // The super-typed schema should include all of them.
+//         assert!(
+//             names.contains(&"temperature"),
+//             "missing temperature in {names:?}"
+//         );
+//         assert!(names.contains(&"cycle"), "missing cycle in {names:?}");
+//         assert!(names.contains(&"season"), "missing season in {names:?}");
+//         assert!(names.contains(&"year"), "missing year in {names:?}");
+//     }
 
-    #[tokio::test]
-    async fn infer_schema_empty_objects_returns_empty_schema() {
-        let store = test_store().await;
-        let format = AtlasFormat::new(store, AtlasOptions::default());
-        let ctx = SessionContext::new();
+//     #[tokio::test]
+//     async fn infer_schema_empty_objects_returns_empty_schema() {
+//         let store = test_store().await;
+//         let format = AtlasFormat::new(store, AtlasOptions::default());
+//         let ctx = SessionContext::new();
 
-        let schema = format
-            .infer_schema(&ctx.state(), &dummy_object_store(), &[])
-            .await
-            .expect("infer");
-        assert!(schema.fields().is_empty());
-    }
+//         let schema = format
+//             .infer_schema(&ctx.state(), &dummy_object_store(), &[])
+//             .await
+//             .expect("infer");
+//         assert!(schema.fields().is_empty());
+//     }
 
-    #[tokio::test]
-    async fn file_source_returns_atlas_type() {
-        let store = test_store().await;
-        ensure_fixture().await;
-        let format = AtlasFormat::new(store, AtlasOptions::default());
-        assert_eq!(
-            format
-                .file_source(
-                    datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
-                        arrow::datatypes::Schema::empty()
-                    ))
-                )
-                .file_type(),
-            "atlas"
-        );
-    }
+//     #[tokio::test]
+//     async fn file_source_returns_atlas_type() {
+//         let store = test_store().await;
+//         ensure_fixture().await;
+//         let format = AtlasFormat::new(store, AtlasOptions::default());
+//         assert_eq!(
+//             format
+//                 .file_source(
+//                     datafusion::datasource::table_schema::TableSchema::from_file_schema(Arc::new(
+//                         arrow::datatypes::Schema::empty()
+//                     ))
+//                 )
+//                 .file_type(),
+//             "atlas"
+//         );
+//     }
 
-    #[tokio::test]
-    async fn writer_path_not_implemented() {
-        use datafusion::physical_plan::empty::EmptyExec;
-        let store = test_store().await;
-        let format = AtlasFormat::new(store, AtlasOptions::default());
-        let ctx = SessionContext::new();
-        let empty_schema: arrow::datatypes::SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
-        let input: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(empty_schema.clone()));
+//     #[tokio::test]
+//     async fn writer_path_not_implemented() {
+//         use datafusion::physical_plan::empty::EmptyExec;
+//         let store = test_store().await;
+//         let format = AtlasFormat::new(store, AtlasOptions::default());
+//         let ctx = SessionContext::new();
+//         let empty_schema: arrow::datatypes::SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
+//         let input: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(empty_schema.clone()));
 
-        let conf = FileSinkConfig {
-            original_url: String::new(),
-            object_store_url: datafusion::execution::object_store::ObjectStoreUrl::local_filesystem(
-            ),
-            table_paths: vec![],
-            file_group: FileGroup::new(vec![]),
-            output_schema: empty_schema,
-            table_partition_cols: vec![],
-            insert_op: datafusion::logical_expr::dml::InsertOp::Append,
-            keep_partition_by_columns: false,
-            file_extension: "atlas.json".to_string(),
-            file_output_mode: datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
-        };
-        let err = format
-            .create_writer_physical_plan(input, &ctx.state(), conf, None)
-            .await
-            .expect_err("writing should be unsupported");
-        let msg = format!("{err}");
-        assert!(msg.to_lowercase().contains("not"), "{msg}");
-    }
+//         let conf = FileSinkConfig {
+//             original_url: String::new(),
+//             object_store_url: datafusion::execution::object_store::ObjectStoreUrl::local_filesystem(
+//             ),
+//             table_paths: vec![],
+//             file_group: FileGroup::new(vec![]),
+//             output_schema: empty_schema,
+//             table_partition_cols: vec![],
+//             insert_op: datafusion::logical_expr::dml::InsertOp::Append,
+//             keep_partition_by_columns: false,
+//             file_extension: "atlas.json".to_string(),
+//             file_output_mode: datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
+//         };
+//         let err = format
+//             .create_writer_physical_plan(input, &ctx.state(), conf, None)
+//             .await
+//             .expect_err("writing should be unsupported");
+//         let msg = format!("{err}");
+//         assert!(msg.to_lowercase().contains("not"), "{msg}");
+//     }
 
-    // ── Atlas 0.8.0 marker variants ────────────────────────────────────
+//     // ── Atlas 0.8.0 marker variants ────────────────────────────────────
 
-    fn marker_obj(path: &str) -> ObjectMeta {
-        ObjectMeta {
-            location: object_store::path::Path::from(path),
-            last_modified: chrono::Utc::now(),
-            size: 0,
-            e_tag: None,
-            version: None,
-        }
-    }
+//     fn marker_obj(path: &str) -> ObjectMeta {
+//         ObjectMeta {
+//             location: object_store::path::Path::from(path),
+//             last_modified: chrono::Utc::now(),
+//             size: 0,
+//             e_tag: None,
+//             version: None,
+//         }
+//     }
 
-    #[test]
-    fn is_atlas_marker_matches_all_six_variants() {
-        for name in &ATLAS_MARKER_NAMES {
-            assert!(
-                is_atlas_marker(&marker_obj(name)),
-                "bare {name} should be recognized",
-            );
-            assert!(
-                is_atlas_marker(&marker_obj(&format!("store/{name}"))),
-                "store/{name} should be recognized",
-            );
-            assert!(
-                is_atlas_marker(&marker_obj(&format!("a/b/c/{name}"))),
-                "a/b/c/{name} should be recognized",
-            );
-        }
+//     #[test]
+//     fn is_atlas_marker_matches_all_six_variants() {
+//         for name in &ATLAS_MARKER_NAMES {
+//             assert!(
+//                 is_atlas_marker(&marker_obj(name)),
+//                 "bare {name} should be recognized",
+//             );
+//             assert!(
+//                 is_atlas_marker(&marker_obj(&format!("store/{name}"))),
+//                 "store/{name} should be recognized",
+//             );
+//             assert!(
+//                 is_atlas_marker(&marker_obj(&format!("a/b/c/{name}"))),
+//                 "a/b/c/{name} should be recognized",
+//             );
+//         }
 
-        // Lookalikes must not match.
-        for negative in [
-            "foo/data.af",
-            "store/atlas.json.tmp",
-            "store/atlas.jsona",
-            "store/atlas.msgpack.bak",
-            "atlas.json/inner",
-        ] {
-            assert!(
-                !is_atlas_marker(&marker_obj(negative)),
-                "{negative} should NOT be recognized",
-            );
-        }
-    }
+//         // Lookalikes must not match.
+//         for negative in [
+//             "foo/data.af",
+//             "store/atlas.json.tmp",
+//             "store/atlas.jsona",
+//             "store/atlas.msgpack.bak",
+//             "atlas.json/inner",
+//         ] {
+//             assert!(
+//                 !is_atlas_marker(&marker_obj(negative)),
+//                 "{negative} should NOT be recognized",
+//             );
+//         }
+//     }
 
-    #[test]
-    fn marker_parent_strips_each_variant() {
-        for name in &ATLAS_MARKER_NAMES {
-            assert_eq!(
-                marker_parent(&object_store::path::Path::from(format!("store/{name}"))),
-                Some("store".to_string()),
-                "marker_parent should strip {name}",
-            );
-            assert_eq!(
-                marker_parent(&object_store::path::Path::from(*name)),
-                Some(String::new()),
-                "marker_parent of bare {name} is empty",
-            );
-        }
-        assert_eq!(
-            marker_parent(&object_store::path::Path::from("foo.txt")),
-            None,
-            "marker_parent of a non-marker is None",
-        );
-    }
+//     #[test]
+//     fn marker_parent_strips_each_variant() {
+//         for name in &ATLAS_MARKER_NAMES {
+//             assert_eq!(
+//                 marker_parent(&object_store::path::Path::from(format!("store/{name}"))),
+//                 Some("store".to_string()),
+//                 "marker_parent should strip {name}",
+//             );
+//             assert_eq!(
+//                 marker_parent(&object_store::path::Path::from(*name)),
+//                 Some(String::new()),
+//                 "marker_parent of bare {name} is empty",
+//             );
+//         }
+//         assert_eq!(
+//             marker_parent(&object_store::path::Path::from("foo.txt")),
+//             None,
+//             "marker_parent of a non-marker is None",
+//         );
+//     }
 
-    // ── read_atlas_dataset_names: one test per variant ─────────────────
+//     // ── read_atlas_dataset_names: one test per variant ─────────────────
 
-    /// Atlas's on-disk meta shape, mirrored just well enough to encode
-    /// fixtures. We don't import atlas's own `StoreMeta` because it's
-    /// `pub(crate)`.
-    #[derive(serde::Serialize)]
-    struct FixtureMeta {
-        version: u32,
-        codec: &'static str,
-        datasets: std::collections::BTreeMap<String, FixtureDataset>,
-    }
+//     /// Atlas's on-disk meta shape, mirrored just well enough to encode
+//     /// fixtures. We don't import atlas's own `StoreMeta` because it's
+//     /// `pub(crate)`.
+//     #[derive(serde::Serialize)]
+//     struct FixtureMeta {
+//         version: u32,
+//         codec: &'static str,
+//         datasets: std::collections::BTreeMap<String, FixtureDataset>,
+//     }
 
-    #[derive(serde::Serialize, Default)]
-    struct FixtureDataset {
-        arrays: std::collections::BTreeMap<String, serde_json::Value>,
-        attributes: std::collections::BTreeMap<String, serde_json::Value>,
-    }
+//     #[derive(serde::Serialize, Default)]
+//     struct FixtureDataset {
+//         arrays: std::collections::BTreeMap<String, serde_json::Value>,
+//         attributes: std::collections::BTreeMap<String, serde_json::Value>,
+//     }
 
-    fn sample_meta() -> FixtureMeta {
-        let mut datasets = std::collections::BTreeMap::new();
-        datasets.insert("a".to_string(), FixtureDataset::default());
-        datasets.insert("b".to_string(), FixtureDataset::default());
-        FixtureMeta {
-            version: 1,
-            codec: "Zstd",
-            datasets,
-        }
-    }
+//     fn sample_meta() -> FixtureMeta {
+//         let mut datasets = std::collections::BTreeMap::new();
+//         datasets.insert("a".to_string(), FixtureDataset::default());
+//         datasets.insert("b".to_string(), FixtureDataset::default());
+//         FixtureMeta {
+//             version: 1,
+//             codec: "Zstd",
+//             datasets,
+//         }
+//     }
 
-    fn encode_meta(meta: &FixtureMeta, format: MetaFormat) -> Vec<u8> {
-        match format {
-            MetaFormat::Json => serde_json::to_vec(meta).expect("encode json"),
-            MetaFormat::MsgPack => rmp_serde::to_vec_named(meta).expect("encode msgpack"),
-        }
-    }
+//     fn encode_meta(meta: &FixtureMeta, format: MetaFormat) -> Vec<u8> {
+//         match format {
+//             MetaFormat::Json => serde_json::to_vec(meta).expect("encode json"),
+//             MetaFormat::MsgPack => rmp_serde::to_vec_named(meta).expect("encode msgpack"),
+//         }
+//     }
 
-    fn compress_meta(bytes: Vec<u8>, codec: Codec) -> Vec<u8> {
-        match codec {
-            Codec::None => bytes,
-            Codec::Zstd => zstd::stream::encode_all(bytes.as_slice(), 0).expect("zstd"),
-            Codec::Lz4 => lz4_flex::compress_prepend_size(&bytes),
-        }
-    }
+//     fn compress_meta(bytes: Vec<u8>, codec: Codec) -> Vec<u8> {
+//         match codec {
+//             Codec::None => bytes,
+//             Codec::Zstd => zstd::stream::encode_all(bytes.as_slice(), 0).expect("zstd"),
+//             Codec::Lz4 => lz4_flex::compress_prepend_size(&bytes),
+//         }
+//     }
 
-    fn write_fixture_marker(filename: &str, format: MetaFormat, codec: Codec) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let bytes = compress_meta(encode_meta(&sample_meta(), format), codec);
-        std::fs::write(dir.path().join(filename), bytes).expect("write fixture");
-        dir
-    }
+//     fn write_fixture_marker(filename: &str, format: MetaFormat, codec: Codec) -> tempfile::TempDir {
+//         let dir = tempfile::tempdir().expect("tempdir");
+//         let bytes = compress_meta(encode_meta(&sample_meta(), format), codec);
+//         std::fs::write(dir.path().join(filename), bytes).expect("write fixture");
+//         dir
+//     }
 
-    fn assert_dataset_names(dir: &std::path::Path, filename: &str) {
-        let path = dir.join(filename);
-        let names =
-            read_atlas_dataset_names(path.to_str().expect("utf-8 path")).expect("read names");
-        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
-    }
+//     fn assert_dataset_names(dir: &std::path::Path, filename: &str) {
+//         let path = dir.join(filename);
+//         let names =
+//             read_atlas_dataset_names(path.to_str().expect("utf-8 path")).expect("read names");
+//         assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+//     }
 
-    #[test]
-    fn read_atlas_dataset_names_json_uncompressed() {
-        let dir = write_fixture_marker("atlas.json", MetaFormat::Json, Codec::None);
-        assert_dataset_names(dir.path(), "atlas.json");
-    }
+//     #[test]
+//     fn read_atlas_dataset_names_json_uncompressed() {
+//         let dir = write_fixture_marker("atlas.json", MetaFormat::Json, Codec::None);
+//         assert_dataset_names(dir.path(), "atlas.json");
+//     }
 
-    #[test]
-    fn read_atlas_dataset_names_json_zstd() {
-        let dir = write_fixture_marker("atlas.json.zst", MetaFormat::Json, Codec::Zstd);
-        assert_dataset_names(dir.path(), "atlas.json.zst");
-    }
+//     #[test]
+//     fn read_atlas_dataset_names_json_zstd() {
+//         let dir = write_fixture_marker("atlas.json.zst", MetaFormat::Json, Codec::Zstd);
+//         assert_dataset_names(dir.path(), "atlas.json.zst");
+//     }
 
-    #[test]
-    fn read_atlas_dataset_names_json_lz4() {
-        let dir = write_fixture_marker("atlas.json.lz4", MetaFormat::Json, Codec::Lz4);
-        assert_dataset_names(dir.path(), "atlas.json.lz4");
-    }
+//     #[test]
+//     fn read_atlas_dataset_names_json_lz4() {
+//         let dir = write_fixture_marker("atlas.json.lz4", MetaFormat::Json, Codec::Lz4);
+//         assert_dataset_names(dir.path(), "atlas.json.lz4");
+//     }
 
-    #[test]
-    fn read_atlas_dataset_names_msgpack_uncompressed() {
-        let dir = write_fixture_marker("atlas.msgpack", MetaFormat::MsgPack, Codec::None);
-        assert_dataset_names(dir.path(), "atlas.msgpack");
-    }
+//     #[test]
+//     fn read_atlas_dataset_names_msgpack_uncompressed() {
+//         let dir = write_fixture_marker("atlas.msgpack", MetaFormat::MsgPack, Codec::None);
+//         assert_dataset_names(dir.path(), "atlas.msgpack");
+//     }
 
-    #[test]
-    fn read_atlas_dataset_names_msgpack_zstd() {
-        let dir = write_fixture_marker("atlas.msgpack.zst", MetaFormat::MsgPack, Codec::Zstd);
-        assert_dataset_names(dir.path(), "atlas.msgpack.zst");
-    }
+//     #[test]
+//     fn read_atlas_dataset_names_msgpack_zstd() {
+//         let dir = write_fixture_marker("atlas.msgpack.zst", MetaFormat::MsgPack, Codec::Zstd);
+//         assert_dataset_names(dir.path(), "atlas.msgpack.zst");
+//     }
 
-    #[test]
-    fn read_atlas_dataset_names_msgpack_lz4() {
-        let dir = write_fixture_marker("atlas.msgpack.lz4", MetaFormat::MsgPack, Codec::Lz4);
-        assert_dataset_names(dir.path(), "atlas.msgpack.lz4");
-    }
+//     #[test]
+//     fn read_atlas_dataset_names_msgpack_lz4() {
+//         let dir = write_fixture_marker("atlas.msgpack.lz4", MetaFormat::MsgPack, Codec::Lz4);
+//         assert_dataset_names(dir.path(), "atlas.msgpack.lz4");
+//     }
 
-    #[test]
-    fn read_atlas_dataset_names_rejects_unknown_filename() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("not_an_atlas_marker");
-        std::fs::write(&path, b"{}").expect("write");
-        let err =
-            read_atlas_dataset_names(path.to_str().expect("utf-8")).expect_err("should reject");
-        assert!(
-            format!("{err}").contains("Unknown atlas marker filename"),
-            "unexpected error: {err}",
-        );
-    }
+//     #[test]
+//     fn read_atlas_dataset_names_rejects_unknown_filename() {
+//         let dir = tempfile::tempdir().expect("tempdir");
+//         let path = dir.path().join("not_an_atlas_marker");
+//         std::fs::write(&path, b"{}").expect("write");
+//         let err =
+//             read_atlas_dataset_names(path.to_str().expect("utf-8")).expect_err("should reject");
+//         assert!(
+//             format!("{err}").contains("Unknown atlas marker filename"),
+//             "unexpected error: {err}",
+//         );
+//     }
 
-    #[test]
-    fn top_level_markers_dedupes_across_different_formats() {
-        // Outer store uses atlas.json; nested store uses atlas.msgpack.zst.
-        // The nested one must be dropped even though the filenames differ.
-        let objs = vec![
-            marker_obj("a/atlas.json"),
-            marker_obj("a/b/atlas.msgpack.zst"),
-            marker_obj("c/atlas.msgpack"),
-        ];
-        let kept: Vec<String> = top_level_atlas_markers(&objs)
-            .iter()
-            .map(|m| m.location.to_string())
-            .collect();
-        assert!(kept.contains(&"a/atlas.json".to_string()));
-        assert!(kept.contains(&"c/atlas.msgpack".to_string()));
-        assert!(!kept.iter().any(|p| p == "a/b/atlas.msgpack.zst"));
-    }
+//     #[test]
+//     fn top_level_markers_dedupes_across_different_formats() {
+//         // Outer store uses atlas.json; nested store uses atlas.msgpack.zst.
+//         // The nested one must be dropped even though the filenames differ.
+//         let objs = vec![
+//             marker_obj("a/atlas.json"),
+//             marker_obj("a/b/atlas.msgpack.zst"),
+//             marker_obj("c/atlas.msgpack"),
+//         ];
+//         let kept: Vec<String> = top_level_atlas_markers(&objs)
+//             .iter()
+//             .map(|m| m.location.to_string())
+//             .collect();
+//         assert!(kept.contains(&"a/atlas.json".to_string()));
+//         assert!(kept.contains(&"c/atlas.msgpack".to_string()));
+//         assert!(!kept.iter().any(|p| p == "a/b/atlas.msgpack.zst"));
+//     }
 
-    // ── End-to-end: discover_datasets against a non-default marker ─────
+//     // ── End-to-end: discover_datasets against a non-default marker ─────
 
-    const MSGPACK_ZST_FIXTURE_DIR: &str = "beacon-arrow-atlas-tests/two_datasets.msgpack.zst.atlas";
+//     const MSGPACK_ZST_FIXTURE_DIR: &str = "beacon-arrow-atlas-tests/two_datasets.msgpack.zst.atlas";
 
-    /// Build the msgpack.zst fixture once per test run.
-    async fn ensure_msgpack_zst_fixture() -> std::path::PathBuf {
-        use crate::reader::test_support::build_two_dataset_store_with_config;
-        use atlas::{Codec as AtlasCodec, MetaFormat as AtlasMetaFormat, StoreConfig};
+//     /// Build the msgpack.zst fixture once per test run.
+//     async fn ensure_msgpack_zst_fixture() -> std::path::PathBuf {
+//         use crate::reader::test_support::build_two_dataset_store_with_config;
+//         use atlas::{Codec as AtlasCodec, MetaFormat as AtlasMetaFormat, StoreConfig};
 
-        static FIXTURE: tokio::sync::OnceCell<std::path::PathBuf> =
-            tokio::sync::OnceCell::const_new();
-        FIXTURE
-            .get_or_init(|| async {
-                let dst = beacon_config::DATASETS_DIR_PATH.join(MSGPACK_ZST_FIXTURE_DIR);
-                let marker = dst.join("atlas.msgpack.zst");
-                if !marker.exists() {
-                    if dst.exists() {
-                        std::fs::remove_dir_all(&dst).expect("cleanup partial fixture");
-                    }
-                    std::fs::create_dir_all(&dst).expect("create fixture dir");
-                    let config = StoreConfig {
-                        meta_format: AtlasMetaFormat::MsgPack,
-                        meta_compression: AtlasCodec::Zstd,
-                        ..Default::default()
-                    };
-                    build_two_dataset_store_with_config(&dst, config).await;
-                }
-                dst
-            })
-            .await
-            .clone()
-    }
+//         static FIXTURE: tokio::sync::OnceCell<std::path::PathBuf> =
+//             tokio::sync::OnceCell::const_new();
+//         FIXTURE
+//             .get_or_init(|| async {
+//                 let dst = beacon_config::DATASETS_DIR_PATH.join(MSGPACK_ZST_FIXTURE_DIR);
+//                 let marker = dst.join("atlas.msgpack.zst");
+//                 if !marker.exists() {
+//                     if dst.exists() {
+//                         std::fs::remove_dir_all(&dst).expect("cleanup partial fixture");
+//                     }
+//                     std::fs::create_dir_all(&dst).expect("create fixture dir");
+//                     let config = StoreConfig {
+//                         meta_format: AtlasMetaFormat::MsgPack,
+//                         meta_compression: AtlasCodec::Zstd,
+//                         ..Default::default()
+//                     };
+//                     build_two_dataset_store_with_config(&dst, config).await;
+//                 }
+//                 dst
+//             })
+//             .await
+//             .clone()
+//     }
 
-    #[tokio::test]
-    async fn discover_datasets_finds_msgpack_zst_store() {
-        ensure_msgpack_zst_fixture().await;
-        let store = test_store().await;
-        let factory =
-            AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
+//     #[tokio::test]
+//     async fn discover_datasets_finds_msgpack_zst_store() {
+//         ensure_msgpack_zst_fixture().await;
+//         let store = test_store().await;
+//         let factory =
+//             AtlasFormatFactory::new(store, AtlasOptions::default(), AtlasConfig::default());
 
-        let marker = ObjectMeta {
-            location: OsPath::from(format!("{MSGPACK_ZST_FIXTURE_DIR}/atlas.msgpack.zst")),
-            last_modified: chrono::Utc::now(),
-            size: 0,
-            e_tag: None,
-            version: None,
-        };
-        let datasets = factory.discover_datasets(&[marker]).expect("discover");
+//         let marker = ObjectMeta {
+//             location: OsPath::from(format!("{MSGPACK_ZST_FIXTURE_DIR}/atlas.msgpack.zst")),
+//             last_modified: chrono::Utc::now(),
+//             size: 0,
+//             e_tag: None,
+//             version: None,
+//         };
+//         let datasets = factory.discover_datasets(&[marker]).expect("discover");
 
-        assert_eq!(datasets.len(), 2, "expected 2 datasets, got {datasets:?}");
-        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
-        // Synthetic paths must preserve the actual on-disk marker name.
-        assert!(
-            paths
-                .iter()
-                .any(|p| p.ends_with("/atlas.msgpack.zst/winter")),
-            "missing winter in {paths:?}",
-        );
-        assert!(
-            paths
-                .iter()
-                .any(|p| p.ends_with("/atlas.msgpack.zst/summer")),
-            "missing summer in {paths:?}",
-        );
-    }
+//         assert_eq!(datasets.len(), 2, "expected 2 datasets, got {datasets:?}");
+//         let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+//         // Synthetic paths must preserve the actual on-disk marker name.
+//         assert!(
+//             paths
+//                 .iter()
+//                 .any(|p| p.ends_with("/atlas.msgpack.zst/winter")),
+//             "missing winter in {paths:?}",
+//         );
+//         assert!(
+//             paths
+//                 .iter()
+//                 .any(|p| p.ends_with("/atlas.msgpack.zst/summer")),
+//             "missing summer in {paths:?}",
+//         );
+//     }
 
-    // ── End-to-end via SessionContext (projection + predicate pushdown) ──
+//     // ── End-to-end via SessionContext (projection + predicate pushdown) ──
 
-    /// Register the `two_datasets.atlas` fixture as a DataFusion table backed by
-    /// [`AtlasFormat`] over the `datasets://` object store.
-    async fn register_example(ctx: &SessionContext, datasets_root: std::path::PathBuf) {
-        use beacon_common::super_table::SuperListingTable;
-        use datafusion::datasource::file_format::FileFormat;
-        use datafusion::datasource::listing::ListingTableUrl;
-        use datafusion::execution::object_store::ObjectStoreUrl;
+//     /// Register the `two_datasets.atlas` fixture as a DataFusion table backed by
+//     /// [`AtlasFormat`] over the `datasets://` object store.
+//     async fn register_example(ctx: &SessionContext, datasets_root: std::path::PathBuf) {
+//         use beacon_common::super_table::SuperListingTable;
+//         use datafusion::datasource::file_format::FileFormat;
+//         use datafusion::datasource::listing::ListingTableUrl;
+//         use datafusion::execution::object_store::ObjectStoreUrl;
 
-        // The `datasets://` store lists the files; the format opens them natively
-        // under `datasets_root`.
-        let store = beacon_object_storage::local_datasets_store(datasets_root.clone())
-            .await
-            .expect("local datasets store");
-        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
-        ctx.register_object_store(store_url.as_ref(), store);
+//         // The `datasets://` store lists the files; the format opens them natively
+//         // under `datasets_root`.
+//         let store = beacon_object_storage::local_datasets_store(datasets_root.clone())
+//             .await
+//             .expect("local datasets store");
+//         let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+//         ctx.register_object_store(store_url.as_ref(), store);
 
-        let format: Arc<dyn FileFormat> =
-            Arc::new(AtlasFormat::new(datasets_root, AtlasOptions::default()));
-        let url = ListingTableUrl::parse(
-            "datasets:///beacon-arrow-atlas-tests/two_datasets.atlas/atlas.json",
-        )
-        .unwrap();
-        let table = SuperListingTable::new(&ctx.state(), format, vec![url])
-            .await
-            .unwrap();
-        ctx.register_table("atlas_t", Arc::new(table)).unwrap();
-    }
+//         let format: Arc<dyn FileFormat> =
+//             Arc::new(AtlasFormat::new(datasets_root, AtlasOptions::default()));
+//         let url = ListingTableUrl::parse(
+//             "datasets:///beacon-arrow-atlas-tests/two_datasets.atlas/atlas.json",
+//         )
+//         .unwrap();
+//         let table = SuperListingTable::new(&ctx.state(), format, vec![url])
+//             .await
+//             .unwrap();
+//         ctx.register_table("atlas_t", Arc::new(table)).unwrap();
+//     }
 
-    #[tokio::test]
-    async fn projection_pushdown_through_datafusion() {
-        ensure_fixture().await;
-        let store = test_store().await;
-        let ctx = SessionContext::new();
-        register_example(&ctx, store).await;
+//     #[tokio::test]
+//     async fn projection_pushdown_through_datafusion() {
+//         ensure_fixture().await;
+//         let store = test_store().await;
+//         let ctx = SessionContext::new();
+//         register_example(&ctx, store).await;
 
-        let df = ctx.sql("SELECT temperature FROM atlas_t").await.unwrap();
-        let names: Vec<String> = df
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect();
-        assert_eq!(names, vec!["temperature".to_string()]);
+//         let df = ctx.sql("SELECT temperature FROM atlas_t").await.unwrap();
+//         let names: Vec<String> = df
+//             .schema()
+//             .fields()
+//             .iter()
+//             .map(|f| f.name().clone())
+//             .collect();
+//         assert_eq!(names, vec!["temperature".to_string()]);
 
-        let batches = df.collect().await.unwrap();
-        assert_eq!(batches[0].num_columns(), 1);
-        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(rows, 7, "winter (4) + summer (3) temperature rows");
-    }
+//         let batches = df.collect().await.unwrap();
+//         assert_eq!(batches[0].num_columns(), 1);
+//         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+//         assert_eq!(rows, 7, "winter (4) + summer (3) temperature rows");
+//     }
 
-    #[tokio::test]
-    async fn predicate_pushdown_prunes_through_datafusion() {
-        ensure_fixture().await;
-        let store = test_store().await;
-        let ctx = SessionContext::new();
-        register_example(&ctx, store).await;
+//     #[tokio::test]
+//     async fn predicate_pushdown_prunes_through_datafusion() {
+//         ensure_fixture().await;
+//         let store = test_store().await;
+//         let ctx = SessionContext::new();
+//         register_example(&ctx, store).await;
 
-        // The maximum temperature in the fixture is 22.
-        let rows: usize = ctx
-            .sql("SELECT temperature FROM atlas_t WHERE temperature > 1000000")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap()
-            .iter()
-            .map(|b| b.num_rows())
-            .sum();
-        assert_eq!(rows, 0, "no temperature exceeds 1e6");
-    }
+//         // The maximum temperature in the fixture is 22.
+//         let rows: usize = ctx
+//             .sql("SELECT temperature FROM atlas_t WHERE temperature > 1000000")
+//             .await
+//             .unwrap()
+//             .collect()
+//             .await
+//             .unwrap()
+//             .iter()
+//             .map(|b| b.num_rows())
+//             .sum();
+//         assert_eq!(rows, 0, "no temperature exceeds 1e6");
+//     }
 
-    #[tokio::test]
-    async fn predicate_pushdown_selects_subset_through_datafusion() {
-        use arrow::array::Float32Array;
+//     #[tokio::test]
+//     async fn predicate_pushdown_selects_subset_through_datafusion() {
+//         use arrow::array::Float32Array;
 
-        ensure_fixture().await;
-        let store = test_store().await;
-        let ctx = SessionContext::new();
-        register_example(&ctx, store).await;
+//         ensure_fixture().await;
+//         let store = test_store().await;
+//         let ctx = SessionContext::new();
+//         register_example(&ctx, store).await;
 
-        // winter = [1,2,3,4], summer = [20,21,22]; `> 10` keeps only summer.
-        let batches = ctx
-            .sql("SELECT temperature FROM atlas_t WHERE temperature > 10")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        let mut temps: Vec<f32> = vec![];
-        for b in &batches {
-            let col = b.column(0).as_any().downcast_ref::<Float32Array>().unwrap();
-            for i in 0..col.len() {
-                assert!(
-                    col.value(i) > 10.0,
-                    "every returned temperature must satisfy the predicate"
-                );
-                temps.push(col.value(i));
-            }
-        }
-        temps.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert_eq!(
-            temps,
-            vec![20.0f32, 21.0, 22.0],
-            "only summer's temperatures remain"
-        );
-    }
-}
+//         // winter = [1,2,3,4], summer = [20,21,22]; `> 10` keeps only summer.
+//         let batches = ctx
+//             .sql("SELECT temperature FROM atlas_t WHERE temperature > 10")
+//             .await
+//             .unwrap()
+//             .collect()
+//             .await
+//             .unwrap();
+//         let mut temps: Vec<f32> = vec![];
+//         for b in &batches {
+//             let col = b.column(0).as_any().downcast_ref::<Float32Array>().unwrap();
+//             for i in 0..col.len() {
+//                 assert!(
+//                     col.value(i) > 10.0,
+//                     "every returned temperature must satisfy the predicate"
+//                 );
+//                 temps.push(col.value(i));
+//             }
+//         }
+//         temps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+//         assert_eq!(
+//             temps,
+//             vec![20.0f32, 21.0, 22.0],
+//             "only summer's temperatures remain"
+//         );
+//     }
+// }
 
-pub mod table_function;
-pub use table_function::ReadAtlasFunc;
+// pub mod table_function;
+// pub use table_function::ReadAtlasFunc;

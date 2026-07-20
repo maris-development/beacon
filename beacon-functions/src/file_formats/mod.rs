@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
-use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
+use datafusion::prelude::SessionContext;
 
 // The shared table-function trait and the glob-arg parser now live in
 // `beacon-common` so each `beacon-arrow-*` format crate can host its own
@@ -18,71 +18,60 @@ pub mod list_datasets;
 pub fn register_table_functions(
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Arc<SessionContext>,
-    data_object_store_url: ObjectStoreUrl,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 ) -> Vec<Arc<dyn BeaconTableFunctionImpl>> {
     vec![
         Arc::new(beacon_arrow_parquet::datafusion::ReadParquetFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
         Arc::new(
             beacon_arrow_geoparquet::datafusion::ReadGeoParquetFunc::new(
                 runtime_handle.clone(),
                 Arc::downgrade(&session_ctx),
-                data_object_store_url.clone(),
             ),
         ),
         Arc::new(beacon_arrow_ipc::datafusion::ReadArrowFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
         Arc::new(beacon_arrow_csv::datafusion::ReadCsvFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
         Arc::new(beacon_arrow_zarr::datafusion::ReadZarrFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
         Arc::new(beacon_arrow_netcdf::datafusion::ReadNetCDFFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
         Arc::new(beacon_arrow_tiff::datafusion::ReadTiffFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
         Arc::new(beacon_arrow_bbf::datafusion::ReadBBFFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
         Arc::new(beacon_arrow_odv::datafusion::ReadOdvAsciiFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
-        Arc::new(beacon_arrow_atlas::datafusion::ReadAtlasFunc::new(
-            runtime_handle.clone(),
-            Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
-        )),
+        Arc::new(
+            beacon_arrow_atlas::datafusion::table_function::ReadAtlasFunc::new(
+                runtime_handle.clone(),
+                Arc::downgrade(&session_ctx),
+            ),
+        ),
         Arc::new(beacon_delta::ReadDeltaFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
-            data_object_store_url.clone(),
         )),
         Arc::new(list_datasets::ListDatasetsFunc::new(
             runtime_handle,
             Arc::downgrade(&session_ctx),
-            data_object_store_url,
             file_formats,
         )),
     ]

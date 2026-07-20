@@ -20,12 +20,14 @@ use futures::{StreamExt, TryStreamExt, stream};
 use beacon_common::file_descriptors::file_open_parallelism;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 
+pub const DEFAULT_CSV_EXTENSION: &str = "csv";
+
 #[derive(Debug, Default)]
 pub struct CsvFormatFactory;
 
 impl GetExt for CsvFormatFactory {
     fn get_ext(&self) -> String {
-        "csv".to_string()
+        DEFAULT_CSV_EXTENSION.to_string()
     }
 }
 
@@ -170,7 +172,10 @@ impl FileFormat for CsvFormat {
             .await
     }
 
-    fn file_source(&self, table_schema: datafusion::datasource::table_schema::TableSchema) -> Arc<dyn FileSource> {
+    fn file_source(
+        &self,
+        table_schema: datafusion::datasource::table_schema::TableSchema,
+    ) -> Arc<dyn FileSource> {
         self.inner_format.file_source(table_schema)
     }
 }
