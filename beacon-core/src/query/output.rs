@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_odv::datafusion::OdvFileFormatFactory;
+use beacon_arrow_zarr::datafusion::{ZarrFormatFactory, ZarrOptions};
 use beacon_arrow_odv::writer::OdvOptions;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::{GeoParquetFormatFactory, GeoParquetOptions};
@@ -92,6 +93,15 @@ pub enum OutputFormat {
         /// Columns to use as dimensions for the ND NetCDF output.
         dimension_columns: Vec<String>, // Cannot be empty
     },
+    /// Flat (record-oriented) Zarr v3 store, returned as a zip archive.
+    Zarr,
+    /// Multi-dimensional (gridded) Zarr v3 store, returned as a zip archive.
+    /// The named columns become the output dimensions; must not be empty.
+    #[serde(alias = "nd_zarr")]
+    NdZarr {
+        /// Columns to use as dimensions for the ND Zarr output.
+        dimension_columns: Vec<String>, // Cannot be empty
+    },
     /// GeoParquet format with optional longitude/latitude columns.
     GeoParquet {
         /// Name of the longitude column, if any.
@@ -113,6 +123,8 @@ impl OutputFormat {
             OutputFormat::GeoParquet { .. } => QueryOutputFile::GeoParquet(temp_file),
             OutputFormat::NetCDF => QueryOutputFile::NetCDF(temp_file),
             OutputFormat::NdNetCDF { .. } => QueryOutputFile::NetCDF(temp_file),
+            OutputFormat::Zarr => QueryOutputFile::Zarr(temp_file),
+            OutputFormat::NdZarr { .. } => QueryOutputFile::Zarr(temp_file),
             OutputFormat::Odv(_) => QueryOutputFile::Odv(temp_file),
         }
     }
@@ -158,6 +170,28 @@ impl OutputFormat {
                     NetcdfConfig::default(),
                 )))
             }
+            OutputFormat::Zarr => {
+                // A zarr store is a directory; the query API can only return one
+                // file, so it is packed into a zip archive.
+                format_as_file_type(Arc::new(ZarrFormatFactory::new_for_write(
+                    datasets_store.clone(),
+                    ZarrOptions {
+                        zip_output: true,
+                        ..Default::default()
+                    },
+                )))
+            }
+            OutputFormat::NdZarr { dimension_columns } => {
+                format_as_file_type(Arc::new(ZarrFormatFactory::new_for_write(
+                    datasets_store.clone(),
+                    ZarrOptions {
+                        zip_output: true,
+                        write_dimensions: Some(dimension_columns.clone()),
+                        unique_value_columns: dimension_columns.clone(),
+                        ..Default::default()
+                    },
+                )))
+            }
             OutputFormat::Odv(options) => {
                 format_as_file_type(Arc::new(OdvFileFormatFactory::new(Some(options.clone()))))
             }
@@ -180,6 +214,8 @@ pub enum QueryOutputFile {
     NetCDF(NamedTempFile),
     /// ODV output file.
     Odv(NamedTempFile),
+    /// Zarr store, packed as a zip archive.
+    Zarr(NamedTempFile),
     /// GeoParquet output file.
     GeoParquet(NamedTempFile),
 }
@@ -194,6 +230,7 @@ impl QueryOutputFile {
             QueryOutputFile::Parquet(file) => Ok(file.path().metadata()?.len()),
             QueryOutputFile::NetCDF(file) => Ok(file.path().metadata()?.len()),
             QueryOutputFile::Odv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::Zarr(file) => Ok(file.path().metadata()?.len()),
             QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
         }
     }
@@ -206,6 +243,7 @@ impl QueryOutputFile {
             QueryOutputFile::Parquet(file) => file.path(),
             QueryOutputFile::NetCDF(file) => file.path(),
             QueryOutputFile::Odv(file) => file.path(),
+            QueryOutputFile::Zarr(file) => file.path(),
             QueryOutputFile::GeoParquet(file) => file.path(),
         }
     }

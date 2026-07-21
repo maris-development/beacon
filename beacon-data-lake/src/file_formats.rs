@@ -13,7 +13,7 @@ use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
 use beacon_arrow_netcdf::datafusion::{NetCDFFormatFactory, options::NetcdfOptions};
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
-use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
+use beacon_arrow_zarr::datafusion::{ZarrFormatFactory, ZarrOptions};
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use beacon_object_storage::DatasetsStore;
 use datafusion::prelude::SessionContext;
@@ -44,7 +44,12 @@ pub fn file_formats(
             config.atlas.clone(),
         )),
         Arc::new(TiffFormatFactory::new(Default::default())),
-        Arc::new(ZarrFormatFactory),
+        // Writable: `COPY TO ... STORED AS ZARR` builds a directory store under
+        // the datasets store's tmp root, the same way NetCDF does.
+        Arc::new(ZarrFormatFactory::new_for_write(
+            datasets_object_store.clone(),
+            ZarrOptions::default(),
+        )),
         Arc::new(BBFFormatFactory::new(config.bbf.clone())),
         Arc::new(GeoParquetFormatFactory::default()),
     ];

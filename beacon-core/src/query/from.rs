@@ -237,7 +237,7 @@ mod tests {
             ),
             (
                 FromFormat::Zarr { paths: vec![] },
-                Arc::new(beacon_arrow_zarr::datafusion::ZarrFormatFactory),
+                Arc::new(beacon_arrow_zarr::datafusion::ZarrFormatFactory::new()),
             ),
             (
                 FromFormat::Bbf { paths: vec![] },

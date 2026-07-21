@@ -127,3 +127,51 @@ def test_nd_netcdf_output_roundtrip(client, datasets_dir):
     # 50 unique time values -> 50 cells along the single dimension.
     assert n == 50
     assert "temperature" in client.sql_rows(f"SELECT * FROM read_netcdf(['{rel}']) LIMIT 1")[0]
+
+
+# --- Zarr output round-trips --------------------------------------------------
+def _unzip_to_datasets(datasets_dir, rel_path: str, data: bytes) -> str:
+    """Unpack a zipped zarr store into the datasets dir and return its path.
+
+    Zarr output arrives as a zip archive because an HTTP response can only carry
+    one file; ``read_zarr`` wants the directory store, so unpack it first.
+    """
+    import io
+    import zipfile
+
+    dst = datasets_dir / rel_path
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        archive.extractall(dst)
+    return rel_path
+
+
+def test_flat_zarr_output_roundtrip(client, datasets_dir):
+    """Flat (record-oriented) Zarr output is readable again by read_zarr."""
+    src = "SELECT temperature, salinity, depth FROM read_parquet(['obs/*.parquet']) LIMIT 100"
+    data = client.query_bytes(src, "zarr")
+    # Zip local file header magic.
+    assert data[:2] == b"PK", data[:8]
+
+    rel = _unzip_to_datasets(datasets_dir, "roundtrip/flat.zarr", data)
+    back = client.sql_rows(f"SELECT * FROM read_zarr(['{rel}'])")
+    assert len(back) - 1 == 100
+    assert "temperature" in back[0]
+
+
+def test_nd_zarr_output_roundtrip(client, datasets_dir):
+    """ND-Zarr output keyed on the unique `time` column round-trips."""
+    src = (
+        "SELECT time, temperature, salinity FROM read_parquet(['obs/*.parquet']) "
+        "ORDER BY time LIMIT 50"
+    )
+    data = client.query_bytes(src, {"ndzarr": {"dimension_columns": ["time"]}})
+    assert data[:2] == b"PK", data[:8]
+
+    rel = _unzip_to_datasets(datasets_dir, "roundtrip/nd.zarr", data)
+    n = client.count(f"SELECT * FROM read_zarr(['{rel}'])")
+    # 50 unique time values -> 50 cells along the single dimension.
+    assert n == 50
+    assert "temperature" in client.sql_rows(f"SELECT * FROM read_zarr(['{rel}']) LIMIT 1")[0]

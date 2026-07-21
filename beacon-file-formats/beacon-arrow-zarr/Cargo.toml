@@ -14,15 +14,19 @@ datafusion = { workspace = true }
 ndarray = {workspace = true}
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { workspace = true }
 tracing = { workspace = true }
 hifitime = {workspace = true}
 futures = { workspace = true }
+thiserror = { workspace = true }
+zip = { workspace = true }
 
 beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-common = { path = "../../beacon-common" }
+beacon-object-storage = { path = "../../beacon-object-storage" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
