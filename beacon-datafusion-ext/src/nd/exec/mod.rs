@@ -92,3 +92,84 @@ pub fn materialize_nd_stream(
         .filter_map(|item| async move { item });
     Box::pin(RecordBatchStreamAdapter::new(schema, batches))
 }
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::physical_plan::ExecutionPlan;
+    use futures::TryStreamExt;
+
+    use crate::nd::array::NdArrowArray;
+    use crate::nd::dimensions::{Dimension, Dimensions};
+    use crate::nd::encoding::encode_nd_record_batch;
+
+    use super::*;
+
+    fn dims(spec: &[(&str, usize)]) -> Dimensions {
+        Dimensions::try_new(
+            spec.iter()
+                .map(|(name, size)| Dimension::new(*name, *size))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// An `NdSourceExec` over a single nd chunk on the given grid.
+    fn source(target: &[(&str, usize)]) -> Arc<NdSourceExec> {
+        let logical = Arc::new(Schema::new(vec![Field::new("time", DataType::Int32, true)]));
+        let size = target[0].1;
+        let time = NdArrowArray::try_new(
+            Arc::new(Int32Array::from((0..size as i32).collect::<Vec<_>>())),
+            dims(&target[..1]),
+        )
+        .unwrap();
+        let nd = NdRecordBatch::try_new(logical, vec![time], dims(target)).unwrap();
+        let encoded = encode_nd_record_batch(&nd).unwrap();
+        let schema = encoded.schema();
+        Arc::new(
+            NdSourceExec::try_new(
+                MemorySourceConfig::try_new_exec(&[vec![encoded]], schema, None).unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn as_nd_plan_recognizes_only_nd_aware_nodes() {
+        let source = source(&[("time", 2)]);
+        let plan: Arc<dyn ExecutionPlan> = source.clone();
+        assert!(as_nd_plan(&plan).is_some());
+
+        let projection: Arc<dyn ExecutionPlan> =
+            Arc::new(NdProjectionExec::try_new(plan.clone(), vec![]).unwrap());
+        assert!(as_nd_plan(&projection).is_some());
+
+        // The broadcast is the terminal node: it flattens, so it is *not* an nd
+        // producer and must not be treated as one.
+        let broadcast: Arc<dyn ExecutionPlan> =
+            Arc::new(NdBroadcastExec::try_new(plan.clone()).unwrap());
+        assert!(as_nd_plan(&broadcast).is_none());
+
+        // …and neither is the underlying flat child.
+        assert!(as_nd_plan(source.input()).is_none());
+    }
+
+    /// An empty grid carries no rows, so the materializing adapter must drop the
+    /// batch entirely rather than emit a zero-row `RecordBatch`.
+    #[tokio::test]
+    async fn empty_grids_are_dropped_instead_of_emitted() {
+        let plan = Arc::new(NdBroadcastExec::try_new(source(&[("time", 0)])).unwrap());
+        let batches: Vec<_> = plan
+            .execute(0, Arc::new(datafusion::execution::TaskContext::default()))
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(batches.is_empty(), "expected no batches, got {batches:?}");
+
+        // No rows were produced, so the broadcast reports none.
+        assert_eq!(plan.metrics().unwrap().output_rows(), Some(0));
+    }
+}

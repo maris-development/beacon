@@ -218,6 +218,44 @@ mod tests {
     }
 
     #[test]
+    fn matches_scheme_covers_every_backend_alias() {
+        // The alias lists must agree with the ones `build_object_store` switches
+        // on, or a secret silently stops applying to e.g. `s3a://` or `abfss://`.
+        for scheme in ["s3", "s3a"] {
+            assert!(SecretType::S3.matches_scheme(scheme), "{scheme}");
+        }
+        for scheme in ["az", "azure", "abfs", "abfss", "wasb", "wasbs", "adl"] {
+            assert!(SecretType::Azure.matches_scheme(scheme), "{scheme}");
+        }
+        assert!(SecretType::Gcs.matches_scheme("gs"));
+        assert!(SecretType::Http.matches_scheme("http"));
+        assert!(SecretType::Http.matches_scheme("https"));
+
+        // …and they do not overlap.
+        assert!(!SecretType::S3.matches_scheme("gs"));
+        assert!(!SecretType::Gcs.matches_scheme("s3"));
+        assert!(!SecretType::Http.matches_scheme("file"));
+    }
+
+    #[test]
+    fn a_scope_ending_in_a_slash_matches_mid_segment() {
+        // `s3://bucket/prefix/` is an explicit path prefix, so it may match a
+        // key that continues without a further separator.
+        let store = SecretStore::new();
+        store.add(secret("p", SecretType::S3, "s3://bucket/prefix/"));
+        assert_eq!(
+            store
+                .resolve(&Url::parse("s3://bucket/prefix/deep/x").unwrap())
+                .map(|s| s.name)
+                .as_deref(),
+            Some("p")
+        );
+        assert!(store
+            .resolve(&Url::parse("s3://bucket/other/x").unwrap())
+            .is_none());
+    }
+
+    #[test]
     fn debug_redacts_option_values() {
         let mut options = HashMap::new();
         options.insert("access_key_id".to_string(), "AKIASECRET".to_string());

@@ -193,8 +193,7 @@ mod tests {
     use beacon_datafusion_ext::table_ext::TableDefinition;
     use datafusion::arrow::datatypes::Schema;
     use datafusion::catalog::TableProvider;
-    use datafusion::datasource::{TableType, empty::EmptyTable as EmptyProvider};
-    use datafusion::execution::object_store::ObjectStoreUrl;
+    use datafusion::datasource::{empty::EmptyTable as EmptyProvider, TableType};
     use datafusion::prelude::SessionContext;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -211,7 +210,6 @@ mod tests {
         async fn build_provider(
             &self,
             _context: Arc<SessionContext>,
-            _data_store_url: &ObjectStoreUrl,
         ) -> anyhow::Result<Arc<dyn TableProvider>> {
             Ok(Arc::new(EmptyProvider::new(Arc::new(Schema::empty()))))
         }
@@ -233,7 +231,6 @@ mod tests {
         async fn build_provider(
             &self,
             _context: Arc<SessionContext>,
-            _data_store_url: &ObjectStoreUrl,
         ) -> anyhow::Result<Arc<dyn TableProvider>> {
             Ok(Arc::new(EmptyProvider::new(Arc::new(Schema::empty()))))
         }

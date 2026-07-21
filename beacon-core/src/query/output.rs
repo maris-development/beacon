@@ -51,12 +51,16 @@ impl Output {
     /// Tuple of the new logical plan and the output file wrapper.
     pub async fn parse(
         &self,
+        session: &SessionContext,
         tmp_dir: &std::path::Path,
         tmp_store_url: &datafusion::execution::object_store::ObjectStoreUrl,
         input_plan: LogicalPlan,
     ) -> datafusion::error::Result<(LogicalPlan, QueryOutputFile)> {
         let kind = self.format.file_kind();
-        let file_type = self.format.file_type(tmp_dir).await;
+        let file_type = self
+            .format
+            .file_type(session)
+            .map_err(|e| DataFusionError::External(e.into()))?;
 
         // Reserve a unique name under `tmp_dir` (the tmp store's root). The COPY
         // target is `<tmp_store_url><object_name>`; object-store writers resolve that

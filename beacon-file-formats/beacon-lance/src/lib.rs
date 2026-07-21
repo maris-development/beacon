@@ -390,6 +390,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_fails_if_a_table_already_exists_at_the_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+        let namespace = beacon_namespace();
+
+        create_lance_table(warehouse.clone(), &namespace, "dupe", &sample_schema())
+            .await
+            .expect("first create succeeds");
+        // A second CREATE at the same location must not silently clobber the
+        // dataset (WriteKind::Create errors when a dataset is already present).
+        let err = create_lance_table(warehouse.clone(), &namespace, "dupe", &sample_schema())
+            .await
+            .expect_err("second create must fail");
+        assert!(
+            err.to_string().to_lowercase().contains("write")
+                || err.to_string().to_lowercase().contains("exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_widens_view_types_in_the_provider_schema() {
+        // A `VARCHAR`/CTAS column arrives as Utf8View from DataFusion; Lance can't
+        // store view types, so the created table's schema must report Utf8.
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+        let schema = ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8View, true),
+            Field::new("blob", DataType::BinaryView, true),
+        ]);
+
+        let table = create_lance_table(warehouse.clone(), &beacon_namespace(), "views", &schema)
+            .await
+            .unwrap();
+        use datafusion::catalog::TableProvider;
+        let provider_schema = table.schema();
+        assert_eq!(provider_schema.field(1).data_type(), &DataType::Utf8);
+        assert_eq!(provider_schema.field(2).data_type(), &DataType::Binary);
+    }
+
+    #[tokio::test]
+    async fn drop_removes_every_object_of_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = test_warehouse(&dir);
+        let namespace = beacon_namespace();
+
+        let table = create_lance_table(warehouse.clone(), &namespace, "gone", &sample_schema())
+            .await
+            .unwrap();
+        let location = table.definition().location.clone();
+        let ctx = SessionContext::new();
+        ctx.register_table("gone", Arc::new(table)).unwrap();
+        ctx.sql("INSERT INTO gone VALUES (1, 'a')")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        // Files exist before the drop...
+        let prefix = LanceWarehouse::object_path(&location);
+        let before = warehouse.store().list(Some(&prefix)).count().await;
+        assert!(before > 0, "table should have objects before drop");
+
+        drop_lance_table(&warehouse, &location).await.unwrap();
+
+        let after = warehouse.store().list(Some(&prefix)).count().await;
+        assert_eq!(after, 0, "drop must remove every object under the table prefix");
+    }
+
+    #[tokio::test]
     async fn native_update_and_delete() {
         use datafusion::arrow::array::StringArray;
 

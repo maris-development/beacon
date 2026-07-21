@@ -1456,3 +1456,189 @@ impl TableDefinition for MaterializedViewDefinition {
 //         fs::remove_dir_all(&root).expect("temporary directory should be cleaned up");
 //     }
 // }
+
+#[cfg(test)]
+/// Unit tests for the pure helpers backing external-table (re)construction:
+/// storage-event matching, location round-tripping, and schema/partition
+/// normalization.
+mod helper_tests {
+    use datafusion::datasource::file_format::csv::CsvFormat;
+    use datafusion::datasource::file_format::parquet::ParquetFormat;
+
+    use super::*;
+    use datafusion::arrow::datatypes::Field;
+
+    fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
+        Arc::new(Schema::new(
+            fields
+                .iter()
+                .map(|(name, dt)| Field::new(*name, dt.clone(), true))
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    // ── storage-event matching ───────────────────────────────────────────
+
+    #[test]
+    fn path_under_prefix_is_segment_aware() {
+        let prefix = ObjectPath::from("data/example");
+
+        assert!(path_under_prefix(&prefix, &ObjectPath::from("data/example/a.parquet")));
+        assert!(path_under_prefix(
+            &prefix,
+            &ObjectPath::from("data/example/nested/a.parquet")
+        ));
+        // A sibling sharing a *string* prefix must not match.
+        assert!(!path_under_prefix(&prefix, &ObjectPath::from("data/example_2/a.parquet")));
+        assert!(!path_under_prefix(&prefix, &ObjectPath::from("other/a.parquet")));
+    }
+
+    #[test]
+    fn path_under_prefix_requires_a_strictly_deeper_path() {
+        let prefix = ObjectPath::from("data/example");
+        // The prefix itself is not "under" the prefix.
+        assert!(!path_under_prefix(&prefix, &prefix.clone()));
+        // ...and neither is a shorter path.
+        assert!(!path_under_prefix(&prefix, &ObjectPath::from("data")));
+    }
+
+    #[test]
+    fn empty_prefix_matches_any_non_empty_path() {
+        let root = ObjectPath::from("");
+        assert!(path_under_prefix(&root, &ObjectPath::from("a.parquet")));
+        assert!(!path_under_prefix(&root, &ObjectPath::from("")));
+    }
+
+    // ── location round-tripping ──────────────────────────────────────────
+
+    #[test]
+    fn listing_location_is_relative_to_the_object_store_root() {
+        let url = ListingTableUrl::parse("file:///data/obs/").unwrap();
+        let location = listing_location_from_table_path(&url).unwrap();
+        // The `file://` object-store URL is `file:///`, so the leading slash is
+        // part of the store root and drops out of the location. The persisted
+        // location is therefore store-relative and only resolves back to the
+        // same directory when a default store URL is configured.
+        assert_eq!(location, "data/obs/");
+    }
+
+    #[test]
+    fn listing_location_strips_the_store_authority_for_remote_stores() {
+        let url = ListingTableUrl::parse("s3://bucket/obs/").unwrap();
+        let location = listing_location_from_table_path(&url).unwrap();
+        // The bucket lives in the object-store URL, so it must not be repeated
+        // in the location (which is resolved *against* that store on reload).
+        assert_eq!(location, "obs/");
+    }
+
+    #[test]
+    fn listing_location_reattaches_the_glob() {
+        let url = ListingTableUrl::parse("file:///data/obs/**/*.parquet").unwrap();
+        let location = listing_location_from_table_path(&url).unwrap();
+        // The glob is dropped from the URL prefix, so it has to be re-appended.
+        assert_eq!(location, "data/obs/**/*.parquet");
+    }
+
+    #[test]
+    fn listing_location_rejects_a_bare_store_root() {
+        // A store root carries no location to persist.
+        let url = ListingTableUrl::parse("s3://bucket/").unwrap();
+        assert!(listing_location_from_table_path(&url).is_err());
+    }
+
+    // ── file type / glob inference ───────────────────────────────────────
+
+    #[test]
+    fn infer_file_type_prefers_the_configured_extension() {
+        let options = ListingOptions::new(Arc::new(ParquetFormat::default()))
+            .with_file_extension(".nc");
+        // The leading dot is stripped; the format's own extension is ignored.
+        assert_eq!(infer_file_type(&options), "nc");
+    }
+
+    #[test]
+    fn infer_file_type_falls_back_to_the_format_extension() {
+        // Beacon clears the extension so the format drives listing; the file
+        // type must then still be recoverable from the format itself.
+        let options =
+            ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension("");
+        assert_eq!(infer_file_type(&options), "parquet");
+
+        let options = ListingOptions::new(Arc::new(CsvFormat::default())).with_file_extension("");
+        assert_eq!(infer_file_type(&options), "csv");
+    }
+
+    #[test]
+    fn fallback_file_glob_is_recursive_and_lowercased() {
+        // Unlike the CREATE EXTERNAL TABLE factory (which globs a single level),
+        // a rebuilt external table re-lists recursively.
+        assert_eq!(fallback_file_glob("ParQuet"), "**/*.parquet");
+    }
+
+    // ── schema / partition normalization ─────────────────────────────────
+
+    #[test]
+    fn empty_schema_defers_inference_and_dictionary_encodes_partitions() {
+        let (resolved, partition_cols) =
+            resolve_schema_and_partition_cols(&Arc::new(Schema::empty()), &["year".to_string()])
+                .unwrap();
+
+        // `None` means "infer from the files".
+        assert!(resolved.is_none());
+        assert_eq!(
+            partition_cols,
+            vec![(
+                "year".to_string(),
+                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8))
+            )]
+        );
+    }
+
+    #[test]
+    fn explicit_schema_projects_out_partition_columns() {
+        let declared = schema(&[
+            ("value", DataType::Int32),
+            ("year", DataType::Utf8),
+        ]);
+
+        let (resolved, partition_cols) =
+            resolve_schema_and_partition_cols(&declared, &["year".to_string()]).unwrap();
+
+        // The file schema excludes the partition column (it lives in the path)...
+        let resolved = resolved.expect("an explicit schema is kept");
+        assert_eq!(resolved.fields().len(), 1);
+        assert_eq!(resolved.field(0).name(), "value");
+        // ...but the partition column keeps its declared type.
+        assert_eq!(partition_cols, vec![("year".to_string(), DataType::Utf8)]);
+    }
+
+    #[test]
+    fn a_partition_column_missing_from_the_schema_errors() {
+        let declared = schema(&[("value", DataType::Int32)]);
+        assert!(resolve_schema_and_partition_cols(&declared, &["year".to_string()]).is_err());
+    }
+
+    // ── persistence ──────────────────────────────────────────────────────
+
+    #[test]
+    fn external_table_definition_round_trips_through_typetag() {
+        let definition: Arc<dyn TableDefinition> = Arc::new(ExternalTableDefinition {
+            name: "obs".to_string(),
+            location: "obs/**/*.parquet".to_string(),
+            file_type: "parquet".to_string(),
+            schema: Arc::new(Schema::empty()),
+            definition: None,
+            partition_cols: vec!["year".to_string()],
+            options: HashMap::new(),
+            if_not_exists: false,
+        });
+
+        let json = serde_json::to_value(&definition).expect("definition should serialize");
+        assert_eq!(json["definition_type"], "listing_table");
+
+        let restored: Arc<dyn TableDefinition> =
+            serde_json::from_value(json).expect("definition should deserialize");
+        assert_eq!(restored.table_name(), "obs");
+        assert_eq!(restored.table_type(), TableType::Base);
+    }
+}

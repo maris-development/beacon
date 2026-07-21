@@ -437,6 +437,71 @@ mod tests {
     }
 
     #[test]
+    fn nd_value_type_rejects_non_nd_types() {
+        // A plain column type is not an nd encoding...
+        assert!(nd_value_type(&DataType::Float64).is_err());
+        // ...and neither is a struct whose `values` field is not a List.
+        let bogus = DataType::Struct(Fields::from(vec![Field::new(
+            "values",
+            DataType::Float64,
+            true,
+        )]));
+        assert!(nd_value_type(&bogus).is_err());
+        // ...nor one missing `values` entirely.
+        let missing =
+            DataType::Struct(Fields::from(vec![Field::new("other", DataType::Utf8, true)]));
+        assert!(nd_value_type(&missing).is_err());
+    }
+
+    #[test]
+    fn target_appends_axes_only_present_on_narrow_columns() {
+        // The widest column (sst{time,lat}) sets the axis order; `depth`, which
+        // only a 1-D column carries, is appended rather than dropped — otherwise
+        // that column could not broadcast onto the grid at all.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("sst", DataType::Float64, true),
+            Field::new("depth", DataType::Int32, true),
+        ]));
+        let sst = NdArrowArray::try_new(
+            Arc::new(Float64Array::from(vec![0.0, 0.1, 0.2, 1.0, 1.1, 1.2])),
+            dims(&[("time", 2), ("lat", 3)]),
+        )
+        .unwrap();
+        let depth = NdArrowArray::try_new(
+            Arc::new(Int32Array::from(vec![5, 10])),
+            dims(&[("depth", 2)]),
+        )
+        .unwrap();
+        let nd = NdRecordBatch::try_new(
+            schema,
+            vec![sst, depth],
+            dims(&[("time", 2), ("lat", 3), ("depth", 2)]),
+        )
+        .unwrap();
+
+        let decoded = decode_nd_record_batch(&encode_nd_record_batch(&nd).unwrap()).unwrap();
+        assert_eq!(
+            decoded.target(),
+            &dims(&[("time", 2), ("lat", 3), ("depth", 2)])
+        );
+        assert_eq!(decoded.materialize().unwrap().num_rows(), 12);
+    }
+
+    #[test]
+    fn scalar_column_round_trips_as_rank_zero() {
+        // A rank-0 attribute column encodes with empty dim lists and decodes
+        // back to a scalar (not to a 1-element axis).
+        let scalar = NdArrowArray::try_new(
+            Arc::new(Float64Array::from(vec![42.0])),
+            Dimensions::scalar(),
+        )
+        .unwrap();
+        let decoded = decode_nd_array(&encode_nd_array(&scalar), 0).unwrap();
+        assert_eq!(decoded.dims().rank(), 0);
+        assert_eq!(decoded.values().len(), 1);
+    }
+
+    #[test]
     fn logical_schema_unwraps_structs() {
         let encoded = Schema::new(vec![
             nd_encoded_field("lat", &DataType::Int32),

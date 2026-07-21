@@ -29,3 +29,22 @@ pub fn file_open_parallelism() -> usize {
     //Make sure max is at least 1 to avoid zero parallelism
     std::cmp::max(max, 1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallelism_is_never_zero_and_stays_under_the_limit() {
+        // Callers use this as a concurrency permit count, so a zero would stall
+        // schema inference outright — the `max(_, 1)` floor is load-bearing.
+        let parallelism = file_open_parallelism();
+        assert!(parallelism >= 1);
+        // It must also leave headroom: never more than half the descriptor budget.
+        let limit = max_open_fd() as usize;
+        assert!(
+            parallelism <= limit.max(2) / 2 || parallelism == 1,
+            "parallelism {parallelism} exceeds half of the {limit} descriptor budget"
+        );
+    }
+}

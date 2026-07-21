@@ -228,3 +228,246 @@ impl FileFormat for BBFFormat {
 
 pub mod table_function;
 pub use table_function::ReadBBFFunc;
+
+#[cfg(test)]
+pub(crate) mod test_util {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Int32Array, StringArray};
+    use beacon_binary_format::array::dimensions::Dimensions;
+    use beacon_binary_format::entry::{ArrayCollection, Column, Entry};
+    use beacon_binary_format::writer::BBFWriter;
+    use object_store::ObjectMeta;
+    use object_store::local::LocalFileSystem;
+    use object_store::path::Path;
+
+    /// Writes a small two-entry BBF file into `dir` and returns a local-filesystem
+    /// object store rooted there plus the file's metadata. Used by the tests that
+    /// need a genuine BBF file rather than a synthetic schema.
+    pub(crate) async fn write_bbf_fixture(
+        dir: &std::path::Path,
+        file_name: &str,
+    ) -> (Arc<LocalFileSystem>, ObjectMeta) {
+        let file_path = dir.join(file_name);
+        {
+            let mut writer =
+                BBFWriter::new(&file_path, 1024 * 1024, None, true).expect("bbf writer");
+
+            let ints: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+            let collection = ArrayCollection::new(
+                "first",
+                Box::new(std::iter::once(Column::new(
+                    "ints",
+                    ints,
+                    Dimensions::Multi(vec![("dim1", 3).into()]),
+                ))),
+            );
+            writer.append(Entry::new(collection), "entry_a");
+
+            let names: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
+            let more_ints: ArrayRef = Arc::new(Int32Array::from(vec![10, 20]));
+            let collection = ArrayCollection::new(
+                "second",
+                Box::new(
+                    vec![
+                        Column::new("names", names, Dimensions::Multi(vec![("dim1", 2).into()])),
+                        Column::new(
+                            "ints",
+                            more_ints,
+                            Dimensions::Multi(vec![("dim1", 2).into()]),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            );
+            writer.append(Entry::new(collection), "entry_b");
+
+            writer.finish().expect("finish bbf file");
+        }
+
+        let store = Arc::new(LocalFileSystem::new_with_prefix(dir).expect("local store"));
+        let location = Path::from(file_name);
+        let meta = {
+            use object_store::ObjectStoreExt;
+            store.head(&location).await.expect("stat bbf fixture")
+        };
+        (store, meta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::prelude::SessionContext;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::{ObjectStoreExt, PutPayload};
+
+    /// Every spelling accepted by `CREATE EXTERNAL TABLE ... OPTIONS` must map to
+    /// the same boolean, including odd casing and surrounding whitespace, because
+    /// SQL option values arrive verbatim from the parser.
+    #[test]
+    fn parse_bool_option_accepts_all_documented_spellings() {
+        for truthy in ["true", "TRUE", " True ", "1", "yes", "YES", "on"] {
+            assert!(
+                parse_bool_option("split_streams_slice", truthy).unwrap(),
+                "{truthy:?} should parse as true"
+            );
+        }
+        for falsy in ["false", "FALSE", " off ", "0", "no", "OFF"] {
+            assert!(
+                !parse_bool_option("split_streams_slice", falsy).unwrap(),
+                "{falsy:?} should parse as false"
+            );
+        }
+    }
+
+    /// A typo in an option must fail loudly (naming the offending option) instead of
+    /// silently falling back to the default.
+    #[test]
+    fn parse_bool_option_rejects_unknown_values() {
+        let err = parse_bool_option("split_streams_slice", "maybe").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("split_streams_slice"), "message was: {msg}");
+        assert!(msg.contains("maybe"), "message was: {msg}");
+        assert!(parse_bool_option("split_streams_slice", "").is_err());
+    }
+
+    /// `create()` must layer the per-table option on top of the runtime default:
+    /// absent option keeps the runtime value, present option overrides it.
+    #[test]
+    fn create_layers_table_option_over_runtime_config() {
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+
+        let on_by_default = BBFFormatFactory::new(BbfConfig {
+            split_streams_slice: true,
+        });
+        let format = on_by_default.create(&state, &HashMap::new()).unwrap();
+        assert!(downcast(&format).split_streams_slice);
+
+        let opts = HashMap::from([("split_streams_slice".to_string(), "false".to_string())]);
+        let format = on_by_default.create(&state, &opts).unwrap();
+        assert!(!downcast(&format).split_streams_slice);
+
+        let off_by_default = <BBFFormatFactory as Default>::default();
+        let opts = HashMap::from([("split_streams_slice".to_string(), "on".to_string())]);
+        let format = off_by_default.create(&state, &opts).unwrap();
+        assert!(downcast(&format).split_streams_slice);
+    }
+
+    /// An invalid option must abort table creation rather than be ignored.
+    #[test]
+    fn create_propagates_invalid_option_error() {
+        let ctx = SessionContext::new();
+        let opts = HashMap::from([("split_streams_slice".to_string(), "nope".to_string())]);
+        assert!(
+            <BBFFormatFactory as Default>::default()
+                .create(&ctx.state(), &opts)
+                .is_err()
+        );
+    }
+
+    /// `default()` has no options to consult, so it must still carry the runtime
+    /// configuration through to the format.
+    #[test]
+    fn default_format_carries_runtime_config() {
+        let factory = BBFFormatFactory::new(BbfConfig {
+            split_streams_slice: true,
+        });
+        assert!(downcast(&FileFormatFactory::default(&factory)).split_streams_slice);
+        assert!(!downcast(&FileFormatFactory::default(&<BBFFormatFactory as Default>::default())).split_streams_slice);
+    }
+
+    fn downcast(format: &Arc<dyn FileFormat>) -> &BBFFormat {
+        format
+            .as_any()
+            .downcast_ref::<BBFFormat>()
+            .expect("factory should produce a BBFFormat")
+    }
+
+    /// Only `.bbf` objects are BBF datasets; anything else in the listing must be
+    /// left to the other format factories.
+    #[tokio::test]
+    async fn discover_datasets_selects_only_bbf_objects() {
+        let store = Arc::new(InMemory::new());
+        let mut objects = Vec::new();
+        for loc in ["x/a.bbf", "x/b.parquet", "x/plain", "x/c.bbf2"] {
+            let path = Path::from(loc);
+            store
+                .put(&path, PutPayload::from(Vec::new()))
+                .await
+                .expect("put");
+            objects.push(store.head(&path).await.expect("head"));
+        }
+        let datasets = <BBFFormatFactory as Default>::default()
+            .discover_datasets(&objects)
+            .unwrap();
+        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+        assert_eq!(paths, vec!["x/a.bbf"]);
+        assert_eq!(datasets[0].format, "bbf");
+        assert_eq!(<BBFFormatFactory as Default>::default().file_extensions(), vec!["bbf"]);
+    }
+
+    /// BBF carries its own internal compression, so the container extension is
+    /// always `bbf` no matter what compression the caller asks about.
+    #[test]
+    fn extension_is_always_bbf() {
+        let format = BBFFormat::default();
+        assert_eq!(format.get_ext(), "bbf");
+        assert_eq!(format.compression_type(), None);
+        assert_eq!(
+            format
+                .get_ext_with_compression(&FileCompressionType::GZIP)
+                .unwrap(),
+            "bbf"
+        );
+    }
+
+    /// End-to-end schema inference over a real BBF file: the union of all entries'
+    /// columns must be visible, plus the synthetic entry-key column, and a column
+    /// that only exists in one entry must still appear.
+    #[tokio::test]
+    async fn infer_schema_reads_real_bbf_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, meta) = super::test_util::write_bbf_fixture(dir.path(), "fixture.bbf").await;
+        let object_store: Arc<dyn ObjectStore> = store;
+
+        let ctx = SessionContext::new();
+        let schema = BBFFormat::default()
+            .infer_schema(&ctx.state(), &object_store, &[meta])
+            .await
+            .expect("real BBF file should infer");
+
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"ints"), "fields were {names:?}");
+        assert!(names.contains(&"names"), "fields were {names:?}");
+        assert!(
+            names.contains(&beacon_binary_format::entry::Entry::FIELD_NAME),
+            "fields were {names:?}"
+        );
+    }
+
+    /// A file that is not BBF must produce an error rather than an empty schema,
+    /// so a mis-registered extension surfaces immediately.
+    #[tokio::test]
+    async fn infer_schema_errors_on_non_bbf_bytes() {
+        let store = Arc::new(InMemory::new());
+        let path = Path::from("junk.bbf");
+        store
+            .put(&path, PutPayload::from(b"definitely not bbf".to_vec()))
+            .await
+            .expect("put");
+        let meta = store.head(&path).await.expect("head");
+        let object_store: Arc<dyn ObjectStore> = store;
+
+        let ctx = SessionContext::new();
+        assert!(
+            BBFFormat::default()
+                .infer_schema(&ctx.state(), &object_store, &[meta])
+                .await
+                .is_err()
+        );
+    }
+
+}

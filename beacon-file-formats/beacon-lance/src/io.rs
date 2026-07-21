@@ -130,3 +130,118 @@ pub async fn write_stream(
 
     Ok(written.load(Ordering::Relaxed))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Int64Array, StringArray};
+
+    /// Lance 7.x can't store Arrow "view" types that DataFusion 53 produces, so
+    /// they must be widened; every other type passes through untouched.
+    #[test]
+    fn view_types_are_widened_others_untouched() {
+        assert_eq!(lance_compatible_type(&DataType::Utf8View), DataType::Utf8);
+        assert_eq!(
+            lance_compatible_type(&DataType::BinaryView),
+            DataType::Binary
+        );
+        assert_eq!(lance_compatible_type(&DataType::Int64), DataType::Int64);
+        assert_eq!(lance_compatible_type(&DataType::Utf8), DataType::Utf8);
+        // Nested/dictionary types are not "view" types and pass through.
+        assert_eq!(
+            lance_compatible_type(&DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Int32,
+                true
+            )))),
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true)))
+        );
+    }
+
+    /// The whole schema is rewritten field-by-field, preserving names and
+    /// nullability while widening view types (as a `VARCHAR`/`Utf8View` CTAS
+    /// column would need).
+    #[test]
+    fn schema_widening_preserves_names_and_nullability() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8View, true),
+            Field::new("blob", DataType::BinaryView, true),
+        ]);
+        let widened = lance_compatible_schema(&schema);
+        assert_eq!(widened.field(0).data_type(), &DataType::Int64);
+        assert_eq!(widened.field(1).data_type(), &DataType::Utf8);
+        assert!(widened.field(1).is_nullable());
+        assert_eq!(widened.field(1).name(), "name");
+        assert_eq!(widened.field(2).data_type(), &DataType::Binary);
+        assert!(!widened.field(0).is_nullable());
+    }
+
+    #[test]
+    fn write_kind_maps_to_lance_write_mode() {
+        assert!(matches!(WriteMode::from(WriteKind::Create), WriteMode::Create));
+        assert!(matches!(WriteMode::from(WriteKind::Append), WriteMode::Append));
+        assert!(matches!(
+            WriteMode::from(WriteKind::Overwrite),
+            WriteMode::Overwrite
+        ));
+    }
+
+    /// `coerce_batch` casts only the columns whose type differs from the target,
+    /// leaving already-matching columns as the exact same array.
+    #[test]
+    fn coerce_batch_casts_only_differing_columns() {
+        let source_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8View, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            source_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                // Build a Utf8View array by casting from Utf8.
+                arrow::compute::cast(
+                    &(Arc::new(StringArray::from(vec!["a", "b"])) as arrow::array::ArrayRef),
+                    &DataType::Utf8View,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let target = lance_compatible_schema(&source_schema);
+        let coerced = coerce_batch(&batch, &target).unwrap();
+        assert_eq!(coerced.schema().field(1).data_type(), &DataType::Utf8);
+        assert_eq!(coerced.num_rows(), 2);
+        // The unchanged Int64 column keeps its values through the coercion.
+        let ids = coerced
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(ids.values(), &[1, 2]);
+        let names = coerced
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "a");
+    }
+
+    #[test]
+    fn empty_stream_carries_schema_and_no_rows() {
+        use futures::StreamExt as _;
+
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let mut stream = empty_stream(schema.clone());
+        assert_eq!(stream.schema(), schema);
+        // No batches are produced.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let first = rt.block_on(async { stream.next().await });
+        assert!(first.is_none());
+    }
+}

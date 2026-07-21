@@ -106,6 +106,44 @@ fn geojson_to_wkt_str(geo_json_str: &str) -> anyhow::Result<String> {
     Ok(geom.to_wkt().to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::logical_expr::ScalarUDFImpl;
+
+    #[test]
+    fn udf_metadata_is_stable() {
+        let udf = GeoJsonAsWktUdf::new();
+        assert_eq!(udf.name(), "st_geojson_as_wkt");
+        assert_eq!(
+            udf.return_type(&[arrow::datatypes::DataType::Utf8]).unwrap(),
+            arrow::datatypes::DataType::Utf8
+        );
+    }
+
+    #[test]
+    fn converts_a_point_to_wkt() {
+        let wkt = geojson_to_wkt_str(r#"{"type":"Point","coordinates":[30.0,10.0]}"#).unwrap();
+        assert_eq!(wkt, "POINT(30 10)");
+    }
+
+    #[test]
+    fn converts_a_polygon_to_wkt() {
+        let wkt = geojson_to_wkt_str(
+            r#"{"type":"Polygon","coordinates":[[[0,0],[0,1],[1,1],[1,0],[0,0]]]}"#,
+        )
+        .unwrap();
+        assert!(wkt.starts_with("POLYGON"), "{wkt}");
+    }
+
+    #[test]
+    fn invalid_geojson_is_an_error() {
+        assert!(geojson_to_wkt_str("not json").is_err());
+        // Valid JSON, but not a GeoJSON geometry.
+        assert!(geojson_to_wkt_str(r#"{"type":"Nonsense"}"#).is_err());
+    }
+}
+
 impl Default for GeoJsonAsWktUdf {
     fn default() -> Self {
         Self::new()

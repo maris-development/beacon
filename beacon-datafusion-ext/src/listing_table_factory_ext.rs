@@ -273,4 +273,87 @@ mod tests {
         assert_eq!(fallback_file_glob("ATLAS"), "*.atlas");
         assert_eq!(fallback_file_glob("ParQuet"), "*.parquet");
     }
+
+    #[test]
+    fn partition_cols_from_schema_errors_on_an_undeclared_column() {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            true,
+        )]));
+
+        // PARTITIONED BY a column the explicit schema never declares.
+        assert!(partition_cols_from_schema(&schema, &["year".to_string()]).is_err());
+    }
+
+    #[test]
+    fn project_out_partition_columns_is_a_no_op_without_partitions() {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int32, true),
+            Field::new("year", DataType::Utf8, true),
+        ]));
+
+        let projected = project_out_partition_columns(&schema, &[]).unwrap();
+        assert_eq!(projected.as_ref(), schema.as_ref());
+    }
+
+    #[test]
+    fn an_empty_schema_defers_inference_to_the_files() {
+        use super::resolve_schema_and_partition_cols;
+
+        let cmd = create_external_table(Schema::empty(), vec!["year".to_string()]);
+        let (schema, partition_cols) = resolve_schema_and_partition_cols(&cmd).unwrap();
+
+        // `None` tells the caller to infer, and partition columns fall back to
+        // DataFusion's dictionary default.
+        assert!(schema.is_none());
+        assert_eq!(
+            partition_cols[0].1,
+            DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8))
+        );
+    }
+
+    #[test]
+    fn an_explicit_schema_is_kept_minus_its_partition_columns() {
+        use super::resolve_schema_and_partition_cols;
+
+        let declared = Schema::new(vec![
+            Field::new("value", DataType::Int32, true),
+            Field::new("year", DataType::Utf8, true),
+        ]);
+        let cmd = create_external_table(declared, vec!["year".to_string()]);
+        let (schema, partition_cols) = resolve_schema_and_partition_cols(&cmd).unwrap();
+
+        let schema = schema.expect("an explicit schema is preserved");
+        assert_eq!(schema.fields().len(), 1);
+        assert_eq!(schema.field(0).name(), "value");
+        // The partition column keeps the type the user declared for it.
+        assert_eq!(partition_cols, vec![("year".to_string(), DataType::Utf8)]);
+    }
+
+    /// A minimal `CREATE EXTERNAL TABLE` command carrying just the schema and
+    /// partition columns the resolver looks at.
+    fn create_external_table(
+        schema: Schema,
+        table_partition_cols: Vec<String>,
+    ) -> datafusion::logical_expr::CreateExternalTable {
+        use datafusion::common::{Constraints, DFSchema};
+
+        datafusion::logical_expr::CreateExternalTable {
+            schema: Arc::new(DFSchema::try_from(schema).unwrap()),
+            name: "t".into(),
+            location: "data/".to_string(),
+            file_type: "parquet".to_string(),
+            table_partition_cols,
+            if_not_exists: false,
+            or_replace: false,
+            temporary: false,
+            definition: None,
+            order_exprs: vec![],
+            unbounded: false,
+            options: Default::default(),
+            constraints: Constraints::default(),
+            column_defaults: Default::default(),
+        }
+    }
 }

@@ -407,6 +407,171 @@ mod tests {
             .values()
             .to_vec()
     }
+    /// `NdRecordBatch` is not `Debug`, so `unwrap_err` is unavailable.
+    fn expect_err(result: anyhow::Result<NdRecordBatch>) -> String {
+        match result {
+            Ok(_) => panic!("expected an error, got a batch"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    fn int32_array(values: Vec<i32>, shape: Vec<usize>, dims: &[&str]) -> Arc<dyn NdArrowArray> {
+        Arc::new(
+            NdArrowArrayDispatch::new(InMemoryArrayBackend::new(
+                ndarray::ArrayD::from_shape_vec(shape.clone(), values).unwrap(),
+                shape,
+                dims.iter().map(|d| d.to_string()).collect(),
+                None,
+            ))
+            .unwrap(),
+        ) as Arc<dyn NdArrowArray>
+    }
+
+    // ── NdRecordBatch::new validation ─────────────────────────────────
+
+    #[test]
+    fn new_rejects_a_schema_with_a_different_number_of_fields() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, false),
+        ]));
+        let err = expect_err(NdRecordBatch::new(
+            "b".to_string(),
+            schema,
+            vec![int32_array(vec![1, 2], vec![2], &["time"])],
+        ));
+        assert!(
+            err.contains("does not match number of fields"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn new_rejects_a_field_whose_data_type_disagrees_with_its_array() {
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Float64, false)]));
+        let err = expect_err(NdRecordBatch::new(
+            "b".to_string(),
+            schema,
+            vec![int32_array(vec![1, 2], vec![2], &["time"])],
+        ));
+        assert!(
+            err.contains("Data type mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn new_rejects_two_arrays_that_disagree_on_a_shared_dimension_size() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, false),
+        ]));
+        let err = expect_err(NdRecordBatch::new(
+            "b".to_string(),
+            schema,
+            vec![
+                int32_array(vec![1, 2], vec![2], &["time"]),
+                int32_array(vec![1, 2, 3], vec![3], &["time"]),
+            ],
+        ));
+        assert!(
+            err.contains("conflicting sizes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_as_arrow_stream_rejects_arrays_on_incompatible_dimension_sets() {
+        // `bnds(lat, nv)` cannot broadcast onto the highest-dimensionality
+        // array's `(time, lat)` grid — `nv` has nowhere to go.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Int32, false),
+            Field::new("bnds", DataType::Int32, false),
+        ]));
+        let batch = NdRecordBatch::new(
+            "b".to_string(),
+            schema,
+            vec![
+                int32_array(vec![1, 2, 3, 4], vec![2, 2], &["time", "lat"]),
+                int32_array(vec![5, 6, 7, 8], vec![2, 2], &["lat", "nv"]),
+            ],
+        )
+        .unwrap();
+
+        let err = batch.try_as_arrow_stream(1024).await.err().expect("expected an error");
+        assert!(
+            err.to_string().contains("cannot be broadcast"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_as_arrow_stream_of_a_zero_length_grid_yields_no_rows() {
+        // An empty unlimited dimension must not fabricate rows.
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+        let batch = NdRecordBatch::new(
+            "b".to_string(),
+            schema,
+            vec![int32_array(vec![], vec![0, 3], &["time", "lat"])],
+        )
+        .unwrap();
+
+        let batches = batch
+            .try_as_arrow_stream(usize::MAX)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+    }
+
+    #[test]
+    fn generate_chunk_shape_never_exceeds_the_axis_length() {
+        // A preferred size larger than the whole array collapses to "read it all".
+        assert_eq!(NdRecordBatch::generate_chunk_shape(&[3, 4], usize::MAX), vec![3, 4]);
+        // A zero-length axis keeps a zero extent rather than being clamped to 1.
+        assert_eq!(NdRecordBatch::generate_chunk_shape(&[0, 4], 1024), vec![0, 4]);
+    }
+
+    #[test]
+    fn generate_chunk_subsets_of_a_zero_length_axis_is_empty() {
+        let subsets: Vec<ArraySubset> =
+            NdRecordBatch::generate_chunk_subsets(vec![0, 4], vec![0, 4]).collect();
+        assert!(subsets.is_empty());
+    }
+
+    #[test]
+    fn generate_chunk_subsets_rank_mismatch_yields_nothing() {
+        let subsets: Vec<ArraySubset> =
+            NdRecordBatch::generate_chunk_subsets(vec![3, 4], vec![3]).collect();
+        assert!(subsets.is_empty());
+    }
+
+    #[test]
+    fn generate_chunk_subsets_tile_the_whole_grid_exactly_once() {
+        // Every element must be covered by exactly one chunk — the property the
+        // remainder handling exists to preserve.
+        let shape = vec![7, 5];
+        let chunk_shape = NdRecordBatch::generate_chunk_shape(&shape, 6);
+        let subsets: Vec<ArraySubset> =
+            NdRecordBatch::generate_chunk_subsets(shape.clone(), chunk_shape).collect();
+
+        let mut covered = vec![0usize; shape[0] * shape[1]];
+        for subset in &subsets {
+            for row in subset.start[0]..subset.start[0] + subset.shape[0] {
+                for col in subset.start[1]..subset.start[1] + subset.shape[1] {
+                    covered[row * shape[1] + col] += 1;
+                }
+            }
+        }
+        assert!(
+            covered.iter().all(|count| *count == 1),
+            "chunks must partition the grid, got coverage {covered:?}"
+        );
+    }
+
     #[test]
     fn generate_chunk_subsets_c_order_and_remainder() {
         let shape = [10474, 4381];

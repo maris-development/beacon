@@ -165,3 +165,52 @@ pub async fn list_indices(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn parses_every_kind_case_insensitively_and_trims() {
+        assert_eq!(
+            ScalarIndexKind::from_str("btree").unwrap(),
+            ScalarIndexKind::BTree
+        );
+        assert_eq!(
+            ScalarIndexKind::from_str("  BITMAP ").unwrap(),
+            ScalarIndexKind::Bitmap
+        );
+        assert_eq!(
+            ScalarIndexKind::from_str("Inverted").unwrap(),
+            ScalarIndexKind::Inverted
+        );
+        // `fts` is an accepted alias for the inverted (full-text) index.
+        assert_eq!(
+            ScalarIndexKind::from_str("fts").unwrap(),
+            ScalarIndexKind::Inverted
+        );
+    }
+
+    #[test]
+    fn unknown_kind_reports_the_accepted_values() {
+        let err = ScalarIndexKind::from_str("hnsw").unwrap_err();
+        assert!(err.contains("btree"), "{err}");
+        assert!(err.contains("bitmap"), "{err}");
+        assert!(err.contains("inverted"), "{err}");
+    }
+
+    /// `as_str` is the DDL/round-trip spelling; parsing it back must be stable
+    /// for every kind (note: `inverted` -> "inverted", never "fts").
+    #[test]
+    fn as_str_round_trips_through_from_str() {
+        for kind in [
+            ScalarIndexKind::BTree,
+            ScalarIndexKind::Bitmap,
+            ScalarIndexKind::Inverted,
+        ] {
+            assert_eq!(ScalarIndexKind::from_str(kind.as_str()).unwrap(), kind);
+        }
+        assert_eq!(ScalarIndexKind::Inverted.as_str(), "inverted");
+    }
+}

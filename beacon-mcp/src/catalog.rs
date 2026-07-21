@@ -714,4 +714,207 @@ mod tests {
         let sql = build_table_sql("obs", &mcp(None), None, &Map::new()).unwrap();
         assert_eq!(sql, r#"SELECT * FROM "obs" LIMIT 100"#);
     }
+
+    // ---- default tool-name derivation -----------------------------------
+
+    #[test]
+    fn default_tool_name_prefixes_and_sanitizes() {
+        assert_eq!(default_tool_name("obs"), "query_obs");
+        // Dots, spaces and other non-MCP-safe characters become '_'; '-' and '_'
+        // are kept (they are valid MCP tool-name characters).
+        assert_eq!(default_tool_name("schema.my table"), "query_schema_my_table");
+        assert_eq!(default_tool_name("keep-_ok"), "query_keep-_ok");
+    }
+
+    #[test]
+    fn default_tool_name_is_truncated_to_64_chars() {
+        let name = default_tool_name(&"a".repeat(200));
+        assert_eq!(name.len(), 64);
+        assert!(name.starts_with("query_aaaa"));
+        // The result is still a valid MCP tool name.
+        assert!(beacon_core::extensions::is_valid_tool_name(&name));
+    }
+
+    /// A custom `tool_name` from the extension is used verbatim; only when it is
+    /// absent do we derive `query_<table>`. (These are the two branches
+    /// `table_tool`/`run_table_tool` pick between.)
+    #[test]
+    fn custom_tool_name_overrides_the_default() {
+        let mut ext = mcp(None);
+        ext.tool_name = Some("ocean_obs".to_string());
+        let chosen = ext
+            .tool_name
+            .clone()
+            .unwrap_or_else(|| default_tool_name("obs"));
+        assert_eq!(chosen, "ocean_obs");
+
+        let plain = mcp(None)
+            .tool_name
+            .clone()
+            .unwrap_or_else(|| default_tool_name("obs"));
+        assert_eq!(plain, "query_obs");
+    }
+
+    // ---- filter / scalar rendering --------------------------------------
+
+    #[test]
+    fn render_filter_covers_simple_comparison_ops() {
+        let f = |op| PresetFilter {
+            column: "depth".into(),
+            op,
+            value: serde_json::json!(10),
+        };
+        assert_eq!(render_filter(&f(PresetOp::Eq)).unwrap(), r#""depth" = 10"#);
+        assert_eq!(render_filter(&f(PresetOp::Ne)).unwrap(), r#""depth" != 10"#);
+        assert_eq!(render_filter(&f(PresetOp::Lt)).unwrap(), r#""depth" < 10"#);
+        assert_eq!(render_filter(&f(PresetOp::Lte)).unwrap(), r#""depth" <= 10"#);
+        assert_eq!(render_filter(&f(PresetOp::Gt)).unwrap(), r#""depth" > 10"#);
+        assert_eq!(render_filter(&f(PresetOp::Gte)).unwrap(), r#""depth" >= 10"#);
+    }
+
+    #[test]
+    fn render_filter_between_requires_a_two_element_array() {
+        let bad = PresetFilter {
+            column: "d".into(),
+            op: PresetOp::Between,
+            value: serde_json::json!([1, 2, 3]),
+        };
+        assert!(render_filter(&bad).unwrap_err().to_string().contains("two-element"));
+
+        let scalar = PresetFilter {
+            column: "d".into(),
+            op: PresetOp::Between,
+            value: serde_json::json!(1),
+        };
+        assert!(render_filter(&scalar).is_err());
+    }
+
+    #[test]
+    fn render_filter_in_requires_a_non_empty_array() {
+        let empty = PresetFilter {
+            column: "d".into(),
+            op: PresetOp::In,
+            value: serde_json::json!([]),
+        };
+        assert!(render_filter(&empty).unwrap_err().to_string().contains("non-empty"));
+    }
+
+    /// Column identifiers are always double-quoted with embedded quotes escaped,
+    /// so a crafted column name can't break out of the identifier.
+    #[test]
+    fn render_filter_quotes_and_escapes_column_identifiers() {
+        let f = PresetFilter {
+            column: r#"we"ird"#.into(),
+            op: PresetOp::Eq,
+            value: serde_json::json!(true),
+        };
+        assert_eq!(render_filter(&f).unwrap(), r#""we""ird" = TRUE"#);
+    }
+
+    #[test]
+    fn render_scalar_renders_each_json_type_and_rejects_nested() {
+        assert_eq!(render_scalar(&serde_json::json!(42)).unwrap(), "42");
+        assert_eq!(render_scalar(&serde_json::json!(1.5)).unwrap(), "1.5");
+        assert_eq!(render_scalar(&serde_json::json!(true)).unwrap(), "TRUE");
+        assert_eq!(render_scalar(&serde_json::json!(false)).unwrap(), "FALSE");
+        assert_eq!(render_scalar(&Value::Null).unwrap(), "NULL");
+        // Single quotes are doubled to avoid SQL-injection via preset values.
+        assert_eq!(
+            render_scalar(&serde_json::json!("a'b")).unwrap(),
+            "'a''b'"
+        );
+        // Arrays / objects are not valid scalar filter values.
+        assert!(render_scalar(&serde_json::json!([1, 2])).is_err());
+        assert!(render_scalar(&serde_json::json!({"x": 1})).is_err());
+    }
+
+    // ---- build_table_sql: select, limit, multi-filter --------------------
+
+    #[test]
+    fn explicit_select_is_quoted_and_limit_defaults_to_100() {
+        let mut args = Map::new();
+        args.insert("select".into(), serde_json::json!(["lat", "depth"]));
+        let sql = build_table_sql("obs", &mcp(Some(vec!["lat", "depth"])), None, &args).unwrap();
+        assert_eq!(sql, r#"SELECT "lat", "depth" FROM "obs" LIMIT 100"#);
+    }
+
+    #[test]
+    fn limit_is_honored_and_clamped_to_max_rows() {
+        let mut args = Map::new();
+        args.insert("limit".into(), serde_json::json!(5));
+        let sql = build_table_sql("obs", &mcp(None), None, &args).unwrap();
+        assert!(sql.ends_with("LIMIT 5"), "{sql}");
+
+        // A caller-supplied limit larger than the hard cap is clamped.
+        let mut big = Map::new();
+        big.insert("limit".into(), serde_json::json!(10_000_000u64));
+        let sql = build_table_sql("obs", &mcp(None), None, &big).unwrap();
+        assert!(sql.ends_with(&format!("LIMIT {MAX_ROWS}")), "{sql}");
+    }
+
+    #[test]
+    fn default_select_uses_exposed_columns_when_curated() {
+        // With exposed columns and no explicit `select`, the default projection is
+        // the curated set (not `*`), so unexposed columns never leak.
+        let sql = build_table_sql("obs", &mcp(Some(vec!["lat", "lon"])), None, &Map::new()).unwrap();
+        assert_eq!(sql, r#"SELECT "lat", "lon" FROM "obs" LIMIT 100"#);
+    }
+
+    #[test]
+    fn multiple_preset_filters_are_joined_with_and() {
+        let p = preset(
+            "band",
+            vec![
+                PresetFilter {
+                    column: "depth".into(),
+                    op: PresetOp::Gte,
+                    value: serde_json::json!(0),
+                },
+                PresetFilter {
+                    column: "depth".into(),
+                    op: PresetOp::Lte,
+                    value: serde_json::json!(10),
+                },
+            ],
+        );
+        let mut args = Map::new();
+        args.insert("preset".into(), Value::String("band".into()));
+        let sql = build_table_sql("obs", &mcp(None), Some(&p), &args).unwrap();
+        assert_eq!(
+            sql,
+            r#"SELECT * FROM "obs" WHERE "depth" >= 0 AND "depth" <= 10 LIMIT 100"#
+        );
+    }
+
+    // ---- resolve_columns edge cases -------------------------------------
+
+    /// An exposed column that does not exist in the schema is silently skipped
+    /// (filter_map), so a stale extension can't crash `describe_table`.
+    #[test]
+    fn resolve_columns_skips_exposed_columns_missing_from_schema() {
+        let schema = SchemaView {
+            fields: vec![field("lat", "Float64")],
+            metadata: Default::default(),
+        };
+        let cols = resolve_columns(&schema, Some(&mcp(Some(vec!["lat", "ghost"]))));
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "lat");
+    }
+
+    /// When no per-column description is curated, the Arrow field metadata's
+    /// `description` (then `comment`) is used as a fallback.
+    #[test]
+    fn resolve_columns_falls_back_to_field_metadata_description() {
+        let mut with_desc = field("lat", "Float64");
+        with_desc.metadata.insert("description".into(), "latitude".into());
+        let mut with_comment = field("lon", "Float64");
+        with_comment.metadata.insert("comment".into(), "longitude".into());
+        let schema = SchemaView {
+            fields: vec![with_desc, with_comment],
+            metadata: Default::default(),
+        };
+        let cols = resolve_columns(&schema, None);
+        assert_eq!(cols[0].description.as_deref(), Some("latitude"));
+        assert_eq!(cols[1].description.as_deref(), Some("longitude"));
+    }
 }

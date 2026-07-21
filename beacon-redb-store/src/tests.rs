@@ -339,6 +339,260 @@ async fn vacuum_requires_exclusive_access() {
     assert_eq!(got.as_ref(), b"x");
 }
 
+/// `head` and `get` on a missing object both map to `NotFound`, and so does a
+/// copy/rename whose source is absent.
+#[tokio::test]
+async fn missing_object_maps_to_not_found() {
+    let (_dir, store) = store();
+    let missing = Path::from("nope");
+
+    assert!(matches!(
+        store.head(&missing).await.unwrap_err(),
+        object_store::Error::NotFound { .. }
+    ));
+    assert!(matches!(
+        store.copy(&missing, &Path::from("dst")).await.unwrap_err(),
+        object_store::Error::NotFound { .. }
+    ));
+    assert!(matches!(
+        store.rename(&missing, &Path::from("dst")).await.unwrap_err(),
+        object_store::Error::NotFound { .. }
+    ));
+}
+
+/// Rename is a move: the destination gets the bytes and the source disappears.
+#[tokio::test]
+async fn rename_moves_and_removes_source() {
+    let (_dir, store) = store();
+    let from = Path::from("a");
+    let to = Path::from("b");
+    store.put(&from, "payload".into()).await.unwrap();
+
+    store.rename(&from, &to).await.unwrap();
+    let got = store.get(&to).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), b"payload");
+    assert!(matches!(
+        store.get(&from).await.unwrap_err(),
+        object_store::Error::NotFound { .. }
+    ));
+}
+
+/// A plain copy overwrites an existing destination (default `Overwrite` mode),
+/// while the source is left intact.
+#[tokio::test]
+async fn copy_overwrites_destination_and_keeps_source() {
+    let (_dir, store) = store();
+    let from = Path::from("src");
+    let to = Path::from("dst");
+    store.put(&from, "new".into()).await.unwrap();
+    store.put(&to, "old".into()).await.unwrap();
+
+    store.copy(&from, &to).await.unwrap();
+    assert_eq!(store.get(&to).await.unwrap().bytes().await.unwrap().as_ref(), b"new");
+    // Source still present after a copy.
+    assert_eq!(store.get(&from).await.unwrap().bytes().await.unwrap().as_ref(), b"new");
+}
+
+/// Copying a heap-backed object shares the extent by reference: no bytes are
+/// rewritten, both keys are heap-stored, and both read back identically.
+#[tokio::test]
+async fn copy_of_heap_object_shares_the_extent() {
+    let (_dir, store) = store();
+    let from = Path::from("data/a.lance");
+    let to = Path::from("data/b.lance");
+    let payload = vec![5u8; super::HEAP_THRESHOLD + 1];
+    store.put(&from, payload.clone().into()).await.unwrap();
+
+    store.copy(&from, &to).await.unwrap();
+    assert!(store.is_heap(&from).unwrap());
+    assert!(store.is_heap(&to).unwrap());
+    assert_eq!(store.get(&to).await.unwrap().bytes().await.unwrap().as_ref(), payload.as_slice());
+    // The copy gets a fresh, distinct etag.
+    assert_ne!(
+        store.head(&from).await.unwrap().e_tag,
+        store.head(&to).await.unwrap().e_tag
+    );
+}
+
+/// A rename in `Create` mode refuses to clobber an existing destination.
+#[tokio::test]
+async fn rename_if_not_exists_rejects_existing_destination() {
+    let (_dir, store) = store();
+    let from = Path::from("src");
+    let to = Path::from("dst");
+    store.put(&from, "x".into()).await.unwrap();
+    store.put(&to, "y".into()).await.unwrap();
+
+    let err = store.rename_if_not_exists(&from, &to).await.unwrap_err();
+    assert!(matches!(err, object_store::Error::AlreadyExists { .. }), "{err}");
+    // The failed rename left the source in place.
+    assert!(store.head(&from).await.unwrap().e_tag.is_some());
+}
+
+/// `get_ranges` clamps ranges to the object length instead of panicking, and an
+/// entirely out-of-bounds range yields an empty slice.
+#[tokio::test]
+async fn get_ranges_clamps_to_length() {
+    let (_dir, store) = store();
+    let path = Path::from("blob");
+    store.put(&path, "0123456789".into()).await.unwrap();
+
+    let ranges = store.get_ranges(&path, &[8..100, 50..60]).await.unwrap();
+    assert_eq!(ranges[0].as_ref(), b"89");
+    assert!(ranges[1].is_empty());
+}
+
+/// A `get` whose range starts beyond the object is a `Generic` error (mapped
+/// from `object_store`'s range validation), not a panic. A range whose end
+/// merely exceeds the size is instead clamped to the object.
+#[tokio::test]
+async fn get_range_start_past_end_errors_but_long_end_is_clamped() {
+    use object_store::{GetOptions, GetRange};
+    let (_dir, store) = store();
+    let path = Path::from("blob");
+    store.put(&path, "0123456789".into()).await.unwrap();
+
+    let start_past = GetOptions {
+        range: Some(GetRange::Bounded(20..30)),
+        ..Default::default()
+    };
+    let err = store.get_opts(&path, start_past).await.unwrap_err();
+    assert!(matches!(err, object_store::Error::Generic { .. }), "{err}");
+
+    // An end past the size is clamped, returning the available tail.
+    let long_end = GetOptions {
+        range: Some(GetRange::Bounded(8..100)),
+        ..Default::default()
+    };
+    let got = store.get_opts(&path, long_end).await.unwrap().bytes().await.unwrap();
+    assert_eq!(got.as_ref(), b"89");
+}
+
+/// `list_with_offset` yields only objects strictly after the offset key, in the
+/// same prefix.
+#[tokio::test]
+async fn list_with_offset_skips_up_to_and_including_offset() {
+    let (_dir, store) = store();
+    for p in ["t/a", "t/b", "t/c", "t/d"] {
+        store.put(&Path::from(p), "x".into()).await.unwrap();
+    }
+    let mut found: Vec<String> = store
+        .list_with_offset(Some(&Path::from("t")), &Path::from("t/b"))
+        .map(|m| m.unwrap().location.to_string())
+        .collect::<Vec<_>>()
+        .await;
+    found.sort();
+    assert_eq!(found, vec!["t/c".to_string(), "t/d".to_string()]);
+}
+
+/// `list_with_delimiter` under a nested prefix separates direct-child objects
+/// from deeper common prefixes.
+#[tokio::test]
+async fn list_with_delimiter_under_nested_prefix() {
+    let (_dir, store) = store();
+    for p in ["tables/a/table.json", "tables/a/sub/data", "tables/direct"] {
+        store.put(&Path::from(p), "x".into()).await.unwrap();
+    }
+    let res = store.list_with_delimiter(Some(&Path::from("tables/a"))).await.unwrap();
+    let objects: Vec<String> = res.objects.iter().map(|m| m.location.to_string()).collect();
+    let prefixes: Vec<String> = res.common_prefixes.iter().map(|p| p.to_string()).collect();
+    assert_eq!(objects, vec!["tables/a/table.json".to_string()]);
+    assert_eq!(prefixes, vec!["tables/a/sub".to_string()]);
+}
+
+/// A key containing a percent-encoded delimiter round-trips through listing
+/// without being re-encoded or split on the encoded `/`.
+#[tokio::test]
+async fn encoded_delimiter_in_key_round_trips() {
+    let (_dir, store) = store();
+    // `Path::parse` preserves the already-encoded form; the segment is `b/c`.
+    let raw = "a/b%2Fc";
+    let location = Path::parse(raw).unwrap();
+    store.put(&location, "x".into()).await.unwrap();
+
+    let found: Vec<Path> = store
+        .list(Some(&Path::from("a")))
+        .map(|m| m.unwrap().location)
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(found, vec![location.clone()]);
+    // Round-trips back to a readable object.
+    assert_eq!(store.get(&location).await.unwrap().bytes().await.unwrap().as_ref(), b"x");
+}
+
+/// Aborting a multipart upload discards buffered parts; a subsequent complete
+/// (with no parts) writes an empty object rather than the aborted bytes.
+#[tokio::test]
+async fn multipart_abort_discards_buffered_parts() {
+    let (_dir, store) = store();
+    let path = Path::from("multi");
+    let mut upload = store.put_multipart(&path).await.unwrap();
+    upload.put_part("discarded".into()).await.unwrap();
+    upload.abort().await.unwrap();
+    upload.complete().await.unwrap();
+
+    let got = store.get(&path).await.unwrap().bytes().await.unwrap();
+    assert!(got.is_empty(), "aborted parts must not be written");
+}
+
+/// Listing with no prefix returns every object; listing under a prefix that
+/// matches nothing returns empty (not an error).
+#[tokio::test]
+async fn list_whole_store_and_empty_prefix() {
+    let (_dir, store) = store();
+    for p in ["x/1", "y/2", "z/3"] {
+        store.put(&Path::from(p), "v".into()).await.unwrap();
+    }
+    let all: Vec<String> = store
+        .list(None)
+        .map(|m| m.unwrap().location.to_string())
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(all.len(), 3);
+
+    let none: Vec<_> = store
+        .list(Some(&Path::from("absent")))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(none.is_empty());
+}
+
+/// Overwriting a heap object with a small one flips its payload back to inline,
+/// and the new bytes read back correctly (the stale heap blob leaks until GC).
+#[tokio::test]
+async fn overwrite_heap_with_inline_flips_payload_location() {
+    let (_dir, store) = store();
+    let path = Path::from("data/x.lance");
+    store.put(&path, vec![1u8; super::HEAP_THRESHOLD + 1].into()).await.unwrap();
+    assert!(store.is_heap(&path).unwrap());
+
+    store.put(&path, "small".into()).await.unwrap();
+    assert!(!store.is_heap(&path).unwrap(), "small overwrite should be inline");
+    assert_eq!(store.get(&path).await.unwrap().bytes().await.unwrap().as_ref(), b"small");
+}
+
+/// Reopening a store must not reuse an etag issued before the restart: the
+/// monotonic sequence counter is persisted, so a fresh put gets a strictly
+/// greater etag.
+#[tokio::test]
+async fn etag_counter_survives_reopen() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("beacon.db");
+    let path = Path::from("k");
+
+    let first = {
+        let store = RedbStore::open(&file).unwrap();
+        store.put(&path, "a".into()).await.unwrap().e_tag.unwrap()
+    };
+    let store = RedbStore::open(&file).unwrap();
+    let second = store.put(&path, "b".into()).await.unwrap().e_tag.unwrap();
+    assert_ne!(first, second);
+    assert!(
+        second.parse::<u64>().unwrap() > first.parse::<u64>().unwrap(),
+        "etag {second} must exceed pre-restart {first}"
+    );
+}
+
 // ---- object_store conformance suite ---------------------------------------
 
 mod conformance {

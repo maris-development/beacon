@@ -527,6 +527,48 @@ mod tests {
             .contains("between"));
     }
 
+    /// `in` with an empty array would render as `column IN ()` — invalid SQL, or
+    /// (worse) a filter that silently matches nothing. Only a non-empty array is
+    /// a usable `IN` list; a scalar is rejected for the same reason.
+    #[test]
+    fn rejects_in_without_a_non_empty_list() {
+        for value in ["[]", "5", r#""a""#] {
+            let mut ext = TableExtensions::default();
+            ext.set_kind(
+                "preset",
+                &format!(
+                    r#"{{"presets":[{{"name":"p","filters":[{{"column":"lat","op":"in","value":{value}}}]}}]}}"#
+                ),
+            )
+            .unwrap();
+            let err = ext.validate(&schema()).unwrap_err().to_string();
+            assert!(err.contains("'in'"), "value {value} gave: {err}");
+        }
+
+        // A populated list passes.
+        let mut ok = TableExtensions::default();
+        ok.set_kind(
+            "preset",
+            r#"{"presets":[{"name":"p","filters":[{"column":"lat","op":"in","value":[1,2]}]}]}"#,
+        )
+        .unwrap();
+        assert!(ok.validate(&schema()).is_ok());
+    }
+
+    /// The MCP tool-name rules are a hard 1-64 character bound: a client can
+    /// reject the *entire* tool list over one bad name, so the boundary is
+    /// enforced exactly rather than approximately.
+    #[test]
+    fn tool_name_length_bounds_are_exact() {
+        assert!(!is_valid_tool_name(""));
+        assert!(is_valid_tool_name("a"));
+        assert!(is_valid_tool_name(&"a".repeat(64)));
+        assert!(!is_valid_tool_name(&"a".repeat(65)));
+        // Only letters, digits, `_` and `-` are allowed — no dots or spaces.
+        assert!(is_valid_tool_name("query_obs-1"));
+        assert!(!is_valid_tool_name("query.obs"));
+    }
+
     #[test]
     fn rejects_duplicate_preset_names() {
         let mut ext = TableExtensions::default();

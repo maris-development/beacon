@@ -39,7 +39,6 @@ pub async fn init_tables(
     session_ctx: &Arc<SessionContext>,
     schema: &PersistentSchemaProvider,
     tables_store_url: &ObjectStoreUrl,
-    datasets_url: &ObjectStoreUrl,
 ) -> anyhow::Result<()> {
     tracing::info!("Initializing tables from object store");
     let tables_object_store = session_ctx
@@ -56,10 +55,7 @@ pub async fn init_tables(
 
     for definition in ordered {
         let table_name = definition.table_name().to_string();
-        match definition
-            .build_provider(session_ctx.clone(), datasets_url)
-            .await
-        {
+        match definition.build_provider(session_ctx.clone()).await {
             Ok(provider) => {
                 let _ = schema.insert_loaded(table_name.clone(), provider);
                 tracing::info!("Registered table '{}'", table_name);

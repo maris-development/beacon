@@ -231,4 +231,62 @@ mod tests {
         let wrapped = binary(expr, Operator::Plus, lit(1.0f64), &s).unwrap();
         assert!(!is_pushable_expr(&wrapped));
     }
+
+    /// The mirror of the volatility guard: an immutable scalar function is
+    /// element-wise, so it may be evaluated on the footprint sub-grid.
+    #[test]
+    fn immutable_scalar_function_is_pushable() {
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        struct ImmutableUdf {
+            signature: Signature,
+        }
+
+        impl ScalarUDFImpl for ImmutableUdf {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn name(&self) -> &str {
+                "test_immutable"
+            }
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+            fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+                Ok(DataType::Float64)
+            }
+            fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
+                Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(0.0))))
+            }
+        }
+
+        let s = schema();
+        let udf = Arc::new(ScalarUDF::new_from_impl(ImmutableUdf {
+            signature: Signature::exact(vec![], Volatility::Immutable),
+        }));
+        let expr: Arc<dyn PhysicalExpr> = Arc::new(
+            ScalarFunctionExpr::try_new(udf, vec![], &s, Arc::new(ConfigOptions::default()))
+                .unwrap(),
+        );
+        assert!(is_pushable_expr(&expr));
+
+        // Wrapping it in whitelisted nodes keeps it pushable.
+        let wrapped = binary(expr, Operator::Plus, lit(1.0f64), &s).unwrap();
+        assert!(is_pushable_expr(&wrapped));
+    }
+
+    /// The whitelist is closed: an element-wise expression type that simply is
+    /// not listed stays above the broadcast rather than being assumed safe.
+    #[test]
+    fn unlisted_expression_types_are_not_pushable() {
+        use datafusion::physical_expr::expressions::in_list;
+
+        let s = schema();
+        let in_list = in_list(col("lat", &s).unwrap(), vec![lit(1i32), lit(2i32)], &false, &s)
+            .unwrap();
+        assert!(!is_pushable_expr(&in_list));
+
+        // A whitelisted parent does not launder an unlisted child.
+        let wrapped = binary(in_list, Operator::And, lit(true), &s).unwrap();
+        assert!(!is_pushable_expr(&wrapped));
+    }
 }

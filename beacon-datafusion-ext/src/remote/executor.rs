@@ -120,3 +120,61 @@ impl SQLExecutor for BeaconFlightSqlExecutor {
         Ok(Statistics::new_unknown(plan.schema().as_arrow()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn executor(url: &str) -> BeaconFlightSqlExecutor {
+        BeaconFlightSqlExecutor::new(RemoteConnection::new(url.to_string()))
+    }
+
+    #[test]
+    /// The compute context is what `datafusion-federation` groups tables by:
+    /// same endpoint → one federated sub-plan (joins/aggregates push down),
+    /// different endpoints → never co-federated.
+    fn compute_context_is_the_endpoint_url() {
+        let a = executor("http://host-a:50051");
+        assert_eq!(a.compute_context().as_deref(), Some("http://host-a:50051"));
+
+        // Two tables on the same remote share a context...
+        let same = executor("http://host-a:50051");
+        assert_eq!(a.compute_context(), same.compute_context());
+
+        // ...and two different remotes never do.
+        let b = executor("http://host-b:50051");
+        assert_ne!(a.compute_context(), b.compute_context());
+    }
+
+    #[tokio::test]
+    /// Auto-discovery is deliberately not implemented: remote tables are always
+    /// declared with an explicit table reference.
+    async fn table_names_are_not_enumerated() {
+        assert!(executor("http://host:50051").table_names().await.unwrap().is_empty());
+    }
+
+    #[test]
+    /// A connect failure must surface as a DataFusion error, not a panic — the
+    /// endpoint string is user-supplied and may be unparseable.
+    fn an_invalid_endpoint_fails_the_stream_rather_than_execute() {
+        use arrow::datatypes::Schema;
+
+        let executor = executor("not a url");
+        // `execute` defers all async work, so building the stream still succeeds.
+        let stream = executor
+            .execute("SELECT 1", Arc::new(Schema::empty()), &[])
+            .expect("execute defers connection to the first poll");
+
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { futures::StreamExt::next(&mut Box::pin(stream)).await })
+            .expect("the stream yields one item")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("remote beacon"),
+            "error should be tagged with its origin: {error}"
+        );
+    }
+}

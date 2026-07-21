@@ -1256,6 +1256,238 @@ mod tests {
         assert_eq!(any.default_broadcast_dimensions(), None);
     }
 
+    // ── project_with_dimensions ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_project_with_dimensions_drops_incompatible_variables() {
+        // Narrowing to the `temp` grid must drop the CF-bounds variable that
+        // lives on the extra `nv` axis.
+        let ds = make_dataset(
+            "bounds",
+            vec![
+                ("temp", arr_shaped(&["x", "y"], &[2, 3]).await),
+                ("y_bnds", arr_shaped(&["y", "nv"], &[3, 2]).await),
+                ("y", arr_shaped(&["y"], &[3]).await),
+            ],
+        )
+        .await;
+
+        let projected = ds
+            .project_with_dimensions(&["x".to_string(), "y".to_string()])
+            .unwrap();
+
+        let names: Vec<&String> = projected.arrays.keys().collect();
+        assert_eq!(names, vec!["temp", "y"]);
+    }
+
+    #[tokio::test]
+    async fn test_project_with_dimensions_prunes_orphaned_dimensions() {
+        // `nv` survives in `self.dimensions` only through the dropped bounds
+        // variable; keeping it would inflate the broadcast grid by a factor of
+        // its size and multiply the row count.
+        let ds = make_dataset(
+            "bounds",
+            vec![
+                ("temp", arr_shaped(&["x", "y"], &[2, 3]).await),
+                ("y_bnds", arr_shaped(&["y", "nv"], &[3, 2]).await),
+            ],
+        )
+        .await;
+        assert!(ds.dimensions.contains_key("nv"));
+
+        let projected = ds
+            .project_with_dimensions(&["x".to_string(), "y".to_string()])
+            .unwrap();
+
+        assert_eq!(
+            projected.dimensions.keys().collect::<Vec<_>>(),
+            vec!["x", "y"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_project_with_dimensions_keeps_original_dimension_order() {
+        // The retained dimensions follow the dataset's own order, not the order
+        // in which they were requested.
+        let ds = make_dataset(
+            "ordered",
+            vec![("temp", arr_shaped(&["x", "y", "z"], &[2, 3, 4]).await)],
+        )
+        .await;
+
+        let projected = ds
+            .project_with_dimensions(&["z".to_string(), "x".to_string(), "y".to_string()])
+            .unwrap();
+
+        assert_eq!(
+            projected.dimensions.keys().collect::<Vec<_>>(),
+            vec!["x", "y", "z"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_project_with_dimensions_rejects_unknown_dimension() {
+        let ds = make_dataset("d", vec![("temp", arr(&["x"]).await)]).await;
+        let err = ds
+            .project_with_dimensions(&["nope".to_string()])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not found in dataset"),
+            "expected unknown dimension error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dataset_project_index_out_of_bounds() {
+        let ds = make_dataset("d", vec![("temp", arr(&["x"]).await)]).await;
+        let err = ds.project(&[5]).unwrap_err();
+        assert!(
+            err.to_string().contains("out of bounds"),
+            "expected out of bounds error, got: {err}"
+        );
+    }
+
+    // ── resolve_read_dimensions ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolve_read_dimensions_explicit_wins_over_default() {
+        // The dataset needs narrowing, but an explicit request must be honoured
+        // verbatim — even when it differs from the auto-selected default.
+        let ds = make_dataset(
+            "incompatible",
+            vec![
+                ("temp", arr(&["x", "y", "z"]).await),
+                ("bnds", arr(&["y", "nv"]).await),
+            ],
+        )
+        .await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        let resolved =
+            resolve_read_dimensions(&any, Some(vec!["y".to_string(), "nv".to_string()]), None);
+        assert_eq!(
+            resolved,
+            Some(vec!["y".to_string(), "nv".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_read_dimensions_explicit_empty_is_still_explicit() {
+        // An empty explicit list means "project to no dimensions", which is not
+        // the same as "no projection requested".
+        let ds = make_dataset(
+            "incompatible",
+            vec![
+                ("temp", arr(&["x", "y", "z"]).await),
+                ("bnds", arr(&["y", "nv"]).await),
+            ],
+        )
+        .await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        assert_eq!(resolve_read_dimensions(&any, Some(vec![]), None), Some(vec![]));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_read_dimensions_falls_back_to_default() {
+        let ds = make_dataset(
+            "incompatible",
+            vec![
+                ("temp", arr(&["x", "y", "z"]).await),
+                ("bnds", arr(&["y", "nv"]).await),
+            ],
+        )
+        .await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        assert_eq!(
+            resolve_read_dimensions(&any, None, None),
+            Some(vec!["x".to_string(), "y".to_string(), "z".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_read_dimensions_none_when_already_broadcast_safe() {
+        let ds = make_dataset(
+            "safe",
+            vec![("grid", arr(&["x", "y"]).await), ("scale", arr(&["y"]).await)],
+        )
+        .await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        assert_eq!(resolve_read_dimensions(&any, None, None), None);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_read_dimensions_none_for_ragged() {
+        let ds = make_ragged_dataset().await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        assert_eq!(resolve_read_dimensions(&any, None, None), None);
+        // An explicit request is still passed through untouched; rejecting it is
+        // `AnyDataset::project`'s job, not this function's.
+        assert_eq!(
+            resolve_read_dimensions(&any, Some(vec!["casts".to_string()]), None),
+            Some(vec!["casts".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_read_dimensions_log_label_does_not_change_the_result() {
+        let ds = make_dataset(
+            "incompatible",
+            vec![
+                ("temp", arr(&["x", "y", "z"]).await),
+                ("bnds", arr(&["y", "nv"]).await),
+            ],
+        )
+        .await;
+        let any = AnyDataset::try_from_dataset(ds).await.unwrap();
+
+        assert_eq!(
+            resolve_read_dimensions(&any, None, Some("netcdf")),
+            resolve_read_dimensions(&any, None, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_read_dimensions_result_is_projectable() {
+        // The contract that matters downstream: whatever this returns can be fed
+        // straight into `project_with_dimensions` without erroring, and the
+        // result is broadcast-safe (every survivor's dims fit the max-rank one).
+        let ds = make_dataset(
+            "argo-like",
+            vec![
+                ("pres", arr_shaped(&["prof", "levels"], &[5, 3]).await),
+                ("temp", arr_shaped(&["prof", "levels"], &[5, 3]).await),
+                ("history", arr_shaped(&["hist", "prof"], &[2, 5]).await),
+                ("juld", arr_shaped(&["prof"], &[5]).await),
+            ],
+        )
+        .await;
+        let any = AnyDataset::try_from_dataset(ds.clone()).await.unwrap();
+
+        let dims = resolve_read_dimensions(&any, None, None).expect("narrowing expected");
+        let projected = ds.project_with_dimensions(&dims).unwrap();
+
+        let max_dims = projected
+            .arrays
+            .values()
+            .max_by_key(|a| a.dimensions().len())
+            .unwrap()
+            .dimensions();
+        assert!(
+            projected
+                .arrays
+                .values()
+                .all(|a| a.dimensions().iter().all(|d| max_dims.contains(d))),
+            "projected dataset is not broadcast-safe: {:?}",
+            projected.dimensions
+        );
+        assert!(projected.arrays.contains_key("pres"));
+        assert!(!projected.arrays.contains_key("history"));
+    }
+
     #[tokio::test]
     async fn test_any_default_dims_regular_delegates() {
         let ds = make_dataset(

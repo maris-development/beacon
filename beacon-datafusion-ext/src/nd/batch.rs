@@ -191,6 +191,62 @@ mod tests {
     }
 
     #[test]
+    fn column_count_mismatch_rejected() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int32, true),
+            Field::new("lat", DataType::Int32, true),
+        ]));
+        let time =
+            NdArrowArray::try_new(Arc::new(Int32Array::from(vec![7, 8])), dims(&[("time", 2)]))
+                .unwrap();
+        // Two declared fields but only one column.
+        assert!(NdRecordBatch::try_new(schema, vec![time], dims(&[("time", 2)])).is_err());
+    }
+
+    #[test]
+    fn nulls_survive_the_broadcast_gather() {
+        // Validity lives in the Arrow null buffer, so a null coordinate value
+        // must replicate as null across every cell it broadcasts to.
+        let schema = Arc::new(Schema::new(vec![Field::new("time", DataType::Int32, true)]));
+        let time = NdArrowArray::try_new(
+            Arc::new(Int32Array::from(vec![Some(7), None])),
+            dims(&[("time", 2)]),
+        )
+        .unwrap();
+        let batch =
+            NdRecordBatch::try_new(schema, vec![time], dims(&[("time", 2), ("lat", 3)])).unwrap();
+
+        let out = batch.materialize().unwrap();
+        assert_eq!(out.num_rows(), 6);
+        // The null time step contributes 3 null cells, one per lat.
+        assert_eq!(out.column(0).null_count(), 3);
+        assert!(out.column(0).is_null(3));
+    }
+
+    #[test]
+    fn materialize_with_stats_separates_gathers_from_passthroughs() {
+        // time and lat need a gather onto the grid; sst is already full-rank.
+        let (_, broadcasts, passthroughs) = test_batch().materialize_with_stats().unwrap();
+        assert_eq!(broadcasts, 2);
+        assert_eq!(passthroughs, 1);
+    }
+
+    #[test]
+    fn an_empty_axis_materializes_a_zero_row_batch() {
+        let schema = Arc::new(Schema::new(vec![Field::new("time", DataType::Int32, true)]));
+        let time = NdArrowArray::try_new(
+            Arc::new(Int32Array::from(Vec::<i32>::new())),
+            dims(&[("time", 0)]),
+        )
+        .unwrap();
+        let batch =
+            NdRecordBatch::try_new(schema, vec![time], dims(&[("time", 0), ("lat", 3)])).unwrap();
+
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.materialize().unwrap().num_rows(), 0);
+    }
+
+    #[test]
     fn incompatible_column_dims_rejected() {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "depth",

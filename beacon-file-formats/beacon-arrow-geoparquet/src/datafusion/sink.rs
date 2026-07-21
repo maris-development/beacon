@@ -233,3 +233,250 @@ impl DataSink for GeoParquetSink {
         Ok(rows_written)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Array, Float32Array, Float64Array, Int32Array, StringArray};
+    use arrow::datatypes::Field;
+    use datafusion::datasource::listing::ListingTableUrl;
+    use datafusion::datasource::physical_plan::{FileGroup, FileOutputMode};
+    use datafusion::execution::object_store::ObjectStoreUrl;
+    use datafusion::logical_expr::dml::InsertOp;
+    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+    use object_store::memory::InMemory;
+
+    // ── helpers ────────────────────────────────────────────────────────
+
+    /// Schema with a lon/lat pair plus a non-coordinate column.
+    fn lonlat_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("lon", DataType::Float64, true),
+            Field::new("lat", DataType::Float64, true),
+        ]))
+    }
+
+    fn lonlat_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![Some(1.0), None, Some(5.0)])),
+                Arc::new(Float64Array::from(vec![Some(2.0), Some(4.0), Some(6.0)])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn test_sink_config(schema: SchemaRef, path: &str) -> FileSinkConfig {
+        FileSinkConfig {
+            original_url: String::new(),
+            object_store_url: ObjectStoreUrl::parse("memory://").unwrap(),
+            file_group: FileGroup::default(),
+            table_paths: vec![ListingTableUrl::parse(path).unwrap()],
+            output_schema: schema,
+            table_partition_cols: vec![],
+            insert_op: InsertOp::Append,
+            keep_partition_by_columns: false,
+            file_extension: crate::datafusion::GEOPARQUET_EXTENSION.to_string(),
+            file_output_mode: FileOutputMode::SingleFile,
+        }
+    }
+
+    // ── GeoMapper ──────────────────────────────────────────────────────
+
+    #[test]
+    fn geo_mapper_appends_geometry_field_to_schema() {
+        let schema = lonlat_schema();
+        let mapper = GeoMapper::new(schema.as_ref(), "lon", "lat").unwrap();
+        let out = &mapper.output_schema;
+
+        // The input fields are preserved in order and `geometry` is appended.
+        assert_eq!(out.fields().len(), schema.fields().len() + 1);
+        for (i, f) in schema.fields().iter().enumerate() {
+            assert_eq!(out.field(i).name(), f.name());
+        }
+        let geometry = out.field(out.fields().len() - 1);
+        assert_eq!(geometry.name(), "geometry");
+        // Native GeoArrow point storage: a struct of separated x/y children.
+        let DataType::Struct(children) = geometry.data_type() else {
+            panic!("geometry should be a struct, got {:?}", geometry.data_type());
+        };
+        let names: Vec<&str> = children.iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["x", "y"]);
+        // The GeoArrow extension metadata must survive onto the field, otherwise
+        // the GeoParquet encoder cannot recognise the column as geometry.
+        assert!(
+            geometry
+                .metadata()
+                .keys()
+                .any(|k| k.contains("extension:name")),
+            "geometry field should carry the GeoArrow extension metadata: {:?}",
+            geometry.metadata()
+        );
+    }
+
+    #[test]
+    fn geo_mapper_errors_on_missing_columns() {
+        let schema = lonlat_schema();
+        let Err(err) = GeoMapper::new(schema.as_ref(), "nope", "lat") else {
+            panic!("a missing longitude column must be rejected");
+        };
+        assert!(err.to_string().contains("Longitude column 'nope'"));
+        let Err(err) = GeoMapper::new(schema.as_ref(), "lon", "nope") else {
+            panic!("a missing latitude column must be rejected");
+        };
+        assert!(err.to_string().contains("Latitude column 'nope'"));
+    }
+
+    #[test]
+    fn geo_mapper_builds_points_and_nulls_incomplete_coordinates() {
+        let schema = lonlat_schema();
+        let mapper = GeoMapper::new(schema.as_ref(), "lon", "lat").unwrap();
+        let mapped = mapper.map(&lonlat_batch(&schema)).unwrap();
+
+        assert_eq!(mapped.num_rows(), 3);
+        let geom = mapped
+            .column(mapped.schema().index_of("geometry").unwrap())
+            .as_struct();
+        // Row 1 has a null longitude, so the whole point is null.
+        assert!(!geom.is_null(0));
+        assert!(geom.is_null(1));
+        assert!(!geom.is_null(2));
+
+        let x = geom
+            .column_by_name("x")
+            .unwrap()
+            .as_primitive::<Float64Type>();
+        let y = geom
+            .column_by_name("y")
+            .unwrap()
+            .as_primitive::<Float64Type>();
+        // (lon, lat) ordering — x is longitude, y is latitude.
+        assert_eq!(x.value(0), 1.0);
+        assert_eq!(y.value(0), 2.0);
+        assert_eq!(x.value(2), 5.0);
+        assert_eq!(y.value(2), 6.0);
+    }
+
+    #[test]
+    fn geo_mapper_casts_non_float64_coordinates() {
+        // Coordinates arriving as Float32/Int32 are cast to Float64 rather than
+        // rejected.
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("lon", DataType::Float32, false),
+            Field::new("lat", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float32Array::from(vec![1.5f32, -2.5])) as ArrayRef,
+                Arc::new(Int32Array::from(vec![10, -20])),
+            ],
+        )
+        .unwrap();
+
+        let mapper = GeoMapper::new(schema.as_ref(), "lon", "lat").unwrap();
+        let mapped = mapper.map(&batch).unwrap();
+        let geom = mapped
+            .column(mapped.schema().index_of("geometry").unwrap())
+            .as_struct();
+        let x = geom
+            .column_by_name("x")
+            .unwrap()
+            .as_primitive::<Float64Type>();
+        let y = geom
+            .column_by_name("y")
+            .unwrap()
+            .as_primitive::<Float64Type>();
+        assert_eq!(x.values(), &[1.5, -2.5]);
+        assert_eq!(y.values(), &[10.0, -20.0]);
+    }
+
+    #[test]
+    fn geo_mapper_rejects_uncastable_coordinate_column() {
+        // A string column that cannot be cast to Float64 must surface an error
+        // rather than silently produce nulls.
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("lon", DataType::Utf8, false),
+            Field::new("lat", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["not-a-number", "x"])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+
+        let mapper = GeoMapper::new(schema.as_ref(), "lon", "lat").unwrap();
+        let mapped = mapper.map(&batch).unwrap();
+        // `safe: true` casting turns unparseable strings into nulls, which in
+        // turn null out the geometry — this documents the lenient behaviour.
+        let geom = mapped
+            .column(mapped.schema().index_of("geometry").unwrap())
+            .as_struct();
+        assert!(geom.is_null(0) && geom.is_null(1));
+    }
+
+    // ── Sink round-trip ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sink_writes_readable_geoparquet_with_geometry() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let schema = lonlat_schema();
+        let batch = lonlat_batch(&schema);
+
+        let input = Arc::new(EmptyExec::new(schema.clone())) as Arc<dyn ExecutionPlan>;
+        let conf = test_sink_config(schema.clone(), "memory:///out.geoparquet");
+        let sink =
+            GeoParquetSink::new(input, conf, object_store.clone(), "lon", "lat").unwrap();
+
+        // The sink's advertised schema is the mapped one (geometry appended).
+        assert!(sink.schema().field_with_name("geometry").is_ok());
+
+        let stream = Box::pin(RecordBatchStreamAdapter::new(
+            schema.clone(),
+            futures::stream::iter(vec![Ok(batch.clone()), Ok(batch)]),
+        ));
+        let rows = sink
+            .write_all(stream, &Arc::new(TaskContext::default()))
+            .await
+            .expect("write_all");
+        assert_eq!(rows, 6);
+
+        // Read it back: the geometry column must be recoverable as native GeoArrow.
+        let path = object_store::path::Path::from("out.geoparquet");
+        let meta = object_store::ObjectStoreExt::head(object_store.as_ref(), &path)
+            .await
+            .expect("output object should exist");
+        let read_schema = crate::datafusion::reader::fetch_schema(object_store.clone(), meta)
+            .await
+            .expect("written file should be readable as GeoParquet");
+        let geometry = read_schema
+            .field_with_name("geometry")
+            .expect("geometry column should round-trip");
+        assert!(
+            matches!(geometry.data_type(), DataType::Struct(_)),
+            "geometry should read back as native GeoArrow, got {:?}",
+            geometry.data_type()
+        );
+        assert!(read_schema.field_with_name("id").is_ok());
+    }
+
+    #[tokio::test]
+    async fn sink_new_errors_when_coordinate_column_missing() {
+        let store = Arc::new(InMemory::new());
+        let schema = lonlat_schema();
+        let input = Arc::new(EmptyExec::new(schema.clone())) as Arc<dyn ExecutionPlan>;
+        let conf = test_sink_config(schema.clone(), "memory:///out.geoparquet");
+        let Err(err) = GeoParquetSink::new(input, conf, store, "missing_lon", "lat") else {
+            panic!("a missing longitude column must be rejected");
+        };
+        assert!(err.to_string().contains("Longitude column 'missing_lon'"));
+    }
+}

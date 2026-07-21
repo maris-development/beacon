@@ -38,6 +38,7 @@ use crate::parser::statement::{
 };
 
 pub(crate) use authz::authorize_logical_plan;
+pub(crate) use stream_coalescer::CoalesceSqlStream;
 pub(crate) use lower::lower_df_statement;
 pub(crate) use query_planner::BeaconQueryPlanner;
 
@@ -292,7 +293,7 @@ pub(crate) async fn execute_statement_plan(
 
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
     let stream = datafusion::physical_plan::execute_stream(physical_plan, session_ctx.task_ctx())?;
-    let stream = stream_coalescer::coalesce_sql_stream(session_ctx, stream);
+    let stream = CoalesceSqlStream::from_session(session_ctx).coalesce(stream);
 
     if stream.schema().fields().is_empty() {
         let schema = stream.schema();
@@ -305,5 +306,130 @@ pub(crate) async fn execute_statement_plan(
         ))
     } else {
         Ok(stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::parser::beacon_parser::BeaconParser;
+    use crate::parser::statement::BeaconStatement;
+
+    /// Lower a beacon statement the way `Runtime::lower_sql` does for the
+    /// non-DataFusion arms, so the tests exercise the real node shapes.
+    fn beacon_plan(sql: &str) -> LogicalPlan {
+        let statement = BeaconParser::new(sql)
+            .unwrap()
+            .parse_statement()
+            .expect("beacon statement should parse");
+        match statement {
+            BeaconStatement::Refresh(statement) => refresh_plan(statement),
+            BeaconStatement::ShowCrawlers => show_crawlers_plan(),
+            BeaconStatement::ShowIndexes(statement) => show_indexes_plan(statement),
+            BeaconStatement::Auth(statement) => auth_plan(statement),
+            other => panic!("unexpected statement for `{sql}`: {other:?}"),
+        }
+    }
+
+    async fn df_plan(sql: &str) -> LogicalPlan {
+        SessionContext::new()
+            .state()
+            .create_logical_plan(sql)
+            .await
+            .expect("SQL should plan")
+    }
+
+    /// A requested output format wraps the plan in a `COPY TO`, which only accepts
+    /// a row-producing input. Row-producing statements must be exportable and
+    /// side-effecting ones must not, or `run_query` either rejects a valid export
+    /// or lets the `COPY TO` builder fail with a cryptic planner error.
+    #[tokio::test]
+    async fn only_row_producing_statements_are_exportable() {
+        assert!(plan_produces_result_set(&df_plan("SELECT 1").await));
+        assert!(plan_produces_result_set(&df_plan("VALUES (1), (2)").await));
+
+        assert!(!plan_produces_result_set(
+            &df_plan("CREATE TABLE t (a INT)").await
+        ));
+        assert!(!plan_produces_result_set(
+            &df_plan("SET datafusion.execution.batch_size = 100").await
+        ));
+    }
+
+    /// Beacon's extension nodes are invisible to DataFusion's plan inspection, so
+    /// exportability is decided by the node's own schema: the side-effecting nodes
+    /// expose an empty schema, the `SHOW ...` nodes expose real columns.
+    #[test]
+    fn extension_nodes_are_exportable_only_when_they_expose_columns() {
+        assert!(!plan_produces_result_set(&beacon_plan("REFRESH t")));
+        assert!(!plan_produces_result_set(&beacon_plan("CREATE ROLE reader")));
+
+        assert!(plan_produces_result_set(&beacon_plan("SHOW CRAWLERS")));
+        assert!(plan_produces_result_set(&beacon_plan("SHOW INDEXES ON t")));
+    }
+
+    /// The super-user gate is the single enforcement point for privileged
+    /// statements. DDL/DML/`SET` are gated through DataFusion's `verify_plan`, and
+    /// the failure must be reframed as a permissions error — the raw DataFusion
+    /// message reads like a missing feature.
+    #[tokio::test]
+    async fn privileged_statements_require_super_user() {
+        for sql in [
+            "CREATE TABLE t (a INT)",
+            "SET datafusion.execution.batch_size = 100",
+        ] {
+            let plan = df_plan(sql).await;
+            let error = validate_query_plan(&plan, false)
+                .expect_err("`{sql}` must be refused for a non-super-user");
+            assert!(
+                error.to_string().contains("operation not permitted"),
+                "`{sql}` produced an unexpected error: {error}"
+            );
+            assert!(validate_query_plan(&plan, true).is_ok(), "super-user: {sql}");
+        }
+    }
+
+    /// `verify_plan` cannot see through an `Extension` node, so every beacon
+    /// extension node needs the separate super-user check — without it, statements
+    /// such as `REFRESH` or auth DDL would pass validation for any user.
+    #[test]
+    fn extension_nodes_are_super_user_only() {
+        for sql in ["REFRESH t", "CREATE ROLE reader", "SHOW CRAWLERS"] {
+            let plan = beacon_plan(sql);
+            // The first gate lets these through: they are not DDL/DML/statements
+            // as far as DataFusion is concerned...
+            let error = validate_query_plan(&plan, false)
+                .expect_err("`{sql}` must be refused for a non-super-user");
+            assert!(
+                error.to_string().contains("operation not permitted"),
+                "`{sql}` produced an unexpected error: {error}"
+            );
+            assert!(validate_query_plan(&plan, true).is_ok(), "super-user: {sql}");
+        }
+    }
+
+    /// An extension node nested *below* the plan root (rather than at it) is just
+    /// as privileged, so the check must walk the whole tree.
+    #[tokio::test]
+    async fn nested_extension_nodes_are_detected() {
+        let projection = datafusion::logical_expr::LogicalPlanBuilder::from(beacon_plan(
+            "SHOW CRAWLERS",
+        ))
+        .project(vec![datafusion::prelude::col("name")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+        assert!(plan_contains_extension(&projection).unwrap());
+        assert!(validate_query_plan(&projection, false).is_err());
+        assert!(validate_query_plan(&projection, true).is_ok());
+    }
+
+    /// A plain query must remain runnable by ordinary users — the gate exists to
+    /// stop privileged statements, not to make the runtime super-user-only.
+    #[tokio::test]
+    async fn plain_queries_are_allowed_without_super_user() {
+        assert!(validate_query_plan(&df_plan("SELECT 1").await, false).is_ok());
     }
 }

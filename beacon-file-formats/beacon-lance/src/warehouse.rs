@@ -154,3 +154,59 @@ impl LanceWarehouse {
             .clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::memory::InMemory;
+
+    fn warehouse() -> LanceWarehouse {
+        LanceWarehouse::new(Arc::new(InMemory::new()))
+    }
+
+    #[test]
+    fn beacon_namespace_is_the_single_default() {
+        assert_eq!(beacon_namespace(), vec![BEACON_NAMESPACE.to_string()]);
+        assert_eq!(BEACON_NAMESPACE, "beacon");
+    }
+
+    /// The table URI is the `db://` address the redb object store resolves, and
+    /// it is persisted in `table.json`, so its exact shape must stay stable.
+    #[test]
+    fn table_uri_has_the_expected_scheme_prefix_and_extension() {
+        let wh = warehouse();
+        assert_eq!(
+            wh.table_uri(&beacon_namespace(), "orders"),
+            "db:///lance/beacon/orders.lance"
+        );
+        // Nested namespaces are joined with '/'.
+        assert_eq!(
+            wh.table_uri(&["a".to_string(), "b".to_string()], "t"),
+            "db:///lance/a/b/t.lance"
+        );
+    }
+
+    /// `object_path` is the key prefix used to enumerate a dataset's files on
+    /// DROP: it must be everything after the scheme+authority, with no leading
+    /// slash (a leading slash would miss every object).
+    #[test]
+    fn object_path_strips_scheme_and_leading_slash() {
+        let uri = "db:///lance/beacon/orders.lance";
+        assert_eq!(
+            LanceWarehouse::object_path(uri).as_ref(),
+            "lance/beacon/orders.lance"
+        );
+    }
+
+    /// The same URI must hand back the *same* lock instance (so writers actually
+    /// serialize), while different URIs get independent locks.
+    #[test]
+    fn locks_are_per_uri_and_stable() {
+        let wh = warehouse();
+        let a1 = wh.lock("db:///lance/beacon/a.lance");
+        let a2 = wh.lock("db:///lance/beacon/a.lance");
+        let b = wh.lock("db:///lance/beacon/b.lance");
+        assert!(Arc::ptr_eq(&a1, &a2), "same URI must share one lock");
+        assert!(!Arc::ptr_eq(&a1, &b), "different URIs get distinct locks");
+    }
+}

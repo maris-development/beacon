@@ -647,6 +647,66 @@ mod tests {
         assert_eq!(m.elements_evaluated.value(), 3); // evaluated over |lat|, not the grid
     }
 
+    // ── construction guards ─────────────────────────────────────────────
+
+    /// The projection can only run before the broadcast, so its child must be
+    /// nd-aware; a flat plan is rejected at construction rather than at execute.
+    #[test]
+    fn non_nd_input_is_rejected() {
+        use datafusion::datasource::memory::MemorySourceConfig;
+
+        let (schema, _) = test_batch();
+        let flat = MemorySourceConfig::try_new_exec(&[vec![]], schema.clone(), None).unwrap();
+
+        let err = NdProjectionExec::try_new(flat, vec![(col("lat", &schema).unwrap(), "lat".into())])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("nd-aware"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The pushdown rule adopts the original `ProjectionExec`'s schema verbatim;
+    /// a schema that disagrees on types with the expressions must be refused, or
+    /// the rewrite would silently change the plan's output type.
+    #[test]
+    fn a_type_incompatible_output_schema_is_rejected() {
+        use datafusion::datasource::memory::MemorySourceConfig;
+
+        use crate::nd::encoding::encoded_schema;
+        use crate::nd::exec::NdSourceExec;
+
+        let (schema, _) = test_batch();
+        let encoded = Arc::new(encoded_schema(&schema));
+        let source: Arc<dyn ExecutionPlan> = Arc::new(
+            NdSourceExec::try_new(
+                MemorySourceConfig::try_new_exec(&[vec![]], encoded, None).unwrap(),
+            )
+            .unwrap(),
+        );
+        let exprs = vec![(col("lat", &schema).unwrap(), "lat".to_string())];
+
+        // `lat` is Int32; claiming Float64 output is a type change.
+        let wrong: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "lat",
+            DataType::Float64,
+            true,
+        )]));
+        assert!(
+            NdProjectionExec::try_new_with_schema(source.clone(), exprs.clone(), Some(wrong))
+                .is_err()
+        );
+
+        // A schema differing only in field metadata is accepted.
+        let annotated: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("lat", DataType::Int32, true)
+                .with_metadata([("units".to_string(), "degrees_north".to_string())].into()),
+        ]));
+        let projection =
+            NdProjectionExec::try_new_with_schema(source, exprs, Some(annotated.clone())).unwrap();
+        assert_eq!(projection.schema(), annotated);
+    }
+
     /// A function over only literals references no columns: it evaluates once on
     /// a rank-0 scalar footprint and broadcasts to a constant column.
     #[test]

@@ -138,4 +138,76 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(result.err().unwrap().to_string(), "input stream failed");
     }
+
+    #[tokio::test]
+    async fn pipe_nd_record_batch_stream_forwards_conversion_errors() {
+        // `bnds(lat, nv)` cannot broadcast onto `temp`'s `(time, lat)` grid, so
+        // `try_as_arrow_stream` fails — the failure must reach the consumer
+        // rather than being swallowed into an empty stream.
+        let make = |values: Vec<i32>, shape: Vec<usize>, dims: Vec<&str>| {
+            Arc::new(
+                NdArrowArrayDispatch::new(InMemoryArrayBackend::new(
+                    ndarray::ArrayD::from_shape_vec(shape.clone(), values).unwrap(),
+                    shape,
+                    dims.iter().map(|d| d.to_string()).collect(),
+                    None,
+                ))
+                .unwrap(),
+            ) as Arc<dyn NdArrowArray>
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("temp", DataType::Int32, false),
+            Field::new("bnds", DataType::Int32, false),
+        ]));
+        let batch = NdRecordBatch::new(
+            "batch".to_string(),
+            schema,
+            vec![
+                make(vec![1, 2, 3, 4], vec![2, 2], vec!["time", "lat"]),
+                make(vec![5, 6, 7, 8], vec![2, 2], vec!["lat", "nv"]),
+            ],
+        )
+        .unwrap();
+
+        let result = pipe_nd_record_batch_stream(
+            futures::stream::iter(vec![Ok(batch)]),
+            NdToArrowPipeOptions::default(),
+        )
+        .try_collect::<Vec<_>>()
+        .await;
+
+        let err = result.err().expect("expected a conversion error");
+        assert!(
+            err.to_string().contains("cannot be broadcast"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipe_nd_record_batch_stream_clamps_zero_concurrency_to_one() {
+        // `buffer_unordered(0)` / `flatten_unordered(0)` would stall forever, so
+        // both knobs are floored at 1.
+        let nd = make_batch(vec![1, 2, 3, 4], vec![2, 2], vec!["time", "lat"]);
+
+        let out = pipe_nd_record_batch_stream(
+            futures::stream::iter(vec![Ok(nd)]),
+            NdToArrowPipeOptions {
+                preferred_chunk_size: 2,
+                batch_parallelism: 0,
+                output_buffer: 0,
+            },
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.iter()
+                .flat_map(|batch| int32_values(batch.column(0)))
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+    }
 }

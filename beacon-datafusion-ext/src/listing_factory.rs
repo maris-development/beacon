@@ -128,3 +128,92 @@ impl ListingFactory {
         todo!()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use object_store::path::Path as ObjectPath;
+
+    use super::*;
+
+    fn factory(root: Option<RootStore>) -> ListingFactory {
+        ListingFactory::new(None, root)
+    }
+
+    #[test]
+    fn filesystem_root_joins_the_object_path() {
+        let factory = factory(Some(RootStore::FileSystem(PathBuf::from("/data/root"))));
+        let path = factory
+            .try_parse_obj_path_to_netcdf_path("file", &ObjectPath::from("argo/a.nc"))
+            .unwrap();
+        assert_eq!(path, "/data/root/argo/a.nc");
+    }
+
+    #[test]
+    fn https_root_trims_its_trailing_slash_and_adds_byte_mode() {
+        // netCDF-c needs the `#mode=bytes` suffix to range-read over HTTP.
+        let factory = factory(Some(RootStore::HttpsStore(
+            "https://example.org/bucket/".to_string(),
+        )));
+        let path = factory
+            .try_parse_obj_path_to_netcdf_path("https", &ObjectPath::from("argo/a.nc"))
+            .unwrap();
+        assert_eq!(path, "https://example.org/bucket/argo/a.nc#mode=bytes");
+    }
+
+    #[test]
+    fn a_root_store_wins_over_the_scheme() {
+        // With a root store configured the scheme is irrelevant — the path is
+        // always resolved against the root.
+        let factory = factory(Some(RootStore::FileSystem(PathBuf::from("/data/root"))));
+        assert_eq!(
+            factory.try_parse_obj_path_to_netcdf_path("s3", &ObjectPath::from("a.nc")),
+            Some("/data/root/a.nc".to_string())
+        );
+    }
+
+    #[test]
+    fn without_a_root_relative_file_paths_are_made_absolute() {
+        let factory = factory(None);
+        let path = factory
+            .try_parse_obj_path_to_netcdf_path("file", &ObjectPath::from("argo/a.nc"))
+            .unwrap();
+        let expected = std::env::current_dir().unwrap().join("argo/a.nc");
+        assert_eq!(path, expected.to_string_lossy());
+    }
+
+    #[test]
+    fn without_a_root_http_paths_only_get_byte_mode() {
+        let factory = factory(None);
+        // `ObjectPath` normalizes the `//`, so the scheme is what matters here.
+        assert_eq!(
+            factory.try_parse_obj_path_to_netcdf_path("http", &ObjectPath::from("host/a.nc")),
+            Some("host/a.nc#mode=bytes".to_string())
+        );
+    }
+
+    #[test]
+    fn without_a_root_unsupported_schemes_are_unresolvable() {
+        // Only file/http/https can be handed to the netCDF reader by path; a
+        // remote object store needs a root store to be expressible.
+        let factory = factory(None);
+        assert_eq!(
+            factory.try_parse_obj_path_to_netcdf_path("s3", &ObjectPath::from("bucket/a.nc")),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_path_prefixes_the_root_store() {
+        assert_eq!(
+            factory(Some(RootStore::FileSystem(PathBuf::from("/data/root")))).rewrite_path("a/b.nc"),
+            "/data/root/a/b.nc"
+        );
+        assert_eq!(
+            factory(Some(RootStore::HttpsStore("https://example.org/".to_string())))
+                .rewrite_path("a/b.nc"),
+            "https://example.org/a/b.nc"
+        );
+        // No root store: the path passes through untouched.
+        assert_eq!(factory(None).rewrite_path("a/b.nc"), "a/b.nc");
+    }
+}

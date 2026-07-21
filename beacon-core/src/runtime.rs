@@ -163,7 +163,7 @@ impl Runtime {
         // bytes are invisible to the returned `QueryOutputFile`.
         let (copy_plan, output_file) = output
             .parse(
-                &self.datasets_dir,
+                &self.session_ctx,
                 &self.tmp_dir,
                 &TMP_STORE_URL_OBJECT_URL,
                 plan,
@@ -351,6 +351,47 @@ impl Runtime {
                 }
             })
             .collect()
+    }
+
+    /// The names of the tables registered in beacon's own schema (`beacon.public`),
+    /// sorted. Tables in other catalogs (e.g. federated ones) are not included.
+    pub fn list_tables(&self) -> Vec<String> {
+        let Some(schema) = self
+            .session_ctx
+            .catalog("beacon")
+            .and_then(|catalog| catalog.schema("public"))
+        else {
+            return Vec::new();
+        };
+
+        let mut table_names = schema.table_names();
+        table_names.sort();
+        table_names.dedup();
+        table_names
+    }
+
+    /// A table's live Arrow schema in API form, or `None` if it is not registered.
+    pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
+        self.session_ctx
+            .table(table_name)
+            .await
+            .map(|table| Arc::new(table.schema().as_arrow().to_owned()))
+            .ok()
+    }
+
+    pub async fn list_table_schema_view(&self, table_name: String) -> Option<SchemaView> {
+        self.list_table_schema(table_name)
+            .await
+            .map(|schema| SchemaView::from(schema.as_ref()))
+    }
+
+    /// A table's consumer-facing extensions (MCP descriptor, query presets), or an
+    /// empty set if none are stored. Errors if the table is not registered.
+    pub async fn get_table_extensions(
+        &self,
+        table_name: String,
+    ) -> anyhow::Result<crate::api::TableExtensions> {
+        crate::extensions::get_table_extensions(&self.session_ctx, &table_name).await
     }
 
     fn list_runtime_functions(&self) -> Vec<FunctionDoc> {

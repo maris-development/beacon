@@ -274,3 +274,108 @@ impl MetricsTracker {
         self.file_paths.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use datafusion::prelude::SessionContext;
+
+    /// Run a small query to completion and return its (metrics-populated)
+    /// physical plan. `explain_analyze_pg_json` documents that the plan must have
+    /// been executed first, so the tests exercise it in that state.
+    async fn executed_plan() -> Arc<dyn ExecutionPlan> {
+        let ctx = SessionContext::new();
+        let df = ctx
+            .sql("SELECT a, count(*) FROM (VALUES (1), (1), (2)) AS t(a) GROUP BY a")
+            .await
+            .unwrap();
+        let plan = df.create_physical_plan().await.unwrap();
+        datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx())
+            .await
+            .unwrap();
+        plan
+    }
+
+    /// The pgjson output must be the array-wrapped `"Plan"` shape that pgjson
+    /// visualizers expect, with children nested under `"Plans"` — this backports a
+    /// format the pinned DataFusion cannot emit itself, so nothing else pins it.
+    #[tokio::test]
+    async fn explain_analyze_pg_json_has_the_visualizer_shape() {
+        let plan = executed_plan().await;
+        let json = explain_analyze_pg_json(plan.as_ref());
+
+        let root = json
+            .as_array()
+            .and_then(|array| array.first())
+            .and_then(|entry| entry.get("Plan"))
+            .expect("output must be [{\"Plan\": ...}]");
+        assert_eq!(root["Node Type"], plan.name());
+        // `one_line` renders with a trailing newline; the detail must be trimmed.
+        let details = root["Details"].as_str().unwrap();
+        assert!(!details.ends_with('\n'), "details not trimmed: {details:?}");
+        // The subtree is present and recursively shaped the same way.
+        let children = root["Plans"].as_array().expect("Plans must be an array");
+        assert_eq!(children.len(), plan.children().len());
+        assert!(children.iter().all(|child| child.get("Plans").is_some()));
+    }
+
+    /// `elapsed_compute` is reported in nanoseconds but PostgreSQL's "Actual Total
+    /// Time" is milliseconds, and the two promoted metrics must not be duplicated
+    /// into `Extras` — both are easy to get wrong and invisible in the output.
+    #[tokio::test]
+    async fn promoted_metrics_are_converted_and_not_duplicated() {
+        let plan = executed_plan().await;
+        let json = explain_analyze_pg_json(plan.as_ref());
+        let root = &json[0]["Plan"];
+
+        assert_eq!(root["Actual Rows"], serde_json::json!(2));
+        if let Some(extras) = root.get("Extras") {
+            assert!(extras.get("output_rows").is_none());
+            assert!(extras.get("elapsed_compute").is_none());
+        }
+
+        // Nanoseconds -> milliseconds: a sub-second query must land well under 1ms
+        // worth of milliseconds, never in the millions (the raw nanosecond count).
+        if let Some(time) = root.get("Actual Total Time") {
+            let time = time.as_f64().expect("time must be a number");
+            assert!(time < 1_000.0, "elapsed_compute was not converted: {time}");
+        }
+    }
+
+    /// The physical plan is optional on the tracker (the unified query path only
+    /// records output rows/bytes), so consolidation must still produce a complete
+    /// record rather than panicking on the missing plan.
+    #[test]
+    fn consolidates_without_a_physical_or_logical_plan() {
+        let query_id = uuid::Uuid::new_v4();
+        let tracker = MetricsTracker::new(serde_json::json!({"sql": "SELECT 1"}), query_id);
+        tracker.add_output_rows(3);
+        tracker.add_output_bytes(128);
+        tracker.add_file_paths(vec!["argo/a.parquet".to_string()]);
+
+        let metrics = tracker.get_consolidated_metrics();
+        assert_eq!(metrics.query_id, query_id);
+        assert_eq!(metrics.result_num_rows, 3);
+        assert_eq!(metrics.result_size_in_bytes, 128);
+        assert_eq!(metrics.file_paths, vec!["argo/a.parquet".to_string()]);
+        assert_eq!(metrics.parsed_logical_plan, serde_json::Value::Null);
+        assert_eq!(metrics.node_metrics.operator, "");
+        assert!(metrics.node_metrics.children.is_empty());
+    }
+
+    /// The file tracer shares the tracker's path list rather than copying it, so
+    /// files a source records while streaming still land in the query's metrics.
+    #[test]
+    fn the_file_tracer_writes_through_to_the_tracker() {
+        let tracker = MetricsTracker::new(serde_json::Value::Null, uuid::Uuid::new_v4());
+        tracker
+            .get_as_file_tracer()
+            .lock()
+            .push("argo/b.parquet".to_string());
+        assert_eq!(
+            tracker.get_consolidated_metrics().file_paths,
+            vec!["argo/b.parquet".to_string()]
+        );
+    }
+}

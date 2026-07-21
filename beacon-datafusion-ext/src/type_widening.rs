@@ -57,3 +57,64 @@ impl ArrowTypeWideningStrategy for DefaultArrowTypeWidening {
         Ok(Arc::new(arrow_schema::Schema::new(merged_fields)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use arrow_schema::{DataType, Field, Schema};
+
+    use super::*;
+
+    fn schema(fields: &[(&str, DataType)]) -> SchemaRef {
+        Arc::new(Schema::new(
+            fields
+                .iter()
+                .map(|(name, dt)| Field::new(*name, dt.clone(), true))
+                .collect::<Vec<_>>(),
+        ))
+    }
+
+    #[test]
+    fn merging_no_schemas_is_an_error() {
+        let widening = ArrowTypeWidening::new(Arc::new(DefaultArrowTypeWidening));
+        let err = widening.merge_schemas(&[]).unwrap_err();
+        assert!(
+            matches!(err, ArrowError::SchemaError(_)),
+            "expected a schema error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn merge_unions_fields_in_first_seen_order() {
+        let widening = ArrowTypeWidening::new(Arc::new(DefaultArrowTypeWidening));
+        let merged = widening
+            .merge_schemas(&[
+                schema(&[("a", DataType::Int32), ("b", DataType::Utf8)]),
+                // `b` repeats with an identical type (deduped), `c` is new.
+                schema(&[("b", DataType::Utf8), ("c", DataType::Float64)]),
+            ])
+            .unwrap();
+
+        let names: Vec<&str> = merged.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn merge_rejects_a_field_with_two_types() {
+        // The default strategy does not widen: it only unions identical fields,
+        // so a type conflict is an error rather than a promotion.
+        let widening = ArrowTypeWidening::new(Arc::new(DefaultArrowTypeWidening));
+        let err = widening
+            .merge_schemas(&[
+                schema(&[("a", DataType::Int32)]),
+                schema(&[("a", DataType::Int64)]),
+            ])
+            .unwrap_err();
+
+        match err {
+            ArrowError::SchemaError(message) => {
+                assert!(message.contains('a'), "message should name the field: {message}");
+            }
+            other => panic!("expected SchemaError, got {other:?}"),
+        }
+    }
+}

@@ -155,3 +155,103 @@ impl TableDefinition for SqlDatabaseTableDefinition {
 pub fn unresolved_schema() -> SchemaRef {
     Arc::new(Schema::empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secret::EncryptedSecret;
+    use arrow::datatypes::{DataType, Field};
+    use datafusion::prelude::SessionConfig;
+
+    fn definition(secret: Option<EncryptedSecret>) -> SqlDatabaseTableDefinition {
+        SqlDatabaseTableDefinition {
+            name: "pg_companies".to_string(),
+            engine: crate::source::tests::engine(),
+            remote_table: "public.companies".to_string(),
+            schema: Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)])),
+            options: BTreeMap::from([
+                ("host".to_string(), "db.internal".to_string()),
+                ("port".to_string(), "5432".to_string()),
+            ]),
+            secret,
+        }
+    }
+
+    /// The definition round-trips through the typetag `TableDefinition` trait,
+    /// keeping its `sql_database_table` tag so `table.json` reloads correctly.
+    #[test]
+    fn definition_serde_round_trip() {
+        let definition: Arc<dyn TableDefinition> = Arc::new(definition(None));
+        let json = serde_json::to_value(&definition).expect("should serialize");
+        assert_eq!(json["definition_type"], "sql_database_table");
+        assert_eq!(json["remote_table"], "public.companies");
+        assert!(
+            json.get("secret").is_none(),
+            "an absent secret must be omitted, not written as null: {json}"
+        );
+
+        let restored: Arc<dyn TableDefinition> =
+            serde_json::from_value(json).expect("should deserialize");
+        assert_eq!(restored.table_name(), "pg_companies");
+    }
+
+    /// The persisted form never contains the plaintext password.
+    #[test]
+    fn persisted_form_holds_only_ciphertext() {
+        let secret = EncryptedSecret::encrypt("hunter2", &[9u8; 32]).unwrap();
+        let json = serde_json::to_string(&definition(Some(secret))).unwrap();
+        assert!(!json.contains("hunter2"), "{json}");
+        assert!(json.contains("ciphertext"), "{json}");
+    }
+
+    /// Fails closed: a stored secret with no secret store in the session must not
+    /// silently connect without a password.
+    #[test]
+    fn decrypt_fails_closed_without_a_secret_store() {
+        let secret = EncryptedSecret::encrypt("hunter2", &[9u8; 32]).unwrap();
+        let ctx = SessionContext::new();
+        let err = definition(Some(secret))
+            .decrypt_password(&ctx)
+            .expect_err("must not fall back to no password");
+        assert!(err.to_string().contains("secret store"), "{err}");
+    }
+
+    /// Likewise when a store is present but no master key is configured.
+    #[test]
+    fn decrypt_fails_closed_without_a_master_key() {
+        let secret = EncryptedSecret::encrypt("hunter2", &[9u8; 32]).unwrap();
+        let ctx = SessionContext::new_with_config(
+            SessionConfig::new().with_extension(Arc::new(SecretStore::new_with_master_key(None))),
+        );
+        let err = definition(Some(secret))
+            .decrypt_password(&ctx)
+            .expect_err("must not decrypt without a key");
+        assert!(err.to_string().contains("encryption key"), "{err}");
+        assert!(err.to_string().contains("pg_companies"), "{err}");
+    }
+
+    /// With the right key the credential is recovered; a definition with no
+    /// secret yields no password at all.
+    #[test]
+    fn decrypt_recovers_the_password_with_the_configured_key() {
+        use secrecy::ExposeSecret as _;
+
+        let key = [9u8; 32];
+        let secret = EncryptedSecret::encrypt("hunter2", &key).unwrap();
+        let ctx = SessionContext::new_with_config(
+            SessionConfig::new()
+                .with_extension(Arc::new(SecretStore::new_with_master_key(Some(key)))),
+        );
+        let password = definition(Some(secret)).decrypt_password(&ctx).unwrap();
+        assert_eq!(password.unwrap().expose_secret(), "hunter2");
+
+        assert!(definition(None).decrypt_password(&ctx).unwrap().is_none());
+    }
+
+    /// An unresolved schema is the "resolve from the database" marker, so it must
+    /// be empty (and not, say, carry a placeholder column).
+    #[test]
+    fn unresolved_schema_is_empty() {
+        assert_eq!(unresolved_schema().fields().len(), 0);
+    }
+}

@@ -205,6 +205,60 @@ mod tests {
         assert!(roles_from_claim(&serde_json::json!(42)).is_empty());
     }
 
+    #[test]
+    fn dotted_path_through_a_non_object_yields_none() {
+        let claims = serde_json::json!({ "user": "alice", "roles": ["reader"] });
+        // Descending into a scalar (`user.name`) or an array (`roles.0`) resolves
+        // to None rather than panicking.
+        assert!(claim_at(&claims, "user.name").is_none());
+        assert!(claim_at(&claims, "roles.reader").is_none());
+        // A trailing empty segment does not match.
+        assert!(claim_at(&claims, "user.").is_none());
+    }
+
+    #[test]
+    fn roles_default_to_empty_when_claim_is_absent_or_ill_typed() {
+        let claims = serde_json::json!({ "preferred_username": "alice" });
+        let roles = claim_at(&claims, "realm_access.roles").map(roles_from_claim);
+        assert_eq!(roles, None);
+        // A present-but-wrong-typed roles claim contributes no roles rather than
+        // erroring — the principal ends up with zero privileges (fail closed).
+        assert!(roles_from_claim(&serde_json::json!({ "nested": "obj" })).is_empty());
+        assert!(roles_from_claim(&serde_json::Value::Null).is_empty());
+        // Non-string array elements are skipped, not stringified.
+        assert_eq!(
+            roles_from_claim(&serde_json::json!(["reader", 7, "writer"])),
+            vec!["reader".to_string(), "writer".to_string()]
+        );
+        // A space-delimited string collapses runs of whitespace.
+        assert_eq!(
+            roles_from_claim(&serde_json::json!("  reader   writer ")),
+            vec!["reader".to_string(), "writer".to_string()]
+        );
+    }
+
+    /// A structurally invalid bearer token is rejected at header decoding, before
+    /// any JWKS fetch — so this exercises the error path without a network.
+    #[tokio::test]
+    async fn malformed_bearer_token_fails_before_network() {
+        let provider = OidcAuthProvider::new(OidcConfig {
+            // An unreachable JWKS URL: if we ever reached the fetch this would
+            // surface as a different error. We assert we fail earlier.
+            issuer: "https://issuer.example".to_string(),
+            jwks_url: "http://127.0.0.1:1/jwks".to_string(),
+            audience: None,
+            roles_claim: "realm_access.roles".to_string(),
+            username_claim: "preferred_username".to_string(),
+            jwks_cache_ttl: Duration::from_secs(300),
+        });
+        let err = provider
+            .authenticate(&Credential::bearer("not-a-jwt"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("token header"), "got: {err}");
+    }
+
     #[tokio::test]
     async fn basic_credential_is_rejected() {
         let provider = OidcAuthProvider::new(OidcConfig {

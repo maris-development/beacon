@@ -451,4 +451,61 @@ mod tests {
         assert!(ba.is_null(1));
         assert!(ba.is_valid(2));
     }
+
+    // ---- datatype conversion ----
+
+    #[test]
+    fn test_datatype_round_trips_through_arrow_for_every_variant() {
+        use NdArrayDataType::*;
+        for dtype in [
+            Bool, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Timestamp, Binary, String,
+        ] {
+            let arrow_dtype: arrow::datatypes::DataType = dtype.clone().into();
+            let back = NdArrayDataType::try_from(arrow_dtype.clone())
+                .unwrap_or_else(|e| panic!("{dtype:?} -> {arrow_dtype:?} did not convert back: {e}"));
+            assert_eq!(back, dtype, "round-trip changed {dtype:?}");
+        }
+    }
+
+    #[test]
+    fn test_timestamp_maps_to_nanoseconds_without_a_timezone() {
+        assert_eq!(
+            arrow::datatypes::DataType::from(NdArrayDataType::Timestamp),
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
+        );
+    }
+
+    #[test]
+    fn test_timestamp_with_a_timezone_is_accepted_as_nanoseconds() {
+        // Only the unit is checked; the timezone is deliberately dropped.
+        let dtype = NdArrayDataType::try_from(arrow::datatypes::DataType::Timestamp(
+            arrow::datatypes::TimeUnit::Nanosecond,
+            Some("UTC".into()),
+        ))
+        .unwrap();
+        assert_eq!(dtype, NdArrayDataType::Timestamp);
+    }
+
+    #[test]
+    fn test_non_nanosecond_timestamps_are_rejected() {
+        let err = NdArrayDataType::try_from(arrow::datatypes::DataType::Timestamp(
+            arrow::datatypes::TimeUnit::Millisecond,
+            None,
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Unsupported time unit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_unsupported_arrow_types_are_rejected() {
+        // `Utf8View`/`LargeUtf8` are not silently narrowed to `String`.
+        let err = NdArrayDataType::try_from(arrow::datatypes::DataType::LargeUtf8).unwrap_err();
+        assert!(
+            err.to_string().contains("Unsupported Arrow data type"),
+            "unexpected error: {err}"
+        );
+    }
 }

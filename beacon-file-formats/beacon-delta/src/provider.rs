@@ -403,4 +403,101 @@ mod tests {
 
         assert_eq!(TimeTravel::from_options(&HashMap::new()).unwrap(), None);
     }
+
+    #[test]
+    fn time_travel_version_wins_over_timestamp() {
+        let mut opts = HashMap::new();
+        opts.insert("version".to_string(), "5".to_string());
+        opts.insert("timestamp".to_string(), "2026-01-01T00:00:00Z".to_string());
+        assert_eq!(
+            TimeTravel::from_options(&opts).unwrap(),
+            Some(TimeTravel::Version(5)),
+            "when both are set, `version` takes precedence"
+        );
+    }
+
+    #[test]
+    fn time_travel_raw_version_beats_format_prefixed() {
+        // DataFusion may surface an OPTIONS key both raw and `format.`-prefixed;
+        // the raw form is preferred.
+        let mut opts = HashMap::new();
+        opts.insert("version".to_string(), "9".to_string());
+        opts.insert("format.version".to_string(), "1".to_string());
+        assert_eq!(
+            TimeTravel::from_options(&opts).unwrap(),
+            Some(TimeTravel::Version(9))
+        );
+    }
+
+    #[test]
+    fn time_travel_rejects_a_non_integer_version() {
+        let mut opts = HashMap::new();
+        opts.insert("version".to_string(), "not-a-number".to_string());
+        let err = TimeTravel::from_options(&opts).unwrap_err();
+        assert!(err.to_string().contains("version"), "{err}");
+    }
+
+    #[test]
+    fn location_to_prefix_rejects_whitespace_and_slash_only() {
+        assert!(location_to_prefix("///").is_err());
+        assert!(location_to_prefix("s3://").is_err());
+        // A bare scheme with only slashes after it is empty too.
+        assert!(location_to_prefix("file:////").is_err());
+    }
+
+    #[tokio::test]
+    async fn sorted_list_store_returns_lexicographic_order() {
+        use futures::StreamExt as _;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use object_store::{ObjectStoreExt as _, PutPayload};
+
+        // Insert out of lexicographic order; the wrapper must still list sorted
+        // (both `list` and `list_with_delimiter`) so delta-rs's log replay sees no
+        // phantom gaps on local-FS-style stores that return `readdir` order.
+        let inner = Arc::new(InMemory::new());
+        for name in [
+            "_delta_log/00002.json",
+            "_delta_log/00000.json",
+            "_delta_log/00001.json",
+        ] {
+            inner
+                .put(&Path::from(name), PutPayload::from_static(b"{}"))
+                .await
+                .unwrap();
+        }
+        let store = SortedListStore { inner };
+
+        let listed: Vec<String> = store
+            .list(None)
+            .map(|r| r.unwrap().location.as_ref().to_string())
+            .collect()
+            .await;
+        assert_eq!(
+            listed,
+            vec![
+                "_delta_log/00000.json".to_string(),
+                "_delta_log/00001.json".to_string(),
+                "_delta_log/00002.json".to_string(),
+            ]
+        );
+
+        let delimited = store
+            .list_with_delimiter(Some(&Path::from("_delta_log")))
+            .await
+            .unwrap();
+        let objects: Vec<String> = delimited
+            .objects
+            .iter()
+            .map(|o| o.location.as_ref().to_string())
+            .collect();
+        assert_eq!(
+            objects,
+            vec![
+                "_delta_log/00000.json".to_string(),
+                "_delta_log/00001.json".to_string(),
+                "_delta_log/00002.json".to_string(),
+            ]
+        );
+    }
 }

@@ -98,3 +98,123 @@ impl<T: NdArrayType, A: ArrayBackend<T> + ?Sized> ArrayBackend<T> for Arc<A> {
         (**self).read_subset(subset).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::array::backend::mem::InMemoryArrayBackend;
+
+    fn backend(shape: Vec<usize>) -> InMemoryArrayBackend<i32> {
+        let len: usize = shape.iter().product();
+        let dimensions = (0..shape.len()).map(|i| format!("d{i}")).collect();
+        InMemoryArrayBackend::new(
+            ndarray::ArrayD::from_shape_vec(shape.clone(), vec![0; len]).unwrap(),
+            shape,
+            dimensions,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_validate_subset_accepts_the_full_extent() {
+        let b = backend(vec![3, 4]);
+        assert!(
+            b.validate_subset(&ArraySubset {
+                start: vec![0, 0],
+                shape: vec![3, 4]
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_subset_accepts_a_zero_length_window_at_the_upper_edge() {
+        // `start == size` with `len == 0` is the empty tail window a chunk
+        // generator can legitimately produce; it must not be rejected.
+        let b = backend(vec![3, 4]);
+        assert!(
+            b.validate_subset(&ArraySubset {
+                start: vec![3, 0],
+                shape: vec![0, 4]
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_subset_rejects_rank_mismatches() {
+        let b = backend(vec![3, 4]);
+        let err = b
+            .validate_subset(&ArraySubset {
+                start: vec![0],
+                shape: vec![3, 4],
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("start rank"),
+            "unexpected error: {err}"
+        );
+
+        let err = b
+            .validate_subset(&ArraySubset {
+                start: vec![0, 0],
+                shape: vec![3],
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("shape rank"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_subset_rejects_out_of_bounds_windows() {
+        let b = backend(vec![3, 4]);
+        let err = b
+            .validate_subset(&ArraySubset {
+                start: vec![4, 0],
+                shape: vec![0, 4],
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("start index 4 exceeds axis size 3"),
+            "unexpected error: {err}"
+        );
+
+        let err = b
+            .validate_subset(&ArraySubset {
+                start: vec![2, 0],
+                shape: vec![2, 4],
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("end index 4 exceeds axis size 3"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_zero_length_axis_makes_the_backend_empty() {
+        let b = backend(vec![0, 4]);
+        assert_eq!(b.len(), 0);
+        assert!(b.is_empty());
+        assert_eq!(b.chunk_shape(), vec![0, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_arc_delegates_every_backend_method() {
+        let b = Arc::new(backend(vec![2, 3]));
+        assert_eq!(ArrayBackend::<i32>::shape(&b), vec![2, 3]);
+        assert_eq!(ArrayBackend::<i32>::len(&b), 6);
+        assert_eq!(ArrayBackend::<i32>::chunk_shape(&b), vec![2, 3]);
+        assert_eq!(ArrayBackend::<i32>::fill_value(&b), None);
+        let values = b
+            .read_subset(ArraySubset {
+                start: vec![0, 0],
+                shape: vec![1, 3],
+            })
+            .await
+            .unwrap();
+        assert_eq!(values.shape(), &[1, 3]);
+    }
+}

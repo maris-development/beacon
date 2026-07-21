@@ -373,3 +373,65 @@ impl RoleStore for TablesAuthStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{quote_literal, string_at};
+
+    use arrow::array::{Int64Array, LargeStringArray, StringArray, StringViewArray};
+
+    /// Every value interpolated into the store's SQL goes through `quote_literal`;
+    /// a value that closes its own quote would let an attacker-influenced username
+    /// or path pattern inject statements. Doubling is also idempotent-safe: the
+    /// escaped form re-parses to the original text, not to a doubled quote.
+    #[test]
+    fn quote_literal_neutralises_embedded_quotes() {
+        assert_eq!(quote_literal("alice"), "alice");
+        assert_eq!(quote_literal("o'brien"), "o''brien");
+        assert_eq!(
+            quote_literal("x'; DROP TABLE __beacon_users; --"),
+            "x''; DROP TABLE __beacon_users; --"
+        );
+        // Backslashes are not escape characters in SQL string literals, so they
+        // must be left alone (escaping them would corrupt path patterns).
+        assert_eq!(quote_literal(r"argo\**"), r"argo\**");
+    }
+
+    /// Managed-table scans may hand back any of the string layouts depending on
+    /// how the batch was produced, so hydration must read all of them — a missed
+    /// layout would fail auth loading at startup with a type error.
+    #[test]
+    fn string_at_reads_every_string_layout() {
+        let plain = StringArray::from(vec![Some("alice")]);
+        assert_eq!(string_at(&plain, 0).unwrap(), "alice");
+
+        let view = StringViewArray::from(vec![Some("alice")]);
+        assert_eq!(string_at(&view, 0).unwrap(), "alice");
+
+        let large = LargeStringArray::from(vec![Some("alice")]);
+        assert_eq!(string_at(&large, 0).unwrap(), "alice");
+    }
+
+    /// A NULL cell reads as the empty string rather than erroring: a role
+    /// assignment or rule row with a missing field must not abort hydration of
+    /// the entire auth state.
+    #[test]
+    fn string_at_reads_null_as_empty() {
+        let array = StringArray::from(vec![None::<&str>, Some("bob")]);
+        assert_eq!(string_at(&array, 0).unwrap(), "");
+        assert_eq!(string_at(&array, 1).unwrap(), "bob");
+    }
+
+    /// A non-string column means the internal table's shape has drifted from what
+    /// the store expects; that must be a loud error naming the type, not a silent
+    /// empty value that would read as "no username".
+    #[test]
+    fn string_at_rejects_a_non_string_column() {
+        let array = Int64Array::from(vec![1]);
+        let error = string_at(&array, 0).expect_err("an integer column must not read as a string");
+        assert!(
+            error.to_string().contains("Int64"),
+            "unexpected error: {error}"
+        );
+    }
+}

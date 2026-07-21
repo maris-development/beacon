@@ -120,6 +120,56 @@ mod tests {
     }
 
     #[test]
+    fn nulls_inside_a_list_are_skipped() {
+        // A `List` literal may carry nulls (e.g. from an array constructor);
+        // they are dropped rather than turned into empty paths.
+        let scalars = vec![
+            ScalarValue::Utf8(Some("a.parquet".to_string())),
+            ScalarValue::Utf8(None),
+            ScalarValue::Utf8(Some("b.parquet".to_string())),
+        ];
+        let expr = Expr::Literal(
+            ScalarValue::List(ScalarValue::new_list_nullable(
+                &scalars,
+                &arrow::datatypes::DataType::Utf8,
+            )),
+            None,
+        );
+        let paths = parse_glob_paths_arg(&[expr], "read_parquet").unwrap();
+        assert_eq!(paths, vec!["a.parquet".to_string(), "b.parquet".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_list_yields_no_paths() {
+        let expr = list_expr(&[]);
+        let paths = parse_glob_paths_arg(&[expr], "read_parquet").unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn a_list_of_non_strings_errors() {
+        // Only `List<Utf8>` is accepted; a numeric list is a plan error, not a
+        // silently empty path list.
+        let scalars = vec![ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(2))];
+        let expr = Expr::Literal(
+            ScalarValue::List(ScalarValue::new_list_nullable(
+                &scalars,
+                &arrow::datatypes::DataType::Int64,
+            )),
+            None,
+        );
+        assert!(parse_glob_paths_arg(&[expr], "read_parquet").is_err());
+    }
+
+    #[test]
+    fn a_null_string_scalar_errors() {
+        // `Utf8(None)` does not match the `Some(s)` arms and falls through to
+        // the catch-all error rather than producing an empty path.
+        let expr = Expr::Literal(ScalarValue::Utf8(None), None);
+        assert!(parse_glob_paths_arg(&[expr], "read_parquet").is_err());
+    }
+
+    #[test]
     fn missing_argument_errors() {
         assert!(parse_glob_paths_arg(&[], "read_parquet").is_err());
     }

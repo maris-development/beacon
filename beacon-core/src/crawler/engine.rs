@@ -70,27 +70,9 @@ impl CrawlEngine {
 
         // 1. Scan + classify (reuses list_datasets + per-format discover_datasets).
         // Crawlers run periodically, so the cache-backed registered store is fine.
-        let listing_factory = self
-            .session_ctx
-            .state()
-            .config()
-            .get_extension::<ListingFactory>()
-            .expect("Listing Factory Should always be populated...");
         let pattern = scan_pattern(&def.target_prefix);
-        let object_store = self
-            .session_ctx
-            .runtime_env()
-            .object_store(&self.datasets_url)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "crawler '{}' could not resolve datasets store: {e}",
-                    def.name
-                )
-            })?;
         let datasets = list_datasets(
             &self.session_ctx,
-            &self.datasets_url,
-            object_store,
             &self.file_formats,
             None,
             None,

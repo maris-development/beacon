@@ -550,6 +550,105 @@ mod tests {
         assert_eq!(total, 2);
     }
 
+    // ── lon/lat column auto-detection ──────────────────────────────────
+
+    #[test]
+    fn coordinate_heuristics_recognise_common_names() {
+        for name in ["lat", "Latitude", "LAT_DEG", "northing", "y"] {
+            assert!(is_lat_column(name), "{name} should be detected as latitude");
+        }
+        for name in ["lon", "Longitude", "lng", "LONG", "easting", "x"] {
+            assert!(
+                is_lon_column(name),
+                "{name} should be detected as longitude"
+            );
+        }
+    }
+
+    #[test]
+    fn coordinate_heuristics_reject_unrelated_names() {
+        for name in ["id", "temperature", "pressure"] {
+            assert!(!is_lat_column(name), "{name} matched latitude");
+            assert!(!is_lon_column(name), "{name} matched longitude");
+        }
+        // A bare "x"/"y" is only longitude/latitude respectively — the longitude
+        // rule matches "x" by full equality, not as a substring.
+        assert!(!is_lon_column("max_depth"));
+        assert!(is_lon_column("x"));
+    }
+
+    #[tokio::test]
+    async fn create_writer_physical_plan_errors_when_no_coordinates_found() {
+        use datafusion::physical_plan::empty::EmptyExec;
+
+        let ctx = datafusion::prelude::SessionContext::new();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("temperature", DataType::Float64, true),
+        ]));
+        let input = Arc::new(EmptyExec::new(schema.clone()));
+
+        let format = GeoParquetFormat::new(GeoParquetOptions {
+            longitude_column: None,
+            latitude_column: None,
+        });
+        let conf = writer_sink_config(schema);
+        let err = format
+            .create_writer_physical_plan(input, &ctx.state(), conf, None)
+            .await
+            .expect_err("a schema without coordinates cannot be written as GeoParquet");
+        assert!(
+            err.to_string()
+                .contains("Could not automatically find longitude column"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_writer_physical_plan_errors_on_unknown_explicit_column() {
+        use datafusion::physical_plan::empty::EmptyExec;
+
+        let ctx = datafusion::prelude::SessionContext::new();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("lon", DataType::Float64, true),
+            Field::new("lat", DataType::Float64, true),
+        ]));
+        let input = Arc::new(EmptyExec::new(schema.clone()));
+
+        // An explicitly configured column that does not exist must be reported
+        // rather than silently falling back to the name heuristics.
+        let format = GeoParquetFormat::new(GeoParquetOptions {
+            longitude_column: Some("does_not_exist".to_string()),
+            latitude_column: None,
+        });
+        let conf = writer_sink_config(schema);
+        let err = format
+            .create_writer_physical_plan(input, &ctx.state(), conf, None)
+            .await
+            .expect_err("unknown explicit longitude column should error");
+        assert!(
+            err.to_string()
+                .contains("Specified longitude column 'does_not_exist' not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn writer_sink_config(schema: SchemaRef) -> FileSinkConfig {
+        FileSinkConfig {
+            original_url: String::new(),
+            object_store_url: datafusion::execution::object_store::ObjectStoreUrl::local_filesystem(
+            ),
+            file_group: datafusion::datasource::physical_plan::FileGroup::default(),
+            table_paths: vec![],
+            output_schema: schema,
+            table_partition_cols: vec![],
+            insert_op: datafusion::logical_expr::dml::InsertOp::Append,
+            keep_partition_by_columns: false,
+            file_extension: GEOPARQUET_EXTENSION.to_string(),
+            file_output_mode: datafusion::datasource::physical_plan::FileOutputMode::SingleFile,
+        }
+    }
+
     fn object_meta(path: &str) -> ObjectMeta {
         ObjectMeta {
             location: Path::from(path),

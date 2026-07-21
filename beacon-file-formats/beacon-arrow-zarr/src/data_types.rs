@@ -81,3 +81,54 @@ pub fn try_zarrs_dtype_to_arrow(
         ZarrDtypeKind::Other => Err(format!("Unsupported Zarrs data type: {:?}", data_type)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::DataType as ArrowType;
+    use zarrs::array::data_type as dt;
+
+    #[test]
+    fn classify_maps_every_supported_builtin() {
+        assert_eq!(classify(&dt::bool()), ZarrDtypeKind::Bool);
+        assert_eq!(classify(&dt::int8()), ZarrDtypeKind::Int8);
+        assert_eq!(classify(&dt::int16()), ZarrDtypeKind::Int16);
+        assert_eq!(classify(&dt::int32()), ZarrDtypeKind::Int32);
+        assert_eq!(classify(&dt::int64()), ZarrDtypeKind::Int64);
+        assert_eq!(classify(&dt::uint8()), ZarrDtypeKind::UInt8);
+        assert_eq!(classify(&dt::uint16()), ZarrDtypeKind::UInt16);
+        assert_eq!(classify(&dt::uint32()), ZarrDtypeKind::UInt32);
+        assert_eq!(classify(&dt::uint64()), ZarrDtypeKind::UInt64);
+        assert_eq!(classify(&dt::float32()), ZarrDtypeKind::Float32);
+        assert_eq!(classify(&dt::float64()), ZarrDtypeKind::Float64);
+        assert_eq!(classify(&dt::string()), ZarrDtypeKind::String);
+        assert_eq!(classify(&dt::bytes()), ZarrDtypeKind::Bytes);
+    }
+
+    #[test]
+    fn classify_reports_unsupported_types_as_other() {
+        // `float16` and `int2` have no explicit Arrow mapping.
+        assert_eq!(classify(&dt::float16()), ZarrDtypeKind::Other);
+        assert_eq!(classify(&dt::int2()), ZarrDtypeKind::Other);
+        assert_eq!(classify(&dt::raw_bits(4)), ZarrDtypeKind::Other);
+    }
+
+    #[test]
+    fn arrow_mapping_round_trips_builtins() {
+        assert_eq!(try_zarrs_dtype_to_arrow(&dt::bool()).unwrap(), ArrowType::Boolean);
+        assert_eq!(try_zarrs_dtype_to_arrow(&dt::int32()).unwrap(), ArrowType::Int32);
+        assert_eq!(try_zarrs_dtype_to_arrow(&dt::uint64()).unwrap(), ArrowType::UInt64);
+        assert_eq!(
+            try_zarrs_dtype_to_arrow(&dt::float64()).unwrap(),
+            ArrowType::Float64
+        );
+        assert_eq!(try_zarrs_dtype_to_arrow(&dt::string()).unwrap(), ArrowType::Utf8);
+        assert_eq!(try_zarrs_dtype_to_arrow(&dt::bytes()).unwrap(), ArrowType::Binary);
+    }
+
+    #[test]
+    fn arrow_mapping_rejects_unsupported_types() {
+        let err = try_zarrs_dtype_to_arrow(&dt::float16()).unwrap_err();
+        assert!(err.contains("Unsupported Zarrs data type"));
+    }
+}

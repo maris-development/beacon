@@ -194,3 +194,190 @@ impl FileSource for BBFSource {
         "bbf"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datafusion::BBFFormat;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::file_format::FileFormat;
+    use datafusion::physical_expr::expressions::{col, lit};
+    use datafusion::physical_expr::projection::ProjectionExprs;
+
+    fn schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+            Field::new("c", DataType::Utf8, true),
+        ]))
+    }
+
+    fn source() -> BBFSource {
+        BBFSource::new(TableSchema::from_file_schema(schema()))
+    }
+
+    fn downcast(source: &Arc<dyn FileSource>) -> &BBFSource {
+        source
+            .as_any()
+            .downcast_ref::<BBFSource>()
+            .expect("should still be a BBFSource")
+    }
+
+    /// A fresh source must not prune, project or slice anything; those only appear
+    /// once the optimizer pushes them down.
+    #[test]
+    fn new_source_starts_without_predicate_or_projection() {
+        let source = source();
+        assert!(source.predicate.is_none());
+        assert!(source.projection().is_none());
+        assert!(!source.split_streams_slice);
+        assert_eq!(source.file_type(), "bbf");
+    }
+
+    /// `with_batch_size` is called by the execution layer after the format built
+    /// the source, so it must not reset the slicing configuration or the schema.
+    #[test]
+    fn with_batch_size_preserves_other_settings() {
+        let source = source().with_split_streams_slice(true);
+        let resized = source.with_batch_size(64);
+        let resized = downcast(&resized);
+        assert_eq!(resized.batch_size, 64);
+        assert!(resized.split_streams_slice);
+        assert_eq!(resized.table_schema().file_schema(), &schema());
+    }
+
+    /// The format must propagate its configured slicing default into the source it
+    /// builds, otherwise `split_streams_slice = true` would have no effect.
+    #[test]
+    fn file_source_built_by_format_inherits_split_setting() {
+        let format = BBFFormat {
+            split_streams_slice: true,
+        };
+        let source = format.file_source(TableSchema::from_file_schema(schema()));
+        assert!(downcast(&source).split_streams_slice);
+
+        let source = BBFFormat::default().file_source(TableSchema::from_file_schema(schema()));
+        assert!(!downcast(&source).split_streams_slice);
+    }
+
+    /// The first projection pushdown is adopted verbatim; the source must report it
+    /// back so `create_physical_plan` can carry it across a source rebuild.
+    #[test]
+    fn try_pushdown_projection_adopts_first_projection() {
+        let projection = ProjectionExprs::from_indices(&[0, 2], &schema());
+        let pushed = source()
+            .try_pushdown_projection(&projection)
+            .expect("pushdown should succeed")
+            .expect("BBF supports projection pushdown");
+        assert_eq!(
+            downcast(&pushed)
+                .projection()
+                .expect("projection recorded")
+                .column_indices(),
+            vec![0, 2]
+        );
+    }
+
+    /// A second pushdown composes with the first (the new projection indexes into
+    /// the already-projected schema), rather than replacing it.
+    #[test]
+    fn try_pushdown_projection_merges_with_existing_projection() {
+        let first = ProjectionExprs::from_indices(&[0, 2], &schema());
+        let projected_schema = first.project_schema(&schema()).expect("project schema");
+        let second = ProjectionExprs::from_indices(&[1], &projected_schema);
+
+        let source = source().with_projection(Some(first));
+        let pushed = source
+            .try_pushdown_projection(&second)
+            .expect("pushdown should succeed")
+            .expect("BBF supports projection pushdown");
+        // Column 1 of (a, c) is `c`, i.e. index 2 of the original schema.
+        assert_eq!(
+            downcast(&pushed)
+                .projection()
+                .expect("projection recorded")
+                .column_indices(),
+            vec![2]
+        );
+    }
+
+    /// Filters are kept for BBF's own container pruning but must still be reported
+    /// as `PushedDown::No`, because pruning is best-effort and the parent operator
+    /// has to re-apply the filter for correctness.
+    #[test]
+    fn try_pushdown_filters_keeps_predicate_but_does_not_claim_it() {
+        let schema = schema();
+        let filter: Arc<dyn PhysicalExpr> = Arc::new(
+            datafusion::physical_expr::expressions::BinaryExpr::new(
+                col("a", &schema).unwrap(),
+                datafusion::logical_expr::Operator::Gt,
+                lit(1i32),
+            ),
+        );
+        let result = source()
+            .try_pushdown_filters(vec![filter.clone()], &ConfigOptions::default())
+            .expect("filter pushdown should succeed");
+
+        assert_eq!(result.filters.len(), 1);
+        assert!(
+            matches!(result.filters[0], PushedDown::No),
+            "BBF pruning is best-effort, so the filter must not be claimed"
+        );
+        let updated = result.updated_node.expect("source should be updated");
+        assert!(downcast(&updated).predicate.is_some());
+    }
+
+    /// Successive filter pushdowns must accumulate into a conjunction instead of
+    /// the later one dropping the earlier predicate.
+    #[test]
+    fn try_pushdown_filters_conjoins_successive_predicates() {
+        let schema = schema();
+        let f1: Arc<dyn PhysicalExpr> = Arc::new(
+            datafusion::physical_expr::expressions::BinaryExpr::new(
+                col("a", &schema).unwrap(),
+                datafusion::logical_expr::Operator::Gt,
+                lit(1i32),
+            ),
+        );
+        let f2: Arc<dyn PhysicalExpr> = Arc::new(
+            datafusion::physical_expr::expressions::BinaryExpr::new(
+                col("b", &schema).unwrap(),
+                datafusion::logical_expr::Operator::Lt,
+                lit(9i32),
+            ),
+        );
+
+        let first = source()
+            .try_pushdown_filters(vec![f1], &ConfigOptions::default())
+            .unwrap()
+            .updated_node
+            .expect("updated source");
+        let second = downcast(&first)
+            .try_pushdown_filters(vec![f2], &ConfigOptions::default())
+            .unwrap()
+            .updated_node
+            .expect("updated source");
+
+        let predicate = downcast(&second)
+            .predicate
+            .clone()
+            .expect("predicate recorded");
+        let rendered = format!("{predicate}");
+        assert!(rendered.contains("a@0 > 1"), "predicate was {rendered}");
+        assert!(rendered.contains("b@1 < 9"), "predicate was {rendered}");
+        assert!(rendered.contains("AND"), "predicate was {rendered}");
+    }
+
+    /// The file tracer is shared by reference: replacing it on the source must be
+    /// visible to openers created afterwards, which is how scanned entries are
+    /// reported back to the query layer.
+    #[test]
+    fn set_file_tracer_swaps_the_shared_tracer() {
+        let source = source();
+        let tracer = Arc::new(Mutex::new(vec!["seed".to_string()]));
+        source.set_file_tracer(tracer.clone());
+        assert_eq!(source.file_tracer.lock().lock().as_slice(), ["seed"]);
+        tracer.lock().push("more".to_string());
+        assert_eq!(source.file_tracer.lock().lock().len(), 2);
+    }
+}

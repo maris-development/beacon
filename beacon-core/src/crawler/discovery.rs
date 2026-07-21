@@ -373,6 +373,46 @@ mod tests {
         );
     }
 
+    /// A candidate rooted at the datasets store has no leaf to name it after, so
+    /// it falls back to the crawler's own (slugified) name — an empty table name
+    /// would be rejected by the catalog.
+    #[test]
+    fn root_candidates_are_named_after_the_crawler() {
+        let cands = vec![CandidateTable {
+            format: "parquet".to_string(),
+            base: String::new(),
+            partition_cols: vec![],
+            recursive: false,
+            file_count: 1,
+        }];
+        let mut d = def();
+        d.name = "Argo Floats!".to_string();
+        assert_eq!(assign_table_names(&cands, &d), vec!["argo_floats".to_string()]);
+    }
+
+    /// Two candidates that share a leaf *and* a format cannot be disambiguated by
+    /// appending the format, so the numeric suffix is the last resort. Names must
+    /// stay unique and deterministic — they are used to register catalog tables.
+    #[test]
+    fn same_leaf_and_format_falls_back_to_a_numeric_suffix() {
+        let candidate = |base: &str| CandidateTable {
+            format: "parquet".to_string(),
+            base: base.to_string(),
+            partition_cols: vec![],
+            recursive: false,
+            file_count: 1,
+        };
+        let cands = vec![candidate("a/data"), candidate("b/data"), candidate("c/data")];
+        assert_eq!(
+            assign_table_names(&cands, &def()),
+            vec![
+                "data".to_string(),
+                "data_parquet".to_string(),
+                "data_parquet_2".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn names_disambiguate_collisions() {
         let cands = vec![

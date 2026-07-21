@@ -78,3 +78,26 @@ pub async fn update_rows(
         .map_err(|e| anyhow::anyhow!("Failed to update rows in '{uri}': {e}"))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::memory::InMemory;
+
+    /// An UPDATE with no assignments is a no-op: it must return early *without*
+    /// touching the dataset, so it is safe even against a URI that doesn't exist.
+    #[tokio::test]
+    async fn update_with_no_assignments_is_a_noop() {
+        let warehouse = LanceWarehouse::new(Arc::new(InMemory::new()));
+        // No dataset exists at this URI; opening it would fail, so a successful
+        // result proves the early return fired before any I/O.
+        update_rows(
+            &warehouse,
+            "db:///lance/beacon/missing.lance",
+            Some("id = 1"),
+            &[],
+        )
+        .await
+        .expect("empty assignment list must short-circuit to Ok");
+    }
+}

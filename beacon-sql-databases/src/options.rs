@@ -73,4 +73,49 @@ mod tests {
         assert!(params.contains_key("port"));
         assert!(!params.contains_key("pass"));
     }
+
+    /// `dbname` is the libpq spelling; both it and `database` must land on the
+    /// pools' `db` key.
+    #[test]
+    fn dbname_is_an_alias_for_database() {
+        let mut opts = BTreeMap::new();
+        opts.insert("dbname".to_string(), "shop".to_string());
+        let params = build_pool_params(crate::source::tests::engine(), &opts, None);
+        assert_eq!(params["db"].expose_secret(), "shop");
+        assert!(!params.contains_key("dbname"));
+    }
+
+    /// Keys beacon does not translate are handed to the pool verbatim, so new
+    /// engine options work without a code change here.
+    #[test]
+    fn unknown_keys_pass_through_unchanged() {
+        let mut opts = BTreeMap::new();
+        opts.insert("sslmode".to_string(), "require".to_string());
+        opts.insert("user".to_string(), "beacon".to_string());
+        let params = build_pool_params(crate::source::tests::engine(), &opts, None);
+        assert_eq!(params["sslmode"].expose_secret(), "require");
+        assert_eq!(params["user"].expose_secret(), "beacon");
+    }
+
+    /// The password is never carried in `options` (it is stored encrypted and
+    /// injected here), so a stray `pass` option must not survive as the password.
+    #[test]
+    fn the_supplied_password_wins_over_an_options_entry() {
+        let mut opts = BTreeMap::new();
+        opts.insert("pass".to_string(), "stale".to_string());
+        let params = build_pool_params(
+            crate::source::tests::engine(),
+            &opts,
+            Some(SecretString::from("fresh".to_string())),
+        );
+        assert_eq!(params["pass"].expose_secret(), "fresh");
+    }
+
+    /// Empty options with no password produce an empty parameter map rather than
+    /// injected defaults.
+    #[test]
+    fn empty_options_produce_no_params() {
+        let params = build_pool_params(crate::source::tests::engine(), &BTreeMap::new(), None);
+        assert!(params.is_empty());
+    }
 }

@@ -201,6 +201,144 @@ fn split_record_batch(batch: RecordBatch, chunk_size: usize) -> Vec<RecordBatch>
     batches
 }
 
+#[cfg(test)]
+mod opener_tests {
+    use crate::datafusion::source::BBFSource;
+    use crate::datafusion::test_util::write_bbf_fixture;
+    use datafusion::datasource::file_format::FileFormat;
+    use datafusion::datasource::listing::PartitionedFile;
+    use datafusion::datasource::physical_plan::{FileScanConfigBuilder, FileSource};
+    use datafusion::datasource::table_schema::TableSchema;
+    use datafusion::execution::object_store::ObjectStoreUrl;
+    use datafusion::prelude::SessionContext;
+    use futures::StreamExt;
+    use object_store::ObjectStore;
+    use std::sync::Arc;
+
+    /// End-to-end read of a real BBF file through the source/opener pair: every
+    /// entry's rows must arrive, mapped onto the inferred table schema (so columns
+    /// missing from an entry come back as nulls), and the file tracer must record
+    /// the entries that were touched.
+    #[tokio::test]
+    async fn opener_streams_all_entries_of_a_real_bbf_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (store, meta) = write_bbf_fixture(dir.path(), "scan.bbf").await;
+        let object_store: Arc<dyn ObjectStore> = store;
+
+        let ctx = SessionContext::new();
+        let table_schema = crate::datafusion::BBFFormat::default()
+            .infer_schema(&ctx.state(), &object_store, &[meta.clone()])
+            .await
+            .expect("schema");
+
+        let source = BBFSource::new(TableSchema::from_file_schema(table_schema.clone()));
+        let tracer = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        source.set_file_tracer(tracer.clone());
+
+        let conf = FileScanConfigBuilder::new(
+            ObjectStoreUrl::parse("file://").expect("url"),
+            Arc::new(source.clone()) as Arc<dyn FileSource>,
+        )
+        .build();
+        let opener = source
+            .create_file_opener(object_store, &conf, 0)
+            .expect("file opener");
+
+        let batches: Vec<_> = opener
+            .open(PartitionedFile::from(meta))
+            .expect("open")
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all batches should be ok");
+
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 5, "3 rows from entry_a + 2 rows from entry_b");
+        for batch in &batches {
+            assert_eq!(batch.schema(), table_schema, "batches must match the table");
+        }
+
+        let traced = tracer.lock().clone();
+        assert!(
+            traced.contains(&"entry_a".to_string()) && traced.contains(&"entry_b".to_string()),
+            "file tracer should list both entries, got {traced:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::split_record_batch;
+    use arrow::array::{Int32Array, RecordBatch};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    fn batch(rows: i32) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from((0..rows).collect::<Vec<_>>()))])
+            .expect("valid batch")
+    }
+
+    fn values(batch: &RecordBatch) -> Vec<i32> {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("int column")
+            .values()
+            .to_vec()
+    }
+
+    /// Slicing must partition the batch exactly: every row appears once, in order,
+    /// with only the final slice allowed to be short. Losing or duplicating rows
+    /// here would silently corrupt query results.
+    #[test]
+    fn split_record_batch_partitions_rows_without_loss() {
+        let b = batch(10);
+        let parts = split_record_batch(b, 4);
+        assert_eq!(
+            parts.iter().map(|p| p.num_rows()).collect::<Vec<_>>(),
+            vec![4, 4, 2]
+        );
+        let flattened: Vec<i32> = parts.iter().flat_map(values).collect();
+        assert_eq!(flattened, (0..10).collect::<Vec<i32>>());
+    }
+
+    /// When the chunk size divides the row count evenly there must be no trailing
+    /// empty batch.
+    #[test]
+    fn split_record_batch_produces_no_empty_trailing_slice() {
+        let parts = split_record_batch(batch(8), 4);
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().all(|p| p.num_rows() == 4));
+    }
+
+    /// A chunk size at or above the row count must return the batch as-is, and an
+    /// empty batch must yield nothing at all (rather than one empty slice).
+    #[test]
+    fn split_record_batch_handles_oversized_chunk_and_empty_input() {
+        let parts = split_record_batch(batch(3), 100);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].num_rows(), 3);
+
+        assert!(split_record_batch(batch(0), 4).is_empty());
+    }
+
+    /// The slices must keep the original schema so downstream operators can treat
+    /// them interchangeably with the unsplit batch.
+    #[test]
+    fn split_record_batch_preserves_schema() {
+        let b = batch(5);
+        let schema = b.schema();
+        for part in split_record_batch(b, 2) {
+            assert_eq!(part.schema(), schema);
+        }
+    }
+}
+
 impl BBFOpener {
     #[allow(clippy::too_many_arguments)]
     pub fn new(

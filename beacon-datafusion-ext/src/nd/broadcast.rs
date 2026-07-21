@@ -217,6 +217,25 @@ mod tests {
     }
 
     #[test]
+    fn missing_target_dimension_rejected() {
+        // A source axis the target does not carry cannot be broadcast away —
+        // dropping it would silently collapse values.
+        let result =
+            BroadcastMap::try_new(&dims(&[("depth", 2)]), &dims(&[("time", 2), ("lon", 3)]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn size_one_axis_does_not_break_identity() {
+        // A degenerate axis carries no information, so a stride mismatch on it
+        // must not disqualify the zero-copy identity path.
+        let source = dims(&[("time", 1), ("lon", 3)]);
+        let map = BroadcastMap::try_new(&source, &source).unwrap();
+        assert!(map.is_identity());
+        assert_eq!(indices(&map), vec![0, 1, 2]);
+    }
+
+    #[test]
     fn empty_axis_yields_no_indices() {
         let map =
             BroadcastMap::try_new(&dims(&[("time", 0)]), &dims(&[("time", 0), ("lon", 3)])).unwrap();

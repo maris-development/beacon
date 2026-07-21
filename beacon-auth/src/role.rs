@@ -533,6 +533,470 @@ mod tests {
         assert!(!provider.is_allowed(&roles, Privilege::Select, &table("x")));
     }
 
+    /// Deny wins across roles, not just within one: a principal holding a
+    /// permissive role *and* a restrictive one is denied. This is the property an
+    /// operator relies on when adding a "quarantine" role to an existing user.
+    #[tokio::test]
+    async fn deny_in_one_role_blocks_a_grant_from_another() {
+        let provider = RoleProvider::new();
+        provider.create_role("reader").await.unwrap();
+        provider.create_role("quarantined").await.unwrap();
+        provider
+            .grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .await
+            .unwrap();
+        provider
+            .deny(
+                "quarantined",
+                PrivilegeRule::new(
+                    Privilege::Select,
+                    Some(PrivilegeTarget::Path("secret/*".to_string())),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let both = vec!["reader".to_string(), "quarantined".to_string()];
+        assert!(!provider.is_allowed(&both, Privilege::Select, &path("secret/a.parquet")));
+        assert!(provider.is_allowed(&both, Privilege::Select, &path("public/a.parquet")));
+        // The order the roles are listed in must not change the outcome.
+        let reversed = vec!["quarantined".to_string(), "reader".to_string()];
+        assert!(!provider.is_allowed(&reversed, Privilege::Select, &path("secret/a.parquet")));
+    }
+
+    /// A global `DENY ALL` cannot be overridden by any grant, however specific.
+    #[tokio::test]
+    async fn global_deny_all_beats_every_grant() {
+        let provider = RoleProvider::new();
+        provider.create_role("locked").await.unwrap();
+        provider
+            .grant(
+                "locked",
+                PrivilegeRule::new(
+                    Privilege::Select,
+                    Some(PrivilegeTarget::Table("obs".to_string())),
+                ),
+            )
+            .await
+            .unwrap();
+        provider
+            .deny("locked", PrivilegeRule::new(Privilege::All, None))
+            .await
+            .unwrap();
+
+        let roles = vec!["locked".to_string()];
+        assert!(!provider.is_allowed(&roles, Privilege::Select, &table("obs")));
+        assert!(!provider.is_allowed(&roles, Privilege::Select, &path("any/thing")));
+    }
+
+    /// Rules scoped to a table never match a path request and vice versa — the
+    /// two target kinds are separate namespaces.
+    #[tokio::test]
+    async fn table_and_path_targets_do_not_cross_match() {
+        let provider = RoleProvider::new();
+        provider.create_role("mixed").await.unwrap();
+        provider
+            .grant(
+                "mixed",
+                PrivilegeRule::new(
+                    Privilege::Select,
+                    Some(PrivilegeTarget::Table("obs".to_string())),
+                ),
+            )
+            .await
+            .unwrap();
+        provider
+            .grant(
+                "mixed",
+                PrivilegeRule::new(
+                    Privilege::Select,
+                    Some(PrivilegeTarget::Path("data/*".to_string())),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let roles = vec!["mixed".to_string()];
+        assert!(provider.is_allowed(&roles, Privilege::Select, &table("obs")));
+        assert!(provider.is_allowed(&roles, Privilege::Select, &path("data/a.parquet")));
+        // A path request is not satisfied by the table rule of the same name...
+        assert!(!provider.is_allowed(&roles, Privilege::Select, &path("obs")));
+        // ...and a table request is not satisfied by the path glob.
+        assert!(!provider.is_allowed(&roles, Privilege::Select, &table("data/a.parquet")));
+    }
+
+    /// Only an unscoped (or explicitly `ALL`-targeted) `ALL` grant counts as a
+    /// super-user grant; a scoped one must not.
+    #[tokio::test]
+    async fn global_all_grant_requires_an_unscoped_all_privilege() {
+        let provider = RoleProvider::new();
+        provider.create_role("scoped_all").await.unwrap();
+        provider
+            .grant(
+                "scoped_all",
+                PrivilegeRule::new(
+                    Privilege::All,
+                    Some(PrivilegeTarget::Table("obs".to_string())),
+                ),
+            )
+            .await
+            .unwrap();
+        provider.create_role("global_select").await.unwrap();
+        provider
+            .grant("global_select", PrivilegeRule::new(Privilege::Select, None))
+            .await
+            .unwrap();
+        provider.create_role("target_all").await.unwrap();
+        provider
+            .grant(
+                "target_all",
+                PrivilegeRule::new(Privilege::All, Some(PrivilegeTarget::All)),
+            )
+            .await
+            .unwrap();
+
+        assert!(!provider.has_global_all_grant(&["scoped_all".to_string()]));
+        assert!(!provider.has_global_all_grant(&["global_select".to_string()]));
+        assert!(provider.has_global_all_grant(&["target_all".to_string()]));
+        // A deny of ALL is not a grant of ALL.
+        provider.create_role("denied_all").await.unwrap();
+        provider
+            .deny("denied_all", PrivilegeRule::new(Privilege::All, None))
+            .await
+            .unwrap();
+        assert!(!provider.has_global_all_grant(&["denied_all".to_string()]));
+        // Unknown roles never confer anything.
+        assert!(!provider.has_global_all_grant(&["ghost".to_string()]));
+        assert!(!provider.is_allowed(&["ghost".to_string()], Privilege::Select, &table("obs")));
+    }
+
+    /// A role's grants apply only to that privilege unless it is `ALL`.
+    #[tokio::test]
+    async fn grants_do_not_widen_to_other_privileges() {
+        let provider = RoleProvider::new();
+        provider.create_role("reader").await.unwrap();
+        provider
+            .grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .await
+            .unwrap();
+        let roles = vec!["reader".to_string()];
+        for privilege in [
+            Privilege::Insert,
+            Privilege::Update,
+            Privilege::Delete,
+            Privilege::Create,
+            Privilege::Drop,
+        ] {
+            assert!(
+                !provider.is_allowed(&roles, privilege, &table("obs")),
+                "SELECT must not imply {privilege}"
+            );
+        }
+    }
+
+    #[test]
+    fn privilege_parses_case_insensitively_and_round_trips() {
+        for privilege in [
+            Privilege::Select,
+            Privilege::Insert,
+            Privilege::Update,
+            Privilege::Delete,
+            Privilege::Create,
+            Privilege::Drop,
+            Privilege::All,
+        ] {
+            let rendered = privilege.to_string();
+            assert_eq!(Privilege::from_str(&rendered).unwrap(), privilege);
+            assert_eq!(
+                Privilege::from_str(&rendered.to_ascii_lowercase()).unwrap(),
+                privilege
+            );
+        }
+        assert!(Privilege::from_str("GRANT").is_err());
+        assert!(Privilege::from_str("").is_err());
+        // No accidental prefix matching.
+        assert!(Privilege::from_str("SELECTX").is_err());
+    }
+
+    /// Globs are matched, not substring-tested, and `?`/`[...]` behave as globs.
+    #[test]
+    fn path_matching_details() {
+        assert!(path_matches("data/*.parquet", "data/a.parquet"));
+        assert!(!path_matches("data/*.parquet", "data/a.csv"));
+        assert!(path_matches("data/file?.nc", "data/file1.nc"));
+        assert!(!path_matches("data/file?.nc", "data/file10.nc"));
+        // Case-sensitive.
+        assert!(!path_matches("Data/*", "data/a"));
+        // Anchored at both ends: no substring matching.
+        assert!(!path_matches("data", "data/a"));
+        assert!(!path_matches("data/a", "x/data/a"));
+        // A literal pattern only matches itself.
+        assert!(path_matches("data/a.parquet", "data/a.parquet"));
+        // An unparsable pattern degrades to literal equality rather than matching
+        // everything.
+        assert!(!path_matches("data/[", "data/anything"));
+        assert!(path_matches("data/[", "data/["));
+    }
+
+    /// A durable [`RoleStore`] used to assert write-through and hydration. Its
+    /// `fail` switch simulates a storage error mid-mutation.
+    #[derive(Debug, Default)]
+    struct RecordingStore {
+        roles: RwLock<HashMap<String, Role>>,
+        fail: RwLock<bool>,
+    }
+
+    impl RecordingStore {
+        fn fail_next(&self, fail: bool) {
+            *self.fail.write() = fail;
+        }
+
+        fn check(&self) -> anyhow::Result<()> {
+            if *self.fail.read() {
+                anyhow::bail!("storage is unavailable");
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RoleStore for RecordingStore {
+        async fn load_roles(&self) -> anyhow::Result<HashMap<String, Role>> {
+            self.check()?;
+            Ok(self.roles.read().clone())
+        }
+        async fn persist_create_role(&self, name: &str) -> anyhow::Result<()> {
+            self.check()?;
+            self.roles.write().insert(name.to_string(), Role::new(name));
+            Ok(())
+        }
+        async fn persist_drop_role(&self, name: &str) -> anyhow::Result<()> {
+            self.check()?;
+            self.roles.write().remove(name);
+            Ok(())
+        }
+        async fn persist_insert_rule(
+            &self,
+            role: &str,
+            is_deny: bool,
+            rule: &PrivilegeRule,
+        ) -> anyhow::Result<()> {
+            self.check()?;
+            let mut roles = self.roles.write();
+            let entry = roles.get_mut(role).expect("role exists");
+            if is_deny {
+                entry.denies.insert(rule.clone());
+            } else {
+                entry.grants.insert(rule.clone());
+            }
+            Ok(())
+        }
+        async fn persist_remove_rule(
+            &self,
+            role: &str,
+            is_deny: bool,
+            rule: &PrivilegeRule,
+        ) -> anyhow::Result<()> {
+            self.check()?;
+            let mut roles = self.roles.write();
+            let entry = roles.get_mut(role).expect("role exists");
+            if is_deny {
+                entry.denies.remove(rule);
+            } else {
+                entry.grants.remove(rule);
+            }
+            Ok(())
+        }
+    }
+
+    /// Every mutation is written through, and a provider rebuilt from the store
+    /// alone evaluates identically — the property that makes grants survive a
+    /// restart.
+    #[tokio::test]
+    async fn mutations_write_through_and_rehydrate() {
+        let durable = Arc::new(RecordingStore::default());
+        let provider = RoleProvider::with_store(durable.clone());
+
+        provider.create_role("reader").await.unwrap();
+        provider.create_role("temp").await.unwrap();
+        provider.drop_role("temp").await.unwrap();
+        let grant = PrivilegeRule::new(Privilege::Select, None);
+        let deny = PrivilegeRule::new(
+            Privilege::Select,
+            Some(PrivilegeTarget::Path("secret/*".to_string())),
+        );
+        provider.grant("reader", grant.clone()).await.unwrap();
+        provider.deny("reader", deny.clone()).await.unwrap();
+        provider.grant("reader", PrivilegeRule::new(Privilege::Select, Some(PrivilegeTarget::Table("tmp".to_string())))).await.unwrap();
+        provider
+            .revoke(
+                "reader",
+                &PrivilegeRule::new(
+                    Privilege::Select,
+                    Some(PrivilegeTarget::Table("tmp".to_string())),
+                ),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let reloaded = RoleProvider::with_persistence(durable).await.unwrap();
+        assert!(reloaded.role_exists("reader"));
+        assert!(!reloaded.role_exists("temp"));
+        let roles = vec!["reader".to_string()];
+        assert!(reloaded.is_allowed(&roles, Privilege::Select, &path("public/a")));
+        assert!(!reloaded.is_allowed(&roles, Privilege::Select, &path("secret/a")));
+        // The revoked table grant did not persist (it would be redundant with the
+        // global grant for `is_allowed`, so assert on the reloaded rule set).
+        let reader = reloaded
+            .list_roles()
+            .into_iter()
+            .find(|r| r.name == "reader")
+            .unwrap();
+        assert!(reader.grants.contains(&grant));
+        assert!(reader.denies.contains(&deny));
+        assert!(!reader.grants.iter().any(|r| matches!(
+            &r.target,
+            Some(PrivilegeTarget::Table(t)) if t == "tmp"
+        )));
+    }
+
+    /// Persistence runs *before* the in-memory state changes, so a storage
+    /// failure can never leave a privilege live in memory that was not durably
+    /// recorded (which a restart would silently revoke).
+    #[tokio::test]
+    async fn a_failed_persist_leaves_memory_untouched() {
+        let durable = Arc::new(RecordingStore::default());
+        let provider = RoleProvider::with_store(durable.clone());
+        provider.create_role("reader").await.unwrap();
+
+        durable.fail_next(true);
+        assert!(provider.create_role("other").await.is_err());
+        assert!(provider.drop_role("reader").await.is_err());
+        assert!(
+            provider
+                .grant("reader", PrivilegeRule::new(Privilege::Select, None))
+                .await
+                .is_err()
+        );
+        durable.fail_next(false);
+
+        assert!(provider.role_exists("reader"), "drop must have been rolled back");
+        assert!(!provider.role_exists("other"));
+        assert!(
+            !provider.is_allowed(&["reader".to_string()], Privilege::Select, &table("obs")),
+            "a grant that failed to persist must not be live in memory"
+        );
+    }
+
+    /// Hydration replaces the working copy wholesale rather than merging, so a
+    /// role removed in durable storage does not linger in memory.
+    #[tokio::test]
+    async fn hydrate_replaces_rather_than_merges() {
+        let durable = Arc::new(RecordingStore::default());
+        durable.persist_create_role("kept").await.unwrap();
+
+        let provider = RoleProvider::with_store(durable.clone());
+        provider.create_role("stale").await.unwrap();
+        durable.roles.write().remove("stale");
+
+        provider.hydrate().await.unwrap();
+        assert!(provider.role_exists("kept"));
+        assert!(!provider.role_exists("stale"));
+    }
+
+    /// A provider with no durable backend still works (the ephemeral/test path),
+    /// and `hydrate` is a no-op rather than an error.
+    #[tokio::test]
+    async fn hydrate_without_a_store_is_a_noop() {
+        let provider = RoleProvider::new();
+        provider.create_role("reader").await.unwrap();
+        provider.hydrate().await.unwrap();
+        assert!(provider.role_exists("reader"));
+    }
+
+    /// Listing is a sorted snapshot including each role's rules, which is what
+    /// the admin API serves.
+    #[tokio::test]
+    async fn list_roles_is_sorted_and_carries_rules() {
+        let provider = RoleProvider::new();
+        for name in ["zeta", "alpha", "mid"] {
+            provider.create_role(name).await.unwrap();
+        }
+        let grant = PrivilegeRule::new(Privilege::Select, None);
+        provider.grant("alpha", grant.clone()).await.unwrap();
+        provider.deny("alpha", grant.clone()).await.unwrap();
+
+        let listed = provider.list_roles();
+        let names: Vec<&str> = listed.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "mid", "zeta"]);
+        let alpha = &listed[0];
+        assert!(alpha.grants.contains(&grant));
+        assert!(alpha.denies.contains(&grant));
+        assert!(listed[1].grants.is_empty());
+    }
+
+    /// Rules are a set: re-granting the same rule is idempotent, and revoking a
+    /// rule that was never granted is a no-op rather than an error.
+    #[tokio::test]
+    async fn rules_are_a_set_and_revoke_is_forgiving() {
+        let provider = RoleProvider::new();
+        provider.create_role("reader").await.unwrap();
+        let rule = PrivilegeRule::new(Privilege::Select, None);
+        provider.grant("reader", rule.clone()).await.unwrap();
+        provider.grant("reader", rule.clone()).await.unwrap();
+        assert_eq!(provider.list_roles()[0].grants.len(), 1);
+
+        provider.revoke("reader", &rule, true).await.unwrap(); // not a deny
+        assert_eq!(provider.list_roles()[0].grants.len(), 1, "wrong kind must not remove");
+        provider.revoke("reader", &rule, false).await.unwrap();
+        assert!(provider.list_roles()[0].grants.is_empty());
+        // Revoking again is fine; revoking on a missing role is not.
+        provider.revoke("reader", &rule, false).await.unwrap();
+        assert!(provider.revoke("ghost", &rule, false).await.is_err());
+        assert!(provider.deny("ghost", rule).await.is_err());
+    }
+
+    /// Recreating a dropped role starts from a clean slate — no rules survive.
+    #[tokio::test]
+    async fn recreated_role_has_no_rules() {
+        let provider = RoleProvider::new();
+        provider.create_role("reader").await.unwrap();
+        provider
+            .grant("reader", PrivilegeRule::new(Privilege::Select, None))
+            .await
+            .unwrap();
+        provider.drop_role("reader").await.unwrap();
+        provider.create_role("reader").await.unwrap();
+        assert!(!provider.is_allowed(&["reader".to_string()], Privilege::Select, &table("obs")));
+    }
+
+    #[test]
+    fn rule_kind_labels_match_the_stored_column() {
+        assert_eq!(rule_kind(true), "deny");
+        assert_eq!(rule_kind(false), "grant");
+    }
+
+    /// The `"none"` sentinel and the `all` target must stay distinguishable in
+    /// storage, and a table named `all` must not decode as the `ALL` target.
+    #[test]
+    fn encoded_targets_are_unambiguous() {
+        assert_eq!(encode_target(&None), ("none", String::new()));
+        assert_eq!(
+            encode_target(&Some(PrivilegeTarget::All)),
+            ("all", String::new())
+        );
+        assert_eq!(
+            decode_target("table", "all".to_string()).unwrap(),
+            Some(PrivilegeTarget::Table("all".to_string()))
+        );
+        // An empty value on a table/path rule stays that rule kind, not `None`.
+        assert_eq!(
+            decode_target("path", String::new()).unwrap(),
+            Some(PrivilegeTarget::Path(String::new()))
+        );
+    }
+
     #[test]
     fn target_round_trips_through_columns() {
         for target in [

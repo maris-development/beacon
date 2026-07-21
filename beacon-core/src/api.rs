@@ -590,3 +590,55 @@ mod table_config_redaction_tests {
         assert!(json.contains("db.internal"));
     }
 }
+
+#[cfg(test)]
+mod query_request_tests {
+    use super::*;
+
+    fn request(json: &str) -> QueryRequest {
+        serde_json::from_str(json).expect("request body should deserialize")
+    }
+
+    /// The request body is a free-form flattened map that is re-serialized into a
+    /// [`crate::query::Query`]; the SQL form must survive that round trip with its
+    /// output options intact, since this is the only path a REST client's query
+    /// takes into the runtime.
+    #[test]
+    fn sql_request_round_trips_into_a_sql_query() {
+        let query = request(r#"{"sql": "SELECT 1", "output": {"format": "csv"}}"#)
+            .into_query()
+            .expect("a SQL body should convert");
+
+        assert!(matches!(query.inner, crate::query::InnerQuery::Sql(sql) if sql == "SELECT 1"));
+        assert!(query.output.is_some());
+    }
+
+    /// The structured form's fields live at the top level of the body (they are
+    /// flattened), so they must reach the JSON query compiler rather than being
+    /// mistaken for unknown keys.
+    #[test]
+    fn structured_request_round_trips_into_a_json_query() {
+        let query = request(r#"{"select": [{"column": "depth"}], "limit": 5}"#)
+            .into_query()
+            .expect("a structured body should convert");
+
+        assert!(matches!(query.inner, crate::query::InnerQuery::Json(_)));
+        assert!(query.output.is_none());
+    }
+
+    /// Conversion is where a malformed body is caught — the map itself accepts any
+    /// JSON object, so a typo'd key must fail here instead of being silently
+    /// dropped and producing a subtly different query.
+    #[test]
+    fn unknown_keys_are_rejected_at_conversion() {
+        // Note: `InnerQuery` is untagged, so serde reports only "data did not
+        // match any variant" — the offending key is not named. The contract tested
+        // here is that the body is *rejected*, not that the message is precise.
+        assert!(request(r#"{"select": ["depth"], "limmit": 5}"#)
+            .into_query()
+            .is_err());
+
+        // A body that is neither SQL nor a structured query is rejected too.
+        assert!(request(r#"{"nonsense": true}"#).into_query().is_err());
+    }
+}

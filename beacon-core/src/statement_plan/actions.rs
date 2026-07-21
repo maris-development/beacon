@@ -662,3 +662,78 @@ mod remote_location_tests {
         assert!(parse_remote_location("beacon://host:50051", None).is_err());
     }
 }
+
+#[cfg(test)]
+mod column_type_tests {
+    use super::sql_column_type_to_arrow;
+
+    use arrow::datatypes::{DataType, TimeUnit};
+    use datafusion::sql::sqlparser::{
+        ast::ColumnDef, dialect::GenericDialect, parser::Parser as SqlParser,
+    };
+
+    /// Parse the type of `ALTER TABLE t ADD COLUMN <column_def>` and convert it,
+    /// so the tests go through the same AST the DDL path produces.
+    fn arrow_type(column_def: &str) -> anyhow::Result<DataType> {
+        let mut parser = SqlParser::new(&GenericDialect {})
+            .try_with_sql(column_def)
+            .unwrap();
+        let column_def: ColumnDef = parser.parse_column_def().unwrap();
+        sql_column_type_to_arrow(&column_def)
+    }
+
+    /// `ALTER TABLE ... ADD COLUMN` maps SQL types through DataFusion's full type
+    /// support. The mapping is what the managed table's new column is created
+    /// with, so a wrong type here silently produces an unwritable column.
+    #[test]
+    fn maps_common_sql_types_to_arrow() {
+        assert_eq!(arrow_type("c INT").unwrap(), DataType::Int32);
+        assert_eq!(arrow_type("c BIGINT").unwrap(), DataType::Int64);
+        assert_eq!(arrow_type("c DOUBLE").unwrap(), DataType::Float64);
+        assert_eq!(arrow_type("c REAL").unwrap(), DataType::Float32);
+        assert_eq!(arrow_type("c BOOLEAN").unwrap(), DataType::Boolean);
+        assert_eq!(
+            arrow_type("c TIMESTAMP").unwrap(),
+            DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+    }
+
+    /// String columns are the ones an `ALTER TABLE ADD COLUMN` most often adds;
+    /// every SQL spelling must land on a string type (and the same one), so a
+    /// later `INSERT` of a string value is not rejected on a type mismatch.
+    #[test]
+    fn every_string_spelling_maps_to_the_same_string_type() {
+        let varchar = arrow_type("c VARCHAR").unwrap();
+        assert!(
+            matches!(varchar, DataType::Utf8 | DataType::Utf8View),
+            "VARCHAR mapped to {varchar:?}"
+        );
+        assert_eq!(arrow_type("c TEXT").unwrap(), varchar);
+        assert_eq!(arrow_type("c STRING").unwrap(), varchar);
+        assert_eq!(arrow_type("c VARCHAR(32)").unwrap(), varchar);
+    }
+
+    /// A type DataFusion cannot represent must be reported as an unsupported
+    /// column type, not silently mapped to a fallback that loses the user's intent.
+    #[test]
+    fn unsupported_types_are_rejected() {
+        let error = arrow_type("c GEOMETRY").expect_err("GEOMETRY has no Arrow mapping");
+        assert!(
+            error.to_string().contains("Unsupported column type"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The conversion never resolves a table, so it must work with the minimal
+    /// context provider — a type conversion that reached for the catalog would
+    /// fail here rather than in production.
+    #[test]
+    fn conversion_does_not_touch_the_catalog() {
+        use datafusion::sql::planner::ContextProvider;
+        let provider = super::AlterTypeContextProvider::default();
+        assert!(provider
+            .get_table_source(datafusion::sql::TableReference::bare("t"))
+            .is_err());
+        assert!(arrow_type("c INT").is_ok());
+    }
+}

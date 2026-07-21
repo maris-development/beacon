@@ -307,3 +307,243 @@ impl<T: NdArrayType> NdArray<T> {
         Ok(new_array)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dims(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn i32_array(values: Vec<i32>, shape: Vec<usize>, names: &[&str]) -> NdArray<i32> {
+        NdArray::<i32>::try_new_from_vec_in_mem(values, shape, dims(names), None).unwrap()
+    }
+
+    // ── construction ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_try_new_from_vec_rejects_values_that_do_not_fill_the_shape() {
+        let err =
+            NdArray::<i32>::try_new_from_vec_in_mem(vec![1, 2, 3], vec![2, 2], dims(&["a", "b"]), None)
+                .unwrap_err();
+        assert!(
+            matches!(err, NdArrayError::InvalidShape(_)),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_new_with_backend_rejects_a_shape_dimension_count_mismatch() {
+        let backend = InMemoryArrayBackend::new(
+            ArrayD::from_shape_vec(vec![2, 2], vec![1, 2, 3, 4]).unwrap(),
+            vec![2, 2],
+            dims(&["only_one"]),
+            None,
+        );
+        let err = NdArray::new_with_backend(backend).unwrap_err();
+        assert!(
+            matches!(err, NdArrayError::ShapeDimensionMismatch { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_new_with_backend_rejects_a_shape_that_disagrees_with_the_data() {
+        // The declared shape says 6 elements, the backing array holds 4.
+        let backend = InMemoryArrayBackend::new(
+            ArrayD::from_shape_vec(vec![2, 2], vec![1, 2, 3, 4]).unwrap(),
+            vec![2, 3],
+            dims(&["a", "b"]),
+            None,
+        );
+        let err = NdArray::new_with_backend(backend).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                NdArrayError::SizeMismatch {
+                    expected: 6,
+                    actual: 4
+                }
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_in_mem_takes_its_shape_from_the_values() {
+        let array = NdArray::new_in_mem(
+            ArrayD::from_shape_vec(vec![2, 3], (0..6).collect::<Vec<i32>>()).unwrap(),
+            dims(&["y", "x"]),
+            Some(-1),
+        );
+        assert_eq!(array.shape(), vec![2, 3]);
+        assert_eq!(array.dimensions(), dims(&["y", "x"]));
+        assert_eq!(array.fill_value().await, Some(-1));
+        // No chunking backend, so the chunk shape is the whole array.
+        assert_eq!(array.chunk_shape(), vec![2, 3]);
+    }
+
+    // ── subset ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_subset_slices_row_major_and_keeps_dimension_names() {
+        let array = i32_array((0..12).collect(), vec![3, 4], &["y", "x"]);
+        let sub = array
+            .subset(ArraySubset {
+                start: vec![1, 1],
+                shape: vec![2, 2],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(sub.shape(), vec![2, 2]);
+        assert_eq!(sub.dimensions(), dims(&["y", "x"]));
+        assert_eq!(sub.clone_into_raw_vec().await, vec![5, 6, 9, 10]);
+    }
+
+    #[tokio::test]
+    async fn test_subset_carries_the_fill_value_forward() {
+        let array =
+            NdArray::<i32>::try_new_from_vec_in_mem((0..4).collect(), vec![4], dims(&["x"]), Some(-9))
+                .unwrap();
+        let sub = array
+            .subset(ArraySubset {
+                start: vec![1],
+                shape: vec![2],
+            })
+            .await
+            .unwrap();
+        assert_eq!(sub.fill_value().await, Some(-9));
+    }
+
+    #[tokio::test]
+    async fn test_subset_out_of_bounds_is_rejected() {
+        let array = i32_array((0..12).collect(), vec![3, 4], &["y", "x"]);
+        let err = array
+            .subset(ArraySubset {
+                start: vec![2, 0],
+                shape: vec![2, 4],
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds axis size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── broadcast ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_broadcast_repeats_along_an_inserted_dimension() {
+        let array = i32_array(vec![10, 20], vec![2], &["lat"]);
+        let broadcasted = array.broadcast(&[3, 2], &dims(&["time", "lat"])).await.unwrap();
+
+        assert_eq!(broadcasted.shape(), vec![3, 2]);
+        assert_eq!(broadcasted.dimensions(), dims(&["time", "lat"]));
+        assert_eq!(
+            broadcasted.clone_into_raw_vec().await,
+            vec![10, 20, 10, 20, 10, 20]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_of_a_scalar_attribute_fills_the_whole_grid() {
+        // Rank-0 arrays back every NetCDF attribute; they must reach any grid.
+        let array = i32_array(vec![7], vec![], &[]);
+        let broadcasted = array.broadcast(&[2, 3], &dims(&["time", "lat"])).await.unwrap();
+        assert_eq!(broadcasted.clone_into_raw_vec().await, vec![7; 6]);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_preserves_the_fill_value() {
+        let array =
+            NdArray::<i32>::try_new_from_vec_in_mem(vec![1, -9], vec![2], dims(&["lat"]), Some(-9))
+                .unwrap();
+        let broadcasted = array.broadcast(&[2, 2], &dims(&["time", "lat"])).await.unwrap();
+        assert_eq!(broadcasted.fill_value().await, Some(-9));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_rejects_source_dims_outside_the_target() {
+        // A CF-bounds style `nv` axis has nowhere to go in the target grid.
+        let array = i32_array(vec![1, 2, 3, 4], vec![2, 2], &["lat", "nv"]);
+        let err = array
+            .broadcast(&[2, 2], &dims(&["time", "lat"]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, NdArrayError::BroadcastDimensions { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_rejects_an_incompatible_extent_on_a_shared_dimension() {
+        // Only length-1 axes may be stretched; 3 -> 5 is not a legal broadcast.
+        let array = i32_array(vec![1, 2, 3], vec![3], &["lat"]);
+        let err = array.broadcast(&[5], &dims(&["lat"])).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Cannot broadcast"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_of_a_zero_length_dimension_stays_empty() {
+        let array = i32_array(vec![], vec![0], &["time"]);
+        let broadcasted = array.broadcast(&[0, 3], &dims(&["time", "lat"])).await.unwrap();
+        assert_eq!(broadcasted.shape(), vec![0, 3]);
+        assert!(broadcasted.clone_into_raw_vec().await.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "known bug: a pure transposition (target shape equals the permuted source \
+                shape, so ndarray never has to expand anything) keeps the source memory \
+                layout through `to_owned()`. `clone_into_raw_vec` — and therefore the Arrow \
+                column built from it — then reports the values in source order. Needs \
+                `.as_standard_layout()` before storing the broadcast result."]
+    async fn test_broadcast_transposes_values_when_dimension_order_differs() {
+        // Stored as (lat, time): lat0 -> [0, 1, 2], lat1 -> [3, 4, 5].
+        // In (time, lat) order that is [0, 3, 1, 4, 2, 5].
+        let array = i32_array((0..6).collect(), vec![2, 3], &["lat", "time"]);
+        let broadcasted = array.broadcast(&[3, 2], &dims(&["time", "lat"])).await.unwrap();
+
+        assert_eq!(broadcasted.shape(), vec![3, 2]);
+        assert_eq!(
+            broadcasted.clone_into_raw_vec().await,
+            vec![0, 3, 1, 4, 2, 5]
+        );
+    }
+
+    // ── dyn dispatch ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_dyn_nd_array_forwards_to_the_typed_implementation() {
+        let array: Arc<dyn NdArrayD> = Arc::new(i32_array(vec![1, 2, 3], vec![3], &["x"]));
+
+        assert_eq!(array.datatype(), NdArrayDataType::I32);
+        assert_eq!(array.shape(), vec![3]);
+        assert_eq!(array.dimensions(), dims(&["x"]));
+
+        let broadcasted = array
+            .broadcast(vec![2, 3], dims(&["t", "x"]))
+            .await
+            .unwrap();
+        assert_eq!(broadcasted.shape(), vec![2, 3]);
+
+        let sub = array
+            .subset(ArraySubset {
+                start: vec![1],
+                shape: vec![2],
+            })
+            .await
+            .unwrap();
+        assert_eq!(sub.shape(), vec![2]);
+
+        // `as_any` must downcast back to the concrete typed array.
+        let typed = sub.as_any().downcast_ref::<NdArray<i32>>().unwrap();
+        assert_eq!(typed.clone_into_raw_vec().await, vec![2, 3]);
+    }
+}

@@ -15,10 +15,11 @@ pub async fn compile_json_query(
 ) -> anyhow::Result<LogicalPlan> {
     // The runtime settings are published as a SessionConfig extension; fall back to
     // defaults if absent (e.g. a bare session in a unit test).
-    let enable_pushdown_projection = settings.sql.enable_pushdown_projection;
+    let settings = crate::settings::SqlSettings::from_session(session);
+    let enable_pushdown_projection = settings.enable_pushdown_projection;
     let from = query_body
         .from
-        .unwrap_or_else(|| crate::query::from::From::Table(settings.sql.default_table.clone()));
+        .unwrap_or_else(|| crate::query::from::From::Table(settings.default_table.clone()));
 
     let mut builder = if enable_pushdown_projection {
         let mut all_columns = vec![];

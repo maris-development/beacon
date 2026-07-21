@@ -670,7 +670,127 @@ lazy_static! {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_master_key, normalize_base_path};
+    use super::{Config, PathBuf, RawConfig, decode_master_key, normalize_base_path};
+    use envconfig::Envconfig;
+    use std::collections::HashMap;
+
+    /// Parses a `RawConfig` from an explicit variable map instead of the process
+    /// environment, so these tests never race with each other (or with other
+    /// crates) over global env state.
+    fn raw(vars: &[(&str, &str)]) -> std::result::Result<RawConfig, envconfig::Error> {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        RawConfig::init_from_hashmap(&map)
+    }
+
+    /// The `RawConfig -> Config` mapping for a given variable map. This is
+    /// everything `Config::load` does apart from base-path normalization, secret
+    /// decoding, and creating the data directories.
+    fn config(vars: &[(&str, &str)]) -> Config {
+        Config::from(raw(vars).expect("config should parse"))
+    }
+
+    /// The out-of-the-box deployment posture. These defaults decide how a Beacon
+    /// with no environment at all behaves, so they are pinned deliberately.
+    #[test]
+    fn defaults_of_an_empty_environment() {
+        let config = config(&[]);
+
+        // The single config-defined super-user exists even with no env set.
+        assert_eq!(config.admin.username, "beacon-admin");
+        assert_eq!(config.admin.password, "beacon-password");
+
+        // Anonymous access is on, query-time enforcement is off (documented as
+        // the backwards-compatible default), OIDC is off.
+        assert!(config.auth.anonymous_enabled);
+        assert!(!config.auth.enforce);
+        assert!(!config.oidc.enabled);
+        assert_eq!(config.oidc.roles_claim, "realm_access.roles");
+        assert_eq!(config.oidc.username_claim, "preferred_username");
+        assert_eq!(config.oidc.jwks_cache_ttl_secs, 300);
+
+        assert_eq!(config.server.port, 5001);
+        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.base_path, "");
+        assert_eq!(config.cors.allowed_origins, "*");
+        assert!(!config.cors.allowed_credentials);
+        assert!(!config.flight_sql.allow_anonymous);
+
+        // No secrets key configured: features that persist credentials must fail
+        // closed rather than write plaintext.
+        assert!(config.secrets.master_key().is_none());
+    }
+
+    /// Every data sub-directory hangs off `BEACON_DATA_DIR`; the conversion only
+    /// derives the paths (creation happens in `Config::load`).
+    #[test]
+    fn data_dirs_derive_from_data_dir() {
+        let default = config(&[]);
+        assert_eq!(default.data.indexes, PathBuf::from("./data/indexes"));
+        assert_eq!(default.data.cache, PathBuf::from("./data/cache"));
+
+        let custom = config(&[("BEACON_DATA_DIR", "/srv/beacon")]);
+        assert_eq!(custom.data.indexes, PathBuf::from("/srv/beacon/indexes"));
+        assert_eq!(custom.data.cache, PathBuf::from("/srv/beacon/cache"));
+    }
+
+    /// Booleans are parsed by `bool::from_str`, which accepts only the exact
+    /// lowercase literals. Anything else is a hard error — a security-relevant
+    /// setting is never silently coerced to `false`.
+    #[test]
+    fn boolean_vars_accept_only_exact_true_false() {
+        assert!(config(&[("BEACON_AUTH_ENFORCE", "true")]).auth.enforce);
+        assert!(!config(&[("BEACON_AUTH_ENFORCE", "false")]).auth.enforce);
+        for bad in ["1", "TRUE", "True", "yes", "on", ""] {
+            assert!(
+                raw(&[("BEACON_AUTH_ENFORCE", bad)]).is_err(),
+                "'{bad}' must be rejected, not coerced"
+            );
+        }
+    }
+
+    /// Numeric values are range-checked by their target type and are never
+    /// clamped: an out-of-range port fails to load instead of wrapping.
+    #[test]
+    fn numeric_vars_are_range_checked_not_clamped() {
+        assert_eq!(config(&[("BEACON_PORT", "65535")]).server.port, 65535);
+        assert!(raw(&[("BEACON_PORT", "65536")]).is_err());
+        assert!(raw(&[("BEACON_PORT", "-1")]).is_err());
+        assert!(raw(&[("BEACON_PORT", "5001.0")]).is_err());
+        assert!(raw(&[("BEACON_WORKER_THREADS", "-1")]).is_err());
+        // Zero is accepted as-is (no floor is applied anywhere).
+        assert_eq!(config(&[("BEACON_PORT", "0")]).server.port, 0);
+        assert_eq!(
+            config(&[("BEACON_BATCH_SIZE", "0")]).runtime.batch_size,
+            0
+        );
+    }
+
+    /// A parse failure names the offending variable, so `ConfigError::EnvLoad`
+    /// tells the operator which value to fix.
+    #[test]
+    fn parse_errors_name_the_variable() {
+        let err = raw(&[("BEACON_FLIGHT_SQL_PORT", "not-a-port")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("BEACON_FLIGHT_SQL_PORT"), "got: {err}");
+    }
+
+    /// Key material must never reach a log line, so `SecretsConfig`'s `Debug`
+    /// (and the `Config` debug output that embeds it) only says whether it is set.
+    #[test]
+    fn secrets_key_is_never_printed() {
+        let mut config = config(&[]);
+        assert!(format!("{:?}", config.secrets).contains("<unset>"));
+
+        config.secrets.master_key = Some([0xAB; 32]);
+        let printed = format!("{:?}", config);
+        assert!(printed.contains("<set>"), "got: {printed}");
+        assert!(!printed.contains("171"), "raw key bytes leaked: {printed}");
+        assert!(!printed.contains("ab, ab"), "raw key bytes leaked: {printed}");
+    }
 
     #[test]
     fn empty_and_blank_serve_at_root() {

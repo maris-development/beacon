@@ -104,3 +104,81 @@ impl ScalarUDFImpl for CoalesceLabel {
         Ok(ColumnarValue::Array(Arc::new(label_array_builder.finish())))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::datatypes::Field;
+    use datafusion::config::ConfigOptions;
+
+    fn utf8_scalar(s: &str) -> ColumnarValue {
+        ColumnarValue::Scalar(ScalarValue::Utf8(Some(s.to_string())))
+    }
+
+    fn call(args: Vec<ColumnarValue>, number_rows: usize) -> Result<StringArray> {
+        let arg_fields = args
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Arc::new(Field::new(format!("a{i}"), c.data_type(), true)))
+            .collect();
+        let out = CoalesceLabel::new().invoke_with_args(ScalarFunctionArgs {
+            args,
+            arg_fields,
+            number_rows,
+            return_field: Arc::new(Field::new("out", ArrowDataType::Utf8, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })?;
+        let array = out.to_array(number_rows)?;
+        Ok(array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .clone())
+    }
+
+    #[test]
+    fn udf_metadata_is_stable() {
+        let udf = coalesce_label();
+        assert_eq!(udf.name(), "coalesce_label");
+    }
+
+    #[test]
+    fn rows_with_no_non_null_column_yield_null() {
+        let col0 = ColumnarValue::Array(Arc::new(Int32Array::from(vec![None, Some(1)])));
+        let out = call(vec![col0, utf8_scalar("A")], 2).unwrap();
+        assert!(out.is_null(0), "all-null row -> NULL label");
+        assert_eq!(out.value(1), "A");
+    }
+
+    /// A non-Utf8 (or NULL) label argument is rejected.
+    #[test]
+    fn non_utf8_label_is_an_error() {
+        let col0 = ColumnarValue::Array(Arc::new(Int32Array::from(vec![Some(1)])));
+        let bad_label = ColumnarValue::Scalar(ScalarValue::Int32(Some(9)));
+        assert!(call(vec![col0, bad_label], 1).is_err());
+    }
+
+    /// SUSPECTED BUG: the doc comment says "the label corresponding to the first
+    /// non-null column", but the implementation overwrites the chosen index for
+    /// every non-null column in ascending order, so the *last* non-null column's
+    /// label wins. This test pins the ACTUAL (last-non-null) behaviour; if the
+    /// intent is truly "first", `invoke_with_args` has an ordering bug.
+    #[test]
+    fn multiple_non_null_columns_currently_pick_the_last_not_the_first() {
+        // Row 0: both columns non-null. Row 1: only the first is non-null.
+        let col0 = ColumnarValue::Array(Arc::new(Int32Array::from(vec![Some(1), Some(1)])));
+        let col1 = ColumnarValue::Array(Arc::new(Int32Array::from(vec![Some(2), None])));
+        let out = call(
+            vec![col0, utf8_scalar("first"), col1, utf8_scalar("second")],
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            out.value(0),
+            "second",
+            "both non-null: the LAST non-null column's label wins (contradicts the doc's 'first')"
+        );
+        assert_eq!(out.value(1), "first", "only the first column is non-null here");
+    }
+}

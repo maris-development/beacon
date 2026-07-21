@@ -1008,6 +1008,28 @@ mod tests {
         assert_eq!(stmt.to_string(), sql);
     }
 
+    /// `Display` is the statement's canonical text (it keys the plan node and is
+    /// what an `EXPLAIN` shows), so a payload containing a single quote must be
+    /// escaped such that the rendered form re-parses to the *same* value — an
+    /// unescaped quote would truncate the JSON, or terminate the statement.
+    #[test]
+    fn test_set_extension_display_escapes_quotes() {
+        let sql = r#"SET EXTENSION 'preset' FOR obs TO '{"presets":[{"name":"o''brien","filters":[]}]}'"#;
+        let mut p = BeaconParser::new(sql).unwrap();
+        let stmt = p.parse_statement().unwrap();
+        let rendered = stmt.to_string();
+        assert_eq!(rendered, sql);
+
+        // Re-parsing the rendered form yields the identical payload.
+        let mut p = BeaconParser::new(&rendered).unwrap();
+        match p.parse_statement().unwrap() {
+            BeaconStatement::SetExtension(s) => {
+                assert_eq!(s.json, r#"{"presets":[{"name":"o'brien","filters":[]}]}"#);
+            }
+            other => panic!("expected SetExtension, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_create_crawler_display_roundtrip() {
         let sql = "CREATE CRAWLER argo ON 'argo/' WITH ('format' 'parquet')";

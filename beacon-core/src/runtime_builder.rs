@@ -49,7 +49,8 @@ use tokio::runtime::Handle;
 use crate::{
     auth_store::TablesAuthStore,
     runtime::Runtime,
-    statement_plan::{new_session_cell, BeaconQueryPlanner, SessionCell},
+    settings::{SqlSettings, SqlStreamCoalesceSettings},
+    statement_plan::{new_session_cell, BeaconQueryPlanner, CoalesceSqlStream, SessionCell},
 };
 
 #[derive(Default)]
@@ -74,6 +75,10 @@ pub struct RuntimeBuilder {
 
     pub batch_size: Option<usize>,
     pub nd_pipeline: bool,
+
+    /// How client queries are compiled and how their results are streamed back.
+    /// Defaults to [`SqlSettings::default`].
+    pub sql: SqlSettings,
 
     pub crawler: CrawlerConfig,
 
@@ -150,6 +155,19 @@ impl RuntimeBuilder {
 
     pub fn with_nd_pipeline(mut self) -> Self {
         self.nd_pipeline = true;
+        self
+    }
+
+    /// Replaces the SQL settings wholesale. Without this, the defaults apply.
+    pub fn with_sql_settings(mut self, settings: SqlSettings) -> Self {
+        self.sql = settings;
+        self
+    }
+
+    /// Replaces just the result-stream coalescing settings; set `enabled: false`
+    /// to stream batches through untouched.
+    pub fn with_sql_stream_coalesce(mut self, settings: SqlStreamCoalesceSettings) -> Self {
+        self.sql.stream_coalesce = settings;
         self
     }
 
@@ -437,7 +455,7 @@ async fn init_session_ctx(
 }
 
 async fn register_schema_provider(
-    runtime_builder: &RuntimeBuilder,
+    _runtime_builder: &RuntimeBuilder,
     session_ctx: &Arc<SessionContext>,
 ) -> anyhow::Result<()> {
     let schema_provider = Arc::new(PersistentSchemaProvider::new(
@@ -451,7 +469,12 @@ async fn register_schema_provider(
         .ok_or(anyhow::anyhow!("Failed to get catalog 'beacon'"))?
         .register_schema("public", schema_provider.clone())?;
 
-    init_tables(&session_ctx, &schema_provider, todo!(), todo!()).await?;
+    init_tables(
+        &session_ctx,
+        &schema_provider,
+        &DEFAULT_DB_STORE_URL_OBJECT_URL,
+    )
+    .await?;
 
     Ok(())
 }
@@ -553,7 +576,14 @@ fn build_session_config(
         // from the datasets URL, not the local filesystem: a bare `LOCATION 'obs/'`
         // means "in the datasets store", and resolving it against `file://` silently
         // yields an empty table instead of an error.
-        .with_extension(Arc::new(ListingTableFactoryExt));
+        .with_extension(Arc::new(ListingTableFactoryExt))
+        // Recovered by the JSON query compiler (default table, projection pushdown).
+        .with_extension(Arc::new(builder.sql.clone()))
+        // Recovered when a statement's result stream is built, to merge the small
+        // batches a plan emits into client-sized ones.
+        .with_extension(Arc::new(CoalesceSqlStream::new(
+            builder.sql.stream_coalesce,
+        )));
 
     config.options_mut().sql_parser.enable_ident_normalization = false;
     config

@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use arrow::{compute::concat_batches, datatypes::SchemaRef, record_batch::RecordBatch};
 use datafusion::{
     error::DataFusionError, execution::SendableRecordBatchStream,
@@ -7,127 +5,118 @@ use datafusion::{
 };
 use futures::StreamExt;
 
-#[derive(Debug, Clone, Copy)]
-struct SqlStreamCoalesceOptions {
-    enabled: bool,
-    target_rows: usize,
-    flush_timeout_ms: u64,
-    max_rows: usize,
+use crate::settings::SqlStreamCoalesceSettings;
+
+/// Merges the small record batches a physical plan emits into batches of at
+/// least [`SqlStreamCoalesceSettings::target_rows`] rows before they reach a
+/// client.
+///
+/// Published on the session config as an extension by the runtime builder, so
+/// execution-time code recovers it with [`CoalesceSqlStream::from_session`]
+/// rather than threading a `Runtime` handle through.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CoalesceSqlStream {
+    settings: SqlStreamCoalesceSettings,
 }
 
-impl SqlStreamCoalesceOptions {
-    /// Read the coalesce options from the runtime settings published on the
-    /// session, falling back to defaults if the extension is absent.
-    fn from_session(session_ctx: &SessionContext) -> Self {
-        let coalesce = &crate::settings::CoreSettings::from_session(session_ctx)
-            .sql
-            .stream_coalesce;
-        Self {
-            enabled: coalesce.enabled,
-            target_rows: coalesce.target_rows,
-            flush_timeout_ms: coalesce.flush_timeout_ms,
-            max_rows: coalesce.max_rows,
+impl CoalesceSqlStream {
+    pub(crate) fn new(settings: SqlStreamCoalesceSettings) -> Self {
+        Self { settings }
+    }
+
+    /// Recovers the coalescer published on `session_ctx`, falling back to the
+    /// defaults if the extension is absent (a session beacon did not build).
+    pub(crate) fn from_session(session_ctx: &SessionContext) -> Self {
+        session_ctx
+            .state()
+            .config()
+            .get_extension::<CoalesceSqlStream>()
+            .map(|coalescer| *coalescer)
+            .unwrap_or_default()
+    }
+
+    /// Wraps `stream` in the coalescing adapter. Returns `stream` unchanged when
+    /// coalescing is disabled or would be a no-op.
+    pub(crate) fn coalesce(&self, stream: SendableRecordBatchStream) -> SendableRecordBatchStream {
+        if !self.settings.enabled || self.settings.target_rows <= 1 {
+            return stream;
         }
-    }
 
-    fn flush_timeout(self) -> Option<Duration> {
-        if self.flush_timeout_ms == 0 {
-            None
-        } else {
-            Some(Duration::from_millis(self.flush_timeout_ms))
-        }
-    }
-}
+        let target_rows = self.settings.target_rows.max(1);
+        let max_rows = self.settings.max_rows.max(target_rows);
+        let flush_timeout = self.settings.flush_timeout();
 
-pub(crate) fn coalesce_sql_stream(
-    session_ctx: &SessionContext,
-    stream: SendableRecordBatchStream,
-) -> SendableRecordBatchStream {
-    coalesce_sql_stream_with_options(stream, SqlStreamCoalesceOptions::from_session(session_ctx))
-}
+        let stream_schema = stream.schema();
+        let concat_schema = stream_schema.clone();
 
-fn coalesce_sql_stream_with_options(
-    stream: SendableRecordBatchStream,
-    options: SqlStreamCoalesceOptions,
-) -> SendableRecordBatchStream {
-    if !options.enabled || options.target_rows <= 1 {
-        return stream;
-    }
+        let output_stream = async_stream::try_stream! {
+            let mut input_stream = stream;
+            let mut buffered_batches: Vec<RecordBatch> = Vec::new();
+            let mut buffered_rows = 0usize;
+            let mut flush_deadline: Option<tokio::time::Instant> = None;
 
-    let target_rows = options.target_rows.max(1);
-    let max_rows = options.max_rows.max(target_rows);
-    let flush_timeout = options.flush_timeout();
-
-    let stream_schema = stream.schema();
-    let concat_schema = stream_schema.clone();
-
-    let output_stream = async_stream::try_stream! {
-        let mut input_stream = stream;
-        let mut buffered_batches: Vec<RecordBatch> = Vec::new();
-        let mut buffered_rows = 0usize;
-        let mut flush_deadline: Option<tokio::time::Instant> = None;
-
-        loop {
-            if buffered_rows >= target_rows || buffered_rows >= max_rows {
-                let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
-                buffered_rows = 0;
-                flush_deadline = None;
-                yield combined_batch;
-                continue;
-            }
-
-            let next_batch = if buffered_batches.is_empty() || flush_timeout.is_none() {
-                input_stream.next().await
-            } else {
-                let deadline = flush_deadline.expect("flush deadline must exist when buffer is non-empty");
-                match tokio::time::timeout_at(deadline, input_stream.next()).await {
-                    Ok(next_batch) => next_batch,
-                    Err(_) => {
-                        let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
-                        buffered_rows = 0;
-                        flush_deadline = None;
-                        yield combined_batch;
-                        continue;
-                    }
+            loop {
+                if buffered_rows >= target_rows || buffered_rows >= max_rows {
+                    let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
+                    buffered_rows = 0;
+                    flush_deadline = None;
+                    yield combined_batch;
+                    continue;
                 }
-            };
 
-            match next_batch {
-                Some(Ok(batch)) => {
-                    buffered_rows = buffered_rows.saturating_add(batch.num_rows());
-                    buffered_batches.push(batch);
-
-                    if buffered_batches.len() == 1 {
-                        if let Some(timeout) = flush_timeout {
-                            flush_deadline = Some(tokio::time::Instant::now() + timeout);
+                let next_batch = if buffered_batches.is_empty() || flush_timeout.is_none() {
+                    input_stream.next().await
+                } else {
+                    let deadline = flush_deadline.expect("flush deadline must exist when buffer is non-empty");
+                    match tokio::time::timeout_at(deadline, input_stream.next()).await {
+                        Ok(next_batch) => next_batch,
+                        Err(_) => {
+                            let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
+                            buffered_rows = 0;
+                            flush_deadline = None;
+                            yield combined_batch;
+                            continue;
                         }
                     }
-                }
-                Some(Err(error)) => {
-                    if !buffered_batches.is_empty() {
-                        let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
-                        buffered_rows = 0;
-                        flush_deadline = None;
-                        yield combined_batch;
-                    }
+                };
 
-                    Err(error)?;
-                }
-                None => {
-                    if !buffered_batches.is_empty() {
-                        let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
-                        buffered_rows = 0;
-                        flush_deadline = None;
-                        yield combined_batch;
-                    }
+                match next_batch {
+                    Some(Ok(batch)) => {
+                        buffered_rows = buffered_rows.saturating_add(batch.num_rows());
+                        buffered_batches.push(batch);
 
-                    break;
+                        if buffered_batches.len() == 1 {
+                            if let Some(timeout) = flush_timeout {
+                                flush_deadline = Some(tokio::time::Instant::now() + timeout);
+                            }
+                        }
+                    }
+                    Some(Err(error)) => {
+                        if !buffered_batches.is_empty() {
+                            let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
+                            buffered_rows = 0;
+                            flush_deadline = None;
+                            yield combined_batch;
+                        }
+
+                        Err(error)?;
+                    }
+                    None => {
+                        if !buffered_batches.is_empty() {
+                            let combined_batch = combine_buffered_batches(&concat_schema, &mut buffered_batches)?;
+                            buffered_rows = 0;
+                            flush_deadline = None;
+                            yield combined_batch;
+                        }
+
+                        break;
+                    }
                 }
             }
-        }
-    };
+        };
 
-    Box::pin(RecordBatchStreamAdapter::new(stream_schema, output_stream))
+        Box::pin(RecordBatchStreamAdapter::new(stream_schema, output_stream))
+    }
 }
 
 fn combine_buffered_batches(
@@ -160,11 +149,14 @@ mod tests {
         record_batch::RecordBatch,
     };
     use datafusion::{
-        execution::SendableRecordBatchStream, physical_plan::stream::RecordBatchStreamAdapter,
+        execution::SendableRecordBatchStream,
+        physical_plan::stream::RecordBatchStreamAdapter,
+        prelude::{SessionConfig, SessionContext},
     };
     use futures::{stream, TryStreamExt};
 
-    use super::{coalesce_sql_stream_with_options, SqlStreamCoalesceOptions};
+    use super::CoalesceSqlStream;
+    use crate::settings::SqlStreamCoalesceSettings;
 
     fn test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![Field::new(
@@ -194,15 +186,18 @@ mod tests {
             make_batch(30_000, 8_000),
         ]);
 
-        let options = SqlStreamCoalesceOptions {
+        let coalescer = CoalesceSqlStream::new(SqlStreamCoalesceSettings {
             enabled: true,
             target_rows: 30_000,
             flush_timeout_ms: 10_000,
             max_rows: 200_000,
-        };
+        });
 
-        let output_stream = coalesce_sql_stream_with_options(input_stream, options);
-        let output_batches = output_stream.try_collect::<Vec<_>>().await.unwrap();
+        let output_batches = coalescer
+            .coalesce(input_stream)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
 
         assert_eq!(output_batches.len(), 2);
         assert_eq!(output_batches[0].num_rows(), 30_000);
@@ -219,15 +214,18 @@ mod tests {
         };
 
         let input_stream = Box::pin(RecordBatchStreamAdapter::new(schema, source_stream));
-        let options = SqlStreamCoalesceOptions {
+        let coalescer = CoalesceSqlStream::new(SqlStreamCoalesceSettings {
             enabled: true,
             target_rows: 100_000,
             flush_timeout_ms: 20,
             max_rows: 200_000,
-        };
+        });
 
-        let output_stream = coalesce_sql_stream_with_options(input_stream, options);
-        let output_batches = output_stream.try_collect::<Vec<_>>().await.unwrap();
+        let output_batches = coalescer
+            .coalesce(input_stream)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
 
         assert_eq!(output_batches.len(), 2);
         assert_eq!(output_batches[0].num_rows(), 5_000);
@@ -237,18 +235,51 @@ mod tests {
     #[tokio::test]
     async fn does_not_coalesce_when_disabled() {
         let input_stream = make_stream(vec![make_batch(0, 1_000), make_batch(1_000, 2_000)]);
-        let options = SqlStreamCoalesceOptions {
+        let coalescer = CoalesceSqlStream::new(SqlStreamCoalesceSettings {
             enabled: false,
-            target_rows: 64_000,
-            flush_timeout_ms: 25,
-            max_rows: 256_000,
-        };
+            ..Default::default()
+        });
 
-        let output_stream = coalesce_sql_stream_with_options(input_stream, options);
-        let output_batches = output_stream.try_collect::<Vec<_>>().await.unwrap();
+        let output_batches = coalescer
+            .coalesce(input_stream)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
 
         assert_eq!(output_batches.len(), 2);
         assert_eq!(output_batches[0].num_rows(), 1_000);
         assert_eq!(output_batches[1].num_rows(), 2_000);
+    }
+
+    /// The coalescer is recovered from the session extension the runtime builder
+    /// publishes, and falls back to the defaults on a session without one.
+    #[tokio::test]
+    async fn reads_settings_from_the_session_extension() {
+        let settings = SqlStreamCoalesceSettings {
+            enabled: true,
+            target_rows: 30_000,
+            flush_timeout_ms: 10_000,
+            max_rows: 200_000,
+        };
+        let config = SessionConfig::new().with_extension(Arc::new(CoalesceSqlStream::new(settings)));
+        let session_ctx = SessionContext::new_with_config(config);
+
+        let output_batches = CoalesceSqlStream::from_session(&session_ctx)
+            .coalesce(make_stream(vec![
+                make_batch(0, 10_000),
+                make_batch(10_000, 25_000),
+            ]))
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert_eq!(output_batches.len(), 1);
+        assert_eq!(output_batches[0].num_rows(), 35_000);
+
+        assert_eq!(
+            CoalesceSqlStream::from_session(&SessionContext::new()).settings,
+            SqlStreamCoalesceSettings::default(),
+            "a session without the extension should fall back to the defaults"
+        );
     }
 }

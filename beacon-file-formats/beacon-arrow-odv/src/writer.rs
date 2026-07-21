@@ -1909,6 +1909,246 @@ mod tests {
         assert!(OdvBatchSchemaMapper::new(input_schema, OdvOptions::default()).is_err());
     }
 
+    // ── has_changes ────────────────────────────────────────────────────
+
+    #[test]
+    fn has_changes_detects_variation_across_types() {
+        type W = AsyncOdvWriter<Vec<u8>>;
+
+        // Single-element and constant arrays report no change.
+        assert!(!W::has_changes(&Float64Array::from(vec![1.0])));
+        assert!(!W::has_changes(&Float64Array::from(vec![1.0, 1.0, 1.0])));
+        assert!(W::has_changes(&Float64Array::from(vec![1.0, 2.0, 1.0])));
+
+        // Works for integer, string and timestamp columns too.
+        assert!(W::has_changes(&Int64Array::from(vec![1, 1, 2])));
+        assert!(!W::has_changes(&StringArray::from(vec!["a", "a"])));
+        assert!(W::has_changes(&StringArray::from(vec!["a", "b"])));
+        assert!(W::has_changes(&TimestampSecondArray::from(vec![10, 20])));
+    }
+
+    // ── key_batches ────────────────────────────────────────────────────
+
+    #[test]
+    fn key_batches_splits_on_contiguous_key_runs() {
+        type W = AsyncOdvWriter<Vec<u8>>;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Cruise", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+        // partition() splits on adjacent runs, so a repeated key that reappears
+        // after another key produces a separate batch.
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "a"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+            ],
+        )
+        .unwrap();
+
+        let opts = OdvOptions::default().with_key_column("Cruise".to_string());
+        let batches = W::key_batches(batch, &opts).unwrap();
+        let sizes: Vec<usize> = batches.iter().map(|b| b.num_rows()).collect();
+        assert_eq!(sizes, vec![2, 1, 1]);
+    }
+
+    #[test]
+    fn key_batches_errors_when_key_column_absent() {
+        type W = AsyncOdvWriter<Vec<u8>>;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
+        let opts = OdvOptions::default().with_key_column("Cruise".to_string());
+        let err = W::key_batches(batch, &opts).unwrap_err();
+        assert!(err.to_string().contains("Key column 'Cruise' not found"));
+    }
+
+    // ── classify_batch ─────────────────────────────────────────────────
+
+    /// Build a batch shaped for the default ODV column names.
+    fn classify_batch_fixture(
+        lon: Vec<f64>,
+        lat: Vec<f64>,
+        time: Vec<&str>,
+        depth: Vec<f64>,
+    ) -> RecordBatch {
+        let n = lon.len();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Cruise", DataType::Utf8, false),
+            Field::new("Longitude [degrees east]", DataType::Float64, false),
+            Field::new("Latitude [degrees north]", DataType::Float64, false),
+            Field::new("yyyy-MM-ddTHH:mm:ss.SSS", DataType::Utf8, false),
+            Field::new("Depth [m]", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["c1"; n])) as ArrayRef,
+                Arc::new(Float64Array::from(lon)),
+                Arc::new(Float64Array::from(lat)),
+                Arc::new(StringArray::from(time)),
+                Arc::new(Float64Array::from(depth)),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn classify_batch_distinguishes_odv_feature_types() {
+        type W = AsyncOdvWriter<Vec<u8>>;
+        let opts = OdvOptions::default();
+
+        // Fixed position + time, varying depth ⇒ Profile.
+        let profile = classify_batch_fixture(
+            vec![1.0, 1.0],
+            vec![2.0, 2.0],
+            vec!["t0", "t0"],
+            vec![10.0, 20.0],
+        );
+        assert!(matches!(
+            W::classify_batch(profile, &opts, &mut None, &mut None).unwrap(),
+            OdvBatchType::Profile(_)
+        ));
+
+        // Fixed position, varying time, fixed depth ⇒ TimeSeries.
+        let ts = classify_batch_fixture(
+            vec![1.0, 1.0],
+            vec![2.0, 2.0],
+            vec!["t0", "t1"],
+            vec![10.0, 10.0],
+        );
+        assert!(matches!(
+            W::classify_batch(ts, &opts, &mut None, &mut None).unwrap(),
+            OdvBatchType::TimeSeries(_)
+        ));
+
+        // Moving position, varying time, fixed depth ⇒ Trajectory.
+        let traj = classify_batch_fixture(
+            vec![1.0, 2.0],
+            vec![2.0, 3.0],
+            vec!["t0", "t1"],
+            vec![10.0, 10.0],
+        );
+        assert!(matches!(
+            W::classify_batch(traj, &opts, &mut None, &mut None).unwrap(),
+            OdvBatchType::Trajectory(_)
+        ));
+
+        // Everything varies ⇒ Ambiguous (written to the error file).
+        let ambiguous = classify_batch_fixture(
+            vec![1.0, 2.0],
+            vec![2.0, 3.0],
+            vec!["t0", "t1"],
+            vec![10.0, 20.0],
+        );
+        assert!(matches!(
+            W::classify_batch(ambiguous, &opts, &mut None, &mut None).unwrap(),
+            OdvBatchType::Ambiguous(_)
+        ));
+
+        // A single, unvarying row defaults to Profile.
+        let single =
+            classify_batch_fixture(vec![1.0], vec![2.0], vec!["t0"], vec![10.0]);
+        assert!(matches!(
+            W::classify_batch(single, &opts, &mut None, &mut None).unwrap(),
+            OdvBatchType::Profile(_)
+        ));
+    }
+
+    #[test]
+    fn classify_batch_errors_on_missing_geo_column() {
+        type W = AsyncOdvWriter<Vec<u8>>;
+        // Missing the longitude column the default options expect.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Latitude [degrees north]", DataType::Float64, false),
+            Field::new("yyyy-MM-ddTHH:mm:ss.SSS", DataType::Utf8, false),
+            Field::new("Depth [m]", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["t0"])),
+                Arc::new(Float64Array::from(vec![10.0])),
+            ],
+        )
+        .unwrap();
+        let err = W::classify_batch(batch, &OdvOptions::default(), &mut None, &mut None)
+            .unwrap_err();
+        assert!(err.to_string().contains("Longitude column"));
+    }
+
+    #[test]
+    fn feature_type_column_overrides_heuristic_classification() {
+        type W = AsyncOdvWriter<Vec<u8>>;
+        // A batch that would otherwise be Ambiguous (all axes vary) is forced to
+        // TimeSeries by an explicit featureType column.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Cruise", DataType::Utf8, false),
+            Field::new("Longitude [degrees east]", DataType::Float64, false),
+            Field::new("Latitude [degrees north]", DataType::Float64, false),
+            Field::new("yyyy-MM-ddTHH:mm:ss.SSS", DataType::Utf8, false),
+            Field::new("Depth [m]", DataType::Float64, false),
+            Field::new("featureType", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["c1", "c1"])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![2.0, 3.0])),
+                Arc::new(StringArray::from(vec!["t0", "t1"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["timeSeries", "timeSeries"])),
+            ],
+        )
+        .unwrap();
+
+        let mut opts = OdvOptions::default();
+        opts.feature_type_column = Some("featureType".to_string());
+        assert!(matches!(
+            W::classify_batch(batch, &opts, &mut None, &mut None).unwrap(),
+            OdvBatchType::TimeSeries(_)
+        ));
+    }
+
+    // ── try_from_arrow_schema ──────────────────────────────────────────
+
+    #[test]
+    fn try_from_arrow_schema_recognises_qc_suffix_and_skips_core_columns() {
+        // `_qc` (not just `_qf`) marks a data column; the core coordinate/time/
+        // depth/key columns are never treated as data or metadata.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Cruise", DataType::Utf8, true),
+            Field::new("Depth [m]", DataType::Float64, true),
+            Field::new("yyyy-MM-ddTHH:mm:ss.SSS", DataType::Utf8, true),
+            Field::new("Latitude [degrees north]", DataType::Float64, true),
+            Field::new("Longitude [degrees east]", DataType::Float64, true),
+            Field::new("oxygen", DataType::Float64, true),
+            Field::new("oxygen_qc", DataType::Utf8, true),
+        ]));
+
+        let opts = OdvOptions::try_from_arrow_schema(schema).unwrap();
+
+        assert_eq!(opts.data_columns.len(), 1);
+        assert_eq!(opts.data_columns[0].column_name, "oxygen");
+        assert_eq!(
+            opts.data_columns[0].qf_column.as_deref(),
+            Some("oxygen_qc")
+        );
+        // No stray metadata columns: the core ODV columns are all excluded.
+        assert!(
+            opts.meta_columns.is_empty(),
+            "core columns should not become metadata: {:?}",
+            opts.meta_columns
+        );
+    }
+
     // #[test]
     // fn test_key_batches() {
     //     let schema = Schema::new(vec![

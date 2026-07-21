@@ -322,3 +322,189 @@ impl ArrowTypeConversion for TimestampNanosecond {
         arrow::datatypes::TimestampNanosecondType::DATA_TYPE.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Array, BooleanArray, Float64Array, Int32Array, StringArray};
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    fn null_flags(array: &arrow::array::ArrayRef) -> Vec<bool> {
+        (0..array.len()).map(|i| array.is_null(i)).collect()
+    }
+
+    // ── arrow_from_array_view_with_fill ────────────────────────────────
+
+    #[test]
+    fn fill_value_marks_matching_slots_null_but_keeps_the_values() {
+        let array = i32::arrow_from_array_view_with_fill(&[1, -9, 3, -9], &-9).unwrap();
+
+        assert_eq!(null_flags(&array), vec![false, true, false, true]);
+        // The data buffer is shared with the un-filled conversion: the fill
+        // value is still physically present underneath the null bitmap.
+        let typed = array.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(typed.values().to_vec(), vec![1, -9, 3, -9]);
+    }
+
+    #[test]
+    fn fill_value_that_never_occurs_produces_no_null_buffer() {
+        let array = i32::arrow_from_array_view_with_fill(&[1, 2, 3], &-9).unwrap();
+        assert_eq!(array.null_count(), 0);
+        assert!(array.nulls().is_none(), "expected the short-circuit path");
+    }
+
+    #[test]
+    fn fill_value_may_null_every_slot() {
+        let array = f64::arrow_from_array_view_with_fill(&[9.9, 9.9], &9.9).unwrap();
+        assert_eq!(array.null_count(), 2);
+        assert_eq!(array.len(), 2);
+    }
+
+    #[test]
+    fn nan_never_matches_a_nan_fill_value() {
+        // `!=` on f64 is IEEE-754: NaN != NaN, so a NaN `_FillValue` cannot
+        // null anything out. This documents the (deliberate) limitation.
+        let array = f64::arrow_from_array_view_with_fill(&[f64::NAN, 1.0], &f64::NAN).unwrap();
+        assert_eq!(array.null_count(), 0);
+    }
+
+    #[test]
+    fn string_fill_value_is_compared_by_content() {
+        let values = vec!["a".to_string(), "missing".to_string(), "c".to_string()];
+        let array =
+            String::arrow_from_array_view_with_fill(&values, &"missing".to_string()).unwrap();
+
+        assert_eq!(null_flags(&array), vec![false, true, false]);
+        let typed = array.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(typed.value(0), "a");
+        assert_eq!(typed.value(2), "c");
+    }
+
+    #[test]
+    fn empty_slice_converts_to_an_empty_array() {
+        let array = i32::arrow_from_array_view(&[]).unwrap();
+        assert_eq!(array.len(), 0);
+        let filled = i32::arrow_from_array_view_with_fill(&[], &0).unwrap();
+        assert_eq!(filled.len(), 0);
+        assert_eq!(filled.null_count(), 0);
+    }
+
+    // ── attach_validity_mask ───────────────────────────────────────────
+
+    #[test]
+    fn validity_mask_nulls_the_false_slots() {
+        let base = i32::arrow_from_array_view(&[1, 2, 3]).unwrap();
+        let masked = attach_validity_mask(base, &[true, false, true]).unwrap();
+        assert_eq!(null_flags(&masked), vec![false, true, false]);
+    }
+
+    #[test]
+    fn all_valid_validity_mask_returns_the_base_array_untouched() {
+        let base = i32::arrow_from_array_view(&[1, 2, 3]).unwrap();
+        let masked = attach_validity_mask(base, &[true, true, true]).unwrap();
+        assert!(masked.nulls().is_none());
+    }
+
+    #[test]
+    fn validity_mask_length_must_match_the_array() {
+        let base = i32::arrow_from_array_view(&[1, 2, 3]).unwrap();
+        let err = attach_validity_mask(base, &[true, false]).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match array length"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── per-type conversions ───────────────────────────────────────────
+
+    #[test]
+    fn bool_round_trips_through_the_packed_arrow_representation() {
+        let array = bool::arrow_from_array_view(&[true, false, true]).unwrap();
+        let typed = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(
+            (0..typed.len()).map(|i| typed.value(i)).collect::<Vec<_>>(),
+            vec![true, false, true]
+        );
+        assert_eq!(bool::data_type(), DataType::Boolean);
+    }
+
+    #[test]
+    fn timestamp_nanosecond_newtype_casts_to_i64_without_reordering() {
+        let values = [
+            TimestampNanosecond(0),
+            TimestampNanosecond(-1),
+            TimestampNanosecond(i64::MAX),
+        ];
+        let array = TimestampNanosecond::arrow_from_array_view(&values).unwrap();
+        let typed = array
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampNanosecondArray>()
+            .unwrap();
+        assert_eq!(typed.values().to_vec(), vec![0, -1, i64::MAX]);
+        assert_eq!(
+            TimestampNanosecond::data_type(),
+            DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+    }
+
+    #[test]
+    fn declared_data_types_match_the_produced_arrays() {
+        // A field built from `data_type()` must accept the array produced by
+        // `arrow_from_array_view` — `RecordBatch::try_new` rejects a mismatch.
+        assert_eq!(i32::data_type(), i32::arrow_from_array_view(&[1]).unwrap().data_type().clone());
+        assert_eq!(u8::data_type(), u8::arrow_from_array_view(&[1]).unwrap().data_type().clone());
+        assert_eq!(
+            f32::data_type(),
+            f32::arrow_from_array_view(&[1.0]).unwrap().data_type().clone()
+        );
+        assert_eq!(
+            String::data_type(),
+            String::arrow_from_array_view(&["x".to_string()])
+                .unwrap()
+                .data_type()
+                .clone()
+        );
+        assert_eq!(String::data_type(), DataType::Utf8);
+    }
+
+    #[test]
+    fn float64_conversion_preserves_value_order() {
+        let array = f64::arrow_from_array_view(&[3.5, -1.25, 0.0]).unwrap();
+        let typed = array.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(typed.values().to_vec(), vec![3.5, -1.25, 0.0]);
+    }
+
+    #[cfg(feature = "ndarray")]
+    #[test]
+    fn naive_datetime_out_of_nanosecond_range_is_rejected() {
+        use chrono::NaiveDate;
+        // Year 3000 overflows the i64-nanosecond epoch range (~1677–2262).
+        let too_late = NaiveDate::from_ymd_opt(3000, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let err = chrono::NaiveDateTime::arrow_from_array_view(&[too_late]).unwrap_err();
+        assert!(
+            err.to_string().contains("out of range"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "ndarray")]
+    #[test]
+    fn utc_datetime_keeps_its_timezone_annotation() {
+        use chrono::TimeZone;
+        let dt = chrono::Utc.timestamp_opt(1_600_000_000, 0).unwrap();
+        let array = chrono::DateTime::<chrono::Utc>::arrow_from_array_view(&[dt]).unwrap();
+        assert_eq!(
+            array.data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        );
+        // The naive variant deliberately carries no timezone.
+        let naive = chrono::NaiveDateTime::arrow_from_array_view(&[dt.naive_utc()]).unwrap();
+        assert_eq!(
+            naive.data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+    }
+}

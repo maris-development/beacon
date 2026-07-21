@@ -182,3 +182,134 @@ impl FileFormat for CsvFormat {
 
 pub mod table_function;
 pub use table_function::ReadCsvFunc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::prelude::SessionContext;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::{ObjectStoreExt, PutPayload};
+
+    /// Materializes empty objects at `locations` in a scratch store and returns
+    /// their metadata; `discover_datasets` only inspects the location.
+    async fn metas(locations: &[&str]) -> Vec<ObjectMeta> {
+        let store = Arc::new(InMemory::new());
+        let mut out = Vec::new();
+        for loc in locations {
+            let path = Path::from(*loc);
+            out.push(put(&store, &path, "").await);
+        }
+        out
+    }
+
+    /// Writes `bytes` to an in-memory store and returns the resulting metadata.
+    async fn put(store: &Arc<InMemory>, path: &Path, bytes: &str) -> ObjectMeta {
+        store
+            .put(path, PutPayload::from(bytes.to_string()))
+            .await
+            .expect("should write CSV fixture");
+        store.head(path).await.expect("should stat CSV fixture")
+    }
+
+    /// The factory must claim both `csv` and its `tsv` alias, because the session
+    /// registry only keys formats by `get_ext()` and alias resolution relies on
+    /// `file_extensions()`.
+    #[test]
+    fn factory_advertises_csv_and_tsv_extensions() {
+        let factory = CsvFormatFactory;
+        assert_eq!(factory.get_ext(), DEFAULT_CSV_EXTENSION);
+        assert_eq!(factory.file_format_name(), "csv");
+        assert_eq!(factory.file_extensions(), vec!["csv", "tsv"]);
+    }
+
+    /// Dataset discovery must accept both spellings and skip anything else, so a
+    /// mixed directory listing does not produce bogus CSV datasets.
+    #[tokio::test]
+    async fn discover_datasets_selects_only_csv_and_tsv_objects() {
+        let objects = metas(&[
+            "a/data.csv",
+            "a/data.tsv",
+            "a/data.parquet",
+            "a/no_extension",
+        ])
+        .await;
+        let datasets = CsvFormatFactory.discover_datasets(&objects).unwrap();
+        let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
+        assert_eq!(paths, vec!["a/data.csv", "a/data.tsv"]);
+        assert!(datasets.iter().all(|d| d.format == "csv"));
+    }
+
+    /// Schemas of multiple CSV files are merged with Beacon's super-typing rather
+    /// than taken from the first file: an Int64 column plus a Float64 column of the
+    /// same name must widen to Float64.
+    #[tokio::test]
+    async fn infer_schema_super_types_columns_across_files() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let a = put(&store, &Path::from("ints.csv"), "value\n1\n2\n").await;
+        let b = put(&store, &Path::from("floats.csv"), "value\n1.5\n2.5\n").await;
+
+        let ctx = SessionContext::new();
+        let format = CsvFormat::new(b',', 1000);
+        let schema = format
+            .infer_schema(&ctx.state(), &object_store, &[a, b])
+            .await
+            .expect("both CSV files should be inferable");
+
+        assert_eq!(schema.fields().len(), 1);
+        assert_eq!(schema.field(0).name(), "value");
+        assert_eq!(
+            schema.field(0).data_type(),
+            &arrow::datatypes::DataType::Float64
+        );
+    }
+
+    /// A non-default delimiter must reach the wrapped DataFusion format, otherwise
+    /// `read_csv(..., ';')` would infer a single blob column.
+    #[tokio::test]
+    async fn infer_schema_honors_custom_delimiter() {
+        let store = Arc::new(InMemory::new());
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let obj = put(&store, &Path::from("semi.csv"), "a;b\n1;2\n").await;
+
+        let ctx = SessionContext::new();
+        let schema = CsvFormat::new(b';', 100)
+            .infer_schema(&ctx.state(), &object_store, &[obj.clone()])
+            .await
+            .expect("semicolon CSV should be inferable");
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+
+        // With the default comma the same bytes are one column named "a;b".
+        let schema = CsvFormat::new(b',', 100)
+            .infer_schema(&ctx.state(), &object_store, &[obj])
+            .await
+            .expect("comma parse should still succeed");
+        assert_eq!(schema.fields().len(), 1);
+    }
+
+    /// Compression must be reflected in the written extension so that COPY TO
+    /// produces `foo.csv.gz` rather than `foo.csv`.
+    #[test]
+    fn extension_reflects_compression_type() {
+        let format = CsvFormat::new(b',', 1000);
+        assert_eq!(format.get_ext(), "csv");
+        assert_eq!(
+            format.compression_type(),
+            Some(FileCompressionType::UNCOMPRESSED)
+        );
+        assert_eq!(
+            format
+                .get_ext_with_compression(&FileCompressionType::UNCOMPRESSED)
+                .unwrap(),
+            "csv"
+        );
+        assert_eq!(
+            format
+                .get_ext_with_compression(&FileCompressionType::GZIP)
+                .unwrap(),
+            "csv.gz"
+        );
+    }
+}

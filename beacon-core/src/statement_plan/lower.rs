@@ -243,3 +243,152 @@ fn replace_contents_plan(
 fn rewrite_copy(mut copy: CopyTo) -> LogicalPlan {
     LogicalPlan::Copy(copy)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc as StdArc;
+
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::MemTable;
+    use datafusion::prelude::col;
+
+    use super::super::logical::ReplaceTableContentsNode;
+
+    /// A session with a single `t(id BIGINT, name VARCHAR)` table, enough to plan
+    /// the `DELETE`/`UPDATE` statements this module rewrites.
+    fn session() -> SessionContext {
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let ctx = SessionContext::new();
+        ctx.register_table("t", StdArc::new(MemTable::try_new(schema, vec![vec![]]).unwrap()))
+            .unwrap();
+        ctx
+    }
+
+    /// Plan `sql` and run it through the lowering rewrite, returning the resulting
+    /// `ReplaceTableContentsNode` (every `DELETE`/`UPDATE` lowers to one).
+    async fn replace_node(sql: &str) -> (LogicalPlan, Option<Mutation>) {
+        let plan = session().state().create_logical_plan(sql).await.unwrap();
+        let lowered = rewrite_logical_plan(plan).expect("statement should lower");
+        let LogicalPlan::Extension(extension) = lowered else {
+            panic!("`{sql}` did not lower to an extension node");
+        };
+        let node = extension
+            .node
+            .as_any()
+            .downcast_ref::<ReplaceTableContentsNode>()
+            .expect("expected a ReplaceTableContents node");
+        (node.input.clone(), node.mutation.clone())
+    }
+
+    /// Lance parses the derived predicate against the *dataset* schema, whose
+    /// fields are unqualified and unquoted. A qualified `t.id` would not resolve,
+    /// and a double-quoted identifier makes Lance's parser match zero rows, so the
+    /// unparsed SQL must be bare on both counts.
+    #[test]
+    fn unparsed_predicates_are_unqualified_and_unquoted() {
+        let qualified = col("t.name").eq(lit("b"));
+        assert_eq!(unparse_expr(&qualified).as_deref(), Some("(name = 'b')"));
+
+        let compound = col("t.id").gt(lit(1i64)).and(col("t.name").is_not_null());
+        assert_eq!(
+            unparse_expr(&compound).as_deref(),
+            Some("((id > 1) AND name IS NOT NULL)")
+        );
+    }
+
+    /// `DELETE ... WHERE p` keeps the rows that do *not* match, and derives a
+    /// native delete spec carrying the original predicate. Getting the negation
+    /// backwards would delete exactly the wrong rows in the copy-on-write path.
+    #[tokio::test]
+    async fn delete_with_predicate_keeps_the_complement_and_derives_a_native_spec() {
+        let (input, mutation) = replace_node("DELETE FROM t WHERE id = 1").await;
+
+        let LogicalPlan::Filter(filter) = &input else {
+            panic!("expected a filter over the scan, got {}", input.display());
+        };
+        assert!(
+            matches!(&filter.predicate, Expr::Not(_)),
+            "surviving rows must be the negated predicate, got {}",
+            filter.predicate
+        );
+        assert_eq!(
+            mutation,
+            Some(Mutation::Delete {
+                predicate: Some("(id = 1)".to_string())
+            })
+        );
+    }
+
+    /// `DELETE` with no `WHERE` removes every row: copy-on-write keeps nothing
+    /// (`false` filter) and the native spec is an unconditional delete. A `None`
+    /// predicate here must never be confused with "could not unparse".
+    #[tokio::test]
+    async fn delete_without_predicate_keeps_nothing() {
+        let (input, mutation) = replace_node("DELETE FROM t").await;
+
+        let LogicalPlan::Filter(filter) = &input else {
+            panic!("expected a filter over the scan, got {}", input.display());
+        };
+        assert_eq!(filter.predicate, lit(false));
+        assert_eq!(mutation, Some(Mutation::Delete { predicate: None }));
+    }
+
+    /// `UPDATE ... SET c = v WHERE p` rebuilds the whole table as one
+    /// `CASE WHEN p THEN v ELSE c END` projection, and the native spec lists only
+    /// the *changed* column — projecting an unchanged column through must not be
+    /// mistaken for an assignment.
+    #[tokio::test]
+    async fn update_derives_only_the_changed_assignments() {
+        let (input, mutation) = replace_node("UPDATE t SET name = 'b' WHERE id = 1").await;
+
+        // The copy-on-write input projects every column over the *unfiltered* scan.
+        let LogicalPlan::Projection(projection) = &input else {
+            panic!("expected a projection, got {}", input.display());
+        };
+        assert_eq!(projection.expr.len(), 2);
+        assert!(
+            matches!(projection.input.as_ref(), LogicalPlan::TableScan(_)),
+            "the projection must cover every row, not a filtered subset"
+        );
+
+        assert_eq!(
+            mutation,
+            Some(Mutation::Update {
+                predicate: Some("(id = 1)".to_string()),
+                assignments: vec![("name".to_string(), "'b'".to_string())],
+            })
+        );
+    }
+
+    /// `UPDATE` with no `WHERE` applies to every row, so there is no predicate to
+    /// derive and the projection is used as planned.
+    #[tokio::test]
+    async fn update_without_predicate_has_no_native_predicate() {
+        let (_, mutation) = replace_node("UPDATE t SET name = 'b'").await;
+        assert_eq!(
+            mutation,
+            Some(Mutation::Update {
+                predicate: None,
+                assignments: vec![("name".to_string(), "'b'".to_string())],
+            })
+        );
+    }
+
+    /// Only `DELETE`/`UPDATE`/`COPY` are rewritten; a `SELECT` must pass through
+    /// untouched, or every ordinary query would be reshaped by the lowering pass.
+    #[tokio::test]
+    async fn other_statements_pass_through_unchanged() {
+        let plan = session()
+            .state()
+            .create_logical_plan("SELECT id FROM t")
+            .await
+            .unwrap();
+        let lowered = rewrite_logical_plan(plan.clone()).unwrap();
+        assert_eq!(format!("{}", lowered.display_indent()), format!("{}", plan.display_indent()));
+    }
+}

@@ -227,4 +227,94 @@ mod tests {
         let result = top_level_zarr_meta_v3(&metas);
         assert_eq!(extract_paths(&result), vec!["a/zarr.json"]);
     }
+
+    #[test]
+    fn deeply_nested_children_are_all_dropped() {
+        // Only the shallowest ancestor group survives.
+        let metas = vec![
+            meta("root/zarr.json"),
+            meta("root/a/zarr.json"),
+            meta("root/a/b/zarr.json"),
+            meta("other/zarr.json"),
+        ];
+        let mut result = extract_paths(&top_level_zarr_meta_v3(&metas));
+        result.sort();
+        assert_eq!(result, vec!["other/zarr.json", "root/zarr.json"]);
+    }
+
+    #[test]
+    fn path_parent_walks_up_one_level() {
+        assert_eq!(
+            path_parent(&Path::from("a/b/c")),
+            Some(Path::from("a/b"))
+        );
+        // A single-segment path has no parent.
+        assert_eq!(path_parent(&Path::from("a")), None);
+    }
+
+    #[test]
+    fn is_zarr_v3_metadata_matches_only_trailing_zarr_json() {
+        assert!(is_zarr_v3_metadata(&meta("group/zarr.json")));
+        // Case-insensitive.
+        assert!(is_zarr_v3_metadata(&meta("group/ZARR.JSON")));
+        // A file literally named zarr.json but not as the final path segment,
+        // or a differently named file, is not v3 metadata.
+        assert!(!is_zarr_v3_metadata(&meta("group/not_zarr.json")));
+        assert!(!is_zarr_v3_metadata(&meta("zarr.json/data")));
+    }
+
+    #[test]
+    fn zarr_path_from_object_meta_normalises_group_path() {
+        let zp = ZarrPath::new_from_object_meta(meta("group/sub/zarr.json")).unwrap();
+        // The group path strips the trailing zarr.json, drops the trailing slash,
+        // and is rooted with a leading slash.
+        assert_eq!(zp.as_zarr_path(), "/group/sub");
+        // The json path is preserved verbatim.
+        assert_eq!(zp.as_zarr_json_path(), "group/sub/zarr.json");
+    }
+
+    #[test]
+    fn zarr_path_from_object_meta_rejects_non_metadata() {
+        let err = ZarrPath::new_from_object_meta(meta("group/data.bin")).unwrap_err();
+        assert!(err.contains("not a Zarr v3 metadata file"));
+    }
+
+    #[test]
+    fn zarr_path_from_dir_path_derives_json_child() {
+        let zp = ZarrPath::DirPath(Path::from("group/sub"));
+        assert_eq!(zp.as_zarr_path(), "/group/sub");
+        assert_eq!(zp.as_zarr_json_path(), "group/sub/zarr.json");
+    }
+
+    #[tokio::test]
+    async fn new_from_dir_path_rejects_a_zarr_json_path() {
+        let store = object_store::memory::InMemory::new();
+        let err = ZarrPath::new_from_dir_path(&store, Path::from("group/zarr.json"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("should be a directory path"));
+    }
+
+    #[tokio::test]
+    async fn new_from_dir_path_requires_existing_zarr_json() {
+        let store = object_store::memory::InMemory::new();
+        // Nothing written under the directory ⇒ no zarr.json ⇒ error.
+        let err = ZarrPath::new_from_dir_path(&store, Path::from("missing"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("No zarr.json file found"));
+
+        // Once a zarr.json exists under the directory, construction succeeds.
+        store
+            .put(
+                &Path::from("present/zarr.json"),
+                object_store::PutPayload::from_static(b"{}"),
+            )
+            .await
+            .unwrap();
+        let zp = ZarrPath::new_from_dir_path(&store, Path::from("present"))
+            .await
+            .unwrap();
+        assert_eq!(zp.as_zarr_json_path(), "present/zarr.json");
+    }
 }
