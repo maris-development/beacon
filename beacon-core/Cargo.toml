@@ -58,6 +58,8 @@ test-util = []
 [dev-dependencies]
 deltalake = { workspace = true }
 url = {workspace = true}
+# Inspecting the zipped zarr stores produced by the zarr output formats.
+zip = { workspace = true }
 # Self-reference enabling `test-util` for this crate's own integration tests
 # (tests/), so they can build an ephemeral in-memory-auth runtime.
 beacon-core = { path = ".", features = ["test-util"] }

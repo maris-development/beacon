@@ -11,7 +11,7 @@ import os
 from typing import Any
 
 # Simple (string) formats keyed by canonical name.
-SIMPLE_FORMATS = {"csv", "ipc", "parquet", "netcdf", "odv"}
+SIMPLE_FORMATS = {"csv", "ipc", "parquet", "netcdf", "odv", "zarr"}
 
 # File-extension -> canonical format name.
 EXT_TO_FORMAT = {
@@ -22,6 +22,8 @@ EXT_TO_FORMAT = {
     ".nc": "netcdf",
     ".geoparquet": "geoparquet",
     ".odv": "odv",
+    # A zarr store is a directory, so it comes back packed as a zip.
+    ".zarr": "zarr",
 }
 
 # Aliases accepted on the --format flag.
@@ -42,7 +44,7 @@ def infer_format_name(path: str, override: str | None) -> str:
         return EXT_TO_FORMAT[ext]
     raise ExportFormatError(
         f"cannot infer output format from '{path}'; pass --format "
-        f"(csv, parquet, ipc/arrow, netcdf, nd_netcdf, geoparquet, odv)"
+        f"(csv, parquet, ipc/arrow, netcdf, nd_netcdf, zarr, nd_zarr, geoparquet, odv)"
     )
 
 
@@ -64,7 +66,11 @@ def build_output_format(
         if not dimension_columns:
             raise ExportFormatError("nd_netcdf requires --dimension-columns")
         return {"nd_netcdf": {"dimension_columns": dimension_columns}}
+    if name == "nd_zarr":
+        if not dimension_columns:
+            raise ExportFormatError("nd_zarr requires --dimension-columns")
+        return {"nd_zarr": {"dimension_columns": dimension_columns}}
     raise ExportFormatError(
         f"unknown output format '{name}'; expected one of: "
-        f"csv, parquet, ipc/arrow, netcdf, nd_netcdf, geoparquet, odv"
+        f"csv, parquet, ipc/arrow, netcdf, nd_netcdf, zarr, nd_zarr, geoparquet, odv"
     )

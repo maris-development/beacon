@@ -36,24 +36,63 @@ use crate::{
     },
 };
 
+pub mod options;
+pub mod sink;
 pub mod source;
 
+pub use options::ZarrOptions;
+pub use sink::{ZarrNdSink, ZarrSink};
 pub use source::ZarrSource;
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
-pub struct ZarrFormatFactory;
+pub struct ZarrFormatFactory {
+    /// Datasets store, used only for writing: a zarr store is built on the
+    /// local filesystem under its configured tmp root. `None` for read-only
+    /// registrations, where `create_writer_physical_plan` is never reached.
+    datasets_store: Option<Arc<beacon_object_storage::DatasetsStore>>,
+    /// Write-side defaults applied to formats this factory creates.
+    options: ZarrOptions,
+}
 
 impl std::fmt::Debug for ZarrFormatFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ZarrFormatFactory").finish()
+        f.debug_struct("ZarrFormatFactory")
+            .field("options", &self.options)
+            .finish()
     }
 }
 
 impl ZarrFormatFactory {
+    /// A read-only factory. Writes through it fail with a clear error.
     pub fn new() -> Self {
-        Self
+        Self {
+            datasets_store: None,
+            options: ZarrOptions::default(),
+        }
+    }
+
+    /// A factory that can also write, using `datasets_store`'s tmp root as the
+    /// destination for the store directory.
+    pub fn new_for_write(
+        datasets_store: Arc<beacon_object_storage::DatasetsStore>,
+        options: ZarrOptions,
+    ) -> Self {
+        Self {
+            datasets_store: Some(datasets_store),
+            options,
+        }
+    }
+
+    fn format(&self, options: ZarrOptions) -> ZarrFormat {
+        ZarrFormat {
+            options,
+            output_dir: self
+                .datasets_store
+                .as_ref()
+                .map(|store| store.storage().tmp_dir.clone()),
+        }
     }
 }
 
@@ -69,19 +108,27 @@ impl FileFormatFactory for ZarrFormatFactory {
         _state: &dyn Session,
         format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        // Per-table override from `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
-        let read_dimensions = format_options.get("read_dimensions").map(|value| {
+        // Per-table overrides from `CREATE EXTERNAL TABLE ... OPTIONS (...)`.
+        let comma_separated = |value: &String| -> Vec<String> {
             value
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
-        });
-        Ok(Arc::new(ZarrFormat::new(read_dimensions)))
+        };
+
+        let mut options = self.options.clone();
+        if let Some(value) = format_options.get("read_dimensions") {
+            options.read_dimensions = Some(comma_separated(value));
+        }
+        if let Some(value) = format_options.get("write_dimensions") {
+            options.write_dimensions = Some(comma_separated(value));
+        }
+        Ok(Arc::new(self.format(options)))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(ZarrFormat::default())
+        Arc::new(self.format(self.options.clone()))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -128,18 +175,30 @@ impl FileFormatFactoryExt for ZarrFormatFactory {
 
 #[derive(Debug, Clone, Default)]
 pub struct ZarrFormat {
-    /// Explicit dimensions requested via `read_zarr(paths, ['dims'])` or a
-    /// `CREATE EXTERNAL TABLE ... OPTIONS (read_dimensions '...')`. When set,
-    /// only variables whose dimensions are a subset of these are read; when
-    /// `None`, a broadcast-compatible default is auto-selected.
-    pub read_dimensions: Option<Vec<String>>,
+    /// Read and write behaviour for this format.
+    pub options: ZarrOptions,
+    /// Local directory zarr stores are written into — the datasets store's tmp
+    /// root. `None` on read-only formats, which reject writes.
+    pub output_dir: Option<std::path::PathBuf>,
 }
 
 impl ZarrFormat {
-    /// Build a format that reads only the variables belonging to
+    /// Build a read-only format that reads only the variables belonging to
     /// `read_dimensions` (or auto-selects a default when `None`).
     pub fn new(read_dimensions: Option<Vec<String>>) -> Self {
-        Self { read_dimensions }
+        Self {
+            options: ZarrOptions {
+                read_dimensions,
+                ..Default::default()
+            },
+            output_dir: None,
+        }
+    }
+
+    /// Explicit dimensions requested via `read_zarr(paths, ['dims'])` or a
+    /// `CREATE EXTERNAL TABLE ... OPTIONS (read_dimensions '...')`.
+    fn read_dimensions(&self) -> Option<Vec<String>> {
+        self.options.read_dimensions.clone()
     }
 }
 
@@ -216,7 +275,7 @@ impl FileFormat for ZarrFormat {
                 // default so the inferred schema matches what the scan returns.
                 let any = match resolve_read_dimensions(
                     &any,
-                    self.read_dimensions.clone(),
+                    self.read_dimensions(),
                     Some("read_zarr"),
                 ) {
                     Some(dims) => any
@@ -300,7 +359,7 @@ impl FileFormat for ZarrFormat {
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = ZarrSource::new(table_schema)
-            .with_read_dimensions(self.read_dimensions.clone())
+            .with_read_dimensions(self.read_dimensions())
             .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_file_groups(file_groups)
@@ -314,11 +373,50 @@ impl FileFormat for ZarrFormat {
         Ok(Arc::new(broadcast))
     }
 
+    async fn create_writer_physical_plan(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        _state: &dyn Session,
+        conf: datafusion::datasource::physical_plan::FileSinkConfig,
+        order_requirements: Option<datafusion::physical_expr::LexRequirement>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        // A zarr store is a directory tree of chunk files, which `zarrs` writes
+        // through a local filesystem store. Like NetCDF, we build it under the
+        // configured tmp root rather than streaming to an object store.
+        let output_dir = self.output_dir.clone().ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "Zarr writing requires a datasets store; this format was registered read-only"
+                    .to_string(),
+            )
+        })?;
+
+        // `DataSinkExec` already requires a single input partition, so the
+        // gridded sink sees every row without extra plan nodes.
+        let sink: Arc<dyn datafusion::datasource::sink::DataSink> =
+            match &self.options.write_dimensions {
+                Some(dimension_columns) if !dimension_columns.is_empty() => Arc::new(
+                    sink::ZarrNdSink::new(
+                        conf,
+                        self.options.clone(),
+                        dimension_columns.clone(),
+                        output_dir,
+                    )?,
+                ),
+                _ => Arc::new(sink::ZarrSink::new(conf, self.options.clone(), output_dir)),
+            };
+
+        Ok(Arc::new(datafusion::datasource::sink::DataSinkExec::new(
+            input,
+            sink,
+            order_requirements,
+        )))
+    }
+
     fn file_source(
         &self,
         table_schema: datafusion::datasource::table_schema::TableSchema,
     ) -> Arc<dyn FileSource> {
-        Arc::new(ZarrSource::new(table_schema).with_read_dimensions(self.read_dimensions.clone()))
+        Arc::new(ZarrSource::new(table_schema).with_read_dimensions(self.read_dimensions()))
     }
 }
 

@@ -84,11 +84,24 @@ export type OutputFormat =
   | SimpleOutputFormat
   | { ndnetcdf: { dimension_columns: string[] } }
   | { nd_netcdf: { dimension_columns: string[] } }
+  | { ndzarr: { dimension_columns: string[] } }
+  | { nd_zarr: { dimension_columns: string[] } }
   | { geoparquet: GeoParquetOptions }
   | { odv: Record<string, unknown> };
 
-/** Output formats expressed as a bare string. `arrow` is an alias for `ipc`. */
-export type SimpleOutputFormat = "csv" | "ipc" | "arrow" | "parquet" | "netcdf";
+/**
+ * Output formats expressed as a bare string. `arrow` is an alias for `ipc`.
+ *
+ * `zarr` returns a zip archive: a zarr store is a directory, and a single HTTP
+ * response can only carry one file.
+ */
+export type SimpleOutputFormat =
+  | "csv"
+  | "ipc"
+  | "arrow"
+  | "parquet"
+  | "netcdf"
+  | "zarr";
 
 export interface GeoParquetOptions {
   longitude_column?: string | null;

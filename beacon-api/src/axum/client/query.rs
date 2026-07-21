@@ -152,6 +152,16 @@ async fn handle_query_output_file(
         QueryOutputFile::Odv(named_temp_file) => {
             file_stream_response(named_temp_file.path(), "application/zip", "zip", query_id).await
         }
+        QueryOutputFile::Zarr(named_temp_file) => {
+            // A zarr store is a directory tree, delivered as a zip archive.
+            file_stream_response(
+                named_temp_file.path(),
+                "application/zip",
+                "zarr.zip",
+                query_id,
+            )
+            .await
+        }
         QueryOutputFile::NetCDF(named_temp_file) => {
             file_stream_response(named_temp_file.path(), "application/netcdf", "nc", query_id).await
         }

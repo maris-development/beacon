@@ -38,6 +38,8 @@ pub enum QueryOutputFile {
     Parquet(NamedTempFile),
     NetCDF(NamedTempFile),
     Odv(NamedTempFile),
+    /// Zarr store, packed as a zip archive.
+    Zarr(NamedTempFile),
     GeoParquet(NamedTempFile),
 }
 
@@ -50,6 +52,7 @@ impl QueryOutputFile {
             QueryOutputFile::Parquet(file) => Ok(file.path().metadata()?.len()),
             QueryOutputFile::NetCDF(file) => Ok(file.path().metadata()?.len()),
             QueryOutputFile::Odv(file) => Ok(file.path().metadata()?.len()),
+            QueryOutputFile::Zarr(file) => Ok(file.path().metadata()?.len()),
             QueryOutputFile::GeoParquet(file) => Ok(file.path().metadata()?.len()),
         }
     }
@@ -62,6 +65,7 @@ impl QueryOutputFile {
             QueryOutputFile::Parquet(file) => file.path(),
             QueryOutputFile::NetCDF(file) => file.path(),
             QueryOutputFile::Odv(file) => file.path(),
+            QueryOutputFile::Zarr(file) => file.path(),
             QueryOutputFile::GeoParquet(file) => file.path(),
         }
     }
@@ -76,6 +80,7 @@ impl From<crate::query::output::QueryOutputFile> for QueryOutputFile {
             crate::query::output::QueryOutputFile::Parquet(file) => Self::Parquet(file),
             crate::query::output::QueryOutputFile::NetCDF(file) => Self::NetCDF(file),
             crate::query::output::QueryOutputFile::Odv(file) => Self::Odv(file),
+            crate::query::output::QueryOutputFile::Zarr(file) => Self::Zarr(file),
             crate::query::output::QueryOutputFile::GeoParquet(file) => Self::GeoParquet(file),
         }
     }

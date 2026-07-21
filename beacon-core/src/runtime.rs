@@ -1641,6 +1641,188 @@ mod client_query_tests {
         }
     }
 
+    /// Zarr output is a *directory* of chunk files, so the query API packs it
+    /// into a zip archive — the only shape a single-file HTTP response can
+    /// carry. This asserts the archive lands under the configured tmp dir and
+    /// holds the group metadata plus a `zarr.json` for the selected column.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn query_with_zarr_output_returns_a_zipped_store() {
+        let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
+        let tmp_dir = config.storage.tmp_dir.clone();
+        let runtime = Runtime::new_with_in_memory_auth(config)
+            .await
+            .expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("zarrout_{suffix}");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2)")).await;
+
+        let result = runtime
+            .run_query(
+                query(serde_json::json!({
+                    "from": table,
+                    "select": ["a"],
+                    "output": { "format": "zarr" },
+                })),
+                beacon_auth::AuthIdentity::empty(),
+            )
+            .await
+            .expect("zarr query with output should run");
+
+        match result.query_output {
+            QueryOutput::File(file) => {
+                let got = std::fs::canonicalize(file.path().parent().unwrap())
+                    .expect("canonicalize output parent");
+                let want = std::fs::canonicalize(&tmp_dir).expect("canonicalize tmp dir");
+                assert_eq!(
+                    got, want,
+                    "zarr output should be written under the configured tmp dir"
+                );
+
+                let entries = zip_entry_names(file.path());
+                assert!(
+                    entries.iter().any(|name| name == "zarr.json"),
+                    "archive should hold the root group metadata, got {entries:?}"
+                );
+                assert!(
+                    entries.iter().any(|name| name == "a/zarr.json"),
+                    "archive should hold the 'a' array metadata, got {entries:?}"
+                );
+                // The scratch build directory must not survive alongside the zip.
+                let scratch = file.path().with_extension("zarr-build");
+                assert!(!scratch.exists(), "scratch store dir should be cleaned up");
+            }
+            QueryOutput::Stream(_) => panic!("expected a file output"),
+        }
+    }
+
+    /// Gridded zarr output turns the named dimension columns into coordinate
+    /// arrays and every other column into an array indexed by them. Two `time`
+    /// values and two `depth` values must yield a 2×2 grid, not four rows.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn query_with_nd_zarr_output_writes_gridded_arrays() {
+        let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
+        let runtime = Runtime::new_with_in_memory_auth(config)
+            .await
+            .expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("ndzarrout_{suffix}");
+
+        run_sql(
+            &runtime,
+            &format!("CREATE TABLE {table} (time BIGINT, depth BIGINT, temp DOUBLE)"),
+        )
+        .await;
+        run_sql(
+            &runtime,
+            &format!(
+                "INSERT INTO {table} VALUES \
+                 (1, 10, 1.5), (1, 20, 2.5), (2, 10, 3.5), (2, 20, 4.5)"
+            ),
+        )
+        .await;
+
+        let result = runtime
+            .run_query(
+                query(serde_json::json!({
+                    "from": table,
+                    "select": ["time", "depth", "temp"],
+                    "output": {
+                        "format": { "ndzarr": { "dimension_columns": ["time", "depth"] } },
+                    },
+                })),
+                beacon_auth::AuthIdentity::empty(),
+            )
+            .await
+            .expect("nd zarr query with output should run");
+
+        match result.query_output {
+            QueryOutput::File(file) => {
+                let entries = zip_entry_names(file.path());
+                for expected in ["zarr.json", "time/zarr.json", "depth/zarr.json", "temp/zarr.json"]
+                {
+                    assert!(
+                        entries.iter().any(|name| name == expected),
+                        "archive should hold {expected}, got {entries:?}"
+                    );
+                }
+
+                let temp_meta: serde_json::Value =
+                    serde_json::from_slice(&read_zip_entry(file.path(), "temp/zarr.json"))
+                        .expect("temp metadata should be valid JSON");
+                assert_eq!(
+                    temp_meta["shape"],
+                    serde_json::json!([2, 2]),
+                    "temp should be gridded as time x depth"
+                );
+                assert_eq!(
+                    temp_meta["dimension_names"],
+                    serde_json::json!(["time", "depth"])
+                );
+
+                let time_meta: serde_json::Value =
+                    serde_json::from_slice(&read_zip_entry(file.path(), "time/zarr.json"))
+                        .expect("time metadata should be valid JSON");
+                assert_eq!(
+                    time_meta["shape"],
+                    serde_json::json!([2]),
+                    "time should be a 1-D coordinate array of its distinct values"
+                );
+            }
+            QueryOutput::Stream(_) => panic!("expected a file output"),
+        }
+    }
+
+    /// `COPY TO ... STORED AS ZARR` writes a plain directory store rather than a
+    /// zip: unlike the HTTP API, a copy target is not limited to a single file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn copy_to_zarr_writes_a_directory_store() {
+        let config = std::sync::Arc::new(beacon_config::Config::load().unwrap());
+        let tmp_dir = config.storage.tmp_dir.clone();
+        let runtime = Runtime::new_with_in_memory_auth(config)
+            .await
+            .expect("runtime should start");
+        let suffix = uuid::Uuid::new_v4().simple();
+        let table = format!("zarrcopy_{suffix}");
+        let target = format!("copy_{suffix}.zarr");
+
+        run_sql(&runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+        run_sql(&runtime, &format!("INSERT INTO {table} VALUES (1), (2)")).await;
+        run_sql(
+            &runtime,
+            &format!("COPY (SELECT a FROM {table}) TO '{target}' STORED AS ZARR"),
+        )
+        .await;
+
+        let store = tmp_dir.join(&target);
+        assert!(store.is_dir(), "expected a directory store at {store:?}");
+        assert!(store.join("zarr.json").exists(), "root group metadata");
+        assert!(store.join("a/zarr.json").exists(), "array metadata");
+    }
+
+    /// Entry names inside a zip archive, for asserting on zarr store layout.
+    fn zip_entry_names(path: &std::path::Path) -> Vec<String> {
+        let file = std::fs::File::open(path).expect("open zip output");
+        let mut archive = zip::ZipArchive::new(file).expect("output should be a zip archive");
+        (0..archive.len())
+            .map(|i| archive.by_index(i).expect("zip entry").name().to_string())
+            .collect()
+    }
+
+    /// Read one entry out of a zip archive.
+    fn read_zip_entry(path: &std::path::Path, name: &str) -> Vec<u8> {
+        use std::io::Read as _;
+        let file = std::fs::File::open(path).expect("open zip output");
+        let mut archive = zip::ZipArchive::new(file).expect("output should be a zip archive");
+        let mut entry = archive
+            .by_name(name)
+            .unwrap_or_else(|_| panic!("archive should contain {name}"));
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("read zip entry");
+        bytes
+    }
+
     /// `validate_query_plan` is the single permission gate: non-super-users may run
     /// read-only SELECTs but not DDL/DML (standard nodes) nor any beacon extension
     /// operation (super-user-only).
