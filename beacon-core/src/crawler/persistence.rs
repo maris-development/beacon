@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
-use datafusion::{
-    error::DataFusionError, execution::object_store::ObjectStoreUrl, prelude::SessionContext,
-};
+use datafusion::{error::DataFusionError, execution::object_store::ObjectStoreUrl};
 use futures::StreamExt;
 use object_store::{path::Path, ObjectStore, ObjectStoreExt};
+
+use crate::statement_plan::{upgrade_session, SessionCell};
 
 use super::definition::CrawlerDefinition;
 
@@ -20,20 +20,23 @@ const CRAWLERS_PREFIX: &str = "__crawlers__";
 
 #[derive(Clone)]
 pub struct CrawlerPersistence {
-    session_context: Arc<SessionContext>,
+    /// Weak, for the same reason as [`CrawlEngine`](super::engine::CrawlEngine):
+    /// the session owns the manager, so the manager must not own the session.
+    session: SessionCell,
     db_store_url: ObjectStoreUrl,
 }
 
 impl CrawlerPersistence {
-    pub fn new(session_context: Arc<SessionContext>, db_store_url: ObjectStoreUrl) -> Self {
+    pub(crate) fn new(session: SessionCell, db_store_url: ObjectStoreUrl) -> Self {
         Self {
-            session_context,
+            session,
             db_store_url,
         }
     }
 
     fn store(&self) -> Result<Arc<dyn ObjectStore>, DataFusionError> {
-        self.session_context
+        upgrade_session(&self.session, "crawler persistence")
+            .map_err(|e| DataFusionError::Plan(e.to_string()))?
             .runtime_env()
             .object_store(&self.db_store_url)
             .map_err(|e| DataFusionError::Plan(format!("crawler store unavailable: {e}")))
@@ -107,16 +110,22 @@ impl CrawlerPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::prelude::SessionContext;
     use object_store::memory::InMemory;
     use std::collections::HashMap;
     use url::Url;
 
-    fn service() -> CrawlerPersistence {
+    /// Returns the session alongside the service: the service holds only a `Weak`,
+    /// so the caller must keep the context alive for the duration of the test.
+    fn service() -> (CrawlerPersistence, Arc<SessionContext>) {
         let ctx = Arc::new(SessionContext::new());
         let store = Arc::new(InMemory::new());
         let url = ObjectStoreUrl::parse("db://").unwrap();
         ctx.register_object_store(&Url::parse(url.as_str()).unwrap(), store);
-        CrawlerPersistence::new(ctx, url)
+
+        let cell = crate::statement_plan::new_session_cell();
+        let _ = cell.set(Arc::downgrade(&ctx));
+        (CrawlerPersistence::new(cell, url), ctx)
     }
 
     fn def(name: &str) -> CrawlerDefinition {
@@ -125,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_load_delete_roundtrip() {
-        let svc = service();
+        let (svc, _ctx) = service();
         svc.save(&def("argo")).await.unwrap();
         svc.save(&def("ctd")).await.unwrap();
 

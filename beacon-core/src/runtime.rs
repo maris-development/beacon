@@ -1,39 +1,32 @@
 //! High-level Beacon runtime shared by the API transports.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
-use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
-use arrow::{
-    array::AsArray,
-    datatypes::{SchemaRef, UInt64Type},
-};
-use beacon_datafusion_ext::{
-    consts::TMP_STORE_URL_OBJECT_URL,
-    format_ext::{DatasetMetadata, FileFormatFactoryExt},
-    listing_table_factory_ext::ListingTableFactoryExt,
-};
-use beacon_functions::function_doc::FunctionDoc;
+use crate::metrics::MetricsTracker;
+use arrow::{array::AsArray, datatypes::UInt64Type};
+use beacon_datafusion_ext::consts::TMP_STORE_URL_OBJECT_URL;
 use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
-use parking_lot::Mutex;
 
 use crate::{
-    api::{
-        CrawlReportView, CrawlerView, CreateCrawlerRequest, CreateExternalTableRequest,
-        DatasetInfo, FunctionInfo, QueryMetricsView, QueryRequest, SchemaView, TableConfigView,
-    },
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
     query_result::{ArrowOutputStream, QueryOutput, QueryResult},
+    system_schema::QueryMetricsMap,
 };
 
-/// Beacon's single execution layer: startup, catalog access, queries, SQL, and files.
+/// Beacon's single execution layer.
+///
+/// The interface is deliberately narrow: authenticate a caller, then run a query.
+/// Everything else — the catalog, table schemas, extensions, functions, query
+/// metrics — is reachable as SQL (`information_schema`, `SHOW EXTENSIONS`,
+/// `beacon.system.*`), so consumers query it and map the resulting
+/// `RecordBatch`es into their own types rather than calling a typed accessor per
+/// thing they want to know.
 pub struct Runtime {
     pub(crate) session_ctx: Arc<SessionContext>,
-    pub(crate) table_function_docs: Vec<FunctionDoc>,
-    pub(crate) query_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
-    pub(crate) crawler_manager: Option<Arc<crate::crawler::CrawlerManager>>,
-    /// Documentation for the registered table-valued functions, captured at
-    /// startup (DataFusion's UDTF registry is not enumerable with metadata).
+    /// Metrics recorded per executed query. Shared with the
+    /// `beacon.system.query_metrics` table, which is how callers read them.
+    pub(crate) query_metrics: QueryMetricsMap,
     /// Authentication + authorization context (users, roles, grants). Shared, owned by the runtime.
     pub(crate) auth: Arc<beacon_auth::AuthContext>,
 
@@ -129,8 +122,16 @@ impl Runtime {
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
     ) -> anyhow::Result<QueryResult> {
-        let stream = crate::statement_plan::execute_statement_plan(&self.session_ctx, plan).await?;
         let metrics = MetricsTracker::new(query_json, query_id);
+        metrics.set_logical_plan(&plan);
+        let (stream, physical_plan) =
+            crate::statement_plan::execute_statement_plan_tracked(&self.session_ctx, plan).await?;
+        // The physical plan's per-node metrics fill in as the stream drains, and the
+        // stream consolidates when it ends — so registering the plan here is what
+        // makes `node_metrics` non-empty in `beacon.system.query_metrics`.
+        if let Some(physical_plan) = physical_plan {
+            metrics.set_physical_plan(physical_plan);
+        }
         let output_stream = ArrowOutputStream {
             stream,
             metrics,
@@ -171,8 +172,13 @@ impl Runtime {
             .await?;
 
         let metrics = MetricsTracker::new(query_json, query_id);
-        let mut stream =
-            crate::statement_plan::execute_statement_plan(&self.session_ctx, copy_plan).await?;
+        metrics.set_logical_plan(&copy_plan);
+        let (mut stream, physical_plan) =
+            crate::statement_plan::execute_statement_plan_tracked(&self.session_ctx, copy_plan)
+                .await?;
+        if let Some(physical_plan) = physical_plan {
+            metrics.set_physical_plan(physical_plan);
+        }
         // The COPY emits a single `count` row; drain it to complete the write.
         while let Some(batch) = stream.try_next().await? {
             let counts = batch.column(0).as_primitive::<UInt64Type>();
@@ -249,170 +255,6 @@ impl Runtime {
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
             }
         }
-    }
-
-    pub fn get_query_metrics(&self, query_id: uuid::Uuid) -> Option<QueryMetricsView> {
-        self.query_metrics
-            .lock()
-            .get(&query_id)
-            .cloned()
-            .and_then(|metrics| match QueryMetricsView::try_from(metrics) {
-                Ok(metrics) => Some(metrics),
-                Err(error) => {
-                    tracing::error!(%query_id, ?error, "failed to map query metrics into API contract");
-                    None
-                }
-            })
-    }
-
-    pub async fn explain_client_query(
-        &self,
-        query: QueryRequest,
-        identity: beacon_auth::AuthIdentity,
-    ) -> anyhow::Result<String> {
-        let plan = self.lower_query(query.into_query()?.inner).await?;
-        // EXPLAIN is read-only: reject plans the anonymous client could not run.
-        crate::statement_plan::validate_query_plan(&plan, false)?;
-        crate::statement_plan::authorize_logical_plan(
-            &plan,
-            &self.session_ctx,
-            &self.auth,
-            &identity,
-            self.auth_enforce,
-        )?;
-        let json = plan.display_pg_json().to_string();
-        Ok(json)
-    }
-
-    /// Run the query and return its physical plan as pgjson annotated with
-    /// per-node runtime metrics (the `EXPLAIN ANALYZE` analog of
-    /// [`Self::explain_client_query`]).
-    ///
-    /// Unlike `explain_client_query`, this executes the plan to completion to
-    /// populate the metrics, so it applies the same permission gate the client
-    /// query path uses: anonymous callers are read-only, while a super-user
-    /// (valid admin basic auth) may also analyze DDL/DML — which, since this
-    /// runs the plan, has the same side effects as `/api/query`.
-    pub async fn explain_analyze_client_query(
-        &self,
-        query: crate::query::Query,
-        identity: beacon_auth::AuthIdentity,
-    ) -> anyhow::Result<String> {
-        // `output` (file format) is meaningless for EXPLAIN ANALYZE — only the
-        // query body is planned and executed for its metrics.
-        let plan = self.lower_query(query.inner).await?;
-        crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
-        crate::statement_plan::authorize_logical_plan(
-            &plan,
-            &self.session_ctx,
-            &self.auth,
-            &identity,
-            self.auth_enforce,
-        )?;
-
-        // Build the physical plan and keep the `Arc` so its metrics can be read
-        // after the stream drains. `execute_statement_plan` discards the plan,
-        // so the create/execute steps are inlined here.
-        let physical_plan = self.session_ctx.state().create_physical_plan(&plan).await?;
-        let mut stream = datafusion::physical_plan::execute_stream(
-            physical_plan.clone(),
-            self.session_ctx.task_ctx(),
-        )?;
-        // Drain to completion so each node's metrics are fully recorded.
-        while stream.try_next().await?.is_some() {}
-
-        Ok(crate::metrics::explain_analyze_pg_json(physical_plan.as_ref()).to_string())
-    }
-
-    pub fn list_functions(&self) -> Vec<FunctionInfo> {
-        self.list_runtime_functions()
-            .into_iter()
-            .filter_map(|function| match FunctionInfo::try_from(function) {
-                Ok(function) => Some(function),
-                Err(error) => {
-                    tracing::error!(?error, "failed to map function metadata into API contract");
-                    None
-                }
-            })
-            .collect()
-    }
-
-    pub fn list_table_functions(&self) -> Vec<FunctionInfo> {
-        self.list_runtime_table_functions()
-            .into_iter()
-            .filter_map(|function| match FunctionInfo::try_from(function) {
-                Ok(function) => Some(function),
-                Err(error) => {
-                    tracing::error!(
-                        ?error,
-                        "failed to map table function metadata into API contract"
-                    );
-                    None
-                }
-            })
-            .collect()
-    }
-
-    /// The names of the tables registered in beacon's own schema (`beacon.public`),
-    /// sorted. Tables in other catalogs (e.g. federated ones) are not included.
-    pub fn list_tables(&self) -> Vec<String> {
-        let Some(schema) = self
-            .session_ctx
-            .catalog("beacon")
-            .and_then(|catalog| catalog.schema("public"))
-        else {
-            return Vec::new();
-        };
-
-        let mut table_names = schema.table_names();
-        table_names.sort();
-        table_names.dedup();
-        table_names
-    }
-
-    /// A table's live Arrow schema in API form, or `None` if it is not registered.
-    pub async fn list_table_schema(&self, table_name: String) -> Option<SchemaRef> {
-        self.session_ctx
-            .table(table_name)
-            .await
-            .map(|table| Arc::new(table.schema().as_arrow().to_owned()))
-            .ok()
-    }
-
-    pub async fn list_table_schema_view(&self, table_name: String) -> Option<SchemaView> {
-        self.list_table_schema(table_name)
-            .await
-            .map(|schema| SchemaView::from(schema.as_ref()))
-    }
-
-    /// A table's consumer-facing extensions (MCP descriptor, query presets), or an
-    /// empty set if none are stored. Errors if the table is not registered.
-    pub async fn get_table_extensions(
-        &self,
-        table_name: String,
-    ) -> anyhow::Result<crate::api::TableExtensions> {
-        crate::extensions::get_table_extensions(&self.session_ctx, &table_name).await
-    }
-
-    fn list_runtime_functions(&self) -> Vec<FunctionDoc> {
-        let mut functions: Vec<FunctionDoc> = self
-            .session_ctx
-            .state()
-            .scalar_functions()
-            .values()
-            .flat_map(|function| FunctionDoc::from_scalar(function))
-            .collect();
-
-        functions.sort_by(|left, right| left.function_name.cmp(&right.function_name));
-        functions.dedup_by(|left, right| left.function_name == right.function_name);
-        functions
-    }
-
-    fn list_runtime_table_functions(&self) -> Vec<FunctionDoc> {
-        let mut functions = self.table_function_docs.clone();
-        functions.sort_by(|left, right| left.function_name.cmp(&right.function_name));
-        functions.dedup_by(|left, right| left.function_name == right.function_name);
-        functions
     }
 
     fn parse_beacon_statement(sql: &str) -> anyhow::Result<BeaconStatement> {
@@ -678,44 +520,45 @@ mod client_query_tests {
 
         run_sql(runtime, "CREATE TABLE ext (lat BIGINT, depth BIGINT)").await;
 
-        // SET a preset via SQL, then read it back through the typed API.
+        // `SHOW EXTENSIONS` is the only way to read extensions back — there is no
+        // typed accessor on the runtime.
+        async fn show_extensions(runtime: &Runtime) -> serde_json::Value {
+            let batches = runtime
+                .run_query(
+                    crate::query::Query::sql("SHOW EXTENSIONS FOR ext".to_string()),
+                    beacon_auth::AuthIdentity::system(),
+                )
+                .await
+                .expect("show extensions should run")
+                .into_record_stream()
+                .expect("streamed result")
+                .try_collect::<Vec<_>>()
+                .await
+                .expect("stream should drain");
+            let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, 1, "SHOW EXTENSIONS returns one row");
+            let json = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .expect("extensions column is Utf8")
+                .value(0);
+            serde_json::from_str(json).expect("extensions column should be JSON")
+        }
+
         run_sql(
             runtime,
             "SET EXTENSION 'preset' FOR ext TO '{\"presets\":[{\"name\":\"shallow\",\"filters\":[{\"column\":\"depth\",\"op\":\"<=\",\"value\":10}]}]}'",
         )
         .await;
 
-        let extensions = runtime
-            .get_table_extensions("ext".to_string())
-            .await
-            .expect("extensions should load");
-        let preset = extensions.preset.expect("preset extension should be set");
-        assert_eq!(preset.presets[0].name, "shallow");
-
-        // SHOW EXTENSIONS returns one JSON row mentioning the preset.
-        let batches = runtime
-            .run_query(
-                crate::query::Query::sql("SHOW EXTENSIONS FOR ext".to_string()),
-                beacon_auth::AuthIdentity::system(),
-            )
-            .await
-            .expect("show extensions should run")
-            .into_record_stream()
-            .expect("streamed result")
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("stream should drain");
-        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(rows, 1, "SHOW EXTENSIONS returns one row");
-        let json = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .expect("extensions column is Utf8")
-            .value(0);
-        assert!(
-            json.contains("shallow"),
-            "SHOW output should include the preset: {json}"
+        let extensions = show_extensions(runtime).await;
+        assert_eq!(
+            extensions
+                .pointer("/preset/presets/0/name")
+                .and_then(|name| name.as_str()),
+            Some("shallow"),
+            "SHOW output should include the preset: {extensions}"
         );
 
         // An extension over a non-existent column is rejected by validation.
@@ -731,13 +574,10 @@ mod client_query_tests {
 
         // DROP removes it; the document becomes empty.
         run_sql(runtime, "DROP EXTENSION 'preset' FOR ext").await;
+        let extensions = show_extensions(runtime).await;
         assert!(
-            runtime
-                .get_table_extensions("ext".to_string())
-                .await
-                .expect("extensions should load")
-                .is_empty(),
-            "dropping the only extension leaves an empty document"
+            extensions.get("preset").is_none(),
+            "dropping the only extension leaves an empty document, got: {extensions}"
         );
     }
 

@@ -10,10 +10,12 @@ use std::time::Duration;
 
 use beacon_common::CrawlerConfig;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
-use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
+use datafusion::execution::object_store::ObjectStoreUrl;
 use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
+
+use crate::statement_plan::SessionCell;
 
 use super::definition::CrawlerDefinition;
 use super::engine::{CrawlEngine, CrawlReport};
@@ -24,12 +26,11 @@ use super::persistence::CrawlerPersistence;
 /// pattern: the manager is built after the session context, so the cell is
 /// registered empty during context init and filled once the manager exists.
 ///
-/// Holds a [`Weak`] reference so this handle — reachable from the session context
-/// it is registered on — does not form a strong cycle through the manager (which
-/// holds the session context). The runtime owns the only strong reference, so
-/// dropping the runtime drops the manager and releases the session context (and
-/// the tables store it registers). Consumers [`Weak::upgrade`] before use.
-pub type CrawlerManagerHandle = Arc<OnceLock<Weak<CrawlerManager>>>;
+/// The session owns the manager through this handle. The reverse edge is weak —
+/// the manager reaches the session through a [`SessionCell`] — so there is no
+/// cycle, and dropping the runtime drops the session, the manager, and the
+/// tables-store lock in that order.
+pub type CrawlerManagerHandle = Arc<OnceLock<Arc<CrawlerManager>>>;
 
 /// Create an empty manager handle to register as a session extension.
 pub fn new_crawler_manager_handle() -> CrawlerManagerHandle {
@@ -52,14 +53,14 @@ pub struct CrawlerManager {
 }
 
 impl CrawlerManager {
-    pub fn new(
-        session_ctx: Arc<SessionContext>,
+    pub(crate) fn new(
+        session: SessionCell,
         file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
         db_store_url: ObjectStoreUrl,
         config: CrawlerConfig,
     ) -> Arc<Self> {
-        let engine = CrawlEngine::new(session_ctx.clone(), file_formats);
-        let persistence = CrawlerPersistence::new(session_ctx, db_store_url);
+        let engine = CrawlEngine::new(session.clone(), file_formats);
+        let persistence = CrawlerPersistence::new(session, db_store_url);
         Arc::new(Self {
             engine,
             persistence,

@@ -3,13 +3,11 @@ use std::sync::Arc;
 
 use datafusion::arrow::datatypes::Schema;
 use datafusion::common::{
-    DataFusionError, ToDFSchema, arrow_datafusion_err, config_datafusion_err, plan_err,
+    ToDFSchema, arrow_datafusion_err, config_datafusion_err, plan_err,
 };
 use datafusion::datasource::listing::ListingOptions;
 use datafusion::execution::SessionState;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::logical_expr::CreateExternalTable;
-use datafusion::prelude::SessionContext;
 use datafusion::{
     arrow::datatypes::{DataType, SchemaRef},
     catalog::{Session, TableProvider, TableProviderFactory},
@@ -42,14 +40,29 @@ impl TableProviderFactory for ListingTableFactoryExt {
                 cmd.file_type
             ))?;
 
-        let file_format = file_format_factory.create(session_state, &cmd.options)?;
-
         let (provided_schema, table_partition_cols) = resolve_schema_and_partition_cols(cmd)?;
         let schema_inferred = provided_schema.is_none();
 
         let listing_factory = session_state.config().get_extension::<ListingFactory>().expect("Listing Factory should be registered at startup. If you are seeing this error, please report it to the Beacon team.");
         let mut listing_table_url =
             listing_factory.parse_listing_table_url(state, &cmd.location)?;
+
+        // Built *after* the URL is parsed: a natively-read format (netCDF) opens
+        // files by path rather than through the object store, so it needs the root
+        // store this LOCATION resolves against. For every other format the hook
+        // delegates to plain `create` and the URL is ignored.
+        let file_format = match crate::format_ext::try_file_format_factory_ext(
+            state,
+            cmd.file_type.to_lowercase().as_str(),
+        ) {
+            Some(factory) => factory.create_with_native_root(
+                state,
+                &cmd.options,
+                &listing_table_url,
+                &listing_factory,
+            )?,
+            None => file_format_factory.create(session_state, &cmd.options)?,
+        };
 
         let options = ListingOptions::new(file_format)
             .with_file_extension("") // file extension is not needed for listing table factory since the file format will handle it in `infer_schema` and `infer_partition_schema`

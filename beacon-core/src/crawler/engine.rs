@@ -15,12 +15,13 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema;
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
-use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_datafusion_ext::table_ext::{ExternalTable, ExternalTableDefinition, TableDefinition};
 use datafusion::prelude::SessionContext;
 use serde::{Deserialize, Serialize};
 
 use beacon_functions::file_formats::list_datasets::list_datasets;
+
+use crate::statement_plan::{upgrade_session, SessionCell};
 
 use super::definition::{CrawlerDefinition, CRAWLER_OWNER_OPTION};
 use super::discovery::{assign_table_names, group_into_tables};
@@ -46,23 +47,32 @@ pub struct CrawlReport {
 
 /// Builds external tables from discovered datasets.
 pub struct CrawlEngine {
-    session_ctx: Arc<SessionContext>,
+    /// A weak handle, not an `Arc<SessionContext>`: the session owns the crawler
+    /// manager (through a config extension), so a strong reference back would be a
+    /// cycle that leaks the session and the tables-store lock it holds.
+    session: SessionCell,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
 }
 
 impl CrawlEngine {
-    pub fn new(
-        session_ctx: Arc<SessionContext>,
-        file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-    ) -> Self {
+    pub(crate) fn new(session: SessionCell, file_formats: Vec<Arc<dyn FileFormatFactoryExt>>) -> Self {
         Self {
-            session_ctx,
+            session,
             file_formats,
         }
     }
 
+    fn session(&self) -> anyhow::Result<Arc<SessionContext>> {
+        upgrade_session(&self.session, "crawler engine")
+    }
+
     /// Scan, group, and (re)register external tables for `def`.
     pub async fn run(&self, def: &CrawlerDefinition) -> anyhow::Result<CrawlReport> {
+        // Upgraded once per crawl: a run is short and must see one consistent
+        // session, and failing here (runtime torn down mid-schedule) aborts the
+        // whole crawl rather than half-registering its tables.
+        let session_ctx = self.session()?;
+
         let mut report = CrawlReport {
             crawler: def.name.clone(),
             ..Default::default()
@@ -72,7 +82,7 @@ impl CrawlEngine {
         // Crawlers run periodically, so the cache-backed registered store is fine.
         let pattern = scan_pattern(&def.target_prefix);
         let datasets = list_datasets(
-            &self.session_ctx,
+            &session_ctx,
             &self.file_formats,
             None,
             None,
@@ -90,7 +100,7 @@ impl CrawlEngine {
         // 3. Build + register each candidate.
         for (cand, name) in candidates.iter().zip(names) {
             // Ownership guard: only (re)write tables this crawler owns.
-            let is_update = match self.session_ctx.table_provider(name.as_str()).await {
+            let is_update = match session_ctx.table_provider(name.as_str()).await {
                 Err(_) => false, // does not exist yet
                 Ok(provider) => {
                     let owned = provider
@@ -129,7 +139,7 @@ impl CrawlEngine {
 
             // build_provider infers schema and validates partitions; failures are
             // per-table and must not abort the whole crawl.
-            let provider = match table_def.build_provider(self.session_ctx.clone()).await {
+            let provider = match table_def.build_provider(session_ctx.clone()).await {
                 Ok(provider) => provider,
                 Err(error) => {
                     report.failed.push((name, error.to_string()));
@@ -138,7 +148,7 @@ impl CrawlEngine {
             };
 
             // register_table (via PersistentSchemaProvider) persists table.json.
-            match self.session_ctx.register_table(name.as_str(), provider) {
+            match session_ctx.register_table(name.as_str(), provider) {
                 Ok(_) if is_update => report.updated.push(name),
                 Ok(_) => report.created.push(name),
                 Err(error) => report.failed.push((name, error.to_string())),

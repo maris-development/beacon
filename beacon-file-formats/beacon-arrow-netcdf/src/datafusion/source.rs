@@ -4,7 +4,6 @@ use arrow::{
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
-use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_nd_array::{
     arrow::{
         batch::any_dataset_as_record_batch_stream, metrics::DatasetReadMetrics,

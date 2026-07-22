@@ -1,14 +1,17 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use datafusion::{
     catalog::Session,
-    datasource::file_format::{FileFormat, FileFormatFactory},
+    datasource::{
+        file_format::{FileFormat, FileFormatFactory},
+        listing::ListingTableUrl,
+    },
     object_store::ObjectMeta,
     prelude::SessionContext,
 };
 
-use crate::listing_factory::RootStore;
+use crate::listing_factory::ListingFactory;
 
 pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     fn discover_datasets(
@@ -30,35 +33,68 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
         vec![self.get_ext()]
     }
 
-    /// Whether this format reads files *natively* — opened by local path / URL
-    /// (netCDF-c, Atlas) rather than streamed through the object store. Native
-    /// readers can only open local files and http/https, so the listing layer
-    /// resolves a [`RootStore`] for them at plan time (rejecting object stores like
-    /// s3/gs/az) and hands it to [`Self::create_with_native_root`]. Object-store
-    /// formats (Parquet, CSV, …) read any scheme and return `false`.
-    fn native_read_only(&self) -> bool {
-        false
-    }
-
-    /// Create a [`FileFormat`] that translates object paths to native-reader paths
-    /// against `root` (a local dir or an https base, resolved by the listing
-    /// factory). Only meaningful when [`Self::native_read_only`] is `true`; the
-    /// default ignores `root` and delegates to [`FileFormatFactory::create`].
+    /// Create a [`FileFormat`] for files located at `url`.
+    ///
+    /// A format read *natively* — opened by local path or http(s) URL by an
+    /// external reader (netCDF-c), never streamed through the object store — needs
+    /// to know which [`RootStore`](crate::listing_factory::RootStore) its objects
+    /// live under so it can turn each
+    /// listed object into a path that reader can open. `listing` resolves that
+    /// from `url` via [`ListingFactory::native_read_root`].
+    ///
+    /// The default ignores both and delegates to [`FileFormatFactory::create`], so
+    /// object-store formats (Parquet, CSV, …) are unaffected and no location is
+    /// rejected on their behalf. Only an overriding format calls
+    /// `native_read_root`, so the "only local files and http/https" error is raised
+    /// exactly for the formats that have that limitation.
     fn create_with_native_root(
         &self,
         state: &dyn Session,
         format_options: &HashMap<String, String>,
-        _root: RootStore,
+        _url: &ListingTableUrl,
+        _listing: &ListingFactory,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         self.create(state, format_options)
     }
+}
+
+/// Shared, late-filled handle to the [`FileFormatRegistry`], registered as a
+/// session-config extension. The formats are built *after* the session (they need
+/// it), so the cell is registered empty during config construction and filled once
+/// the factories exist — the same pattern as the session and crawler handles.
+pub type FileFormatRegistryHandle = Arc<OnceLock<FileFormatRegistry>>;
+
+/// Create an empty registry handle to register as a session extension.
+pub fn new_file_format_registry_handle() -> FileFormatRegistryHandle {
+    Arc::new(OnceLock::new())
+}
+
+/// The beacon [`FileFormatFactoryExt`] answering to `key` (a format name or file
+/// extension), recovered from the session's registry handle.
+///
+/// This is the only way back to the `Ext` trait: DataFusion's own registry hands
+/// out `Arc<dyn FileFormatFactory>`, and there is no upcast from that to
+/// [`FileFormatFactoryExt`] (nor any way to downcast to a concrete factory from
+/// this crate, which the format crates depend on rather than the reverse).
+///
+/// `None` when the registry is absent or unfilled, or nothing answers to `key`.
+pub fn try_file_format_factory_ext(
+    session: &dyn Session,
+    key: &str,
+) -> Option<Arc<dyn FileFormatFactoryExt>> {
+    session
+        .config()
+        .get_extension::<OnceLock<FileFormatRegistry>>()?
+        .get()?
+        .get(key)
+        .cloned()
 }
 
 /// Beacon's [`FileFormatFactoryExt`] factories, keyed by the format names and file
 /// extensions they answer to. Registered (via a late-filled `OnceLock`) as a
 /// session-config extension so plan-time code — the external-table builder, table
 /// functions — can recover format capabilities (like
-/// [`FileFormatFactoryExt::native_read_only`]) that DataFusion's plain
+/// [`FileFormatFactoryExt::create_with_native_root`]) that DataFusion's plain
 /// `FileFormatFactory` registry erases once the concrete `Ext` type is gone.
 #[derive(Default)]
 pub struct FileFormatRegistry {

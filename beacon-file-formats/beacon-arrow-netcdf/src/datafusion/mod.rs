@@ -178,6 +178,33 @@ impl GetExt for NetCDFFormatFactory {
 }
 
 impl FileFormatFactoryExt for NetCDFFormatFactory {
+    /// netCDF is read by netcdf-c, which opens a local path or an http(s) URL and
+    /// never the object store, so the format needs a [`NetCDFObjectResolver`] built
+    /// from the root store `url` resolves against. Plain [`FileFormatFactory::create`]
+    /// has no location to work from and yields a format whose resolver always errors.
+    ///
+    /// `native_read_root` rejects a scheme netcdf-c cannot open (s3/gs/az) here,
+    /// naming the location, rather than failing later per listed object.
+    fn create_with_native_root(
+        &self,
+        state: &dyn Session,
+        format_options: &std::collections::HashMap<String, String>,
+        url: &datafusion::datasource::listing::ListingTableUrl,
+        listing: &ListingFactory,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        let root = listing.native_read_root(url)?;
+        let format = self.create(state, format_options)?;
+        let netcdf = format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .ok_or_else(|| {
+                exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
+            })?
+            .clone()
+            .with_object_path_resolver(object_meta_resolver::create_object_resolver(&root));
+        Ok(Arc::new(netcdf))
+    }
+
     fn discover_datasets(
         &self,
         objects: &[ObjectMeta],
@@ -316,8 +343,16 @@ impl FileFormat for NetcdfFormat {
         object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
         if self.enable_statistics {
+            // Resolved through the same resolver the reader uses, so statistics and
+            // scans can never disagree about where a file is.
+            let native_path = self.object_path_resolver.resolve(object).map_err(|e| {
+                exec_datafusion_err!(
+                    "Failed to resolve object metadata (path) to NetCDF native path: {}",
+                    e
+                )
+            })?;
             Ok(
-                statistics::generate_statistics(&self.listing_factory, object, &table_schema)
+                statistics::generate_statistics(native_path, &table_schema)
                     .await
                     .unwrap_or_else(|e| {
                         tracing::warn!(

@@ -327,71 +327,6 @@ pub struct ExternalTableDefinition {
     pub if_not_exists: bool,
 }
 
-/// Converts a concrete listing table path into the location format expected by `parse_listing_table_url`.
-fn listing_location_from_table_path(
-    table_path: &datafusion::datasource::listing::ListingTableUrl,
-) -> anyhow::Result<String> {
-    let full = table_path.as_str();
-    let store_url = table_path.object_store().to_string();
-
-    let mut location = full
-        .strip_prefix(&store_url)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "ListingTable path '{}' does not start with object store URL '{}'",
-                full,
-                store_url
-            )
-        })?
-        .to_string();
-
-    if table_path.scheme() != "file" {
-        location = location.trim_start_matches('/').to_string();
-    }
-
-    if let Some(glob) = table_path.get_glob() {
-        if !location.is_empty() && !location.ends_with('/') {
-            location.push('/');
-        }
-        location.push_str(&glob.to_string());
-    }
-
-    anyhow::ensure!(
-        !location.is_empty(),
-        "Derived empty location from ListingTable path '{}'",
-        full
-    );
-
-    Ok(location)
-}
-
-/// Best-effort file type inference for serialized listing table definitions.
-fn infer_file_type(options: &ListingOptions) -> String {
-    let from_file_extension = options
-        .file_extension
-        .trim()
-        .trim_start_matches('.')
-        .to_string();
-    if !from_file_extension.is_empty() {
-        return from_file_extension;
-    }
-
-    if let Some(compression) = options.format.compression_type()
-        && let Ok(ext) = options.format.get_ext_with_compression(&compression)
-    {
-        let inferred = ext.trim().trim_start_matches('.').to_string();
-        if !inferred.is_empty() {
-            return inferred;
-        }
-    }
-
-    options
-        .format
-        .get_ext()
-        .trim()
-        .trim_start_matches('.')
-        .to_string()
-}
 
 /// Partition column declarations represented as `(name, data_type)` tuples.
 type PartitionCols = Vec<(String, DataType)>;
@@ -520,13 +455,27 @@ impl TableDefinition for ExternalTableDefinition {
             .filter(|(k, _)| !k.starts_with("__"))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let file_format = file_format_factory.create(&session_state, &format_options)?;
-
         let (provided_schema, table_partition_cols) =
             resolve_schema_and_partition_cols(&self.schema, &self.partition_cols)?;
 
         let mut listing_table_url =
             listing_factory.parse_listing_table_url(&session_state, &self.location)?;
+
+        // Built after the URL for the same reason as in `ListingTableFactoryExt`:
+        // a natively-read format needs the root store this LOCATION resolves
+        // against. This path also runs on startup, rebuilding persisted tables.
+        let file_format = match crate::format_ext::try_file_format_factory_ext(
+            &session_state,
+            self.file_type.as_str(),
+        ) {
+            Some(factory) => factory.create_with_native_root(
+                &session_state,
+                &format_options,
+                &listing_table_url,
+                &listing_factory,
+            )?,
+            None => file_format_factory.create(&session_state, &format_options)?,
+        };
 
         let options = ListingOptions::new(file_format)
             .with_file_extension("") // file extension is not needed for listing table factory since the file format will handle it in `infer_schema` and `infer_partition_schema`
@@ -1517,65 +1466,6 @@ mod helper_tests {
         let root = ObjectPath::from("");
         assert!(path_under_prefix(&root, &ObjectPath::from("a.parquet")));
         assert!(!path_under_prefix(&root, &ObjectPath::from("")));
-    }
-
-    // ── location round-tripping ──────────────────────────────────────────
-
-    #[test]
-    fn listing_location_is_relative_to_the_object_store_root() {
-        let url = ListingTableUrl::parse("file:///data/obs/").unwrap();
-        let location = listing_location_from_table_path(&url).unwrap();
-        // The `file://` object-store URL is `file:///`, so the leading slash is
-        // part of the store root and drops out of the location. The persisted
-        // location is therefore store-relative and only resolves back to the
-        // same directory when a default store URL is configured.
-        assert_eq!(location, "data/obs/");
-    }
-
-    #[test]
-    fn listing_location_strips_the_store_authority_for_remote_stores() {
-        let url = ListingTableUrl::parse("s3://bucket/obs/").unwrap();
-        let location = listing_location_from_table_path(&url).unwrap();
-        // The bucket lives in the object-store URL, so it must not be repeated
-        // in the location (which is resolved *against* that store on reload).
-        assert_eq!(location, "obs/");
-    }
-
-    #[test]
-    fn listing_location_reattaches_the_glob() {
-        let url = ListingTableUrl::parse("file:///data/obs/**/*.parquet").unwrap();
-        let location = listing_location_from_table_path(&url).unwrap();
-        // The glob is dropped from the URL prefix, so it has to be re-appended.
-        assert_eq!(location, "data/obs/**/*.parquet");
-    }
-
-    #[test]
-    fn listing_location_rejects_a_bare_store_root() {
-        // A store root carries no location to persist.
-        let url = ListingTableUrl::parse("s3://bucket/").unwrap();
-        assert!(listing_location_from_table_path(&url).is_err());
-    }
-
-    // ── file type / glob inference ───────────────────────────────────────
-
-    #[test]
-    fn infer_file_type_prefers_the_configured_extension() {
-        let options = ListingOptions::new(Arc::new(ParquetFormat::default()))
-            .with_file_extension(".nc");
-        // The leading dot is stripped; the format's own extension is ignored.
-        assert_eq!(infer_file_type(&options), "nc");
-    }
-
-    #[test]
-    fn infer_file_type_falls_back_to_the_format_extension() {
-        // Beacon clears the extension so the format drives listing; the file
-        // type must then still be recoverable from the format itself.
-        let options =
-            ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension("");
-        assert_eq!(infer_file_type(&options), "parquet");
-
-        let options = ListingOptions::new(Arc::new(CsvFormat::default())).with_file_extension("");
-        assert_eq!(infer_file_type(&options), "csv");
     }
 
     #[test]

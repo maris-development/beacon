@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, OnceLock, Weak},
+    sync::{Arc, OnceLock},
 };
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
@@ -19,7 +19,7 @@ use beacon_auth::{
 };
 use beacon_datafusion_ext::{
     consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
-    format_ext::{FileFormatFactoryExt, FileFormatRegistry},
+    format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
     listing_factory::{DefaultStore, ListingFactory, RootStore},
     listing_table_factory_ext::ListingTableFactoryExt,
     nd::NdProjectionPushdown,
@@ -52,6 +52,7 @@ use crate::{
     runtime::Runtime,
     settings::{SqlSettings, SqlStreamCoalesceSettings},
     statement_plan::{new_session_cell, BeaconQueryPlanner, CoalesceSqlStream, SessionCell},
+    system_schema::{QueryMetricsMap, SystemSchemaProvider, SYSTEM_SCHEMA_NAME},
 };
 
 #[derive(Default)]
@@ -250,7 +251,7 @@ impl RuntimeBuilder {
         } = init_auth_context(&self, session_cell.clone()).await?;
         let auth_context = Arc::new(auth_context);
 
-        let session_ctx = init_session_ctx(&self, auth_context.clone(), session_cell)
+        let session_ctx = init_session_ctx(&self, auth_context.clone(), session_cell.clone())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
 
@@ -279,7 +280,22 @@ impl RuntimeBuilder {
             file_formats.clone(),
         );
 
-        let crawler_manager = init_crawler_manager(&self, &session_ctx, file_formats).await?;
+        // The metrics map is created here rather than in the `Runtime` literal below
+        // because the `beacon.system.query_metrics` table reads the same handle: the
+        // table observes what `run_query` records.
+        let query_metrics: QueryMetricsMap = Arc::new(Mutex::new(HashMap::new()));
+
+        // `beacon.system` — the functions, table functions and query metrics as SQL
+        // tables. Registered after `register_functions` so the table-function docs it
+        // returns are available.
+        register_system_schema(
+            &session_ctx,
+            session_cell.clone(),
+            table_function_docs,
+            query_metrics.clone(),
+        )?;
+
+        init_crawler_manager(&self, &session_ctx, session_cell, file_formats).await?;
 
         // Event-driven external-table refresh was removed; external tables become
         // current on an explicit `REFRESH` only.
@@ -291,9 +307,7 @@ impl RuntimeBuilder {
 
         Ok(Runtime {
             session_ctx,
-            table_function_docs,
-            query_metrics: Arc::new(Mutex::new(HashMap::new())),
-            crawler_manager,
+            query_metrics,
             auth: auth_context,
             auth_enforce: self.auth_enforce,
 
@@ -308,32 +322,39 @@ impl RuntimeBuilder {
 async fn init_crawler_manager(
     builder: &RuntimeBuilder,
     session_ctx: &Arc<SessionContext>,
+    session_cell: SessionCell,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-) -> anyhow::Result<Option<Arc<CrawlerManager>>> {
+) -> anyhow::Result<()> {
     if !builder.crawler.enable {
-        return Ok(None);
+        return Ok(());
     }
 
     let crawler_manager = CrawlerManager::new(
-        session_ctx.clone(),
+        session_cell,
         file_formats,
         DEFAULT_DB_STORE_URL_OBJECT_URL.clone(),
         builder.crawler.clone(),
     );
     crawler_manager.init().await?;
 
-    // The handle registered on the session holds a Weak, so the runtime keeps the
-    // only strong reference and dropping it releases the session context. The
-    // extension is keyed on the inner type: `CrawlerManagerHandle` is itself an Arc.
+    // The session owns the manager from here on; the manager holds only a weak
+    // handle back, so there is no cycle and dropping the runtime still releases
+    // the session context and the tables-store lock. The extension is keyed on the
+    // inner type: `CrawlerManagerHandle` is itself an Arc.
     if let Some(handle) = session_ctx
         .state()
         .config()
-        .get_extension::<OnceLock<Weak<CrawlerManager>>>()
+        .get_extension::<OnceLock<Arc<CrawlerManager>>>()
     {
-        let _ = handle.set(Arc::downgrade(&crawler_manager));
+        let _ = handle.set(crawler_manager);
+    } else {
+        anyhow::bail!(
+            "crawler manager handle is not registered on the session; \
+             the crawler subsystem would be unreachable"
+        );
     }
 
-    Ok(Some(crawler_manager))
+    Ok(())
 }
 
 /// The auth context plus the tables-backed store that has to be brought online once the session
@@ -487,6 +508,28 @@ async fn register_schema_provider(
     Ok(())
 }
 
+/// Registers the read-only `beacon.system` schema (functions, table functions,
+/// query metrics) so runtime introspection is reachable through SQL.
+fn register_system_schema(
+    session_ctx: &Arc<SessionContext>,
+    session_cell: SessionCell,
+    table_function_docs: Vec<beacon_functions::function_doc::FunctionDoc>,
+    query_metrics: QueryMetricsMap,
+) -> anyhow::Result<()> {
+    let provider = Arc::new(SystemSchemaProvider::new(
+        session_cell,
+        table_function_docs,
+        query_metrics,
+    ));
+
+    session_ctx
+        .catalog("beacon")
+        .ok_or_else(|| anyhow::anyhow!("Failed to get catalog 'beacon'"))?
+        .register_schema(SYSTEM_SCHEMA_NAME, provider)?;
+
+    Ok(())
+}
+
 fn register_file_formats(
     builder: &RuntimeBuilder,
     session_ctx: &Arc<SessionContext>,
@@ -522,6 +565,17 @@ fn register_file_formats(
     for format in &formats {
         state.register_file_format(format.clone(), true)?;
     }
+
+    // Fill the handle registered on the session config. Without this the
+    // external-table builder cannot reach `create_with_native_root`, and a netCDF
+    // external table is built with a resolver that fails on every object.
+    let handle = state
+        .config()
+        .get_extension::<OnceLock<FileFormatRegistry>>()
+        .ok_or_else(|| {
+            anyhow::anyhow!("file format registry handle must be registered on the session config")
+        })?;
+    let _ = handle.set(FileFormatRegistry::new(&formats));
 
     Ok(formats)
 }
@@ -600,6 +654,11 @@ fn build_session_config(
         .with_extension(Arc::new(build_listing_factory(builder)))
         // The store a `CREATE EXTERNAL TABLE` LOCATION is resolved against.
         .with_extension(Arc::new(ListingTableFactoryExt))
+        // Late-filled by `register_file_formats` once the factories exist. The only
+        // route back to a format's `FileFormatFactoryExt` — DataFusion's own
+        // registry erases the `Ext` type — which the external-table builder needs
+        // to hand a natively-read format its root store.
+        .with_extension(new_file_format_registry_handle())
         // Recovered by the JSON query compiler (default table, projection pushdown).
         .with_extension(Arc::new(builder.sql.clone()))
         // Recovered when a statement's result stream is built, to merge the small

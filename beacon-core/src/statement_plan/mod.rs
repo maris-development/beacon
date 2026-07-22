@@ -133,6 +133,16 @@ pub(crate) fn new_session_cell() -> SessionCell {
     Arc::new(OnceLock::new())
 }
 
+/// Upgrade a [`SessionCell`] to the live session, naming the caller in the error.
+///
+/// Fails only once the runtime has been torn down (or, in principle, before the
+/// cell is filled — which cannot happen for anything built during startup).
+pub(crate) fn upgrade_session(cell: &SessionCell, who: &str) -> anyhow::Result<Arc<SessionContext>> {
+    cell.get()
+        .and_then(|weak| weak.upgrade())
+        .ok_or_else(|| anyhow::anyhow!("{who}: beacon session context is unavailable"))
+}
+
 /// Build the logical plan for an auth-management statement (CREATE/DROP USER/ROLE, GRANT/DENY/
 /// REVOKE). Lowered to an [`Extension`] node so it inherits the super-user gate in
 /// [`validate_query_plan`] (all beacon extension nodes are super-user-only).
@@ -270,6 +280,23 @@ pub(crate) async fn execute_statement_plan(
     session_ctx: &Arc<SessionContext>,
     plan: LogicalPlan,
 ) -> anyhow::Result<SendableRecordBatchStream> {
+    let (stream, _physical_plan) = execute_statement_plan_tracked(session_ctx, plan).await?;
+    Ok(stream)
+}
+
+/// [`execute_statement_plan`], additionally returning the physical plan it built.
+///
+/// The plan is handed back so a caller can register it with a `MetricsTracker`:
+/// per-node metrics are populated as the returned stream drains, so the same
+/// `Arc` read after the stream ends carries the runtime metrics. `None` for
+/// `Statement` plans, which never get a physical plan.
+pub(crate) async fn execute_statement_plan_tracked(
+    session_ctx: &Arc<SessionContext>,
+    plan: LogicalPlan,
+) -> anyhow::Result<(
+    SendableRecordBatchStream,
+    Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+)> {
     use futures::TryStreamExt;
 
     // Statements (e.g. `SET datafusion.execution.batch_size = …`) cannot be
@@ -283,29 +310,36 @@ pub(crate) async fn execute_statement_plan(
             .await?
             .collect()
             .await?;
-        return Ok(Box::pin(
-            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-                schema,
-                futures::stream::empty(),
+        return Ok((
+            Box::pin(
+                datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                    schema,
+                    futures::stream::empty(),
+                ),
             ),
+            None,
         ));
     }
 
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
-    let stream = datafusion::physical_plan::execute_stream(physical_plan, session_ctx.task_ctx())?;
+    let stream =
+        datafusion::physical_plan::execute_stream(physical_plan.clone(), session_ctx.task_ctx())?;
     let stream = CoalesceSqlStream::from_session(session_ctx).coalesce(stream);
 
     if stream.schema().fields().is_empty() {
         let schema = stream.schema();
         stream.try_collect::<Vec<_>>().await?;
-        Ok(Box::pin(
-            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-                schema,
-                futures::stream::empty(),
+        Ok((
+            Box::pin(
+                datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                    schema,
+                    futures::stream::empty(),
+                ),
             ),
+            Some(physical_plan),
         ))
     } else {
-        Ok(stream)
+        Ok((stream, Some(physical_plan)))
     }
 }
 

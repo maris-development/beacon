@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use beacon_datafusion_ext::listing_factory::ListingFactory;
 use beacon_nd_array::dataset::AnyDataset;
 use object_store::ObjectMeta;
 

@@ -8,7 +8,6 @@
 //! and partition pruning.  Arrays for which a range cannot be determined
 //! (multi-dimensional, String, Binary) get [`ColumnStatistics::new_unknown`].
 
-use beacon_datafusion_ext::listing_factory;
 use beacon_nd_array::{
     arrow::compute::value_range,
     dataset::{ragged::RaggedArray, AnyDataset, Dataset, RaggedDataset},
@@ -23,24 +22,17 @@ use crate::reader::open_dataset;
 
 // ─── Public entry point ─────────────────────────────────────────────────────
 
-/// Open the NetCDF file at `object` and return DataFusion [`Statistics`] for
+/// Open the NetCDF file at `netcdf_path` and return DataFusion [`Statistics`] for
 /// the columns in `table_schema`.
+///
+/// `netcdf_path` is the already-resolved path/URL the netCDF-c reader opens
+/// directly, produced by the format's `NetCDFObjectResolver`. Resolution is the
+/// caller's job so statistics and scans go through one mechanism (see
+/// `datafusion::reader::open_dataset` for how the scheme is interpreted).
 pub async fn generate_statistics(
-    listing_factory: &listing_factory::ListingFactory,
-    object: &object_store::ObjectMeta,
+    netcdf_path: String,
     table_schema: &arrow::datatypes::Schema,
 ) -> anyhow::Result<Statistics> {
-    // Resolve the object to a path/URL the netCDF-c reader can open directly
-    // (see `datafusion::reader::open_dataset` for how the scheme is interpreted).
-    let netcdf_path = listing_factory
-        .try_parse_obj_path_to_netcdf_path("file", &object.location)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cannot resolve a readable NetCDF path for object {}; a remote \
-                 object store requires a configured root store",
-                object.location
-            )
-        })?;
     let dataset = open_dataset(netcdf_path).await?;
 
     match dataset {

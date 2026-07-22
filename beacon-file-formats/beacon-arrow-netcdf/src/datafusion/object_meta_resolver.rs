@@ -7,68 +7,60 @@ pub trait NetCDFObjectResolver: Send + Sync + Debug {
     fn resolve(&self, object: &ObjectMeta) -> anyhow::Result<String>;
 }
 
+/// The resolver a format gets when it was built without a location — through
+/// [`FileFormatFactory::default`](datafusion::datasource::file_format::FileFormatFactory::default),
+/// or plain `create`. It cannot resolve anything: which root store the objects
+/// live under is exactly the information that was not supplied.
+///
+/// Reaching this in a scan means the format was built off the location-less path;
+/// see `FileFormatFactoryExt::create_with_native_root`.
 #[derive(Debug)]
 pub struct DefaultNetCDFObjectResolver;
 
 impl NetCDFObjectResolver for DefaultNetCDFObjectResolver {
-    fn resolve(&self, _object: &ObjectMeta) -> anyhow::Result<String> {
-        Err(anyhow::anyhow!("Unable to resolve object metadata (path): {} to netcdf native path which only supports local files and http/https.", _object.location.as_ref()))
-    }
-}
-
-#[derive(Debug)]
-pub struct NetCDFLocalObjectResolver {
-    pub base_path: String,
-}
-
-impl NetCDFLocalObjectResolver {
-    pub fn new(base_path: String) -> Self {
-        Self { base_path }
-    }
-}
-
-impl NetCDFObjectResolver for NetCDFLocalObjectResolver {
     fn resolve(&self, object: &ObjectMeta) -> anyhow::Result<String> {
-        let path = format!("{}/{}", self.base_path, object.location.as_ref());
-        // Check if the path exists
-        if !std::path::Path::new(&path).exists() {
-            return Err(anyhow::anyhow!(
-                "File does not exist or could not be resolved to a valid path: {}",
-                path
-            ));
-        }
-        Ok(path)
-    }
-}
-
-#[derive(Debug)]
-pub struct NetCDFHttpObjectResolver {
-    pub base_url: String,
-}
-
-impl NetCDFHttpObjectResolver {
-    pub fn new(base_url: String) -> Self {
-        Self { base_url }
-    }
-}
-
-impl NetCDFObjectResolver for NetCDFHttpObjectResolver {
-    fn resolve(&self, object: &ObjectMeta) -> anyhow::Result<String> {
-        Ok(format!(
-            "{}/{}#mode=bytes",
-            self.base_url,
+        Err(anyhow::anyhow!(
+            "Unable to resolve object metadata (path): {} to netcdf native path \
+             which only supports local files and http/https.",
             object.location.as_ref()
         ))
     }
 }
 
-pub fn create_object_resolver(root_store: &RootStore) -> Arc<dyn NetCDFObjectResolver> {
-    match root_store {
-        RootStore::FileSystem(base_path) => Arc::new(NetCDFLocalObjectResolver::new(
-            base_path.to_string_lossy().to_string(),
-        )),
-        RootStore::HttpsStore(base_url) => {
-            Arc::new(NetCDFHttpObjectResolver::new(base_url.clone()))
-        }
+/// Resolves each object against the [`RootStore`] its table's location resolved
+/// to — a local directory or an https base.
+///
+/// The path construction itself is [`RootStore::to_native_path`], so netCDF and
+/// the listing layer cannot disagree about where a file is.
+#[derive(Debug)]
+pub struct RootStoreObjectResolver {
+    root: RootStore,
+}
+
+impl RootStoreObjectResolver {
+    pub fn new(root: RootStore) -> Self {
+        Self { root }
     }
+}
+
+impl NetCDFObjectResolver for RootStoreObjectResolver {
+    fn resolve(&self, object: &ObjectMeta) -> anyhow::Result<String> {
+        let path = self.root.to_native_path(&object.location);
+
+        // Local files are checked up front: netcdf-c reports a missing file as an
+        // opaque error, so failing here names the path that was actually tried.
+        // An https base is not probed — that would cost a request per object.
+        if matches!(self.root, RootStore::FileSystem(_)) && !std::path::Path::new(&path).exists() {
+            return Err(anyhow::anyhow!(
+                "File does not exist or could not be resolved to a valid path: {}",
+                path
+            ));
+        }
+
+        Ok(path)
+    }
+}
+
+pub fn create_object_resolver(root_store: &RootStore) -> Arc<dyn NetCDFObjectResolver> {
+    Arc::new(RootStoreObjectResolver::new(root_store.clone()))
 }
