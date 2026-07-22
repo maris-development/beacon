@@ -24,7 +24,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # COPY SOURCE
 
-COPY beacon-api/ /beacon-api/
+COPY beacon-datalake/ /beacon-datalake/
 COPY beacon-auth/ /beacon-auth/
 COPY beacon-file-formats/beacon-arrow-atlas/ /beacon-file-formats/beacon-arrow-atlas/
 COPY beacon-file-formats/beacon-arrow-netcdf/ /beacon-file-formats/beacon-arrow-netcdf/
@@ -53,7 +53,7 @@ COPY Cargo.lock /
 COPY rust-toolchain /
 
 #Build the project (only the server binary the image ships; jemalloc on for prod)
-RUN cargo build --release -p beacon-api --features jemalloc
+RUN cargo build --release -p beacon-datalake --features jemalloc
 
 # Build the admin web UI (Vite SPA) from the JS client workspace. The SDK
 # (@beacon/client) must be built before the web app, which imports from its dist.
@@ -68,8 +68,8 @@ RUN npm run build --workspace beacon-web
 
 FROM ubuntu:latest AS runtime
 WORKDIR /beacon
-COPY --from=builder /target/release/beacon-api /beacon/
-# Bundle the built admin UI; beacon-api serves it at /admin (BEACON_WEB_UI_DIR=web).
+COPY --from=builder /target/release/beacon-datalake /beacon/
+# Bundle the built admin UI; beacon-datalake serves it at /admin (BEACON_WEB_UI_DIR=web).
 COPY --from=webui /clients/beacon-web/dist /beacon/web
 
 #Install Dependencies
@@ -81,4 +81,4 @@ RUN apt-get install -y libnetcdf-dev
 # 5001: HTTP API + admin UI. 32011: Arrow Flight SQL (BEACON_FLIGHT_SQL_PORT).
 EXPOSE 5001 32011
 
-ENTRYPOINT ["/beacon/beacon-api"]
+ENTRYPOINT ["/beacon/beacon-datalake"]

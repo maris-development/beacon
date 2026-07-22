@@ -5,7 +5,7 @@ import { fileURLToPath, URL } from "node:url";
 // https://vite.dev/config/
 export default defineConfig(({ command }) => ({
   // Production builds are served by the Beacon server, which mounts the SPA at
-  // `/admin` (see beacon-api router). The dev server keeps it at the root.
+  // `/admin` (see beacon-datalake router). The dev server keeps it at the root.
   base: command === "build" ? "/admin/" : "/",
   plugins: [react()],
   resolve: {

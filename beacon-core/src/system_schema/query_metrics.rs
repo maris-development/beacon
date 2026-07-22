@@ -99,7 +99,7 @@ pub(super) fn query_metrics_table(metrics: QueryMetricsMap) -> SystemTable {
         // Clone under the lock and build the batch outside it: the map is on the
         // query-completion path and must not be held across the row build.
         let rows: Vec<ConsolidatedMetrics> = metrics.lock().values().cloned().collect();
-        query_metrics_batch(rows)
+        Box::pin(async move { query_metrics_batch(rows) })
     });
 
     SystemTable::new(query_metrics_schema(), snapshot)

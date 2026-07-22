@@ -1,4 +1,4 @@
-//! Beacon-core-owned contracts for outer layers such as beacon-api.
+//! Beacon-core-owned contracts for outer layers such as beacon-datalake.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

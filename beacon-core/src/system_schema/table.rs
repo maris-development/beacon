@@ -13,7 +13,12 @@ use datafusion::{
 
 /// Produces the table's rows. Called once per scan, so a table always reflects the
 /// runtime's state at query time rather than at registration time.
-pub(crate) type Snapshot = Arc<dyn Fn() -> DFResult<RecordBatch> + Send + Sync>;
+///
+/// Async because some sources are (the auth directory reads through a provider
+/// that may be backed by storage); synchronous sources just return a ready future.
+pub(crate) type Snapshot = Arc<
+    dyn Fn() -> futures::future::BoxFuture<'static, DFResult<RecordBatch>> + Send + Sync,
+>;
 
 /// A read-only, in-memory system table: a fixed schema plus a closure that
 /// materializes the current rows.
@@ -65,7 +70,7 @@ impl TableProvider for SystemTable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        let batch = (self.snapshot)()?;
+        let batch = (self.snapshot)().await?;
         let exec = MemorySourceConfig::try_new_exec(
             &[vec![batch]],
             self.schema.clone(),

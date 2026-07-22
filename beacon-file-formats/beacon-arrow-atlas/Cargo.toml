@@ -29,5 +29,4 @@ beacon-nd-array = { path = "../beacon-nd-array" }
 beacon-common = { path = "../../beacon-common" }
 
 [dev-dependencies]
-beacon-config = { path = "../../beacon-config" }
 tempfile = { workspace = true }

@@ -37,7 +37,13 @@ async fn system_tables_are_listed_in_information_schema() {
 
     assert_eq!(
         names,
-        vec!["functions", "query_metrics", "table_functions"],
+        vec![
+            "functions",
+            "query_metrics",
+            "roles",
+            "table_functions",
+            "users"
+        ],
         "the system schema should expose exactly these tables"
     );
 }
@@ -171,4 +177,89 @@ async fn system_schema_rejects_writes() {
         err.to_string().contains("read-only") || err.to_string().contains("system"),
         "unexpected error: {err}"
     );
+}
+
+/// The auth directory is readable as SQL by the super-user, completing the set:
+/// `CREATE USER` / `CREATE ROLE` / `GRANT` were already SQL, and now so is
+/// reading back what they did.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_tables_expose_the_directory_to_the_super_user() {
+    let rt = runtime("system-schema-auth").await;
+
+    rt.sql("CREATE ROLE analyst").await;
+    rt.sql("CREATE USER alice WITH PASSWORD 'pw'").await;
+    rt.sql("GRANT ROLE analyst TO USER alice").await;
+
+    assert_eq!(
+        scalar_i64(
+            &rt.sql("SELECT count(*) FROM beacon.system.users WHERE username = 'alice'")
+                .await
+        ),
+        1,
+        "a user created through SQL should be listed"
+    );
+    assert_eq!(
+        scalar_i64(
+            &rt.sql("SELECT count(*) FROM beacon.system.roles WHERE role_name = 'analyst'")
+                .await
+        ),
+        1,
+        "a role created through SQL should be listed"
+    );
+
+    let batches = rt
+        .sql("SELECT username, roles FROM beacon.system.users WHERE username = 'alice'")
+        .await;
+    let roles = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("roles is Utf8")
+        .value(0);
+    let roles: Vec<String> =
+        serde_json::from_str(roles).expect("roles should be a JSON array");
+    assert!(
+        roles.iter().any(|r| r == "analyst"),
+        "alice's granted role should be listed, got: {roles:?}"
+    );
+
+    // Roles render their rules as JSON, and no password material is present
+    // anywhere in the users table.
+    let dumped = format!("{:?}", rt.sql("SELECT * FROM beacon.system.users").await);
+    assert!(
+        !dumped.contains("$argon2"),
+        "the users table must never expose password hashes"
+    );
+}
+
+/// The auth tables are super-user-only *unconditionally* — this runtime has
+/// grant enforcement off, which is the default and the case where a gate that
+/// depended on enforcement would leak the directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_tables_are_super_user_only_even_without_enforcement() {
+    let rt = runtime("system-schema-auth-gate").await;
+
+    for sql in [
+        "SELECT * FROM beacon.system.users",
+        "SELECT * FROM beacon.system.roles",
+        // Reached indirectly: the gate matches the scan, not the statement shape.
+        "SELECT count(*) FROM (SELECT * FROM beacon.system.users)",
+    ] {
+        let err = rt
+            .try_sql_as(sql, beacon_core::AuthIdentity::empty())
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("non-super read should be rejected: {sql}"));
+        assert!(
+            err.to_string().contains("super-user"),
+            "expected a super-user error for `{sql}`, got: {err}"
+        );
+    }
+
+    // The non-auth system tables stay readable — the gate is scoped, not blanket.
+    rt.sql_as(
+        "SELECT count(*) FROM beacon.system.functions",
+        beacon_core::AuthIdentity::empty(),
+    )
+    .await;
 }

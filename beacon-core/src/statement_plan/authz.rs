@@ -44,6 +44,16 @@ pub(crate) fn authorize_logical_plan(
         );
     }
 
+    // Same treatment, same reason, for the auth directory exposed as SQL:
+    // `beacon.system.users` / `beacon.system.roles` are who-can-do-what, so they
+    // must not be readable just because enforcement happens to be off.
+    if !identity.is_super_user && plan_touches_auth_system_tables(plan) {
+        anyhow::bail!(
+            "permission denied: the 'beacon.{}' auth tables are restricted to the super-user",
+            crate::system_schema::SYSTEM_SCHEMA_NAME
+        );
+    }
+
     if !enforce || identity.is_super_user {
         return Ok(());
     }
@@ -65,6 +75,31 @@ pub(crate) fn authorize_logical_plan(
     }
 
     Ok(())
+}
+
+/// Whether any table scan in `plan` references `beacon.system.users` or
+/// `beacon.system.roles`. Matched on schema + table name so it catches the table
+/// however it is reached (including through a subquery or a view).
+fn plan_touches_auth_system_tables(plan: &LogicalPlan) -> bool {
+    let mut touches = false;
+    let _ = plan.apply_with_subqueries(|node| {
+        if let LogicalPlan::TableScan(scan) = node {
+            let in_system_schema = scan
+                .table_name
+                .schema()
+                .is_some_and(|s| s.eq_ignore_ascii_case(crate::system_schema::SYSTEM_SCHEMA_NAME));
+            if in_system_schema
+                && crate::system_schema::AUTH_TABLES
+                    .iter()
+                    .any(|name| scan.table_name.table().eq_ignore_ascii_case(name))
+            {
+                touches = true;
+                return Ok(TreeNodeRecursion::Stop);
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    touches
 }
 
 /// Whether any table scan in `plan` (including subqueries and write inputs) references one of

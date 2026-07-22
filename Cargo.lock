@@ -1245,44 +1245,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-api"
-version = "1.8.0"
-dependencies = [
- "anyhow",
- "arrow 58.3.0",
- "arrow-flight",
- "arrow-ipc 58.3.0",
- "axum",
- "axum-streams",
- "base64",
- "beacon-config",
- "beacon-core",
- "beacon-mcp",
- "bytes",
- "futures",
- "pprof",
- "prost",
- "serde",
- "serde_json",
- "tempfile",
- "tikv-jemallocator",
- "tokio",
- "tokio-util",
- "tonic",
- "tower",
- "tower-http",
- "tracing",
- "tracing-appender",
- "tracing-panic",
- "tracing-subscriber",
- "utoipa",
- "utoipa-axum",
- "utoipa-scalar",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
 name = "beacon-arrow-atlas"
 version = "0.1.0"
 dependencies = [
@@ -1291,7 +1253,6 @@ dependencies = [
  "async-trait",
  "atlas-rust",
  "beacon-common",
- "beacon-config",
  "beacon-datafusion-ext",
  "beacon-nd-array",
  "chrono",
@@ -1392,7 +1353,6 @@ dependencies = [
  "arrow 58.3.0",
  "async-trait",
  "beacon-common",
- "beacon-config",
  "beacon-datafusion-ext",
  "beacon-nd-array",
  "bytemuck",
@@ -1582,22 +1542,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-config"
-version = "1.7.3"
-dependencies = [
- "base64",
- "beacon-arrow-atlas",
- "beacon-arrow-bbf",
- "beacon-arrow-netcdf",
- "beacon-common",
- "envconfig",
- "lazy_static",
- "object_store 0.13.2",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "beacon-core"
 version = "1.8.0"
 dependencies = [
@@ -1675,6 +1619,63 @@ dependencies = [
  "tracing",
  "typetag",
  "url",
+]
+
+[[package]]
+name = "beacon-datalake"
+version = "1.8.0"
+dependencies = [
+ "anyhow",
+ "arrow 58.3.0",
+ "arrow-flight",
+ "arrow-ipc 58.3.0",
+ "axum",
+ "axum-streams",
+ "base64",
+ "beacon-core",
+ "beacon-datafusion-ext",
+ "beacon-datalake-config",
+ "beacon-mcp",
+ "bytes",
+ "datafusion",
+ "futures",
+ "object_store 0.13.2",
+ "pprof",
+ "prost",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-appender",
+ "tracing-panic",
+ "tracing-subscriber",
+ "utoipa",
+ "utoipa-axum",
+ "utoipa-scalar",
+ "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "beacon-datalake-config"
+version = "1.7.3"
+dependencies = [
+ "base64",
+ "beacon-arrow-atlas",
+ "beacon-arrow-bbf",
+ "beacon-arrow-netcdf",
+ "beacon-common",
+ "envconfig",
+ "object_store 0.13.2",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

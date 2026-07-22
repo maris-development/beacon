@@ -77,7 +77,7 @@ pub(super) fn functions_table(session: SessionCell) -> SystemTable {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        function_docs_batch(docs)
+        Box::pin(async move { function_docs_batch(docs) })
     });
 
     SystemTable::new(function_doc_schema(), snapshot)
@@ -86,6 +86,9 @@ pub(super) fn functions_table(session: SessionCell) -> SystemTable {
 /// `beacon.system.table_functions` — the table-valued functions, from the docs
 /// captured when they were registered at startup.
 pub(super) fn table_functions_table(docs: Vec<FunctionDoc>) -> SystemTable {
-    let snapshot: Snapshot = Arc::new(move || function_docs_batch(docs.clone()));
+    let snapshot: Snapshot = Arc::new(move || {
+        let docs = docs.clone();
+        Box::pin(async move { function_docs_batch(docs) })
+    });
     SystemTable::new(function_doc_schema(), snapshot)
 }

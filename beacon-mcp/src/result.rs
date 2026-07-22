@@ -57,6 +57,22 @@ pub async fn run_sql_to_json(
     }
 }
 
+/// Run a query and return its rows as JSON objects.
+///
+/// The typed counterpart of [`run_sql_to_json`]: that one produces a string for
+/// the model, this one produces values the catalog maps into typed views. There
+/// is no row cap — the callers query `information_schema` and `SHOW EXTENSIONS`,
+/// which are bounded by the size of the catalog.
+pub(crate) async fn run_sql_rows(
+    runtime: &Arc<Runtime>,
+    sql: String,
+    identity: AuthIdentity,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let result = runtime.run_query(Query::sql(sql), identity).await?;
+    let batches: Vec<RecordBatch> = result.into_record_stream()?.try_collect().await?;
+    Ok(serde_json::from_str(&batches_to_json(&batches)?)?)
+}
+
 /// Serialize record batches to a JSON array of row objects.
 fn batches_to_json(batches: &[RecordBatch]) -> anyhow::Result<String> {
     if batches.iter().all(|b| b.num_rows() == 0) {

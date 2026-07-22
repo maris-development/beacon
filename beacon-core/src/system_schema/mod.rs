@@ -12,8 +12,10 @@
 //!
 //! Unlike `information_schema`, this schema is **not** exempt from grant checks
 //! (see `statement_plan::authz`), because `query_metrics` exposes the full text
-//! and plans of queries other users ran.
+//! and plans of queries other users ran. `users` and `roles` go further still:
+//! they are super-user-only unconditionally, independent of grant enforcement.
 
+mod auth;
 mod functions;
 mod query_metrics;
 mod table;
@@ -26,6 +28,7 @@ use datafusion::{
     error::DataFusionError,
 };
 
+pub use auth::AUTH_TABLES;
 pub use query_metrics::QueryMetricsMap;
 
 use crate::statement_plan::SessionCell;
@@ -49,6 +52,7 @@ impl SystemSchemaProvider {
         session: SessionCell,
         table_function_docs: Vec<FunctionDoc>,
         query_metrics: QueryMetricsMap,
+        auth: Arc<beacon_auth::AuthContext>,
     ) -> Self {
         let mut tables: HashMap<String, Arc<dyn TableProvider>> = HashMap::new();
         tables.insert(
@@ -63,6 +67,11 @@ impl SystemSchemaProvider {
             "query_metrics".to_string(),
             Arc::new(query_metrics::query_metrics_table(query_metrics)),
         );
+        tables.insert(
+            "users".to_string(),
+            Arc::new(auth::users_table(auth.clone())),
+        );
+        tables.insert("roles".to_string(), Arc::new(auth::roles_table(auth)));
         Self { tables }
     }
 }

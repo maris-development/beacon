@@ -38,9 +38,11 @@ impl ServerHandler for BeaconMcpServer {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let tools = crate::catalog::build_tools(&self.runtime)
+        // The catalog is now built with SQL, so listing tools runs as the caller
+        // rather than with implicit full access.
+        let tools = crate::catalog::build_tools(&self.runtime, identity_from_context(&context))
             .await
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         Ok(ListToolsResult::with_all_items(tools))

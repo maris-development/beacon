@@ -513,18 +513,27 @@ pub(crate) mod test_support {
     use object_store::{ObjectMeta, path::Path as OsPath};
     use std::path::PathBuf;
 
-    /// Fixture directory under [`beacon_config::DATASETS_DIR_PATH`].
+    /// Fixture directory under [`datasets_root`].
     pub const FIXTURE_DIR: &str = "beacon-arrow-atlas-tests/two_datasets.atlas";
 
-    /// Ensure the `two_datasets.atlas` fixture exists under the global
-    /// datasets directory. Idempotent and race-free across concurrent
-    /// `#[tokio::test]` invocations.
+    /// The local root fixtures are built under.
+    ///
+    /// A crate-local directory in the OS temp dir: these tests need *a* datasets
+    /// root, not the application's — reading that from `beacon-config` would make
+    /// a file format depend on the data lake's configuration.
+    fn datasets_root() -> PathBuf {
+        std::env::temp_dir().join("beacon-arrow-atlas-datasets")
+    }
+
+    /// Ensure the `two_datasets.atlas` fixture exists under the test datasets
+    /// root. Idempotent and race-free across concurrent `#[tokio::test]`
+    /// invocations.
     pub async fn ensure_fixture() -> std::path::PathBuf {
         static FIXTURE: tokio::sync::OnceCell<std::path::PathBuf> =
             tokio::sync::OnceCell::const_new();
         FIXTURE
             .get_or_init(|| async {
-                let dst = beacon_config::DATASETS_DIR_PATH.join(FIXTURE_DIR);
+                let dst = datasets_root().join(FIXTURE_DIR);
                 let marker = dst.join(ATLAS_MARKER);
                 if !marker.exists() {
                     if dst.exists() {
@@ -544,7 +553,7 @@ pub(crate) mod test_support {
     /// that Atlas opens files natively rather than through `object_store`.
     pub async fn test_store() -> PathBuf {
         ensure_fixture().await;
-        beacon_config::DATASETS_DIR_PATH.to_path_buf()
+        datasets_root()
     }
 
     /// `ObjectMeta` for the fixture's `atlas.json` marker.

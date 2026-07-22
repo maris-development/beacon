@@ -69,6 +69,11 @@ pub struct RuntimeBuilder {
     /// the URL. This is the single datasets-store configuration point — the
     /// [`ListingFactory`] is built directly from it.
     pub default_store: Option<DefaultStore>,
+    /// A pre-built object store to register under [`Self::default_store`]'s URL,
+    /// instead of deriving one from its [`RootStore`]. Set when the embedder owns
+    /// the store itself (e.g. an application that also reads and writes files
+    /// through it) and needs the runtime to query the very same instance.
+    pub default_store_instance: Option<Arc<dyn ObjectStore>>,
 
     pub admin_username: Option<String>,
     pub admin_password: Option<String>,
@@ -130,6 +135,15 @@ impl RuntimeBuilder {
     /// or against the cwd when schemeless.
     pub fn with_default_store(mut self, url: ObjectStoreUrl, root: RootStore) -> Self {
         self.default_store = Some(DefaultStore::new(url, root));
+        self
+    }
+
+    /// Register `store` under the default store's URL instead of building one from
+    /// the configured [`RootStore`]. Use with [`Self::with_default_store`], which
+    /// still supplies the URL and the root that native readers resolve paths
+    /// against.
+    pub fn with_default_object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
+        self.default_store_instance = Some(store);
         self
     }
 
@@ -293,6 +307,7 @@ impl RuntimeBuilder {
             session_cell.clone(),
             table_function_docs,
             query_metrics.clone(),
+            auth_context.clone(),
         )?;
 
         init_crawler_manager(&self, &session_ctx, session_cell, file_formats).await?;
@@ -462,15 +477,20 @@ async fn init_session_ctx(
     // against), building it from the root the ListingFactory will also use. Without
     // one, the lazy object-store registry resolves schemes dynamically instead.
     if let Some(default) = &builder.default_store {
-        let store: Arc<dyn ObjectStore> = match &default.root {
-            RootStore::FileSystem(path) => {
-                Arc::new(object_store::local::LocalFileSystem::new_with_prefix(path)?)
-            }
-            RootStore::HttpsStore(base) => Arc::new(
-                object_store::http::HttpBuilder::new()
-                    .with_url(base.clone())
-                    .build()?,
-            ),
+        let store: Arc<dyn ObjectStore> = match &builder.default_store_instance {
+            // The embedder owns the store; register that instance so its writes are
+            // immediately visible to queries.
+            Some(store) => store.clone(),
+            None => match &default.root {
+                RootStore::FileSystem(path) => {
+                    Arc::new(object_store::local::LocalFileSystem::new_with_prefix(path)?)
+                }
+                RootStore::HttpsStore(base) => Arc::new(
+                    object_store::http::HttpBuilder::new()
+                        .with_url(base.clone())
+                        .build()?,
+                ),
+            },
         };
         session_ctx.register_object_store(default.url.as_ref(), store);
     }
@@ -515,11 +535,13 @@ fn register_system_schema(
     session_cell: SessionCell,
     table_function_docs: Vec<beacon_functions::function_doc::FunctionDoc>,
     query_metrics: QueryMetricsMap,
+    auth: Arc<AuthContext>,
 ) -> anyhow::Result<()> {
     let provider = Arc::new(SystemSchemaProvider::new(
         session_cell,
         table_function_docs,
         query_metrics,
+        auth,
     ));
 
     session_ctx

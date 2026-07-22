@@ -7,30 +7,138 @@
 
 use std::sync::Arc;
 
-use beacon_core::extensions::{McpExtension, PresetExtension, PresetFilter, PresetOp};
 use beacon_core::api::{SchemaFieldView, SchemaView};
+use beacon_core::extensions::{
+    McpExtension, PresetExtension, PresetFilter, PresetOp, TableExtensions,
+};
 use beacon_core::runtime::Runtime;
 use beacon_core::AuthIdentity;
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
-use crate::result::{run_sql_to_json, MAX_ROWS};
+use crate::result::{run_sql_rows, run_sql_to_json, MAX_ROWS};
+
+/// Quote a SQL string literal, escaping any embedded single quotes.
+fn quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// The tables in beacon's own schema, sorted.
+///
+/// Replaces `Runtime::list_tables`. Unlike that method this runs as `identity`,
+/// so the listing is subject to the same authorization as any other query.
+async fn list_table_names(
+    runtime: &Arc<Runtime>,
+    identity: &AuthIdentity,
+) -> anyhow::Result<Vec<String>> {
+    let rows = run_sql_rows(
+        runtime,
+        "SELECT table_name FROM information_schema.tables \
+         WHERE table_catalog = 'beacon' AND table_schema = 'public' \
+         ORDER BY table_name"
+            .to_string(),
+        identity.clone(),
+    )
+    .await?;
+
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get("table_name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect())
+}
+
+/// A table's extensions, or the empty set when it has none (or is unreadable).
+///
+/// Replaces `Runtime::get_table_extensions`. `SHOW EXTENSIONS` returns one row
+/// holding the same JSON document the typed accessor used to deserialize, so the
+/// mapping back to [`TableExtensions`] is exact.
+async fn table_extensions(
+    runtime: &Arc<Runtime>,
+    table: &str,
+    identity: &AuthIdentity,
+) -> TableExtensions {
+    let sql = format!("SHOW EXTENSIONS FOR {}", quote_ident(table));
+    let Ok(rows) = run_sql_rows(runtime, sql, identity.clone()).await else {
+        return TableExtensions::default();
+    };
+    rows.first()
+        .and_then(|row| row.as_object()?.values().next())
+        .and_then(Value::as_str)
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default()
+}
+
+/// A table's columns as a [`SchemaView`], or `None` when the table is unknown.
+///
+/// Replaces `Runtime::list_table_schema_view`. `information_schema` carries no
+/// Arrow field metadata, so the `metadata` maps are always empty here — the MCP
+/// catalog only reads name/type/nullability.
+async fn table_schema_view(
+    runtime: &Arc<Runtime>,
+    table: &str,
+    identity: &AuthIdentity,
+) -> Option<SchemaView> {
+    let sql = format!(
+        "SELECT column_name, data_type, is_nullable FROM information_schema.columns \
+         WHERE table_catalog = 'beacon' AND table_schema = 'public' AND table_name = {} \
+         ORDER BY ordinal_position",
+        quote_literal(table)
+    );
+    let rows = run_sql_rows(runtime, sql, identity.clone()).await.ok()?;
+    if rows.is_empty() {
+        return None;
+    }
+
+    let fields = rows
+        .iter()
+        .filter_map(|row| {
+            Some(SchemaFieldView {
+                name: row.get("column_name").and_then(Value::as_str)?.to_string(),
+                data_type: row
+                    .get("data_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                nullable: row
+                    .get("is_nullable")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| n.eq_ignore_ascii_case("YES")),
+                metadata: Default::default(),
+            })
+        })
+        .collect();
+
+    Some(SchemaView {
+        fields,
+        metadata: Default::default(),
+    })
+}
 
 /// Build the full tool list: generic tools + per-table tools from extensions.
-pub async fn build_tools(runtime: &Arc<Runtime>) -> anyhow::Result<Vec<Tool>> {
+pub async fn build_tools(
+    runtime: &Arc<Runtime>,
+    identity: AuthIdentity,
+) -> anyhow::Result<Vec<Tool>> {
     let mut tools = vec![
         list_tables_tool(),
         describe_table_tool(),
         run_sql_tool(),
         export_query_tool(),
     ];
-    for table in runtime.list_tables() {
-        let ext = runtime
-            .get_table_extensions(table.clone())
-            .await
-            .unwrap_or_default();
+    for table in list_table_names(runtime, &identity).await? {
+        let ext = table_extensions(runtime, &table, &identity).await;
         if ext.mcp.as_ref().is_some_and(|mcp| mcp.enabled) {
-            tools.push(table_tool(runtime, &table, &ext.mcp.unwrap(), ext.preset.as_ref()).await);
+            tools.push(
+                table_tool(
+                    runtime,
+                    &table,
+                    &ext.mcp.unwrap(),
+                    ext.preset.as_ref(),
+                    &identity,
+                )
+                .await,
+            );
         }
     }
     Ok(tools)
@@ -44,8 +152,8 @@ pub async fn dispatch(
     identity: AuthIdentity,
 ) -> anyhow::Result<String> {
     match name {
-        "list_tables" => list_tables_json(runtime).await,
-        "describe_table" => describe_table_json(runtime, &args).await,
+        "list_tables" => list_tables_json(runtime, &identity).await,
+        "describe_table" => describe_table_json(runtime, &args, &identity).await,
         "run_sql" => {
             let sql = args
                 .get("sql")
@@ -194,13 +302,13 @@ fn export_query_recipe(args: &Map<String, Value>) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(&recipe)?)
 }
 
-async fn list_tables_json(runtime: &Arc<Runtime>) -> anyhow::Result<String> {
+async fn list_tables_json(
+    runtime: &Arc<Runtime>,
+    identity: &AuthIdentity,
+) -> anyhow::Result<String> {
     let mut out = Vec::new();
-    for table in runtime.list_tables() {
-        let ext = runtime
-            .get_table_extensions(table.clone())
-            .await
-            .unwrap_or_default();
+    for table in list_table_names(runtime, identity).await? {
+        let ext = table_extensions(runtime, &table, identity).await;
         out.push(json!({
             "name": table,
             "mcp_enabled": ext.mcp.as_ref().map(|m| m.enabled).unwrap_or(false),
@@ -213,19 +321,16 @@ async fn list_tables_json(runtime: &Arc<Runtime>) -> anyhow::Result<String> {
 async fn describe_table_json(
     runtime: &Arc<Runtime>,
     args: &Map<String, Value>,
+    identity: &AuthIdentity,
 ) -> anyhow::Result<String> {
     let table = args
         .get("table_name")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing required 'table_name' argument"))?;
-    let schema = runtime
-        .list_table_schema_view(table.to_string())
+    let schema = table_schema_view(runtime, table, identity)
         .await
         .ok_or_else(|| anyhow::anyhow!("table '{table}' not found"))?;
-    let ext = runtime
-        .get_table_extensions(table.to_string())
-        .await
-        .unwrap_or_default();
+    let ext = table_extensions(runtime, table, identity).await;
     // Merge schema types with per-column descriptions, scoped to the exposed
     // columns (or all columns when none are curated).
     let columns: Vec<Value> = resolve_columns(&schema, ext.mcp.as_ref())
@@ -339,6 +444,7 @@ async fn table_tool(
     table: &str,
     mcp: &McpExtension,
     preset: Option<&PresetExtension>,
+    identity: &AuthIdentity,
 ) -> Tool {
     let name = mcp
         .tool_name
@@ -358,7 +464,7 @@ async fn table_tool(
     // Merge the table schema (types) with the extension's per-column descriptions,
     // scoped to `exposed_columns` when set, or all columns otherwise, so the model
     // sees name + data type + meaning for every queryable column.
-    let resolved = match runtime.list_table_schema_view(table.to_string()).await {
+    let resolved = match table_schema_view(runtime, table, identity).await {
         Some(schema) => resolve_columns(&schema, Some(mcp)),
         None => Vec::new(),
     };
@@ -425,11 +531,8 @@ async fn run_table_tool(
     args: &Map<String, Value>,
     identity: AuthIdentity,
 ) -> anyhow::Result<String> {
-    for table in runtime.list_tables() {
-        let ext = runtime
-            .get_table_extensions(table.clone())
-            .await
-            .unwrap_or_default();
+    for table in list_table_names(runtime, &identity).await? {
+        let ext = table_extensions(runtime, &table, &identity).await;
         let Some(mcp) = ext.mcp.as_ref().filter(|m| m.enabled) else {
             continue;
         };

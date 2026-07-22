@@ -1,6 +1,6 @@
 # Beacon developer convenience targets.
 #
-# The Rust server (beacon-api) and the admin web UI (clients/beacon-web) build
+# The Rust server (beacon-datalake) and the admin web UI (clients/beacon-web) build
 # independently. These targets wire them together so you can serve both from a
 # single process, or run the UI with hot-reload while iterating.
 #
@@ -12,7 +12,7 @@
 # Admin credentials the server starts with (also what you log in with).
 BEACON_ADMIN_USERNAME ?= beacon-admin
 BEACON_ADMIN_PASSWORD ?= beacon-password
-# Where the built SPA lives; beacon-api serves it at /admin when present.
+# Where the built SPA lives; beacon-datalake serves it at /admin when present.
 WEB_DIR ?= clients/beacon-web/dist
 
 export BEACON_ADMIN_USERNAME
@@ -32,16 +32,16 @@ ui: ## Build the admin web UI (SDK first, then the SPA) into $(WEB_DIR)
 	cd clients && npm run build --workspace beacon-web
 
 run: ui ## Build the SPA, then serve API + UI on http://localhost:5001/admin
-	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run -p beacon-api
+	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run -p beacon-datalake
 
 run-release: ui ## Build the SPA, then serve API + UI on http://localhost:5001/admin
-	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run --release -p beacon-api
+	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run --release -p beacon-datalake
 
 serve: ## Serve API + UI without rebuilding the SPA (expects $(WEB_DIR) to exist)
-	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run -p beacon-api
+	BEACON_WEB_UI_DIR=$(WEB_DIR) cargo run -p beacon-datalake
 
 dev-api: ## Run only the API (no bundled UI); pair with `make dev-ui`
-	cargo run -p beacon-api
+	cargo run -p beacon-datalake
 
 dev-ui: ## Run the Vite dev server with hot-reload on http://localhost:5173
 	cd clients/beacon-web && npm run dev

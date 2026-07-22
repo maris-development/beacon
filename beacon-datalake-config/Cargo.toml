@@ -1,0 +1,18 @@
+[package]
+name = "beacon-datalake-config"
+version = "1.7.3"
+edition = "2021"
+
+[dependencies]
+envconfig = {workspace = true}
+object_store = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+
+# Per-format and storage config types are owned by their crates; beacon-config
+# composes them and fills them from the environment.
+beacon-common = { path = "../beacon-common" }
+beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
+beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
+beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
