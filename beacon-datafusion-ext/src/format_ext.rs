@@ -1,10 +1,14 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::{
+    catalog::Session,
     datasource::file_format::{FileFormat, FileFormatFactory},
     object_store::ObjectMeta,
     prelude::SessionContext,
 };
+
+use crate::listing_factory::RootStore;
 
 pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     fn discover_datasets(
@@ -24,6 +28,62 @@ pub trait FileFormatFactoryExt: FileFormatFactory + Send + Sync {
     /// override when a format accepts more than one spelling.
     fn file_extensions(&self) -> Vec<String> {
         vec![self.get_ext()]
+    }
+
+    /// Whether this format reads files *natively* — opened by local path / URL
+    /// (netCDF-c, Atlas) rather than streamed through the object store. Native
+    /// readers can only open local files and http/https, so the listing layer
+    /// resolves a [`RootStore`] for them at plan time (rejecting object stores like
+    /// s3/gs/az) and hands it to [`Self::create_with_native_root`]. Object-store
+    /// formats (Parquet, CSV, …) read any scheme and return `false`.
+    fn native_read_only(&self) -> bool {
+        false
+    }
+
+    /// Create a [`FileFormat`] that translates object paths to native-reader paths
+    /// against `root` (a local dir or an https base, resolved by the listing
+    /// factory). Only meaningful when [`Self::native_read_only`] is `true`; the
+    /// default ignores `root` and delegates to [`FileFormatFactory::create`].
+    fn create_with_native_root(
+        &self,
+        state: &dyn Session,
+        format_options: &HashMap<String, String>,
+        _root: RootStore,
+    ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
+        self.create(state, format_options)
+    }
+}
+
+/// Beacon's [`FileFormatFactoryExt`] factories, keyed by the format names and file
+/// extensions they answer to. Registered (via a late-filled `OnceLock`) as a
+/// session-config extension so plan-time code — the external-table builder, table
+/// functions — can recover format capabilities (like
+/// [`FileFormatFactoryExt::native_read_only`]) that DataFusion's plain
+/// `FileFormatFactory` registry erases once the concrete `Ext` type is gone.
+#[derive(Default)]
+pub struct FileFormatRegistry {
+    by_key: HashMap<String, Arc<dyn FileFormatFactoryExt>>,
+}
+
+impl FileFormatRegistry {
+    pub fn new(formats: &[Arc<dyn FileFormatFactoryExt>]) -> Self {
+        let mut by_key = HashMap::new();
+        for format in formats {
+            by_key
+                .entry(format.file_format_name().to_ascii_lowercase())
+                .or_insert_with(|| format.clone());
+            for ext in format.file_extensions() {
+                by_key
+                    .entry(ext.to_ascii_lowercase())
+                    .or_insert_with(|| format.clone());
+            }
+        }
+        Self { by_key }
+    }
+
+    /// The factory answering to `key` (a format name or file extension), if any.
+    pub fn get(&self, key: &str) -> Option<&Arc<dyn FileFormatFactoryExt>> {
+        self.by_key.get(&key.to_ascii_lowercase())
     }
 }
 

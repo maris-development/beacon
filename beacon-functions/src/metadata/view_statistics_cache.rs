@@ -26,7 +26,9 @@ use arrow::{
     array::{BooleanArray, BooleanBuilder, RecordBatch, StringArray, UInt64Array},
     datatypes::{DataType, Field, Schema, SchemaRef},
 };
-use beacon_datafusion_ext::stats_cache::BeaconFileStatisticsCache;
+use beacon_datafusion_ext::{
+    listing_factory::ListingFactory, stats_cache::BeaconFileStatisticsCache,
+};
 use datafusion::{
     catalog::TableFunctionImpl,
     common::plan_datafusion_err,
@@ -62,9 +64,6 @@ pub struct ViewStatisticsCacheFunc {
     cache: Arc<BeaconFileStatisticsCache>,
     runtime_handle: Handle,
     session_ctx: Weak<SessionContext>,
-    /// URL the datasets store is registered under, resolved from the session's
-    /// object-store registry at call time.
-    datasets_url: ObjectStoreUrl,
 }
 
 impl ViewStatisticsCacheFunc {
@@ -72,13 +71,11 @@ impl ViewStatisticsCacheFunc {
         session_ctx: Weak<SessionContext>,
         cache: Arc<BeaconFileStatisticsCache>,
         runtime_handle: Handle,
-        datasets_url: ObjectStoreUrl,
     ) -> Self {
         Self {
             cache,
             runtime_handle,
             session_ctx,
-            datasets_url,
         }
     }
 }
@@ -129,12 +126,22 @@ impl TableFunctionImpl for ViewStatisticsCacheFunc {
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             plan_datafusion_err!("session context has been dropped")
         })?;
-        let store = session_ctx
-            .state()
+        // The cache keys are bare object paths, so resolve the store the listing
+        // factory leads to: its configured default store URL, or the local
+        // filesystem when the factory is dynamic (no default store).
+        let state = session_ctx.state();
+        let store_url = state
+            .config()
+            .get_extension::<ListingFactory>()
+            .and_then(|f| f.default_store_url().cloned())
+            .map(Ok)
+            .unwrap_or_else(|| ObjectStoreUrl::parse("file://"))
+            .map_err(|e| plan_datafusion_err!("invalid store URL: {e}"))?;
+        let store = state
             .runtime_env()
-            .object_store(self.datasets_url.clone())
+            .object_store(store_url)
             .map_err(|e| {
-                plan_datafusion_err!("failed to resolve datasets object store: {e}")
+                plan_datafusion_err!("failed to resolve statistics-cache object store: {e}")
             })?;
 
         // Validate each cached entry against the live object store by calling head().

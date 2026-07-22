@@ -31,7 +31,7 @@ use datafusion::{
     catalog::{TableFunctionImpl, TableProvider},
     common::{plan_datafusion_err, plan_err},
     datasource::MemTable,
-    execution::{cache::CacheAccessor, object_store::ObjectStoreUrl},
+    execution::cache::CacheAccessor,
     logical_expr::{Signature, Volatility},
     prelude::{Expr, SessionContext},
     scalar::ScalarValue,
@@ -64,9 +64,6 @@ pub struct ViewExternalTableStatisticsFunc {
     cache: Arc<BeaconFileStatisticsCache>,
     runtime_handle: Handle,
     session_ctx: Weak<SessionContext>,
-    /// URL the datasets store is registered under, resolved from the session's
-    /// object-store registry at call time.
-    datasets_url: ObjectStoreUrl,
 }
 
 impl ViewExternalTableStatisticsFunc {
@@ -74,13 +71,11 @@ impl ViewExternalTableStatisticsFunc {
         session_ctx: Weak<SessionContext>,
         cache: Arc<BeaconFileStatisticsCache>,
         runtime_handle: Handle,
-        datasets_url: ObjectStoreUrl,
     ) -> Self {
         Self {
             cache,
             runtime_handle,
             session_ctx,
-            datasets_url,
         }
     }
 }
@@ -136,7 +131,6 @@ impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             plan_datafusion_err!("session context has been dropped")
         })?;
-        let datasets_url = self.datasets_url.clone();
 
         let (schema, files) = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
@@ -155,20 +149,24 @@ impl TableFunctionImpl for ViewExternalTableStatisticsFunc {
 
                 let listing_table = external.inner();
                 let schema = listing_table.schema();
-                let store = session_ctx
-                    .state()
-                    .runtime_env()
-                    .object_store(datasets_url)
-                    .map_err(|e| {
-                        plan_datafusion_err!("failed to resolve datasets object store: {e}")
-                    })?;
 
-                // List every file that belongs to this listing table.
+                // List every file that belongs to this listing table. Each
+                // `table_url` (produced by the listing factory when the table was
+                // created) carries its own store URL, so the store is resolved from
+                // the URL itself — no assumption about a single datasets store.
                 // `table_paths()` carries the prefix and optional glob; `contains()`
                 // handles glob matching so we don't need DataFusion's internal
                 // `list_files_for_scan`.
                 let mut files: Vec<ObjectMeta> = Vec::new();
                 for table_url in listing_table.table_paths() {
+                    let store = state
+                        .runtime_env()
+                        .object_store(table_url.object_store())
+                        .map_err(|e| {
+                            plan_datafusion_err!(
+                                "failed to resolve object store for {table_url}: {e}"
+                            )
+                        })?;
                     let listed: Vec<ObjectMeta> = table_url
                         .list_all_files(&state, store.as_ref(), "")
                         .await?

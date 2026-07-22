@@ -2,8 +2,14 @@
 //!
 //! beacon-core is configured only through [`RuntimeBuilder`] — it reads no
 //! environment and knows nothing about `beacon-config` — so tests describe the
-//! runtime they want explicitly. Each [`TestRuntime`] gets its own temp root and an
-//! ephemeral (in-memory) tables store, so tests are isolated and persist nothing.
+//! runtime they want explicitly. Each [`TestRuntime`] gets its own temp root with a
+//! local datasets store rooted there and, by default, an ephemeral (in-memory)
+//! tables store, so tests are isolated and persist nothing.
+//!
+//! The datasets store is registered under `datasets://`, so a relative
+//! `LOCATION 'obs/'` (or `read_*('obs/…')`) in a test resolves against the temp
+//! datasets directory the test wrote its files into — no dependence on the
+//! process cwd, so tests stay isolated under parallelism.
 
 #![allow(dead_code)] // each test binary uses a different subset of these helpers.
 
@@ -14,7 +20,8 @@ use arrow::record_batch::RecordBatch;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_core::{AuthIdentity, Credential};
-use beacon_object_storage::StorageConfig;
+use beacon_datafusion_ext::listing_factory::RootStore;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use futures::TryStreamExt;
 use tempfile::TempDir;
 
@@ -23,6 +30,16 @@ pub const ADMIN_PASSWORD: &str = "test-admin-password";
 /// The built-in anonymous principal (re-exported through beacon-core).
 pub const ANONYMOUS_USERNAME: &str = beacon_core::beacon_auth::ANONYMOUS_USERNAME;
 
+/// The isolated storage layout a test runs against: a datasets directory (where
+/// the test writes the files it queries), a tmp directory (query-output files),
+/// and an optional redb tables-store path (`None` => in-memory, nothing persists).
+#[derive(Clone)]
+pub struct Storage {
+    pub datasets_dir: PathBuf,
+    pub tmp_dir: PathBuf,
+    pub db_path: Option<PathBuf>,
+}
+
 /// Rebuilds an identical runtime over the same storage. `Fn` (not `FnOnce`) so
 /// [`TestRuntime::restart`] can apply it again.
 type Rebuild = Arc<dyn Fn(RuntimeBuilder) -> RuntimeBuilder + Send + Sync>;
@@ -30,18 +47,17 @@ type Rebuild = Arc<dyn Fn(RuntimeBuilder) -> RuntimeBuilder + Send + Sync>;
 /// A runtime plus the temp root backing it. Dropping it removes the root.
 pub struct TestRuntime {
     pub runtime: Runtime,
-    pub datasets_dir: PathBuf,
     /// Owns the temp root; the directory is removed when this is dropped.
     _root: Arc<TempDir>,
     /// Present only for runtimes built by [`restartable_runtime`].
     rebuild: Option<Rebuild>,
-    storage: StorageConfig,
+    storage: Storage,
 }
 
 impl TestRuntime {
     /// The `datasets://` root, where tests write the files they then query.
     pub fn datasets_dir(&self) -> &Path {
-        &self.datasets_dir
+        &self.storage.datasets_dir
     }
 
     /// The tmp store root — where query-output files are written and read back.
@@ -54,7 +70,6 @@ impl TestRuntime {
     pub async fn restart(self) -> TestRuntime {
         let TestRuntime {
             runtime,
-            datasets_dir,
             _root,
             rebuild,
             storage,
@@ -68,7 +83,6 @@ impl TestRuntime {
         let runtime = build_runtime(&storage, rebuild.as_ref()).await;
         TestRuntime {
             runtime,
-            datasets_dir,
             _root,
             rebuild: Some(rebuild),
             storage,
@@ -95,6 +109,11 @@ impl TestRuntime {
             .unwrap_or_else(|e| panic!("SQL failed: {sql}\n{e}"))
     }
 
+    /// Runs a statement as the super-user, surfacing errors to the caller.
+    pub async fn try_sql(&self, sql: &str) -> anyhow::Result<Vec<RecordBatch>> {
+        self.try_sql_as(sql, self.admin().await).await
+    }
+
     /// Runs a statement as `identity`, surfacing errors to the caller.
     pub async fn try_sql_as(
         &self,
@@ -113,28 +132,46 @@ impl TestRuntime {
 }
 
 /// Creates the temp root and the storage layout under it.
-fn new_root(tag: &str) -> (Arc<TempDir>, StorageConfig) {
+fn new_root(tag: &str) -> (Arc<TempDir>, Storage) {
     let root = tempfile::Builder::new()
         .prefix(&format!("beacon-core-test-{tag}-"))
         .tempdir()
         .expect("create temp root");
-    let storage = storage_in(root.path());
-    for dir in [&storage.data_dir, &storage.datasets_dir, &storage.tmp_dir] {
+    let storage = Storage {
+        datasets_dir: root.path().join("datasets"),
+        tmp_dir: root.path().join("tmp"),
+        // In-memory tables store: independent per runtime, nothing persists.
+        db_path: None,
+    };
+    for dir in [&storage.datasets_dir, &storage.tmp_dir] {
         std::fs::create_dir_all(dir).expect("create storage dir");
     }
     (Arc::new(root), storage)
 }
 
-/// Builds a runtime over `storage`, with the super-user bootstrapped.
-async fn build_runtime(
-    storage: &StorageConfig,
-    customize: &dyn Fn(RuntimeBuilder) -> RuntimeBuilder,
-) -> Runtime {
-    let builder = RuntimeBuilder::new()
-        .with_storage(storage.clone())
+/// The base builder every test runtime shares: a local datasets store rooted at
+/// `storage.datasets_dir` (so relative `LOCATION`s resolve there), the tmp store,
+/// an optional persistent tables store, and a bootstrapped super-user.
+fn base_builder(storage: &Storage) -> RuntimeBuilder {
+    let mut builder = RuntimeBuilder::new()
+        .with_default_store(
+            ObjectStoreUrl::parse("datasets://").unwrap(),
+            RootStore::FileSystem(storage.datasets_dir.clone()),
+        )
         .with_tmp_dir_path(storage.tmp_dir.clone())
         .with_admin_credentials(ADMIN_USERNAME.to_string(), ADMIN_PASSWORD.to_string());
-    customize(builder)
+    if let Some(db_path) = &storage.db_path {
+        builder = builder.with_db_path(db_path.clone());
+    }
+    builder
+}
+
+/// Builds a runtime over `storage`, with the super-user bootstrapped.
+async fn build_runtime(
+    storage: &Storage,
+    customize: &dyn Fn(RuntimeBuilder) -> RuntimeBuilder,
+) -> Runtime {
+    customize(base_builder(storage))
         .build()
         .await
         .expect("runtime should build")
@@ -147,18 +184,13 @@ pub async fn runtime_with(
     customize: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
 ) -> TestRuntime {
     let (root, storage) = new_root(tag);
-    let builder = RuntimeBuilder::new()
-        .with_storage(storage.clone())
-        .with_tmp_dir_path(storage.tmp_dir.clone())
-        .with_admin_credentials(ADMIN_USERNAME.to_string(), ADMIN_PASSWORD.to_string());
-    let runtime = customize(builder)
+    let runtime = customize(base_builder(&storage))
         .build()
         .await
         .expect("runtime should build");
 
     TestRuntime {
         runtime,
-        datasets_dir: storage.datasets_dir.clone(),
         _root: root,
         rebuild: None,
         storage,
@@ -187,24 +219,9 @@ pub async fn restartable_runtime(
 
     TestRuntime {
         runtime,
-        datasets_dir: storage.datasets_dir.clone(),
         _root: root,
         rebuild: Some(rebuild),
         storage,
-    }
-}
-
-/// Storage rooted at `root`, with an ephemeral (in-memory) tables store and no
-/// filesystem watching — tests trigger crawls explicitly unless they opt in.
-pub fn storage_in(root: &Path) -> StorageConfig {
-    StorageConfig {
-        data_dir: root.to_path_buf(),
-        datasets_dir: root.join("datasets"),
-        // In-memory tables store: independent per runtime, nothing persists.
-        db_path: None,
-        tmp_dir: root.join("tmp"),
-        enable_fs_events: false,
-        ..Default::default()
     }
 }
 

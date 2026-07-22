@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use beacon_datafusion_ext::format_ext::FileFormatFactoryExt;
 use datafusion::catalog::TableFunctionImpl;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use tokio::runtime::Handle;
 
 use crate::{
@@ -40,12 +39,11 @@ pub fn register_functions(
     // is this function's job.
     let mut table_functions =
         register_metadata_functions(session_context.clone(), runtime_handle.clone());
-    // table_functions.extend(register_table_functions(
-    //     runtime_handle,
-    //     session_context.clone(),
-    //     default_store_url,
-    //     file_formats,
-    // ));
+    table_functions.extend(register_table_functions(
+        runtime_handle,
+        session_context.clone(),
+        file_formats,
+    ));
 
     for table_function in table_functions.iter() {
         session_context.register_udtf(

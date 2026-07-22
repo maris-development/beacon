@@ -41,8 +41,8 @@ struct CacheKey {
 /// opened directly with no caching (e.g. schema inference or a table that opted
 /// out of caching).
 pub async fn open_dataset(
-    listing_factory: &ListingFactory,
     cache: Option<&NetcdfReaderCache>,
+    native_path: String,
     object: ObjectMeta,
 ) -> anyhow::Result<AnyDataset> {
     let key = CacheKey {
@@ -56,23 +56,7 @@ pub async fn open_dataset(
         }
     }
 
-    // Resolve the object to a path/URL the netCDF-c reader can open directly.
-    // The `file` scheme reflects the historical local-only behavior: with a
-    // configured root store the scheme is ignored (the path is joined onto the
-    // root — a local dir or an https base), and in dynamic mode a schemeless
-    // object is a local file. A remote object store (s3/gs) without a root store
-    // is not expressible as a netCDF path and is rejected here.
-    let netcdf_path = listing_factory
-        .try_parse_obj_path_to_netcdf_path("file", &object.location)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "cannot resolve a readable NetCDF path for object {}; a remote \
-                 object store requires a configured root store",
-                object.location
-            )
-        })?;
-
-    let dataset = reader::open_dataset(netcdf_path).await?;
+    let dataset = reader::open_dataset(native_path).await?;
 
     if let Some(cache) = cache {
         cache.cache.insert(key, Arc::new(dataset.clone())).await;
@@ -91,13 +75,14 @@ pub async fn open_dataset(
 /// so the schema matches
 /// what `SELECT *` can actually return.
 pub async fn fetch_schema(
-    listing_factory: &ListingFactory,
+    cache: Option<&NetcdfReaderCache>,
+    native_path: String,
     object: ObjectMeta,
     read_dimensions: Option<Vec<String>>,
 ) -> datafusion::error::Result<arrow::datatypes::SchemaRef> {
     // Schema inference does not consult the reader cache; the cache benefits
     // repeated data scans, which flow through `NetCDFSource`.
-    let dataset = open_dataset(listing_factory, None, object)
+    let dataset = open_dataset(cache, native_path, object)
         .await
         .map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!(

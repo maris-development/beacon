@@ -10,7 +10,7 @@ use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
 use beacon_arrow_ipc::datafusion::ArrowFormatFactory;
-use beacon_arrow_netcdf::datafusion::NetcdfConfig;
+use beacon_arrow_netcdf::datafusion::{options::NetcdfOptions, NetCDFFormatFactory, NetcdfConfig};
 use beacon_arrow_parquet::datafusion::ParquetFormatFactory;
 use beacon_arrow_tiff::datafusion::TiffFormatFactory;
 use beacon_arrow_zarr::datafusion::ZarrFormatFactory;
@@ -19,7 +19,8 @@ use beacon_auth::{
 };
 use beacon_datafusion_ext::{
     consts::{DEFAULT_DB_STORE_URL_OBJECT_URL, TMP_STORE_URL_OBJECT_URL},
-    format_ext::FileFormatFactoryExt,
+    format_ext::{FileFormatFactoryExt, FileFormatRegistry},
+    listing_factory::{DefaultStore, ListingFactory, RootStore},
     listing_table_factory_ext::ListingTableFactoryExt,
     nd::NdProjectionPushdown,
     object_store_registry::LazyObjectStoreRegistry,
@@ -59,13 +60,14 @@ pub struct RuntimeBuilder {
 
     pub db_path: Option<PathBuf>,
     pub tmp_dir_path: Option<PathBuf>,
-    /// The URL relative dataset paths resolve against, and the URL the datasets
-    /// store is registered under. `None` => the `datasets://` default (see
-    /// [`ObjectStoreUrls::default`]).
-    pub default_store_url: Option<ObjectStoreUrl>,
-    /// Backs [`Self::default_store_url`]. `None` => the store described by
-    /// [`Self::storage`] (by default a local filesystem rooted at the cwd).
-    pub default_store: Option<Arc<dyn ObjectStore>>,
+    /// The default datasets store: the URL bare dataset paths resolve against,
+    /// paired with the physical [`RootStore`] it maps to (a local directory or an
+    /// https base) that native readers open files under. `None` => dynamic mode:
+    /// paths resolve by their own scheme, or against the cwd when schemeless. The
+    /// backing object store is derived from the [`RootStore`] and registered under
+    /// the URL. This is the single datasets-store configuration point — the
+    /// [`ListingFactory`] is built directly from it.
+    pub default_store: Option<DefaultStore>,
 
     pub admin_username: Option<String>,
     pub admin_password: Option<String>,
@@ -116,19 +118,17 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Resolves dataset paths against `url`, backed by `store`, in place of the
-    /// datasets store [`Self::storage`] would otherwise describe.
+    /// Configure the default datasets store: bare dataset paths resolve against
+    /// `url`, and `root` is the physical location the store maps to — a local
+    /// directory ([`RootStore::FileSystem`]) or an https base ([`RootStore::HttpsStore`]).
     ///
-    /// `store` is a plain [`ObjectStore`], registered as the datasets store as-is.
-    /// Two consequences, since a raw store cannot describe itself: it emits no change
-    /// notifications, so external tables over it become current on an explicit
-    /// `REFRESH` only; and the netCDF/Atlas readers open files natively under
-    /// `storage.datasets_dir` (a local root), so an embedder injecting a *local*
-    /// store that it wants to read natively must point `storage.datasets_dir` at that
-    /// store's root (an S3-backed store cannot be read natively at all).
-    pub fn with_default_store(mut self, url: ObjectStoreUrl, store: Arc<dyn ObjectStore>) -> Self {
-        self.default_store_url = Some(url);
-        self.default_store = Some(store);
+    /// The backing object store is derived from `root` and registered under `url`
+    /// (a local root becomes a `LocalFileSystem`, an https base an HTTP store), and
+    /// the native readers (netCDF/Atlas) open files under `root` directly. Without
+    /// this call the runtime is in dynamic mode: paths resolve by their own scheme,
+    /// or against the cwd when schemeless.
+    pub fn with_default_store(mut self, url: ObjectStoreUrl, root: RootStore) -> Self {
+        self.default_store = Some(DefaultStore::new(url, root));
         self
     }
 
@@ -253,6 +253,14 @@ impl RuntimeBuilder {
         let session_ctx = init_session_ctx(&self, auth_context.clone(), session_cell)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
+
+        // Install the persistent schema provider and load the tables already in the
+        // tables store into the catalog. This must run before `ensure_tables` below:
+        // on a restart the auth `__beacon_*` tables already exist in the store, and
+        // only a hydrated catalog lets their `CREATE TABLE IF NOT EXISTS` see them —
+        // otherwise the managed-table create path re-creates them and Lance rejects
+        // the duplicate dataset.
+        register_schema_provider(&self, &session_ctx).await?;
 
         // The session and its tables now exist and the session cell is filled, so the auth store can
         // reach its tables. Ensure they exist, hydrate the in-memory user/role copies from whatever
@@ -429,21 +437,21 @@ async fn init_session_ctx(
 
     // Register db the object store for storing tables and managed datasets. This is the store the `db://` scheme resolves against.
     session_ctx.register_object_store(DEFAULT_DB_STORE_URL_OBJECT_URL.as_ref(), db_store.clone());
-    // Register optionally a default store for resolving dataset paths. This is the store the `datasets://` scheme resolves against.
-    match (&builder.default_store_url, &builder.default_store) {
-        (Some(url), Some(store)) => {
-            session_ctx.register_object_store(url.as_ref(), store.clone());
-        }
-        (None, None) => {
-            // No default store is provided so the lazy object store registry will be used to resolve schemes dynamically.
-        }
-        _ => {
-            return Err(anyhow::anyhow!(
-                "Both default_store_url and default_store must be provided together. Got default_store_url: {:?}, default_store: {:?}",
-                builder.default_store_url,
-                builder.default_store,
-            ));
-        }
+    // Register the configured default store (the store bare dataset paths resolve
+    // against), building it from the root the ListingFactory will also use. Without
+    // one, the lazy object-store registry resolves schemes dynamically instead.
+    if let Some(default) = &builder.default_store {
+        let store: Arc<dyn ObjectStore> = match &default.root {
+            RootStore::FileSystem(path) => {
+                Arc::new(object_store::local::LocalFileSystem::new_with_prefix(path)?)
+            }
+            RootStore::HttpsStore(base) => Arc::new(
+                object_store::http::HttpBuilder::new()
+                    .with_url(base.clone())
+                    .build()?,
+            ),
+        };
+        session_ctx.register_object_store(default.url.as_ref(), store);
     }
     // Register the tmp store for storing temporary query outputs. This is the store the `tmp://` scheme resolves against.
     let tmp_store = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(
@@ -483,6 +491,16 @@ fn register_file_formats(
     builder: &RuntimeBuilder,
     session_ctx: &Arc<SessionContext>,
 ) -> anyhow::Result<Vec<Arc<dyn FileFormatFactoryExt>>> {
+    // The NetCDF factory resolves object paths to native reader paths through the
+    // `ListingFactory`, so it must already be registered (it is, as a session config
+    // extension built in `build_session_config`). Read it before taking the write lock.
+    let listing_factory = session_ctx
+        .state()
+        .config()
+        .get_extension::<ListingFactory>()
+        .ok_or_else(|| anyhow::anyhow!("ListingFactory must be registered before file formats"))?;
+    let netcdf_output_dir = builder.tmp_dir_path.clone().unwrap_or_else(temp_dir);
+
     let state_ref = session_ctx.state_ref();
     let mut state = state_ref.write();
 
@@ -494,6 +512,12 @@ fn register_file_formats(
         Arc::new(ZarrFormatFactory),
         Arc::new(BBFFormatFactory::new(Default::default())),
         Arc::new(GeoParquetFormatFactory::default()),
+        Arc::new(NetCDFFormatFactory::new(
+            listing_factory,
+            netcdf_output_dir,
+            NetcdfOptions::default(),
+            builder.netcdf.clone(),
+        )),
     ];
     for format in &formats {
         state.register_file_format(format.clone(), true)?;
@@ -569,13 +593,12 @@ fn build_session_config(
                 .clone()
                 .unwrap_or_else(|| Arc::new(DefaultArrowTypeWidening)),
         )))
-        // The URLs plan-time code resolves against (datasets / tables / tmp), each
-        // the same URL its store above is registered under.
-        // .with_extension(Arc::new(urls.clone()))
-        // The store a `CREATE EXTERNAL TABLE` LOCATION is resolved against. Built
-        // from the datasets URL, not the local filesystem: a bare `LOCATION 'obs/'`
-        // means "in the datasets store", and resolving it against `file://` silently
-        // yields an empty table instead of an error.
+        // Resolves user-supplied dataset paths (a `LOCATION`, a `read_*` argument)
+        // to object-store URLs and to native reader paths. Configured against the
+        // default datasets store when one is set, otherwise dynamic (schemed paths
+        // by their scheme, bare paths against the cwd — DuckDB style).
+        .with_extension(Arc::new(build_listing_factory(builder)))
+        // The store a `CREATE EXTERNAL TABLE` LOCATION is resolved against.
         .with_extension(Arc::new(ListingTableFactoryExt))
         // Recovered by the JSON query compiler (default table, projection pushdown).
         .with_extension(Arc::new(builder.sql.clone()))
@@ -599,6 +622,17 @@ fn build_session_config(
     config.options_mut().sql_parser.map_string_types_to_utf8view = false;
 
     Ok(config)
+}
+
+/// Build the [`ListingFactory`] that resolves dataset paths for this runtime,
+/// directly from the builder's [`RuntimeBuilder::default_store`]:
+///
+/// - `Some(default)` → a configured factory that prepends the store URL to bare
+///   paths and resolves native reads against the store's [`RootStore`].
+/// - `None` → a dynamic factory: schemed paths keep their scheme, bare paths
+///   resolve against the cwd (DuckDB style). This is what a bare builder gets.
+fn build_listing_factory(builder: &RuntimeBuilder) -> ListingFactory {
+    ListingFactory::new(builder.default_store.clone())
 }
 
 /// Default query memory pool size: 80% of usable RAM.

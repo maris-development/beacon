@@ -80,8 +80,8 @@ async fn bare_builder_reads_from_the_cwd_and_writes_nothing_to_it() {
 
     let _guard = set_cwd(&cwd);
 
-    // Neither `with_storage` nor `with_default_store`: the datasets store is whatever
-    // `StorageConfig::default()` describes, which is a local filesystem at the cwd.
+    // No `with_default_store`: the runtime is in dynamic mode, so a relative path
+    // resolves against the process's current working directory (DuckDB-style).
     let runtime = RuntimeBuilder::new()
         .build()
         .await

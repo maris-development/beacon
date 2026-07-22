@@ -13,6 +13,9 @@ use datafusion::{
 
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
+use crate::datafusion::object_meta_resolver::create_object_resolver;
+use crate::datafusion::NetcdfFormat;
+
 /// Format identity the NetCDF factory is registered under (its `get_ext`).
 const NETCDF_FORMAT: &str = "nc";
 
@@ -102,11 +105,41 @@ impl TableFunctionImpl for ReadNetCDFFunc {
 
         tracing::debug!("read_netcdf glob paths: {:?}", glob_paths);
 
+        let mut root_store = None;
         let mut listing_urls = vec![];
         for path in &glob_paths {
             tracing::debug!("read_netcdf processing path: {}", path);
-            listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
+            let url = listing_factory.parse_listing_table_url(&state, path)?;
+            let native_read_store = listing_factory.native_read_root(&url)?;
+            // NetCDF is read natively (by path / http range-read), so reject a
+            // remote object store (s3/gs/az) here with a clear error rather than
+            // failing later inside the reader.
+            listing_urls.push(url);
+            match &mut root_store {
+                Some(store) => {
+                    // Compare if store is the same as the first one, if not, return an error
+                    if store != &native_read_store {
+                        return plan_err!(
+                            "read_netcdf: all glob paths must resolve to the same root store (local or http/https)"
+                        );
+                    }
+                }
+                None => {
+                    root_store = Some(native_read_store);
+                }
+            };
         }
+
+        if listing_urls.is_empty() {
+            return plan_err!("read_netcdf: no valid glob paths provided");
+        }
+
+        let object_resolver = match root_store {
+            Some(store) => create_object_resolver(&store),
+            None => {
+                return plan_err!("read_netcdf: no root store could be determined from the provided glob paths. NetCDF files only work for local or http/https paths.");
+            }
+        };
 
         tracing::debug!("read_netcdf listing urls: {:?}", listing_urls);
 
@@ -127,10 +160,26 @@ impl TableFunctionImpl for ReadNetCDFFunc {
                 )
             })?;
         let file_format = factory.create(&state, &format_options)?;
+        let netcdf_file_format = file_format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "read_netcdf: the file format registered under 'nc' is not a NetcdfFormat"
+                        .to_string(),
+                )
+            })?
+            .clone()
+            .with_object_path_resolver(object_resolver);
 
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async {
-                SuperListingTable::new(&session_ctx.state(), file_format, listing_urls).await
+                SuperListingTable::new(
+                    &session_ctx.state(),
+                    Arc::new(netcdf_file_format),
+                    listing_urls,
+                )
+                .await
             })
         })?;
 

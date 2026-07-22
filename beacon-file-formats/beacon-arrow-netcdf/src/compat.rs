@@ -4,7 +4,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use beacon_nd_array::{datatypes::NdArrayType, NdArray, NdArrayD};
 use netcdf::AttributeValue;
-use num_traits::AsPrimitive;
 
 use crate::{
     backend::{AttributeBackend, VariableBackend},
@@ -255,8 +254,8 @@ pub fn variable_to_nd_array(
     // factor defaults to the identity (scale 1.0, offset 0.0).
     let scale = attributes.get("scale_factor").and_then(attribute_as_f64);
     let offset = attributes.get("add_offset").and_then(attribute_as_f64);
-    let scale_offset =
-        (scale.is_some() || offset.is_some()).then(|| (scale.unwrap_or(1.0), offset.unwrap_or(0.0)));
+    let scale_offset = (scale.is_some() || offset.is_some())
+        .then(|| (scale.unwrap_or(1.0), offset.unwrap_or(0.0)));
 
     match var_type {
         netcdf::types::NcVariableType::String => {

@@ -29,6 +29,13 @@ pub fn parse_listing_table_url(
     glob_path: &str,
     registry: &dyn ObjectStoreRegistry,
 ) -> datafusion::error::Result<ListingTableUrl> {
+    // On Windows, `std::fs::canonicalize` yields an extended-length path such as
+    // `\\?\C:\data`. The `?` in that verbatim prefix reads as a glob wildcard to
+    // `split_path_and_glob`, and object stores want the plain path anyway, so
+    // strip it up front. No-op on non-Windows / non-verbatim paths.
+    let normalized = strip_windows_verbatim_prefix(glob_path);
+    let glob_path = normalized.as_ref();
+
     // Split the path into (base, optional glob) and detect a leading scheme
     // (e.g. `s3://`) on the raw input.
     let (base_path, glob_pattern) = split_path_and_glob(glob_path);
@@ -85,7 +92,19 @@ pub fn parse_listing_table_url(
                 exec_datafusion_err!("failed to build file URL for {}", abs.display())
             })?;
             ensure_store_registered(registry, &file_url)?;
-            file_url.to_string()
+            let mut url = file_url.to_string();
+            // Preserve directory semantics. `ListingTableUrl` treats a `file://`
+            // URL without a trailing slash as a single file and *opens* it; a
+            // directory `LOCATION 'obs/'` must stay a collection prefix so it is
+            // listed instead. `Url::from_file_path` drops the trailing separator,
+            // so restore it when the input asked for a directory (trailing
+            // separator) or the path is in fact a directory.
+            let is_dir =
+                glob_path.ends_with('/') || glob_path.ends_with('\\') || abs.is_dir();
+            if is_dir && !url.ends_with('/') {
+                url.push('/');
+            }
+            url
         }
     };
 
@@ -143,10 +162,40 @@ pub(crate) fn scheme_of(path: &str) -> Option<&str> {
     }
     let idx = path.find("://")?;
     let scheme = &path[..idx];
+    // A single ASCII letter before `://` is a Windows drive letter (`C:`), not a
+    // URL scheme — real schemes are at least two characters. This keeps
+    // `C://users/x.nc` (a local path with a doubled separator) local rather than
+    // misreading it as a `c://` object store.
+    if scheme.len() < 2 {
+        return None;
+    }
     scheme
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
         .then_some(scheme)
+}
+
+/// Strip a Windows extended-length (verbatim) path prefix — `\\?\C:\…` or the
+/// UNC form `\\?\UNC\server\share\…` — which `std::fs::canonicalize` produces on
+/// Windows. The embedded `?` otherwise looks like a glob wildcard, and object
+/// stores expect the plain path. Returns the input untouched on other platforms
+/// and for paths without the prefix.
+#[cfg(windows)]
+fn strip_windows_verbatim_prefix(path: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        // `\\?\UNC\server\share` → `\\server\share`; `\\?\C:\x` → `C:\x`.
+        if let Some(unc) = rest.strip_prefix(r"UNC\") {
+            return Cow::Owned(format!(r"\\{unc}"));
+        }
+        return Cow::Borrowed(rest);
+    }
+    Cow::Borrowed(path)
+}
+
+#[cfg(not(windows))]
+fn strip_windows_verbatim_prefix(path: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(path)
 }
 
 /// Splits a path containing an optional glob pattern into
@@ -265,8 +314,14 @@ mod tests {
         assert_eq!(scheme_of("rel/path/x.nc"), None);
         assert_eq!(scheme_of("/abs/path/x.nc"), None);
         assert_eq!(scheme_of("file[0-9].log"), None);
-        // Windows drive path has no `://`
+        // Windows drive path with a single separator has no `://`.
         assert_eq!(scheme_of("C:/data/x.nc"), None);
+        // A drive letter followed by a doubled separator (`C://…`) must NOT be
+        // read as a one-letter URL scheme — it is a local path.
+        assert_eq!(scheme_of("C://data/x.nc"), None);
+        assert_eq!(scheme_of("d://some_user/file.nc"), None);
+        // Two-letter schemes are still schemes.
+        assert_eq!(scheme_of("s3://bucket"), Some("s3"));
     }
 
     #[test]
@@ -375,6 +430,60 @@ mod tests {
         let url = parse_listing_table_url(None, "rel/dir/*.nc", &registry).unwrap();
         assert!(url.as_str().starts_with("file:///"), "url={}", url.as_str());
         assert!(url.as_str().contains("rel/dir"), "url={}", url.as_str());
+        assert_eq!(
+            url.get_glob().as_ref().map(glob::Pattern::as_str),
+            Some("*.nc")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strips_windows_verbatim_prefixes() {
+        // Disk verbatim: `\\?\C:\data` → `C:\data`.
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\C:\data\x.nc"),
+            r"C:\data\x.nc"
+        );
+        // UNC verbatim: `\\?\UNC\server\share` → `\\server\share`.
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\UNC\server\share\x.nc"),
+            r"\\server\share\x.nc"
+        );
+        // Plain paths are untouched.
+        assert_eq!(strip_windows_verbatim_prefix(r"C:\data\x.nc"), r"C:\data\x.nc");
+        assert_eq!(strip_windows_verbatim_prefix("rel/x.nc"), "rel/x.nc");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_paths_resolve_to_local_file_urls() {
+        let registry = DefaultObjectStoreRegistry::new();
+
+        // Backslash drive path with a space in a directory name.
+        let url =
+            parse_listing_table_url(None, r"D:\rws-inlaad\RWS DataV2\test.nc", &registry).unwrap();
+        assert!(url.as_str().starts_with("file:///D:/"), "url={}", url.as_str());
+        // The space is percent-encoded in the URL.
+        assert!(url.as_str().contains("RWS%20DataV2"), "url={}", url.as_str());
+        assert!(url.get_glob().is_none(), "unexpected glob: {:?}", url.get_glob());
+
+        // Forward-slash drive path with a doubled separator (`C://…`) must be
+        // treated as a local file, not a `c://` object store.
+        let url = parse_listing_table_url(None, "C://some_user/file.nc", &registry).unwrap();
+        assert!(url.as_str().starts_with("file:///C:/"), "url={}", url.as_str());
+        assert!(url.as_str().contains("some_user/file.nc"), "url={}", url.as_str());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefixed_glob_resolves_without_treating_the_prefix_as_a_glob() {
+        // A `\\?\C:\...\*.nc` path must resolve to a `file://` URL whose glob is
+        // exactly `*.nc` — the `?` in the verbatim prefix must not leak in.
+        let registry = DefaultObjectStoreRegistry::new();
+        let url =
+            parse_listing_table_url(None, r"\\?\C:\data\dir\*.nc", &registry).unwrap();
+        assert!(url.as_str().starts_with("file:///"), "url={}", url.as_str());
+        assert!(url.as_str().contains("C:/data/dir"), "url={}", url.as_str());
         assert_eq!(
             url.get_glob().as_ref().map(glob::Pattern::as_str),
             Some("*.nc")

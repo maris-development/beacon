@@ -3,13 +3,11 @@
 
 mod common;
 
-use std::sync::Arc;
-
 use beacon_core::query::Query;
 use beacon_core::settings::SqlSettings;
+use beacon_datafusion_ext::listing_factory::RootStore;
 use common::TestRuntime;
 use datafusion::execution::object_store::ObjectStoreUrl;
-use object_store::local::LocalFileSystem;
 
 /// Builds a runtime whose `sql.default_table` is `default_table`, on its own temp
 /// root with its own (in-memory) tables store. Config is passed explicitly to the
@@ -80,7 +78,7 @@ async fn two_runtimes_honor_their_own_config() {
 /// has no opinion about storage, and `datasets://` is only a default.
 ///
 /// The store is injected under a non-default scheme and pointed at a directory that
-/// is *not* `storage.datasets_dir`; the latter holds decoys at the same relative
+/// is *not* the harness's datasets dir; the latter holds decoys at the same relative
 /// paths with different row counts. Reading the injected store's rows — rather than
 /// a decoy's, and rather than nothing — is what proves the configured URL and the
 /// store registered under it agree.
@@ -105,19 +103,18 @@ async fn an_injected_store_replaces_the_datasets_store() {
         "v,name\n1,a\n2,b\n3,c\n4,d\n",
     );
 
-    let store =
-        Arc::new(LocalFileSystem::new_with_prefix(injected_dir.path()).expect("local store"));
+    let injected_root = injected_dir.path().to_path_buf();
     let rt = common::runtime_with("injected-store", move |b| {
         b.with_default_store(
             ObjectStoreUrl::parse("injected://").expect("a valid URL"),
-            store,
+            RootStore::FileSystem(injected_root),
         )
     })
     .await;
 
-    // Decoys under the storage config's datasets_dir, at the same relative paths but
-    // with different row counts. A runtime still reading the store built from
-    // StorageConfig would report 1 for both counts below.
+    // Decoys under the harness's default datasets dir, at the same relative paths but
+    // with different row counts. A runtime still reading the harness's default store
+    // (rather than the injected one) would report 1 for both counts below.
     common::write_file(&rt.datasets_dir().join("obs/a.csv"), "v,name\n9,z\n");
     common::write_file(&rt.datasets_dir().join("crawled/a.csv"), "v,name\n9,z\n");
 
@@ -134,6 +131,6 @@ async fn an_injected_store_replaces_the_datasets_store() {
     assert_eq!(
         common::scalar_i64(&rt.sql("SELECT count(*) FROM crawled").await),
         4,
-        "the crawler should scan the injected store, not the one built from StorageConfig"
+        "the crawler should scan the injected store, not the harness's default store"
     );
 }

@@ -33,6 +33,8 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
 
+use crate::datafusion::object_meta_resolver::NetCDFObjectResolver;
+
 use super::reader::{self, NetcdfReaderCache};
 
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
@@ -41,8 +43,8 @@ use super::reader::{self, NetcdfReaderCache};
 /// pipeline via a [`FileOpener`].
 #[derive(Debug, Clone)]
 pub struct NetCDFSource {
-    listing_factory: Arc<ListingFactory>,
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
+    object_path_resolver: Arc<dyn NetCDFObjectResolver>,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     read_dimensions: Option<Vec<String>>,
@@ -56,13 +58,13 @@ pub struct NetCDFSource {
 
 impl NetCDFSource {
     pub fn new(
-        listing_factory: Arc<ListingFactory>,
+        object_path_resolver: Arc<dyn NetCDFObjectResolver>,
         read_dimensions: Option<Vec<String>>,
         table_schema: TableSchema,
     ) -> Self {
         Self {
-            listing_factory,
             schema_adapter_factory: None,
+            object_path_resolver,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             read_dimensions,
@@ -100,7 +102,7 @@ impl FileSource for NetCDFSource {
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(NetCDFOpener::new(
-            self.listing_factory.clone(),
+            self.object_path_resolver.clone(),
             projected_schema,
             self.read_dimensions.clone(),
             self.batch_size,
@@ -194,7 +196,6 @@ impl FileSource for NetCDFSource {
 /// Opens a single NetCDF file and streams its contents as Arrow
 /// [`RecordBatch`]es via [`any_dataset_as_record_batch_stream`].
 struct NetCDFOpener {
-    listing_factory: Arc<ListingFactory>,
     projected_schema: SchemaRef,
     read_dimensions: Option<Vec<String>>,
     batch_size: usize,
@@ -204,12 +205,13 @@ struct NetCDFOpener {
     cache: Option<NetcdfReaderCache>,
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
+    object_path_resolver: Arc<dyn NetCDFObjectResolver>,
 }
 
 impl NetCDFOpener {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        listing_factory: Arc<ListingFactory>,
+        object_path_resolver: Arc<dyn NetCDFObjectResolver>,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
@@ -224,7 +226,6 @@ impl NetCDFOpener {
             .and_then(|pred| PruningPredicate::try_new(pred.clone(), table_schema.clone()).ok());
 
         Self {
-            listing_factory,
             projected_schema,
             read_dimensions,
             batch_size,
@@ -234,13 +235,14 @@ impl NetCDFOpener {
             cache,
             metrics,
             partition,
+            object_path_resolver,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn read_task(
+        object_path_resolver: Arc<dyn NetCDFObjectResolver>,
         object: ObjectMeta,
-        listing_factory: Arc<ListingFactory>,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
@@ -248,7 +250,13 @@ impl NetCDFOpener {
         cache: Option<NetcdfReaderCache>,
         metrics: Option<DatasetReadMetrics>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let dataset = reader::open_dataset(&listing_factory, cache.as_ref(), object.clone())
+        let native_path = object_path_resolver.resolve(&object).map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to resolve object metadata (path) to NetCDF native path: {}",
+                e
+            ))
+        })?;
+        let dataset = reader::open_dataset(cache.as_ref(), native_path, object.clone())
             .await
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -424,8 +432,8 @@ impl FileOpener for NetCDFOpener {
 
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
         let fut = Self::read_task(
+            self.object_path_resolver.clone(),
             file.object_meta,
-            self.listing_factory.clone(),
             self.projected_schema.clone(),
             self.read_dimensions.clone(),
             self.batch_size,

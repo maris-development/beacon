@@ -510,7 +510,17 @@ impl TableDefinition for ExternalTableDefinition {
                 self.file_type
             ))?;
 
-        let file_format = file_format_factory.create(&session_state, &self.options)?;
+        // Beacon-internal markers (e.g. the crawler's `__crawler__` owner tag) are
+        // stored alongside the user's format options but are not DataFusion config
+        // keys, so strip them before the format factory parses the rest — otherwise
+        // it errors with "could not find config namespace for key".
+        let format_options: std::collections::HashMap<String, String> = self
+            .options
+            .iter()
+            .filter(|(k, _)| !k.starts_with("__"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let file_format = file_format_factory.create(&session_state, &format_options)?;
 
         let (provided_schema, table_partition_cols) =
             resolve_schema_and_partition_cols(&self.schema, &self.partition_cols)?;

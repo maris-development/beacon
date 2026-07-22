@@ -7,28 +7,39 @@
 //! hence the lock, alive for the process lifetime. That is invisible with a plain
 //! filesystem tables store and fatal with a single-file redb one, so each way of
 //! reaching a table is covered here.
-mod common;
+
+use std::path::Path;
 
 use beacon_core::query::Query;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_core::AuthIdentity;
-use beacon_object_storage::StorageConfig;
+use beacon_datafusion_ext::listing_factory::RootStore;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use futures::TryStreamExt;
 
-fn storage(root: &std::path::Path) -> StorageConfig {
-    let s = StorageConfig {
-        data_dir: root.to_path_buf(),
-        datasets_dir: root.join("datasets"),
-        db_path: Some(root.join("beacon.db")),
-        tmp_dir: root.join("tmp"),
-        enable_fs_events: false,
-        ..Default::default()
-    };
-    for d in [&s.data_dir, &s.datasets_dir, &s.tmp_dir] {
-        std::fs::create_dir_all(d).unwrap();
-    }
-    s
+/// A builder over `root`: a redb tables store at `beacon.db`, a local datasets
+/// store rooted at `root/datasets` (so a relative `LOCATION 'src/'` resolves
+/// there), and a tmp dir. Called twice per test (build, drop, reopen) so both
+/// runtimes share identical storage.
+fn builder(root: &Path) -> RuntimeBuilder {
+    let datasets = root.join("datasets");
+    std::fs::create_dir_all(&datasets).unwrap();
+    std::fs::create_dir_all(root.join("tmp")).unwrap();
+    RuntimeBuilder::new()
+        .with_db_path(root.join("beacon.db"))
+        .with_default_store(
+            ObjectStoreUrl::parse("datasets://").unwrap(),
+            RootStore::FileSystem(datasets),
+        )
+        .with_tmp_dir_path(root.join("tmp"))
+}
+
+/// Writes a one-row CSV at `root/datasets/src/a.csv` for the crawler/external-table cases.
+fn seed_src_csv(root: &Path) {
+    let src = root.join("datasets/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.csv"), "v,name\n1,a\n").unwrap();
 }
 
 async fn sql(rt: &Runtime, q: &str) {
@@ -46,14 +57,9 @@ async fn sql(rt: &Runtime, q: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn bare_runtime_releases_redb_lock_on_drop() {
     let root = tempfile::tempdir().unwrap();
-    let s = storage(root.path());
-    let rt = RuntimeBuilder::new()
-        .with_storage(s.clone())
-        .build()
-        .await
-        .expect("first build");
+    let rt = builder(root.path()).build().await.expect("first build");
     drop(rt);
-    let rt2 = RuntimeBuilder::new().with_storage(s).build().await;
+    let rt2 = builder(root.path()).build().await;
     assert!(rt2.is_ok(), "reopen after drop failed: {:?}", rt2.err());
 }
 
@@ -61,30 +67,31 @@ async fn bare_runtime_releases_redb_lock_on_drop() {
 #[tokio::test(flavor = "multi_thread")]
 async fn releases_lock_after_create_table() {
     let root = tempfile::tempdir().unwrap();
-    let s = storage(root.path());
-    let rt = RuntimeBuilder::new()
-        .with_storage(s.clone())
-        .build()
-        .await
-        .unwrap();
+    let rt = builder(root.path()).build().await.unwrap();
     sql(&rt, "CREATE TABLE t (a BIGINT)").await;
     drop(rt);
-    let rt2 = RuntimeBuilder::new().with_storage(s).build().await;
-    assert!(rt2.is_ok(), "reopen after CREATE TABLE failed: {:?}", rt2.err());
+    let rt2 = builder(root.path()).build().await;
+    assert!(
+        rt2.is_ok(),
+        "reopen after CREATE TABLE failed: {:?}",
+        rt2.err()
+    );
 }
 
 /// After only DEFINING a crawler (no run).
 #[tokio::test(flavor = "multi_thread")]
 async fn releases_lock_after_create_crawler_only() {
     let root = tempfile::tempdir().unwrap();
-    let s = storage(root.path());
-    std::fs::create_dir_all(s.datasets_dir.join("src")).unwrap();
-    std::fs::write(s.datasets_dir.join("src/a.csv"), "v,name\n1,a\n").unwrap();
-    let rt = RuntimeBuilder::new().with_storage(s.clone()).build().await.unwrap();
+    seed_src_csv(root.path());
+    let rt = builder(root.path()).build().await.unwrap();
     sql(&rt, "CREATE CRAWLER c ON 'src/'").await;
     drop(rt);
-    let rt2 = RuntimeBuilder::new().with_storage(s).build().await;
-    assert!(rt2.is_ok(), "reopen after CREATE CRAWLER only failed: {:?}", rt2.err());
+    let rt2 = builder(root.path()).build().await;
+    assert!(
+        rt2.is_ok(),
+        "reopen after CREATE CRAWLER only failed: {:?}",
+        rt2.err()
+    );
 }
 
 /// Runtime with the crawler subsystem entirely disabled.
@@ -92,39 +99,34 @@ async fn releases_lock_after_create_crawler_only() {
 async fn releases_lock_with_crawler_disabled() {
     use beacon_core::crawler::CrawlerConfig;
     let root = tempfile::tempdir().unwrap();
-    let s = storage(root.path());
-    let rt = RuntimeBuilder::new()
-        .with_storage(s.clone())
-        .with_crawler(CrawlerConfig { enable: false, default_interval_secs: 900 })
+    let disabled = || CrawlerConfig {
+        enable: false,
+        default_interval_secs: 900,
+    };
+    let rt = builder(root.path())
+        .with_crawler(disabled())
         .build()
         .await
         .unwrap();
     drop(rt);
-    let rt2 = RuntimeBuilder::new()
-        .with_storage(s)
-        .with_crawler(CrawlerConfig { enable: false, default_interval_secs: 900 })
-        .build()
-        .await;
-    assert!(rt2.is_ok(), "reopen with crawler disabled failed: {:?}", rt2.err());
+    let rt2 = builder(root.path()).with_crawler(disabled()).build().await;
+    assert!(
+        rt2.is_ok(),
+        "reopen with crawler disabled failed: {:?}",
+        rt2.err()
+    );
 }
 
 /// After defining + running a crawler.
 #[tokio::test(flavor = "multi_thread")]
 async fn releases_lock_after_crawler() {
     let root = tempfile::tempdir().unwrap();
-    let s = storage(root.path());
-    std::fs::create_dir_all(s.datasets_dir.join("src")).unwrap();
-    std::fs::write(s.datasets_dir.join("src/a.csv"), "v,name\n1,a\n").unwrap();
-
-    let rt = RuntimeBuilder::new()
-        .with_storage(s.clone())
-        .build()
-        .await
-        .unwrap();
+    seed_src_csv(root.path());
+    let rt = builder(root.path()).build().await.unwrap();
     sql(&rt, "CREATE CRAWLER c ON 'src/'").await;
     sql(&rt, "RUN CRAWLER c").await;
     drop(rt);
-    let rt2 = RuntimeBuilder::new().with_storage(s).build().await;
+    let rt2 = builder(root.path()).build().await;
     assert!(rt2.is_ok(), "reopen after crawler failed: {:?}", rt2.err());
 }
 
@@ -132,29 +134,39 @@ async fn releases_lock_after_crawler() {
 #[tokio::test(flavor = "multi_thread")]
 async fn releases_lock_after_create_external_table() {
     let root = tempfile::tempdir().unwrap();
-    let s = storage(root.path());
-    std::fs::create_dir_all(s.datasets_dir.join("src")).unwrap();
-    std::fs::write(s.datasets_dir.join("src/a.csv"), "v,name\n1,a\n").unwrap();
-
-    let rt = RuntimeBuilder::new().with_storage(s.clone()).build().await.unwrap();
-    sql(&rt, "CREATE EXTERNAL TABLE ext STORED AS CSV LOCATION 'src/'").await;
+    seed_src_csv(root.path());
+    let rt = builder(root.path()).build().await.unwrap();
+    sql(
+        &rt,
+        "CREATE EXTERNAL TABLE ext STORED AS CSV LOCATION 'src/'",
+    )
+    .await;
     drop(rt);
-    let rt2 = RuntimeBuilder::new().with_storage(s).build().await;
-    assert!(rt2.is_ok(), "reopen after CREATE EXTERNAL TABLE failed: {:?}", rt2.err());
+    let rt2 = builder(root.path()).build().await;
+    assert!(
+        rt2.is_ok(),
+        "reopen after CREATE EXTERNAL TABLE failed: {:?}",
+        rt2.err()
+    );
 }
 
 /// Does merely QUERYING an external table leak it?
 #[tokio::test(flavor = "multi_thread")]
 async fn releases_lock_after_query_external_table() {
     let root = tempfile::tempdir().unwrap();
-    let s = storage(root.path());
-    std::fs::create_dir_all(s.datasets_dir.join("src")).unwrap();
-    std::fs::write(s.datasets_dir.join("src/a.csv"), "v,name\n1,a\n").unwrap();
-
-    let rt = RuntimeBuilder::new().with_storage(s.clone()).build().await.unwrap();
-    sql(&rt, "CREATE EXTERNAL TABLE ext STORED AS CSV LOCATION 'src/'").await;
+    seed_src_csv(root.path());
+    let rt = builder(root.path()).build().await.unwrap();
+    sql(
+        &rt,
+        "CREATE EXTERNAL TABLE ext STORED AS CSV LOCATION 'src/'",
+    )
+    .await;
     sql(&rt, "SELECT count(*) FROM ext").await;
     drop(rt);
-    let rt2 = RuntimeBuilder::new().with_storage(s).build().await;
-    assert!(rt2.is_ok(), "reopen after querying external table failed: {:?}", rt2.err());
+    let rt2 = builder(root.path()).build().await;
+    assert!(
+        rt2.is_ok(),
+        "reopen after querying external table failed: {:?}",
+        rt2.err()
+    );
 }

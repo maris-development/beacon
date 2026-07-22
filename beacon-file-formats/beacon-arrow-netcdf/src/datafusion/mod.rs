@@ -23,6 +23,7 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
+use crate::datafusion::object_meta_resolver::{DefaultNetCDFObjectResolver, NetCDFObjectResolver};
 use crate::datafusion::{
     options::NetcdfOptions,
     sink::{NetCDFNdSink, NetCDFSink},
@@ -31,6 +32,7 @@ use crate::datafusion::{
 
 pub const NETCDF_EXTENSION: &str = "nc";
 
+pub mod object_meta_resolver;
 pub mod options;
 pub mod reader;
 pub mod sink;
@@ -208,6 +210,7 @@ pub struct NetcdfFormat {
     enable_statistics: bool,
     /// Local directory the netcdf-c writer emits output files into.
     output_dir: PathBuf,
+    pub object_path_resolver: Arc<dyn NetCDFObjectResolver>,
 }
 
 impl NetcdfFormat {
@@ -218,6 +221,7 @@ impl NetcdfFormat {
             cache: None,
             enable_statistics: false,
             output_dir: std::env::temp_dir(),
+            object_path_resolver: Arc::new(DefaultNetCDFObjectResolver),
         }
     }
 
@@ -237,6 +241,11 @@ impl NetcdfFormat {
     /// OS temp dir).
     pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
         self.output_dir = output_dir;
+        self
+    }
+
+    pub fn with_object_path_resolver(mut self, resolver: Arc<dyn NetCDFObjectResolver>) -> Self {
+        self.object_path_resolver = resolver;
         self
     }
 }
@@ -269,9 +278,17 @@ impl FileFormat for NetcdfFormat {
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
         let mut tasks = vec![];
+        let cache = self.cache.as_ref();
         for object in objects {
+            let native_path = self.object_path_resolver.resolve(object).map_err(|e| {
+                exec_datafusion_err!(
+                    "Failed to resolve object metadata (path) to NetCDF native path: {}",
+                    e
+                )
+            })?;
             let task = reader::fetch_schema(
-                &self.listing_factory,
+                cache,
+                native_path,
                 object.clone(),
                 self.options.read_dimensions.clone(),
             );
@@ -336,7 +353,7 @@ impl FileFormat for NetcdfFormat {
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = NetCDFSource::new(
-            self.listing_factory.clone(),
+            self.object_path_resolver.clone(),
             self.options.read_dimensions.clone(),
             table_schema,
         )
@@ -418,7 +435,7 @@ impl FileFormat for NetcdfFormat {
     ) -> Arc<dyn FileSource> {
         Arc::new(
             NetCDFSource::new(
-                self.listing_factory.clone(),
+                self.object_path_resolver.clone(),
                 self.options.read_dimensions.clone(),
                 table_schema,
             )

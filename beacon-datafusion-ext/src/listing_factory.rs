@@ -9,10 +9,33 @@ use crate::format_ext::{DatasetMetadata, FileFormatFactoryExt};
 use crate::listing_url_resolver::scheme_of;
 use crate::object_store_registry::store_key_url;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootStore {
     FileSystem(PathBuf), // File System full path, e.g. /path/to/root
     HttpsStore(String), // Object Store full path, e.g. https://s3.amazonaws.com/bucket-name/path/to/root
+}
+
+impl RootStore {
+    /// Translate an object path (relative to the store this root describes) into the
+    /// path / URL a native reader (netCDF-c) opens directly.
+    ///
+    /// - [`RootStore::FileSystem`] → the object path joined onto the local root.
+    ///   (For a dynamic local store the root is the filesystem root `/`, so this
+    ///   restores the absolute path; `PathBuf::join` leaves an already-absolute
+    ///   Windows drive path unchanged.)
+    /// - [`RootStore::HttpsStore`] → the object path appended to the base URL, with
+    ///   the `#mode=bytes` suffix netCDF-c needs to range-read over HTTP.
+    pub fn to_native_path(&self, object_path: &object_store::path::Path) -> String {
+        match self {
+            RootStore::FileSystem(root) => root
+                .join(object_path.to_string())
+                .to_string_lossy()
+                .into_owned(),
+            RootStore::HttpsStore(base) => {
+                format!("{}/{}#mode=bytes", base.trim_end_matches('/'), object_path)
+            }
+        }
+    }
 }
 
 /// A configured default store: the DataFusion object-store URL a bare (schemeless)
@@ -117,10 +140,16 @@ impl ListingFactory {
             // to be expressible as a path, so those are unresolvable here.
             None => match scheme {
                 "file" => {
-                    // `object_store::path::Path` is always relative (it strips a
-                    // leading `/`), so absolutize it against the cwd.
-                    let abs = std::path::absolute(object_path.to_string()).ok()?;
-                    Some(abs.to_string_lossy().to_string())
+                    // The object path is absolute w.r.t. the `file://` store root.
+                    // Windows drive paths (`C:/data/…`) are already absolute; on
+                    // Unix `object_store` stripped the leading `/`, so restore it.
+                    // (`std::path::absolute` would wrongly rebase it on the cwd.)
+                    let p = object_path.to_string();
+                    if std::path::Path::new(&p).is_absolute() {
+                        Some(p)
+                    } else {
+                        Some(format!("/{p}"))
+                    }
                 }
                 "http" | "https" => {
                     // Preserve the scheme as given and add the byte-range suffix.
@@ -128,6 +157,38 @@ impl ListingFactory {
                 }
                 _ => None,
             },
+        }
+    }
+
+    /// The physical [`RootStore`] a native reader (netCDF-c) translates `url`'s
+    /// object paths against — a local directory or an https base. This is captured
+    /// once, at plan time, and handed to the file format so it can turn each
+    /// [`object_store::ObjectMeta`] into a readable path without re-consulting the
+    /// factory (see [`RootStore::to_native_path`]).
+    ///
+    /// - **Configured** mode: the factory's own root store (a local dir or an https
+    ///   base — both natively readable), regardless of the resolved scheme.
+    /// - **Dynamic** mode: derived from the resolved URL's scheme — `file` → the
+    ///   local filesystem root, `http`/`https` → the `scheme://authority` base.
+    ///   A remote object store (`s3`/`gs`/`az`) is **not** natively readable and is
+    ///   rejected here with a clear error, rather than failing later deep in the
+    ///   reader with a confusing "file not found".
+    pub fn native_read_root(&self, url: &ListingTableUrl) -> datafusion::error::Result<RootStore> {
+        if let Some(default) = &self.default_store {
+            return Ok(default.root.clone());
+        }
+        match url.scheme() {
+            // Local files: object paths are absolute w.r.t. the filesystem root.
+            "file" => Ok(RootStore::FileSystem(PathBuf::from("/"))),
+            // Range-reads over HTTP: the base is the store's `scheme://authority`.
+            "http" | "https" => Ok(RootStore::HttpsStore(
+                url.object_store().as_str().trim_end_matches('/').to_string(),
+            )),
+            other => Err(datafusion::error::DataFusionError::Execution(format!(
+                "cannot read this format over `{other}://`: only local files and \
+                 http/https are read natively by path. Configure a datasets store to \
+                 read remote data; object stores like s3/gs/az are not natively readable."
+            ))),
         }
     }
 
@@ -311,15 +372,20 @@ mod tests {
     }
 
     #[test]
-    fn without_a_root_relative_file_paths_are_made_absolute() {
+    fn without_a_root_file_paths_are_absolute_from_the_store_root() {
         let factory = ListingFactory::dynamic();
+        // An object path from a `file://` store is absolute w.r.t. the store root
+        // (object_store strips the leading `/`), so the leading `/` is restored —
+        // it must NOT be rebased on the process cwd.
         let path = factory
-            .try_parse_obj_path_to_netcdf_path("file", &ObjectPath::from("argo/a.nc"))
+            .try_parse_obj_path_to_netcdf_path("file", &ObjectPath::from("data/root/a.nc"))
             .unwrap();
-        // Same absolutization the implementation uses, so the comparison holds on
-        // every platform.
-        let expected = std::path::absolute("argo/a.nc").unwrap();
-        assert_eq!(path, expected.to_string_lossy());
+        assert_eq!(path, "/data/root/a.nc");
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        assert!(
+            !path.contains(&cwd),
+            "the path must be root-absolute, not cwd-relative: {path}"
+        );
     }
 
     #[test]
@@ -350,6 +416,62 @@ mod tests {
         assert_eq!(
             factory.try_parse_obj_path_to_netcdf_path("gs", &ObjectPath::from("bucket/a.nc")),
             None
+        );
+    }
+
+    // ---- native_read_root -------------------------------------------------
+
+    fn listing_url(s: &str) -> datafusion::datasource::listing::ListingTableUrl {
+        datafusion::datasource::listing::ListingTableUrl::parse(s).unwrap()
+    }
+
+    #[test]
+    fn dynamic_native_read_root_derives_from_the_resolved_scheme() {
+        let factory = ListingFactory::dynamic();
+        // A local resolved URL → the filesystem root (object paths are absolute).
+        assert_eq!(
+            factory.native_read_root(&listing_url("file:///data/a.nc")).unwrap(),
+            RootStore::FileSystem(PathBuf::from("/"))
+        );
+        // An http/https URL → the `scheme://authority` base.
+        assert_eq!(
+            factory.native_read_root(&listing_url("https://host/a.nc")).unwrap(),
+            RootStore::HttpsStore("https://host".to_string())
+        );
+        // Object stores are not natively readable.
+        for url in ["s3://bucket/a.nc", "gs://bucket/a.nc"] {
+            let err = factory
+                .native_read_root(&listing_url(url))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not natively readable"), "url={url}, err={err}");
+        }
+    }
+
+    #[test]
+    fn configured_native_read_root_is_the_configured_root() {
+        // A configured root store (FileSystem or HttpsStore) is used regardless of
+        // the resolved URL's scheme.
+        let factory = configured(RootStore::FileSystem(PathBuf::from("/data/root")));
+        assert_eq!(
+            factory.native_read_root(&listing_url("datasets:///a.nc")).unwrap(),
+            RootStore::FileSystem(PathBuf::from("/data/root"))
+        );
+    }
+
+    #[test]
+    fn root_store_translates_object_paths_to_native_paths() {
+        // FileSystem: join onto the root.
+        assert_eq!(
+            RootStore::FileSystem(PathBuf::from("/data/root"))
+                .to_native_path(&ObjectPath::from("argo/a.nc")),
+            PathBuf::from("/data/root").join("argo/a.nc").to_string_lossy()
+        );
+        // HttpsStore: append + byte-range suffix, trimming a trailing slash.
+        assert_eq!(
+            RootStore::HttpsStore("https://example.org/bucket/".to_string())
+                .to_native_path(&ObjectPath::from("argo/a.nc")),
+            "https://example.org/bucket/argo/a.nc#mode=bytes"
         );
     }
 
