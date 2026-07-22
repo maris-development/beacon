@@ -261,7 +261,8 @@ mod tests {
             flush_timeout_ms: 10_000,
             max_rows: 200_000,
         };
-        let config = SessionConfig::new().with_extension(Arc::new(CoalesceSqlStream::new(settings)));
+        let config =
+            SessionConfig::new().with_extension(Arc::new(CoalesceSqlStream::new(settings)));
         let session_ctx = SessionContext::new_with_config(config);
 
         let output_batches = CoalesceSqlStream::from_session(&session_ctx)

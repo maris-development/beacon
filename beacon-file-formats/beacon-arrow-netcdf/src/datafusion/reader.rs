@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use beacon_datafusion_ext::listing_factory::ListingFactory;
@@ -57,7 +56,21 @@ pub async fn open_dataset(
         }
     }
 
-    let netcdf_path: PathBuf = todo!(); // beacon_object_storage::local_object_path(&datasets_root, &object.location)?;
+    // Resolve the object to a path/URL the netCDF-c reader can open directly.
+    // The `file` scheme reflects the historical local-only behavior: with a
+    // configured root store the scheme is ignored (the path is joined onto the
+    // root — a local dir or an https base), and in dynamic mode a schemeless
+    // object is a local file. A remote object store (s3/gs) without a root store
+    // is not expressible as a netCDF path and is rejected here.
+    let netcdf_path = listing_factory
+        .try_parse_obj_path_to_netcdf_path("file", &object.location)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot resolve a readable NetCDF path for object {}; a remote \
+                 object store requires a configured root store",
+                object.location
+            )
+        })?;
 
     let dataset = reader::open_dataset(netcdf_path).await?;
 

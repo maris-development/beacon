@@ -137,7 +137,7 @@ fn ensure_store_registered(
 /// and Windows drive paths (which contain no `://`).
 ///
 /// scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
-fn scheme_of(path: &str) -> Option<&str> {
+pub(crate) fn scheme_of(path: &str) -> Option<&str> {
     if !path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
         return None;
     }

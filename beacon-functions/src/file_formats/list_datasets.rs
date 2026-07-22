@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use arrow::{
@@ -13,7 +12,6 @@ use datafusion::{
     error::DataFusionError,
     prelude::{Expr, SessionContext},
 };
-use futures::StreamExt;
 
 use crate::file_formats::BeaconTableFunctionImpl;
 
@@ -37,66 +35,15 @@ pub async fn list_datasets(
             )
         })?;
 
-    let listing_url = listing_factory.parse_listing_table_url(
-        &state,
-        &search_pattern.unwrap_or_else(|| "**/*".to_string()),
-    )?;
-    let store_url = listing_url.object_store();
-    let store = state
-        .runtime_env()
-        .object_store(store_url.clone())
-        .map_err(|e| {
-            DataFusionError::Execution(format!(
-                "list_datasets: failed to get object store for {}: {}",
-                store_url, e
-            ))
-        })?;
-
-    let mut objects = Vec::new();
-    let mut entry_stream = listing_url.list_all_files(&state, &store, "").await?;
-
-    while let Some(entry) = entry_stream.next().await {
-        if let Ok(entry) = entry {
-            objects.push(entry);
-        }
-    }
-
-    let mut datasets = vec![];
-
-    for file_format in file_formats.iter() {
-        let format_datasets = file_format.discover_datasets(&objects)?;
-        datasets.extend(format_datasets);
-    }
-
-    // Enrich each dataset with size + last-modified from the object listing. A
-    // single-file dataset matches an object exactly; a directory-shaped dataset
-    // (e.g. Zarr) aggregates every object under its prefix (sum of sizes, newest
-    // mtime). Datasets with no matching object keep `None`.
-    let by_path: HashMap<&str, &object_store::ObjectMeta> =
-        objects.iter().map(|o| (o.location.as_ref(), o)).collect();
-    for ds in datasets.iter_mut() {
-        if let Some(obj) = by_path.get(ds.file_path.as_str()) {
-            ds.size = Some(obj.size);
-            ds.last_modified = Some(obj.last_modified);
-        } else {
-            let prefix = format!("{}/", ds.file_path);
-            let mut total = 0u64;
-            let mut latest = None;
-            for o in &objects {
-                if o.location.as_ref().starts_with(&prefix) {
-                    total += o.size;
-                    latest = Some(match latest {
-                        Some(l) if l >= o.last_modified => l,
-                        _ => o.last_modified,
-                    });
-                }
-            }
-            if latest.is_some() {
-                ds.size = Some(total);
-                ds.last_modified = latest;
-            }
-        }
-    }
+    // Discovery + object-metadata enrichment lives on the listing factory; this
+    // function only adds pagination on top.
+    let datasets = listing_factory
+        .list_datasets(
+            &state,
+            file_formats,
+            &search_pattern.unwrap_or_else(|| "**/*".to_string()),
+        )
+        .await?;
 
     // Keep current pagination semantics to avoid behavior regressions.
     let start = offset.unwrap_or(0);

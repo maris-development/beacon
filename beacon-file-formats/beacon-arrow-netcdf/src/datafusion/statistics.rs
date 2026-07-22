@@ -8,8 +8,6 @@
 //! and partition pruning.  Arrays for which a range cannot be determined
 //! (multi-dimensional, String, Binary) get [`ColumnStatistics::new_unknown`].
 
-use std::path::PathBuf;
-
 use beacon_datafusion_ext::listing_factory;
 use beacon_nd_array::{
     arrow::compute::value_range,
@@ -32,7 +30,17 @@ pub async fn generate_statistics(
     object: &object_store::ObjectMeta,
     table_schema: &arrow::datatypes::Schema,
 ) -> anyhow::Result<Statistics> {
-    let netcdf_path: PathBuf = todo!(); //beacon_object_storage::local_object_path(&datasets_root, &object.location)?;
+    // Resolve the object to a path/URL the netCDF-c reader can open directly
+    // (see `datafusion::reader::open_dataset` for how the scheme is interpreted).
+    let netcdf_path = listing_factory
+        .try_parse_obj_path_to_netcdf_path("file", &object.location)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot resolve a readable NetCDF path for object {}; a remote \
+                 object store requires a configured root store",
+                object.location
+            )
+        })?;
     let dataset = open_dataset(netcdf_path).await?;
 
     match dataset {
