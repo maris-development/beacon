@@ -35,7 +35,8 @@ async fn read_csv_accepts_a_tab_escape_delimiter() {
     // The value in the second column of the first row is the tab-split field.
     assert_eq!(
         column_strings(
-            &rt.sql("SELECT name FROM read_csv('t/data.tsv', '\\t') WHERE id = 1").await,
+            &rt.sql("SELECT name FROM read_csv('t/data.tsv', '\\t') WHERE id = 1")
+                .await,
             0
         ),
         vec!["a"]
@@ -78,15 +79,20 @@ async fn read_csv_schema_accepts_the_delimiter() {
 
     // The schema function forwards the delimiter to the reader.
     let names = column_strings(
-        &rt.sql("SELECT column_name FROM read_csv_schema('t/data.tsv', '\\t') ORDER BY column_name")
-            .await,
+        &rt.sql(
+            "SELECT column_name FROM read_csv_schema('t/data.tsv', '\\t') ORDER BY column_name",
+        )
+        .await,
         0,
     );
     assert_eq!(names, vec!["depth", "id", "name"]);
 
     // Without the delimiter it collapses to one column.
     assert_eq!(
-        scalar_i64(&rt.sql("SELECT count(*) FROM read_csv_schema('t/data.tsv')").await),
+        scalar_i64(
+            &rt.sql("SELECT count(*) FROM read_csv_schema('t/data.tsv')")
+                .await
+        ),
         1,
     );
 }
@@ -95,10 +101,8 @@ async fn read_csv_schema_accepts_the_delimiter() {
 async fn external_csv_table_honours_the_delimiter_option() {
     let rt = tsv_runtime("csv-delim-external").await;
 
-    rt.sql(
-        "CREATE EXTERNAL TABLE tsv STORED AS CSV LOCATION 't/' OPTIONS ('delimiter' '\\t')",
-    )
-    .await;
+    rt.sql("CREATE EXTERNAL TABLE tsv STORED AS CSV LOCATION 't/' OPTIONS ('delimiter' '\\t')")
+        .await;
 
     // The tab delimiter took effect: three columns, two rows.
     assert_eq!(scalar_i64(&rt.sql("SELECT count(*) FROM tsv").await), 2);
@@ -122,7 +126,8 @@ async fn external_csv_table_honours_the_delimiter_option() {
 async fn external_csv_table_without_delimiter_defaults_to_comma() {
     let rt = tsv_runtime("csv-delim-external-default").await;
 
-    rt.sql("CREATE EXTERNAL TABLE tsv STORED AS CSV LOCATION 't/'").await;
+    rt.sql("CREATE EXTERNAL TABLE tsv STORED AS CSV LOCATION 't/'")
+        .await;
     let batches = rt.sql("SELECT * FROM tsv LIMIT 1").await;
     assert_eq!(
         batches[0].schema().fields().len(),
