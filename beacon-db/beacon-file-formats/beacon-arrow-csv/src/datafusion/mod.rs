@@ -31,17 +31,38 @@ impl GetExt for CsvFormatFactory {
     }
 }
 
+/// The default number of records the CSV reader samples to infer a schema.
+const DEFAULT_INFER_RECORDS: usize = 1000;
+
 impl FileFormatFactory for CsvFormatFactory {
     fn create(
         &self,
         _state: &dyn Session,
-        _format_options: &std::collections::HashMap<String, String>,
+        format_options: &std::collections::HashMap<String, String>,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        Ok(Arc::new(CsvFormat::new(b',', 1000)))
+        // `CREATE EXTERNAL TABLE … STORED AS CSV OPTIONS ('delimiter' '\t', …)`.
+        // DataFusion prefixes bare OPTIONS keys with `format.`, so look up both
+        // spellings, and resolve escapes (`\t`) the same way `read_csv` does.
+        let option = |key: &str| {
+            format_options
+                .get(key)
+                .or_else(|| format_options.get(&format!("format.{key}")))
+        };
+
+        let delimiter = match option("delimiter") {
+            Some(value) => crate::parse_delimiter(value)
+                .map_err(datafusion::error::DataFusionError::Execution)?,
+            None => b',',
+        };
+        let infer_records = option("infer_records")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_INFER_RECORDS);
+
+        Ok(Arc::new(CsvFormat::new(delimiter, infer_records)))
     }
 
     fn default(&self) -> Arc<dyn FileFormat> {
-        Arc::new(CsvFormat::new(b',', 1000))
+        Arc::new(CsvFormat::new(b',', DEFAULT_INFER_RECORDS))
     }
 
     fn as_any(&self) -> &dyn Any {

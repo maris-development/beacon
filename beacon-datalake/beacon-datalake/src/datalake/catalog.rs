@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use beacon_core::api::{DatasetInfo, SchemaFieldView, SchemaView};
+use beacon_core::api::{DatasetInfo, SchemaView};
 use beacon_core::extensions::TableExtensions;
 use beacon_core::AuthIdentity;
 use serde_json::Value;
@@ -35,43 +35,24 @@ pub(crate) async fn list_table_names(
         .collect())
 }
 
-/// A table's columns as a [`SchemaView`], or `None` when it is not registered.
+/// A table's schema as a [`SchemaView`], or `None` when it is not registered.
 ///
-/// `information_schema` carries no Arrow field metadata, so the `metadata` maps
-/// are empty — the name, type and nullability are what the API contract exposes.
+/// Uses a zero-row scan (`SELECT * FROM t LIMIT 0`) rather than
+/// `information_schema.columns`: tables in the persistent schema provider load
+/// their schema lazily, so `information_schema.columns` can be empty for a table
+/// that is nonetheless listed in `information_schema.tables`. The scan is the
+/// same reliable source [`table_arrow_schema`] (Flight SQL) and
+/// [`dataset_schema_view`] use.
 pub(crate) async fn table_schema_view(
     lake: &Arc<DataLake>,
     table: &str,
     identity: AuthIdentity,
 ) -> anyhow::Result<Option<SchemaView>> {
-    let rows = query_rows(
-        lake,
-        format!(
-            "SELECT column_name, data_type, is_nullable FROM information_schema.columns \
-             WHERE table_catalog = 'beacon' AND table_schema = 'public' AND table_name = {} \
-             ORDER BY ordinal_position",
-            quote_literal(table)
-        ),
-        identity,
-    )
-    .await?;
-
-    if rows.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(SchemaView {
-        fields: rows.iter().map(schema_field).collect(),
-        metadata: Default::default(),
-    }))
-}
-
-fn schema_field(row: &Value) -> SchemaFieldView {
-    SchemaFieldView {
-        name: str_field(row, "column_name").to_string(),
-        data_type: str_field(row, "data_type").to_string(),
-        nullable: str_field(row, "is_nullable").eq_ignore_ascii_case("YES"),
-        metadata: Default::default(),
+    match table_arrow_schema(lake, &quote_ident(table), identity).await {
+        Ok(schema) => Ok(Some(SchemaView::from(schema.as_ref()))),
+        // A table that does not resolve surfaces as a planning error; the API
+        // contract for that is `None` (→ 404), not a 500.
+        Err(_) => Ok(None),
     }
 }
 
@@ -185,19 +166,45 @@ pub(crate) async fn list_datasets(
         .collect())
 }
 
-/// The Arrow schema produced when reading a dataset file, via `read_schema`.
+/// The `read_*` table function that reads a dataset file with the given
+/// extension, or `None` when the extension is not one beacon reads by path.
+fn read_function_for_extension(ext: &str) -> Option<&'static str> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "parquet" => "read_parquet",
+        "csv" => "read_csv",
+        "nc" | "cdf" | "netcdf" => "read_netcdf",
+        "arrow" | "arrows" | "ipc" => "read_arrow",
+        "zarr" => "read_zarr",
+        "tif" | "tiff" => "read_tiff",
+        "bbf" => "read_bbf",
+        _ => return None,
+    })
+}
+
+/// The Arrow schema produced when reading a dataset file.
+///
+/// A zero-row scan (`SELECT * FROM read_<fmt>(file) LIMIT 0`) yields the real
+/// Arrow schema, the same trick [`table_arrow_schema`] uses for tables. The
+/// reader is chosen from the file extension (there is no format-agnostic
+/// `read_*` function).
 pub(crate) async fn dataset_schema_view(
     lake: &Arc<DataLake>,
     file: &str,
     identity: AuthIdentity,
 ) -> anyhow::Result<SchemaView> {
-    // A zero-row scan of the file yields its real Arrow schema, the same trick
-    // the Flight SQL metadata path uses for tables.
+    let ext = std::path::Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let read_fn = read_function_for_extension(ext).ok_or_else(|| {
+        anyhow::anyhow!("cannot infer a reader for '{file}': unsupported extension '{ext}'")
+    })?;
+
     let result = lake
         .runtime()
         .run_query(
             beacon_core::query::Query::sql(format!(
-                "SELECT * FROM read_schema({}) LIMIT 0",
+                "SELECT * FROM {read_fn}({}) LIMIT 0",
                 quote_literal(file)
             )),
             identity,

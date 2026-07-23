@@ -4,3 +4,7 @@
 
 /// DataFusion integration for the CSV file format.
 pub mod datafusion;
+/// Parsing a user-supplied CSV delimiter (with escape support) into a byte.
+pub mod delimiter;
+
+pub use delimiter::parse_delimiter;

@@ -340,3 +340,165 @@ async fn anonymous_write_statement_is_rejected() {
 
     server.handle.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_credentials_are_rejected_at_handshake() {
+    let server = spawn_server(false).await;
+    let mut client = client(server.addr).await;
+
+    let err = client
+        .handshake(common::ADMIN_USERNAME, "not-the-password")
+        .await
+        .expect_err("a wrong password must not authenticate");
+    assert!(!err.to_string().is_empty());
+    assert!(
+        client.token().is_none(),
+        "no session token should be issued on a failed handshake"
+    );
+
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unauthenticated_execute_is_rejected_when_anonymous_is_off() {
+    let server = spawn_server(false).await;
+    let mut client = client(server.addr).await;
+
+    // No handshake, anonymous disabled → the statement is refused.
+    let err = client
+        .execute("SELECT 1".to_string(), None)
+        .await
+        .expect_err("an unauthenticated query must be rejected when anonymous is off");
+    assert!(!err.to_string().is_empty());
+
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_over_a_managed_table_returns_the_rows() {
+    let server = spawn_server(false).await;
+    let runtime = server.lake.lake.runtime();
+
+    // Seed a managed table directly against the shared runtime.
+    let table = format!("fsql_{}", uuid::Uuid::new_v4().simple());
+    run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+    run_sql_rows(runtime, &format!("INSERT INTO {table} VALUES (1), (2), (3)")).await;
+
+    let mut client = client(server.addr).await;
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    let info = client
+        .execute(format!("SELECT a FROM {table} ORDER BY a"), None)
+        .await
+        .unwrap();
+    let ticket = info.endpoint[0].ticket.clone().unwrap();
+    let batches = client
+        .do_get(ticket)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    let values: Vec<i64> = batches
+        .iter()
+        .flat_map(|b| {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("a is Int64");
+            (0..col.len()).map(|i| col.value(i)).collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(values, vec![1, 2, 3], "the streamed rows should match the table");
+
+    run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_tables_metadata_includes_a_created_table() {
+    let server = spawn_server(false).await;
+    let runtime = server.lake.lake.runtime();
+
+    let table = format!("meta_{}", uuid::Uuid::new_v4().simple());
+    run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+
+    let mut client = client(server.addr).await;
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    let info = client
+        .get_tables(CommandGetTables {
+            catalog: None,
+            db_schema_filter_pattern: None,
+            table_name_filter_pattern: None,
+            table_types: vec![],
+            include_schema: true,
+        })
+        .await
+        .unwrap();
+    let batches = client
+        .do_get(info.endpoint[0].ticket.clone().unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    let rendered = arrow::util::pretty::pretty_format_batches(&batches)
+        .expect("format tables metadata")
+        .to_string();
+    assert!(
+        rendered.contains(&table),
+        "get_tables should list the created table `{table}`, got:\n{rendered}"
+    );
+
+    run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_update_inserts_rows() {
+    let server = spawn_server(false).await;
+    let runtime = server.lake.lake.runtime();
+
+    let table = format!("upd_{}", uuid::Uuid::new_v4().simple());
+    run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+
+    let mut client = client(server.addr).await;
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    // A prepared write (DML) executed over Flight SQL as the super-user.
+    let mut prepared = client
+        .prepare(format!("INSERT INTO {table} VALUES (7), (8)"), None)
+        .await
+        .unwrap();
+    // The affected-row count DataFusion reports for an INSERT is not contractually
+    // 2 here (it reports per-statement, not per-row); the row count below is the
+    // real proof the write happened.
+    let _affected = prepared.execute_update().await.unwrap();
+    prepared.close().await.unwrap();
+
+    // The rows really landed.
+    let rows = run_sql_rows(runtime, &format!("SELECT count(*) FROM {table}")).await;
+    let count = rows[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(count, 2, "the prepared INSERT should have added two rows");
+
+    run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
+    server.handle.abort();
+}

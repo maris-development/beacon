@@ -45,7 +45,13 @@ impl BeaconTableFunctionImpl for ReadCsvFunc {
     }
 
     fn description(&self) -> Option<String> {
-        Some("Reads CSV files from specified glob paths. With optional delimiter and record inference settings.".to_string())
+        Some(
+            "Reads CSV files from specified glob paths. Optional second argument is the \
+             field delimiter — a single character (';', '|') or an escape ('\\t', '\\n', \
+             '\\r'); defaults to ','. Optional third argument sets the schema-inference \
+             sample size."
+                .to_string(),
+        )
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
@@ -80,26 +86,24 @@ impl TableFunctionImpl for ReadCsvFunc {
             })?;
         let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_csv")?;
 
-        let delimeter = if let Some(delimiter_arg) = args.get(1) {
-            match delimiter_arg {
-                Expr::Literal(ScalarValue::Utf8(opt_str), _) => {
-                    if let Some(s) = opt_str {
-                        let mut chars = s.chars();
-                        if let Some(c) = chars.next() {
-                            c as u8
-                        } else {
-                            b','
-                        }
-                    } else {
-                        b','
-                    }
-                }
-                _ => {
-                    return plan_err!("read_csv second argument 'delimiter' must be a Utf8 string");
-                }
+        let delimiter = match args.get(1) {
+            None => b',',
+            // A NULL delimiter (or an absent value) means "use the default".
+            Some(Expr::Literal(
+                ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) | ScalarValue::Utf8View(None),
+                _,
+            )) => b',',
+            // Accept every string-scalar flavour, and resolve escapes like `\t`.
+            Some(Expr::Literal(
+                ScalarValue::Utf8(Some(s))
+                | ScalarValue::LargeUtf8(Some(s))
+                | ScalarValue::Utf8View(Some(s)),
+                _,
+            )) => crate::parse_delimiter(s)
+                .map_err(|e| datafusion::common::plan_datafusion_err!("read_csv: {e}"))?,
+            Some(_) => {
+                return plan_err!("read_csv second argument 'delimiter' must be a Utf8 string");
             }
-        } else {
-            b','
         };
 
         let infer_records = args
@@ -118,7 +122,7 @@ impl TableFunctionImpl for ReadCsvFunc {
             listing_urls.push(listing_factory.parse_listing_table_url(&state, path)?);
         }
 
-        let file_format = CsvFormat::new(delimeter, infer_records);
+        let file_format = CsvFormat::new(delimiter, infer_records);
 
         let super_listing_table = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
