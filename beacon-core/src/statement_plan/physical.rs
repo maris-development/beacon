@@ -28,7 +28,8 @@ use futures::{StreamExt, TryStreamExt};
 use super::{
     actions, crawler,
     logical::{
-        count_arrow_schema, show_crawlers_arrow_schema, show_indexes_arrow_schema, AlterTableSpec,
+        count_arrow_schema, run_crawler_arrow_schema, show_crawlers_arrow_schema,
+        show_indexes_arrow_schema, AlterTableSpec,
         Mutation,
     },
     materialized_view, SessionCell,
@@ -789,21 +790,56 @@ impl RunCrawlerExec {
         Self {
             name,
             session,
-            cache: Arc::new(side_effect_properties()),
+            // Row-producing, not a side-effect node: the crawl report is the result.
+            cache: Arc::new(plan_properties(run_crawler_arrow_schema())),
         }
-    }
-    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RunCrawlerExec: name={}", self.name)
     }
 }
 
-side_effect_exec!(RunCrawlerExec, "RunCrawlerExec", |exec: &RunCrawlerExec| {
-    let session = upgrade_session(&exec.session)?;
-    let name = exec.name.clone();
-    Ok(side_effect_stream(async move {
-        crawler::run_crawler(&session, &name).await.map_err(to_df_err)
-    }))
-});
+impl DisplayAs for RunCrawlerExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "RunCrawlerExec: name={}", self.name)
+            }
+            DisplayFormatType::TreeRender => write!(f, "RunCrawlerExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for RunCrawlerExec {
+    fn name(&self) -> &str {
+        "RunCrawlerExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let name = self.name.clone();
+        let schema = run_crawler_arrow_schema();
+        let stream = futures::stream::once(async move {
+            crawler::run_crawler(&session, &name).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
 
 /// Physical node for `DROP CRAWLER <name>`.
 #[derive(Debug)]

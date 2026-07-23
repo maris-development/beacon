@@ -97,16 +97,26 @@ pub(super) fn roles_table(auth: Arc<beacon_auth::AuthContext>) -> SystemTable {
     SystemTable::new(roles_schema(), snapshot)
 }
 
-/// Render a rule set as a sorted JSON array of `{privilege, target}` objects, so
-/// a scan is deterministic (the underlying set has no stable order).
+/// Render a rule set as a sorted JSON array of
+/// `{privilege, target_type, target_value}` objects.
+///
+/// The shape mirrors the `AuthRuleView` API contract so a consumer can
+/// deserialize a row straight into it. Sorted because the underlying set has no
+/// stable order and a scan must be deterministic.
 fn rules_json(rules: &std::collections::HashSet<beacon_auth::PrivilegeRule>) -> String {
     let mut rendered: Vec<serde_json::Value> = rules
         .iter()
         .map(|rule| {
+            // `None` and `All` both mean "every target for this privilege".
+            let (target_type, target_value) = match &rule.target {
+                None | Some(beacon_auth::PrivilegeTarget::All) => ("all", None),
+                Some(beacon_auth::PrivilegeTarget::Table(t)) => ("table", Some(t.clone())),
+                Some(beacon_auth::PrivilegeTarget::Path(p)) => ("path", Some(p.clone())),
+            };
             serde_json::json!({
-                "privilege": format!("{:?}", rule.privilege),
-                // `None` means the rule applies to every target for that privilege.
-                "target": rule.target.as_ref().map(|t| format!("{t:?}")),
+                "privilege": rule.privilege.to_string(),
+                "target_type": target_type,
+                "target_value": target_value,
             })
         })
         .collect();

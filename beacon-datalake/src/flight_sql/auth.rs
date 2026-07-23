@@ -107,7 +107,7 @@ impl Authenticator {
     /// Resolves the anonymous principal's context, falling back to a role-less context when the
     /// anonymous user is disabled in the auth model.
     async fn anonymous_context(&self) -> AuthContext {
-        match self.runtime.authenticate_anonymous().await {
+        match self.runtime.runtime().authenticate_anonymous().await {
             Ok(identity) => AuthContext::from_identity(identity),
             Err(_) => AuthContext::anonymous(),
         }
@@ -171,6 +171,7 @@ impl Authenticator {
     async fn authenticate(&self, username: &str, password: &str) -> Result<AuthContext, Status> {
         let identity = self
             .runtime
+            .runtime()
             .authenticate(&Credential::basic(username, password))
             .await
             .map_err(|_| Status::unauthenticated("invalid credentials"))?;

@@ -16,7 +16,6 @@ mod crawlers;
 mod datasets;
 mod extensions;
 mod external_tables;
-mod tables;
 
 /// OpenAPI document marker for the admin surface.
 #[derive(OpenApi)]
@@ -49,7 +48,6 @@ pub(crate) fn setup_admin_router() -> (Router<Arc<DataLake>>, utoipa::openapi::O
         .routes(routes!(datasets::upload_part))
         .routes(routes!(datasets::complete_upload))
         .routes(routes!(datasets::abort_upload))
-        .routes(routes!(tables::list_table_config))
         .routes(routes!(auth::list_users))
         .routes(routes!(auth::list_roles))
         .routes(routes!(

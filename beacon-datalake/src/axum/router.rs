@@ -84,7 +84,7 @@ pub(crate) fn setup_router(
         let mcp_router = ::axum::Router::new()
             .route_service(
                 "/mcp",
-                beacon_mcp::streamable_http_service(beacon_runtime.clone()),
+                beacon_mcp::streamable_http_service(beacon_runtime.runtime().clone()),
             )
             .layer(::axum::middleware::from_fn_with_state(
                 beacon_runtime.clone(),

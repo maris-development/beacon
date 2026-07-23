@@ -1,7 +1,7 @@
 use std::sync::{Arc, Weak};
 
 use arrow::{
-    array::StringArray,
+    array::{BooleanArray, StringArray, UInt64Array},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -11,6 +11,7 @@ use datafusion::{
     catalog::{MemTable, TableFunctionImpl, TableProvider},
     error::DataFusionError,
     prelude::{Expr, SessionContext},
+    scalar::ScalarValue,
 };
 
 use crate::file_formats::BeaconTableFunctionImpl;
@@ -89,12 +90,61 @@ impl BeaconTableFunctionImpl for ListDatasetsFunc {
     }
 
     fn description(&self) -> Option<String> {
-        Some("Lists all datasets stored in beacon, returning file name and format.".to_string())
+        Some(
+            "Lists the datasets stored in beacon. Optional arguments: \
+             list_datasets(pattern, offset, limit) — a glob (default '**/*'), \
+             a row offset, and a row limit."
+                .to_string(),
+        )
+    }
+}
+
+/// The full [`DatasetMetadata`] shape, so a caller gets everything discovery
+/// computed rather than just the name and format.
+pub fn list_datasets_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("file_name", DataType::Utf8, false),
+        Field::new("file_format", DataType::Utf8, false),
+        Field::new("can_inspect", DataType::Boolean, false),
+        Field::new("can_partial_explore", DataType::Boolean, false),
+        // Null when the size or timestamp could not be resolved.
+        Field::new("size", DataType::UInt64, true),
+        Field::new("last_modified", DataType::Utf8, true),
+    ]))
+}
+
+/// A `Utf8` literal argument, or `None` when absent.
+fn string_arg(args: &[Expr], index: usize) -> Option<String> {
+    match args.get(index) {
+        Some(Expr::Literal(ScalarValue::Utf8(value), _)) => value.clone(),
+        _ => None,
+    }
+}
+
+/// A non-negative integer literal argument, or `None` when absent.
+fn usize_arg(args: &[Expr], index: usize) -> Option<usize> {
+    match args.get(index) {
+        Some(Expr::Literal(scalar, _)) => match scalar {
+            ScalarValue::Int64(Some(v)) if *v >= 0 => Some(*v as usize),
+            ScalarValue::UInt64(Some(v)) => Some(*v as usize),
+            ScalarValue::Int32(Some(v)) if *v >= 0 => Some(*v as usize),
+            ScalarValue::UInt32(Some(v)) => Some(*v as usize),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
 impl TableFunctionImpl for ListDatasetsFunc {
-    fn call(&self, _args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+    /// `list_datasets([pattern[, offset[, limit]]])`.
+    ///
+    /// All three are optional and positional; omitting them recursively lists
+    /// everything, which is the historical behaviour.
+    fn call(&self, args: &[Expr]) -> datafusion::error::Result<Arc<dyn TableProvider>> {
+        let pattern = string_arg(args, 0).unwrap_or_else(|| "**/*".to_string());
+        let offset = usize_arg(args, 1);
+        let limit = usize_arg(args, 2);
+
         let file_formats = self.file_formats.clone();
         let session_ctx = self.session_ctx.upgrade().ok_or_else(|| {
             datafusion::common::plan_datafusion_err!("session context has been dropped")
@@ -102,33 +152,41 @@ impl TableFunctionImpl for ListDatasetsFunc {
 
         let datasets: Vec<DatasetMetadata> = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(async move {
-                // Recursive scan (`**/*`), unpaginated — the historical UDTF
-                // behaviour — reusing the shared discovery helper.
-                list_datasets(
-                    &session_ctx,
-                    &file_formats,
-                    None,
-                    None,
-                    Some("**/*".to_string()),
-                )
-                .await
+                list_datasets(&session_ctx, &file_formats, offset, limit, Some(pattern)).await
             })
         })?;
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("file_name", DataType::Utf8, false),
-            Field::new("file_format", DataType::Utf8, false),
-        ]));
-
+        let schema = list_datasets_schema();
         let file_names: StringArray = datasets
             .iter()
             .map(|d| Some(d.file_path.as_str()))
             .collect();
-        let file_formats: StringArray = datasets.iter().map(|d| Some(d.format.as_str())).collect();
+        let formats: StringArray = datasets.iter().map(|d| Some(d.format.as_str())).collect();
+        let can_inspect = BooleanArray::from(
+            datasets.iter().map(|d| d.can_inspect).collect::<Vec<_>>(),
+        );
+        let can_partial_explore = BooleanArray::from(
+            datasets
+                .iter()
+                .map(|d| d.can_partial_explore)
+                .collect::<Vec<_>>(),
+        );
+        let sizes = UInt64Array::from(datasets.iter().map(|d| d.size).collect::<Vec<_>>());
+        let last_modified: StringArray = datasets
+            .iter()
+            .map(|d| d.last_modified.map(|ts| ts.to_rfc3339()))
+            .collect();
 
         let batch = RecordBatch::try_new(
             schema.clone(),
-            vec![Arc::new(file_names), Arc::new(file_formats)],
+            vec![
+                Arc::new(file_names),
+                Arc::new(formats),
+                Arc::new(can_inspect),
+                Arc::new(can_partial_explore),
+                Arc::new(sizes),
+                Arc::new(last_modified),
+            ],
         )?;
 
         Ok(Arc::new(MemTable::try_new(schema, vec![vec![batch]])?))

@@ -15,6 +15,7 @@ use arrow_flight::sql::{
 };
 use arrow_flight::sql::{CommandGetDbSchemas, CommandGetSqlInfo, CommandGetTables, SqlInfo};
 
+use crate::datalake::{catalog, sql};
 use crate::flight_sql::util::to_internal_status;
 
 const DEFAULT_TABLE_TYPE: &str = "TABLE";
@@ -22,24 +23,34 @@ const DEFAULT_TABLE_TYPE: &str = "TABLE";
 /// Produces metadata record batches backed by the Beacon runtime catalog.
 #[derive(Clone)]
 pub(super) struct FlightSqlMetadata {
-    runtime: Arc<beacon_core::runtime::Runtime>,
+    lake: Arc<crate::datalake::DataLake>,
     sql_info_data: Arc<SqlInfoData>,
 }
 
 impl FlightSqlMetadata {
-    /// Creates metadata builders bound to the shared Beacon runtime.
-    pub(super) fn new(runtime: Arc<beacon_core::runtime::Runtime>) -> anyhow::Result<Self> {
+    /// Creates metadata builders bound to the shared data lake.
+    pub(super) fn new(lake: Arc<crate::datalake::DataLake>) -> anyhow::Result<Self> {
         Ok(Self {
-            runtime,
+            lake,
             sql_info_data: Arc::new(build_sql_info_data()?),
         })
     }
 
     /// Builds the `GetCatalogs` response batch from DataFusion catalogs visible to Beacon.
-    pub(super) fn build_catalogs_batch(&self) -> Result<RecordBatch, tonic::Status> {
+    pub(super) async fn build_catalogs_batch(
+        &self,
+        identity: beacon_core::AuthIdentity,
+    ) -> Result<RecordBatch, tonic::Status> {
         let mut builder = GetCatalogsBuilder::new();
 
-        for catalog_name in self.runtime.list_sql_catalogs() {
+        let mut catalogs: Vec<String> = catalog::list_qualified_tables(&self.lake, identity)
+            .await
+            .map_err(to_internal_status)?
+            .into_iter()
+            .map(|(catalog, _, _)| catalog)
+            .collect();
+        catalogs.dedup();
+        for catalog_name in catalogs {
             builder.append(catalog_name);
         }
 
@@ -47,13 +58,22 @@ impl FlightSqlMetadata {
     }
 
     /// Builds the `GetDbSchemas` response batch from the runtime catalog listing.
-    pub(super) fn build_schemas_batch(
+    pub(super) async fn build_schemas_batch(
         &self,
         query: CommandGetDbSchemas,
+        identity: beacon_core::AuthIdentity,
     ) -> Result<RecordBatch, tonic::Status> {
         let mut builder = GetDbSchemasBuilder::from(query);
 
-        for (catalog_name, schema_name) in self.runtime.list_sql_schemas() {
+        let mut schemas: Vec<(String, String)> =
+            catalog::list_qualified_tables(&self.lake, identity)
+                .await
+                .map_err(to_internal_status)?
+                .into_iter()
+                .map(|(catalog, schema, _)| (catalog, schema))
+                .collect();
+        schemas.dedup();
+        for (catalog_name, schema_name) in schemas {
             builder.append(catalog_name, schema_name);
         }
 
@@ -64,17 +84,26 @@ impl FlightSqlMetadata {
     pub(super) async fn build_tables_batch(
         &self,
         query: CommandGetTables,
+        identity: beacon_core::AuthIdentity,
     ) -> Result<RecordBatch, tonic::Status> {
         let mut builder = GetTablesBuilder::from(query);
 
-        for (catalog_name, schema_name, table_name) in self.runtime.list_sql_tables() {
-            let qualified_table_name = format!("{catalog_name}.{schema_name}.{table_name}");
-            let table_schema = self
-                .runtime
-                .list_table_schema(qualified_table_name)
-                .await
-                // Some internal tables may not resolve to Arrow schemas through the public lookup.
-                .unwrap_or_else(|| Arc::new(Schema::empty()));
+        let tables = catalog::list_qualified_tables(&self.lake, identity.clone())
+            .await
+            .map_err(to_internal_status)?;
+        for (catalog_name, schema_name, table_name) in tables {
+            let qualified_table_name = format!(
+                "{}.{}.{}",
+                sql::quote_ident(&catalog_name),
+                sql::quote_ident(&schema_name),
+                sql::quote_ident(&table_name)
+            );
+            let table_schema =
+                catalog::table_arrow_schema(&self.lake, &qualified_table_name, identity.clone())
+                    .await
+                    // A table the caller cannot scan still appears in the listing,
+                    // with an empty schema rather than failing the whole response.
+                    .unwrap_or_else(|_| Arc::new(Schema::empty()));
 
             builder
                 .append(

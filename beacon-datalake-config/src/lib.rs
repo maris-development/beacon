@@ -81,6 +81,9 @@ pub struct ServerConfig {
     /// Directory holding the built admin web UI (Vite `dist/`). Served at
     /// `{base_path}/admin` when the directory exists; skipped otherwise.
     pub web_ui_dir: String,
+    /// Maximum size, in bytes, accepted for a single dataset upload. `0` disables
+    /// the cap. From `BEACON_MAX_UPLOAD_BYTES`.
+    pub max_upload_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -432,6 +435,7 @@ impl From<RawConfig> for Config {
                 worker_threads: raw.worker_threads,
                 base_path: raw.base_path,
                 web_ui_dir: raw.web_ui_dir,
+                max_upload_bytes: raw.max_upload_bytes,
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,

@@ -13,8 +13,10 @@ use ::axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use beacon_core::dataset_files::{FileError, UploadResult};
-use crate::datalake::DataLake;
+use crate::datalake::{
+    files::{FileError, UploadResult},
+    DataLake,
+};
 use futures::TryStreamExt;
 
 /// Hard cap on a single chunked-upload part's body, bounding per-request memory
@@ -305,9 +307,7 @@ fn attachment_filename(path: &str) -> String {
 /// the web UI relies on to distinguish (e.g.) "already exists" from "too large".
 fn file_error(err: FileError) -> (StatusCode, String) {
     let status = match &err {
-        FileError::InvalidPath(_) | FileError::UnsupportedExtension(_) | FileError::Body(_) => {
-            StatusCode::BAD_REQUEST
-        }
+        FileError::InvalidPath(_) | FileError::Body(_) => StatusCode::BAD_REQUEST,
         FileError::AlreadyExists(_)
         | FileError::InUse { .. }
         | FileError::PartOutOfOrder { .. } => StatusCode::CONFLICT,

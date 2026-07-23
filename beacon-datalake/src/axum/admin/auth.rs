@@ -5,11 +5,21 @@
 
 use std::sync::Arc;
 
-use ::axum::{extract::State, http::StatusCode, Json};
-use beacon_core::api::{AuthRoleView, AuthUserView};
-use crate::datalake::DataLake;
+use ::axum::{extract::State, http::StatusCode, Extension, Json};
+use beacon_core::api::{AuthRoleView, AuthRuleView, AuthUserView};
+use beacon_core::AuthIdentity;
+use crate::datalake::{
+    sql::{query_rows, str_field},
+    DataLake,
+};
 
 use super::bad_request;
+
+/// Rules come back as a JSON array shaped like [`AuthRuleView`]; anything
+/// unparseable yields an empty list rather than failing the whole listing.
+fn rules(row: &serde_json::Value, column: &str) -> Vec<AuthRuleView> {
+    serde_json::from_str(str_field(row, column)).unwrap_or_default()
+}
 
 /// Lists all principals: the config super-user (flagged) plus stored local users
 /// with their roles.
@@ -26,8 +36,33 @@ use super::bad_request;
 )]
 pub(crate) async fn list_users(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
 ) -> Result<Json<Vec<AuthUserView>>, (StatusCode, String)> {
-    state.list_auth_users().map(Json).map_err(bad_request)
+    let rows = query_rows(
+        &state,
+        "SELECT username, roles FROM beacon.system.users ORDER BY username",
+        identity,
+    )
+    .await
+    .map_err(bad_request)?;
+
+    let super_user = &state.config().admin.username;
+    let anonymous = crate::datalake::ANONYMOUS_USERNAME;
+
+    let users = rows
+        .iter()
+        .map(|row| {
+            let username = str_field(row, "username").to_string();
+            AuthUserView {
+                is_super_user: username == *super_user,
+                is_anonymous: username == anonymous,
+                roles: serde_json::from_str(str_field(row, "roles")).unwrap_or_default(),
+                username,
+            }
+        })
+        .collect();
+
+    Ok(Json(users))
 }
 
 /// Lists all roles with their grant and deny rules.
@@ -39,6 +74,25 @@ pub(crate) async fn list_users(
     responses((status = 200, description = "Roles with their rules", body = Vec<AuthRoleView>)),
     security(("basic-auth" = []))
 )]
-pub(crate) async fn list_roles(State(state): State<Arc<DataLake>>) -> Json<Vec<AuthRoleView>> {
-    Json(state.list_auth_roles())
+pub(crate) async fn list_roles(
+    State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
+) -> Json<Vec<AuthRoleView>> {
+    let rows = query_rows(
+        &state,
+        "SELECT role_name, grants, denies FROM beacon.system.roles ORDER BY role_name",
+        identity,
+    )
+    .await
+    .unwrap_or_default();
+
+    Json(
+        rows.iter()
+            .map(|row| AuthRoleView {
+                name: str_field(row, "role_name").to_string(),
+                grants: rules(row, "grants"),
+                denies: rules(row, "denies"),
+            })
+            .collect(),
+    )
 }

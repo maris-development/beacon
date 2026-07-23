@@ -227,9 +227,44 @@ pub(crate) fn show_crawlers_arrow_schema() -> Arc<Schema> {
                 Field::new("schedule_secs", DataType::UInt64, true),
                 Field::new("event_driven", DataType::Boolean, false),
                 Field::new("table_naming", DataType::Utf8, false),
+                // JSON object: the per-crawler format options forwarded into every
+                // discovered table's `OPTIONS`.
+                Field::new("options", DataType::Utf8, false),
             ]))
         })
         .clone()
+}
+
+/// Arrow schema produced by `RUN CRAWLER`: the crawl report, one row.
+///
+/// The list-valued fields are JSON arrays rather than Arrow lists — they are
+/// reported for a human or an API response, never joined against.
+pub(crate) fn run_crawler_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("crawler", DataType::Utf8, false),
+                Field::new("discovered", DataType::UInt64, false),
+                Field::new("created", DataType::Utf8, false),
+                Field::new("updated", DataType::Utf8, false),
+                Field::new("skipped", DataType::Utf8, false),
+                // JSON array of `[name, error]` pairs.
+                Field::new("failed", DataType::Utf8, false),
+                Field::new("skipped_files", DataType::UInt64, false),
+            ]))
+        })
+        .clone()
+}
+
+fn run_crawler_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(run_crawler_arrow_schema().as_ref().clone())
+                .expect("RUN CRAWLER schema is valid"),
+        )
+    })
 }
 
 fn show_crawlers_df_schema() -> &'static DFSchemaRef {
@@ -312,7 +347,7 @@ impl UserDefinedLogicalNodeCore for RunCrawlerNode {
         vec![]
     }
     fn schema(&self) -> &DFSchemaRef {
-        empty_schema()
+        run_crawler_df_schema()
     }
     fn expressions(&self) -> Vec<Expr> {
         vec![]

@@ -39,7 +39,7 @@ use tracing::info;
 /// Flight SQL service backed by the shared Beacon runtime.
 #[derive(Clone)]
 pub(crate) struct BeaconFlightSqlService {
-    runtime: Arc<beacon_core::runtime::Runtime>,
+    runtime: Arc<crate::datalake::DataLake>,
     authenticator: Authenticator,
     statements: SqlHandleStore,
     prepared_statements: SqlHandleStore,
@@ -47,23 +47,24 @@ pub(crate) struct BeaconFlightSqlService {
 }
 
 impl BeaconFlightSqlService {
-    /// Creates a service using the runtime's configured anonymous-access policy.
-    pub(crate) fn new(runtime: Arc<beacon_core::runtime::Runtime>) -> anyhow::Result<Self> {
-        let allow_anonymous = runtime.config().flight_sql.allow_anonymous;
-        Self::new_with_options(runtime, allow_anonymous)
+    /// Creates a service using the lake's configured anonymous-access policy.
+    pub(crate) fn new(lake: Arc<crate::datalake::DataLake>) -> anyhow::Result<Self> {
+        let allow_anonymous = lake.config().flight_sql.allow_anonymous;
+        Self::new_with_options(lake, allow_anonymous)
     }
 
     /// Creates a service with an explicit anonymous-access setting, used primarily by tests.
     pub(super) fn new_with_options(
-        runtime: Arc<beacon_core::runtime::Runtime>,
+        lake: Arc<crate::datalake::DataLake>,
         allow_anonymous: bool,
     ) -> anyhow::Result<Self> {
-        let flight_sql = runtime.config().flight_sql.clone();
+        let flight_sql = lake.config().flight_sql.clone();
+        let runtime = lake.clone();
 
         Ok(Self {
-            metadata: FlightSqlMetadata::new(runtime.clone())?,
+            metadata: FlightSqlMetadata::new(lake.clone())?,
             authenticator: Authenticator::new(
-                runtime.clone(),
+                lake.clone(),
                 allow_anonymous,
                 Duration::from_secs(flight_sql.token_ttl_secs),
             ),
@@ -84,6 +85,7 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightInfo, Status> {
         let stream = self
             .runtime
+            .runtime()
             .run_query(beacon_core::query::Query::sql(sql.clone()), auth.identity.clone())
             .await
             .map_err(to_internal_status)?
@@ -111,6 +113,7 @@ impl BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
+            .runtime()
             .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
             .await
             .map_err(to_internal_status)?
@@ -128,6 +131,7 @@ impl BeaconFlightSqlService {
     ) -> Result<FlightDataStream, Status> {
         let stream = self
             .runtime
+            .runtime()
             .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
             .await
             .map_err(to_internal_status)?
@@ -217,9 +221,9 @@ impl FlightSqlService for BeaconFlightSqlService {
         query: CommandGetCatalogs,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        self.authenticator.authorize_request(&request).await?;
+        let auth = self.authenticator.authorize_request(&request).await?;
         let descriptor = request.into_inner();
-        let batch = self.metadata.build_catalogs_batch()?;
+        let batch = self.metadata.build_catalogs_batch(auth.identity).await?;
         let info = build_flight_info(batch.schema().as_ref(), &descriptor, &query.as_any())?;
         Ok(Response::new(info))
     }
@@ -229,9 +233,12 @@ impl FlightSqlService for BeaconFlightSqlService {
         query: CommandGetDbSchemas,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        self.authenticator.authorize_request(&request).await?;
+        let auth = self.authenticator.authorize_request(&request).await?;
         let descriptor = request.into_inner();
-        let batch = self.metadata.build_schemas_batch(query.clone())?;
+        let batch = self
+            .metadata
+            .build_schemas_batch(query.clone(), auth.identity)
+            .await?;
         let info = build_flight_info(batch.schema().as_ref(), &descriptor, &query.as_any())?;
         Ok(Response::new(info))
     }
@@ -241,9 +248,12 @@ impl FlightSqlService for BeaconFlightSqlService {
         query: CommandGetTables,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        self.authenticator.authorize_request(&request).await?;
+        let auth = self.authenticator.authorize_request(&request).await?;
         let descriptor = request.into_inner();
-        let batch = self.metadata.build_tables_batch(query.clone()).await?;
+        let batch = self
+            .metadata
+            .build_tables_batch(query.clone(), auth.identity)
+            .await?;
         let info = build_flight_info(batch.schema().as_ref(), &descriptor, &query.as_any())?;
         Ok(Response::new(info))
     }
@@ -301,8 +311,10 @@ impl FlightSqlService for BeaconFlightSqlService {
         _query: CommandGetCatalogs,
         request: Request<Ticket>,
     ) -> Result<Response<<Self::FlightService as FlightService>::DoGetStream>, Status> {
-        self.authenticator.authorize_request(&request).await?;
-        Ok(batch_to_response(self.metadata.build_catalogs_batch()?))
+        let auth = self.authenticator.authorize_request(&request).await?;
+        Ok(batch_to_response(
+            self.metadata.build_catalogs_batch(auth.identity).await?,
+        ))
     }
 
     async fn do_get_schemas(
@@ -310,8 +322,10 @@ impl FlightSqlService for BeaconFlightSqlService {
         query: CommandGetDbSchemas,
         request: Request<Ticket>,
     ) -> Result<Response<<Self::FlightService as FlightService>::DoGetStream>, Status> {
-        self.authenticator.authorize_request(&request).await?;
-        Ok(batch_to_response(self.metadata.build_schemas_batch(query)?))
+        let auth = self.authenticator.authorize_request(&request).await?;
+        Ok(batch_to_response(
+            self.metadata.build_schemas_batch(query, auth.identity).await?,
+        ))
     }
 
     async fn do_get_tables(
@@ -319,9 +333,9 @@ impl FlightSqlService for BeaconFlightSqlService {
         query: CommandGetTables,
         request: Request<Ticket>,
     ) -> Result<Response<<Self::FlightService as FlightService>::DoGetStream>, Status> {
-        self.authenticator.authorize_request(&request).await?;
+        let auth = self.authenticator.authorize_request(&request).await?;
         Ok(batch_to_response(
-            self.metadata.build_tables_batch(query).await?,
+            self.metadata.build_tables_batch(query, auth.identity).await?,
         ))
     }
 
@@ -372,6 +386,7 @@ impl FlightSqlService for BeaconFlightSqlService {
             .await?;
         let stream = self
             .runtime
+            .runtime()
             .run_query(beacon_core::query::Query::sql(sql), auth.identity.clone())
             .await
             .map_err(to_internal_status)?
@@ -406,7 +421,8 @@ impl FlightSqlService for BeaconFlightSqlService {
         } else {
             let stream = self
                 .runtime
-                .run_query(beacon_core::query::Query::sql(query.query.clone()), auth.identity.clone())
+                .runtime()
+            .run_query(beacon_core::query::Query::sql(query.query.clone()), auth.identity.clone())
             .await
             .map_err(to_internal_status)?
             .into_record_stream()
@@ -444,9 +460,9 @@ fn is_ddl(sql: &str) -> bool {
 }
 
 /// Starts the Flight SQL gRPC server on the configured host and port.
-pub(crate) async fn serve(runtime: Arc<beacon_core::runtime::Runtime>) -> anyhow::Result<()> {
-    let flight_sql = runtime.config().flight_sql.clone();
-    let service = BeaconFlightSqlService::new(runtime)?;
+pub(crate) async fn serve(lake: Arc<crate::datalake::DataLake>) -> anyhow::Result<()> {
+    let flight_sql = lake.config().flight_sql.clone();
+    let service = BeaconFlightSqlService::new(lake)?;
     let addr = SocketAddr::new(
         IpAddr::from_str(&flight_sql.host)
             .map_err(|error| anyhow::anyhow!("failed to parse Flight SQL host: {error}"))?,

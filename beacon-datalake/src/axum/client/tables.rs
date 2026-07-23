@@ -5,10 +5,12 @@ use std::sync::Arc;
 use ::axum::{
     extract::{Query, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
-use beacon_core::api::{SchemaFieldView, SchemaView, TableExtensions};
-use crate::datalake::DataLake;
+use beacon_core::api::{SchemaFieldView, SchemaView};
+use beacon_core::extensions::TableExtensions;
+use beacon_core::AuthIdentity;
+use crate::datalake::{catalog, DataLake};
 use utoipa::{IntoParams, ToSchema};
 
 /// Returns the names of all tables registered in the runtime catalog.
@@ -24,9 +26,15 @@ use utoipa::{IntoParams, ToSchema};
         ("bearer" = [])
     )
 )]
-pub(crate) async fn list_tables(State(state): State<Arc<DataLake>>) -> Json<Vec<String>> {
-    let result = state.list_tables();
-    Json(result)
+pub(crate) async fn list_tables(
+    State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
+) -> Json<Vec<String>> {
+    Json(
+        catalog::list_table_names(&state, identity)
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 /// Response entry pairing a table name with its Arrow schema.
@@ -53,11 +61,16 @@ pub(crate) struct TableWithSchema {
 )]
 pub(crate) async fn list_tables_with_schema(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
 ) -> Json<Vec<TableWithSchema>> {
-    let table_names = state.list_tables();
+    let table_names = catalog::list_table_names(&state, identity.clone())
+        .await
+        .unwrap_or_default();
     let mut result = Vec::new();
     for table_name in table_names {
-        if let Some(schema) = state.list_table_schema_view(table_name.clone()).await {
+        if let Ok(Some(schema)) =
+            catalog::table_schema_view(&state, &table_name, identity.clone()).await
+        {
             result.push(TableWithSchema {
                 table_name,
                 columns: schema.fields,
@@ -94,9 +107,12 @@ pub struct ListTableSchemaQuery {
 )]
 pub(crate) async fn list_table_schema(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
     Query(query): Query<ListTableSchemaQuery>,
 ) -> Result<Json<SchemaView>, (StatusCode, String)> {
-    let result = state.list_table_schema_view(query.table_name.clone()).await;
+    let result = catalog::table_schema_view(&state, &query.table_name, identity)
+        .await
+        .unwrap_or(None);
 
     match result {
         Some(schema) => Ok(Json(schema)),
@@ -138,9 +154,10 @@ pub struct ListTableExtensionsQuery {
 )]
 pub(crate) async fn list_table_extensions(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
     Query(query): Query<ListTableExtensionsQuery>,
 ) -> Result<Json<TableExtensions>, (StatusCode, String)> {
-    match state.get_table_extensions(query.table_name.clone()).await {
+    match catalog::table_extensions(&state, &query.table_name, identity).await {
         Ok(extensions) => Ok(Json(extensions)),
         Err(error) => {
             tracing::error!(?error, "error listing table extensions");
@@ -167,9 +184,17 @@ pub(crate) async fn list_table_extensions(
 )]
 pub(crate) async fn default_table_schema(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
 ) -> Json<SchemaView> {
-    let result = state.list_default_table_schema_view().await;
-    Json(result)
+    let table = catalog::default_table(&state);
+    let schema = catalog::table_schema_view(&state, &table, identity)
+        .await
+        .unwrap_or(None)
+        .unwrap_or_else(|| SchemaView {
+            fields: Vec::new(),
+            metadata: Default::default(),
+        });
+    Json(schema)
 }
 
 /// Returns the name of the runtime's default table.
@@ -186,6 +211,5 @@ pub(crate) async fn default_table_schema(
     )
 )]
 pub(crate) async fn default_table(State(state): State<Arc<DataLake>>) -> Json<String> {
-    let result = state.default_table();
-    Json(result)
+    Json(catalog::default_table(&state))
 }

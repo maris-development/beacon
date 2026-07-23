@@ -11,7 +11,7 @@ use arrow::record_batch::RecordBatch;
 use crate::crawler::{CrawlerDefinition, CrawlerManager, TableNaming};
 use datafusion::prelude::SessionContext;
 
-use super::logical::show_crawlers_arrow_schema;
+use super::logical::{run_crawler_arrow_schema, show_crawlers_arrow_schema};
 
 /// Recover the crawler manager from the session extension handle.
 fn crawler_manager(session: &Arc<SessionContext>) -> anyhow::Result<Arc<CrawlerManager>> {
@@ -42,7 +42,14 @@ pub(crate) async fn create_crawler(
 }
 
 /// `RUN CRAWLER`: run once on demand, logging the resulting report.
-pub(crate) async fn run_crawler(session: &Arc<SessionContext>, name: &str) -> anyhow::Result<()> {
+/// `RUN CRAWLER`: crawl once and return the report as a single row.
+///
+/// The report is returned rather than only logged so callers — the admin API
+/// among them — can see what a crawl did without scraping the log.
+pub(crate) async fn run_crawler(
+    session: &Arc<SessionContext>,
+    name: &str,
+) -> anyhow::Result<RecordBatch> {
     let report = crawler_manager(session)?.run(name).await?;
     tracing::info!(
         "ran crawler '{name}': discovered={} created={} updated={} skipped={} failed={}",
@@ -52,7 +59,26 @@ pub(crate) async fn run_crawler(session: &Arc<SessionContext>, name: &str) -> an
         report.skipped.len(),
         report.failed.len()
     );
-    Ok(())
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(vec![report.crawler.clone()])),
+        Arc::new(UInt64Array::from(vec![report.discovered as u64])),
+        Arc::new(StringArray::from(vec![json_list(&report.created)])),
+        Arc::new(StringArray::from(vec![json_list(&report.updated)])),
+        Arc::new(StringArray::from(vec![json_list(&report.skipped)])),
+        Arc::new(StringArray::from(vec![
+            serde_json::to_string(&report.failed).unwrap_or_else(|_| "[]".to_string()),
+        ])),
+        Arc::new(UInt64Array::from(vec![report.skipped_files as u64])),
+    ];
+
+    RecordBatch::try_new(run_crawler_arrow_schema(), columns)
+        .map_err(|e| anyhow::anyhow!("failed to build RUN CRAWLER batch: {e}"))
+}
+
+/// Render a list of table names as a JSON array.
+fn json_list(values: &[String]) -> String {
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// `DROP CRAWLER`: remove the definition and stop its triggers.
@@ -85,6 +111,11 @@ pub(crate) async fn show_crawlers(session: &Arc<SessionContext>) -> anyhow::Resu
         .iter()
         .map(|c| Some(naming_str(c.table_naming)))
         .collect();
+    // Serialized as JSON rather than flattened: the option set is open-ended.
+    let options: StringArray = crawlers
+        .iter()
+        .map(|c| Some(serde_json::to_string(&c.options).unwrap_or_else(|_| "{}".to_string())))
+        .collect();
 
     let columns: Vec<ArrayRef> = vec![
         Arc::new(names),
@@ -94,6 +125,7 @@ pub(crate) async fn show_crawlers(session: &Arc<SessionContext>) -> anyhow::Resu
         Arc::new(schedule_secs),
         Arc::new(event_driven),
         Arc::new(table_naming),
+        Arc::new(options),
     ];
 
     RecordBatch::try_new(show_crawlers_arrow_schema(), columns)

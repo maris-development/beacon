@@ -5,10 +5,11 @@ use std::sync::Arc;
 use ::axum::{
     extract::{Query, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use beacon_core::api::{DatasetInfo, SchemaView};
-use crate::datalake::DataLake;
+use beacon_core::AuthIdentity;
+use crate::datalake::{catalog, DataLake};
 use utoipa::{IntoParams, ToSchema};
 
 /// Pagination and filter parameters shared by the dataset listing endpoints.
@@ -45,11 +46,11 @@ pub struct ListDatasetsQuery {
 #[deprecated = "Use /api/list-datasets instead"]
 pub(crate) async fn datasets(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
     Query(query): Query<ListDatasetsQuery>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let result = state
-        .list_datasets(query.pattern, query.offset, query.limit)
-        .await;
+    let result =
+        catalog::list_datasets(&state, query.pattern, query.offset, query.limit, identity).await;
 
     match result {
         Ok(datasets) => Ok(Json(datasets.into_iter().map(|d| d.file_path).collect())),
@@ -82,11 +83,11 @@ pub(crate) async fn datasets(
 )]
 pub(crate) async fn list_datasets(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
     Query(query): Query<ListDatasetsQuery>,
 ) -> Result<Json<Vec<DatasetInfo>>, (StatusCode, String)> {
-    let result = state
-        .list_datasets(query.pattern, query.offset, query.limit)
-        .await;
+    let result =
+        catalog::list_datasets(&state, query.pattern, query.offset, query.limit, identity).await;
 
     match result {
         Ok(datasets) => Ok(Json(datasets)),
@@ -126,9 +127,10 @@ pub struct ListDatasetSchemaQuery {
 )]
 pub(crate) async fn list_dataset_schema(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
     Query(query): Query<ListDatasetSchemaQuery>,
 ) -> Result<Json<SchemaView>, (StatusCode, String)> {
-    let result = state.list_dataset_schema_view(query.file.clone()).await;
+    let result = catalog::dataset_schema_view(&state, &query.file, identity).await;
 
     match result {
         Ok(schema) => Ok(Json(schema)),
@@ -160,8 +162,11 @@ pub(crate) async fn list_dataset_schema(
 )]
 pub(crate) async fn total_datasets(
     State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
 ) -> Result<Json<usize>, (StatusCode, String)> {
-    let result = state.total_datasets().await;
+    let result = catalog::list_datasets(&state, None, None, None, identity)
+        .await
+        .map(|datasets| datasets.len());
 
     match result {
         Ok(total_datasets) => Ok(Json(total_datasets)),

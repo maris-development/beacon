@@ -13,7 +13,11 @@
 //! Everything the transports need hangs off this type: the config, the store, and
 //! the runtime.
 
+pub mod catalog;
 pub mod files;
+pub mod sql;
+pub mod sys;
+pub mod uploads;
 
 use std::sync::Arc;
 
@@ -38,6 +42,9 @@ pub struct DataLake {
     /// or listing to invalidate between them.
     store: Arc<dyn ObjectStore>,
     runtime: Arc<Runtime>,
+    /// Chunked uploads in flight. In memory: a multipart write cannot outlive the
+    /// process that opened it.
+    uploads: uploads::UploadSessions,
 }
 
 impl DataLake {
@@ -61,7 +68,112 @@ impl DataLake {
             config,
             store,
             runtime: Arc::new(runtime),
+            uploads: uploads::UploadSessions::default(),
         })
+    }
+
+    /// Host and build information for `GET /api/info`.
+    pub fn system_info(&self) -> sys::SystemInfo {
+        sys::SystemInfo::new(self.config.runtime.enable_sys_info)
+    }
+
+    /// The cap on a single upload, in bytes. `0` means unlimited.
+    fn max_upload_bytes(&self) -> u64 {
+        self.config.server.max_upload_bytes
+    }
+
+    /// Validate a caller-supplied dataset key.
+    ///
+    /// Path safety only — the file type is not restricted. A lake holds whatever
+    /// the operator puts in it, and a file beacon cannot read today it may read
+    /// tomorrow.
+    fn dataset_path(&self, path: &str) -> Result<object_store::path::Path, files::FileError> {
+        files::validate_dataset_path(path)
+    }
+
+    /// Stream a file into the datasets store.
+    pub async fn upload_dataset<S>(
+        &self,
+        path: &str,
+        overwrite: bool,
+        body: S,
+    ) -> Result<files::UploadResult, files::FileError>
+    where
+        S: futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
+    {
+        let path = self.dataset_path(path)?;
+        files::upload_dataset(
+            self.store.as_ref(),
+            &path,
+            overwrite,
+            self.max_upload_bytes(),
+            body,
+        )
+        .await
+    }
+
+    /// Open a streaming read of a dataset file.
+    pub async fn download_dataset(
+        &self,
+        path: &str,
+    ) -> Result<object_store::GetResult, files::FileError> {
+        // Read needs no extension check: anything already in the store is fair
+        // game, and the path gate still applies.
+        let path = files::validate_dataset_path(path)?;
+        files::download_dataset(self.store.as_ref(), &path).await
+    }
+
+    /// Delete a dataset file.
+    pub async fn delete_dataset(&self, path: &str) -> Result<(), files::FileError> {
+        let path = files::validate_dataset_path(path)?;
+        files::delete_dataset(self.store.as_ref(), &path).await
+    }
+
+    /// Begin a chunked upload, returning its session id and the part size clients
+    /// should slice to.
+    pub async fn initiate_dataset_upload(
+        &self,
+        path: &str,
+        overwrite: bool,
+    ) -> Result<(uuid::Uuid, usize), files::FileError> {
+        let path = self.dataset_path(path)?;
+        if !overwrite {
+            // Checked up front so a client is not told to upload gigabytes before
+            // discovering the destination is taken.
+            match object_store::ObjectStoreExt::head(self.store.as_ref(), &path).await {
+                Ok(_) => return Err(files::FileError::AlreadyExists(path.to_string())),
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let id = self
+            .uploads
+            .initiate(self.store.as_ref(), path, self.max_upload_bytes())
+            .await?;
+        Ok((id, uploads::PART_SIZE))
+    }
+
+    /// Append one part to a chunked upload.
+    pub async fn upload_dataset_part(
+        &self,
+        id: uuid::Uuid,
+        part_number: u32,
+        bytes: bytes::Bytes,
+    ) -> Result<(), files::FileError> {
+        self.uploads.put_part(id, part_number, bytes).await
+    }
+
+    /// Finish a chunked upload.
+    pub async fn complete_dataset_upload(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<files::UploadResult, files::FileError> {
+        self.uploads.complete(id).await
+    }
+
+    /// Discard a chunked upload.
+    pub async fn abort_dataset_upload(&self, id: uuid::Uuid) -> Result<(), files::FileError> {
+        self.uploads.abort(id).await
     }
 
     /// The processing unit: authenticate a caller, then run queries.

@@ -2,14 +2,14 @@
 
 use ::axum::{
     body::Body,
-    extract::{Path, State},
+    extract::State,
     http::{header, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
 use crate::datalake::DataLake;
 use beacon_core::{
-    api::{QueryMetricsView, QueryRequest},
+    api::QueryRequest,
     query::Query,
     query_result::QueryOutputFile,
     AuthIdentity,
@@ -71,7 +71,7 @@ pub(crate) async fn query(
     // The caller's identity is resolved by the `resolve_identity` middleware and stored in the
     // request extensions: a super-user (e.g. the admin) may run DDL/DML, while anonymous/role
     // users are gated by `validate_query_plan` (and read-authz when enforcement is enabled).
-    let query_result = state.run_query(query, identity).await.map_err(|err| {
+    let query_result = state.runtime().run_query(query, identity).await.map_err(|err| {
         tracing::error!("Error running beacon query: {}", err);
         (StatusCode::BAD_REQUEST, Json(err.to_string()))
     })?;
@@ -124,47 +124,15 @@ async fn handle_query_output_file(
     output_file: QueryOutputFile,
     query_id: uuid::Uuid,
 ) -> Result<Response<Body>, (StatusCode, Json<String>)> {
-    match output_file {
-        QueryOutputFile::Csv(named_temp_file) => {
-            file_stream_response(named_temp_file.path(), "text/csv", "csv", query_id).await
-        }
-        QueryOutputFile::Parquet(named_temp_file) => {
-            file_stream_response(
-                named_temp_file.path(),
-                "application/vnd.apache.parquet",
-                "parquet",
-                query_id,
-            )
-            .await
-        }
-        QueryOutputFile::Ipc(named_temp_file) => {
-            file_stream_response(
-                named_temp_file.path(),
-                "application/vnd.apache.arrow.file",
-                "arrow",
-                query_id,
-            )
-            .await
-        }
-        QueryOutputFile::Json(named_temp_file) => {
-            file_stream_response(named_temp_file.path(), "application/json", "json", query_id).await
-        }
-        QueryOutputFile::Odv(named_temp_file) => {
-            file_stream_response(named_temp_file.path(), "application/zip", "zip", query_id).await
-        }
-        QueryOutputFile::NetCDF(named_temp_file) => {
-            file_stream_response(named_temp_file.path(), "application/netcdf", "nc", query_id).await
-        }
-        QueryOutputFile::GeoParquet(named_temp_file) => {
-            file_stream_response(
-                named_temp_file.path(),
-                "application/vnd.apache.arrow.geo+parquet",
-                "geoparquet",
-                query_id,
-            )
-            .await
-        }
-    }
+    // `QueryOutputFile` carries its own format now, and with it the MIME type and
+    // extension — so the transport no longer restates the format table.
+    file_stream_response(
+        output_file.path(),
+        output_file.kind().content_type(),
+        output_file.kind().suggested_extension().trim_start_matches('.'),
+        query_id,
+    )
+    .await
 }
 
 /// Streams a temporary result file to the client with the appropriate content headers.
@@ -238,14 +206,15 @@ pub(crate) async fn parse_query(Json(_query_obj): Json<QueryRequest>) -> StatusC
     )
 )]
 #[deprecated = "Use /api/default-table-schema instead"]
-pub(crate) async fn available_columns(State(state): State<Arc<DataLake>>) -> Json<Vec<String>> {
-    Json(
-        state
-            .list_default_table_schema_view()
-            .await
-            .fields
-            .iter()
-            .map(|f| f.name.clone())
-            .collect(),
-    )
+pub(crate) async fn available_columns(
+    State(state): State<Arc<DataLake>>,
+    Extension(identity): Extension<AuthIdentity>,
+) -> Json<Vec<String>> {
+    let table = crate::datalake::catalog::default_table(&state);
+    let columns = crate::datalake::catalog::table_schema_view(&state, &table, identity)
+        .await
+        .unwrap_or(None)
+        .map(|schema| schema.fields.iter().map(|f| f.name.clone()).collect())
+        .unwrap_or_default();
+    Json(columns)
 }

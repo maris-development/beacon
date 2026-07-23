@@ -7,8 +7,10 @@
 //!
 //! - [`validate_dataset_path`] is the single anti-traversal gate. Every operation
 //!   routes its user-supplied path through it before touching the store.
-//! - Uploads are streamed (never buffered whole), size-capped, and confined to an
-//!   extension allowlist derived from the formats beacon can actually read.
+//! - Uploads are streamed (never buffered whole) and size-capped. The file *type*
+//!   is deliberately not restricted: a data lake holds whatever the operator puts
+//!   in it, and beacon gains readers over time, so an extension allowlist would
+//!   only block files that are legitimately there.
 //! - Nothing here can read, write, or delete under [`INTERNAL_PREFIX`]; that area
 //!   is owned by beacon's own machinery.
 //!
@@ -32,9 +34,6 @@ pub enum FileError {
     /// characters, or resolved into the beacon-internal prefix. → 400.
     #[error("invalid dataset path: {0}")]
     InvalidPath(String),
-    /// The filename extension is not in the allowlist of readable formats. → 400.
-    #[error("unsupported file extension '{0}'")]
-    UnsupportedExtension(String),
     /// A file already exists at the destination and `overwrite` was not set. → 409.
     #[error("a file already exists at '{0}'; pass overwrite=true to replace it")]
     AlreadyExists(String),
@@ -50,6 +49,14 @@ pub enum FileError {
         path: String,
         dependents: Vec<String>,
     },
+    /// The referenced chunked-upload session does not exist (unknown id, or it
+    /// already completed/expired). → 404.
+    #[error("unknown or expired upload session: {0}")]
+    UnknownUpload(String),
+    /// A chunked-upload part arrived out of order (a gap relative to the next
+    /// expected part). → 409.
+    #[error("upload part {got} is out of order; expected part {expected}")]
+    PartOutOfOrder { got: u32, expected: u32 },
     /// An error reading the request body stream. → 400.
     #[error("error reading upload stream: {0}")]
     Body(std::io::Error),
@@ -123,22 +130,6 @@ fn is_internal(path: &Path) -> bool {
     path.parts()
         .next()
         .is_some_and(|first| first.as_ref() == INTERNAL_PREFIX)
-}
-
-/// Check the file's extension against an allowlist (case-insensitive).
-///
-/// `allowed` is the set of extensions beacon's registered formats recognize, so
-/// an upload can only land if the engine could subsequently read it.
-pub fn validate_extension(path: &Path, allowed: &[String]) -> Result<(), FileError> {
-    let ext = path
-        .filename()
-        .and_then(|name| name.rsplit_once('.'))
-        .map(|(_, ext)| ext.to_ascii_lowercase());
-    match ext {
-        Some(ext) if allowed.iter().any(|a| a.eq_ignore_ascii_case(&ext)) => Ok(()),
-        Some(ext) => Err(FileError::UnsupportedExtension(ext)),
-        None => Err(FileError::UnsupportedExtension("(none)".into())),
-    }
 }
 
 /// Stream `body` into the store at the (already validated) `path`.
@@ -255,22 +246,6 @@ mod tests {
     fn accepts_normal_relative_paths() {
         let path = validate_dataset_path("argo/floats/a.parquet").unwrap();
         assert_eq!(path.to_string(), "argo/floats/a.parquet");
-    }
-
-    #[test]
-    fn extension_allowlist_is_case_insensitive() {
-        let allowed = vec!["parquet".to_string(), "nc".to_string()];
-        let ok = validate_dataset_path("a/B.PARQUET").unwrap();
-        assert!(validate_extension(&ok, &allowed).is_ok());
-
-        let bad = validate_dataset_path("a/b.exe").unwrap();
-        assert!(matches!(
-            validate_extension(&bad, &allowed),
-            Err(FileError::UnsupportedExtension(_))
-        ));
-
-        let none = validate_dataset_path("a/noext").unwrap();
-        assert!(validate_extension(&none, &allowed).is_err());
     }
 
     #[tokio::test]

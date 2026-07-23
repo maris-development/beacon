@@ -47,11 +47,13 @@ pub(super) async fn resolve_identity(
             let auth_str = value.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
             let credential = credential_from_header(auth_str)?;
             runtime
+                .runtime()
                 .authenticate(&credential)
                 .await
                 .map_err(|_| StatusCode::UNAUTHORIZED)?
         }
         None => runtime
+            .runtime()
             .authenticate_anonymous()
             .await
             .unwrap_or_else(|_| AuthIdentity::empty()),
@@ -78,6 +80,7 @@ pub(super) async fn basic_auth(
     let credential = credential_from_header(auth_str)?;
 
     let identity = runtime
+        .runtime()
         .authenticate(&credential)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;

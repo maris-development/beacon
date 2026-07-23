@@ -3,8 +3,7 @@
 use std::sync::Arc;
 
 use ::axum::{extract::State, Json};
-use crate::datalake::DataLake;
-use beacon_core::{sys::SystemInfo};
+use crate::datalake::{sys::SystemInfo, DataLake};
 
 /// Returns Beacon runtime system information (version, host, resource totals).
 #[tracing::instrument(level = "info", skip(state))]
