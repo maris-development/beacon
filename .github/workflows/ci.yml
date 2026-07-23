@@ -18,6 +18,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check layer boundary (beacon-db must not depend on beacon-datalake)
+        run: ./scripts/check-layer-boundary.sh
+
       - name: Install system dependencies (Dockerfile parity)
         run: |
           sudo apt-get update

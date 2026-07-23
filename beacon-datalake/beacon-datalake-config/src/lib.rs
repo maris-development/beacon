@@ -88,6 +88,7 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    /// Query memory pool size, in **megabytes** (the runtime builder takes bytes).
     pub vm_memory_size: usize,
     pub sanitize_schema: bool,
     pub st_within_point_cache_size: usize,
@@ -240,6 +241,7 @@ struct RawConfig {
     log_level: String,
 
     //VM Settings
+    /// Query memory pool size, in **megabytes**.
     #[envconfig(from = "BEACON_VM_MEMORY_SIZE", default = "8192")]
     vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]

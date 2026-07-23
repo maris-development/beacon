@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-beacon-core = { path = "../beacon-core" }
+beacon-core = { path = "../../beacon-db/beacon-core" }
 rmcp = { version = "=1.8.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
 tokio = { workspace = true }
 futures = { workspace = true }

@@ -24,30 +24,9 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # COPY SOURCE
 
+# Two source trees: the engine and the application that runs on it.
+COPY beacon-db/ /beacon-db/
 COPY beacon-datalake/ /beacon-datalake/
-COPY beacon-auth/ /beacon-auth/
-COPY beacon-file-formats/beacon-arrow-atlas/ /beacon-file-formats/beacon-arrow-atlas/
-COPY beacon-file-formats/beacon-arrow-netcdf/ /beacon-file-formats/beacon-arrow-netcdf/
-COPY beacon-file-formats/beacon-arrow-tiff/ /beacon-file-formats/beacon-arrow-tiff/
-COPY beacon-file-formats/beacon-arrow-zarr/ /beacon-file-formats/beacon-arrow-zarr/
-COPY beacon-file-formats/beacon-arrow-odv/ /beacon-file-formats/beacon-arrow-odv/
-COPY beacon-file-formats/beacon-binary-format/ /beacon-file-formats/beacon-binary-format/
-COPY beacon-common/ /beacon-common/
-COPY beacon-config/ /beacon-config/
-COPY beacon-core/ /beacon-core/
-COPY beacon-datafusion-ext/ /beacon-datafusion-ext/
-COPY beacon-file-formats/beacon-arrow-ipc/ /beacon-file-formats/beacon-arrow-ipc/
-COPY beacon-file-formats/beacon-arrow-csv/ /beacon-file-formats/beacon-arrow-csv/
-COPY beacon-file-formats/beacon-arrow-parquet/ /beacon-file-formats/beacon-arrow-parquet/
-COPY beacon-file-formats/beacon-arrow-geoparquet/ /beacon-file-formats/beacon-arrow-geoparquet/
-COPY beacon-file-formats/beacon-arrow-bbf/ /beacon-file-formats/beacon-arrow-bbf/
-COPY beacon-functions/ /beacon-functions/
-COPY beacon-file-formats/beacon-lance/ /beacon-file-formats/beacon-lance/
-COPY beacon-file-formats/beacon-nd-array/ /beacon-file-formats/beacon-nd-array/
-COPY beacon-file-formats/beacon-nd-arrow/ /beacon-file-formats/beacon-nd-arrow/
-COPY beacon-object-storage/ /beacon-object-storage/
-COPY beacon-sql-databases/ /beacon-sql-databases/
-COPY beacon-file-formats/beacon-delta/ /beacon-file-formats/beacon-delta/
 COPY Cargo.toml /
 COPY Cargo.lock /
 COPY rust-toolchain /

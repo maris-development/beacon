@@ -218,7 +218,10 @@ async fn build_runtime(
         )
         .with_auth_enforcement(config.auth.enforce)
         .with_batch_size(config.runtime.batch_size)
-        .with_vm_memory_limit(config.runtime.vm_memory_size)
+        // `BEACON_VM_MEMORY_SIZE` is megabytes (default 8192 = 8 GiB); the
+        // builder takes bytes. Passing it through unconverted yields an 8 KB
+        // query pool, which fails the first ORDER BY that needs to sort.
+        .with_vm_memory_limit(config.runtime.vm_memory_size.saturating_mul(1024 * 1024))
         .with_crawler(config.crawler.clone())
         .with_netcdf_config(config.netcdf.clone())
         .with_sql_settings(SqlSettings {

@@ -5,20 +5,23 @@
 
 use std::sync::Arc;
 
+use crate::datalake::DataLake;
 use ::axum::{
     body::{to_bytes, Body},
     http::{header, Request, StatusCode},
     Router,
 };
 use base64::{engine::general_purpose, Engine as _};
-use crate::datalake::DataLake;
 use tower::ServiceExt;
 
 use super::setup_router;
 
 /// Config rooted at `dir`, with a deliberately small upload cap so the `413`
 /// path is exercisable, and filesystem events off (no watcher on the temp dir).
-fn temp_config(dir: &std::path::Path, max_upload_bytes: u64) -> Arc<beacon_datalake_config::Config> {
+fn temp_config(
+    dir: &std::path::Path,
+    max_upload_bytes: u64,
+) -> Arc<beacon_datalake_config::Config> {
     let mut config = beacon_datalake_config::Config::load().expect("load config");
     config.auth.anonymous_enabled = true;
     config.sql.enable = true;
@@ -259,9 +262,7 @@ async fn chunked_upload_round_trip_and_download() {
             &router,
             request(
                 "PUT",
-                &format!(
-                    "/api/admin/datasets/upload/part?upload_id={upload_id}&part_number={n}"
-                ),
+                &format!("/api/admin/datasets/upload/part?upload_id={upload_id}&part_number={n}"),
                 Some(&admin),
                 Body::from(payload),
             ),

@@ -49,14 +49,14 @@ sysinfo = { workspace = true }
 
 # Local dependencies
 beacon-datalake-config = { path = "../beacon-datalake-config" }
-beacon-core = { path = "../beacon-core" }
-beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+beacon-core = { path = "../../beacon-db/beacon-core" }
+beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
 beacon-mcp = { path = "../beacon-mcp" }
 
 [dev-dependencies]
 # Tests build runtimes directly via `RuntimeBuilder` (ephemeral temp dirs + an
 # in-memory auth provider), so no test-only feature is needed.
-beacon-core = { path = "../beacon-core" }
+beacon-core = { path = "../../beacon-db/beacon-core" }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
 tower = { version = "0.5", features = ["util"] }
 # Temp storage roots for the admin dataset file-management HTTP tests.

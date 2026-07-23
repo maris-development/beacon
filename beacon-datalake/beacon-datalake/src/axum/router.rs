@@ -43,10 +43,20 @@ pub(crate) fn setup_router(
         beacon_runtime.clone(),
         crate::axum::auth::resolve_identity,
     ));
-    let admin_router = admin_router.layer(::axum::middleware::from_fn_with_state(
-        beacon_runtime.clone(),
-        crate::axum::auth::basic_auth,
-    ));
+    // `basic_auth` gates admin routes on the super-user; `resolve_identity` puts
+    // that identity in the request extensions. Admin handlers need it too, now
+    // that they read the catalog by running SQL as the caller rather than through
+    // privileged accessors. Layers apply bottom-up, so `resolve_identity` is
+    // listed second to run after the gate.
+    let admin_router = admin_router
+        .layer(::axum::middleware::from_fn_with_state(
+            beacon_runtime.clone(),
+            crate::axum::auth::resolve_identity,
+        ))
+        .layer(::axum::middleware::from_fn_with_state(
+            beacon_runtime.clone(),
+            crate::axum::auth::basic_auth,
+        ));
 
     api_docs_client.merge(api_docs_admin);
     api_docs_client = set_api_docs_info(api_docs_client, &config.api_docs);

@@ -509,8 +509,11 @@ async fn non_super_user_cannot_manage_auth_or_run_ddl() {
 
 /// The bundled parquet fixture used to back dataset files.
 fn parquet_fixture() -> PathBuf {
+    // `beacon-db/beacon-core` -> up two, to the workspace root that holds
+    // `test-datasets/`.
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
+        .ancestors()
+        .nth(2)
         .expect("workspace root")
         .join("test-datasets/test_file.parquet")
 }
