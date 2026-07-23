@@ -10,12 +10,7 @@ use anyhow::Context;
 use tokio::runtime::Builder;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::axum::setup_router;
-
-mod auth;
-mod axum;
-mod datalake;
-mod flight_sql;
+use beacon_datalake::{axum::setup_router, flight_sql, DataLake};
 
 #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
 use tikv_jemallocator::Jemalloc;
@@ -50,7 +45,7 @@ async fn async_main(config: Arc<beacon_datalake_config::Config>) -> anyhow::Resu
 
     tracing::info!("Beacon v{}", BEACON_VERSION);
     // The lake owns the datasets store and hosts the runtime that queries it.
-    let lake = Arc::new(crate::datalake::DataLake::open(config.clone()).await?);
+    let lake = Arc::new(DataLake::open(config.clone()).await?);
     // Keep both transports on the same lake so metadata and access rules stay aligned.
     let router = setup_router(lake.clone(), config.clone())?;
 

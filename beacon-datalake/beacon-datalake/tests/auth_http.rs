@@ -2,6 +2,8 @@
 //! middleware and the super-user `basic_auth` admin gate, driven through the real router with
 //! `tower::ServiceExt::oneshot`.
 
+mod common;
+
 use std::sync::Arc;
 
 use ::axum::{
@@ -9,39 +11,22 @@ use ::axum::{
     http::{header, Request, StatusCode},
     Router,
 };
-use base64::{engine::general_purpose, Engine as _};
-use crate::datalake::DataLake;
+use beacon_core::runtime::Runtime;
+use common::{basic, config, unique};
 use futures::TryStreamExt;
 use tower::ServiceExt;
 
-use super::setup_router;
+use beacon_datalake::axum::setup_router;
 
-/// Config with explicit auth + SQL settings; everything else from the environment.
-fn config(enforce: bool) -> Arc<beacon_datalake_config::Config> {
-    let mut config = beacon_datalake_config::Config::load().expect("load config");
-    config.auth.enforce = enforce;
-    config.auth.anonymous_enabled = true;
-    config.sql.enable = true;
-    Arc::new(config)
-}
-
-async fn runtime(config: Arc<beacon_datalake_config::Config>) -> Arc<DataLake> {
-    Arc::new(
-        Runtime::new_with_in_memory_auth(config)
-            .await
-            .expect("runtime should start"),
-    )
-}
-
-fn unique(prefix: &str) -> String {
-    format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
-}
-
-fn basic(username: &str, password: &str) -> String {
-    format!(
-        "Basic {}",
-        general_purpose::STANDARD.encode(format!("{username}:{password}"))
-    )
+/// Opens an ephemeral lake from `config` and returns it with the `Arc<Config>`
+/// the router should use — the lake's own config, which carries the ephemeral
+/// temp paths but keeps the auth/admin settings unchanged.
+async fn lake(
+    config: beacon_datalake_config::Config,
+) -> (common::TestLake, Arc<beacon_datalake_config::Config>) {
+    let lake = common::lake_with(config).await;
+    let cfg = lake.lake.config().clone();
+    (lake, cfg)
 }
 
 /// Runs setup SQL as a super-user directly against the runtime (test fixture).
@@ -86,14 +71,13 @@ async fn status(router: &Router, req: Request<Body>) -> StatusCode {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn admin_route_requires_a_super_user() {
-    let config = config(false);
-    let runtime = runtime(config.clone()).await;
+    let (lake, config) = lake(config(false)).await;
     // A non-super-user to exercise the 403 path.
-    seed(&runtime, "CREATE ROLE reader").await;
-    seed(&runtime, "CREATE USER alice WITH PASSWORD 'pw'").await;
-    seed(&runtime, "GRANT ROLE reader TO USER alice").await;
+    seed(lake.lake.runtime(), "CREATE ROLE reader").await;
+    seed(lake.lake.runtime(), "CREATE USER alice WITH PASSWORD 'pw'").await;
+    seed(lake.lake.runtime(), "GRANT ROLE reader TO USER alice").await;
 
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
 
     // No credentials → 401.
     assert_eq!(
@@ -133,9 +117,8 @@ async fn admin_route_requires_a_super_user() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_query_anonymous_reads_but_cannot_write() {
-    let config = config(false);
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(config(false)).await;
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let table = unique("t");
 
     // Anonymous SELECT is allowed (read-only, enforcement off).
@@ -168,21 +151,21 @@ async fn client_query_anonymous_reads_but_cannot_write() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforced_http_query_respects_table_grants() {
-    let config = config(true);
-    let runtime = runtime(config.clone()).await;
+    let (lake, config) = lake(config(true)).await;
+    let rt = lake.lake.runtime();
 
     let t1 = unique("t1");
     let t2 = unique("t2");
-    seed(&runtime, &format!("CREATE TABLE {t1} (a BIGINT)")).await;
-    seed(&runtime, &format!("INSERT INTO {t1} VALUES (1)")).await;
-    seed(&runtime, &format!("CREATE TABLE {t2} (a BIGINT)")).await;
-    seed(&runtime, &format!("INSERT INTO {t2} VALUES (2)")).await;
-    seed(&runtime, "CREATE ROLE reader").await;
-    seed(&runtime, "CREATE USER alice WITH PASSWORD 'pw'").await;
-    seed(&runtime, "GRANT ROLE reader TO USER alice").await;
-    seed(&runtime, &format!("GRANT SELECT ON TABLE {t1} TO ROLE reader")).await;
+    seed(rt, &format!("CREATE TABLE {t1} (a BIGINT)")).await;
+    seed(rt, &format!("INSERT INTO {t1} VALUES (1)")).await;
+    seed(rt, &format!("CREATE TABLE {t2} (a BIGINT)")).await;
+    seed(rt, &format!("INSERT INTO {t2} VALUES (2)")).await;
+    seed(rt, "CREATE ROLE reader").await;
+    seed(rt, "CREATE USER alice WITH PASSWORD 'pw'").await;
+    seed(rt, "GRANT ROLE reader TO USER alice").await;
+    seed(rt, &format!("GRANT SELECT ON TABLE {t1} TO ROLE reader")).await;
 
-    let router = setup_router(runtime, config).unwrap();
+    let router = setup_router(lake.lake.clone(), config).unwrap();
     let auth = basic("alice", "pw");
 
     // Granted table → 200.

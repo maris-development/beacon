@@ -124,6 +124,12 @@ impl Runtime {
     ) -> anyhow::Result<QueryResult> {
         let metrics = MetricsTracker::new(query_json, query_id);
         metrics.set_logical_plan(&plan);
+        // Record the optimized logical plan alongside the parsed one. `optimize`
+        // errors for `Statement` plans (`SET ...`), which have nothing to
+        // optimize — leave the column null in that case rather than failing.
+        if let Ok(optimized) = self.session_ctx.state().optimize(&plan) {
+            metrics.set_optimized_logical_plan(&optimized);
+        }
         let (stream, physical_plan) =
             crate::statement_plan::execute_statement_plan_tracked(&self.session_ctx, plan).await?;
         // The physical plan's per-node metrics fill in as the stream drains, and the
@@ -173,6 +179,9 @@ impl Runtime {
 
         let metrics = MetricsTracker::new(query_json, query_id);
         metrics.set_logical_plan(&copy_plan);
+        if let Ok(optimized) = self.session_ctx.state().optimize(&copy_plan) {
+            metrics.set_optimized_logical_plan(&optimized);
+        }
         let (mut stream, physical_plan) =
             crate::statement_plan::execute_statement_plan_tracked(&self.session_ctx, copy_plan)
                 .await?;

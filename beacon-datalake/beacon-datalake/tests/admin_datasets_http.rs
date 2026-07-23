@@ -3,55 +3,38 @@
 //! `tower::ServiceExt::oneshot`. Storage is rooted at a temp directory so the
 //! tests never touch the developer's `./data`.
 
+mod common;
+
 use std::sync::Arc;
 
-use crate::datalake::DataLake;
 use ::axum::{
     body::{to_bytes, Body},
     http::{header, Request, StatusCode},
     Router,
 };
-use base64::{engine::general_purpose, Engine as _};
+use common::basic;
 use tower::ServiceExt;
 
-use super::setup_router;
+use beacon_datalake::axum::setup_router;
 
-/// Config rooted at `dir`, with a deliberately small upload cap so the `413`
-/// path is exercisable, and filesystem events off (no watcher on the temp dir).
-fn temp_config(
-    dir: &std::path::Path,
-    max_upload_bytes: u64,
-) -> Arc<beacon_datalake_config::Config> {
-    let mut config = beacon_datalake_config::Config::load().expect("load config");
-    config.auth.anonymous_enabled = true;
-    config.sql.enable = true;
-    config.storage.data_dir = dir.to_path_buf();
-    config.storage.datasets_dir = dir.join("datasets");
-    config.storage.db_path = None; // in-memory tables store (runtime uses in-memory auth)
-    config.storage.tmp_dir = dir.join("tmp");
-    config.storage.enable_fs_events = false;
-    config.storage.max_upload_bytes = max_upload_bytes;
-    // The local object stores canonicalize their root, so the directories must
-    // exist before the runtime builds them.
-    for sub in ["datasets", "tmp"] {
-        std::fs::create_dir_all(dir.join(sub)).expect("create storage dir");
-    }
-    Arc::new(config)
+/// Test config with a deliberately small upload cap so the `413` path is
+/// exercisable. The datasets/tmp/tables paths come from the ephemeral lake, so
+/// only the upload cap (and the shared auth/sql defaults) need setting here.
+fn temp_config(max_upload_bytes: u64) -> beacon_datalake_config::Config {
+    let mut config = common::config(false);
+    config.server.max_upload_bytes = max_upload_bytes;
+    config
 }
 
-async fn runtime(config: Arc<beacon_datalake_config::Config>) -> Arc<DataLake> {
-    Arc::new(
-        Runtime::new_with_in_memory_auth(config)
-            .await
-            .expect("runtime should start"),
-    )
-}
-
-fn basic(username: &str, password: &str) -> String {
-    format!(
-        "Basic {}",
-        general_purpose::STANDARD.encode(format!("{username}:{password}"))
-    )
+/// Opens an ephemeral lake from `config` and returns it with the `Arc<Config>`
+/// the router should use — the lake's own config, which carries the upload cap
+/// and the ephemeral temp paths.
+async fn lake(
+    config: beacon_datalake_config::Config,
+) -> (common::TestLake, Arc<beacon_datalake_config::Config>) {
+    let lake = common::lake_with(config).await;
+    let cfg = lake.lake.config().clone();
+    (lake, cfg)
 }
 
 fn request(method: &str, uri: &str, auth: Option<&str>, body: Body) -> Request<Body> {
@@ -71,10 +54,8 @@ async fn send(router: &Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn upload_download_delete_round_trip_is_super_user_only() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let config = temp_config(dir.path(), 1024);
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(temp_config(1024)).await;
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let admin = basic(&config.admin.username, &config.admin.password);
 
     let upload_uri = "/api/admin/datasets/upload?path=ctd/a.parquet";
@@ -161,10 +142,8 @@ async fn upload_download_delete_round_trip_is_super_user_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn upload_rejects_traversal_extension_and_oversize() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let config = temp_config(dir.path(), 8); // 8-byte cap
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(temp_config(8)).await; // 8-byte cap
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let admin = basic(&config.admin.username, &config.admin.password);
 
     // Path traversal → 400.
@@ -193,7 +172,8 @@ async fn upload_rejects_traversal_extension_and_oversize() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // Unsupported extension → 400.
+    // Any extension is accepted — the upload path no longer inspects it — so an
+    // `.exe` within the size cap is stored like any other file.
     let (status, _) = send(
         &router,
         request(
@@ -204,7 +184,7 @@ async fn upload_rejects_traversal_extension_and_oversize() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
 
     // Over the 8-byte cap → 413, and nothing is left behind.
     let (status, _) = send(
@@ -234,10 +214,8 @@ async fn upload_rejects_traversal_extension_and_oversize() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chunked_upload_round_trip_and_download() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let config = temp_config(dir.path(), 1024);
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(temp_config(1024)).await;
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let admin = basic(&config.admin.username, &config.admin.password);
 
     // Initiate → 200 with an upload_id.
@@ -304,10 +282,8 @@ async fn chunked_upload_round_trip_and_download() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn chunked_upload_rejects_unknown_session_and_out_of_order() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let config = temp_config(dir.path(), 1024);
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(temp_config(1024)).await;
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let admin = basic(&config.admin.username, &config.admin.password);
 
     // A part for an unknown session → 404.

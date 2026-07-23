@@ -246,3 +246,28 @@ pub fn scalar_i64(batches: &[RecordBatch]) -> i64 {
 pub fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|b| b.num_rows()).sum()
 }
+
+/// All values of the Utf8 column at `col`, in row order across batches.
+pub fn column_strings(batches: &[RecordBatch], col: usize) -> Vec<String> {
+    use arrow::array::{Array, StringArray};
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let column = batch
+                .column(col)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("expected a Utf8 column");
+            (0..column.len())
+                .map(|i| column.value(i).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The single string in a one-row result whose first column is Utf8.
+pub fn scalar_string(batches: &[RecordBatch]) -> String {
+    let values = column_strings(batches, 0);
+    assert_eq!(values.len(), 1, "expected exactly one row");
+    values.into_iter().next().unwrap()
+}

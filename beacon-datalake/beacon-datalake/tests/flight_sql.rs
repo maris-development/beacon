@@ -1,67 +1,35 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+mod common;
+
+use std::{net::SocketAddr, time::Duration};
 
 use arrow_flight::sql::{CommandGetDbSchemas, CommandGetTables};
-use arrow_flight::{
-    flight_service_server::FlightServiceServer, sql::client::FlightSqlServiceClient,
-};
+use arrow_flight::sql::client::FlightSqlServiceClient;
 use futures::TryStreamExt;
 use tonic::transport::{Channel, Endpoint, Server};
 
-use crate::flight_sql::service::BeaconFlightSqlService;
-
-async fn spawn_server(allow_anonymous: bool) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let tmp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = tmp.local_addr().unwrap().port();
-    drop(tmp);
-
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let runtime = Arc::new(beacon_core::runtime::Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_datalake_config::Config::load().unwrap())).await.unwrap());
-    let service = BeaconFlightSqlService::new_with_options(runtime, allow_anonymous).unwrap();
-
-    let handle = tokio::spawn(async move {
-        Server::builder()
-            .add_service(FlightServiceServer::new(service))
-            .serve(addr)
-            .await
-            .unwrap();
-    });
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if std::net::TcpStream::connect(addr).is_ok() {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("Flight SQL test server did not become ready within 5 seconds");
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    (addr, handle)
+/// A running loopback Flight SQL server: its address, the lake it serves (held
+/// so its temp root outlives the server), and the serve task's handle.
+struct TestServer {
+    addr: SocketAddr,
+    lake: common::TestLake,
+    handle: tokio::task::JoinHandle<()>,
 }
 
-/// Like [`spawn_server`] but returns the shared `Runtime` so the test can also
-/// issue queries directly against the same instance (used by the federation
-/// loopback test, where one Runtime is both the remote and the originator).
-async fn spawn_server_with_runtime(
-    allow_anonymous: bool,
-) -> (
-    SocketAddr,
-    Arc<beacon_core::runtime::Runtime>,
-    tokio::task::JoinHandle<()>,
-) {
+/// Spawns a Flight SQL server on an ephemeral loopback port, backed by a fresh
+/// ephemeral lake. `allow_anonymous` sets the service's anonymous-access policy.
+async fn spawn_server(allow_anonymous: bool) -> TestServer {
     let tmp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = tmp.local_addr().unwrap().port();
     drop(tmp);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let runtime = Arc::new(beacon_core::runtime::Runtime::new_with_in_memory_auth(std::sync::Arc::new(beacon_datalake_config::Config::load().unwrap())).await.unwrap());
+    let lake = common::test_lake().await;
     let service =
-        BeaconFlightSqlService::new_with_options(runtime.clone(), allow_anonymous).unwrap();
+        beacon_datalake::flight_sql::flight_service(lake.lake.clone(), allow_anonymous).unwrap();
 
     let handle = tokio::spawn(async move {
         Server::builder()
-            .add_service(FlightServiceServer::new(service))
+            .add_service(service)
             .serve(addr)
             .await
             .unwrap();
@@ -78,7 +46,7 @@ async fn spawn_server_with_runtime(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    (addr, runtime, handle)
+    TestServer { addr, lake, handle }
 }
 
 async fn run_sql_rows(
@@ -112,18 +80,19 @@ async fn client(addr: SocketAddr) -> FlightSqlServiceClient<Channel> {
 #[tokio::test(flavor = "multi_thread")]
 async fn federated_remote_table_pushes_down_and_streams() {
     // Anonymous access on the remote: remote tables connect without credentials.
-    let (addr, runtime, handle) = spawn_server_with_runtime(true).await;
-    let port = addr.port();
+    let server = spawn_server(true).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
 
-    // Unique names: `Runtime::new` shares an on-disk catalog across tests.
+    // Unique names so the shared process-wide test state can't collide.
     let suffix = uuid::Uuid::new_v4().simple();
     let obs = format!("obs_{suffix}");
     let remote_obs = format!("remote_obs_{suffix}");
 
     // Seed the "remote" table.
-    run_sql_rows(&runtime, &format!("CREATE TABLE {obs} (id BIGINT, val DOUBLE)")).await;
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT, val DOUBLE)")).await;
     run_sql_rows(
-        &runtime,
+        runtime,
         &format!("INSERT INTO {obs} VALUES (1, 10.0), (2, 20.0), (3, 30.0)"),
     )
     .await;
@@ -131,7 +100,7 @@ async fn federated_remote_table_pushes_down_and_streams() {
     // Register a federated remote table pointing at the loopback Flight SQL port.
     // No credentials — the remote allows anonymous access.
     run_sql_rows(
-        &runtime,
+        runtime,
         &format!(
             "CREATE EXTERNAL TABLE {remote_obs} STORED AS REMOTE \
              LOCATION 'beacon://127.0.0.1:{port}/{obs}'"
@@ -139,16 +108,26 @@ async fn federated_remote_table_pushes_down_and_streams() {
     )
     .await;
 
-    // Schema was fetched from the remote at registration.
-    let schema = runtime
-        .list_table_schema(remote_obs.clone())
-        .await
-        .expect("remote table schema should be available");
-    assert_eq!(schema.fields().len(), 2);
+    // Schema was fetched from the remote at registration: two columns are
+    // visible through the catalog (`information_schema.columns`).
+    let column_count = run_sql_rows(
+        runtime,
+        &format!(
+            "SELECT count(*) FROM information_schema.columns WHERE table_name = '{remote_obs}'"
+        ),
+    )
+    .await;
+    let columns = column_count[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(columns, 2, "the remote table should expose its two columns");
 
     // A filtered aggregate over the remote table returns the correct result.
     let batches = run_sql_rows(
-        &runtime,
+        runtime,
         &format!("SELECT count(*) AS c, sum(val) AS s FROM {remote_obs} WHERE id > 1"),
     )
     .await;
@@ -165,7 +144,7 @@ async fn federated_remote_table_pushes_down_and_streams() {
     // The plan federates the scan (pushed to the remote), rather than scanning
     // locally — confirm a federated/virtual node appears in the physical plan.
     let explain = run_sql_rows(
-        &runtime,
+        runtime,
         &format!("EXPLAIN SELECT count(*) FROM {remote_obs} WHERE id > 1"),
     )
     .await;
@@ -179,21 +158,19 @@ async fn federated_remote_table_pushes_down_and_streams() {
         "expected a federated scan node in the plan, got:\n{explain_text}"
     );
 
-    // Clean up the shared on-disk catalog.
-    run_sql_rows(&runtime, &format!("DROP TABLE {remote_obs}")).await;
-    run_sql_rows(&runtime, &format!("DROP TABLE {obs}")).await;
+    run_sql_rows(runtime, &format!("DROP TABLE {remote_obs}")).await;
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
 
-    handle.abort();
+    server.handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn handshake_execute_and_metadata_work() {
-    let (addr, handle) = spawn_server(false).await;
-    let mut client = client(addr).await;
+    let server = spawn_server(false).await;
+    let mut client = client(server.addr).await;
 
-    let admin = beacon_datalake_config::Config::load().unwrap().admin;
     client
-        .handshake(&admin.username, &admin.password)
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
         .await
         .unwrap();
     assert!(client.token().is_some());
@@ -258,17 +235,16 @@ async fn handshake_execute_and_metadata_work() {
         .unwrap();
     assert!(!table_batches.is_empty());
 
-    handle.abort();
+    server.handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn prepared_statement_flow_works() {
-    let (addr, handle) = spawn_server(false).await;
-    let mut client = client(addr).await;
+    let server = spawn_server(false).await;
+    let mut client = client(server.addr).await;
 
-    let admin = beacon_datalake_config::Config::load().unwrap().admin;
     client
-        .handshake(&admin.username, &admin.password)
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
         .await
         .unwrap();
 
@@ -291,13 +267,13 @@ async fn prepared_statement_flow_works() {
     assert_eq!(batches[0].num_rows(), 1);
 
     prepared.close().await.unwrap();
-    handle.abort();
+    server.handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn anonymous_metadata_and_select_work() {
-    let (addr, handle) = spawn_server(true).await;
-    let mut client = client(addr).await;
+    let server = spawn_server(true).await;
+    let mut client = client(server.addr).await;
 
     let catalogs = client.get_catalogs().await.unwrap();
     let catalog_batches = client
@@ -341,13 +317,13 @@ async fn anonymous_metadata_and_select_work() {
     assert_eq!(prepared_batches[0].num_rows(), 1);
 
     prepared.close().await.unwrap();
-    handle.abort();
+    server.handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn anonymous_write_statement_is_rejected() {
-    let (addr, handle) = spawn_server(true).await;
-    let mut client = client(addr).await;
+    let server = spawn_server(true).await;
+    let mut client = client(server.addr).await;
 
     let error = client
         .execute(
@@ -362,5 +338,5 @@ async fn anonymous_write_statement_is_rejected() {
             || error_message.contains("anonymous Flight SQL access only supports")
     );
 
-    handle.abort();
+    server.handle.abort();
 }

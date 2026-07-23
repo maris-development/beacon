@@ -143,6 +143,20 @@ pub(crate) fn upgrade_session(cell: &SessionCell, who: &str) -> anyhow::Result<A
         .ok_or_else(|| anyhow::anyhow!("{who}: beacon session context is unavailable"))
 }
 
+/// The bare value of a parsed object name, for use as a storage/lookup key.
+/// `ObjectName::Display` re-adds SQL quoting, so lowering via `to_string()`
+/// would store `CREATE CRAWLER "c1"` under the key `"c1"` instead of `c1`.
+fn object_name_value(name: &datafusion::sql::sqlparser::ast::ObjectName) -> String {
+    name.0
+        .iter()
+        .map(|part| match part.as_ident() {
+            Some(ident) => ident.value.clone(),
+            None => part.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 /// Build the logical plan for an auth-management statement (CREATE/DROP USER/ROLE, GRANT/DENY/
 /// REVOKE). Lowered to an [`Extension`] node so it inherits the super-user gate in
 /// [`validate_query_plan`] (all beacon extension nodes are super-user-only).
@@ -161,7 +175,7 @@ pub(crate) fn create_materialized_view_plan(
 ) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::CreateMaterializedViewNode::new(
-            statement.view_name.to_string(),
+            object_name_value(&statement.view_name),
             statement.query_sql,
         )),
     })
@@ -170,7 +184,7 @@ pub(crate) fn create_materialized_view_plan(
 /// Build the logical plan for `REFRESH [TABLE] <name>`.
 pub(crate) fn refresh_plan(statement: RefreshStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::RefreshNode::new(statement.name.to_string())),
+        node: Arc::new(logical::RefreshNode::new(object_name_value(&statement.name))),
     })
 }
 
@@ -179,7 +193,7 @@ pub(crate) fn create_crawler_plan(statement: CreateCrawlerStatement) -> LogicalP
     let options: Vec<(String, String)> = statement.options.into_iter().collect();
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::CreateCrawlerNode::new(
-            statement.name.to_string(),
+            object_name_value(&statement.name),
             statement.target_prefix,
             options,
         )),
@@ -189,14 +203,14 @@ pub(crate) fn create_crawler_plan(statement: CreateCrawlerStatement) -> LogicalP
 /// Build the logical plan for `RUN CRAWLER <name>`.
 pub(crate) fn run_crawler_plan(statement: RunCrawlerStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::RunCrawlerNode::new(statement.name.to_string())),
+        node: Arc::new(logical::RunCrawlerNode::new(object_name_value(&statement.name))),
     })
 }
 
 /// Build the logical plan for `DROP CRAWLER <name>`.
 pub(crate) fn drop_crawler_plan(statement: DropCrawlerStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::DropCrawlerNode::new(statement.name.to_string())),
+        node: Arc::new(logical::DropCrawlerNode::new(object_name_value(&statement.name))),
     })
 }
 
@@ -212,7 +226,7 @@ pub(crate) fn set_extension_plan(statement: SetExtensionStatement) -> LogicalPla
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::SetExtensionNode::new(
             statement.kind,
-            statement.table.to_string(),
+            object_name_value(&statement.table),
             statement.json,
         )),
     })
@@ -223,7 +237,7 @@ pub(crate) fn drop_extension_plan(statement: DropExtensionStatement) -> LogicalP
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::DropExtensionNode::new(
             statement.kind,
-            statement.table.to_string(),
+            object_name_value(&statement.table),
         )),
     })
 }
@@ -231,7 +245,7 @@ pub(crate) fn drop_extension_plan(statement: DropExtensionStatement) -> LogicalP
 /// Build the logical plan for `SHOW EXTENSIONS FOR <table>`.
 pub(crate) fn show_extensions_plan(statement: ShowExtensionsStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
-        node: Arc::new(logical::ShowExtensionsNode::new(statement.table.to_string())),
+        node: Arc::new(logical::ShowExtensionsNode::new(object_name_value(&statement.table))),
     })
 }
 
@@ -239,9 +253,9 @@ pub(crate) fn show_extensions_plan(statement: ShowExtensionsStatement) -> Logica
 pub(crate) fn create_index_plan(statement: CreateIndexStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::CreateIndexNode {
-            table: statement.table.to_string(),
+            table: object_name_value(&statement.table),
             column: statement.column,
-            name: statement.name.map(|n| n.to_string()),
+            name: statement.name.as_ref().map(object_name_value),
             using: statement.using,
         }),
     })
@@ -251,8 +265,8 @@ pub(crate) fn create_index_plan(statement: CreateIndexStatement) -> LogicalPlan 
 pub(crate) fn drop_index_plan(statement: DropIndexStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::DropIndexNode {
-            table: statement.table.to_string(),
-            name: statement.name.to_string(),
+            table: object_name_value(&statement.table),
+            name: object_name_value(&statement.name),
         }),
     })
 }
@@ -261,7 +275,7 @@ pub(crate) fn drop_index_plan(statement: DropIndexStatement) -> LogicalPlan {
 pub(crate) fn show_indexes_plan(statement: ShowIndexesStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::ShowIndexesNode {
-            table: statement.table.to_string(),
+            table: object_name_value(&statement.table),
         }),
     })
 }

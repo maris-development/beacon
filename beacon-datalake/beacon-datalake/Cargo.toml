@@ -10,6 +10,14 @@ edition = "2021"
 tikv-jemallocator = {workspace = true, optional = true}
 pprof = {workspace = true}
 
+[lib]
+name = "beacon_datalake"
+path = "src/lib.rs"
+
+[[bin]]
+name = "beacon-datalake"
+path = "src/main.rs"
+
 [features]
 jemalloc = ["dep:tikv-jemallocator"]
 
@@ -46,6 +54,9 @@ object_store = { workspace = true }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 sysinfo = { workspace = true }
+# `DataLake::open_ephemeral` builds its data root in a temp dir, so this belongs
+# to the library, not only to the tests.
+tempfile = { workspace = true }
 
 # Local dependencies
 beacon-datalake-config = { path = "../beacon-datalake-config" }
@@ -59,5 +70,3 @@ beacon-mcp = { path = "../beacon-mcp" }
 beacon-core = { path = "../../beacon-db/beacon-core" }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
 tower = { version = "0.5", features = ["util"] }
-# Temp storage roots for the admin dataset file-management HTTP tests.
-tempfile = { workspace = true }

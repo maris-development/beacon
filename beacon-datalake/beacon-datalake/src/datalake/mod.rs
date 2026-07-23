@@ -51,6 +51,12 @@ impl DataLake {
     /// Open the data lake described by `config`: build the datasets store, then
     /// start a runtime over it.
     pub async fn open(config: Arc<Config>) -> anyhow::Result<Self> {
+        Self::open_with(config, true).await
+    }
+
+    /// `persist` selects the tables store: a single redb file at
+    /// `config.data.db_file`, or in-memory when false.
+    async fn open_with(config: Arc<Config>, persist: bool) -> anyhow::Result<Self> {
         let datasets_dir = config.data.datasets.clone();
         let store: Arc<dyn ObjectStore> = Arc::new(
             object_store::local::LocalFileSystem::new_with_prefix(&datasets_dir).with_context(
@@ -60,7 +66,7 @@ impl DataLake {
         let store_url = ObjectStoreUrl::parse(DATASETS_STORE_URL)
             .context("invalid datasets store URL")?;
 
-        let runtime = build_runtime(&config, store_url, datasets_dir, store.clone())
+        let runtime = build_runtime(&config, store_url, datasets_dir, store.clone(), persist)
             .await
             .context("failed to start the beacon runtime")?;
 
@@ -176,6 +182,46 @@ impl DataLake {
         self.uploads.abort(id).await
     }
 
+    /// Open a lake whose state is entirely ephemeral: datasets under a fresh
+    /// temporary directory, and — because no db path is set — an in-memory tables
+    /// store, so the catalog, managed data and auth directory all vanish with it.
+    ///
+    /// The returned [`TempDir`](tempfile::TempDir) owns the directory; drop it and
+    /// the datasets root disappears from under the runtime, so a caller must hold
+    /// it for as long as the lake is in use.
+    pub async fn open_ephemeral(
+        mut config: Config,
+    ) -> anyhow::Result<(Self, tempfile::TempDir)> {
+        let root = tempfile::tempdir().context("failed to create a temporary data directory")?;
+        let base = root.path();
+
+        config.data.root = base.to_path_buf();
+        config.data.datasets = base.join("datasets");
+        config.data.tables = base.join("tables");
+        config.data.tmp = base.join("tmp");
+        config.data.indexes = base.join("indexes");
+        config.data.cache = base.join("cache");
+        // Left pointing inside the temp root, but never used: `build_runtime`
+        // skips `with_db_path` for an ephemeral lake, which is what selects the
+        // in-memory tables store.
+        config.data.db_file = base.join("tables").join("beacon.db");
+
+        for dir in [
+            &config.data.datasets,
+            &config.data.tables,
+            &config.data.tmp,
+            &config.data.indexes,
+            &config.data.cache,
+        ] {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+        }
+
+        let config = Arc::new(config);
+        let lake = Self::open_with(config, false).await?;
+        Ok((lake, root))
+    }
+
     /// The processing unit: authenticate a caller, then run queries.
     pub fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
@@ -202,6 +248,7 @@ async fn build_runtime(
     store_url: ObjectStoreUrl,
     datasets_dir: std::path::PathBuf,
     store: Arc<dyn ObjectStore>,
+    persist: bool,
 ) -> anyhow::Result<Runtime> {
     let mut builder = RuntimeBuilder::new()
         .with_runtime_handle(tokio::runtime::Handle::current())
@@ -209,8 +256,6 @@ async fn build_runtime(
         // translate object paths against.
         .with_default_store(store_url, RootStore::FileSystem(datasets_dir))
         .with_default_object_store(store)
-        // The single-file tables store (catalog + managed data).
-        .with_db_path(config.data.db_file.clone())
         .with_tmp_dir_path(config.data.tmp.clone())
         .with_admin_credentials(
             config.admin.username.clone(),
@@ -235,6 +280,12 @@ async fn build_runtime(
             },
         });
 
+    // The single-file tables store (catalog + managed data + the auth directory).
+    // Without it the whole lot is in memory — there is no third mode where some
+    // of it persists.
+    if persist {
+        builder = builder.with_db_path(config.data.db_file.clone());
+    }
     if config.sql.enable_nd_pipeline {
         builder = builder.with_nd_pipeline();
     }

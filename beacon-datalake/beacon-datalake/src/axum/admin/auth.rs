@@ -49,7 +49,7 @@ pub(crate) async fn list_users(
     let super_user = &state.config().admin.username;
     let anonymous = crate::datalake::ANONYMOUS_USERNAME;
 
-    let users = rows
+    let mut users: Vec<AuthUserView> = rows
         .iter()
         .map(|row| {
             let username = str_field(row, "username").to_string();
@@ -61,6 +61,21 @@ pub(crate) async fn list_users(
             }
         })
         .collect();
+
+    // The super-user is config-defined, not a directory entry, so it never shows
+    // up in `beacon.system.users`. Surface it here so the listing reflects every
+    // principal (and the `is_super_user` flag is actually reachable).
+    if !users.iter().any(|u| u.username == *super_user) {
+        users.insert(
+            0,
+            AuthUserView {
+                username: super_user.clone(),
+                is_super_user: true,
+                is_anonymous: false,
+                roles: Vec::new(),
+            },
+        );
+    }
 
     Ok(Json(users))
 }

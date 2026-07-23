@@ -163,6 +163,40 @@ async fn query_metrics_table_records_completed_queries() {
     );
 }
 
+/// The metrics row carries both logical plans — parsed and optimized — because
+/// `run_query` registers the plan with the tracker before execution. This is
+/// what `EXPLAIN`-style introspection over past queries is built on.
+#[tokio::test(flavor = "multi_thread")]
+async fn query_metrics_capture_the_logical_plans() {
+    let rt = runtime("system-schema-metrics-plans").await;
+
+    rt.sql("CREATE TABLE plan_src (a BIGINT)").await;
+    rt.sql("INSERT INTO plan_src VALUES (1)").await;
+    rt.sql("SELECT a FROM plan_src WHERE a > 0").await;
+
+    let batches = rt
+        .sql(
+            "SELECT parsed_logical_plan, optimized_logical_plan \
+             FROM beacon.system.query_metrics \
+             WHERE query LIKE '%SELECT a FROM plan_src%'",
+        )
+        .await;
+    assert_eq!(total_rows(&batches), 1);
+
+    for (col, name) in [(0, "parsed_logical_plan"), (1, "optimized_logical_plan")] {
+        let plan = batches[0]
+            .column(col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("plan columns are Utf8")
+            .value(0);
+        assert!(
+            plan.contains("plan_src"),
+            "{name} should render the plan over plan_src, got: {plan:?}"
+        );
+    }
+}
+
 /// The system schema is read-only: it rejects `CREATE TABLE` into it.
 #[tokio::test(flavor = "multi_thread")]
 async fn system_schema_rejects_writes() {

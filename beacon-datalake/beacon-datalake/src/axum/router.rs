@@ -29,7 +29,7 @@ const BEACON_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Returns an error when the CORS configuration in the passed-in `config`
 /// contains invalid origins, methods, or headers — validated once at startup
 /// rather than on every request.
-pub(crate) fn setup_router(
+pub fn setup_router(
     beacon_runtime: Arc<DataLake>,
     config: Arc<beacon_datalake_config::Config>,
 ) -> anyhow::Result<Router> {

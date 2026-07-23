@@ -47,9 +47,15 @@ pub async fn list_datasets(
         .await?;
 
     // Keep current pagination semantics to avoid behavior regressions.
+    // `saturating_sub`: an offset past the end must yield an empty page, not an
+    // underflow panic (`end` is clamped to `datasets.len()`, so it can be < start).
     let start = offset.unwrap_or(0);
     let end = limit.map(|l| start + l).unwrap_or(datasets.len());
-    let datasets = datasets.into_iter().skip(start).take(end - start).collect();
+    let datasets = datasets
+        .into_iter()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect();
 
     Ok(datasets)
 }

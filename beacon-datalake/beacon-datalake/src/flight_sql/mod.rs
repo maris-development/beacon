@@ -12,7 +12,4 @@ mod service;
 mod storage;
 mod util;
 
-#[cfg(test)]
-mod tests;
-
-pub(crate) use service::serve;
+pub use service::{flight_service, serve};

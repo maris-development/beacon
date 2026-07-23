@@ -459,8 +459,23 @@ fn is_ddl(sql: &str) -> bool {
         || upper.starts_with("TRUNCATE ")
 }
 
+/// Builds the Flight SQL tonic service for embedding in a caller-managed server
+/// — an ephemeral-port test server, a custom shutdown path, a shared tonic
+/// router. Production serving goes through [`serve`]. `allow_anonymous` overrides
+/// the lake's configured policy, so tests can exercise both postures.
+///
+/// The concrete service type stays private; it is returned behind `impl
+/// FlightService` so callers can only wire it into a server.
+pub fn flight_service(
+    lake: Arc<crate::datalake::DataLake>,
+    allow_anonymous: bool,
+) -> anyhow::Result<FlightServiceServer<impl FlightService>> {
+    let service = BeaconFlightSqlService::new_with_options(lake, allow_anonymous)?;
+    Ok(FlightServiceServer::new(service))
+}
+
 /// Starts the Flight SQL gRPC server on the configured host and port.
-pub(crate) async fn serve(lake: Arc<crate::datalake::DataLake>) -> anyhow::Result<()> {
+pub async fn serve(lake: Arc<crate::datalake::DataLake>) -> anyhow::Result<()> {
     let flight_sql = lake.config().flight_sql.clone();
     let service = BeaconFlightSqlService::new(lake)?;
     let addr = SocketAddr::new(

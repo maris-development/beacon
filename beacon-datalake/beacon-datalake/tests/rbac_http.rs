@@ -8,6 +8,8 @@
 //!   user, non-super users can't manage or enumerate auth),
 //! - with enforcement on, that grants allow and denies block query results.
 
+mod common;
+
 use std::sync::Arc;
 
 use ::axum::{
@@ -15,42 +17,23 @@ use ::axum::{
     http::{header, Request, StatusCode},
     Router,
 };
-use base64::{engine::general_purpose, Engine as _};
-use crate::datalake::DataLake;
+use beacon_core::runtime::Runtime;
+use common::{basic, config, unique};
 use futures::TryStreamExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
-use super::setup_router;
+use beacon_datalake::axum::setup_router;
 
-/// Config with explicit auth + SQL settings; everything else from the environment.
-fn config(enforce: bool) -> Arc<beacon_datalake_config::Config> {
-    let mut config = beacon_datalake_config::Config::load().expect("load config");
-    config.auth.enforce = enforce;
-    config.auth.anonymous_enabled = true;
-    config.sql.enable = true;
-    Arc::new(config)
-}
-
-async fn runtime(config: Arc<beacon_datalake_config::Config>) -> Arc<DataLake> {
-    Arc::new(
-        Runtime::new_with_in_memory_auth(config)
-            .await
-            .expect("runtime should start"),
-    )
-}
-
-fn basic(username: &str, password: &str) -> String {
-    format!(
-        "Basic {}",
-        general_purpose::STANDARD.encode(format!("{username}:{password}"))
-    )
-}
-
-/// A unique name so managed tables don't collide with leftovers from other tests
-/// (the tables store is shared across runtimes in this process).
-fn unique(prefix: &str) -> String {
-    format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
+/// Opens an ephemeral lake from `config` and returns it with the `Arc<Config>`
+/// the router should use — the lake's own config, which carries the ephemeral
+/// temp paths but keeps the auth/admin settings unchanged.
+async fn lake(
+    config: beacon_datalake_config::Config,
+) -> (common::TestLake, Arc<beacon_datalake_config::Config>) {
+    let lake = common::lake_with(config).await;
+    let cfg = lake.lake.config().clone();
+    (lake, cfg)
 }
 
 fn get(uri: &str, auth: Option<&str>) -> Request<Body> {
@@ -108,9 +91,8 @@ async fn seed(runtime: &Runtime, sql: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn auth_endpoints_gated_and_list_default_principals() {
-    let config = config(false);
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(config(false)).await;
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let admin = basic(&config.admin.username, &config.admin.password);
 
     // A stored, non-super user to exercise the 403 path.
@@ -149,9 +131,8 @@ async fn auth_endpoints_gated_and_list_default_principals() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rbac_lifecycle_reflected_in_endpoints() {
-    let config = config(false);
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(config(false)).await;
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let admin = basic(&config.admin.username, &config.admin.password);
 
     // Create + grant + deny + assign.
@@ -222,9 +203,8 @@ async fn rbac_lifecycle_reflected_in_endpoints() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn model_guards_are_enforced() {
-    let config = config(false);
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(config(false)).await;
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let admin = basic(&config.admin.username, &config.admin.password);
     let admin_name = config.admin.username.clone();
 
@@ -260,9 +240,8 @@ async fn model_guards_are_enforced() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn non_super_user_cannot_manage_or_enumerate_auth() {
-    let config = config(false);
-    let runtime = runtime(config.clone()).await;
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let (lake, config) = lake(config(false)).await;
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
     let admin = basic(&config.admin.username, &config.admin.password);
 
     admin_ok(&router, &admin, "CREATE USER bob WITH PASSWORD 'pw'").await;
@@ -282,19 +261,19 @@ async fn non_super_user_cannot_manage_or_enumerate_auth() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn enforcement_grants_allow_and_denies_block() {
-    let config = config(true);
-    let runtime = runtime(config.clone()).await;
+    let (lake, config) = lake(config(true)).await;
     let admin = basic(&config.admin.username, &config.admin.password);
 
     // Two tables with a row each (unique names to avoid cross-test collisions).
     let t1 = unique("t1");
     let t2 = unique("t2");
-    seed(&runtime, &format!("CREATE TABLE {t1} (a BIGINT)")).await;
-    seed(&runtime, &format!("INSERT INTO {t1} VALUES (1)")).await;
-    seed(&runtime, &format!("CREATE TABLE {t2} (a BIGINT)")).await;
-    seed(&runtime, &format!("INSERT INTO {t2} VALUES (2)")).await;
+    let rt = lake.lake.runtime();
+    seed(rt, &format!("CREATE TABLE {t1} (a BIGINT)")).await;
+    seed(rt, &format!("INSERT INTO {t1} VALUES (1)")).await;
+    seed(rt, &format!("CREATE TABLE {t2} (a BIGINT)")).await;
+    seed(rt, &format!("INSERT INTO {t2} VALUES (2)")).await;
 
-    let router = setup_router(runtime, config.clone()).unwrap();
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
 
     // reader gets a global SELECT grant; alice gets the role.
     admin_ok(&router, &admin, "CREATE ROLE reader").await;
