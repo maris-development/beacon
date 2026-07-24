@@ -1,6 +1,7 @@
 pub mod api;
 mod auth_store;
 pub mod crawler;
+pub mod embedded;
 pub mod extensions;
 pub mod metrics;
 pub mod parser;

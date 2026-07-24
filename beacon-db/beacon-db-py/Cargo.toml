@@ -1,0 +1,28 @@
+[package]
+name = "beacon-db-py"
+version = "1.8.0"
+edition = "2021"
+description = "Python bindings for beacon-db: an embeddable, DuckDB-class database"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+# The compiled module is imported as `beacondb._beacondb`; the Python package
+# `beacondb` (python/beacondb) re-exports it. A `cdylib` only — nothing in the
+# workspace may depend on this crate.
+name = "_beacondb"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned exactly. 0.29.0 (2026-06-11) is the current release and predates our
+# no-fresh-packages window. `abi3-py310` builds one wheel for CPython >= 3.10,
+# matching `requires-python` in pyproject.toml.
+pyo3 = { version = "=0.29.0", features = ["abi3-py310", "extension-module"] }
+
+beacon-core = { path = "../beacon-core" }
+
+anyhow = { workspace = true }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }

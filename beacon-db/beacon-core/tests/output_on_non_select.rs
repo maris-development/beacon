@@ -17,6 +17,7 @@ fn csv_query(sql: &str) -> Query {
         output: Some(Output {
             format: OutputFormat::Csv,
         }),
+        params: Vec::new(),
     }
 }
 

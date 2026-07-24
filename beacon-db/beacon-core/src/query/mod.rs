@@ -37,6 +37,16 @@ pub struct Query {
     pub inner: InnerQuery,
     /// Result output format. Omit for the default zstd-compressed Arrow IPC stream.
     pub output: Option<Output>,
+    /// Positional parameter values bound to `$1..$n` placeholders in a SQL query, applied to
+    /// the lowered plan via [`LogicalPlan::with_param_values`](datafusion::logical_expr::LogicalPlan::with_param_values).
+    ///
+    /// Not part of the request wire format: parameters are an *embedded*-API concern (the
+    /// Python bindings bind them rather than interpolate, for injection safety), while the
+    /// HTTP/Flight transports send fully-formed SQL. `#[serde(skip)]` keeps them out of the
+    /// JSON contract and defaults them to empty for every deserialized request.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub params: Vec<ScalarValue>,
 }
 
 impl Query {
@@ -45,6 +55,16 @@ impl Query {
         Self {
             inner: InnerQuery::Sql(sql),
             output: None,
+            params: Vec::new(),
+        }
+    }
+
+    /// A SQL query whose `$1..$n` placeholders are bound to `params` after planning.
+    pub fn sql_with_params(sql: String, params: Vec<ScalarValue>) -> Self {
+        Self {
+            inner: InnerQuery::Sql(sql),
+            output: None,
+            params,
         }
     }
 }

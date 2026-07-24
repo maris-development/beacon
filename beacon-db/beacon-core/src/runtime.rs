@@ -83,9 +83,22 @@ impl Runtime {
     ) -> anyhow::Result<QueryResult> {
         let query_id = uuid::Uuid::new_v4();
         let query_json = serde_json::to_value(&query)?;
-        let crate::query::Query { inner, output } = query;
+        let crate::query::Query {
+            inner,
+            output,
+            params,
+        } = query;
 
-        let plan = self.lower_query(inner).await?;
+        let mut plan = self.lower_query(inner).await?;
+        // Bind positional parameters into the placeholders the planner produced. Done before
+        // validation/authorization so those see the concrete plan, and only when parameters
+        // were supplied — `with_param_values` errors if a plan has no placeholders but values
+        // were given, which is exactly the mismatch a caller wants reported.
+        if !params.is_empty() {
+            plan = plan
+                .with_param_values(params)
+                .map_err(|e| anyhow::anyhow!("failed to bind query parameters: {e}"))?;
+        }
         crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
         crate::statement_plan::authorize_logical_plan(
             &plan,

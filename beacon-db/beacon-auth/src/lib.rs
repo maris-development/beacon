@@ -20,7 +20,7 @@ mod role;
 
 pub use basic::{BasicAuthProvider, InMemoryUserStore};
 pub use composite::CompositeAuthProvider;
-pub use context::{AuthContext, AuthIdentity, ANONYMOUS_USERNAME};
+pub use context::{AuthContext, AuthIdentity, ANONYMOUS_USERNAME, LOCAL_USERNAME};
 pub use credential::Credential;
 pub use oidc::{OidcAuthProvider, OidcConfig};
 pub use password::{hash_password, verify_password};

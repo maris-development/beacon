@@ -114,6 +114,12 @@ impl GeoMapper {
 pub struct GeoParquetSink {
     /// The input execution plan.
     input: Arc<dyn ExecutionPlan>,
+    /// The schema of the batches this sink **consumes** (the input schema, before the geometry
+    /// column is appended). This is what [`DataSink::schema`] must return — DataFusion's
+    /// `execute_input_stream` asserts the sink schema matches the input plan's schema and uses
+    /// it to coerce the incoming stream. The geometry column is added *inside* [`Self::write_all`]
+    /// (see [`GeoMapper::output_schema`]), so it must not appear here.
+    input_schema: SchemaRef,
     /// Configuration for the file sink.
     file_sink_config: FileSinkConfig,
     /// The object store to write to.
@@ -138,10 +144,12 @@ impl GeoParquetSink {
         longitude_column: &str,
         latitude_column: &str,
     ) -> datafusion::error::Result<Self> {
-        let mapper = GeoMapper::new(input.schema().as_ref(), longitude_column, latitude_column)?;
+        let input_schema = input.schema();
+        let mapper = GeoMapper::new(input_schema.as_ref(), longitude_column, latitude_column)?;
 
         Ok(Self {
             input,
+            input_schema,
             file_sink_config,
             object_store,
             mapper,
@@ -169,9 +177,16 @@ impl DataSink for GeoParquetSink {
         self
     }
 
-    /// Returns the output schema with the geometry column.
+    /// The schema of the batches this sink consumes — the input schema, **without** the
+    /// geometry column.
+    ///
+    /// DataFusion's `DataSinkExec` passes this to `execute_input_stream`, which asserts it has
+    /// the same field count as the input plan and uses it to coerce the incoming stream.
+    /// Returning the mapped (geometry-appended) schema here breaks that invariant and panics
+    /// (`sink_schema.len() != input.schema().len()`). The geometry column is added inside
+    /// [`Self::write_all`] via [`GeoMapper`], which is where it belongs.
     fn schema(&self) -> &SchemaRef {
-        &self.mapper.output_schema
+        &self.input_schema
     }
 
     fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
@@ -436,8 +451,15 @@ mod tests {
         let sink =
             GeoParquetSink::new(input, conf, object_store.clone(), "lon", "lat").unwrap();
 
-        // The sink's advertised schema is the mapped one (geometry appended).
-        assert!(sink.schema().field_with_name("geometry").is_ok());
+        // The sink advertises its *input* schema (no geometry): DataFusion requires
+        // `DataSink::schema()` to match the input plan's schema, and the geometry column is
+        // added internally on write (verified by the round-trip below). Advertising the mapped
+        // schema here is exactly the bug that made a GeoParquet COPY panic.
+        assert!(
+            sink.schema().field_with_name("geometry").is_err(),
+            "sink.schema() must be the input schema, without the geometry column"
+        );
+        assert_eq!(sink.schema().fields().len(), schema.fields().len());
 
         let stream = Box::pin(RecordBatchStreamAdapter::new(
             schema.clone(),

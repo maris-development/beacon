@@ -1,0 +1,60 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "beacondb"
+version = "1.8.0"
+description = "An embeddable, DuckDB-class database for scientific data — one file, Arrow-native, netCDF/Zarr/Parquet/Delta/Lance."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Beacon" }]
+keywords = ["beacon", "database", "sql", "arrow", "duckdb", "netcdf", "zarr", "parquet"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Scientific/Engineering",
+]
+# No required runtime dependencies: results cross into Python over the Arrow
+# PyCapsule protocol, so pyarrow/pandas/polars are only needed by the methods
+# that explicitly return their types.
+dependencies = []
+
+[project.optional-dependencies]
+arrow = ["pyarrow>=14.0"]
+pandas = ["pyarrow>=14.0", "pandas>=2.0"]
+polars = ["polars>=1.0"]
+dev = ["pytest>=8.0", "pyarrow>=14.0", "pandas>=2.0", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/maris-development/beacon"
+Repository = "https://github.com/maris-development/beacon"
+Source = "https://github.com/maris-development/beacon/tree/main/beacon-db/beacon-db-py"
+
+[tool.maturin]
+# Mixed Rust/Python layout: hand-written Python in python/beacondb, the compiled
+# extension dropped in beside it as `beacondb._beacondb`.
+python-source = "python"
+module-name = "beacondb._beacondb"
+features = ["pyo3/extension-module"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

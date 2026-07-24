@@ -11,6 +11,10 @@ use crate::{
 /// Default username of the built-in anonymous principal.
 pub const ANONYMOUS_USERNAME: &str = "anonymous";
 
+/// Username carried by [`AuthIdentity::local`], the identity used when a database is opened
+/// in-process with auth disabled.
+pub const LOCAL_USERNAME: &str = "local";
+
 /// The single super-user, defined entirely by deployment configuration (the `BEACON_ADMIN_*`
 /// environment variables).
 ///
@@ -56,6 +60,21 @@ impl AuthIdentity {
     pub fn system() -> Self {
         Self {
             username: "system".to_string(),
+            roles: Vec::new(),
+            is_super_user: true,
+        }
+    }
+
+    /// The identity of an embedder that opened the database in-process with auth disabled.
+    ///
+    /// Same privileges as [`Self::system`], but a distinct username so query metrics and audit
+    /// records tell an embedded caller apart from an engine-initiated query. Handing this out is
+    /// what makes `beacondb.connect("beacon.db")` behave like SQLite/DuckDB — possession of the
+    /// file grants full control — so it belongs only to the embedded entry point
+    /// (`beacon_core::embedded`), never to a served transport.
+    pub fn local() -> Self {
+        Self {
+            username: LOCAL_USERNAME.to_string(),
             roles: Vec::new(),
             is_super_user: true,
         }
