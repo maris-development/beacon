@@ -42,3 +42,20 @@ beacon-arrow-tiff/test-files/TEMP_AVG_20201201.tif
 beacon-binary-format-toolbox/test-files/000043_CFPOINT_100098_V0.nc
 beacon-binary-format-toolbox/test-files/000635_CFPOINT_BA080006_V0.nc
 plans/
+# --- beacon-db-py: maturin/PyO3 build artifacts ---
+# The compiled extension module `maturin develop` drops into the package dir. It is a
+# ~400 MB build output and must never be tracked (it once blocked a push at GitHub's 100 MB
+# limit). Rebuild it with `maturin develop`.
+beacon-db/beacon-db-py/python/beacondb/*.so
+beacon-db/beacon-db-py/python/beacondb/*.pyd
+beacon-db/beacon-db-py/python/beacondb/*.dylib
+# Wheel/sdist output from `maturin build` / `python -m build`.
+beacon-db/beacon-db-py/dist/
+beacon-db/beacon-db-py/build/
+beacon-db/beacon-db-py/wheelhouse/
+
+# --- Python packaging & tooling caches (safe anywhere) ---
+*.egg-info/
+*.pyc
+.ruff_cache/
+.mypy_cache/
