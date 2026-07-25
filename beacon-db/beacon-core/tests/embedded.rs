@@ -7,7 +7,10 @@
 //! what an embedder sees.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use arrow::array::Int64Array;
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use beacon_core::embedded::{AuthMode, Database, DbPath, OpenOptions};
 use beacon_core::{AuthIdentity, Credential};
@@ -235,6 +238,91 @@ async fn file_database_persists_across_reopen() {
         total_rows(&rows),
         1,
         "the table survived the reopen — the catalog and data live in the file"
+    );
+}
+
+/// A registered in-memory table is queryable by its bare name, and — crucially — is
+/// **session-scoped**: it is a `MemTable`, not a beacon-managed table, so it must never be
+/// persisted into `beacon.db`. This pins the property `Connection.register(...)` depends on.
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_table_is_queryable_but_not_persisted() {
+    let root = TempDir::new().expect("temp root");
+    let db_file: PathBuf = root.path().join("beacon.db");
+
+    let mut options = OpenOptions::new();
+    options.crawlers.enable = false;
+
+    let arrow_schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        arrow_schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+    )
+    .unwrap();
+
+    {
+        let db = Database::open(db_file.clone(), options.clone())
+            .await
+            .expect("open database");
+        db.register_batches("py_df", arrow_schema.clone(), vec![batch])
+            .expect("register in-memory table");
+
+        let me = db.require_default_identity().unwrap();
+        let rows = sql(&db, "SELECT sum(a) AS s FROM py_df", me).await;
+        assert_eq!(total_rows(&rows), 1, "the registered table is queryable by name");
+
+        assert!(db.deregister_table("py_df").unwrap(), "unregister reports it existed");
+        assert!(!db.deregister_table("py_df").unwrap(), "second unregister is a no-op");
+    } // drop -> release the lock
+
+    // Reopen: the registered table must be gone (it was never written into the file).
+    let reopened = Database::open(db_file, options).await.expect("reopen");
+    let me = reopened.require_default_identity().unwrap();
+    let err = try_sql(&reopened, "SELECT * FROM py_df", me)
+        .await
+        .expect_err("a session-only table must not survive a reopen");
+    assert!(
+        err.to_string().contains("py_df"),
+        "unexpected error: {err}"
+    );
+}
+
+/// `persist_batches` writes a managed table into `beacon.db`, so — unlike a registered
+/// `MemTable` — it survives a reopen. The counterpart to
+/// `registered_table_is_queryable_but_not_persisted`.
+#[tokio::test(flavor = "multi_thread")]
+async fn persisted_batches_survive_a_reopen() {
+    let root = TempDir::new().expect("temp root");
+    let db_file: PathBuf = root.path().join("beacon.db");
+
+    let mut options = OpenOptions::new();
+    options.crawlers.enable = false;
+
+    let arrow_schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        arrow_schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![10, 20, 30]))],
+    )
+    .unwrap();
+
+    {
+        let db = Database::open(db_file.clone(), options.clone())
+            .await
+            .expect("open database");
+        let me = db.require_default_identity().unwrap();
+        db.persist_batches("kept", arrow_schema.clone(), vec![batch], me.clone())
+            .await
+            .expect("persist batches into a managed table");
+        let rows = sql(&db, "SELECT sum(x) AS s FROM kept", me).await;
+        assert_eq!(total_rows(&rows), 1);
+    } // drop -> release the lock
+
+    let reopened = Database::open(db_file, options).await.expect("reopen");
+    let me = reopened.require_default_identity().unwrap();
+    let rows = sql(&reopened, "SELECT sum(x) AS s FROM kept", me).await;
+    assert_eq!(
+        total_rows(&rows),
+        1,
+        "the persisted table was written into the file and survives the reopen"
     );
 }
 

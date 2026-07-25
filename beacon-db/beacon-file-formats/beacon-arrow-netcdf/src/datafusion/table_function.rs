@@ -23,13 +23,27 @@ pub struct ReadNetCDFFunc {
     // Session Reference
     runtime_handle: tokio::runtime::Handle,
     session_ctx: Weak<SessionContext>,
+    /// The SQL name this reader is registered under — `read_netcdf`, or an alias supplied via
+    /// [`Self::with_name`]. Only affects the name used in error messages.
+    name: String,
 }
 
 impl ReadNetCDFFunc {
     pub fn new(runtime_handle: tokio::runtime::Handle, session_ctx: Weak<SessionContext>) -> Self {
+        Self::with_name("read_netcdf", runtime_handle, session_ctx)
+    }
+
+    /// The same reader exposed under a different SQL name, for callers that register it under an
+    /// alias (the reader logic is identical; only the name used in error messages differs).
+    pub fn with_name(
+        name: impl Into<String>,
+        runtime_handle: tokio::runtime::Handle,
+        session_ctx: Weak<SessionContext>,
+    ) -> Self {
         Self {
             runtime_handle,
             session_ctx,
+            name: name.into(),
         }
     }
 }
@@ -50,7 +64,7 @@ impl BeaconTableFunctionImpl for ReadNetCDFFunc {
     }
 
     fn name(&self) -> String {
-        "read_netcdf".to_string()
+        self.name.clone()
     }
 
     fn arguments(&self) -> Option<Vec<arrow::datatypes::Field>> {
@@ -75,11 +89,12 @@ impl TableFunctionImpl for ReadNetCDFFunc {
             .config()
             .get_extension::<ListingFactory>()
             .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "read_netcdf: the ListingFactory is not registered on the session".to_string(),
-                )
+                datafusion::error::DataFusionError::Execution(format!(
+                    "{}: the ListingFactory is not registered on the session",
+                    self.name
+                ))
             })?;
-        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, "read_netcdf")?;
+        let glob_paths = beacon_common::table_function::parse_glob_paths_arg(args, &self.name)?;
         let mut dimensions: Vec<String> = vec![];
         if let Some(dimensions_arg) = args.get(1) {
             if let Expr::Literal(ScalarValue::List(values), _) = dimensions_arg {

@@ -96,7 +96,9 @@ pub enum OutputFormat {
     Parquet,
     // Json,
     // Odv(OdvOptions),
-    /// Flat (record-oriented) NetCDF format.
+    /// Flat (record-oriented) NetCDF format. A NetCDF-4 file *is* HDF5, so `hdf5`/`h5` are
+    /// accepted as aliases for this format.
+    #[serde(alias = "hdf5", alias = "h5")]
     NetCDF,
     /// Multi-dimensional (nd-array) NetCDF format. The named columns become the
     /// output dimensions; must not be empty.

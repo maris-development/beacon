@@ -17,6 +17,7 @@ use beacon_core::query_result::QueryOutput;
 use beacon_core::AuthIdentity;
 use futures::TryStreamExt;
 use pyo3::prelude::*;
+use pyo3::types::{PyList, PyTuple};
 
 use crate::errors::{map_engine_error, not_supported, programming_error};
 use crate::result::ResultSet;
@@ -35,6 +36,28 @@ pub fn run_sql(
 
     let (schema, batches) = block_on(py, async move {
         let stream = database.sql(sql, identity).await?.into_record_stream()?;
+        let schema = stream.schema();
+        let batches: Vec<RecordBatch> = stream.try_collect().await?;
+        Ok::<_, anyhow::Error>((schema, batches))
+    })?
+    .map_err(map_engine_error)?;
+
+    Ok(ResultSet::new(schema, batches))
+}
+
+/// Runs a fully-formed [`Query`] (SQL or beacon's structured JSON form) and collects the whole
+/// result. The path behind `json_query()`.
+pub fn run_query_collected(
+    py: Python<'_>,
+    database: &Arc<Database>,
+    identity: &AuthIdentity,
+    query: Query,
+) -> PyResult<ResultSet> {
+    let database = database.clone();
+    let identity = identity.clone();
+
+    let (schema, batches) = block_on(py, async move {
+        let stream = database.run_query(query, identity).await?.into_record_stream()?;
         let schema = stream.schema();
         let batches: Vec<RecordBatch> = stream.try_collect().await?;
         Ok::<_, anyhow::Error>((schema, batches))
@@ -156,22 +179,13 @@ fn url_scheme(path: &std::path::Path) -> Option<String> {
     }
 }
 
-/// Builds a table-function call expression from a function name and Python arguments, encoding
-/// each argument as a SQL literal. Used by the `read_*` readers.
-pub fn table_function_call(function: &str, args: &[Bound<'_, PyAny>]) -> PyResult<String> {
-    let mut rendered = Vec::with_capacity(args.len());
-    for arg in args {
-        rendered.push(py_to_sql_literal(arg)?);
-    }
-    Ok(format!("{function}({})", rendered.join(", ")))
-}
-
 /// Encodes a Python value as a SQL literal.
 ///
-/// Deliberately narrow — strings, numbers, booleans, null — because these are the argument
-/// kinds beacon's table functions actually take (a path, an option flag). Anything else is
-/// refused rather than guessed, so a mistake surfaces here instead of as malformed SQL.
-fn py_to_sql_literal(value: &Bound<'_, PyAny>) -> PyResult<String> {
+/// Deliberately narrow — strings, numbers, booleans, null, and lists/tuples of these — because
+/// these are the argument kinds beacon's table functions actually take (a path, an option flag, a
+/// list of dimensions). Anything else is refused rather than guessed, so a mistake surfaces here
+/// instead of as malformed SQL.
+pub(crate) fn py_to_sql_literal(value: &Bound<'_, PyAny>) -> PyResult<String> {
     if value.is_none() {
         return Ok("NULL".to_string());
     }
@@ -188,9 +202,19 @@ fn py_to_sql_literal(value: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(float) = value.extract::<f64>() {
         return Ok(float.to_string());
     }
+    // A list/tuple becomes a SQL array literal — e.g. `read_netcdf(path, ['depth', 'lat'])`. Only
+    // list/tuple, not any iterable: a dict is iterable too but is not a valid argument, so it must
+    // fall through to the error below rather than silently become an array of its keys.
+    if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+        let mut rendered = Vec::new();
+        for item in value.try_iter()? {
+            rendered.push(py_to_sql_literal(&item?)?);
+        }
+        return Ok(format!("[{}]", rendered.join(", ")));
+    }
     Err(programming_error(format!(
         "cannot pass a value of type `{}` to a table function; use a string path, number, \
-         boolean, or None",
+         boolean, list, or None",
         value.get_type().name()?
     )))
 }

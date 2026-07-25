@@ -42,9 +42,16 @@ use crate::query::Query;
 use crate::query_result::QueryResult;
 use crate::runtime::Runtime;
 use crate::runtime_builder::RuntimeBuilder;
+use crate::schema_persistence::PersistentSchemaProvider;
 
 /// The spelling that selects an in-memory database, shared with DuckDB and SQLite.
 pub const MEMORY_PATH: &str = ":memory:";
+
+/// Double-quotes a SQL identifier, escaping embedded quotes, so a name with spaces or a
+/// reserved word cannot break the statement it is spliced into.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
 
 /// The URL bare dataset paths resolve against when [`OpenOptions::with_datasets_dir`] is used.
 pub const DATASETS_STORE_URL: &str = "datasets://";
@@ -52,6 +59,9 @@ pub const DATASETS_STORE_URL: &str = "datasets://";
 // Re-exported so an embedder configures the datasets store through this module alone, rather
 // than depending on beacon-datafusion-ext and datafusion directly.
 pub use beacon_datafusion_ext::listing_factory::RootStore;
+// The credential for [`Database::attach_remote`], re-exported so an embedder names it through this
+// module rather than depending on beacon-datafusion-ext directly.
+pub use beacon_datafusion_ext::remote::RemoteCredential;
 pub use datafusion::execution::object_store::ObjectStoreUrl;
 
 /// Where a database's container lives: one file, or nothing at all.
@@ -383,6 +393,35 @@ impl Database {
         &self.runtime
     }
 
+    /// Attach another Beacon instance as a catalog named `name`, so its tables are queryable as
+    /// `name.<schema>.<table>` and joins/filters/aggregates push down to it over Flight SQL.
+    ///
+    /// `url` is the remote's Flight SQL endpoint — `beacon://host:port`, `grpc://…`, `http://…`,
+    /// `https://…`, or a bare `host:port`. `tls` (or an explicit `https://`) selects TLS. `token`,
+    /// if given, is the remote's bearer credential; without one the remote must permit anonymous
+    /// access. The remote's schemas and tables are enumerated once here, so an unreachable or
+    /// unauthorized endpoint fails now rather than on first query.
+    pub async fn attach_remote(
+        &self,
+        name: &str,
+        url: &str,
+        credential: beacon_datafusion_ext::remote::RemoteCredential,
+        tls: bool,
+    ) -> anyhow::Result<()> {
+        attach_remote_catalog(&self.runtime.session_ctx, name, url, credential, tls).await
+    }
+
+    /// Detach a previously [`attach_remote`](Self::attach_remote)ed catalog. Returns whether one
+    /// was attached under that name.
+    pub fn detach(&self, name: &str) -> anyhow::Result<bool> {
+        detach_remote_catalog(&self.runtime.session_ctx, name)
+    }
+
+    /// The names of the remote Beacon instances currently attached as catalogs.
+    pub fn attached_catalogs(&self) -> Vec<String> {
+        attached_remote_catalogs(&self.runtime.session_ctx)
+    }
+
     /// Whether this database was opened with RBAC applied.
     pub fn auth_enabled(&self) -> bool {
         self.auth_enabled
@@ -451,11 +490,231 @@ impl Database {
         self.run_query(Query::sql_with_params(sql.into(), params), identity)
             .await
     }
+
+    /// Registers `batches` as a **session-only** in-memory table named `name`, queryable by
+    /// that bare name for the life of the process.
+    ///
+    /// This is how an embedder makes a pandas/pyarrow/polars frame queryable. The table is a
+    /// [`MemTable`] and is **not persisted** into `beacon.db` (see
+    /// [`PersistentSchemaProvider::register_temporary_table`]): copying the file does not carry
+    /// it, and reopening the database does not see it. A prior table under `name` is replaced.
+    pub fn register_batches(
+        &self,
+        name: &str,
+        schema: arrow::datatypes::SchemaRef,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+    ) -> anyhow::Result<()> {
+        let table = datafusion::datasource::MemTable::try_new(schema, vec![batches])
+            .map_err(|e| anyhow::anyhow!("failed to build the in-memory table `{name}`: {e}"))?;
+        self.with_default_schema(|schema| {
+            schema
+                .register_temporary_table(name.to_string(), Arc::new(table))
+                .map_err(|e| anyhow::anyhow!("failed to register `{name}`: {e}"))?;
+            Ok(())
+        })
+    }
+
+    /// Creates a **persisted** managed table named `name` from `batches`, as `identity`.
+    ///
+    /// Unlike [`Self::register_batches`] (a session-only [`MemTable`]), this writes the data into
+    /// `beacon.db` through the default managed-table engine — so it survives a reopen and travels
+    /// with the file. Implemented by reusing beacon's `CREATE TABLE … AS SELECT` path: the batches
+    /// are staged as a temporary table and copied into a managed one. Being real DDL, it requires
+    /// the identity's DDL privileges (a super-user), and it fails if `name` already exists — drop
+    /// it first to replace, rather than silently overwriting persisted data.
+    pub async fn persist_batches(
+        &self,
+        name: &str,
+        schema: arrow::datatypes::SchemaRef,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        identity: AuthIdentity,
+    ) -> anyhow::Result<()> {
+        use futures::TryStreamExt;
+
+        // A fixed staging name is safe: registration overwrites any stale entry, opens are
+        // single-writer, and the embedded API is driven single-threaded from Python. It does not
+        // match `INTERNAL_TABLE_PREFIX` (`__beacon_`), so it is not treated as an internal table.
+        const STAGING: &str = "__beacondb_register_staging";
+
+        self.register_batches(STAGING, schema, batches)?;
+
+        let ctas = format!(
+            "CREATE TABLE {} AS SELECT * FROM {}",
+            quote_ident(name),
+            quote_ident(STAGING)
+        );
+        let outcome = async {
+            let stream = self.sql(ctas, identity).await?.into_record_stream()?;
+            // Draining the statement's stream is what runs the write to completion.
+            stream.try_collect::<Vec<_>>().await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        // Remove the staging table whether or not the CTAS succeeded, then surface its result.
+        let _ = self.deregister_table(STAGING);
+        outcome
+    }
+
+    /// Removes a table registered with [`Self::register_batches`]. Returns whether one existed.
+    pub fn deregister_table(&self, name: &str) -> anyhow::Result<bool> {
+        self.with_default_schema(|schema| {
+            let removed = schema
+                .deregister_temporary_table(name)
+                .map_err(|e| anyhow::anyhow!("failed to unregister `{name}`: {e}"))?;
+            Ok(removed.is_some())
+        })
+    }
+
+    /// Runs `f` with the default schema, downcast to the concrete
+    /// [`PersistentSchemaProvider`] (which owns the temporary-table registration path).
+    fn with_default_schema<R>(
+        &self,
+        f: impl FnOnce(&PersistentSchemaProvider) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
+        let ctx = &self.runtime.session_ctx;
+        let state = ctx.state();
+        let options = state.config().options();
+        let catalog_name = options.catalog.default_catalog.clone();
+        let schema_name = options.catalog.default_schema.clone();
+
+        let catalog = ctx
+            .catalog(&catalog_name)
+            .ok_or_else(|| anyhow::anyhow!("default catalog `{catalog_name}` is not registered"))?;
+        let schema = catalog
+            .schema(&schema_name)
+            .ok_or_else(|| anyhow::anyhow!("default schema `{schema_name}` is not registered"))?;
+        let provider = schema
+            .as_any()
+            .downcast_ref::<PersistentSchemaProvider>()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the default schema is not beacon's persistent provider; cannot register an \
+                     in-memory table"
+                )
+            })?;
+        f(provider)
+    }
+}
+
+/// Attach a remote Beacon as a catalog named `name` on `session_ctx`.
+///
+/// Shared by [`Database::attach_remote`] (the embedded API) and the SQL `ATTACH` statement, so both
+/// register the identical [`RemoteCatalogProvider`](beacon_datafusion_ext::remote::RemoteCatalogProvider)
+/// and are observed the same way by [`attached_remote_catalogs`].
+pub(crate) async fn attach_remote_catalog(
+    session_ctx: &datafusion::prelude::SessionContext,
+    name: &str,
+    url: &str,
+    credential: beacon_datafusion_ext::remote::RemoteCredential,
+    tls: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!name.trim().is_empty(), "attach name must not be empty");
+    let endpoint = normalize_remote_endpoint(url, tls)?;
+    let connection =
+        beacon_datafusion_ext::remote::RemoteConnection::with_credential(endpoint, credential);
+    let catalog = beacon_datafusion_ext::remote::RemoteCatalogProvider::connect(connection).await?;
+    session_ctx.register_catalog(name.to_string(), Arc::new(catalog));
+    Ok(())
+}
+
+/// Detach a remote catalog by shadowing it with an empty one (DataFusion cannot deregister a
+/// catalog). Returns whether a *remote* catalog was attached under that name — detaching a
+/// non-remote catalog (e.g. `beacon`) is refused by returning `false`.
+pub(crate) fn detach_remote_catalog(
+    session_ctx: &datafusion::prelude::SessionContext,
+    name: &str,
+) -> anyhow::Result<bool> {
+    if !is_remote_catalog(session_ctx, name) {
+        return Ok(false);
+    }
+    session_ctx.register_catalog(
+        name.to_string(),
+        Arc::new(datafusion::catalog::MemoryCatalogProvider::new()),
+    );
+    Ok(true)
+}
+
+/// The names of the remote Beacon catalogs currently attached — derived from the session's
+/// registered catalogs (those that are a `RemoteCatalogProvider`), so it is a single source of
+/// truth shared by the embedded API and SQL `ATTACH`.
+pub(crate) fn attached_remote_catalogs(
+    session_ctx: &datafusion::prelude::SessionContext,
+) -> Vec<String> {
+    let mut names: Vec<String> = session_ctx
+        .catalog_names()
+        .into_iter()
+        .filter(|name| is_remote_catalog(session_ctx, name))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Whether the catalog registered under `name` is a remote-Beacon catalog.
+fn is_remote_catalog(session_ctx: &datafusion::prelude::SessionContext, name: &str) -> bool {
+    session_ctx
+        .catalog(name)
+        .map(|catalog| {
+            catalog
+                .as_any()
+                .downcast_ref::<beacon_datafusion_ext::remote::RemoteCatalogProvider>()
+                .is_some()
+        })
+        .unwrap_or(false)
+}
+
+/// Normalize an attach URL into a tonic gRPC endpoint (`http(s)://host:port`).
+///
+/// Accepts the `beacon://`/`grpc://` schemes used by `CREATE EXTERNAL TABLE … STORED AS BEACON`,
+/// plain `http://`/`https://`, or a bare `host:port`. `tls` (or an explicit `https://`) selects
+/// `https`.
+pub(crate) fn normalize_remote_endpoint(url: &str, tls: bool) -> anyhow::Result<String> {
+    let url = url.trim();
+    let secure = tls || url.starts_with("https://");
+    let authority = url
+        .strip_prefix("beacon://")
+        .or_else(|| url.strip_prefix("grpc://"))
+        .or_else(|| url.strip_prefix("https://"))
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .trim_end_matches('/');
+
+    anyhow::ensure!(!authority.is_empty(), "attach url missing host:port");
+
+    let scheme = if secure { "https" } else { "http" };
+    Ok(format!("{scheme}://{authority}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_endpoint_maps_schemes_and_tls() {
+        // beacon:// / grpc:// / bare host:port default to http unless tls is asked for
+        assert_eq!(
+            normalize_remote_endpoint("beacon://host:50051", false).unwrap(),
+            "http://host:50051"
+        );
+        assert_eq!(
+            normalize_remote_endpoint("grpc://host:50051", true).unwrap(),
+            "https://host:50051"
+        );
+        assert_eq!(
+            normalize_remote_endpoint("host:50051", false).unwrap(),
+            "http://host:50051"
+        );
+        // an explicit https:// implies tls even without the flag; a trailing slash is trimmed
+        assert_eq!(
+            normalize_remote_endpoint("https://host:50051/", false).unwrap(),
+            "https://host:50051"
+        );
+        assert_eq!(
+            normalize_remote_endpoint("http://host:50051", false).unwrap(),
+            "http://host:50051"
+        );
+        assert!(normalize_remote_endpoint("beacon://", false).is_err());
+    }
 
     #[test]
     fn memory_spec_parses_to_memory() {

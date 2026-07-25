@@ -93,6 +93,8 @@ def query(query_text: str) -> Relation:
     return _default().sql(query_text)
 
 
-def execute(query: str, parameters=None) -> Connection:
+def execute(
+    query: str, parameters: list | tuple | None = None
+) -> Connection:
     """Runs ``query`` on the default in-memory connection, DB-API style."""
     return _default().execute(query, parameters)

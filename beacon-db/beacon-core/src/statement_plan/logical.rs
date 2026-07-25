@@ -397,6 +397,93 @@ impl UserDefinedLogicalNodeCore for DropCrawlerNode {
     }
 }
 
+/// Logical node for `ATTACH '<url>' AS <name>` — mounts a remote Beacon as a catalog.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct AttachNode {
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) credential: beacon_datafusion_ext::remote::RemoteCredential,
+    pub(crate) tls: bool,
+}
+
+impl AttachNode {
+    pub(crate) fn new(
+        name: String,
+        url: String,
+        credential: beacon_datafusion_ext::remote::RemoteCredential,
+        tls: bool,
+    ) -> Self {
+        Self {
+            name,
+            url,
+            credential,
+            tls,
+        }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for AttachNode {
+    fn name(&self) -> &str {
+        "Attach"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // The token is a credential — never print it.
+        write!(f, "Attach: name={} url={}", self.name, self.url)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            url: self.url.clone(),
+            credential: self.credential.clone(),
+            tls: self.tls,
+        })
+    }
+}
+
+/// Logical node for `DETACH <name>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct DetachNode {
+    pub(crate) name: String,
+}
+
+impl DetachNode {
+    pub(crate) fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for DetachNode {
+    fn name(&self) -> &str {
+        "Detach"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Detach: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+        })
+    }
+}
+
 /// Logical node for `SHOW CRAWLERS`. Unlike the other crawler nodes it produces
 /// rows, so it carries the listing schema.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]

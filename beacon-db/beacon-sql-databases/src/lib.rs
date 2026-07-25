@@ -1,4 +1,5 @@
-//! External SQL-database table providers for Beacon (PostgreSQL, MySQL).
+//! External SQL-database table providers for Beacon (PostgreSQL, MySQL, and — via ODBC — SQL
+//! Server and any other ODBC source).
 //!
 //! Registers an existing remote database table as a Beacon table so it can be
 //! queried and joined alongside Parquet, Delta, Iceberg, and remote-Beacon
@@ -64,6 +65,10 @@ pub enum SqlEngine {
     Postgres,
     #[cfg(feature = "mysql")]
     MySql,
+    /// Any ODBC data source (SQL Server, Oracle, DB2, …), configured by a connection string
+    /// rather than pooled host/port parameters.
+    #[cfg(feature = "odbc")]
+    Odbc,
 }
 
 impl SqlEngine {
@@ -78,6 +83,8 @@ impl SqlEngine {
             }
             #[cfg(feature = "mysql")]
             _ if keyword.eq_ignore_ascii_case("MYSQL") => Some(Self::MySql),
+            #[cfg(feature = "odbc")]
+            _ if keyword.eq_ignore_ascii_case("ODBC") => Some(Self::Odbc),
             _ => None,
         }
     }
@@ -89,6 +96,8 @@ impl SqlEngine {
             Self::Postgres => "postgres",
             #[cfg(feature = "mysql")]
             Self::MySql => "mysql",
+            #[cfg(feature = "odbc")]
+            Self::Odbc => "odbc",
         }
     }
 
@@ -100,6 +109,10 @@ impl SqlEngine {
             Self::Postgres => "port",
             #[cfg(feature = "mysql")]
             Self::MySql => "tcp_port",
+            // ODBC does not use pooled host/port params (it takes a connection string), so this
+            // key is never consulted for it; `build_pool_params` branches before reaching here.
+            #[cfg(feature = "odbc")]
+            Self::Odbc => "port",
         }
     }
 
@@ -115,6 +128,8 @@ impl SqlEngine {
             Self::Postgres => build_postgres_provider(params, table_ref).await,
             #[cfg(feature = "mysql")]
             Self::MySql => build_mysql_provider(params, table_ref).await,
+            #[cfg(feature = "odbc")]
+            Self::Odbc => build_odbc_provider(params, table_ref).await,
         }
     }
 }
@@ -153,6 +168,56 @@ async fn build_mysql_provider(
         .table_provider(table_ref)
         .await
         .map_err(|e| anyhow::anyhow!("failed to resolve MySQL table: {e}"))
+}
+
+#[cfg(feature = "odbc")]
+async fn build_odbc_provider(
+    params: HashMap<String, SecretString>,
+    table_ref: TableReference,
+) -> anyhow::Result<Arc<dyn TableProvider>> {
+    use datafusion_table_providers::odbc::ODBCTableFactory;
+    use datafusion_table_providers::sql::db_connection_pool::odbcpool::ODBCPool;
+
+    // `ODBCPool::new` is synchronous (unlike the pg/mysql pools) — it validates the connection
+    // string and prepares the environment; the connection itself is opened lazily on scan.
+    let pool = ODBCPool::new(params)
+        .map_err(|e| anyhow::anyhow!("ODBC connection pool creation failed: {e}"))?;
+    let factory = ODBCTableFactory::new(Arc::new(pool));
+    factory
+        // The second argument is an optional pre-resolved schema; `None` lets the provider infer
+        // it from the source. The `odbc-federation` feature (enabled by our `odbc` feature) makes
+        // this return the `FederatedTableProviderAdaptor` the definition layer expects.
+        .table_provider(table_ref, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to resolve ODBC table: {e}"))
+}
+
+#[cfg(all(test, feature = "odbc"))]
+mod odbc_error_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Observe how a missing/unregistered ODBC driver surfaces. Ignored by default because it
+    /// depends on the named driver being *absent* (which it is on the dev box / CI without
+    /// msodbcsql installed). Run with:
+    ///   cargo test -p beacon-sql-databases --features odbc -- --ignored --nocapture missing_driver
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "observes the driver-not-found error path; depends on the driver being absent"]
+    async fn missing_driver_surfaces_a_clear_error() {
+        let mut options = BTreeMap::new();
+        options.insert("Driver".to_string(), "{No Such ODBC Driver}".to_string());
+        options.insert("Server".to_string(), "localhost".to_string());
+        options.insert("Database".to_string(), "x".to_string());
+
+        let params = crate::options::build_pool_params(SqlEngine::Odbc, &options, None);
+        let table_ref = TableReference::parse_str("dbo.orders");
+        let error = build_odbc_provider(params, table_ref)
+            .await
+            .expect_err("a missing driver must be an error");
+
+        // The exact SQLSTATE/text comes from the unixODBC driver manager; print the full chain.
+        eprintln!("\n--- ODBC missing-driver error ---\n{error:#}\n---------------------------------\n");
+    }
 }
 
 #[cfg(test)]

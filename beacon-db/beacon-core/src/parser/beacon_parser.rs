@@ -10,8 +10,8 @@ use datafusion::sql::{
 use beacon_auth::{Privilege, PrivilegeTarget};
 
 use super::statement::{
-    AuthStatement, BeaconStatement, CreateCrawlerStatement, CreateIndexStatement,
-    CreateMaterializedViewStatement, DropCrawlerStatement, DropExtensionStatement,
+    AttachStatement, AuthStatement, BeaconStatement, CreateCrawlerStatement, CreateIndexStatement,
+    CreateMaterializedViewStatement, DetachStatement, DropCrawlerStatement, DropExtensionStatement,
     DropIndexStatement, RefreshStatement, RunCrawlerStatement, SetExtensionStatement,
     ShowExtensionsStatement, ShowIndexesStatement,
 };
@@ -80,6 +80,14 @@ impl<'a> BeaconParser<'a> {
 
         if self.is_show_indexes() {
             return self.parse_show_indexes();
+        }
+
+        if self.is_attach() {
+            return self.parse_attach();
+        }
+
+        if self.is_detach() {
+            return self.parse_detach();
         }
 
         let df_statement = Box::new(self.df_parser.parse_statement()?);
@@ -382,6 +390,43 @@ impl<'a> BeaconParser<'a> {
             .parse_object_name(false)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         Ok(BeaconStatement::ShowIndexes(ShowIndexesStatement { table }))
+    }
+
+    fn is_attach(&self) -> bool {
+        matches!(&self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.value.to_uppercase() == "ATTACH")
+    }
+
+    fn is_detach(&self) -> bool {
+        matches!(&self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.value.to_uppercase() == "DETACH")
+    }
+
+    /// Parse: ATTACH '<url>' AS <name> [WITH ('token' '<t>', 'tls' 'true')]
+    fn parse_attach(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // ATTACH
+        let url = self.parse_string_value()?;
+        self.expect_keyword(Keyword::AS)?;
+        let name = self.parse_string_value()?;
+
+        let options = if matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.keyword == Keyword::WITH
+        ) {
+            self.df_parser.parser.next_token(); // WITH
+            self.parse_with_options()?
+        } else {
+            HashMap::new()
+        };
+
+        Ok(BeaconStatement::Attach(AttachStatement { name, url, options }))
+    }
+
+    /// Parse: DETACH <name>
+    fn parse_detach(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // DETACH
+        let name = self.parse_string_value()?;
+        Ok(BeaconStatement::Detach(DetachStatement { name }))
     }
 
     /// Read a single string value (single-quoted string, identifier, or number).
@@ -1039,5 +1084,49 @@ mod tests {
             stmt.to_string(),
             "CREATE CRAWLER argo ON 'argo/' WITH ('format' 'parquet')"
         );
+    }
+
+    #[test]
+    fn test_parse_attach_with_options() {
+        let sql = "ATTACH 'beacon://host:50051' AS lake WITH ('token' 'secret', 'tls' 'true')";
+        let stmt = BeaconParser::new(sql).unwrap().parse_statement().unwrap();
+        match stmt {
+            BeaconStatement::Attach(attach) => {
+                assert_eq!(attach.name, "lake");
+                assert_eq!(attach.url, "beacon://host:50051");
+                assert_eq!(attach.options.get("token").map(String::as_str), Some("secret"));
+                assert_eq!(attach.options.get("tls").map(String::as_str), Some("true"));
+            }
+            other => panic!("expected ATTACH, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_attach_and_detach_bare() {
+        match BeaconParser::new("ATTACH 'beacon://h:1' AS r")
+            .unwrap()
+            .parse_statement()
+            .unwrap()
+        {
+            BeaconStatement::Attach(a) => {
+                assert_eq!((a.name.as_str(), a.url.as_str()), ("r", "beacon://h:1"));
+                assert!(a.options.is_empty());
+            }
+            other => panic!("expected ATTACH, got {other:?}"),
+        }
+        match BeaconParser::new("DETACH lake").unwrap().parse_statement().unwrap() {
+            BeaconStatement::Detach(d) => assert_eq!(d.name, "lake"),
+            other => panic!("expected DETACH, got {other:?}"),
+        }
+    }
+
+    /// The rendered form must not leak the token (it is a credential).
+    #[test]
+    fn test_attach_display_omits_token() {
+        let sql = "ATTACH 'beacon://h:1' AS r WITH ('token' 'secret')";
+        let stmt = BeaconParser::new(sql).unwrap().parse_statement().unwrap();
+        let rendered = stmt.to_string();
+        assert_eq!(rendered, "ATTACH 'beacon://h:1' AS r");
+        assert!(!rendered.contains("secret"));
     }
 }

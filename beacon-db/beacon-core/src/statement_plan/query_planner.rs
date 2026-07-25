@@ -207,6 +207,23 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if let Some(attach) = any.downcast_ref::<logical::AttachNode>() {
+            return Ok(Some(Arc::new(physical::AttachExec::new(
+                attach.name.clone(),
+                attach.url.clone(),
+                attach.credential.clone(),
+                attach.tls,
+                session,
+            ))));
+        }
+
+        if let Some(detach) = any.downcast_ref::<logical::DetachNode>() {
+            return Ok(Some(Arc::new(physical::DetachExec::new(
+                detach.name.clone(),
+                session,
+            ))));
+        }
+
         if any.downcast_ref::<logical::ShowCrawlersNode>().is_some() {
             return Ok(Some(Arc::new(physical::ShowCrawlersExec::new(session))));
         }

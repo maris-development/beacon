@@ -164,6 +164,239 @@ async fn federated_remote_table_pushes_down_and_streams() {
     server.handle.abort();
 }
 
+/// Collect a query run against a local embedded [`Database`].
+async fn run_local(
+    db: &beacon_core::embedded::Database,
+    sql: &str,
+) -> Vec<arrow::array::RecordBatch> {
+    db.sql(sql.to_string(), beacon_core::AuthIdentity::local())
+        .await
+        .expect("local query should run")
+        .into_record_stream()
+        .expect("streamed result")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("stream should drain")
+}
+
+/// End-to-end catalog federation: a *separate* embedded Beacon attaches a loopback
+/// remote as a catalog, then queries its tables as `remote.<schema>.<table>` — the
+/// remote's schemas/tables are enumerated at attach, each table resolves lazily, and
+/// a filtered aggregate pushes down to the remote. Detaching stops it resolving.
+#[tokio::test(flavor = "multi_thread")]
+async fn attached_remote_catalog_resolves_and_queries_tables() {
+    use beacon_core::embedded::{Database, DbPath, OpenOptions, RemoteCredential};
+
+    // Anonymous access on the remote: attach connects without credentials.
+    let server = spawn_server(true).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+
+    // Seed the remote table.
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT, val DOUBLE)")).await;
+    run_sql_rows(
+        runtime,
+        &format!("INSERT INTO {obs} VALUES (1, 10.0), (2, 20.0), (3, 30.0)"),
+    )
+    .await;
+
+    // A separate, LOCAL embedded database attaches the remote as a catalog.
+    let local = Database::open(DbPath::Memory, OpenOptions::default())
+        .await
+        .expect("open local embedded database");
+    local
+        .attach_remote(
+            "remote",
+            &format!("beacon://127.0.0.1:{port}"),
+            RemoteCredential::Anonymous,
+            false,
+        )
+        .await
+        .expect("attach should enumerate the remote");
+    assert_eq!(local.attached_catalogs(), vec!["remote".to_string()]);
+
+    // The remote table is queryable as `remote.public.<obs>`; the filtered aggregate
+    // is pushed to the remote and only the one-row result comes back.
+    let batches = run_local(
+        &local,
+        &format!("SELECT count(*) AS c, sum(val) AS s FROM remote.public.{obs} WHERE id > 1"),
+    )
+    .await;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    let c = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    let s = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .expect("sum is Float64")
+        .value(0);
+    assert_eq!(c, 2, "id > 1 matches two rows");
+    assert_eq!(s, 50.0, "20.0 + 30.0");
+
+    // The scan federates to the remote rather than running locally.
+    let explain = run_local(
+        &local,
+        &format!("EXPLAIN SELECT count(*) FROM remote.public.{obs} WHERE id > 1"),
+    )
+    .await;
+    let explain_text = arrow::util::pretty::pretty_format_batches(&explain)
+        .expect("explain should format")
+        .to_string();
+    assert!(
+        explain_text.contains("Virtual")
+            || explain_text.to_lowercase().contains("federat")
+            || explain_text.contains("SchemaCast"),
+        "expected a federated scan node in the plan, got:\n{explain_text}"
+    );
+
+    // Detaching removes it: the catalog list is empty and the table no longer resolves.
+    assert!(local.detach("remote").expect("detach"));
+    assert!(local.attached_catalogs().is_empty());
+    assert!(
+        local
+            .sql(
+                format!("SELECT * FROM remote.public.{obs}"),
+                beacon_core::AuthIdentity::local(),
+            )
+            .await
+            .is_err(),
+        "after detach the remote table must not resolve"
+    );
+
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+    server.handle.abort();
+}
+
+/// The same catalog federation, driven entirely from **SQL** (`ATTACH`/`DETACH`) instead of the
+/// embedded API — so it works over any SQL entry point (server, CLI, SQLAlchemy). Also pins that
+/// a SQL-attached catalog shows up in `attached_catalogs()` (the state is session-derived, so the
+/// SQL and embedded paths agree).
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_attach_and_detach_a_remote_catalog() {
+    use beacon_core::embedded::{Database, DbPath, OpenOptions};
+
+    let server = spawn_server(true).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT, val DOUBLE)")).await;
+    run_sql_rows(runtime, &format!("INSERT INTO {obs} VALUES (1, 10.0), (2, 20.0)")).await;
+
+    let local = Database::open(DbPath::Memory, OpenOptions::default())
+        .await
+        .expect("open local embedded database");
+
+    // ATTACH over SQL, not the embedded method.
+    run_local(
+        &local,
+        &format!("ATTACH 'beacon://127.0.0.1:{port}' AS remote"),
+    )
+    .await;
+    // The SQL-attached catalog is visible through the embedded introspection (shared state).
+    assert_eq!(local.attached_catalogs(), vec!["remote".to_string()]);
+
+    let batches = run_local(
+        &local,
+        &format!("SELECT sum(val) AS s FROM remote.public.{obs}"),
+    )
+    .await;
+    let s = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .expect("sum is Float64")
+        .value(0);
+    assert_eq!(s, 30.0, "10.0 + 20.0");
+
+    // DETACH over SQL; the catalog is gone and a typo'd detach errors.
+    run_local(&local, "DETACH remote").await;
+    assert!(local.attached_catalogs().is_empty());
+    assert!(
+        local
+            .sql("DETACH nope", beacon_core::AuthIdentity::local())
+            .await
+            .is_err(),
+        "detaching an unattached catalog must error"
+    );
+
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+    server.handle.abort();
+}
+
+/// Attaching a remote that requires authentication: username/password (HTTP Basic) authenticates
+/// and lets the catalog resolve, while an anonymous attach is refused. Proves the `RemoteCredential`
+/// path end to end against a server with anonymous access disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_authenticates_with_username_and_password() {
+    use beacon_core::embedded::{Database, DbPath, OpenOptions, RemoteCredential};
+
+    // Anonymous access disabled: the remote demands credentials.
+    let server = spawn_server(false).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT)")).await;
+    run_sql_rows(runtime, &format!("INSERT INTO {obs} VALUES (1), (2), (3)")).await;
+
+    let local = Database::open(DbPath::Memory, OpenOptions::default())
+        .await
+        .expect("open local embedded database");
+    let url = format!("beacon://127.0.0.1:{port}");
+
+    // Anonymous attach is rejected — enumeration needs credentials the remote won't waive.
+    assert!(
+        local
+            .attach_remote("nope", &url, RemoteCredential::Anonymous, false)
+            .await
+            .is_err(),
+        "anonymous attach must fail when the remote disallows anonymous access"
+    );
+    assert!(local.attached_catalogs().is_empty());
+
+    // Username/password authenticates (sent as HTTP Basic).
+    local
+        .attach_remote(
+            "remote",
+            &url,
+            RemoteCredential::Basic {
+                username: common::ADMIN_USERNAME.to_string(),
+                password: common::ADMIN_PASSWORD.to_string(),
+            },
+            false,
+        )
+        .await
+        .expect("username/password attach should authenticate");
+    assert_eq!(local.attached_catalogs(), vec!["remote".to_string()]);
+
+    let batches = run_local(
+        &local,
+        &format!("SELECT count(*) AS c FROM remote.public.{obs}"),
+    )
+    .await;
+    let c = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(c, 3);
+
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+    server.handle.abort();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn handshake_execute_and_metadata_work() {
     let server = spawn_server(false).await;

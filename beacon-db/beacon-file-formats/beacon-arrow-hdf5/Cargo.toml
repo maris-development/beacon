@@ -1,0 +1,28 @@
+[package]
+name = "beacon-arrow-hdf5"
+version = "1.7.3"
+edition = "2021"
+
+[features]
+# Build netCDF-c and HDF5 from source and link them statically. Forwarded to
+# `beacon-arrow-netcdf` (the reader this crate delegates to); off by default. Used for the
+# portable Python wheels.
+static = ["beacon-arrow-netcdf/static"]
+
+[dependencies]
+arrow = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+tokio = { workspace = true }
+
+# HDF5 reading is netCDF-c reading: a NetCDF-4 file *is* HDF5, and netCDF-c's HDF5 dispatch also
+# opens plain HDF5 files. So this crate owns the HDF5 *identity* (names, `.h5`/`.hdf5`
+# extensions, `STORED AS {h5,hdf5}`, `read_hdf5`) and delegates the actual read/write to
+# beacon-arrow-netcdf rather than duplicating the reader.
+beacon-arrow-netcdf = { path = "../beacon-arrow-netcdf" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-common = { path = "../../beacon-common" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+chrono = { workspace = true }

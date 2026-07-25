@@ -32,9 +32,10 @@ use datafusion::{
 };
 
 use crate::parser::statement::{
-    AuthStatement, CreateCrawlerStatement, CreateIndexStatement, CreateMaterializedViewStatement,
-    DropCrawlerStatement, DropExtensionStatement, DropIndexStatement, RefreshStatement,
-    RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
+    AttachStatement, AuthStatement, CreateCrawlerStatement, CreateIndexStatement,
+    CreateMaterializedViewStatement, DetachStatement, DropCrawlerStatement, DropExtensionStatement,
+    DropIndexStatement, RefreshStatement, RunCrawlerStatement, SetExtensionStatement,
+    ShowExtensionsStatement, ShowIndexesStatement,
 };
 
 pub(crate) use authz::authorize_logical_plan;
@@ -211,6 +212,38 @@ pub(crate) fn run_crawler_plan(statement: RunCrawlerStatement) -> LogicalPlan {
 pub(crate) fn drop_crawler_plan(statement: DropCrawlerStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::DropCrawlerNode::new(object_name_value(&statement.name))),
+    })
+}
+
+/// Build the logical plan for `ATTACH '<url>' AS <name> [WITH (...)]`.
+///
+/// Recognized options: `token` (bearer), `username`+`password` (Basic), and `tls`. Fallible
+/// because the credential combination is validated here (e.g. a token *and* a password is refused).
+pub(crate) fn attach_plan(statement: AttachStatement) -> anyhow::Result<LogicalPlan> {
+    let credential = beacon_datafusion_ext::remote::RemoteCredential::from_parts(
+        statement.options.get("token").cloned(),
+        statement.options.get("username").cloned(),
+        statement.options.get("password").cloned(),
+    )?;
+    let tls = statement
+        .options
+        .get("tls")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    Ok(LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::AttachNode::new(
+            statement.name,
+            statement.url,
+            credential,
+            tls,
+        )),
+    }))
+}
+
+/// Build the logical plan for `DETACH <name>`.
+pub(crate) fn detach_plan(statement: DetachStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::DetachNode::new(statement.name)),
     })
 }
 

@@ -21,6 +21,13 @@ pub(crate) fn build_pool_params(
     options: &BTreeMap<String, String>,
     password: Option<SecretString>,
 ) -> HashMap<String, SecretString> {
+    // ODBC is configured by a single connection string, not pooled host/port keys, so it takes a
+    // different assembly path.
+    #[cfg(feature = "odbc")]
+    if engine == SqlEngine::Odbc {
+        return build_odbc_params(options, password);
+    }
+
     let mut params: HashMap<String, String> = HashMap::with_capacity(options.len() + 1);
     for (key, value) in options {
         let mapped = match key.as_str() {
@@ -39,6 +46,97 @@ pub(crate) fn build_pool_params(
         secret_params.insert("pass".to_string(), password);
     }
     secret_params
+}
+
+/// Build the ODBC pool's single `connection_string` parameter from beacon's options.
+///
+/// Two ways to configure it:
+/// - a raw `connection_string` option, passed through verbatim (full control); or
+/// - individual options joined as ODBC `Key=Value;` pairs — the user supplies ODBC key names
+///   (`Driver`, `Server`, `Database`, `UID`, …), since connection-string keys are driver-specific
+///   and beacon does not invent an abstraction over them.
+///
+/// The password is stored encrypted (never in `options`) and injected here as `PWD`, unless the
+/// connection string already carries one.
+#[cfg(feature = "odbc")]
+fn build_odbc_params(
+    options: &BTreeMap<String, String>,
+    password: Option<SecretString>,
+) -> HashMap<String, SecretString> {
+    use secrecy::ExposeSecret as _;
+
+    let mut connection_string = match options.get("connection_string") {
+        Some(raw) => raw.clone(),
+        None => options
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+    };
+
+    if let Some(password) = password {
+        if !connection_string.to_ascii_lowercase().contains("pwd=") {
+            if !connection_string.is_empty() && !connection_string.ends_with(';') {
+                connection_string.push(';');
+            }
+            connection_string.push_str("PWD=");
+            connection_string.push_str(password.expose_secret());
+        }
+    }
+
+    let mut params = HashMap::new();
+    params.insert(
+        "connection_string".to_string(),
+        SecretString::from(connection_string),
+    );
+    params
+}
+
+#[cfg(all(test, feature = "odbc"))]
+mod odbc_tests {
+    use super::*;
+    use secrecy::ExposeSecret as _;
+
+    #[test]
+    fn assembles_a_connection_string_from_options_and_injects_the_password() {
+        let mut opts = BTreeMap::new();
+        opts.insert("Driver".to_string(), "{ODBC Driver 18 for SQL Server}".to_string());
+        opts.insert("Server".to_string(), "sql.internal,1433".to_string());
+        opts.insert("Database".to_string(), "sales".to_string());
+        opts.insert("UID".to_string(), "reader".to_string());
+
+        let params = build_odbc_params(&opts, Some(SecretString::from("s3cret".to_string())));
+        let cs = params["connection_string"].expose_secret();
+        // BTreeMap orders keys, so this is deterministic.
+        assert!(cs.contains("Driver={ODBC Driver 18 for SQL Server}"));
+        assert!(cs.contains("Server=sql.internal,1433"));
+        assert!(cs.contains("Database=sales"));
+        assert!(cs.contains("UID=reader"));
+        assert!(cs.ends_with("PWD=s3cret"));
+    }
+
+    #[test]
+    fn a_raw_connection_string_is_passed_through() {
+        let mut opts = BTreeMap::new();
+        opts.insert(
+            "connection_string".to_string(),
+            "Driver={x};Server=h;Database=d".to_string(),
+        );
+        let params = build_odbc_params(&opts, None);
+        assert_eq!(
+            params["connection_string"].expose_secret(),
+            "Driver={x};Server=h;Database=d"
+        );
+    }
+
+    #[test]
+    fn an_existing_pwd_is_not_duplicated() {
+        let mut opts = BTreeMap::new();
+        opts.insert("connection_string".to_string(), "Server=h;PWD=inline".to_string());
+        let params = build_odbc_params(&opts, Some(SecretString::from("other".to_string())));
+        // The connection string already has a password, so the secret is not appended.
+        assert_eq!(params["connection_string"].expose_secret(), "Server=h;PWD=inline");
+    }
 }
 
 #[cfg(test)]

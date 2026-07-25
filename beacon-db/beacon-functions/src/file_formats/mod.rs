@@ -51,6 +51,12 @@ pub fn register_table_functions(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),
         )),
+        // `read_hdf5` lives in its own crate (beacon-arrow-hdf5); it delegates to the netCDF
+        // reader, since netCDF-4 files are HDF5 and netCDF-c opens plain HDF5 too.
+        Arc::new(beacon_arrow_hdf5::ReadHdf5Func::new(
+            runtime_handle.clone(),
+            Arc::downgrade(&session_ctx),
+        )),
         Arc::new(beacon_arrow_tiff::datafusion::ReadTiffFunc::new(
             runtime_handle.clone(),
             Arc::downgrade(&session_ctx),

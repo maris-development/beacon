@@ -3,6 +3,16 @@ name = "beacon-core"
 version = "1.8.0"
 edition = "2021"
 
+[features]
+# Statically build+link netCDF/HDF5 (see beacon-arrow-netcdf). Passed through for the Python
+# wheels; off by default.
+static-netcdf = ["beacon-arrow-netcdf/static", "beacon-arrow-hdf5/static"]
+# Enable the ODBC external-table engine (`STORED AS ODBC`), reaching SQL Server and any ODBC
+# source. Off by default: it needs a system ODBC driver manager (unixODBC) at build time and a
+# vendor driver (e.g. msodbcsql18) at runtime. PostgreSQL/MySQL are always on via the crate's
+# defaults.
+sql-odbc = ["beacon-sql-databases/odbc"]
+
 [dependencies]
 futures = { workspace=true}
 anyhow = { workspace=true}
@@ -35,6 +45,7 @@ tracing = { workspace=true}
 beacon-auth = { path = "../beacon-auth" }
 beacon-common = { path = "../beacon-common" }
 beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
+beacon-arrow-hdf5 = { path = "../beacon-file-formats/beacon-arrow-hdf5" }
 beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
 beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
 beacon-functions = { path = "../beacon-functions" }

@@ -20,6 +20,26 @@ pub enum BeaconStatement {
     CreateIndex(CreateIndexStatement),
     DropIndex(DropIndexStatement),
     ShowIndexes(ShowIndexesStatement),
+    Attach(AttachStatement),
+    Detach(DetachStatement),
+}
+
+/// ATTACH '<url>' AS <name> [WITH ('token' '<t>', 'tls' 'true')]
+#[derive(Debug, Clone)]
+pub struct AttachStatement {
+    /// Local catalog name the remote is mounted under.
+    pub name: String,
+    /// The remote's Flight SQL endpoint (`beacon://host:port`, `grpc://…`, `http(s)://…`, `host:port`).
+    pub url: String,
+    /// Options: `token` (bearer credential) and `tls` (`true`/`false`).
+    pub options: HashMap<String, String>,
+}
+
+/// DETACH <name>
+#[derive(Debug, Clone)]
+pub struct DetachStatement {
+    /// The attached catalog name to detach.
+    pub name: String,
 }
 
 /// SET EXTENSION '<kind>' FOR <table> TO '<json>'
@@ -308,6 +328,9 @@ impl Display for BeaconStatement {
             Self::CreateIndex(s) => write!(f, "{s}"),
             Self::DropIndex(s) => write!(f, "{s}"),
             Self::ShowIndexes(s) => write!(f, "{s}"),
+            // The token, if any, is a credential — never render it.
+            Self::Attach(s) => write!(f, "ATTACH '{}' AS {}", s.url, s.name),
+            Self::Detach(s) => write!(f, "DETACH {}", s.name),
         }
     }
 }

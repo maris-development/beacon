@@ -44,6 +44,23 @@ def norm(sql: str) -> str:
 # ----------------------------------------------------------------------------------------
 
 
+def test_raw_sql_order_by_is_preserved(con):
+    # A bare con.sql("... ORDER BY ...") must run verbatim, not wrapped in `SELECT * FROM (...)`
+    # — an inner ORDER BY under an outer query is legally dropped by the optimizer, which once
+    # silently unsorted every raw ordered query. The rendered SQL is the statement itself.
+    rel = con.sql("SELECT amount FROM events ORDER BY amount")
+    assert rel.sql == "SELECT amount FROM events ORDER BY amount"
+    assert rel.fetchall() == [(10,), (20,), (30,), (40,), (50,)]
+
+
+def test_raw_sql_group_by_order_is_deterministic(con):
+    # The regression that surfaced the wrapping bug: grouped + ordered raw SQL returned rows in
+    # nondeterministic order. Run it several times; it must be sorted every time.
+    query = "SELECT kind, sum(amount) AS s FROM events GROUP BY kind ORDER BY kind"
+    for _ in range(5):
+        assert con.sql(query).fetchall() == [("click", 70), ("view", 80)]
+
+
 def test_building_a_relation_executes_nothing(con):
     rel = con.table("events").filter("kind = 'click'").project("user_id")
     # No terminal method was called; `sql` is pure string assembly.
@@ -181,6 +198,16 @@ def test_shape_and_len(con):
 def test_explain_returns_plan_text(con):
     text = con.table("events").filter("amount > 0").explain()
     assert "plan" in text.lower() or "Filter" in text
+
+
+def test_explain_analyze_annotates_runtime_metrics(con):
+    # EXPLAIN (no analyze) prints the plan but never runs it, so it carries no metrics; ANALYZE
+    # runs the query and annotates each operator with real counters.
+    plain = con.table("events").explain()
+    analyzed = con.table("events").explain(analyze=True)
+    assert "metrics=" not in plain
+    assert "metrics=" in analyzed
+    assert "output_rows" in analyzed
 
 
 def test_arrow_and_df_on_a_relation(con):

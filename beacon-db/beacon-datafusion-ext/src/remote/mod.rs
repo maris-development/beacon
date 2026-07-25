@@ -5,11 +5,13 @@
 //! largest federatable sub-plan (filters, projection, limit, joins, aggregates)
 //! to the remote over Arrow Flight SQL via [`BeaconFlightSqlExecutor`].
 
+mod catalog;
 mod connection;
 mod definition;
 mod executor;
 
-pub use connection::RemoteConnection;
+pub use catalog::RemoteCatalogProvider;
+pub use connection::{RemoteConnection, RemoteCredential};
 pub use definition::{BeaconRemoteSqlTable, RemoteTableDefinition, unresolved_schema};
 pub use executor::BeaconFlightSqlExecutor;
 

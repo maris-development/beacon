@@ -72,6 +72,28 @@ pub(crate) async fn drop_table(
     Ok(())
 }
 
+/// `ATTACH '<url>' AS <name> [WITH (...)]`: mount a remote Beacon as a catalog on the session, so
+/// its tables are queryable as `name.<schema>.<table>` with Flight SQL pushdown. Shares its
+/// implementation with the embedded `Database::attach_remote`.
+pub(crate) async fn attach_remote(
+    session: &Arc<SessionContext>,
+    name: &str,
+    url: &str,
+    credential: beacon_datafusion_ext::remote::RemoteCredential,
+    tls: bool,
+) -> anyhow::Result<()> {
+    crate::embedded::attach_remote_catalog(session, name, url, credential, tls).await
+}
+
+/// `DETACH <name>`: unmount a remote catalog. Errors if no remote catalog is attached under
+/// `name`, so a typo is a clear failure rather than a silent no-op.
+pub(crate) async fn detach_remote(session: &Arc<SessionContext>, name: &str) -> anyhow::Result<()> {
+    if !crate::embedded::detach_remote_catalog(session, name)? {
+        anyhow::bail!("no remote catalog named `{name}` is attached");
+    }
+    Ok(())
+}
+
 /// Register a `CREATE EXTERNAL TABLE` via the listing-table factory and persist
 /// it to the catalog.
 pub(crate) async fn create_external_table(

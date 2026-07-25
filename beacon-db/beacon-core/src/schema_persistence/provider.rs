@@ -72,6 +72,36 @@ impl PersistentSchemaProvider {
         ))
     }
 
+    /// Registers a **session-only** table: added to the in-memory catalog but never persisted,
+    /// so it holds for the process and writes no `db://<name>/table.json`.
+    ///
+    /// This is the path for `Connection.register(...)` in the embedded bindings — an ephemeral
+    /// view over in-memory Python data (a pandas/pyarrow/polars frame). Such a table is backed
+    /// by a plain [`MemTable`](datafusion::datasource::MemTable), which has no beacon
+    /// [`TableDefinition`](beacon_datafusion_ext::table_ext::TableDefinition) to serialize;
+    /// routing it through the persisting [`Self::register_table`] would fail on exactly that.
+    ///
+    /// Overwrite semantics match [`Self::register_table`]: a prior entry under `name` is
+    /// replaced and returned.
+    pub fn register_temporary_table(
+        &self,
+        name: String,
+        table: Arc<dyn TableProvider>,
+    ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+        let previous = self.inner.deregister_table(&name)?;
+        self.inner.register_table(name, table)?;
+        Ok(previous)
+    }
+
+    /// Removes a table from the in-memory catalog **without** touching persisted state — the
+    /// counterpart to [`Self::register_temporary_table`]. Returns the removed provider, if any.
+    pub fn deregister_temporary_table(
+        &self,
+        name: &str,
+    ) -> datafusion::error::Result<Option<Arc<dyn TableProvider>>> {
+        self.inner.deregister_table(name)
+    }
+
     /// Run a persistence side effect to completion from the sync `SchemaProvider`
     /// trait methods. A no-op when the session context is gone. Requires a
     /// multi-threaded runtime (`block_in_place`).

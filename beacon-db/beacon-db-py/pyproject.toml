@@ -35,7 +35,13 @@ dependencies = []
 arrow = ["pyarrow>=14.0"]
 pandas = ["pyarrow>=14.0", "pandas>=2.0"]
 polars = ["polars>=1.0"]
-dev = ["pytest>=8.0", "pyarrow>=14.0", "pandas>=2.0", "ruff>=0.6"]
+sqlalchemy = ["sqlalchemy>=2.0"]
+dev = ["pytest>=8.0", "pyarrow>=14.0", "pandas>=2.0", "polars>=1.0", "h5py>=3.0", "sqlalchemy>=2.0", "ruff>=0.6"]
+
+# Registers the `beacondb://` dialect so `create_engine("beacondb:///...")` works with no manual
+# setup once the package is installed.
+[project.entry-points."sqlalchemy.dialects"]
+beacondb = "beacondb.sqlalchemy:BeacondbDialect"
 
 [project.urls]
 Homepage = "https://github.com/maris-development/beacon"
@@ -48,6 +54,9 @@ Source = "https://github.com/maris-development/beacon/tree/main/beacon-db/beacon
 python-source = "python"
 module-name = "beacondb._beacondb"
 features = ["pyo3/extension-module"]
+# Never ship compiled bytecode: the wheel is abi3 (one wheel for many CPythons), so a
+# version-specific `.pyc` baked in from a local build is both wrong and stale.
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.pyo"]
 
 [tool.ruff]
 line-length = 100

@@ -3,6 +3,14 @@ name = "beacon-arrow-netcdf"
 version = "1.7.3"
 edition = "2021"
 
+[features]
+# Build netCDF-c and HDF5 from source and link them statically, instead of linking the system
+# libraries. Off by default (dynamic linking is faster to build and fine for local dev / the
+# server, which control their own environment); turned on for the distributable Python wheels so
+# they carry netCDF/HDF5 and need nothing installed — the only way to build a portable Windows
+# wheel. Requires `cmake` at build time (netcdf-src/hdf5-src build with it).
+static = ["netcdf/static", "netcdf-sys/static"]
+
 [dependencies]
 netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["ndarray"], version = "0.11.1"}
 netcdf-sys = { git ="https://github.com/robinskil/netcdf.git", package = "netcdf-sys" }

@@ -578,15 +578,38 @@ fn register_file_formats(
         Arc::new(BBFFormatFactory::new(Default::default())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
-            listing_factory,
-            netcdf_output_dir,
+            listing_factory.clone(),
+            netcdf_output_dir.clone(),
             NetcdfOptions::default(),
             builder.netcdf.clone(),
+        )),
+        // HDF5 (its own crate, delegating to the netCDF reader — a NetCDF-4 file is HDF5). In the
+        // `formats` vec so beacon's format registry keys it by `.h5`/`.hdf5` and dataset
+        // discovery picks those files up. Registered under `hdf5` in DataFusion's native registry
+        // by the loop below.
+        Arc::new(beacon_arrow_hdf5::Hdf5FormatFactory::wrapping(
+            NetCDFFormatFactory::new(
+                listing_factory.clone(),
+                netcdf_output_dir.clone(),
+                NetcdfOptions::default(),
+                builder.netcdf.clone(),
+            ),
         )),
     ];
     for format in &formats {
         state.register_file_format(format.clone(), true)?;
     }
+
+    // DataFusion's native registry keys a factory by its single `get_ext`, and the HDF5 factory
+    // above registered `hdf5`. Register it once more under `h5` so `STORED AS H5` resolves too.
+    let hdf5_h5 = beacon_arrow_hdf5::Hdf5FormatFactory::wrapping(NetCDFFormatFactory::new(
+        listing_factory.clone(),
+        netcdf_output_dir.clone(),
+        NetcdfOptions::default(),
+        builder.netcdf.clone(),
+    ))
+    .with_ext("h5");
+    state.register_file_format(Arc::new(hdf5_h5), true)?;
 
     // Fill the handle registered on the session config. Without this the
     // external-table builder cannot reach `create_with_native_root`, and a netCDF

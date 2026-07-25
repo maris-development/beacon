@@ -5,13 +5,14 @@
 //! with different identities exist over a single container file — the file allows exactly one
 //! handle per process, so per-connection identity is the only way to have more than one.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 
-use arrow::array::AsArray;
+use arrow::array::{Array, AsArray};
 
 use beacon_core::embedded::{AuthMode, Database, DbPath, OpenOptions};
+use beacon_core::query::{InnerQuery, Query};
 use beacon_core::{AuthIdentity, Credential};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -19,7 +20,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use crate::errors::{
     interface_error, map_engine_error, not_supported, programming_error, OperationalError,
 };
-use crate::exec::run_sql;
+use crate::exec::{run_query_collected, run_sql};
 use crate::relation::{quote_ident, Relation};
 use crate::result::ResultSet;
 use crate::runtime::block_on;
@@ -80,8 +81,16 @@ fn open_or_attach(
                      change the mode of an open database. Close the existing connection first, \
                      or open with auth={}.",
                     key.display(),
-                    if existing.auth_enabled() { "enabled" } else { "disabled" },
-                    if existing.auth_enabled() { "True" } else { "False" },
+                    if existing.auth_enabled() {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    if existing.auth_enabled() {
+                        "True"
+                    } else {
+                        "False"
+                    },
                 )));
             }
             return Ok(existing);
@@ -125,9 +134,9 @@ impl Connection {
     }
 
     fn last_result_mut(&mut self) -> PyResult<&mut ResultSet> {
-        self.last_result.as_mut().ok_or_else(|| {
-            interface_error("no statement has been executed on this connection yet")
-        })
+        self.last_result
+            .as_mut()
+            .ok_or_else(|| interface_error("no statement has been executed on this connection yet"))
     }
 }
 
@@ -202,6 +211,175 @@ impl Connection {
         self.sql(query)
     }
 
+    /// Registers a pandas / pyarrow / polars frame (or any Arrow-C-stream object, or a beacondb
+    /// relation) as a table queryable by `name`, and returns the connection so the call chains.
+    ///
+    /// By default the table is **session-only**: an in-memory copy that lives for the process and
+    /// is not written into `beacon.db` (copying the file does not carry it, reopening does not
+    /// see it), and re-registering the name replaces it.
+    ///
+    /// With `persist=True` the data is written into `beacon.db` as a managed table instead, so it
+    /// survives a reopen and travels with the file. That is real DDL: it needs the connection's
+    /// identity to have write privileges (a super-user — the default with auth off), and it
+    /// fails if `name` already exists (drop it first rather than silently overwriting on-disk
+    /// data). Needs `pyarrow` installed either way.
+    #[pyo3(signature = (name, obj, *, persist=false))]
+    fn register<'py>(
+        slf: Bound<'py, Self>,
+        name: &str,
+        obj: Bound<'py, PyAny>,
+        persist: bool,
+    ) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let (schema, batches) = crate::ingest::arrow_from_py(py, &obj)?;
+
+        let conn = slf.borrow();
+        let database = conn.database()?.clone();
+        let name = name.to_string();
+        if persist {
+            let identity = conn.identity.clone();
+            block_on(py, async move {
+                database.persist_batches(&name, schema, batches, identity).await
+            })?
+            .map_err(map_engine_error)?;
+        } else {
+            // A session-only registration is a synchronous catalog mutation, but it touches the
+            // session context, so keep the GIL released while it runs.
+            py.detach(|| database.register_batches(&name, schema, batches))
+                .map_err(map_engine_error)?;
+        }
+        drop(conn);
+        Ok(slf)
+    }
+
+    /// Removes a table registered with [`Self::register`]. Returns the connection.
+    fn unregister<'py>(slf: Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let conn = slf.borrow();
+        let database = conn.database()?.clone();
+        let name = name.to_string();
+        py.detach(|| database.deregister_table(&name))
+            .map_err(map_engine_error)?;
+        drop(conn);
+        Ok(slf)
+    }
+
+    /// Runs a **structured JSON query** — beacon's non-SQL query form, the same payload the HTTP
+    /// API and the TS client send (`{"select": [...], "filter": {...}, "from": {...}, ...}`).
+    ///
+    /// Returns the materialized result (a full query spec is not composable as SQL, so unlike
+    /// `sql()` this runs eagerly); the result exposes the same terminal methods — `fetchall`,
+    /// `arrow`, `df`, `pl`, `__arrow_c_stream__`.
+    fn json_query(&self, py: Python<'_>, spec: Bound<'_, PyAny>) -> PyResult<ResultSet> {
+        // Round-trip the dict through JSON text so beacon's own serde model does the parsing —
+        // no second, drifting schema on this side.
+        let json = py
+            .import("json")?
+            .call_method1("dumps", (spec,))?
+            .extract::<String>()?;
+        let inner: InnerQuery = serde_json::from_str(&json).map_err(|e| {
+            programming_error(format!("not a valid beacon JSON query: {e}"))
+        })?;
+        let query = Query {
+            inner,
+            output: None,
+            params: Vec::new(),
+        };
+        run_query_collected(py, self.database()?, &self.identity, query)
+    }
+
+    /// The registered scalar/aggregate functions, as a lazy [`Relation`] over
+    /// `beacon.system.functions` (name, description, return type, parameters).
+    fn functions(&self) -> PyResult<Relation> {
+        Ok(Relation::from_query(
+            self.database()?.clone(),
+            self.identity.clone(),
+            "SELECT * FROM beacon.system.functions",
+        ))
+    }
+
+    /// Per-query execution metrics, as a lazy [`Relation`] over `beacon.system.query_metrics`.
+    /// With `query_id`, narrows to that one query.
+    #[pyo3(signature = (query_id=None))]
+    fn metrics(&self, query_id: Option<&str>) -> PyResult<Relation> {
+        let sql = match query_id {
+            // A query id is a UUID; escape it as a string literal regardless, so this can never
+            // be an injection vector.
+            Some(id) => format!(
+                "SELECT * FROM beacon.system.query_metrics WHERE query_id = '{}'",
+                id.replace('\'', "''")
+            ),
+            None => "SELECT * FROM beacon.system.query_metrics".to_string(),
+        };
+        Ok(Relation::from_query(
+            self.database()?.clone(),
+            self.identity.clone(),
+            &sql,
+        ))
+    }
+
+    /// The names of the user tables and views in the default schema.
+    fn list_tables(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let result = self.run(
+            py,
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' ORDER BY table_name"
+                .to_string(),
+        )?;
+        Ok(string_column(&result))
+    }
+
+    /// Refreshes an external table or materialized view (re-lists its files / re-runs its query),
+    /// then returns the connection so the call chains. This is `REFRESH <name>`.
+    fn refresh<'py>(slf: Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let sql = format!("REFRESH {}", quote_ident(name));
+        slf.borrow().run(py, sql)?;
+        Ok(slf)
+    }
+
+    /// Attaches another Beacon instance as a catalog named `name`, so its tables are queryable as
+    /// `name.<schema>.<table>` and joins/filters/aggregates push down to it over Flight SQL.
+    ///
+    /// `url` is the remote's Flight SQL endpoint (`beacon://host:port`, `grpc://…`, `http(s)://…`,
+    /// or a bare `host:port`); `tls=True` (or an `https://` url) uses TLS. Credentials, if the
+    /// remote requires them, are either a bearer `token` or a `username`/`password` pair (not both).
+    /// The remote is contacted now — its schemas and tables are enumerated — so an unreachable or
+    /// unauthorized endpoint raises here, not on first query.
+    #[pyo3(signature = (name, url, *, token=None, username=None, password=None, tls=false))]
+    fn attach(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        url: &str,
+        token: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+        tls: bool,
+    ) -> PyResult<()> {
+        let credential = beacon_core::embedded::RemoteCredential::from_parts(
+            token, username, password,
+        )
+        .map_err(|e| programming_error(e.to_string()))?;
+        let database = self.database()?.clone();
+        let name = name.to_string();
+        let url = url.to_string();
+        block_on(py, async move {
+            database.attach_remote(&name, &url, credential, tls).await
+        })?
+        .map_err(map_engine_error)
+    }
+
+    /// Detaches a catalog attached with [`Self::attach`]. Returns `True` if it was attached.
+    fn detach(&self, name: &str) -> PyResult<bool> {
+        self.database()?.detach(name).map_err(map_engine_error)
+    }
+
+    /// The names of the remote Beacon instances currently attached as catalogs.
+    fn attached(&self) -> PyResult<Vec<String>> {
+        Ok(self.database()?.attached_catalogs())
+    }
+
     /// A lazy [`Relation`] over a catalog table or view.
     fn table(&self, name: &str) -> PyResult<Relation> {
         Ok(Relation::over(
@@ -221,20 +399,93 @@ impl Connection {
     /// This is the general form; the named readers (`con.read_parquet(...)`, `con.read_netcdf(...)`,
     /// …) are thin wrappers over it, resolved from the catalog by [`Self::__getattr__`], so any
     /// table function beacon registers is reachable without a hand-written method here.
-    #[pyo3(signature = (function, *args))]
-    fn read(&self, function: &str, args: Vec<Bound<'_, PyAny>>) -> PyResult<Relation> {
-        let call = crate::exec::table_function_call(function, &args)?;
-        Ok(Relation::over(
-            self.database()?.clone(),
-            self.identity.clone(),
-            call,
-        ))
+    ///
+    /// Format options can be passed positionally or by keyword. Keyword options are matched to the
+    /// reader's declared parameters (from `beacon.system.table_functions`) by name, so
+    /// `read_csv(path, delimiter=';')` fills the `delimiter` slot and leaves the rest defaulted.
+    /// The universal `columns=[...]` keyword projects the named columns instead of being passed to
+    /// the function.
+    #[pyo3(signature = (function, *args, **kwargs))]
+    fn read(
+        &self,
+        py: Python<'_>,
+        function: &str,
+        args: Vec<Bound<'_, PyAny>>,
+        kwargs: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<Relation> {
+        let database = self.database()?.clone();
+
+        // `slots[i]` is the SQL literal for positional argument `i` (`None` = not supplied yet).
+        let mut slots: Vec<Option<String>> = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            ensure_slot(&mut slots, index);
+            slots[index] = Some(crate::exec::py_to_sql_literal(arg)?);
+        }
+
+        let mut columns: Option<Vec<String>> = None;
+        if let Some(kwargs) = kwargs {
+            // The reader's declared parameters, in order (first is the path/glob). Fetched lazily so
+            // a purely-positional call never touches the catalog.
+            let mut param_names: Option<Vec<String>> = None;
+            for (key, value) in kwargs.iter() {
+                let key: String = key.extract()?;
+                if key == "columns" {
+                    columns = Some(extract_columns(&value)?);
+                    continue;
+                }
+                let params = match &param_names {
+                    Some(params) => params,
+                    None => {
+                        let meta = table_function_meta(py, self)?;
+                        param_names = Some(meta.get(function).cloned().unwrap_or_default());
+                        param_names.as_ref().unwrap()
+                    }
+                };
+                let index = params.iter().position(|p| p == &key).ok_or_else(|| {
+                    let options: Vec<&String> = params.iter().skip(1).collect();
+                    programming_error(format!(
+                        "`{function}` has no option `{key}`; its options are {options:?}"
+                    ))
+                })?;
+                ensure_slot(&mut slots, index);
+                if slots[index].is_some() {
+                    return Err(programming_error(format!(
+                        "option `{key}` for `{function}` was given more than once"
+                    )));
+                }
+                slots[index] = Some(crate::exec::py_to_sql_literal(&value)?);
+            }
+        }
+
+        // Unfilled interior slots become NULL, which the readers treat as "use the default".
+        let rendered: Vec<String> = slots
+            .into_iter()
+            .map(|slot| slot.unwrap_or_else(|| "NULL".to_string()))
+            .collect();
+        let call = format!("{function}({})", rendered.join(", "));
+
+        let relation = match columns {
+            Some(columns) if !columns.is_empty() => {
+                let projected = columns
+                    .iter()
+                    .map(|column| quote_ident(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Relation::from_query(
+                    database,
+                    self.identity.clone(),
+                    &format!("SELECT {projected} FROM {call}"),
+                )
+            }
+            _ => Relation::over(database, self.identity.clone(), call),
+        };
+        Ok(relation)
     }
 
     /// The names of the table-valued functions this database exposes (`read_parquet`,
     /// `read_netcdf`, `list_datasets`, …).
     fn table_functions(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        Ok(table_function_names(py, self)?.iter().cloned().collect())
+        Ok(table_function_meta(py, self)?.keys().cloned().collect())
     }
 
     /// Resolves an unknown attribute against the table-function catalog, so `con.read_parquet`,
@@ -250,7 +501,7 @@ impl Connection {
         let py = slf.py();
         let is_table_function = {
             let conn = slf.borrow();
-            table_function_names(py, &conn)?.contains(&name)
+            table_function_meta(py, &conn)?.contains_key(&name)
         };
         if !is_table_function {
             return Err(pyo3::exceptions::PyAttributeError::new_err(name));
@@ -334,7 +585,9 @@ impl Connection {
                  principal: every session is the local super-user",
             ));
         }
-        let identity = database.require_default_identity().map_err(map_engine_error)?;
+        let identity = database
+            .require_default_identity()
+            .map_err(map_engine_error)?;
         Ok(Self {
             database: Some(database),
             identity,
@@ -366,6 +619,15 @@ impl Connection {
         self.database = None;
         self.last_result = None;
     }
+
+    /// PEP 249 `commit`. A no-op: the engine is autocommit — every statement commits on its own,
+    /// and there are no multi-statement transactions to flush. Present so DB-API consumers (e.g.
+    /// SQLAlchemy) that call `commit()` after each statement work unchanged.
+    fn commit(&self) {}
+
+    /// PEP 249 `rollback`. A no-op, for the same reason as [`Self::commit`]: an autocommit
+    /// connection has nothing to undo. It never errors, so DB-API error-cleanup paths are safe.
+    fn rollback(&self) {}
 
     fn __enter__(slf: Bound<'_, Self>) -> Bound<'_, Self> {
         slf
@@ -402,28 +664,91 @@ impl Connection {
 /// vary between connections or databases — a process-global cache is correct and spares every
 /// `con.read_*` attribute access a catalog round-trip. `beacon.system.table_functions` is not
 /// an auth table, so this works for any identity, anonymous included.
-static TABLE_FUNCTIONS: OnceLock<Arc<BTreeSet<String>>> = OnceLock::new();
+static TABLE_FUNCTIONS: OnceLock<Arc<BTreeMap<String, Vec<String>>>> = OnceLock::new();
 
-fn table_function_names(py: Python<'_>, conn: &Connection) -> PyResult<Arc<BTreeSet<String>>> {
+/// Every table function mapped to its declared parameter names, in order. The first parameter is
+/// the path/glob for the readers; the rest are the format options `read(...)` accepts as keywords.
+fn table_function_meta(
+    py: Python<'_>,
+    conn: &Connection,
+) -> PyResult<Arc<BTreeMap<String, Vec<String>>>> {
     if let Some(cached) = TABLE_FUNCTIONS.get() {
         return Ok(cached.clone());
     }
     let result = conn.run(
         py,
-        "SELECT function_name FROM beacon.system.table_functions".to_string(),
+        "SELECT function_name, parameters FROM beacon.system.table_functions".to_string(),
     )?;
-    let mut names = BTreeSet::new();
+    let mut functions = BTreeMap::new();
     for batch in result.batches() {
-        if let Some(column) = batch.column(0).as_string_opt::<i32>() {
-            for value in column.iter().flatten() {
-                names.insert(value.to_string());
+        let names = batch.column(0).as_string_opt::<i32>();
+        let params = batch.column(1).as_string_opt::<i32>();
+        let (Some(names), Some(params)) = (names, params) else {
+            continue;
+        };
+        for row in 0..batch.num_rows() {
+            if names.is_null(row) {
+                continue;
             }
+            let param_names = if params.is_null(row) {
+                Vec::new()
+            } else {
+                parse_param_names(params.value(row))
+            };
+            functions.insert(names.value(row).to_string(), param_names);
         }
     }
-    let arc = Arc::new(names);
+    let arc = Arc::new(functions);
     let _ = TABLE_FUNCTIONS.set(arc.clone());
     // Whoever won the race owns the canonical set; return that one.
     Ok(TABLE_FUNCTIONS.get().cloned().unwrap_or(arc))
+}
+
+/// Pulls the ordered `name` fields out of a table function's `parameters` JSON
+/// (`[{"name": "glob_paths", ...}, {"name": "delimiter", ...}]`). Anything unparseable yields no
+/// names, so the function is still callable positionally — it just has no keyword options.
+fn parse_param_names(json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|value| {
+            value.as_array().map(|params| {
+                params
+                    .iter()
+                    .filter_map(|param| {
+                        param.get("name").and_then(|n| n.as_str()).map(String::from)
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Grows `slots` so index `index` is addressable, padding new positions with `None`.
+fn ensure_slot(slots: &mut Vec<Option<String>>, index: usize) {
+    if slots.len() <= index {
+        slots.resize(index + 1, None);
+    }
+}
+
+/// Reads the `columns=` keyword — a single column name or a list/tuple of them.
+fn extract_columns(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(single) = value.extract::<String>() {
+        return Ok(vec![single]);
+    }
+    value.extract::<Vec<String>>().map_err(|_| {
+        programming_error("`columns` must be a column name or a list of column names")
+    })
+}
+
+/// Collects the first column of a single-column `Utf8` result into a `Vec<String>`.
+fn string_column(result: &ResultSet) -> Vec<String> {
+    let mut values = Vec::new();
+    for batch in result.batches() {
+        if let Some(column) = batch.column(0).as_string_opt::<i32>() {
+            values.extend(column.iter().flatten().map(str::to_string));
+        }
+    }
+    values
 }
 
 fn build_credential(
@@ -569,9 +894,10 @@ pub fn connect(
     let database = match DbPath::parse(database) {
         // In-memory databases share nothing: each connect() gets its own, as in DuckDB.
         DbPath::Memory => {
-            let opened = block_on(py, async move {
-                Database::open(DbPath::Memory, options).await
-            })?
+            let opened = block_on(
+                py,
+                async move { Database::open(DbPath::Memory, options).await },
+            )?
             .map_err(map_engine_error)?;
             Arc::new(opened)
         }
@@ -580,7 +906,9 @@ pub fn connect(
 
     let identity = match credential {
         Some(credential) => authenticate(py, &database, &credential)?,
-        None => database.require_default_identity().map_err(map_engine_error)?,
+        None => database
+            .require_default_identity()
+            .map_err(map_engine_error)?,
     };
 
     Ok(Connection {

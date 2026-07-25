@@ -10,8 +10,9 @@
 //! Batches are collected before the result reaches Python (with the GIL released), rather than
 //! streamed lazily through the capsule. That trades peak memory for a guarantee: no engine
 //! work happens inside an FFI callback, where the consumer holds the GIL and we could not
-//! release it. Streaming results (`fetch_record_batch`) come later and will need their own
-//! GIL-aware bridge.
+//! release it. For a memory-bounded alternative, `Relation.record_batch()` streams batch by
+//! batch through the GIL-aware bridge in [`crate::stream`] — each `__next__` pulls one batch
+//! with the GIL released, so nothing runs inside an FFI callback there either.
 
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{

@@ -13,6 +13,12 @@ publish = false
 name = "_beacondb"
 crate-type = ["cdylib"]
 
+[features]
+# Statically build+link netCDF/HDF5 so the wheel carries them and needs no system libraries.
+# Enabled for the distributable wheels (`maturin build --features static-netcdf`), off for
+# `maturin develop` and local iteration. Requires `cmake` at build time.
+static-netcdf = ["beacon-core/static-netcdf"]
+
 [dependencies]
 # Pinned exactly. 0.29.0 (2026-06-11) is the current release and predates our
 # no-fresh-packages window. `abi3-py310` builds one wheel for CPython >= 3.10,
@@ -20,9 +26,17 @@ crate-type = ["cdylib"]
 pyo3 = { version = "=0.29.0", features = ["abi3-py310", "extension-module"] }
 
 beacon-core = { path = "../beacon-core" }
+# `OdvOptions` for the `to_odv` sink (auto-inferred from the schema). beacon-core does not
+# re-export it, so it is named directly; version follows the workspace path dependency.
+beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
 
 anyhow = { workspace = true }
 arrow = { workspace = true }
+# Reads the Arrow IPC stream `register()` produces from a pandas/pyarrow/polars object back
+# into `RecordBatch`es. Version-locked to the workspace arrow (^58).
+arrow-ipc = { workspace = true }
 datafusion = { workspace = true }
 futures = { workspace = true }
+# Deserializes the `json_query()` dict (as JSON text) into beacon's `InnerQuery`.
+serde_json = { workspace = true }
 tokio = { workspace = true }

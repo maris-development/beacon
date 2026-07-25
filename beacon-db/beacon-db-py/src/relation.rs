@@ -32,22 +32,36 @@ use std::sync::Arc;
 
 use std::path::PathBuf;
 
+use beacon_arrow_odv::writer::{ColumnInfo, OdvOptions};
 use beacon_core::embedded::Database;
 use beacon_core::query::output::OutputFormat;
 use beacon_core::AuthIdentity;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyList, PyTuple};
 
-use crate::errors::programming_error;
+use crate::errors::{map_engine_error, programming_error};
 use crate::exec::{run_sql, run_to_file, schema_of};
 use crate::result::{import_or_hint, ResultSet};
+
+/// What a [`Select`] reads from.
+#[derive(Clone)]
+enum Source {
+    /// A complete SQL statement from `con.sql(...)`. Rendered **verbatim** while the select has
+    /// no added clauses, so the statement's own `ORDER BY`/`LIMIT` survive — wrapping it in
+    /// `SELECT * FROM (...)` would let the optimizer legally drop an inner ordering. Wrapped as
+    /// a subquery once a relational method is chained onto it.
+    Query(String),
+    /// A `FROM`-clause fragment: a table name, a table-function call (`read_parquet(...)`), or a
+    /// subquery already written with its alias.
+    From(String),
+}
 
 /// The accumulated `SELECT`. Each field maps to one clause; `render` assembles them.
 #[derive(Clone)]
 struct Select {
     projection: String,
     distinct: bool,
-    from: String,
+    source: Source,
     filters: Vec<String>,
     group_by: Option<String>,
     order_by: Option<String>,
@@ -56,12 +70,21 @@ struct Select {
 }
 
 impl Select {
-    /// A `SELECT * FROM <from>` with no other clauses.
-    fn over(from: String) -> Self {
+    /// A `SELECT *` over a `FROM`-clause fragment.
+    fn from_fragment(fragment: String) -> Self {
+        Self::new(Source::From(fragment))
+    }
+
+    /// A relation that *is* a complete SQL statement (from `con.sql(...)`).
+    fn from_query(query: String) -> Self {
+        Self::new(Source::Query(query))
+    }
+
+    fn new(source: Source) -> Self {
         Self {
             projection: "*".to_string(),
             distinct: false,
-            from,
+            source,
             filters: Vec::new(),
             group_by: None,
             order_by: None,
@@ -80,14 +103,38 @@ impl Select {
         self.order_by.is_some() || self.limit.is_some() || self.offset.is_some()
     }
 
+    /// Whether no clause has been added, so a [`Source::Query`] can run verbatim.
+    fn is_pristine(&self) -> bool {
+        self.projection == "*"
+            && !self.distinct
+            && self.filters.is_empty()
+            && self.group_by.is_none()
+            && !self.has_tail()
+    }
+
+    /// The `FROM`-clause text for this source.
+    fn from_clause(&self) -> String {
+        match &self.source {
+            Source::From(fragment) => fragment.clone(),
+            Source::Query(query) => format!("({query}) AS _rel"),
+        }
+    }
+
     fn render(&self) -> String {
+        // A bare `con.sql(q)` runs `q` unchanged, so its own ORDER BY/LIMIT are preserved.
+        if let Source::Query(query) = &self.source {
+            if self.is_pristine() {
+                return query.clone();
+            }
+        }
+
         let mut sql = String::from("SELECT ");
         if self.distinct {
             sql.push_str("DISTINCT ");
         }
         sql.push_str(&self.projection);
         sql.push_str(" FROM ");
-        sql.push_str(&self.from);
+        sql.push_str(&self.from_clause());
         if !self.filters.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&self.filters.join(" AND "));
@@ -112,7 +159,7 @@ impl Select {
     /// Turns the current select into the `FROM` of a fresh `SELECT *`, so a new clause starts
     /// from a clean slate. This is the "wrap" half of fold-or-wrap.
     fn wrapped(&self) -> Self {
-        Self::over(format!("({}) AS _rel", self.render()))
+        Self::from_fragment(format!("({}) AS _rel", self.render()))
     }
 }
 
@@ -134,14 +181,23 @@ impl Relation {
         Self {
             database,
             identity,
-            select: Select::over(from),
+            select: Select::from_fragment(from),
             materialized: None,
         }
     }
 
-    /// A relation wrapping a complete SQL statement.
+    /// A relation that is a complete SQL statement (from `con.sql(...)`).
+    ///
+    /// The statement is run verbatim until a relational method is chained onto it, so
+    /// `con.sql("… ORDER BY …").fetchall()` keeps its ordering (wrapping it in a subquery up
+    /// front would let the optimizer drop that inner `ORDER BY`).
     pub fn from_query(database: Arc<Database>, identity: AuthIdentity, query: &str) -> Self {
-        Self::over(database, identity, format!("({query}) AS _rel"))
+        Self {
+            database,
+            identity,
+            select: Select::from_query(query.to_string()),
+            materialized: None,
+        }
     }
 
     /// A new relation sharing the database/identity, carrying `select`.
@@ -171,7 +227,7 @@ impl Relation {
     /// Wraps the current select as a subquery and starts a fresh `SELECT *` over it. Used by
     /// aggregate/scalar/join/set operations that always need a clean scope.
     fn derived_from_subquery(&self) -> Select {
-        Select::over(format!("({}) AS _rel", self.sql_text()))
+        Select::from_fragment(format!("({}) AS _rel", self.sql_text()))
     }
 }
 
@@ -308,7 +364,7 @@ impl Relation {
                 other.sql_text()
             )
         };
-        Ok(self.with_select(Select::over(from)))
+        Ok(self.with_select(Select::from_fragment(from)))
     }
 
     /// Stacks another relation's rows, keeping duplicates.
@@ -318,13 +374,13 @@ impl Relation {
             self.sql_text(),
             other.sql_text()
         );
-        self.with_select(Select::over(from))
+        self.with_select(Select::from_fragment(from))
     }
 
     /// Stacks another relation's rows, removing duplicates.
     fn union(&self, other: &Relation) -> Self {
         let from = format!("({} UNION {}) AS _rel", self.sql_text(), other.sql_text());
-        self.with_select(Select::over(from))
+        self.with_select(Select::from_fragment(from))
     }
 
     /// Counts rows: a one-row relation with a single `count` column.
@@ -433,14 +489,46 @@ impl Relation {
         polars.call_method1("DataFrame", (slf,))
     }
 
-    /// A `pyarrow.RecordBatchReader` over the relation's batches.
-    fn record_batch<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let py = slf.py();
-        slf.borrow_mut().materialize(py)?;
-        let pyarrow = import_or_hint(py, "pyarrow", "beacondb[arrow]")?;
-        pyarrow
-            .getattr("RecordBatchReader")?
-            .call_method1("from_stream", (slf,))
+    /// A streaming `pyarrow.RecordBatchReader` over the relation.
+    ///
+    /// Batches are pulled from the engine on demand as the reader is iterated (the GIL is released
+    /// during each pull), so a query over a huge file never lands in memory all at once — unlike
+    /// `.arrow()`/`.df()`, which collect. `batch_size` re-chunks to roughly that many rows per
+    /// batch; omit it for the engine's native batches (most efficient). Each call runs the query
+    /// afresh.
+    #[pyo3(signature = (batch_size=None))]
+    fn record_batch<'py>(
+        &self,
+        py: Python<'py>,
+        batch_size: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::stream::record_batch_reader(
+            py,
+            &self.database,
+            &self.identity,
+            self.sql_text(),
+            batch_size,
+        )
+    }
+
+    /// Alias of [`Self::record_batch`], matching DuckDB's `fetch_record_batch`.
+    #[pyo3(signature = (batch_size=None))]
+    fn fetch_record_batch<'py>(
+        &self,
+        py: Python<'py>,
+        batch_size: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.record_batch(py, batch_size)
+    }
+
+    /// Alias of [`Self::record_batch`].
+    #[pyo3(signature = (batch_size=None))]
+    fn fetch_arrow_reader<'py>(
+        &self,
+        py: Python<'py>,
+        batch_size: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.record_batch(py, batch_size)
     }
 
     // ---- terminal: file sinks ----------------------------------------------------------
@@ -467,6 +555,13 @@ impl Relation {
 
     /// Writes the relation to a flat (record-oriented) NetCDF-4 file.
     fn to_netcdf(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        self.write(py, OutputFormat::NetCDF, path)
+    }
+
+    /// Writes the relation to an HDF5 file. A NetCDF-4 file *is* HDF5, so this is the flat
+    /// NetCDF writer under an HDF5-friendly name — the output is a valid HDF5 file that h5py and
+    /// `read_hdf5` read back. For a gridded/multi-dimensional layout, use [`Self::to_nd_netcdf`].
+    fn to_hdf5(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         self.write(py, OutputFormat::NetCDF, path)
     }
 
@@ -506,6 +601,60 @@ impl Relation {
             },
             path,
         )
+    }
+
+    /// Writes the relation to an Ocean Data View (ODV) archive (a `.zip`).
+    ///
+    /// The ODV column layout is inferred from the result schema: columns whose names match ODV's
+    /// standard headers become the longitude/latitude/depth/time/key columns, and the rest are
+    /// classified as data columns (those with a `<col>_qf`/`<col>_qc` quality-flag companion) or
+    /// metadata columns. Most data does not use ODV's exact header names, so pass the column names
+    /// to map them — e.g. `to_odv("out.zip", longitude="LONGITUDE", latitude="LATITUDE",
+    /// depth="PRES", time="JULD", key="platform")`. A named column that the schema does not contain
+    /// makes the engine error clearly at write time.
+    #[pyo3(signature = (path, *, longitude=None, latitude=None, depth=None, time=None, key=None, qf_schema=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn to_odv(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        longitude: Option<String>,
+        latitude: Option<String>,
+        depth: Option<String>,
+        time: Option<String>,
+        key: Option<String>,
+        qf_schema: Option<String>,
+    ) -> PyResult<()> {
+        let schema = schema_of(py, &self.database, &self.identity, self.sql_text())?;
+        let mut options = OdvOptions::try_from_arrow_schema(schema).map_err(map_engine_error)?;
+
+        // Each override points a special column at the user's column *and* removes it from the
+        // auto-classified data/metadata columns, so a promoted column is never written twice.
+        if let Some(name) = longitude {
+            demote_named_column(&mut options.data_columns, &mut options.meta_columns, &name);
+            options.longitude_column.column_name = name;
+        }
+        if let Some(name) = latitude {
+            demote_named_column(&mut options.data_columns, &mut options.meta_columns, &name);
+            options.latitude_column.column_name = name;
+        }
+        if let Some(name) = depth {
+            demote_named_column(&mut options.data_columns, &mut options.meta_columns, &name);
+            options.depth_column.column_name = name;
+        }
+        if let Some(name) = time {
+            demote_named_column(&mut options.data_columns, &mut options.meta_columns, &name);
+            options.time_column.column_name = name;
+        }
+        if let Some(name) = key {
+            demote_named_column(&mut options.data_columns, &mut options.meta_columns, &name);
+            options.key_column = name;
+        }
+        if let Some(schema_id) = qf_schema {
+            options.qf_schema = schema_id;
+        }
+
+        self.write(py, OutputFormat::Odv(options), path)
     }
 
     // ---- metadata / introspection ------------------------------------------------------
@@ -554,13 +703,17 @@ impl Relation {
         Ok(self.row_count(py)? as usize)
     }
 
-    /// The logical and physical plans, as DataFusion prints them.
-    fn explain(&self, py: Python<'_>) -> PyResult<String> {
+    /// The logical and physical plans, as DataFusion prints them. With `analyze=True`, runs the
+    /// query and annotates the physical plan with per-operator runtime metrics (rows, time, bytes)
+    /// — DataFusion's `EXPLAIN ANALYZE`.
+    #[pyo3(signature = (analyze=false))]
+    fn explain(&self, py: Python<'_>, analyze: bool) -> PyResult<String> {
+        let keyword = if analyze { "EXPLAIN ANALYZE" } else { "EXPLAIN" };
         let result = run_sql(
             py,
             &self.database,
             &self.identity,
-            format!("EXPLAIN {}", self.sql_text()),
+            format!("{keyword} {}", self.sql_text()),
         )?;
         Ok(format_batches(&result))
     }
@@ -655,6 +808,13 @@ impl Relation {
 /// keyword can't break the surrounding statement.
 pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Drops any auto-classified ODV data/metadata column with this name (case-insensitive), used
+/// when the column is promoted to a special role (longitude, key, …) so it is not emitted twice.
+fn demote_named_column(data: &mut Vec<ColumnInfo>, meta: &mut Vec<ColumnInfo>, name: &str) {
+    data.retain(|column| !column.column_name.eq_ignore_ascii_case(name));
+    meta.retain(|column| !column.column_name.eq_ignore_ascii_case(name));
 }
 
 /// Pretty-prints a result's batches the way the CLI does.

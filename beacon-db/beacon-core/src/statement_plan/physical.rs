@@ -409,6 +409,84 @@ side_effect_exec!(
     }
 );
 
+/// Physical node for `ATTACH '<url>' AS <name>` — mounts a remote Beacon as a catalog.
+#[derive(Debug)]
+pub(crate) struct AttachExec {
+    name: String,
+    url: String,
+    credential: beacon_datafusion_ext::remote::RemoteCredential,
+    tls: bool,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl AttachExec {
+    pub(crate) fn new(
+        name: String,
+        url: String,
+        credential: beacon_datafusion_ext::remote::RemoteCredential,
+        tls: bool,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            name,
+            url,
+            credential,
+            tls,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Credentials are never printed.
+        write!(f, "AttachExec: name={} url={}", self.name, self.url)
+    }
+}
+
+side_effect_exec!(AttachExec, "AttachExec", |exec: &AttachExec| {
+    let session = upgrade_session(&exec.session)?;
+    let name = exec.name.clone();
+    let url = exec.url.clone();
+    let credential = exec.credential.clone();
+    let tls = exec.tls;
+    Ok(side_effect_stream(async move {
+        actions::attach_remote(&session, &name, &url, credential, tls)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `DETACH <name>`.
+#[derive(Debug)]
+pub(crate) struct DetachExec {
+    name: String,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl DetachExec {
+    pub(crate) fn new(name: String, session: SessionCell) -> Self {
+        Self {
+            name,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DetachExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(DetachExec, "DetachExec", |exec: &DetachExec| {
+    let session = upgrade_session(&exec.session)?;
+    let name = exec.name.clone();
+    Ok(side_effect_stream(async move {
+        actions::detach_remote(&session, &name)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
 /// Physical node for `CREATE VIEW`.
 #[derive(Debug)]
 pub(crate) struct CreateViewExec {

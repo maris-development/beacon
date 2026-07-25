@@ -13,10 +13,12 @@ use pyo3::prelude::*;
 mod connection;
 mod errors;
 mod exec;
+mod ingest;
 mod params;
 mod relation;
 mod result;
 mod runtime;
+mod stream;
 
 /// The engine version, so `beacondb.__version__` and the Rust crate can never disagree.
 #[pyfunction]

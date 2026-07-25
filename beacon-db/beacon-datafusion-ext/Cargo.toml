@@ -9,6 +9,8 @@ datafusion-federation = { workspace = true }
 chrono = { workspace = true }
 arrow-flight = { workspace = true, features = ["flight-sql"] }
 tonic = { workspace = true }
+# Encodes remote-Beacon HTTP Basic credentials (`authorization: Basic <base64(user:pass)>`).
+base64 = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

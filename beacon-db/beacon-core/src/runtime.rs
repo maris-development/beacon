@@ -273,6 +273,12 @@ impl Runtime {
             BeaconStatement::ShowIndexes(statement) => {
                 Ok(crate::statement_plan::show_indexes_plan(statement))
             }
+            BeaconStatement::Attach(statement) => {
+                crate::statement_plan::attach_plan(statement)
+            }
+            BeaconStatement::Detach(statement) => {
+                Ok(crate::statement_plan::detach_plan(statement))
+            }
             BeaconStatement::DFStatement(statement) => {
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await
             }
