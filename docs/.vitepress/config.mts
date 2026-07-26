@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitepress'
+import { LATEST_VERSION, LATEST_ENTRY } from './theme/version.js'
 
 const SITE_URL = 'https://maris-development.github.io/beacon/'
 const OG_IMAGE = SITE_URL + 'hero.png'
@@ -52,6 +53,19 @@ export default defineConfig({
   description: DESCRIPTION,
   lastUpdated: true,
   sitemap: { hostname: SITE_URL },
+
+  // No-JS fallback for the `/docs/latest` alias. The version comes from
+  // theme/version.js, so bumping it there is the only edit needed.
+  transformPageData(pageData) {
+    if (pageData.relativePath === 'docs/latest/index.md') {
+      const url = `/beacon/docs/${LATEST_VERSION}/${LATEST_ENTRY}`
+      pageData.frontmatter.head ??= []
+      pageData.frontmatter.head.push([
+        'meta',
+        { 'http-equiv': 'refresh', content: `0; url=${url}` }
+      ])
+    }
+  },
   transformHead({ pageData }) {
     const path = pageData.relativePath
       .replace(/\.md$/, '.html')
@@ -107,11 +121,6 @@ export default defineConfig({
         activeMatch: '/changelog'
       },
       {
-        text: 'Benchmarks',
-        link: '/docs/benchmarks/beacon-vs-sql-engines-250m',
-        activeMatch: '/benchmarks'
-      },
-      {
         text: 'Available nodes',
         link: '/available-nodes/available-nodes',
         activeMatch: '/available-nodes/available-nodes'
@@ -123,19 +132,73 @@ export default defineConfig({
         {
           text: 'Overview',
           items: [
-            { text: 'Introduction', link: '/docs/2.0.0/introduction' },
+            {
+              text: 'Introduction',
+              link: '/docs/2.0.0/introduction',
+              collapsed: true,
+              items: [
+                { text: 'How it fits together', link: '/docs/2.0.0/introduction#how-it-fits-together' },
+                { text: 'BeaconDB', link: '/docs/2.0.0/introduction#beacondb-the-embeddable-engine' },
+                { text: 'Beacon Data Lake', link: '/docs/2.0.0/introduction#beacon-data-lake-the-server' },
+                { text: 'One engine, one SQL', link: '/docs/2.0.0/introduction#one-engine-one-sql' },
+                { text: 'Which should I use?', link: '/docs/2.0.0/introduction#which-should-i-use' },
+              ]
+            },
+            {
+              text: 'Quick Start',
+              link: '/docs/2.0.0/quickstart',
+              collapsed: true,
+              items: [
+                { text: 'Embed it: BeaconDB', link: '/docs/2.0.0/quickstart#embed-it-beacondb' },
+                { text: 'Serve it: Beacon Data Lake', link: '/docs/2.0.0/quickstart#serve-it-beacon-data-lake' },
+                { text: 'Which one to start with', link: '/docs/2.0.0/quickstart#which-one-should-i-start-with' },
+              ]
+            },
             { text: 'Concepts', link: '/docs/2.0.0/concepts' },
+            { text: 'FAQ', link: '/docs/2.0.0/faq' },
           ]
         },
         {
-          text: 'BeaconDB — The Database',
+          text: 'BeaconDB',
           collapsed: false,
           items: [
             { text: 'Overview', link: '/docs/2.0.0/beacondb/' },
+            { text: 'How It Works', link: '/docs/2.0.0/beacondb/how-it-works' },
+            {
+              text: 'Data Sources',
+              link: '/docs/2.0.0/beacondb/data-sources/',
+              collapsed: true,
+              items: [
+                {
+                  text: 'File Formats',
+                  link: '/docs/2.0.0/beacondb/data-sources/formats/',
+                  collapsed: true,
+                  items: [
+                    { text: 'Parquet', link: '/docs/2.0.0/beacondb/data-sources/formats/parquet' },
+                    { text: 'GeoParquet', link: '/docs/2.0.0/beacondb/data-sources/formats/geoparquet' },
+                    { text: 'CSV / TSV', link: '/docs/2.0.0/beacondb/data-sources/formats/csv' },
+                    { text: 'Arrow IPC', link: '/docs/2.0.0/beacondb/data-sources/formats/arrow' },
+                    { text: 'NetCDF', link: '/docs/2.0.0/beacondb/data-sources/formats/netcdf' },
+                    { text: 'Zarr', link: '/docs/2.0.0/beacondb/data-sources/formats/zarr' },
+                    { text: 'Atlas', link: '/docs/2.0.0/beacondb/data-sources/formats/atlas' },
+                    { text: 'GeoTIFF / COG', link: '/docs/2.0.0/beacondb/data-sources/formats/geotiff' },
+                    { text: 'BBF', link: '/docs/2.0.0/beacondb/data-sources/formats/bbf' },
+                    { text: 'Delta Lake', link: '/docs/2.0.0/beacondb/data-sources/formats/delta-lake' },
+                    { text: 'ODV ASCII', link: '/docs/2.0.0/beacondb/data-sources/formats/odv' },
+                  ]
+                },
+                { text: 'Object Storage (S3)', link: '/docs/2.0.0/beacondb/data-sources/object-storage' },
+                { text: 'External Tables', link: '/docs/2.0.0/beacondb/data-sources/external-tables' },
+                { text: 'SQL Databases', link: '/docs/2.0.0/beacondb/data-sources/sql-databases' },
+                { text: 'Remote Tables', link: '/docs/2.0.0/beacondb/data-sources/remote-tables' },
+                { text: 'ATTACH', link: '/docs/2.0.0/beacondb/data-sources/attach' },
+                { text: 'Internal Format (beacon.db)', link: '/docs/2.0.0/beacondb/data-sources/internal-format' },
+              ]
+            },
             {
               text: 'SQL Reference',
               link: '/docs/2.0.0/beacondb/sql/',
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: 'SELECT', link: '/docs/2.0.0/beacondb/sql/select' },
                 { text: 'WHERE', link: '/docs/2.0.0/beacondb/sql/where' },
@@ -151,14 +214,13 @@ export default defineConfig({
                 { text: 'SUMMARIZE', link: '/docs/2.0.0/beacondb/sql/summarize' },
                 { text: 'Table Functions', link: '/docs/2.0.0/beacondb/sql/table-functions' },
                 { text: 'Utility Table Functions', link: '/docs/2.0.0/beacondb/sql/table-functions-utility' },
-                { text: 'GeoParquet', link: '/docs/2.0.0/beacondb/sql/geoparquet' },
                 { text: 'Function Reference', link: '/docs/2.0.0/beacondb/sql/function-reference' },
               ]
             },
             {
-              text: 'Python binding',
+              text: 'Python Binding',
               link: '/docs/2.0.0/beacondb/python/',
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: 'Getting Started', link: '/docs/2.0.0/beacondb/python/getting-started' },
                 { text: 'Querying', link: '/docs/2.0.0/beacondb/python/querying' },
@@ -170,10 +232,21 @@ export default defineConfig({
                 { text: 'Building from source', link: '/docs/2.0.0/beacondb/python/building' },
               ]
             },
+            {
+              text: 'Guides',
+              link: '/docs/2.0.0/beacondb/guides/',
+              collapsed: true,
+              items: [
+                { text: 'Query a File Collection', link: '/docs/2.0.0/beacondb/guides/query-a-collection' },
+                { text: 'Query Data on S3', link: '/docs/2.0.0/beacondb/guides/query-s3' },
+                { text: 'Export Query Results', link: '/docs/2.0.0/beacondb/guides/export-results' },
+                { text: 'Speed Up Slow Queries', link: '/docs/2.0.0/beacondb/guides/speed-up-queries' },
+              ]
+            },
           ]
         },
         {
-          text: 'Beacon Data Lake — Server',
+          text: 'Beacon Data Lake',
           collapsed: false,
           items: [
             { text: 'Getting Started', link: '/docs/2.0.0/getting-started' },
@@ -183,11 +256,6 @@ export default defineConfig({
               collapsed: true,
               items: [
                 { text: 'Supported Formats', link: '/docs/2.0.0/data-lake/datasets' },
-                { text: 'External Tables', link: '/docs/2.0.0/data-lake/external-tables' },
-                { text: 'GeoParquet', link: '/docs/2.0.0/data-lake/geoparquet' },
-                { text: 'Delta Lake', link: '/docs/2.0.0/data-lake/delta-lake' },
-                { text: 'SQL Databases', link: '/docs/2.0.0/data-lake/sql-databases' },
-                { text: 'Remote Tables (Federation)', link: '/docs/2.0.0/data-lake/remote-tables' },
                 { text: 'Views', link: '/docs/2.0.0/data-lake/view' },
                 { text: 'Crawlers', link: '/docs/2.0.0/data-lake/crawlers' },
                 { text: 'Extensions', link: '/docs/2.0.0/data-lake/extensions' },
@@ -221,6 +289,7 @@ export default defineConfig({
             },
             { text: 'Access Control', link: '/docs/2.0.0/security/access-control' },
             { text: 'MCP', link: '/docs/2.0.0/mcp' },
+            { text: 'Data Sources →', link: '/docs/2.0.0/beacondb/data-sources/' },
             { text: 'SQL Reference →', link: '/docs/2.0.0/beacondb/sql/' },
           ]
         },
@@ -303,7 +372,7 @@ export default defineConfig({
             },
             {
               text: 'SQL Tables & Views',
-              collapsed: false,
+              collapsed: true,
               items: [
                 {
                   text: 'External Tables',
@@ -509,6 +578,7 @@ export default defineConfig({
             },
             {
               text: 'DDL',
+              collapsed: true,
               items: [
                 {
                   text: 'CREATE EXTERNAL TABLE',
@@ -662,7 +732,7 @@ export default defineConfig({
             {
               text: 'Querying',
               link: '/docs/1.8.0/api/querying',
-              collapsed: false,
+              collapsed: true,
               items: [
                 {
                   text: 'JSON Query DSL',
@@ -813,7 +883,7 @@ export default defineConfig({
             },
             {
               text: 'SQL Tables & Views',
-              collapsed: false,
+              collapsed: true,
               items: [
                 {
                   text: 'External Tables',
@@ -994,6 +1064,7 @@ export default defineConfig({
             },
             {
               text: 'DDL',
+              collapsed: true,
               items: [
                 {
                   text: 'CREATE EXTERNAL TABLE',
@@ -1136,7 +1207,7 @@ export default defineConfig({
             {
               text: 'Querying',
               link: '/docs/1.7.3/api/querying',
-              collapsed: false,
+              collapsed: true,
               items: [
                 {
                   text: 'JSON Query DSL',
@@ -1191,17 +1262,6 @@ export default defineConfig({
           ]
         }
       ],
-      '/docs/benchmarks/': [
-        {
-          text: 'Benchmarks',
-          items: [
-            {
-              text: 'vs PostgreSQL, Trino, Presto & DuckDB (250M rows)',
-              link: '/docs/benchmarks/beacon-vs-sql-engines-250m',
-            },
-          ],
-        },
-      ],
       '/available-nodes/': [
         {
           text: 'Euro-Argo',
@@ -1249,6 +1309,7 @@ export default defineConfig({
           {
             text: 'Getting started',
             link: '/docs/1.5.0-install/getting-started',
+            collapsed: true,
             items: [
               {
                 text: 'Local File System',
@@ -1271,6 +1332,7 @@ export default defineConfig({
           {
             text: 'Data Lake Setup',
             link: '/docs/1.5.0-install/data-lake/introduction',
+            collapsed: true,
             items: [
               {
                 text: 'Introduction',
@@ -1318,6 +1380,7 @@ export default defineConfig({
                   {
                     text: 'Datasets Harmonization',
                     link: '/docs/1.5.0-install/data-lake/datasets-harmonization',
+                    collapsed: true,
                     items: [
                       {
                         text: 'Schema Merging',
@@ -1367,6 +1430,7 @@ export default defineConfig({
           {
             text: 'Data Lake Querying',
             link: '/docs/1.5.0-install/data-lake-querying',
+            collapsed: true,
             items: [
               {
                 text: 'Introduction',
@@ -1385,7 +1449,7 @@ export default defineConfig({
           {
             text: 'Tuning for performance',
             link: '/docs/1.5.0-install/performance',
-            collapsed: false,
+            collapsed: true,
             items: [
               {
                 text: 'NetCDF',
@@ -1433,6 +1497,7 @@ export default defineConfig({
             {
               text: 'Data Lake',
               link: '/docs/1.5.0/query-docs/data-lake#introduction-beacon-data-lake',
+              collapsed: true,
               items: [
                 {
                   text: 'Introduction',
@@ -1451,6 +1516,7 @@ export default defineConfig({
             {
               text: 'Getting Started',
               link: '/docs/1.5.0/query-docs/getting-started#python',
+              collapsed: true,
               items: [
                 {
                   text: 'Python',
@@ -1465,6 +1531,7 @@ export default defineConfig({
             {
               text: 'Exploring the Data Lake',
               link: '/docs/1.5.0/query-docs/exploring-data-lake',
+              collapsed: true,
               items: [
 
               ]
@@ -1472,6 +1539,7 @@ export default defineConfig({
             {
               text: 'Querying API',
               link: '/docs/1.5.0/query-docs/querying/introduction',
+              collapsed: true,
               items: [
                 {
                   text: 'Introduction',
@@ -1480,6 +1548,7 @@ export default defineConfig({
                 {
                   text: 'Querying with SQL',
                   link: '/docs/1.5.0/query-docs/querying/sql',
+                  collapsed: true,
                   items: [
                     {
                       text: `Read Data Tables`,
@@ -1502,6 +1571,7 @@ export default defineConfig({
                 {
                   text: 'Querying with JSON',
                   link: '/docs/1.5.0/query-docs/querying/json',
+                  collapsed: true,
                   items: [
                     {
                       text: 'Selecting Columns',
@@ -1526,6 +1596,7 @@ export default defineConfig({
             {
               text: 'Query Libraries',
               link: '/docs/1.5.0/query-docs/libraries/python',
+              collapsed: true,
               items: [
                 {
                   text: 'Python',

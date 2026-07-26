@@ -6,7 +6,7 @@ STORED AS PARQUET
 LOCATION 'profiles/'
 ```
 
-An external table is a SQL table backed by files in Beacon's storage. Once registered, you can query it with `SELECT`, `JOIN`, or reference it from a `VIEW` — Beacon reads the files on demand without copying them. Table definitions survive restarts.
+An external table is a SQL table backed by files in Beacon's storage. Once registered, you can query it with `SELECT`, `JOIN`, or reference it from a `VIEW`, Beacon reads the files on demand without copying them. Table definitions survive restarts.
 
 ## Syntax
 
@@ -31,20 +31,20 @@ CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
 
 | `STORED AS` | File types |
 | ----------- | ---------- |
-| `PARQUET`   | `.parquet` |
+| `PARQUET` | `.parquet` |
 | `GEOPARQUET` | `.geoparquet` |
-| `NC`        | `.nc` |
-| `ZARR`      | Zarr v3 (`zarr.json`) |
-| `ATLAS`     | Atlas array store (`atlas.json`) |
-| `CSV`       | `.csv` |
-| `ARROW`     | Arrow IPC (`.arrow`, `.feather`) |
-| `TIFF`      | GeoTIFF / Cloud-Optimized GeoTIFF |
-| `BBF`       | Beacon Binary Format |
-| `DELTA`     | Delta Lake table directory (`_delta_log/`) |
-| `POSTGRES`  | External PostgreSQL table (federated) |
-| `MYSQL`     | External MySQL table (federated) |
+| `NC` | `.nc` |
+| `ZARR` | Zarr v3 (`zarr.json`) |
+| `ATLAS` | Atlas array store (`atlas.json`) |
+| `CSV` | `.csv` |
+| `ARROW` | Arrow IPC (`.arrow`, `.feather`) |
+| `TIFF` | GeoTIFF / Cloud-Optimized GeoTIFF |
+| `BBF` | Beacon Binary Format |
+| `DELTA` | Delta Lake table directory (`_delta_log/`) |
+| `POSTGRES` | External PostgreSQL table (federated) |
+| `MYSQL` | External MySQL table (federated) |
 
-`DELTA` points at an existing [Delta Lake](../../data-lake/delta-lake.md) table directory and additionally supports time travel and `INSERT INTO`. `REMOTE` federates a table on another Beacon instance — see [Remote Tables](../../data-lake/remote-tables.md). `POSTGRES` / `MYSQL` federate a table in an external SQL database — see [SQL Databases](../../data-lake/sql-databases.md); their `LOCATION` is the remote table name and connection details (including an encrypted `password`) go in `OPTIONS`.
+`DELTA` points at an existing [Delta Lake](/docs/2.0.0/beacondb/data-sources/formats/delta-lake) table directory and additionally supports time travel and `INSERT INTO`. `REMOTE` federates a table on another Beacon instance, see [Remote Tables](/docs/2.0.0/beacondb/data-sources/remote-tables). `POSTGRES` / `MYSQL` federate a table in an external SQL database, see [SQL Databases](/docs/2.0.0/beacondb/data-sources/sql-databases); their `LOCATION` is the remote table name and connection details (including an encrypted `password`) go in `OPTIONS`.
 
 Zarr tables should point at `zarr.json` entry files, and Atlas tables at `atlas.json` markers:
 
@@ -54,7 +54,7 @@ CREATE EXTERNAL TABLE sst STORED AS ZARR LOCATION 'sst/*/zarr.json'
 CREATE EXTERNAL TABLE sensor STORED AS ATLAS LOCATION 'sensor/atlas.json'
 ```
 
-`GEOPARQUET` reads Parquet files whose geometry columns are decoded to native GeoArrow — see the [GeoParquet chapter](./geoparquet.md) for querying geometry and the [data-lake setup](../../data-lake/geoparquet.md) for details.
+`GEOPARQUET` reads Parquet files whose geometry columns are decoded to native GeoArrow, see [GeoParquet in File Formats](/docs/2.0.0/beacondb/data-sources/formats/geoparquet) for querying geometry and read behaviour.
 
 ## `IF NOT EXISTS`
 
@@ -109,4 +109,4 @@ SHOW TABLES;
 DESCRIBE ocean_profiles;
 ```
 
-See the [External Tables](../../data-lake/external-tables.md) setup guide for per-format examples and the HTTP API for listing tables.
+See the [External Tables](/docs/2.0.0/beacondb/data-sources/external-tables) setup guide for per-format examples and the HTTP API for listing tables.

@@ -1,5 +1,5 @@
 ---
-description: "@beacon/client is an isomorphic TypeScript SDK for Beacon — run SQL or the JSON query DSL from Node.js or the browser, decode the Arrow result stream to plain JS objects, and build queries with an EF Core-style fluent builder."
+description: "@beacon/client is an isomorphic TypeScript SDK for Beacon, run SQL or the JSON query DSL from Node.js or the browser, decode the Arrow result stream to plain JS objects, and build queries with an EF Core-style fluent builder."
 ---
 
 # Beacon TypeScript SDK
@@ -19,7 +19,7 @@ npm install @beacon/client
 ```
 
 `apache-arrow` (the result decoder) and `fzstd` (a tiny pure-JS zstd
-decompressor) are regular dependencies and install automatically — no extra
+decompressor) are regular dependencies and install automatically, no extra
 setup. Beacon's results are zstd-compressed Arrow IPC; the SDK registers an
 fzstd-backed zstd codec with `apache-arrow` so they decode out of the box.
 
@@ -87,7 +87,7 @@ const dsl = beacon.from("ctd").select("TEMP").where(col("d").gte(0)).build();
 ## Admin operations
 
 When constructed with admin Basic-auth credentials, the client can manage the
-data lake — register external tables, manage crawlers, and drop tables:
+data lake, register external tables, manage crawlers, and drop tables:
 
 ```ts
 const beacon = new BeaconClient({

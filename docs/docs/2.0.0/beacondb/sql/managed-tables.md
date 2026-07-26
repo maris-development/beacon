@@ -6,7 +6,7 @@ INSERT INTO observations VALUES (1, 'a'), (2, 'b');
 SELECT * FROM observations;
 ```
 
-A **managed table** is a SQL table whose data Beacon owns and stores itself. Unlike an [external table](../../data-lake/external-tables.md) — which only points at existing files — a managed table is created empty (or from a query) and populated with `INSERT`. It supports `UPDATE`, `DELETE`, schema evolution with `ALTER TABLE`, and secondary `INDEX`es. Table definitions and data survive restarts.
+A **managed table** is a SQL table whose data Beacon owns and stores itself. Unlike an [external table](/docs/2.0.0/beacondb/data-sources/external-tables), which only points at existing files, a managed table is created empty (or from a query) and populated with `INSERT`. It supports `UPDATE`, `DELETE`, schema evolution with `ALTER TABLE`, and secondary `INDEX`es. Table definitions and data survive restarts.
 
 Managed tables are an authenticated, write capability: `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, and `CREATE/DROP INDEX` require admin credentials. Anonymous access remains read-only.
 
@@ -72,7 +72,7 @@ DELETE FROM measurements WHERE value IS NULL;
 DELETE FROM measurements;        -- empties the table
 ```
 
-On **Lance** tables this is a native delete (deletion vectors) — it does not rewrite the whole table. On **Iceberg** tables it is copy-on-write.
+On **Lance** tables this is a native delete (deletion vectors), it does not rewrite the whole table. On **Iceberg** tables it is copy-on-write.
 
 ## `UPDATE`
 
@@ -112,7 +112,7 @@ On **Lance** tables schema changes are applied natively (no table rebuild). On *
 Secondary indexes are a feature of the **Lance** engine. They are not available on Iceberg-backed tables.
 :::
 
-Create a scalar index on a column to speed up filters. Once created, queries use it automatically — no query changes are needed.
+Create a scalar index on a column to speed up filters. Once created, queries use it automatically, no query changes are needed.
 
 ```sql
 -- Default (BTREE) index; auto-named <table>_<column>_idx

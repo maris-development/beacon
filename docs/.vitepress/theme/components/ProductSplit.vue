@@ -11,7 +11,7 @@ const products = [
     icon: 'database',
     name: 'BeaconDB',
     lede: 'The engine, in-process.',
-    body: 'A DuckDB-class query engine that runs inside your Python process, with no server to stand up. Everything it owns lives in one portable beacon.db file you can query from a notebook or ship inside an app.',
+    body: 'An analytical query engine that runs inside your Python process, with no server to stand up. Everything it owns lives in one portable beacon.db file you can query from a notebook or ship inside an app.',
     cmd: 'pip install beacondb',
     points: [
       'In-process, no server to run',
@@ -47,7 +47,7 @@ const products = [
     <p class="psplit-kicker">Two ways to run Beacon</p>
     <h2 class="psplit-title">Embed the engine, or serve it</h2>
     <p class="psplit-sub">
-      One codebase, two products. Pick the one that fits, and switch without rewriting a query.
+      One engine, two ways to run it. Pick the one that fits, and switch without rewriting a query.
     </p>
 
     <div class="psplit-grid">
@@ -206,7 +206,11 @@ const products = [
   color: var(--vp-c-text-1);
 }
 
+/* The two cards stretch to equal height, and every row except this one is the
+   same height in both. Letting the body absorb the slack keeps the install
+   command (and everything below it) on the same baseline across both cards. */
 .pcard-body {
+  flex: 1 1 auto;
   margin: 0 0 1.1rem;
   color: var(--vp-c-text-2);
   font-size: 0.92rem;
@@ -259,8 +263,9 @@ const products = [
   border: 1.5px solid var(--vp-c-green-1);
 }
 
+/* No `margin-top: auto` here: an auto margin would absorb the card's free space
+   before flex-grow is applied, cancelling the body's alignment above. */
 .pcard-link {
-  margin-top: auto;
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--vp-c-brand-1);

@@ -1,6 +1,6 @@
 # JetBrains DataGrip
 
-You can connect to a Beacon data lakehouse from [JetBrains DataGrip](https://www.jetbrains.com/datagrip/) using the **Arrow Flight SQL JDBC driver**. This gives you a full SQL interface — browse tables, run queries, and explore your data directly from the IDE.
+You can connect to a Beacon data lakehouse from [JetBrains DataGrip](https://www.jetbrains.com/datagrip/) using the **Arrow Flight SQL JDBC driver**. This gives you a full SQL interface, browse tables, run queries, and explore your data directly from the IDE.
 
 ## Prerequisites
 
@@ -8,15 +8,15 @@ You can connect to a Beacon data lakehouse from [JetBrains DataGrip](https://www
 - A running Beacon instance with Arrow Flight SQL enabled (enabled by default)
 - Port `32011` reachable from your machine (see [Docker note](#expose-the-flight-sql-port) below)
 
-## Step 1 — Download the Arrow Flight SQL JDBC driver
+## Step 1, Download the Arrow Flight SQL JDBC driver
 
 Download the driver from:
 
-- [JetBrains JDBC Drivers page](https://www.jetbrains.com/datagrip/jdbc-drivers/) — search for "Apache Arrow Flight"
+- [JetBrains JDBC Drivers page](https://www.jetbrains.com/datagrip/jdbc-drivers/), search for "Apache Arrow Flight"
     Click on the versions (18.3.0 or later) to download a zip file containing the JAR.
     Unzip the downloaded file and locate the JAR (e.g. `flight-sql-jdbc-driver-18.3.0.jar`).
 
-## Step 2 — Add the driver to DataGrip
+## Step 2, Add the driver to DataGrip
 
 1. Open **Database Explorer** → **New** → **Driver**.
 ![DataGrip Driver Manager](/connect_datagrip/2.png)
@@ -27,17 +27,17 @@ Download the driver from:
 ![DataGrip Driver Manager](/connect_datagrip/4.png)
 5. Click **OK** to save the driver.
 
-## Step 3 — Create a data source
+## Step 3, Create a data source
 
 1. Open **Database Explorer** → **New** → **Data Source** -> **YOUR_DRIVER_NAME**.
 2. Click **+** → select the **YOUR_DRIVER_NAME** driver.
 3. Fill in the connection details:
 
-| Field        | Value                                                          |
+| Field | Value |
 | ------------ | -------------------------------------------------------------- |
-| **User**     | Your Beacon admin username (`BEACON_ADMIN_USERNAME`)           |
-| **Password** | Your Beacon admin password (`BEACON_ADMIN_PASSWORD`)           |
-| **URL**      | `jdbc:arrow-flight-sql://localhost:32011?useEncryption=false`  |
+| **User** | Your Beacon admin username (`BEACON_ADMIN_USERNAME`) |
+| **Password** | Your Beacon admin password (`BEACON_ADMIN_PASSWORD`) |
+| **URL** | `jdbc:arrow-flight-sql://localhost:32011?useEncryption=false` |
 
 ![DataGrip Data Source Configuration](/connect_datagrip/6.png)
 
@@ -87,10 +87,10 @@ Beacon tables are named after your dataset files or registered external table na
 
 The Arrow Flight SQL endpoint can be tuned with the following environment variables in your Beacon deployment:
 
-| Variable                              | Default   | Description                              |
+| Variable | Default | Description |
 | ------------------------------------- | --------- | ---------------------------------------- |
-| `BEACON_FLIGHT_SQL_ENABLE`            | `true`    | Enable or disable the Flight SQL server  |
-| `BEACON_FLIGHT_SQL_HOST`              | `0.0.0.0` | IP address to listen on                  |
-| `BEACON_FLIGHT_SQL_PORT`              | `32011`   | Port for the Flight SQL gRPC server      |
-| `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS`   | `false`   | Allow unauthenticated connections        |
-| `BEACON_FLIGHT_SQL_TOKEN_TTL_SECS`    | `3600`    | Auth token lifetime in seconds           |
+| `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable or disable the Flight SQL server |
+| `BEACON_FLIGHT_SQL_HOST` | `0.0.0.0` | IP address to listen on |
+| `BEACON_FLIGHT_SQL_PORT` | `32011` | Port for the Flight SQL gRPC server |
+| `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS` | `false` | Allow unauthenticated connections |
+| `BEACON_FLIGHT_SQL_TOKEN_TTL_SECS` | `3600` | Auth token lifetime in seconds |

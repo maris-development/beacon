@@ -6,7 +6,7 @@ CREATE VIEW north_atlantic AS
     WHERE latitude BETWEEN 0 AND 70
 ```
 
-A view is a saved `SELECT` statement that behaves like a table. It holds no data — Beacon runs the query on the fly whenever the view is referenced. Views are persisted and survive restarts.
+A view is a saved `SELECT` statement that behaves like a table. It holds no data, Beacon runs the query on the fly whenever the view is referenced. Views are persisted and survive restarts.
 
 ## Syntax
 
@@ -28,7 +28,7 @@ CREATE OR REPLACE VIEW north_atlantic AS
 
 ## Querying over a table function
 
-Views work over [table functions](./table-functions.md) as well as external tables — useful when you want to expose a specific file set as a named table:
+Views work over [table functions](/docs/2.0.0/beacondb/sql/table-functions) as well as external tables, useful when you want to expose a specific file set as a named table:
 
 ```sql
 CREATE VIEW argo_2024 AS
@@ -39,7 +39,7 @@ CREATE VIEW argo_2024 AS
 
 ## Harmonizing datasets with `UNION ALL BY NAME`
 
-Use a view to expose multiple datasets with different schemas as a single unified table. See [UNION ALL BY NAME](./union-by-name.md) for how column matching and type widening work.
+Use a view to expose multiple datasets with different schemas as a single unified table. See [UNION ALL BY NAME](/docs/2.0.0/beacondb/sql/union-by-name) for how column matching and type widening work.
 
 ```sql
 CREATE VIEW all_profiles AS
@@ -59,5 +59,5 @@ DROP TABLE IF EXISTS north_atlantic
 ```
 
 :::info
-`DROP TABLE` removes both external tables and views — there is no separate `DROP VIEW` statement.
+`DROP TABLE` removes both external tables and views, there is no separate `DROP VIEW` statement.
 :::

@@ -1,12 +1,12 @@
 ---
-description: CREATE SECRET stores credentials for object stores (S3/GCS/Azure) and remote Beacons — named, scoped, DuckDB-style, session or persisted encrypted into the beacon.db file.
+description: CREATE SECRET stores credentials for object stores (S3/GCS/Azure) and remote Beacons as named, scoped secrets, session or persisted encrypted into the beacon.db file.
 ---
 
 # Secrets
 
-`CREATE SECRET` stores credentials — for a cloud object store or a remote Beacon — as a **named,
+`CREATE SECRET` stores credentials, for a cloud object store or a remote Beacon, as a **named,
 scoped** secret, so `read_parquet('s3://…')` and [`ATTACH`](/docs/2.0.0/beacondb/sql/remote-tables) resolve
-them without environment variables. The syntax follows DuckDB's.
+them without environment variables.
 
 ## Object-store secrets
 
@@ -20,11 +20,11 @@ CREATE SECRET my_s3 (
 SELECT * FROM read_parquet('s3://my-bucket/obs/*.parquet');   -- uses my_s3
 ```
 
-- **`TYPE`** — `S3`, `GCS`, `AZURE`, `HTTP`, or `BEACON` (remote Beacon; see below).
-- **`SCOPE`** — a URL prefix; the best match (longest scope prefix) wins, so a broad `s3://` secret is
+- **`TYPE`**: `S3`, `GCS`, `AZURE`, `HTTP`, or `BEACON` (remote Beacon; see below).
+- **`SCOPE`**: a URL prefix; the best match (longest scope prefix) wins, so a broad `s3://` secret is
   the default and `s3://bucket` overrides it. Omitted, it defaults to the whole backend.
-- The DuckDB parameter names (`KEY_ID`, `SECRET`, `REGION`, `SESSION_TOKEN`, `ENDPOINT`, …) map to the
-  underlying `object_store` config keys; any native key also works.
+- The standard parameter names (`KEY_ID`, `SECRET`, `REGION`, `SESSION_TOKEN`, `ENDPOINT`, …) map to
+  the underlying `object_store` config keys; any native key also works.
 
 ## Inspect and remove
 
@@ -44,7 +44,7 @@ CREATE PERSISTENT SECRET my_s3 (TYPE S3, KEY_ID '…', SECRET '…', SCOPE 's3:/
 ```
 
 Persisting requires a configured **master key** (`BEACON_SECRETS_KEY`, or `secrets_key=` in
-[`beacondb.connect`](/docs/2.0.0/beacondb/python/secrets)) and a file-backed database — Beacon **refuses to
+[`beacondb.connect`](/docs/2.0.0/beacondb/python/secrets)) and a file-backed database, Beacon **refuses to
 write a plaintext credential to disk**. Only the name/type/scope are stored in the clear; the values
 are encrypted.
 

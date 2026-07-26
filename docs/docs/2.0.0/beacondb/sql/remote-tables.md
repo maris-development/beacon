@@ -1,8 +1,8 @@
 # Remote Tables
 
-A **remote table** points at a table living on **another Beacon instance** and is queried over Arrow Flight SQL. Once created it behaves like any other table in your SQL — you `SELECT`, `JOIN`, and aggregate over it — but the data stays on the remote, and Beacon pushes as much work as possible down to it so only the reduced result set travels the network.
+A **remote table** points at a table living on **another Beacon instance** and is queried over Arrow Flight SQL. Once created it behaves like any other table in your SQL, you `SELECT`, `JOIN`, and aggregate over it, but the data stays on the remote, and Beacon pushes as much work as possible down to it so only the reduced result set travels the network.
 
-This chapter covers querying remote tables. For the DDL that creates them (`LOCATION`, `OPTIONS`, TLS), schema handling, and the full list of limitations, see the [Remote Tables (Federation) setup chapter](../../data-lake/remote-tables.md).
+This chapter covers querying remote tables. For the DDL that creates them (`LOCATION`, `OPTIONS`, TLS), schema handling, and the full list of limitations, see the [Remote Tables (Federation) setup chapter](/docs/2.0.0/beacondb/data-sources/remote-tables).
 
 ## Querying a remote table
 
@@ -24,7 +24,7 @@ When you query a remote table, Beacon's planner federates the largest sub-plan r
 EXPLAIN SELECT count(*) FROM remote_profiles WHERE depth < 50;
 ```
 
-The plan shows a federated (virtual) scan node in place of a local table scan — everything below it runs remotely.
+The plan shows a federated (virtual) scan node in place of a local table scan, everything below it runs remotely.
 
 ## Joins across the same remote
 
@@ -39,14 +39,14 @@ JOIN remote_stations m ON p.station_id = m.id;
 Joins that mix a remote table with a **local** table (or with a table on a *different* remote) are executed locally: Beacon fetches the needed remote rows and joins them on this instance.
 
 :::tip
-Keep remote-pushed predicates to standard SQL comparisons. A filter or projection that uses a Beacon UDF (e.g. a geospatial `st_*` function) is only pushed down if the remote instance has the same function; otherwise Beacon falls back to local execution. See the [setup chapter's limitations](../../data-lake/remote-tables.md#limitations).
+Keep remote-pushed predicates to standard SQL comparisons. A filter or projection that uses a Beacon UDF (e.g. a geospatial `st_*` function) is only pushed down if the remote instance has the same function; otherwise Beacon falls back to local execution. See the [setup chapter's limitations](/docs/2.0.0/beacondb/data-sources/remote-tables#limitations).
 :::
 
 ## Attaching a whole remote catalog (`ATTACH`)
 
 Instead of registering one remote table at a time, **`ATTACH`** mirrors an *entire* remote Beacon's
-catalog under a local name — every remote schema and table becomes queryable as `name.schema.table`,
-DuckDB-`ATTACH` style. The same federation applies: filters, aggregates, and joins between tables on
+catalog under a local name, so every remote schema and table becomes queryable as
+`name.schema.table`. The same federation applies: filters, aggregates, and joins between tables on
 that remote push down.
 
 ```sql
@@ -61,14 +61,14 @@ GROUP BY platform;
 DETACH lake;
 ```
 
-- **URL** — `beacon://host:port`, `grpc://…`, `http(s)://…`, or a bare `host:port`; `'tls' 'true'` (or
+- **URL**: `beacon://host:port`, `grpc://…`, `http(s)://…`, or a bare `host:port`; `'tls' 'true'` (or
   an `https://` url) uses TLS.
-- **Credentials** — `'username'`/`'password'` (HTTP Basic) or a bearer `'token'`, or the name of a
-  [`TYPE BEACON` secret](/docs/2.0.0/beacondb/sql/secrets) via `'secret'` — exactly one. Omit for anonymous. The
+- **Credentials**: `'username'`/`'password'` (HTTP Basic) or a bearer `'token'`, or the name of a
+  [`TYPE BEACON` secret](/docs/2.0.0/beacondb/sql/secrets) via `'secret'`, exactly one. Omit for anonymous. The
   remote enforces its own [RBAC](/docs/2.0.0/security/access-control) against whoever you authenticate
   as.
 - The remote is contacted at `ATTACH` time to enumerate its schemas and tables (a snapshot); each
   table's schema resolves lazily on first use.
 
-In **beacondb**, the same thing is available as `con.attach(name, url, …)` — see
+In **BeaconDB**, the same thing is available as `con.attach(name, url, …)`, see
 [Remote catalogs](/docs/2.0.0/beacondb/python/remote-catalogs).

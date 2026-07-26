@@ -1,6 +1,6 @@
 # Reading Files
 
-Table functions let you query files directly in a `FROM` clause without creating a persistent [External Table](../../data-lake/external-tables.md) first. They are useful for ad-hoc exploration or when you want to embed the file path logic inside a [View](../../data-lake/view.md).
+Table functions let you query files directly in a `FROM` clause without creating a persistent [External Table](/docs/2.0.0/beacondb/data-sources/external-tables) first. They are useful for ad-hoc exploration or when you want to embed the file path logic inside a [View](/docs/2.0.0/data-lake/view).
 
 All functions take the file path(s) to read as their first argument. This can be **either a single glob/path string** or **a list of strings**. Globs are resolved relative to Beacon's configured dataset storage root.
 
@@ -15,7 +15,7 @@ SELECT * FROM read_netcdf('argo/**/*.nc')
 SELECT * FROM read_netcdf(['argo/**/*.nc', 'wod/**/*.nc'])
 ```
 
-In every signature below, the `glob_paths` argument accepts either form — a single string or a list of strings.
+In every signature below, the `glob_paths` argument accepts either form, a single string or a list of strings.
 
 ## `read_netcdf`
 
@@ -62,9 +62,9 @@ read_zarr(glob_paths, dimensions)
 
 Reads Zarr stores matching one or more glob patterns. Each path should point at a `zarr.json` entry file.
 
-The optional `dimensions` argument restricts the arrays returned to those whose dimensions are a subset of the provided list — use it to drop high-dimensional arrays you don't need.
+The optional `dimensions` argument restricts the arrays returned to those whose dimensions are a subset of the provided list, use it to drop high-dimensional arrays you don't need.
 
-Predicate pushdown is automatic: Beacon prunes chunks and slices coordinate dimensions (e.g. `time`, `latitude`, `longitude`) based on the query's `WHERE` clause — no statistics columns need to be declared.
+Predicate pushdown is automatic: Beacon prunes chunks and slices coordinate dimensions (e.g. `time`, `latitude`, `longitude`) based on the query's `WHERE` clause, no statistics columns need to be declared.
 
 ```sql
 SELECT * FROM read_zarr('sst/*/zarr.json')
@@ -98,7 +98,7 @@ read_atlas(glob_paths)
 read_atlas(glob_paths, dimensions)
 ```
 
-Reads [Atlas](../../data-lake/datasets.md#atlas) array stores matching one or more glob patterns. Each path must point at an `atlas.json` marker file — an exact path or a glob such as `**/atlas.json`.
+Reads [Atlas](/docs/2.0.0/beacondb/data-sources/formats/atlas) array stores matching one or more glob patterns. Each path must point at an `atlas.json` marker file, an exact path or a glob such as `**/atlas.json`.
 
 The optional `dimensions` argument filters the arrays to those matching the listed dimension names. Atlas prunes whole datasets using per-column statistics, so range queries over large collections only read the datasets that can match the predicate.
 
@@ -155,8 +155,8 @@ read_csv(glob_paths, delimiter, infer_records)
 
 Schema is inferred from the file contents. The first row must be a header row.
 
-- `delimiter` — single-character field separator (default: `,`)
-- `infer_records` — number of rows to sample when inferring column types (default: `128000`)
+- `delimiter`, single-character field separator (default: `,`)
+- `infer_records`, number of rows to sample when inferring column types (default: `128000`)
 
 ```sql
 SELECT * FROM read_csv('metadata/*.csv')
@@ -222,12 +222,12 @@ read_delta(location)
 read_delta(location, version_or_timestamp)
 ```
 
-Reads a [Delta Lake](../../data-lake/delta-lake.md) table. Unlike the other functions, `location` is a **single path to the Delta table directory** (the folder containing `_delta_log/`) — not a glob or a list. The schema is read from the transaction log.
+Reads a [Delta Lake](/docs/2.0.0/beacondb/data-sources/formats/delta-lake) table. Unlike the other functions, `location` is a **single path to the Delta table directory** (the folder containing `_delta_log/`), not a glob or a list. The schema is read from the transaction log.
 
 The optional second argument selects a snapshot for **time travel**:
 
 - an integer is a Delta **version** number, e.g. `12`
-- any other string is an RFC-3339 **timestamp** — the latest version at or before it
+- any other string is an RFC-3339 **timestamp**: the latest version at or before it
 
 ```sql
 -- Latest version
@@ -240,4 +240,4 @@ SELECT count(*) FROM read_delta('delta/ocean_profiles', 12)
 SELECT * FROM read_delta('delta/ocean_profiles', '2026-01-01T00:00:00Z')
 ```
 
-To register a Delta table persistently (and to `INSERT INTO` it), use [`CREATE EXTERNAL TABLE … STORED AS DELTA`](../../data-lake/delta-lake.md).
+To register a Delta table persistently (and to `INSERT INTO` it), use [`CREATE EXTERNAL TABLE … STORED AS DELTA`](/docs/2.0.0/beacondb/data-sources/formats/delta-lake).

@@ -1,6 +1,6 @@
 # JSON Query DSL
 
-The JSON DSL lets you express queries as a typed object — no SQL string building required. It is the preferred interface for programmatic clients and query builders.
+The JSON DSL lets you express queries as a typed object, no SQL string building required. It is the preferred interface for programmatic clients and query builders.
 
 ```http
 POST /api/query
@@ -20,7 +20,7 @@ Discover available columns before querying:
 | Field | Required | Description |
 | ----- | -------- | ----------- |
 | `select` | Yes | Columns (and expressions) to return |
-| `from` | No | Data source — table name or inline file source |
+| `from` | No | Data source, table name or inline file source |
 | `filters` | No | Row filters, combined with AND by default |
 | `sort_by` | No | Sort expressions |
 | `limit` | No | Maximum rows to return |
@@ -108,7 +108,7 @@ Content-Type: application/json
 }
 ```
 
-Predicate pushdown is automatic for large Zarr stores — Beacon prunes chunks and slices coordinate dimensions from your `filters`, with no extra options to configure:
+Predicate pushdown is automatic for large Zarr stores, Beacon prunes chunks and slices coordinate dimensions from your `filters`, with no extra options to configure:
 
 ```http
 POST /api/query
@@ -294,4 +294,4 @@ Content-Type: application/json
 
 ## Output formats
 
-See [Querying — Output formats](./index.md#output-formats) for the full list. The `output` field is identical for JSON DSL and SQL queries.
+See [Querying, Output formats](/docs/2.0.0/api/querying/#output-formats) for the full list. The `output` field is identical for JSON DSL and SQL queries.

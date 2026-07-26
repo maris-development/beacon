@@ -42,7 +42,7 @@ WHERE quality_flag IN (1, 2)
 
 ## LIKE
 
-Pattern matching — `%` matches any sequence of characters, `_` matches one character:
+Pattern matching, `%` matches any sequence of characters, `_` matches one character:
 
 ```sql
 WHERE cruise_id LIKE '2024%'

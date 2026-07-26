@@ -73,7 +73,7 @@ Content-Type: application/json
 }
 ```
 
-Predicate pushdown is automatic — Beacon prunes chunks and slices coordinate dimensions based on your `WHERE` clause, with no extra arguments to configure:
+Predicate pushdown is automatic, Beacon prunes chunks and slices coordinate dimensions based on your `WHERE` clause, with no extra arguments to configure:
 
 ```http
 POST /api/query
@@ -97,11 +97,11 @@ Content-Type: application/json
 }
 ```
 
-Other table functions: `read_arrow`, `read_csv`, `read_odv_ascii`, `read_bbf`, `read_tiff`. See [Reading Files](../../sql/table-functions.md) for full signatures.
+Other table functions: `read_arrow`, `read_csv`, `read_odv_ascii`, `read_bbf`, `read_tiff`. See [Reading Files](/docs/2.0.0/beacondb/sql/table-functions) for full signatures.
 
 ## Output formats
 
-See [Querying — Output formats](./index.md#output-formats) for the full list. Add `output` alongside `sql` in the same request body:
+See [Querying, Output formats](/docs/2.0.0/api/querying/#output-formats) for the full list. Add `output` alongside `sql` in the same request body:
 
 ```http
 POST /api/query

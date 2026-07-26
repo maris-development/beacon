@@ -1,12 +1,12 @@
 ---
-description: Bring Python data into beacondb with register() (session or persisted) and append() into managed tables.
+description: Bring Python data into BeaconDB with register() (session or persisted) and append() into managed tables.
 ---
 
 # Bringing data in
 
 ## Register a frame as a table
 
-Register a pandas / pyarrow / polars frame (or any Arrow object, or a beacondb relation) as a table
+Register a pandas / pyarrow / polars frame (or any Arrow object, or a BeaconDB relation) as a table
 queryable by name:
 
 ```python
@@ -16,7 +16,7 @@ con.sql("SELECT sum(a) FROM events").fetchall()
 con.unregister("events")
 ```
 
-By default the table is **session-only** — held in memory for the process, never written into
+By default the table is **session-only**: held in memory for the process, never written into
 `beacon.db`. Pass `persist=True` to write it into the file as a managed table, so it survives a reopen
 and travels with the file:
 
@@ -24,7 +24,7 @@ and travels with the file:
 con.register("kept", pd.DataFrame({"x": [1, 2, 3]}), persist=True)
 ```
 
-`persist=True` is real DDL: it needs write privileges (a super-user — the default with auth off) and
+`persist=True` is real DDL: it needs write privileges (a super-user, the default with auth off) and
 refuses to overwrite an existing table (drop it first). `register()` needs `pyarrow` installed either
 way.
 

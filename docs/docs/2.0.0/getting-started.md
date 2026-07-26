@@ -1,15 +1,15 @@
 ---
-description: Run Beacon with Docker in minutes — locally or against S3-compatible object storage — explore it in the bundled admin UI, then query your files over SQL or JSON.
+description: Run Beacon with Docker in minutes, locally or against S3-compatible object storage, explore it in the bundled admin UI, then query your files over SQL or JSON.
 ---
 
 # Getting Started
 
-This guide gets a Beacon instance running with Docker. The **[Quick Start](#quick-start)** below is the fastest path — run, add data, and explore in the bundled admin UI. The **[Local](#local)** and **[S3](#s3-compatible-object-storage)** sections that follow cover reproducible Docker Compose setups. For ready-made examples including MinIO and sample datasets, see the [beacon-example repository](https://github.com/maris-development/beacon-example).
+This guide gets a Beacon instance running with Docker. The **[Quick Start](#quick-start)** below is the fastest path, run, add data, and explore in the bundled admin UI. The **[Local](#local)** and **[S3](#s3-compatible-object-storage)** sections that follow cover reproducible Docker Compose setups. For ready-made examples including MinIO and sample datasets, see the [beacon-example repository](https://github.com/maris-development/beacon-example).
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/)
-- [Docker Compose](https://docs.docker.com/compose/install/) — for the reproducible setups below
+- [Docker Compose](https://docs.docker.com/compose/install/), for the reproducible setups below
 
 ## Quick Start
 
@@ -30,21 +30,21 @@ docker run -d \
   ghcr.io/maris-development/beacon:latest
 ```
 
-That's it — Beacon is now serving on <http://localhost:5001>.
+That's it, Beacon is now serving on <http://localhost:5001>.
 
 ### 2. Add data
 
-Drop any supported files (e.g. `.parquet`, `.nc`, `.zarr`, `.csv`) into the `./datasets` folder you just mounted. Beacon discovers them automatically — there is no import step.
+Drop any supported files (e.g. `.parquet`, `.nc`, `.zarr`, `.csv`) into the `./datasets` folder you just mounted. Beacon discovers them automatically, there is no import step.
 
 ### 3. Explore in the Admin UI
 
-Open <http://localhost:5001/admin> and sign in with the admin username and password you set above (`admin` / `securepassword`). Beacon bundles an [admin web UI](./connect/web-admin-ui.md) into the server and Docker image — nothing extra to deploy. From it you can:
+Open <http://localhost:5001/admin> and sign in with the admin username and password you set above (`admin` / `securepassword`). Beacon bundles an [admin web UI](/docs/2.0.0/connect/web-admin-ui) into the server and Docker image, nothing extra to deploy. From it you can:
 
-- **Query editor** — write SQL, run it (⌘/Ctrl + Enter), view results, and download CSV/Parquet.
-- **Datasets** — browse discovered files and inspect their schemas.
-- **Tables** — register and manage queryable tables over your datasets.
-- **Crawlers & external tables** — automate discovery and register external sources.
-- **Server** — runtime info, health, and the available functions.
+- **Query editor**: write SQL, run it (⌘/Ctrl + Enter), view results, and download CSV/Parquet.
+- **Datasets**: browse discovered files and inspect their schemas.
+- **Tables**: register and manage queryable tables over your datasets.
+- **Crawlers & external tables**: automate discovery and register external sources.
+- **Server**: runtime info, health, and the available functions.
 
 ### 4. Or query over HTTP
 
@@ -99,14 +99,14 @@ services:
 
 :::
 
-If you used Compose, start it with `docker compose up -d`. Beacon is now running. Open the [admin UI](./connect/web-admin-ui.md) at `http://localhost:5001/admin` to explore and query, or `http://localhost:5001/swagger` for the API docs. Any files placed in `./datasets` are immediately available for querying.
+If you used Compose, start it with `docker compose up -d`. Beacon is now running. Open the [admin UI](/docs/2.0.0/connect/web-admin-ui) at `http://localhost:5001/admin` to explore and query, or `http://localhost:5001/swagger` for the API docs. Any files placed in `./datasets` are immediately available for querying.
 
 ::: tip Two ways to connect
-Beacon exposes two endpoints. The **HTTP API** on port `5001` serves SQL/JSON queries, the admin UI, and the OpenAPI docs. The **Arrow Flight SQL** server on port `32011` is a high-throughput, columnar protocol used by clients such as [JetBrains DataGrip](./connect/jetbrains-datagrip.md) and the [Python ADBC driver](./connect/python-adbc.md). Flight SQL uses bearer-token authentication and can be tuned or disabled via the `BEACON_FLIGHT_SQL_*` [settings](./data-lake/configuration.md#arrow-flight-sql).
+Beacon exposes two endpoints. The **HTTP API** on port `5001` serves SQL/JSON queries, the admin UI, and the OpenAPI docs. The **Arrow Flight SQL** server on port `32011` is a high-throughput, columnar protocol used by clients such as [JetBrains DataGrip](/docs/2.0.0/connect/jetbrains-datagrip) and the [Python ADBC driver](/docs/2.0.0/connect/python-adbc). Flight SQL uses bearer-token authentication and can be tuned or disabled via the `BEACON_FLIGHT_SQL_*` [settings](/docs/2.0.0/data-lake/configuration#arrow-flight-sql).
 :::
 
 ::: warning Secure your instance
-The `BEACON_ADMIN_*` credentials gate the admin UI and all write/management operations — **change them from the defaults** before exposing Beacon. To restrict who can read data, enable [access control](./security/access-control.md) (`BEACON_AUTH_ENFORCE=true`).
+The `BEACON_ADMIN_*` credentials gate the admin UI and all write/management operations, **change them from the defaults** before exposing Beacon. To restrict who can read data, enable [access control](/docs/2.0.0/security/access-control) (`BEACON_AUTH_ENFORCE=true`).
 :::
 
 ## S3-Compatible Object Storage
@@ -165,9 +165,9 @@ If you used Compose, start it with `docker compose up -d`. Files already in the 
 
 | | |
 | - | - |
-| **Explore in the browser** | [Admin Web UI](./connect/web-admin-ui.md) |
-| **Connect a client** | [JetBrains DataGrip](./connect/jetbrains-datagrip.md) · [Python ADBC](./connect/python-adbc.md) · [TypeScript SDK](./connect/beacon-typescript-sdk.md) |
-| **Register datasets as SQL tables** | [External Tables](./data-lake/external-tables.md) · [Views](./data-lake/view.md) |
-| **Write queries** | [SQL Guide](./sql/index.md) |
-| **Secure access** | [Authentication & Access Control](./security/access-control.md) |
-| **Tune performance** | [Performance Tuning](./data-lake/performance-tuning.md) |
+| **Explore in the browser** | [Admin Web UI](/docs/2.0.0/connect/web-admin-ui) |
+| **Connect a client** | [JetBrains DataGrip](/docs/2.0.0/connect/jetbrains-datagrip) · [Python ADBC](/docs/2.0.0/connect/python-adbc) · [TypeScript SDK](/docs/2.0.0/connect/beacon-typescript-sdk) |
+| **Register datasets as SQL tables** | [External Tables](/docs/2.0.0/beacondb/data-sources/external-tables) · [Views](/docs/2.0.0/data-lake/view) |
+| **Write queries** | [SQL Guide](/docs/2.0.0/beacondb/sql/) |
+| **Secure access** | [Authentication & Access Control](/docs/2.0.0/security/access-control) |
+| **Tune performance** | [Performance Tuning](/docs/2.0.0/data-lake/performance-tuning) |

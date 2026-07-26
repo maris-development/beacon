@@ -1,5 +1,5 @@
 ---
-description: Complete reference of Beacon's BEACON_* environment variables — server, query engine, storage, S3, Arrow Flight SQL, crawler, file formats, and API docs metadata — with their defaults.
+description: Complete reference of Beacon's BEACON_* environment variables, server, query engine, storage, S3, Arrow Flight SQL, crawler, file formats, and API docs metadata, with their defaults.
 ---
 
 # Configuration
@@ -33,7 +33,7 @@ over HTTP and the admin endpoints).
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_ADMIN_USERNAME` | `beacon-admin` | Super-user username for management endpoints. |
-| `BEACON_ADMIN_PASSWORD` | `beacon-password` | Super-user password — **change this in production**. |
+| `BEACON_ADMIN_PASSWORD` | `beacon-password` | Super-user password, **change this in production**. |
 
 ## Authentication & access control
 
@@ -56,14 +56,14 @@ for the full model and SQL reference. The variables that tune it:
 
 ## Secrets
 
-Master key used to encrypt persisted credentials at rest — currently the
-`password` of external [SQL database tables](./sql-databases.md). It is required
+Master key used to encrypt persisted credentials at rest, currently the
+`password` of external [SQL database tables](/docs/2.0.0/beacondb/data-sources/sql-databases). It is required
 to create a database table with a password; without it, such a `CREATE` is
 rejected rather than writing plaintext.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_SECRETS_KEY` | _(none)_ | Base64-encoded **32-byte** key (e.g. `openssl rand -base64 32`). If set, it must decode to exactly 32 bytes or Beacon exits at startup. Losing or changing it makes previously stored credentials undecryptable — recreate those tables with the new key. |
+| `BEACON_SECRETS_KEY` | _(none)_ | Base64-encoded **32-byte** key (e.g. `openssl rand -base64 32`). If set, it must decode to exactly 32 bytes or Beacon exits at startup. Losing or changing it makes previously stored credentials undecryptable, recreate those tables with the new key. |
 
 ## Query engine
 
@@ -71,7 +71,7 @@ rejected rather than writing plaintext.
 | --- | --- | --- |
 | `BEACON_ENABLE_SQL` | `true` | Enable the raw SQL query interface. Set to `false` to disable it (the JSON query API stays available). |
 | `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. More is better for larger datasets and memory-heavy operations such as spatial joins and `GROUP BY`. |
-| `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request omits the source. Only applies to the JSON query API — SQL queries must always specify a source. |
+| `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request omits the source. Only applies to the JSON query API, SQL queries must always specify a source. |
 | `BEACON_ENABLE_PUSHDOWN_PROJECTION` | `true` | Push column projection down into file readers so only requested columns are decoded. |
 | `BEACON_ENABLE_ND_PIPELINE` | `false` | Enable the N-dimensional pipeline optimizer for zarr/netcdf reads: sink element-wise projections below the grid broadcast so `lat * 2` and similar run on the coordinate axis instead of the full cross-product. The base nd pipeline always runs; this only enables the node-rewriting optimization. |
 | `BEACON_SANITIZE_SCHEMA` | `false` | Sanitize dataset schemas (normalize column names/types) during discovery. |
@@ -95,7 +95,7 @@ streamed to the client, which improves throughput for fine-grained results.
 
 Beacon also exposes an [Arrow Flight SQL](https://arrow.apache.org/docs/format/FlightSql.html)
 endpoint on its own port, used by clients such as JetBrains DataGrip and the
-Python ADBC driver (see [Connect](../connect/jetbrains-datagrip.md)). Unlike the
+Python ADBC driver (see [Connect](/docs/2.0.0/connect/jetbrains-datagrip)). Unlike the
 HTTP API, Flight SQL uses bearer-token authentication.
 
 | Variable | Default | Description |
@@ -115,7 +115,7 @@ Beacon keeps all local state under a single root directory.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_DATA_DIR` | `./data` | Root directory for all local data. |
-| `BEACON_ENABLE_FS_EVENTS` | `false` | Watch the local datasets directory so new files are picked up automatically (uses inotify on Linux). Set to `true` to enable live auto-refresh of external tables and event-driven crawler triggering. Not used with the S3 data lake. Mounted Docker volumes can interfere with filesystem events — test this in your deployment environment. |
+| `BEACON_ENABLE_FS_EVENTS` | `false` | Watch the local datasets directory so new files are picked up automatically (uses inotify on Linux). Set to `true` to enable live auto-refresh of external tables and event-driven crawler triggering. Not used with the S3 data lake. Mounted Docker volumes can interfere with filesystem events, test this in your deployment environment. |
 
 The following sub-directories are created under `BEACON_DATA_DIR` and used by
 Beacon:
@@ -140,7 +140,7 @@ and `cache/` directories remain on local disk.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_S3_DATA_LAKE` | `false` | Use S3-compatible object storage as the datasets store. When `false`, the local filesystem is used. |
-| `BEACON_S3_BUCKET` | _(none)_ | Bucket name. **Required** when `BEACON_S3_DATA_LAKE=true` — Beacon exits at startup if it is missing. Never inferred from the endpoint. |
+| `BEACON_S3_BUCKET` | _(none)_ | Bucket name. **Required** when `BEACON_S3_DATA_LAKE=true`, Beacon exits at startup if it is missing. Never inferred from the endpoint. |
 | `BEACON_S3_ENABLE_VIRTUAL_HOSTING` | `false` | Use virtual-hosted-style addressing (bucket in the host) instead of path-style (`{endpoint}/{bucket}/{key}`). |
 | `BEACON_S3_ALLOW_HTTP` | `true` | Allow plain `http://` endpoints (useful for local MinIO; disable for production). |
 | `BEACON_ENABLE_S3_EVENTS` | `false` | Reserved: wire S3 change notifications into the event listener. |
@@ -155,14 +155,14 @@ environment values.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `AWS_ENDPOINT` | _(none)_ | S3-compatible endpoint URL, e.g. `https://s3.amazonaws.com` or `http://minio:9000`. The bucket is always taken from `BEACON_S3_BUCKET`, never parsed from this URL. |
-| `AWS_REGION` | _(none)_ | S3 region. (Note: `AWS_DEFAULT_REGION` is **not** used — set `AWS_REGION`.) |
+| `AWS_REGION` | _(none)_ | S3 region. (Note: `AWS_DEFAULT_REGION` is **not** used, set `AWS_REGION`.) |
 | `AWS_ACCESS_KEY_ID` | _(none)_ | Access key. Only required when the object store needs authentication. |
 | `AWS_SECRET_ACCESS_KEY` | _(none)_ | Secret key. Only required when the object store needs authentication. |
-| `AWS_SKIP_SIGNATURE` | _(none)_ | Set to `true` to send unsigned requests — useful for public/anonymous buckets. |
+| `AWS_SKIP_SIGNATURE` | _(none)_ | Set to `true` to send unsigned requests, useful for public/anonymous buckets. |
 
 ## Crawler
 
-The [crawler](./crawlers.md) discovers files under a prefix and registers them as
+The [crawler](/docs/2.0.0/data-lake/crawlers) discovers files under a prefix and registers them as
 external tables.
 
 | Variable | Default | Description |
@@ -183,7 +183,7 @@ external tables.
 
 ## File formats
 
-Per-format tuning. See [Performance Tuning](./performance-tuning.md) for guidance
+Per-format tuning. See [Performance Tuning](/docs/2.0.0/data-lake/performance-tuning) for guidance
 on when to change these.
 
 ### NetCDF

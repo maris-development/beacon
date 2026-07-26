@@ -14,7 +14,7 @@ Beacon generates an OpenAPI spec at runtime. When the server is running, open on
 
 ## Base URL
 
-All endpoints in these docs are shown as relative paths (e.g. `GET /api/health`). Send requests to your Beacon base URL — by default `http://localhost:5001`. If you run behind a reverse proxy, use that URL instead.
+All endpoints in these docs are shown as relative paths (e.g. `GET /api/health`). Send requests to your Beacon base URL, by default `http://localhost:5001`. If you run behind a reverse proxy, use that URL instead.
 
 ## Health check
 
@@ -28,8 +28,8 @@ Returns `200 OK` when Beacon is up and ready.
 
 | Section | Description |
 | ------- | ----------- |
-| [Exploring the Data Lake](./exploring-data-lake.md) | Discover datasets, tables, and schemas |
-| [Querying](./querying/index.md) | Run queries (JSON DSL or SQL) and receive results |
-| [JSON Query DSL](./querying/json.md) | Structured query format for programmatic clients |
-| [SQL](./querying/sql.md) | Full SQL via DataFusion |
-| [Examples](./querying/examples.md) | Copy-paste query patterns |
+| [Exploring the Data Lake](/docs/2.0.0/api/exploring-data-lake) | Discover datasets, tables, and schemas |
+| [Querying](/docs/2.0.0/api/querying/) | Run queries (JSON DSL or SQL) and receive results |
+| [JSON Query DSL](/docs/2.0.0/api/querying/json) | Structured query format for programmatic clients |
+| [SQL](/docs/2.0.0/api/querying/sql) | Full SQL via DataFusion |
+| [Examples](/docs/2.0.0/api/querying/examples) | Copy-paste query patterns |

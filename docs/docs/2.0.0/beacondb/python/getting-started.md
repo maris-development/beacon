@@ -1,8 +1,8 @@
 ---
-description: Install beacondb, open a database, run your first query, and understand the two auth modes.
+description: Install BeaconDB, open a database, run your first query, and understand the two auth modes.
 ---
 
-# Getting started with beacondb
+# Getting started with BeaconDB
 
 ## Install
 
@@ -47,12 +47,13 @@ cur.fetchone(); cur.fetchall()
 cur.description; cur.rowcount
 ```
 
-Parameters are **bound** (never string-interpolated), with `?` or `$1` placeholders — injection-safe.
+Parameters are **bound** (never string-interpolated), with `?` or `$1` placeholders, injection-safe.
 `executemany(sql, rows)` runs the statement per row.
 
 ## Authentication
 
-Auth is **off by default** — the SQLite/DuckDB contract: *possession of the file is full control*.
+Auth is **off by default**, following the usual embedded-database contract: *possession of the file
+is full control*.
 
 ```python
 con = beacondb.connect("beacon.db")
@@ -72,7 +73,7 @@ analyst = anon.connect_as(username="analyst", password=...)
 
 Supplying credentials with `auth=False` is an error, not a no-op. RBAC written into a database is
 **not** enforced when it is opened with `auth=False`: it is a boundary for *served* access
-(beacon-datalake), not against local possession of the file.
+(Beacon Data Lake), not against local possession of the file.
 
 ## Read-only
 
@@ -82,11 +83,11 @@ con.sql("SELECT * FROM t").df()            # ok
 con.execute("INSERT INTO t VALUES (1)")    # refused: opened read-only
 ```
 
-Every write — DDL/DML and side-effecting statements (`ATTACH`, `CREATE SECRET`, …) — is refused,
+Every write, DDL/DML and side-effecting statements (`ATTACH`, `CREATE SECRET`, …), is refused,
 while `SELECT` and `SHOW …` work.
 
 ## Next
 
-- [Querying](/docs/2.0.0/beacondb/python/querying) — the lazy relation, readers, and file sinks.
-- [Bringing data in](/docs/2.0.0/beacondb/python/data-in) — `register()` / `append()`.
+- [Querying](/docs/2.0.0/beacondb/python/querying), the lazy relation, readers, and file sinks.
+- [Bringing data in](/docs/2.0.0/beacondb/python/data-in)-`register()` / `append()`.
 - The full [SQL reference](/docs/2.0.0/beacondb/sql/) applies unchanged.

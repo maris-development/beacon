@@ -6,27 +6,27 @@ STORED AS REMOTE
 LOCATION 'beacon://other-beacon:50051/ocean_profiles'
 ```
 
-A **remote table** points at a table living on **another Beacon instance**. Once created, you can `SELECT`, `JOIN`, aggregate, and `DROP` it like any other table — but the data stays on the remote. When you query it, Beacon pushes as much of the work as possible (filters, projected columns, `LIMIT`, and whole joins/aggregates between remote tables) **down to the remote instance**, so only the reduced result set travels over the network.
+A **remote table** points at a table living on **another Beacon instance**. Once created, you can `SELECT`, `JOIN`, aggregate, and `DROP` it like any other table, but the data stays on the remote. When you query it, Beacon pushes as much of the work as possible (filters, projected columns, `LIMIT`, and whole joins/aggregates between remote tables) **down to the remote instance**, so only the reduced result set travels over the network.
 
 This is built on Arrow Flight SQL: the remote Beacon already exposes a Flight SQL server, and your local instance acts as a client to it.
 
 :::warning Anonymous access required
-Remote tables connect to the remote **anonymously** — no credentials are stored anywhere. The remote Beacon instance must therefore **allow anonymous Flight SQL access** (`BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS=true` on the remote). If anonymous access is disabled there, queries against the remote table fail with an authentication error. Anonymous Flight SQL access is read-only, which is exactly what federation needs.
+Remote tables connect to the remote **anonymously**: no credentials are stored anywhere. The remote Beacon instance must therefore **allow anonymous Flight SQL access** (`BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS=true` on the remote). If anonymous access is disabled there, queries against the remote table fail with an authentication error. Anonymous Flight SQL access is read-only, which is exactly what federation needs.
 :::
 
 :::tip External vs managed vs remote
-- An [**external table**](./external-tables.md) reads files in Beacon's own storage in place.
-- A [**managed table**](../sql/managed-tables.md) is owned by Beacon and mutable with `INSERT` / `UPDATE` / `DELETE`.
-- A **remote table** owns no data locally at all — it is a federated pointer at a table on another Beacon, queried on demand.
+- An [**external table**](/docs/2.0.0/beacondb/data-sources/external-tables) reads files in Beacon's own storage in place.
+- A [**managed table**](/docs/2.0.0/beacondb/sql/managed-tables) is owned by Beacon and mutable with `INSERT` / `UPDATE` / `DELETE`.
+- A **remote table** owns no data locally at all, it is a federated pointer at a table on another Beacon, queried on demand.
 :::
 
 DDL can be submitted through any of Beacon's SQL surfaces:
 
-- **HTTP** — `POST /api/query` with `{ "sql": "CREATE EXTERNAL TABLE ... STORED AS REMOTE ..." }`
-- **Arrow Flight SQL** — any Flight SQL client (DataGrip, ADBC, DBeaver, …)
+- **HTTP**: `POST /api/query` with `{ "sql": "CREATE EXTERNAL TABLE ... STORED AS REMOTE ..." }`
+- **Arrow Flight SQL**: any Flight SQL client (DataGrip, ADBC, DBeaver, …)
 
 :::info
-Creating a remote table is admin-only DDL. SQL must be enabled (`BEACON_ENABLE_SQL=true`) to run DDL over the HTTP API; Arrow Flight SQL does not require this flag.
+Creating a remote table is admin-only DDL. Running DDL over the HTTP API needs the SQL interface, which is enabled by default (`BEACON_ENABLE_SQL`); Arrow Flight SQL does not require this flag.
 :::
 
 ## Defining a remote table
@@ -46,16 +46,16 @@ The location encodes the remote Flight SQL endpoint and the table name on that i
 beacon://<host>:<port>/<remote_table>
 ```
 
-- `<host>:<port>` — the remote Beacon's Flight SQL address (its Flight SQL port, **not** the HTTP port).
-- `<remote_table>` — the name of the table as it is registered on the remote instance.
+- `<host>:<port>`, the remote Beacon's Flight SQL address (its Flight SQL port, **not** the HTTP port).
+- `<remote_table>`, the name of the table as it is registered on the remote instance.
 
 ### `OPTIONS`
 
-| Option | Required | Description                                                |
+| Option | Required | Description |
 | ------ | -------- | ---------------------------------------------------------- |
-| `tls`  | No (default `false`) | Set to `'true'` to connect over `https` instead of `http`. |
+| `tls` | No (default `false`) | Set to `'true'` to connect over `https` instead of `http`. |
 
-No credentials are configured: remote tables connect anonymously, so the table definition (`table.json`) never contains secrets. The remote must allow anonymous Flight SQL access — see the note above.
+No credentials are configured: remote tables connect anonymously, so the table definition (`table.json`) never contains secrets. The remote must allow anonymous Flight SQL access, see the note above.
 
 ## How pushdown works
 
@@ -91,7 +91,7 @@ Joins that mix a remote table with a **local** table (or with a table on a *diff
 
 The remote table's schema is fetched from the remote instance **once, when the table is created**, and pinned into the table definition. This means:
 
-- After creation, planning is fast and offline — `SELECT`, schema inspection, and joins do not need a round-trip just to learn the columns.
+- After creation, planning is fast and offline, `SELECT`, schema inspection, and joins do not need a round-trip just to learn the columns.
 - On restart, the table reloads from its pinned schema, so a temporarily unreachable remote does **not** block Beacon from starting (only querying the table requires the remote to be up).
 - If the remote table's schema changes, drop and recreate the remote table to pick up the new schema.
 
@@ -104,11 +104,11 @@ GET /api/tables
 GET /api/table-schema?table_name=remote_profiles
 ```
 
-For the SQL equivalents (`SHOW TABLES`, `DESCRIBE`), see the [`CREATE EXTERNAL TABLE`](../sql/create-table.md#querying-and-inspecting) reference.
+For the SQL equivalents (`SHOW TABLES`, `DESCRIBE`), see the [`CREATE EXTERNAL TABLE`](/docs/2.0.0/beacondb/sql/create-table#querying-and-inspecting) reference.
 
 ## Removing a remote table
 
-Dropping a remote table removes it from the local catalog only — nothing on the remote instance is affected.
+Dropping a remote table removes it from the local catalog only, nothing on the remote instance is affected.
 
 ```sql
 DROP TABLE remote_profiles;

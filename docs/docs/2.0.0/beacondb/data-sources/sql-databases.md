@@ -14,24 +14,24 @@ OPTIONS (
 )
 ```
 
-A **SQL database table** points at a table living in an external **PostgreSQL** or **MySQL** database. Once created, you can `SELECT`, `JOIN`, aggregate, and `DROP` it like any other table — but the data stays in the source database. When you query it, Beacon pushes as much work as possible (filters, projected columns, `LIMIT`, and aggregates) **down to the database**, so only the reduced result set travels over the wire.
+A **SQL database table** points at a table living in an external **PostgreSQL** or **MySQL** database. Once created, you can `SELECT`, `JOIN`, aggregate, and `DROP` it like any other table, but the data stays in the source database. When you query it, Beacon pushes as much work as possible (filters, projected columns, `LIMIT`, and aggregates) **down to the database**, so only the reduced result set travels over the wire.
 
-This is built on [`datafusion-table-providers`](https://github.com/datafusion-contrib/datafusion-table-providers) and DataFusion's federation layer — the same pushdown mechanism used by [remote tables](./remote-tables.md).
+This is built on [`datafusion-table-providers`](https://github.com/datafusion-contrib/datafusion-table-providers) and DataFusion's federation layer, the same pushdown mechanism used by [remote tables](/docs/2.0.0/beacondb/data-sources/remote-tables).
 
 :::tip External vs managed vs remote vs database
-- An [**external table**](./external-tables.md) reads files in Beacon's own storage in place.
-- A [**managed table**](../sql/managed-tables.md) is owned by Beacon and mutable with `INSERT` / `UPDATE` / `DELETE`.
-- A [**remote table**](./remote-tables.md) is a federated pointer at a table on another Beacon instance.
+- An [**external table**](/docs/2.0.0/beacondb/data-sources/external-tables) reads files in Beacon's own storage in place.
+- A [**managed table**](/docs/2.0.0/beacondb/sql/managed-tables) is owned by Beacon and mutable with `INSERT` / `UPDATE` / `DELETE`.
+- A [**remote table**](/docs/2.0.0/beacondb/data-sources/remote-tables) is a federated pointer at a table on another Beacon instance.
 - A **SQL database table** is a federated pointer at a table in an external PostgreSQL/MySQL database, queried on demand. It is read-only.
 :::
 
 DDL can be submitted through any of Beacon's SQL surfaces:
 
-- **HTTP** — `POST /api/query` with `{ "sql": "CREATE EXTERNAL TABLE ... STORED AS POSTGRES ..." }`
-- **Arrow Flight SQL** — any Flight SQL client (DataGrip, ADBC, DBeaver, …)
+- **HTTP**: `POST /api/query` with `{ "sql": "CREATE EXTERNAL TABLE ... STORED AS POSTGRES ..." }`
+- **Arrow Flight SQL**: any Flight SQL client (DataGrip, ADBC, DBeaver, …)
 
 :::info
-Creating a SQL database table is admin-only DDL. SQL must be enabled (`BEACON_ENABLE_SQL=true`) to run DDL over the HTTP API; Arrow Flight SQL does not require this flag.
+Creating a SQL database table is admin-only DDL. Running DDL over the HTTP API needs the SQL interface, which is enabled by default (`BEACON_ENABLE_SQL`); Arrow Flight SQL does not require this flag.
 :::
 
 ## Credentials and `BEACON_SECRETS_KEY` {#credentials}
@@ -51,7 +51,7 @@ export BEACON_SECRETS_KEY="$(openssl rand -base64 32)"
 | `CREATE` without a `password` | Allowed | Allowed |
 
 :::warning Key management
-- The persisted credential can only be decrypted with the **same** key. If you lose or rotate `BEACON_SECRETS_KEY`, existing SQL database tables can no longer be queried — drop and recreate them with the new key.
+- The persisted credential can only be decrypted with the **same** key. If you lose or rotate `BEACON_SECRETS_KEY`, existing SQL database tables can no longer be queried, drop and recreate them with the new key.
 - The password is **never** returned by the API. `GET /api/admin/table-config` (admin basic-auth required) shows the `secret` field as `***`, and the encrypted material never appears in logs.
 :::
 
@@ -128,7 +128,7 @@ GET /api/admin/table-config?table_name=orders   # admin basic-auth; the `secret`
 
 ## Removing a SQL database table
 
-Dropping the table removes it from the local catalog only — nothing in the source database is affected.
+Dropping the table removes it from the local catalog only, nothing in the source database is affected.
 
 ```sql
 DROP TABLE orders;

@@ -1,11 +1,11 @@
 ---
-description: Give beacondb credentials for object stores (S3/GCS/Azure) and remote Beacons as named secrets, session-only or persisted encrypted into the beacon.db file.
+description: Give BeaconDB credentials for object stores (S3/GCS/Azure) and remote Beacons as named secrets, session-only or persisted encrypted into the beacon.db file.
 ---
 
 # Secrets
 
-Give Beacon credentials for a cloud object store or a remote Beacon the DuckDB way — a named, scoped
-`SECRET` — instead of environment variables. This is the shared [`CREATE SECRET`](/docs/2.0.0/beacondb/sql/secrets)
+Give Beacon credentials for a cloud object store or a remote Beacon as a named, scoped
+`SECRET`, instead of environment variables. This is the shared [`CREATE SECRET`](/docs/2.0.0/beacondb/sql/secrets)
 statement; the notes here are what's specific to beacondb.
 
 ## Object-store secrets
@@ -35,8 +35,8 @@ con.execute("CREATE PERSISTENT SECRET my_s3 (TYPE S3, KEY_ID '…', SECRET '…'
 # reopen later with the same key -> my_s3 is still there
 ```
 
-Persisting requires a **master key** (`secrets_key=` or the `BEACON_SECRETS_KEY` env var) — beacondb
-**refuses to write a plaintext credential to disk** — and a file-backed database (not `:memory:`).
+Persisting requires a **master key** (`secrets_key=` or the `BEACON_SECRETS_KEY` env var), BeaconDB
+**refuses to write a plaintext credential to disk**: and a file-backed database (not `:memory:`).
 
 ## Remote-Beacon secrets
 

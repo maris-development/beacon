@@ -3,6 +3,14 @@
     --vp-home-hero-name-background: linear-gradient(270deg, #ff512f, #dd2476, #24c6dc);
     --vp-home-hero-name-background-clip: text;
 
+    /* Lucide icon masks for doc callouts (see custom-block styling below) */
+    --icon-info: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20%3E%20%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%2210%22%20%2F%3E%20%3Cpath%20d%3D%22M12%2016v-4%22%20%2F%3E%20%3Cpath%20d%3D%22M12%208h.01%22%20%2F%3E%20%3C%2Fsvg%3E");
+    --icon-tip: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20%3E%20%3Cpath%20d%3D%22M15%2014c.2-1%20.7-1.7%201.5-2.5%201-.9%201.5-2.2%201.5-3.5A6%206%200%200%200%206%208c0%201%20.2%202.2%201.5%203.5.7.7%201.3%201.5%201.5%202.5%22%20%2F%3E%20%3Cpath%20d%3D%22M9%2018h6%22%20%2F%3E%20%3Cpath%20d%3D%22M10%2022h4%22%20%2F%3E%20%3C%2Fsvg%3E");
+    --icon-warning: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20%3E%20%3Cpath%20d%3D%22m21.73%2018-8-14a2%202%200%200%200-3.48%200l-8%2014A2%202%200%200%200%204%2021h16a2%202%200%200%200%201.73-3%22%20%2F%3E%20%3Cpath%20d%3D%22M12%209v4%22%20%2F%3E%20%3Cpath%20d%3D%22M12%2017h.01%22%20%2F%3E%20%3C%2Fsvg%3E");
+    --icon-danger: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20%3E%20%3Cpath%20d%3D%22M12%2016h.01%22%20%2F%3E%20%3Cpath%20d%3D%22M12%208v4%22%20%2F%3E%20%3Cpath%20d%3D%22M15.312%202a2%202%200%200%201%201.414.586l4.688%204.688A2%202%200%200%201%2022%208.688v6.624a2%202%200%200%201-.586%201.414l-4.688%204.688a2%202%200%200%201-1.414.586H8.688a2%202%200%200%201-1.414-.586l-4.688-4.688A2%202%200%200%201%202%2015.312V8.688a2%202%200%200%201%20.586-1.414l4.688-4.688A2%202%200%200%201%208.688%202z%22%20%2F%3E%20%3C%2Fsvg%3E");
+    --icon-note: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20%3E%20%3Cpath%20d%3D%22M21.174%206.812a1%201%200%200%200-3.986-3.987L3.842%2016.174a2%202%200%200%200-.5.83l-1.321%204.352a.5.5%200%200%200%20.623.622l4.353-1.32a2%202%200%200%200%20.83-.497z%22%20%2F%3E%20%3Cpath%20d%3D%22m15%205%204%204%22%20%2F%3E%20%3C%2Fsvg%3E");
+    --icon-details: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20%3E%20%3Cpath%20d%3D%22M3%205h.01%22%20%2F%3E%20%3Cpath%20d%3D%22M3%2012h.01%22%20%2F%3E%20%3Cpath%20d%3D%22M3%2019h.01%22%20%2F%3E%20%3Cpath%20d%3D%22M8%205h13%22%20%2F%3E%20%3Cpath%20d%3D%22M8%2012h13%22%20%2F%3E%20%3Cpath%20d%3D%22M8%2019h13%22%20%2F%3E%20%3C%2Fsvg%3E");
+
     /* Deep Iris */
     /* --vp-c-deep-iris-1: #895eff;
     --vp-c-deep-iris-2: #5f24dd;
@@ -264,4 +272,184 @@
   content: "·";
   margin-left: 0.6rem;
   color: var(--vp-c-divider);
+}
+
+/* ============================================================
+   Documentation (doc layout) — visual polish
+   Applies to every content page via the shared theme.
+   ============================================================ */
+
+/* --- Headings: clearer hierarchy --- */
+.vp-doc h2 { letter-spacing: -0.02em; }
+.vp-doc h3 { letter-spacing: -0.01em; }
+
+/* header anchors slide in a touch on hover */
+.vp-doc .header-anchor {
+  transition: opacity 0.2s ease, color 0.2s ease;
+}
+.vp-doc .header-anchor:hover { color: var(--vp-c-brand-1); }
+
+/* --- Body links: animated underline --- */
+.vp-doc a:not(.header-anchor) {
+  text-decoration: none;
+  background-image: linear-gradient(var(--vp-c-brand-1), var(--vp-c-brand-1));
+  background-position: 0 100%;
+  background-repeat: no-repeat;
+  background-size: 0% 1.5px;
+  transition: background-size 0.25s ease, color 0.2s ease;
+}
+.vp-doc a:not(.header-anchor):hover {
+  color: var(--vp-c-brand-1);
+  background-size: 100% 1.5px;
+}
+
+/* --- Inline code: subtle chip --- */
+.vp-doc :not(pre) > code {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg-soft);
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+.vp-doc a:hover :not(pre) > code { border-color: var(--vp-c-brand-1); }
+
+/* --- Fenced code blocks: rounded, bordered, gentle hover lift --- */
+.vp-doc div[class*="language-"] {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.vp-doc div[class*="language-"]:hover {
+  border-color: color-mix(in srgb, var(--vp-c-brand-1) 30%, var(--vp-c-divider));
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.10);
+}
+.vp-doc [class*="language-"] > span.lang {
+  transition: opacity 0.2s ease;
+  letter-spacing: 0.04em;
+}
+
+/* --- Tables: rounded frame, zebra rows, header cap, row hover --- */
+.vp-doc table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+}
+.vp-doc tr { background: transparent; transition: background-color 0.15s ease; }
+.vp-doc tr:nth-child(2n) { background: var(--vp-c-bg-soft); }
+.vp-doc tbody tr:hover { background: var(--vp-c-brand-soft); }
+.vp-doc th {
+  background: var(--vp-c-bg-soft);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-2);
+  border: none;
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+.vp-doc td { border: none; border-bottom: 1px solid var(--vp-c-divider); }
+.vp-doc tr:last-child td { border-bottom: none; }
+
+/* --- Blockquotes: accent bar --- */
+.vp-doc blockquote {
+  border-left: 3px solid var(--vp-c-brand-1);
+  border-radius: 0 8px 8px 0;
+  background: var(--vp-c-bg-soft);
+  padding: 0.4rem 1rem;
+}
+
+/* --- Custom containers (callouts): Lucide icon + hover --- */
+.vp-doc .custom-block {
+  border: 1px solid var(--vp-c-divider);
+  border-left-width: 4px;
+  border-radius: 10px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.vp-doc .custom-block:hover {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.07);
+}
+.vp-doc .custom-block .custom-block-title {
+  display: flex;
+  align-items: center;
+  font-weight: 700;
+}
+.vp-doc .custom-block .custom-block-title::before {
+  content: "";
+  display: inline-block;
+  width: 1.15em;
+  height: 1.15em;
+  margin-right: 0.5em;
+  flex: none;
+  background-color: currentColor;
+  -webkit-mask: var(--cb-icon, var(--icon-info)) center / contain no-repeat;
+  mask: var(--cb-icon, var(--icon-info)) center / contain no-repeat;
+}
+.vp-doc .custom-block.info    { --cb-icon: var(--icon-info); border-left-color: var(--vp-c-text-3); }
+.vp-doc .custom-block.tip     { --cb-icon: var(--icon-tip); border-left-color: var(--vp-c-brand-1); }
+.vp-doc .custom-block.note    { --cb-icon: var(--icon-note); border-left-color: var(--vp-c-text-3); }
+.vp-doc .custom-block.warning { --cb-icon: var(--icon-warning); border-left-color: var(--vp-c-yellow-1); }
+.vp-doc .custom-block.danger  { --cb-icon: var(--icon-danger); border-left-color: var(--vp-c-red-1); }
+.vp-doc .custom-block.details { --cb-icon: var(--icon-details); border-left-color: var(--vp-c-text-3); }
+.vp-doc .custom-block.details summary { display: flex; align-items: center; font-weight: 700; }
+.vp-doc .custom-block.details summary::before {
+  content: "";
+  display: inline-block;
+  width: 1.15em;
+  height: 1.15em;
+  margin-right: 0.5em;
+  flex: none;
+  background-color: currentColor;
+  -webkit-mask: var(--icon-details) center / contain no-repeat;
+  mask: var(--icon-details) center / contain no-repeat;
+}
+
+/* --- Sidebar: rounded active pill + hover --- */
+.VPSidebarItem.is-link > .item > .link .text,
+.VPSidebarItem .item .link .text { transition: color 0.2s ease; }
+.VPSidebarItem.is-active > .item .link .text { font-weight: 600; }
+.VPSidebar .link:hover .text { color: var(--vp-c-brand-1); }
+
+/* --- "On this page" outline marker glides to the active item --- */
+.VPDocAsideOutline .outline-marker {
+  transition: top 0.25s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s ease, background-color 0.2s ease;
+}
+
+/* --- Prev/Next pager cards lift on hover --- */
+.VPDocFooter .pager-link {
+  border-radius: 12px;
+  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+}
+.VPDocFooter .pager-link:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08);
+}
+
+/* --- Content entrance on load (one-shot, no-JS safe via backwards fill) --- */
+.VPDoc .vp-doc {
+  animation: doc-fade 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+@keyframes doc-fade {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* --- Scroll-reveal for content blocks (hidden state added by JS only) --- */
+.doc-reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+  will-change: opacity, transform;
+}
+.doc-reveal.doc-in { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .VPDoc .vp-doc { animation: none; }
+  .doc-reveal { opacity: 1; transform: none; transition: none; }
+  .vp-doc div[class*="language-"],
+  .vp-doc .custom-block,
+  .VPDocFooter .pager-link { transition: none; }
 }

@@ -1,5 +1,5 @@
 ---
-description: A condensed reference of the beacondb Connection and Relation surface.
+description: A condensed reference of the BeaconDB Connection and Relation surface.
 ---
 
 # API reference
@@ -49,4 +49,4 @@ Lazy; nothing runs until a terminal.
 
 `beacondb.Error` is the root, with `InterfaceError`, `DatabaseError`, `OperationalError`,
 `ProgrammingError`, `NotSupportedError`, `DataError`, `InternalError`, and `NotPermittedError` (a
-`ProgrammingError` subclass — the authorization refusal; not the CPython `PermissionError`).
+`ProgrammingError` subclass, the authorization refusal; not the CPython `PermissionError`).

@@ -68,7 +68,7 @@ SELECT * FROM view_dataset_statistics('argo/2024/R6900001.nc')
 view_external_table_statistics(table_name)
 ```
 
-Returns per-file statistics for every file that backs an external table — useful for checking which files have cached statistics and what their value ranges are.
+Returns per-file statistics for every file that backs an external table, useful for checking which files have cached statistics and what their value ranges are.
 
 | Column | Type | Description |
 | ------ | ---- | ----------- |
@@ -95,7 +95,7 @@ WHERE cached = false
 view_statistics_cache()
 ```
 
-Streams all entries from the global file statistics cache. Each row is validated against the object store — the `is_valid` flag indicates whether the cached file still exists and its size matches.
+Streams all entries from the global file statistics cache. Each row is validated against the object store, the `is_valid` flag indicates whether the cached file still exists and its size matches.
 
 | Column | Type | Description |
 | ------ | ---- | ----------- |

@@ -1,12 +1,12 @@
 # Exploring the Data Lake (REST API)
 
-Use these endpoints to discover what data is available on a running Beacon instance — without running a full query.
+Use these endpoints to discover what data is available on a running Beacon instance, without running a full query.
 
 **Concepts:**
 
-- **Datasets** — individual files (a single `.nc` file, a `.parquet` file, a Zarr group, etc.)
-- **Tables** — named logical tables registered in Beacon, often spanning many datasets
-- **Schemas** — Arrow field lists (name + type) describing the columns available for `select` and `filter`
+- **Datasets**: individual files (a single `.nc` file, a `.parquet` file, a Zarr group, etc.)
+- **Tables**: named logical tables registered in Beacon, often spanning many datasets
+- **Schemas**: Arrow field lists (name + type) describing the columns available for `select` and `filter`
 
 ## System info
 
@@ -110,7 +110,7 @@ GET /api/tables-with-schema
 
 ### Table configuration
 
-Shows how a table was constructed — paths, file format, statistics settings, etc.
+Shows how a table was constructed, paths, file format, statistics settings, etc.
 This endpoint is **admin-only** (see [Admin](#admin)) and requires HTTP Basic
 auth; unauthenticated requests get `401`. Sensitive options such as SQL-database
 passwords are redacted (the `secret` field is returned as `***`).
@@ -134,7 +134,7 @@ List all registered Beacon table functions (e.g. `read_netcdf`, `read_zarr`):
 GET /api/table-functions
 ```
 
-See the [Function Reference](../sql/function-reference.md) for descriptions and signatures.
+See the [Function Reference](/docs/2.0.0/beacondb/sql/function-reference) for descriptions and signatures.
 
 ## Table lifecycle
 
@@ -196,7 +196,7 @@ SQL-database passwords are returned as `***`):
 GET /api/admin/table-config?table_name=default
 ```
 
-Create a crawler (the structured equivalent of [`CREATE CRAWLER`](../data-lake/crawlers.md)):
+Create a crawler (the structured equivalent of [`CREATE CRAWLER`](/docs/2.0.0/data-lake/crawlers)):
 
 ```http
 POST /api/admin/crawlers
@@ -208,7 +208,7 @@ Content-Type: application/json
 ```
 
 Create an external table (the structured equivalent of
-[`CREATE EXTERNAL TABLE`](../sql/create-table.md)):
+[`CREATE EXTERNAL TABLE`](/docs/2.0.0/beacondb/sql/create-table)):
 
 ```http
 POST /api/admin/external-tables

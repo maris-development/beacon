@@ -1,10 +1,10 @@
 ---
-description: SUMMARIZE profiles a table or query — one row per column with min/max, distinct count, avg/std, non-null count and null percentage.
+description: SUMMARIZE profiles a table or query, one row per column with min/max, distinct count, avg/std, non-null count and null percentage.
 ---
 
 # SUMMARIZE
 
-`SUMMARIZE` produces a **one-row-per-column profile** of a table or query — the first thing to run on
+`SUMMARIZE` produces a **one-row-per-column profile** of a table or query, the first thing to run on
 a new dataset.
 
 ```sql
@@ -30,11 +30,11 @@ SUMMARIZE (SELECT * FROM read_parquet('obs/*.parquet'));
 
 ## What each column means
 
-- **min / max** — for orderable columns (numbers, strings, temporal), shown as text.
-- **distinct** — exact number of distinct non-null values.
-- **avg / std** — for numeric columns only (`NULL` otherwise).
-- **count** — number of non-null values.
-- **null_percentage** — share of `NULL`s, `0`–`100`.
+- **min / max**: for orderable columns (numbers, strings, temporal), shown as text.
+- **distinct**: exact number of distinct non-null values.
+- **avg / std**: for numeric columns only (`NULL` otherwise).
+- **count**: number of non-null values.
+- **null_percentage**: share of `NULL`s, `0`–`100`.
 
 ## Notes
 

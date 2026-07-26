@@ -1,27 +1,27 @@
 ---
-description: Beacon's authentication and role-based access control — a single config-defined super-user, read-only SQL-managed users and roles, table/path grants and denies with deny-wins semantics, anonymous access, and optional OIDC.
+description: Beacon's authentication and role-based access control, a single config-defined super-user, read-only SQL-managed users and roles, table/path grants and denies with deny-wins semantics, anonymous access, and optional OIDC.
 ---
 
 # Authentication & Access Control
 
 Beacon has a built-in authentication and **role-based access control (RBAC)**
 layer. Authentication answers *who is this principal and what roles do they have*;
-authorization — which Beacon owns entirely — answers *what may they read*. The two
+authorization, which Beacon owns entirely, answers *what may they read*. The two
 are deliberately separable, so an external identity provider (OIDC) can supply
 identities while grants stay expressed in Beacon's own role model.
 
 ## The model at a glance
 
 - **One super-user**, defined entirely by configuration (`BEACON_ADMIN_USERNAME` /
-  `BEACON_ADMIN_PASSWORD`). It is the only principal that can write — run DDL/DML,
-  manage users and roles, and call the admin endpoints — and it **bypasses
+  `BEACON_ADMIN_PASSWORD`). It is the only principal that can write, run DDL/DML,
+  manage users and roles, and call the admin endpoints, and it **bypasses
   authorization** entirely.
 - **Users and roles created through SQL are always read-only.** There is no way to
   create a second super-user or grant write privileges to a role; the super-user
   is a fixed credential, never a stored user.
 - **Authorization governs reads.** Grants and denies are attached to roles and
   evaluated when a query scans a table or files. Writes and management are not
-  role-grantable — they require the super-user.
+  role-grantable, they require the super-user.
 - **Deny-wins, default-deny.** When enforcement is on, a read is allowed only if a
   matching grant exists and no matching deny does.
 
@@ -35,7 +35,7 @@ identities while grants stay expressed in Beacon's own role model.
 
 Local users are stored in a SQLite directory database (`users/directory.db` under
 the data directory), with passwords hashed using Argon2. The super-user is **not**
-in this store — it is a fixed credential sourced from the environment, so it can't
+in this store, it is a fixed credential sourced from the environment, so it can't
 be altered or duplicated through SQL.
 
 ## Enforcement
@@ -63,7 +63,7 @@ optionally scoped to a *target*.
 | Privilege | Meaning for read enforcement |
 | --- | --- |
 | `SELECT` | Read the target. This is the privilege that matters for query authorization. |
-| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP` | Accepted by the grammar for completeness, but **writes require the super-user** — granting them to a role does not confer write access. |
+| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP` | Accepted by the grammar for completeness, but **writes require the super-user**: granting them to a role does not confer write access. |
 | `ALL` | Matches any privilege. |
 
 | Target | Matches |
@@ -75,7 +75,7 @@ optionally scoped to a *target*.
 ## Managing users and roles (SQL)
 
 All of the statements below are **super-user-only** management DDL. Submit them
-over any SQL surface — `POST /api/query` (with `BEACON_ENABLE_SQL=true`) or Arrow
+over any SQL surface, `POST /api/query` (SQL interface on by default) or Arrow
 Flight SQL.
 
 ### Users
@@ -140,7 +140,7 @@ request.
 Beacon can validate **OIDC bearer tokens** in addition to local passwords. When
 enabled, a request carrying a `Bearer <jwt>` token is validated against the
 issuer's JWKS; the username and role names are read from token claims. Beacon
-still owns authorization — the token supplies *identity and role names*, and the
+still owns authorization, the token supplies *identity and role names*, and the
 grants for those roles live in Beacon's role model.
 
 ```bash
@@ -165,31 +165,31 @@ JWT access token:
    (`kid`) and signing algorithm (`alg`). A token without a `kid` is rejected.
 2. **Resolve the signing key.** The issuer's JWKS (fetched from
    `BEACON_OIDC_JWKS_URL`) is searched for a key matching the `kid`. If no key
-   matches, the token is rejected — re-fetching only happens on the cache TTL (see
+   matches, the token is rejected, re-fetching only happens on the cache TTL (see
    below), so brand-new signing keys become usable once the cache expires.
 3. **Verify signature and claims.** The signature is checked with the matched key
-   using the token's own algorithm (whatever the JWK supports — RS256, ES256, …).
+   using the token's own algorithm (whatever the JWK supports, RS256, ES256, …).
    Expiry (`exp`) and the issuer (`iss`, against `BEACON_OIDC_ISSUER`) are always
    validated. The audience (`aud`) is validated **only when** `BEACON_OIDC_AUDIENCE`
    is set; otherwise audience checking is disabled.
 4. **Extract identity and roles** from the claims (below).
 
 Any failure along the way is an authentication failure: a request that **presents**
-an invalid or expired token is rejected with `401 Unauthorized` — it does **not**
+an invalid or expired token is rejected with `401 Unauthorized`, it does **not**
 fall back to anonymous. Anonymous access applies only when a request carries **no**
 credentials at all.
 
 ### Username and roles claims
 
 Both `BEACON_OIDC_USERNAME_CLAIM` and `BEACON_OIDC_ROLES_CLAIM` are **dotted
-paths**, resolved against the (possibly nested) claims object — e.g.
+paths**, resolved against the (possibly nested) claims object, e.g.
 `realm_access.roles` reads `claims["realm_access"]["roles"]`.
 
 - The **username** claim must resolve to a string; a token missing it is rejected.
 - The **roles** claim is optional and accepts either shape commonly seen in OIDC
   tokens: a **JSON array of strings** (`["reader", "writer"]`) or a single
   **space-delimited string** (`"reader writer"`). A missing or non-string/array
-  roles claim simply yields **no roles** (not an error) — the principal
+  roles claim simply yields **no roles** (not an error), the principal
   authenticates but, under enforcement, can read nothing until granted roles.
 
 For a Keycloak realm, the defaults (`realm_access.roles` and
@@ -214,7 +214,7 @@ credential kind:
 | `Authorization: Bearer …` | OIDC provider | External IdP tokens |
 
 So local admin users and external IdP users coexist. User-management DDL
-(`CREATE USER`, `DROP USER`, …) always targets the **local** directory — the OIDC
+(`CREATE USER`, `DROP USER`, …) always targets the **local** directory, the OIDC
 provider holds no user store, because OIDC users live in your identity provider,
 not in Beacon. (The super-user credential is still checked directly and
 short-circuits before either provider runs.)

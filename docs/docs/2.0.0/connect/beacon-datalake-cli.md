@@ -1,12 +1,12 @@
 ---
-description: beacon-datalake-cli is a terminal client for Beacon — run SQL against a running server, explore tables/datasets/schemas, render results, and export to CSV, Parquet, Arrow IPC, or NetCDF.
+description: beacon-datalake-cli is a terminal client for Beacon, run SQL against a running server, explore tables/datasets/schemas, render results, and export to CSV, Parquet, Arrow IPC, or NetCDF.
 ---
 
 # Beacon Datalake CLI
 
 `beacon-datalake-cli` is a terminal client for a running Beacon server. It runs SQL,
 explores tables / datasets / schemas, renders results as tables in your
-terminal, and exports to CSV, Parquet, Arrow IPC, or NetCDF — all without
+terminal, and exports to CSV, Parquet, Arrow IPC, or NetCDF, all without
 leaving the shell. It talks to the server's `/api/*` HTTP endpoints, decoding the
 zstd-compressed Arrow IPC result stream, and offers both one-shot subcommands and
 an interactive REPL.
@@ -73,7 +73,7 @@ wide tables), and `--json` (emit rows as JSON on stdout).
 ### DDL, admin & crawler statements
 
 `query` (and the REPL) send raw SQL straight through, so any statement the server
-accepts works — including Beacon's custom DDL. Read-only statements need no
+accepts works, including Beacon's custom DDL. Read-only statements need no
 credentials; anything that mutates state requires admin basic auth.
 
 ```bash

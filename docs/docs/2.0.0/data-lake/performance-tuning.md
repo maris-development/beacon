@@ -122,7 +122,7 @@ Beacon’s Zarr reader applies predicate pushdown **automatically** through the 
 - Prunes Zarr chunks that cannot satisfy the predicate, so only the relevant chunks are read.
 - Slices 1D “coordinate-like” arrays (for example `time`, `latitude`, `longitude`) to the requested ranges.
 
-There is nothing to configure — no `statistics_columns` to declare and no statistics to pre-compute. Just read the store and filter; the engine handles the rest.
+There is nothing to configure, no `statistics_columns` to declare and no statistics to pre-compute. Just read the store and filter; the engine handles the rest.
 
 ### SQL
 
@@ -159,12 +159,12 @@ Content-Type: application/json
 ```
 
 ::: tip
-For collections that are queried repeatedly, re-encode the Zarr stores into a single [Atlas](./datasets.md#atlas) collection. Atlas adds per-dataset statistics pruning on top of chunk pruning, dropping whole datasets before any chunk is read.
+For collections that are queried repeatedly, re-encode the Zarr stores into a single [Atlas](/docs/2.0.0/beacondb/data-sources/formats/atlas) collection. Atlas adds per-dataset statistics pruning on top of chunk pruning, dropping whole datasets before any chunk is read.
 :::
 
 ## Atlas Tuning
 
-[Atlas](./datasets.md#atlas) stores are opened through a `atlas.json` registry. To avoid re-opening the same store on every query, Beacon keeps a cache of opened Atlas readers.
+[Atlas](/docs/2.0.0/beacondb/data-sources/formats/atlas) stores are opened through a `atlas.json` registry. To avoid re-opening the same store on every query, Beacon keeps a cache of opened Atlas readers.
 
 ### Reader cache (avoid reopening stores)
 

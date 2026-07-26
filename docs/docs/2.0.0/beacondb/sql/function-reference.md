@@ -2,19 +2,19 @@
 
 Beacon's SQL runtime exposes two families of functions:
 
-1. **DataFusion built-ins** — Beacon inherits Apache DataFusion's full scalar and
+1. **DataFusion built-ins**: Beacon inherits Apache DataFusion's full scalar and
    aggregate function library. The tables below are a curated selection; for the
    exhaustive list see DataFusion's
    [scalar](https://datafusion.apache.org/user-guide/sql/scalar_functions.html)
    and [aggregate](https://datafusion.apache.org/user-guide/sql/aggregate_functions.html)
    references.
-2. **[Beacon-specific functions](#beacon-specific-functions)** — added by Beacon
+2. **[Beacon-specific functions](#beacon-specific-functions)**: added by Beacon
    for geospatial filtering, type conversion, and domain-specific vocabulary
    mapping. That section is exhaustive.
 
 ## DataFusion built-in functions (inherited)
 
-A curated selection of the inherited DataFusion library — anything in
+A curated selection of the inherited DataFusion library, anything in
 DataFusion's reference works even if it is not listed here.
 
 ### Aggregate functions

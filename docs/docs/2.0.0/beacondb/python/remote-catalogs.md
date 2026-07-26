@@ -1,11 +1,11 @@
 ---
-description: Attach a running beacon-datalake as a catalog in beacondb and query it as name.schema.table, with Flight SQL pushdown.
+description: Attach a running Beacon Data Lake as a catalog in BeaconDB and query it as name.schema.table, with Flight SQL pushdown.
 ---
 
 # Remote catalogs
 
-Point beacondb at a running **beacon-datalake** and mirror its whole catalog under a local name —
-every remote schema and table becomes queryable as `name.schema.table`, DuckDB-`ATTACH` style:
+Point BeaconDB at a running **Beacon Data Lake** and mirror its whole catalog under a local name, 
+every remote schema and table becomes queryable as `name.schema.table`:
 
 ```python
 con.attach("lake", "beacon://datalake.example.org:50051",
@@ -24,19 +24,19 @@ con.detach("lake")    # True
 ## How it works
 
 It runs over **Arrow Flight SQL**, and the DataFusion federation optimizer pushes the largest
-federatable sub-plan — filters, projections, aggregates, and joins *between* remote tables — down to
+federatable sub-plan, filters, projections, aggregates, and joins *between* remote tables, down to
 the remote, which executes it on its full engine and streams back only the reduced result. So the
 heavy scan stays on the datalake; your laptop gets the answer.
 
 `attach` contacts the remote immediately to enumerate its schemas and tables, so an unreachable or
-unauthorized endpoint fails there, not on first query. The listing is a snapshot — re-attach to pick
+unauthorized endpoint fails there, not on first query. The listing is a snapshot, re-attach to pick
 up tables created on the remote afterward; each table's schema resolves lazily on first use.
 
 ## Credentials
 
 Authenticate with a `username`/`password` pair (HTTP Basic) or a bearer `token` (not both); omit both
 only if the remote allows anonymous access. The remote enforces its own [RBAC](/docs/2.0.0/security/access-control)
-against whoever you authenticate as — unlike local file access, this *is* a governed boundary.
+against whoever you authenticate as, unlike local file access, this *is* a governed boundary.
 
 You can also store the credentials as a [secret](/docs/2.0.0/beacondb/python/secrets) and reference it:
 
@@ -47,7 +47,7 @@ con.attach("lake", "beacon://datalake:50051", secret="lake")
 
 ## Also SQL
 
-The same works as SQL — so it reaches any entry point — and `con.attached()` reflects either path:
+The same works as SQL, so it reaches any entry point, and `con.attached()` reflects either path:
 
 ```python
 con.execute("ATTACH 'beacon://datalake:50051' AS lake "

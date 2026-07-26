@@ -6,7 +6,7 @@ CREATE VIEW north_atlantic AS
     WHERE latitude BETWEEN 0 AND 70
 ```
 
-A view is a saved `SELECT` statement that behaves like a table. It holds no data — Beacon runs the query on the fly whenever the view is referenced. Views are persisted and survive restarts.
+A view is a saved `SELECT` statement that behaves like a table. It holds no data, Beacon runs the query on the fly whenever the view is referenced. Views are persisted and survive restarts.
 
 ## Creating a view
 
@@ -29,5 +29,5 @@ DROP TABLE <view_name>
 ```
 
 :::info
-`DROP TABLE` removes both external tables and views — there is no separate `DROP VIEW` statement.
+`DROP TABLE` removes both external tables and views, there is no separate `DROP VIEW` statement.
 :::

@@ -1,6 +1,6 @@
-# Python — ADBC (Arrow Database Connectivity)
+# Python, ADBC (Arrow Database Connectivity)
 
-[ADBC](https://arrow.apache.org/adbc/) is a database-connectivity standard built on Apache Arrow. The `adbc-driver-flightsql` package connects to any Arrow Flight SQL server — including Beacon — and returns results as zero-copy Arrow record batches, making it ideal for data science workloads.
+[ADBC](https://arrow.apache.org/adbc/) is a database-connectivity standard built on Apache Arrow. The `adbc-driver-flightsql` package connects to any Arrow Flight SQL server, including Beacon, and returns results as zero-copy Arrow record batches, making it ideal for data science workloads.
 
 ## Installation
 
@@ -10,7 +10,7 @@ pip install adbc-driver-flightsql adbc-driver-manager pyarrow
 
 ## Connecting
 
-Beacon's Arrow Flight SQL server listens on port `32011` by default (separate from the HTTP API on port `5001`). Make sure that port is reachable — see the [Docker Compose note](#expose-the-flight-sql-port) below.
+Beacon's Arrow Flight SQL server listens on port `32011` by default (separate from the HTTP API on port `5001`). Make sure that port is reachable, see the [Docker Compose note](#expose-the-flight-sql-port) below.
 
 ### DBAPI 2.0 interface (recommended)
 
@@ -121,10 +121,10 @@ conn = flight_sql.connect(
 
 ## Configuration reference
 
-| Variable                            | Default   | Description                             |
+| Variable | Default | Description |
 | ----------------------------------- | --------- | --------------------------------------- |
-| `BEACON_FLIGHT_SQL_ENABLE`          | `true`    | Enable or disable the Flight SQL server |
-| `BEACON_FLIGHT_SQL_HOST`            | `0.0.0.0` | IP address to listen on                 |
-| `BEACON_FLIGHT_SQL_PORT`            | `32011`   | Port for the Flight SQL gRPC server     |
-| `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS` | `false`   | Allow unauthenticated connections       |
-| `BEACON_FLIGHT_SQL_TOKEN_TTL_SECS`  | `3600`    | Auth token lifetime in seconds          |
+| `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable or disable the Flight SQL server |
+| `BEACON_FLIGHT_SQL_HOST` | `0.0.0.0` | IP address to listen on |
+| `BEACON_FLIGHT_SQL_PORT` | `32011` | Port for the Flight SQL gRPC server |
+| `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS` | `false` | Allow unauthenticated connections |
+| `BEACON_FLIGHT_SQL_TOKEN_TTL_SECS` | `3600` | Auth token lifetime in seconds |

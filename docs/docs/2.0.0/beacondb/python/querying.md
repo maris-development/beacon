@@ -37,7 +37,7 @@ con.read_csv("stations.csv"); con.read_zarr(...); con.read_delta(...); con.list_
 ```
 
 They resolve from the catalog (`beacon.system.table_functions`), so *any* table function Beacon
-registers is a method — `con.table_functions()` lists them, and `con.read(fn, *args)` is the general
+registers is a method, `con.table_functions()` lists them, and `con.read(fn, *args)` is the general
 form.
 
 **Reader options.** Pass format options positionally or by keyword (matched to the reader's declared
@@ -78,7 +78,7 @@ Local paths only for now; a `scheme://` destination raises `NotSupportedError`.
 
 ## Data profiling
 
-`SUMMARIZE` gives a one-row-per-column profile — the first thing to run on a new dataset:
+`SUMMARIZE` gives a one-row-per-column profile, the first thing to run on a new dataset:
 
 ```python
 con.sql("SUMMARIZE read_parquet('obs/*.parquet')").df()

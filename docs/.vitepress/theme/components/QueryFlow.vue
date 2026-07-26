@@ -1,32 +1,34 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { withBase } from 'vitepress'
+import { iconPaths } from '../icons.js'
 
 const logo = withBase('/beacon-logo-small.png')
+const icon = (name) => iconPaths[name] || ''
 
 // Each setup mirrors the homepage deployment cards. The env box wraps Beacon +
 // storage for cloud/on-prem, and the whole thing (incl. the client) for local.
 const setups = [
   {
-    key: 'cloud', label: '☁ Cloud (AWS)', cls: 'env-cloud',
+    key: 'cloud', label: 'Cloud (AWS)', cls: 'env-cloud',
     box: { x: 376, w: 596, lx: 392 },
-    client: { ico: '💻', sub: 'remote notebook' },
+    client: { ico: 'notebook-text', sub: 'remote notebook' },
     beaconSub: 'on EC2',
-    store: { ico: '🪣', title: 'S3 Bucket', sub: 'object storage' },
+    store: { ico: 'box', title: 'S3 Bucket', sub: 'object storage' },
   },
   {
-    key: 'onprem', label: '🖥 On-premise', cls: 'env-onprem',
+    key: 'onprem', label: 'On-premise', cls: 'env-onprem',
     box: { x: 376, w: 596, lx: 392 },
-    client: { ico: '💻', sub: 'remote notebook' },
+    client: { ico: 'notebook-text', sub: 'remote notebook' },
     beaconSub: 'your server',
-    store: { ico: '💾', title: 'Local disk', sub: 'NetCDF · Parquet' },
+    store: { ico: 'hard-drive', title: 'Local disk', sub: 'NetCDF, Parquet' },
   },
   {
-    key: 'local', label: '💻 Local', cls: 'env-local',
+    key: 'local', label: 'Local', cls: 'env-local',
     box: { x: 8, w: 964, lx: 24 },
-    client: { ico: '📓', sub: 'same machine' },
+    client: { ico: 'notebook-text', sub: 'same machine' },
     beaconSub: 'localhost:5001',
-    store: { ico: '💾', title: 'Local files', sub: 'on disk' },
+    store: { ico: 'hard-drive', title: 'Local files', sub: 'on disk' },
   },
 ]
 
@@ -91,12 +93,16 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
         <g :key="cur.key" class="setup-layer">
           <text class="env-name" :class="cur.cls" :x="cur.box.lx" y="80">{{ cur.label }}</text>
 
-          <text class="ico" x="52" y="144">{{ cur.client.ico }}</text>
+          <g class="qico" transform="translate(40,112)" stroke="currentColor" fill="none"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             v-html="icon(cur.client.ico)"></g>
           <text class="n-sub tight" x="74" y="150">{{ cur.client.sub }}</text>
 
           <text class="n-sub" x="454" y="150">{{ cur.beaconSub }}</text>
 
-          <text class="ico" x="788" y="144">{{ cur.store.ico }}</text>
+          <g class="qico" transform="translate(776,112)" stroke="currentColor" fill="none"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             v-html="icon(cur.store.ico)"></g>
           <text class="n-title" x="810" y="130">{{ cur.store.title }}</text>
           <text class="n-sub" x="810" y="150">{{ cur.store.sub }}</text>
         </g>
@@ -144,7 +150,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 .n-title.big { font-size: 18px; }
 .n-sub { fill: var(--vp-c-text-3); font-size: 11.5px; }
 .n-sub.tight { font-size: 11px; }
-.ico { font-size: 24px; text-anchor: middle; }
+.qico { color: var(--vp-c-text-2); }
 
 .elabel { fill: var(--vp-c-text-3); font-size: 12px; text-anchor: middle; }
 .res-label { opacity: 0.9; }

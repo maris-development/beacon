@@ -1,11 +1,11 @@
 ---
-description: The beacondb:// SQLAlchemy dialect — use pandas.read_sql, reflection, notebooks and BI tools against an embedded beacondb.
+description: The BeaconDB:// SQLAlchemy dialect, use pandas.read_sql, reflection, notebooks and BI tools against an embedded beacondb.
 ---
 
 # SQLAlchemy
 
 A `beacondb://` dialect ships with the package (`pip install "beacondb[sqlalchemy]"`), so the
-SQLAlchemy ecosystem — `pandas.read_sql`, reflection, notebooks, BI tools — works out of the box:
+SQLAlchemy ecosystem, `pandas.read_sql`, reflection, notebooks, BI tools, works out of the box:
 
 ```python
 from sqlalchemy import create_engine
@@ -18,5 +18,5 @@ pd.read_sql("SELECT platform, avg(temperature) AS t FROM obs GROUP BY platform",
 ```
 
 Reflection (`inspect(engine).get_table_names()`, `get_columns(...)`, `has_table(...)`) is answered from
-Beacon's `information_schema`. The engine is autocommit — `commit()`/`rollback()` are no-ops, since
+Beacon's `information_schema`. The engine is autocommit, `commit()`/`rollback()` are no-ops, since
 Beacon has no multi-statement transactions.

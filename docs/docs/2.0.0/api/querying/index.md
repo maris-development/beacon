@@ -11,8 +11,8 @@ The request body selects between two query styles:
 
 | Style | When to use | Body key |
 | ----- | ----------- | -------- |
-| [JSON DSL](./json.md) | Programmatic clients, query builders | `select`, `from`, `filters`, … |
-| [SQL](./sql.md) | Power users, ad-hoc analysis | `sql` |
+| [JSON DSL](/docs/2.0.0/api/querying/json) | Programmatic clients, query builders | `select`, `from`, `filters`, … |
+| [SQL](/docs/2.0.0/api/querying/sql) | Power users, ad-hoc analysis | `sql` |
 
 Both styles share the same `output` field and the same supporting endpoints.
 
@@ -31,7 +31,7 @@ Content-Type: application/json
 
 ### Explain
 
-Return the query plan without executing it — useful for debugging and performance work:
+Return the query plan without executing it, useful for debugging and performance work:
 
 ```http
 POST /api/explain-query
@@ -43,7 +43,7 @@ Content-Type: application/json
 ### Explain Analyze
 
 **Run** the query and return the physical plan annotated with per-operator
-runtime metrics (rows, bytes, and time per node) — the analog of SQL `EXPLAIN
+runtime metrics (rows, bytes, and time per node), the analog of SQL `EXPLAIN
 ANALYZE`. Because it executes the query, it is subject to the same SQL gating as
 `/api/query` (disabled when `BEACON_ENABLE_SQL=false` for `sql` bodies):
 
@@ -174,4 +174,4 @@ Most queries target a **registered table** by name:
 { "from": "default", "select": ["time"] }
 ```
 
-Both styles also support querying files directly without a registered table — see the [JSON DSL `from` reference](./json.md#choosing-the-data-source-from) and the [SQL table functions](./sql.md#query-files-directly).
+Both styles also support querying files directly without a registered table, see the [JSON DSL `from` reference](/docs/2.0.0/api/querying/json#choosing-the-data-source-from) and the [SQL table functions](/docs/2.0.0/api/querying/sql#query-files-directly).

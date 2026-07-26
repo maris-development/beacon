@@ -55,4 +55,4 @@ ORDER BY lat_bin
 | `STDDEV(col)` | Standard deviation |
 | `MEDIAN(col)` | Median |
 
-See [Function Reference](./function-reference.md#aggregate-functions) for the full list.
+See [Function Reference](/docs/2.0.0/beacondb/sql/function-reference#aggregate-functions) for the full list.

@@ -1,6 +1,6 @@
 # Query Examples
 
-Copy-paste examples for both query styles. All examples use `"output": { "format": "csv" }` — omit `output` to receive a streaming Arrow IPC response instead.
+Copy-paste examples for both query styles. All examples use `"output": { "format": "csv" }`, omit `output` to receive a streaming Arrow IPC response instead.
 
 ## JSON DSL
 
@@ -137,7 +137,7 @@ Content-Type: application/json
 
 ### Query Zarr with a coordinate range
 
-Predicate pushdown is automatic — Beacon prunes chunks and slices coordinate dimensions from your `filters`:
+Predicate pushdown is automatic, Beacon prunes chunks and slices coordinate dimensions from your `filters`:
 
 ```http
 POST /api/query
