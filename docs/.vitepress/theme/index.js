@@ -8,6 +8,7 @@ import FeaturesIntro from './components/FeaturesIntro.vue'
 import GetStartedCta from './components/GetStartedCta.vue'
 import QueryFlow from './components/QueryFlow.vue'
 import HeroBackdrop from './components/HeroBackdrop.vue'
+import ProductSplit from './components/ProductSplit.vue'
 import './custom.css'
 
 // Reveal sections as they scroll into view. No-JS safe (the hidden state is only
@@ -54,6 +55,7 @@ const Layout = {
             'home-hero-image': () => h(HeroQuery),
             'home-hero-after': () =>
                 h('div', { class: 'home-hero-badges' }, [
+                    h(ProductSplit),
                     h(FormatBadges),
                     h(IntegrationBadges),
                     h(ArchDiagram)
@@ -76,6 +78,7 @@ export default {
         app.component('GetStartedCta', GetStartedCta)
         app.component('QueryFlow', QueryFlow)
         app.component('HeroBackdrop', HeroBackdrop)
+        app.component('ProductSplit', ProductSplit)
     },
 
     Layout

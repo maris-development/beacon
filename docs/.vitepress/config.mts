@@ -128,7 +128,7 @@ export default defineConfig({
           ]
         },
         {
-          text: 'beacondb — The Database',
+          text: 'BeaconDB — The Database',
           collapsed: false,
           items: [
             { text: 'Overview', link: '/docs/2.0.0/beacondb/' },
@@ -173,7 +173,7 @@ export default defineConfig({
           ]
         },
         {
-          text: 'beacon-datalake — Server',
+          text: 'Beacon Data Lake — Server',
           collapsed: false,
           items: [
             { text: 'Getting Started', link: '/docs/2.0.0/getting-started' },
