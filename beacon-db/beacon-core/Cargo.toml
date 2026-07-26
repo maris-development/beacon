@@ -39,6 +39,10 @@ geojson = {workspace = true}
 num_cpus = {workspace = true}
 url = { workspace = true }
 typetag = { workspace = true }
+# Reads the plaintext out of a decrypted `EncryptedSecret` (a `secrecy::SecretString`).
+secrecy = { workspace = true }
+# Decodes the base64 `BEACON_SECRETS_KEY` master key.
+base64 = { workspace = true }
 
 tracing = { workspace=true}
 # Local dependencies

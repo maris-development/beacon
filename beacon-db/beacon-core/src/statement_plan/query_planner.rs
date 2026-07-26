@@ -212,6 +212,7 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
                 attach.name.clone(),
                 attach.url.clone(),
                 attach.credential.clone(),
+                attach.secret.clone(),
                 attach.tls,
                 session,
             ))));
@@ -222,6 +223,29 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
                 detach.name.clone(),
                 session,
             ))));
+        }
+
+        if let Some(create) = any.downcast_ref::<logical::CreateSecretNode>() {
+            return Ok(Some(Arc::new(physical::CreateSecretExec::new(
+                create.name.clone(),
+                create.secret_type,
+                create.scope.clone(),
+                create.options.clone(),
+                create.persistent,
+                session,
+            ))));
+        }
+
+        if let Some(drop) = any.downcast_ref::<logical::DropSecretNode>() {
+            return Ok(Some(Arc::new(physical::DropSecretExec::new(
+                drop.name.clone(),
+                drop.if_exists,
+                session,
+            ))));
+        }
+
+        if any.downcast_ref::<logical::ShowSecretsNode>().is_some() {
+            return Ok(Some(Arc::new(physical::ShowSecretsExec::new(session))));
         }
 
         if any.downcast_ref::<logical::ShowCrawlersNode>().is_some() {

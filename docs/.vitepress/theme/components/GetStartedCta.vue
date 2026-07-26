@@ -1,6 +1,6 @@
 <script setup>
 import { withBase } from 'vitepress'
-const start = withBase('/docs/1.7.3/getting-started')
+const start = withBase('/docs/2.0.0/introduction')
 </script>
 
 <template>
@@ -8,9 +8,13 @@ const start = withBase('/docs/1.7.3/getting-started')
     <div class="cta-inner">
       <h2 class="cta-title">Get started in minutes</h2>
       <p class="cta-sub">
-        Run Beacon with Docker, point it at your files, and query over SQL or JSON.
+        Embed the engine in Python, or run the server with Docker — point it at your files and
+        query with SQL.
       </p>
-      <code class="cta-code">docker pull ghcr.io/maris-development/beacon:latest</code>
+      <div class="cta-codes">
+        <code class="cta-code">pip install beacondb</code>
+        <code class="cta-code">docker pull ghcr.io/maris-development/beacon:latest</code>
+      </div>
       <div class="cta-actions">
         <a class="cta-btn brand" :href="start">Get started</a>
         <a class="cta-btn alt" href="https://github.com/maris-development/beacon"
@@ -49,9 +53,15 @@ const start = withBase('/docs/1.7.3/getting-started')
   font-size: 1rem;
   line-height: 1.5;
 }
+.cta-codes {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.6rem;
+}
 .cta-code {
   display: inline-block;
-  margin-bottom: 1.6rem;
   padding: 0.6rem 1rem;
   border: 1px solid var(--vp-c-divider);
   border-radius: 8px;

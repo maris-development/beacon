@@ -11,9 +11,10 @@ use beacon_auth::{Privilege, PrivilegeTarget};
 
 use super::statement::{
     AttachStatement, AuthStatement, BeaconStatement, CreateCrawlerStatement, CreateIndexStatement,
-    CreateMaterializedViewStatement, DetachStatement, DropCrawlerStatement, DropExtensionStatement,
-    DropIndexStatement, RefreshStatement, RunCrawlerStatement, SetExtensionStatement,
-    ShowExtensionsStatement, ShowIndexesStatement,
+    CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
+    DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
+    RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
+    SummarizeStatement,
 };
 
 /// A parser that extends `DFParser` with custom Beacon SQL syntax.
@@ -88,6 +89,22 @@ impl<'a> BeaconParser<'a> {
 
         if self.is_detach() {
             return self.parse_detach();
+        }
+
+        if self.is_create_secret() {
+            return self.parse_create_secret();
+        }
+
+        if self.is_drop_secret() {
+            return self.parse_drop_secret();
+        }
+
+        if self.is_show_secrets() {
+            return self.parse_show_secrets();
+        }
+
+        if self.is_summarize() {
+            return self.parse_summarize();
         }
 
         let df_statement = Box::new(self.df_parser.parse_statement()?);
@@ -427,6 +444,116 @@ impl<'a> BeaconParser<'a> {
         self.df_parser.parser.next_token(); // DETACH
         let name = self.parse_string_value()?;
         Ok(BeaconStatement::Detach(DetachStatement { name }))
+    }
+
+    fn is_create_secret(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        let t3 = &self.df_parser.parser.peek_nth_token(2).token;
+        let is_secret = |t: &Token| matches!(t, Token::Word(w) if w.value.to_uppercase() == "SECRET");
+        let is_modifier = |t: &Token| {
+            matches!(t, Token::Word(w) if matches!(w.value.to_uppercase().as_str(), "PERSISTENT" | "TEMPORARY"))
+        };
+        // CREATE SECRET … or CREATE {PERSISTENT|TEMPORARY} SECRET …
+        matches!(t1, Token::Word(w) if w.keyword == Keyword::CREATE)
+            && (is_secret(t2) || (is_modifier(t2) && is_secret(t3)))
+    }
+
+    fn is_drop_secret(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.keyword == Keyword::DROP)
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "SECRET")
+    }
+
+    fn is_show_secrets(&self) -> bool {
+        let t1 = &self.df_parser.parser.peek_nth_token(0).token;
+        let t2 = &self.df_parser.parser.peek_nth_token(1).token;
+        matches!(t1, Token::Word(w) if w.value.to_uppercase() == "SHOW")
+            && matches!(t2, Token::Word(w) if w.value.to_uppercase() == "SECRETS")
+    }
+
+    /// Parse: CREATE [PERSISTENT|TEMPORARY] SECRET <name> (TYPE <type>, <key> '<value>', …)
+    fn parse_create_secret(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // CREATE
+        // Optional PERSISTENT / TEMPORARY modifier (default: session-only).
+        let persistent = match &self.df_parser.parser.peek_nth_token(0).token {
+            Token::Word(w) if w.value.to_uppercase() == "PERSISTENT" => {
+                self.df_parser.parser.next_token();
+                true
+            }
+            Token::Word(w) if w.value.to_uppercase() == "TEMPORARY" => {
+                self.df_parser.parser.next_token();
+                false
+            }
+            _ => false,
+        };
+        self.df_parser.parser.next_token(); // SECRET
+        let name = self.parse_string_value()?;
+        let params = self.parse_with_options()?;
+        Ok(BeaconStatement::CreateSecret(CreateSecretStatement {
+            name,
+            params,
+            persistent,
+        }))
+    }
+
+    /// Parse: DROP SECRET [IF EXISTS] <name>
+    fn parse_drop_secret(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // DROP
+        self.df_parser.parser.next_token(); // SECRET
+        let if_exists = self
+            .df_parser
+            .parser
+            .parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+        let name = self.parse_string_value()?;
+        Ok(BeaconStatement::DropSecret(DropSecretStatement {
+            name,
+            if_exists,
+        }))
+    }
+
+    /// Parse: SHOW SECRETS
+    fn parse_show_secrets(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // SHOW
+        self.df_parser.parser.next_token(); // SECRETS
+        Ok(BeaconStatement::ShowSecrets)
+    }
+
+    fn is_summarize(&self) -> bool {
+        matches!(&self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if w.value.to_uppercase() == "SUMMARIZE")
+    }
+
+    /// Parse: SUMMARIZE <table> | SUMMARIZE <query>
+    ///
+    /// A bare table name becomes `SELECT * FROM <name>`; anything starting a query (`SELECT`,
+    /// `WITH`, `VALUES`, `TABLE`, or a parenthesized query) is taken as the source query verbatim.
+    fn parse_summarize(&mut self) -> Result<BeaconStatement> {
+        self.df_parser.parser.next_token(); // SUMMARIZE
+
+        let starts_query = matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::LParen
+        ) || matches!(
+            &self.df_parser.parser.peek_nth_token(0).token,
+            Token::Word(w) if matches!(
+                w.keyword,
+                Keyword::SELECT | Keyword::WITH | Keyword::VALUES | Keyword::TABLE
+            )
+        );
+
+        let source = if starts_query {
+            self.df_parser
+                .parser
+                .parse_query()
+                .map_err(|e| DataFusionError::External(Box::new(e)))?
+                .to_string()
+        } else {
+            format!("SELECT * FROM {}", self.parse_object_name()?)
+        };
+
+        Ok(BeaconStatement::Summarize(SummarizeStatement { source }))
     }
 
     /// Read a single string value (single-quoted string, identifier, or number).
@@ -1128,5 +1255,100 @@ mod tests {
         let rendered = stmt.to_string();
         assert_eq!(rendered, "ATTACH 'beacon://h:1' AS r");
         assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn test_parse_create_secret() {
+        let sql = "CREATE SECRET my_s3 (TYPE S3, KEY_ID 'AKIA', SECRET 'shh', REGION 'eu-west-1', SCOPE 's3://bucket')";
+        match BeaconParser::new(sql).unwrap().parse_statement().unwrap() {
+            BeaconStatement::CreateSecret(s) => {
+                assert_eq!(s.name, "my_s3");
+                assert_eq!(s.params.get("TYPE").map(String::as_str), Some("S3"));
+                assert_eq!(s.params.get("KEY_ID").map(String::as_str), Some("AKIA"));
+                assert_eq!(s.params.get("SCOPE").map(String::as_str), Some("s3://bucket"));
+            }
+            other => panic!("expected CREATE SECRET, got {other:?}"),
+        }
+    }
+
+    /// The rendered form must not leak credential values.
+    #[test]
+    fn test_create_secret_display_omits_values() {
+        let sql = "CREATE SECRET s (TYPE S3, KEY_ID 'AKIA', SECRET 'topsecret')";
+        let rendered = BeaconParser::new(sql)
+            .unwrap()
+            .parse_statement()
+            .unwrap()
+            .to_string();
+        assert_eq!(rendered, "CREATE SECRET s");
+        assert!(!rendered.contains("topsecret"));
+    }
+
+    #[test]
+    fn test_parse_summarize() {
+        // A bare table name is wrapped as SELECT * FROM <name>.
+        match BeaconParser::new("SUMMARIZE obs").unwrap().parse_statement().unwrap() {
+            BeaconStatement::Summarize(s) => assert_eq!(s.source, "SELECT * FROM obs"),
+            other => panic!("expected SUMMARIZE, got {other:?}"),
+        }
+        // A schema-qualified name too.
+        match BeaconParser::new("SUMMARIZE public.obs").unwrap().parse_statement().unwrap() {
+            BeaconStatement::Summarize(s) => assert_eq!(s.source, "SELECT * FROM public.obs"),
+            other => panic!("expected SUMMARIZE, got {other:?}"),
+        }
+        // A query source is captured as-is.
+        match BeaconParser::new("SUMMARIZE SELECT a FROM t WHERE a > 0")
+            .unwrap()
+            .parse_statement()
+            .unwrap()
+        {
+            BeaconStatement::Summarize(s) => assert!(s.source.contains("SELECT a FROM t")),
+            other => panic!("expected SUMMARIZE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_persistent_and_temporary_secret() {
+        let persistent = BeaconParser::new("CREATE PERSISTENT SECRET p (TYPE S3)")
+            .unwrap()
+            .parse_statement()
+            .unwrap();
+        match persistent {
+            BeaconStatement::CreateSecret(s) => {
+                assert_eq!(s.name, "p");
+                assert!(s.persistent);
+            }
+            other => panic!("expected CREATE SECRET, got {other:?}"),
+        }
+        // TEMPORARY (and the bare form) are session-only.
+        for sql in ["CREATE TEMPORARY SECRET t (TYPE S3)", "CREATE SECRET t (TYPE S3)"] {
+            match BeaconParser::new(sql).unwrap().parse_statement().unwrap() {
+                BeaconStatement::CreateSecret(s) => assert!(!s.persistent, "{sql}"),
+                other => panic!("expected CREATE SECRET for `{sql}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_and_show_secrets() {
+        match BeaconParser::new("DROP SECRET IF EXISTS s")
+            .unwrap()
+            .parse_statement()
+            .unwrap()
+        {
+            BeaconStatement::DropSecret(s) => {
+                assert_eq!(s.name, "s");
+                assert!(s.if_exists);
+            }
+            other => panic!("expected DROP SECRET, got {other:?}"),
+        }
+        match BeaconParser::new("DROP SECRET s").unwrap().parse_statement().unwrap() {
+            BeaconStatement::DropSecret(s) => assert!(!s.if_exists),
+            other => panic!("expected DROP SECRET, got {other:?}"),
+        }
+        assert!(matches!(
+            BeaconParser::new("SHOW SECRETS").unwrap().parse_statement().unwrap(),
+            BeaconStatement::ShowSecrets
+        ));
     }
 }

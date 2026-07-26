@@ -18,7 +18,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::errors::{
-    interface_error, map_engine_error, not_supported, programming_error, OperationalError,
+    interface_error, map_engine_error, programming_error, NotPermittedError, OperationalError,
 };
 use crate::exec::{run_query_collected, run_sql};
 use crate::relation::{quote_ident, Relation};
@@ -131,6 +131,25 @@ impl Connection {
     /// Runs a statement and collects its result, with the GIL released for the duration.
     fn run(&self, py: Python<'_>, sql: String) -> PyResult<ResultSet> {
         run_sql(py, self.database()?, &self.identity, sql)
+    }
+
+    /// Refuse a mutating convenience method (`attach`/`detach`) that bypasses the engine's query
+    /// path: on a read-only connection, or when auth is enabled and this session is not a
+    /// super-user — matching the gates the SQL path already applies to `ATTACH`/`CREATE SECRET` and
+    /// other writes. With auth off and read-write, every session may write.
+    fn require_writer(&self) -> PyResult<()> {
+        let database = self.database()?;
+        if database.is_read_only() {
+            return Err(NotPermittedError::new_err(
+                "this database was opened read-only; writes are not permitted on this connection",
+            ));
+        }
+        if database.auth_enabled() && !self.identity.is_super_user {
+            return Err(NotPermittedError::new_err(
+                "this operation requires super-user privileges",
+            ));
+        }
+        Ok(())
     }
 
     fn last_result_mut(&mut self) -> PyResult<&mut ResultSet> {
@@ -252,6 +271,31 @@ impl Connection {
         Ok(slf)
     }
 
+    /// Appends a pandas / pyarrow / polars frame (or any Arrow object) to an **existing** managed
+    /// table `name`, and returns the connection so the call chains. This is `INSERT INTO name …`, so
+    /// it needs write privileges (a super-user — the default with auth off), fails if `name` does
+    /// not exist or its columns are incompatible, and is refused on a read-only connection. Needs
+    /// `pyarrow` installed.
+    fn append<'py>(
+        slf: Bound<'py, Self>,
+        name: &str,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let (schema, batches) = crate::ingest::arrow_from_py(py, &obj)?;
+
+        let conn = slf.borrow();
+        let database = conn.database()?.clone();
+        let identity = conn.identity.clone();
+        let name = name.to_string();
+        block_on(py, async move {
+            database.append_batches(&name, schema, batches, identity).await
+        })?
+        .map_err(map_engine_error)?;
+        drop(conn);
+        Ok(slf)
+    }
+
     /// Removes a table registered with [`Self::register`]. Returns the connection.
     fn unregister<'py>(slf: Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, Self>> {
         let py = slf.py();
@@ -343,10 +387,11 @@ impl Connection {
     ///
     /// `url` is the remote's Flight SQL endpoint (`beacon://host:port`, `grpc://…`, `http(s)://…`,
     /// or a bare `host:port`); `tls=True` (or an `https://` url) uses TLS. Credentials, if the
-    /// remote requires them, are either a bearer `token` or a `username`/`password` pair (not both).
-    /// The remote is contacted now — its schemas and tables are enumerated — so an unreachable or
-    /// unauthorized endpoint raises here, not on first query.
-    #[pyo3(signature = (name, url, *, token=None, username=None, password=None, tls=false))]
+    /// remote requires them, are either a bearer `token`, a `username`/`password` pair, or the name
+    /// of a stored `TYPE BEACON` `secret` — exactly one of these. The remote is contacted now — its
+    /// schemas and tables are enumerated — so an unreachable or unauthorized endpoint raises here.
+    #[pyo3(signature = (name, url, *, token=None, username=None, password=None, secret=None, tls=false))]
+    #[allow(clippy::too_many_arguments)]
     fn attach(
         &self,
         py: Python<'_>,
@@ -355,13 +400,23 @@ impl Connection {
         token: Option<String>,
         username: Option<String>,
         password: Option<String>,
+        secret: Option<String>,
         tls: bool,
     ) -> PyResult<()> {
-        let credential = beacon_core::embedded::RemoteCredential::from_parts(
-            token, username, password,
-        )
-        .map_err(|e| programming_error(e.to_string()))?;
+        self.require_writer()?;
+        if secret.is_some() && (token.is_some() || username.is_some() || password.is_some()) {
+            return Err(programming_error(
+                "attach takes either a `secret` or inline credentials, not both",
+            ));
+        }
         let database = self.database()?.clone();
+        let credential = match &secret {
+            Some(secret_name) => database
+                .secret_credential(secret_name)
+                .map_err(map_engine_error)?,
+            None => beacon_core::embedded::RemoteCredential::from_parts(token, username, password)
+                .map_err(|e| programming_error(e.to_string()))?,
+        };
         let name = name.to_string();
         let url = url.to_string();
         block_on(py, async move {
@@ -372,6 +427,7 @@ impl Connection {
 
     /// Detaches a catalog attached with [`Self::attach`]. Returns `True` if it was attached.
     fn detach(&self, name: &str) -> PyResult<bool> {
+        self.require_writer()?;
         self.database()?.detach(name).map_err(map_engine_error)
     }
 
@@ -816,6 +872,7 @@ fn authenticate(
     memory_limit = None,
     cpu_limit = None,
     crawlers = false,
+    secrets_key = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn connect(
@@ -834,16 +891,8 @@ pub fn connect(
     memory_limit: Option<usize>,
     cpu_limit: Option<usize>,
     crawlers: bool,
+    secrets_key: Option<&str>,
 ) -> PyResult<Connection> {
-    if read_only {
-        // Honest refusal: `RedbStore` only opens the container exclusively today, so a
-        // read-only handle would be a lie about both concurrency and writability.
-        return Err(not_supported(
-            "read_only=True is not implemented yet: the container file is always opened with an \
-             exclusive lock",
-        ));
-    }
-
     let credential = build_credential(username, password, token)?;
     if !auth && credential.is_some() {
         return Err(programming_error(
@@ -876,7 +925,7 @@ pub fn connect(
         AuthMode::Disabled
     };
 
-    let mut options = OpenOptions::new().with_auth(auth_mode);
+    let mut options = OpenOptions::new().with_auth(auth_mode).with_read_only(read_only);
     options.crawlers.enable = crawlers;
     if let Some(size) = batch_size {
         options = options.with_batch_size(size);
@@ -889,6 +938,11 @@ pub fn connect(
     }
     if let Some(dir) = datasets {
         options = options.with_datasets_dir(PathBuf::from(dir));
+    }
+    if let Some(encoded) = secrets_key {
+        let key = beacon_core::embedded::decode_secrets_key(encoded)
+            .map_err(|e| programming_error(e.to_string()))?;
+        options = options.with_secrets_key(key);
     }
 
     let database = match DbPath::parse(database) {

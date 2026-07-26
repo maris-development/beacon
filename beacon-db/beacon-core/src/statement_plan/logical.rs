@@ -403,6 +403,9 @@ pub(crate) struct AttachNode {
     pub(crate) name: String,
     pub(crate) url: String,
     pub(crate) credential: beacon_datafusion_ext::remote::RemoteCredential,
+    /// Name of a `TYPE BEACON` secret to authenticate with, resolved at execution. Mutually
+    /// exclusive with an inline `credential`.
+    pub(crate) secret: Option<String>,
     pub(crate) tls: bool,
 }
 
@@ -411,12 +414,14 @@ impl AttachNode {
         name: String,
         url: String,
         credential: beacon_datafusion_ext::remote::RemoteCredential,
+        secret: Option<String>,
         tls: bool,
     ) -> Self {
         Self {
             name,
             url,
             credential,
+            secret,
             tls,
         }
     }
@@ -444,6 +449,7 @@ impl UserDefinedLogicalNodeCore for AttachNode {
             name: self.name.clone(),
             url: self.url.clone(),
             credential: self.credential.clone(),
+            secret: self.secret.clone(),
             tls: self.tls,
         })
     }
@@ -482,6 +488,160 @@ impl UserDefinedLogicalNodeCore for DetachNode {
             name: self.name.clone(),
         })
     }
+}
+
+/// Logical node for `CREATE SECRET <name> (...)` — registers object-store credentials.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct CreateSecretNode {
+    pub(crate) name: String,
+    pub(crate) secret_type: beacon_datafusion_ext::secrets::SecretType,
+    pub(crate) scope: String,
+    /// `object_store` config keys → values, sorted (so the node hashes/compares deterministically).
+    /// Credentials, so never rendered in `fmt_for_explain`.
+    pub(crate) options: Vec<(String, String)>,
+    pub(crate) persistent: bool,
+}
+
+impl CreateSecretNode {
+    pub(crate) fn new(
+        name: String,
+        secret_type: beacon_datafusion_ext::secrets::SecretType,
+        scope: String,
+        options: Vec<(String, String)>,
+        persistent: bool,
+    ) -> Self {
+        Self {
+            name,
+            secret_type,
+            scope,
+            options,
+            persistent,
+        }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for CreateSecretNode {
+    fn name(&self) -> &str {
+        "CreateSecret"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Credential values are never printed — only the name, type, scope, and persistence.
+        write!(
+            f,
+            "CreateSecret: name={} type={} scope={} persistent={}",
+            self.name,
+            self.secret_type.as_str(),
+            self.scope,
+            self.persistent
+        )
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            secret_type: self.secret_type,
+            scope: self.scope.clone(),
+            options: self.options.clone(),
+            persistent: self.persistent,
+        })
+    }
+}
+
+/// Logical node for `DROP SECRET [IF EXISTS] <name>`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct DropSecretNode {
+    pub(crate) name: String,
+    pub(crate) if_exists: bool,
+}
+
+impl DropSecretNode {
+    pub(crate) fn new(name: String, if_exists: bool) -> Self {
+        Self { name, if_exists }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for DropSecretNode {
+    fn name(&self) -> &str {
+        "DropSecret"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        empty_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "DropSecret: name={}", self.name)
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            name: self.name.clone(),
+            if_exists: self.if_exists,
+        })
+    }
+}
+
+/// Logical node for `SHOW SECRETS` — produces one row per secret (no credential values).
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct ShowSecretsNode;
+
+impl UserDefinedLogicalNodeCore for ShowSecretsNode {
+    fn name(&self) -> &str {
+        "ShowSecrets"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        show_secrets_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ShowSecrets")
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// Arrow schema produced by `SHOW SECRETS` — the option *keys* only, never values.
+pub(crate) fn show_secrets_arrow_schema() -> Arc<Schema> {
+    static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("type", DataType::Utf8, false),
+                Field::new("scope", DataType::Utf8, false),
+                // Comma-separated option keys (e.g. "access_key_id,region"); values are secret.
+                Field::new("option_keys", DataType::Utf8, false),
+                Field::new("persistent", DataType::Boolean, false),
+            ]))
+        })
+        .clone()
+}
+
+fn show_secrets_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(show_secrets_arrow_schema().as_ref().clone())
+                .expect("SHOW SECRETS schema is valid"),
+        )
+    })
 }
 
 /// Logical node for `SHOW CRAWLERS`. Unlike the other crawler nodes it produces

@@ -214,6 +214,14 @@ pub struct OpenOptions {
     pub datasets: Option<DefaultStore>,
     /// Scratch directory for query output files. Defaults to the system temp directory.
     pub tmp_dir: Option<PathBuf>,
+    /// The 32-byte master key that encrypts persisted secrets (`CREATE PERSISTENT SECRET`, external
+    /// database passwords) at rest. `None` falls back to the base64 `BEACON_SECRETS_KEY` env var;
+    /// with neither set, persisting a credential fails closed.
+    pub secrets_key: Option<[u8; 32]>,
+    /// Open read-only: every write (DDL/DML and beacon's side-effecting statements) is refused.
+    /// The container file is still opened with an exclusive lock, so this is a per-connection
+    /// writability guarantee, not (yet) multi-process concurrent access.
+    pub read_only: bool,
 }
 
 impl OpenOptions {
@@ -228,6 +236,18 @@ impl OpenOptions {
 
     pub fn with_runtime_handle(mut self, handle: Handle) -> Self {
         self.runtime_handle = Some(handle);
+        self
+    }
+
+    /// Set the 32-byte master key used to encrypt persisted secrets at rest.
+    pub fn with_secrets_key(mut self, key: [u8; 32]) -> Self {
+        self.secrets_key = Some(key);
+        self
+    }
+
+    /// Open read-only: refuse every write on the resulting database.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 
@@ -320,6 +340,7 @@ impl Database {
 
         let mut builder = RuntimeBuilder::new()
             .with_auth_enforcement(auth_enabled)
+            .with_read_only(options.read_only)
             .with_crawler(options.crawlers.clone());
 
         if let Some(file) = path.as_path() {
@@ -345,6 +366,10 @@ impl Database {
         }
         if let Some(dir) = options.tmp_dir.clone() {
             builder = builder.with_tmp_dir_path(dir);
+        }
+        // The master key for at-rest secret encryption: explicit option, else `BEACON_SECRETS_KEY`.
+        if let Some(key) = options.secrets_key.or_else(secrets_key_from_env) {
+            builder = builder.with_secrets_encryption(key);
         }
         if let AuthMode::Enabled(settings) = &options.auth {
             if let Some(admin) = &settings.admin {
@@ -422,9 +447,33 @@ impl Database {
         attached_remote_catalogs(&self.runtime.session_ctx)
     }
 
+    /// Resolve a stored `TYPE BEACON` secret into a remote credential, for
+    /// [`attach_remote`](Self::attach_remote)ing with `secret=…`.
+    pub fn secret_credential(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<beacon_datafusion_ext::remote::RemoteCredential> {
+        let store = self
+            .runtime
+            .session_ctx
+            .state()
+            .config()
+            .get_extension::<beacon_datafusion_ext::secrets::SecretStore>()
+            .ok_or_else(|| anyhow::anyhow!("secret store is unavailable"))?;
+        let secret = store
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("no secret named '{name}'"))?;
+        beacon_datafusion_ext::remote::RemoteCredential::from_secret(&secret)
+    }
+
     /// Whether this database was opened with RBAC applied.
     pub fn auth_enabled(&self) -> bool {
         self.auth_enabled
+    }
+
+    /// Whether this database was opened read-only (all writes refused).
+    pub fn is_read_only(&self) -> bool {
+        self.runtime.read_only
     }
 
     /// The identity a session gets without credentials: [`AuthIdentity::local`] when auth is
@@ -556,6 +605,39 @@ impl Database {
         outcome
     }
 
+    /// Append `batches` to an existing managed table `name` (`INSERT INTO name SELECT * FROM …`).
+    ///
+    /// The insert runs through the normal query path, so it is subject to the same authorization
+    /// (write privileges) and read-only checks as any other write, and fails clearly if `name` does
+    /// not exist or its schema is incompatible.
+    pub async fn append_batches(
+        &self,
+        name: &str,
+        schema: arrow::datatypes::SchemaRef,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        identity: AuthIdentity,
+    ) -> anyhow::Result<()> {
+        use futures::TryStreamExt;
+
+        const STAGING: &str = "__beacondb_append_staging";
+        self.register_batches(STAGING, schema, batches)?;
+
+        let insert = format!(
+            "INSERT INTO {} SELECT * FROM {}",
+            quote_ident(name),
+            quote_ident(STAGING)
+        );
+        let outcome = async {
+            let stream = self.sql(insert, identity).await?.into_record_stream()?;
+            stream.try_collect::<Vec<_>>().await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        let _ = self.deregister_table(STAGING);
+        outcome
+    }
+
     /// Removes a table registered with [`Self::register_batches`]. Returns whether one existed.
     pub fn deregister_table(&self, name: &str) -> anyhow::Result<bool> {
         self.with_default_schema(|schema| {
@@ -595,6 +677,27 @@ impl Database {
             })?;
         f(provider)
     }
+}
+
+/// Decode a base64 string into a 32-byte master key. Errors if it is not valid base64 or not
+/// exactly 32 bytes.
+pub fn decode_secrets_key(encoded: &str) -> anyhow::Result<[u8; 32]> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|e| anyhow::anyhow!("secrets key is not valid base64: {e}"))?;
+    <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| anyhow::anyhow!("secrets key must be exactly 32 bytes (got {})", bytes.len()))
+}
+
+/// Decode the base64 `BEACON_SECRETS_KEY` env var into a 32-byte master key, if set and valid.
+///
+/// A malformed value is ignored (treated as absent) rather than failing the open — a persisted
+/// secret would then fail closed with a clear "no encryption key" message, which is safer than
+/// refusing to open the database at all.
+fn secrets_key_from_env() -> Option<[u8; 32]> {
+    let encoded = std::env::var("BEACON_SECRETS_KEY").ok()?;
+    decode_secrets_key(&encoded).ok()
 }
 
 /// Attach a remote Beacon as a catalog named `name` on `session_ctx`.

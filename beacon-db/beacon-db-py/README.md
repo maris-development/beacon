@@ -68,6 +68,11 @@ A second `connect()` to the same path in the same process returns the same under
 database (sharing its lock); from another process it raises `OperationalError`. Use
 `cursor()` for an independent result slot, and `connect_as()` for a different identity.
 
+`connect(read_only=True)` opens a **read-only** handle: every write — DDL/DML and beacon's
+side-effecting statements (`ATTACH`, `CREATE SECRET`, `INSERT`, …) — is refused, while `SELECT`
+and `SHOW …` work. (The file is still opened exclusively, so this is a per-connection writability
+guarantee, not multi-process concurrency yet.)
+
 ## Lazy relations
 
 `sql()`, `query()`, `table()` and `view()` return a **relation**: a query you compose
@@ -186,6 +191,12 @@ con.register("kept", pd.DataFrame({"x": [1, 2, 3]}), persist=True)
 off) and refuses to overwrite an existing table (drop it first to replace). `register()` needs
 `pyarrow` installed either way.
 
+To add rows to an **existing** managed table, `con.append(name, frame)` (an `INSERT INTO`):
+
+```python
+con.append("obs", pd.DataFrame({"a": [4, 5]}))   # appends; errors if `obs` doesn't exist
+```
+
 ## Attaching another Beacon (remote catalogs)
 
 Point beacondb at a running **beacon-datalake** server and mirror its whole catalog under a local
@@ -214,6 +225,55 @@ con.execute("ATTACH 'beacon://datalake.example.org:50051' AS lake "
             "WITH ('username' 'analyst', 'password' '…', 'tls' 'true')")
 con.execute("DETACH lake")
 ```
+
+## Secrets for object stores (S3, GCS, Azure)
+
+Give beacon credentials for a cloud object store the DuckDB way — a named, scoped `SECRET` — instead
+of environment variables. A `read_parquet('s3://…')` then resolves the best-matching secret by
+longest scope prefix:
+
+```python
+con.execute("CREATE SECRET my_s3 (TYPE S3, KEY_ID '…', SECRET '…', "
+            "REGION 'eu-west-1', SCOPE 's3://my-bucket')")
+con.read_parquet("s3://my-bucket/obs/*.parquet").df()   # uses my_s3
+
+con.sql("SHOW SECRETS").df()      # name, type, scope, option_keys, persistent — never values
+con.execute("DROP SECRET my_s3")
+```
+
+`TYPE` is `S3`/`GCS`/`AZURE`/`HTTP`; `SCOPE` defaults to the whole backend (`s3://`) so one secret
+can be the default and a longer scope overrides it per bucket. The DuckDB parameter names
+(`KEY_ID`, `SECRET`, `REGION`, `SESSION_TOKEN`, `ENDPOINT`, …) map to `object_store` config keys, and
+any native `object_store` key works directly.
+
+**Session vs. persistent.** By default a secret is session-only (in memory for the process). A
+`CREATE PERSISTENT SECRET` is written **into the `beacon.db` file, encrypted**, so a copied file
+carries its own cloud access — the piece that makes the single-file story reach external data:
+
+```python
+con = beacondb.connect("beacon.db", secrets_key=…)   # base64 32-byte key (or $BEACON_SECRETS_KEY)
+con.execute("CREATE PERSISTENT SECRET my_s3 (TYPE S3, KEY_ID '…', SECRET '…', SCOPE 's3://bucket')")
+# reopen later with the same key -> my_s3 is still there
+```
+
+Persisting requires a master key (`secrets_key=` or `BEACON_SECRETS_KEY`) — beacon **refuses to
+write a plaintext credential to disk** — and a file-backed database (not `:memory:`). Credential
+values are encrypted with XChaCha20-Poly1305; only the name/type/scope are stored in the clear.
+Like `ATTACH`, this is also plain SQL, so the server/CLI/SQLAlchemy get it too.
+
+**Remote-Beacon credentials, too.** A `TYPE BEACON` secret stores the credentials for a remote
+Beacon (`ATTACH`), so you keep them in one place — and can `PERSISTENT` them into the file — instead
+of inlining them on every attach:
+
+```python
+con.execute("CREATE SECRET lake (TYPE BEACON, USERNAME 'analyst', PASSWORD '…')")   # or TOKEN '…'
+con.attach("lake", "beacon://datalake:50051", secret="lake")     # or WITH ('secret' 'lake') in SQL
+con.execute("DROP SECRET lake")                                   # remove it from the store
+```
+
+`secret=` is mutually exclusive with inline `token`/`username`/`password`, and only a `TYPE BEACON`
+secret can be used for an attach. Any secret is removed with `DROP SECRET <name>` (which also
+deletes its persisted copy).
 
 It runs over **Arrow Flight SQL**, and the DataFusion federation optimizer pushes the largest
 federatable sub-plan — filters, projections, aggregates, and joins *between* remote tables — down
@@ -252,6 +312,18 @@ con.table_functions()        # the read_* / list_datasets names
 con.metrics()                # per-query execution metrics; con.metrics(query_id=…) to narrow
 con.refresh("ext_table")     # re-list an external table / rebuild a materialized view
 ```
+
+`SUMMARIZE` profiles a table or query — one row per column with min/max, distinct count, avg/std
+(numeric columns), non-null count, and null percentage — the first thing to run on a new dataset:
+
+```python
+con.sql("SUMMARIZE obs").df()
+con.sql("SUMMARIZE SELECT * FROM read_parquet('s3://bucket/obs/*.parquet')").df()
+```
+
+Beyond that, beacon inherits DuckDB-style *friendly SQL* from DataFusion: `SELECT * EXCLUDE (col)`
+/ `REPLACE (…)`, `GROUP BY ALL`, `QUALIFY`, `UNION BY NAME`, `FROM`-first (`FROM t SELECT …`),
+`DESCRIBE`, `SHOW TABLES`/`SHOW COLUMNS`, list literals, and trailing commas all work.
 
 ## Building from source
 
@@ -333,6 +405,6 @@ interpolated) so they are injection-safe; the beacon extras
 Beacon as a catalog (`attach`/`detach`/`attached`, queryable as `name.schema.table` with Flight SQL
 pushdown); and a SQLAlchemy `beacondb://` dialect (engine, reflection, `pandas.read_sql`).
 
-Not yet: replacement scans (querying a bare local variable), `read_only=True`, and
-multi-statement transactions. See
+Not yet: replacement scans (querying a bare local variable), Python UDFs, and multi-statement
+transactions. See
 [plans/python-interface-requirements.md](../../plans/python-interface-requirements.md).

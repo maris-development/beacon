@@ -397,6 +397,70 @@ async fn attach_authenticates_with_username_and_password() {
     server.handle.abort();
 }
 
+/// `ATTACH … WITH ('secret' '<name>')` authenticates from a stored `TYPE BEACON` secret rather than
+/// inline credentials, and `DROP SECRET` removes it. Runs against a remote with anonymous disabled,
+/// so the secret's username/password is what makes the attach succeed.
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_uses_a_stored_beacon_secret() {
+    use beacon_core::embedded::{Database, DbPath, OpenOptions};
+
+    let server = spawn_server(false).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT)")).await;
+    run_sql_rows(runtime, &format!("INSERT INTO {obs} VALUES (1), (2)")).await;
+
+    let local = Database::open(DbPath::Memory, OpenOptions::default())
+        .await
+        .expect("open local embedded database");
+
+    // Store the remote's credentials as a session BEACON secret, then attach by referencing it.
+    run_local(
+        &local,
+        &format!(
+            "CREATE SECRET lake_creds (TYPE BEACON, USERNAME '{}', PASSWORD '{}')",
+            common::ADMIN_USERNAME,
+            common::ADMIN_PASSWORD
+        ),
+    )
+    .await;
+    let secrets = run_local(&local, "SHOW SECRETS").await;
+    let secret_type = arrow::util::pretty::pretty_format_batches(&secrets)
+        .unwrap()
+        .to_string();
+    assert!(secret_type.contains("beacon"), "secret type shown: {secret_type}");
+
+    run_local(
+        &local,
+        &format!("ATTACH 'beacon://127.0.0.1:{port}' AS remote WITH ('secret' 'lake_creds')"),
+    )
+    .await;
+    assert_eq!(local.attached_catalogs(), vec!["remote".to_string()]);
+
+    let batches = run_local(
+        &local,
+        &format!("SELECT count(*) AS c FROM remote.public.{obs}"),
+    )
+    .await;
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(count, 2, "the attach authenticated via the stored secret");
+
+    // The secret can be removed from the store.
+    run_local(&local, "DROP SECRET lake_creds").await;
+    assert!(run_local(&local, "SHOW SECRETS").await.iter().all(|b| b.num_rows() == 0));
+
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+    server.handle.abort();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn handshake_execute_and_metadata_work() {
     let server = spawn_server(false).await;

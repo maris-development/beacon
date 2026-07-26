@@ -22,6 +22,7 @@ mod physical;
 mod query_planner;
 mod stream_coalescer;
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
 
 use datafusion::{
@@ -33,9 +34,10 @@ use datafusion::{
 
 use crate::parser::statement::{
     AttachStatement, AuthStatement, CreateCrawlerStatement, CreateIndexStatement,
-    CreateMaterializedViewStatement, DetachStatement, DropCrawlerStatement, DropExtensionStatement,
-    DropIndexStatement, RefreshStatement, RunCrawlerStatement, SetExtensionStatement,
-    ShowExtensionsStatement, ShowIndexesStatement,
+    CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
+    DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
+    RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
+    SummarizeStatement,
 };
 
 pub(crate) use authz::authorize_logical_plan;
@@ -220,11 +222,17 @@ pub(crate) fn drop_crawler_plan(statement: DropCrawlerStatement) -> LogicalPlan 
 /// Recognized options: `token` (bearer), `username`+`password` (Basic), and `tls`. Fallible
 /// because the credential combination is validated here (e.g. a token *and* a password is refused).
 pub(crate) fn attach_plan(statement: AttachStatement) -> anyhow::Result<LogicalPlan> {
-    let credential = beacon_datafusion_ext::remote::RemoteCredential::from_parts(
-        statement.options.get("token").cloned(),
-        statement.options.get("username").cloned(),
-        statement.options.get("password").cloned(),
-    )?;
+    let secret = statement.options.get("secret").cloned();
+    let token = statement.options.get("token").cloned();
+    let username = statement.options.get("username").cloned();
+    let password = statement.options.get("password").cloned();
+    anyhow::ensure!(
+        !(secret.is_some() && (token.is_some() || username.is_some() || password.is_some())),
+        "ATTACH takes either a `secret` or inline credentials, not both"
+    );
+    // Inline credential (used when no `secret` is named); a named secret is resolved at execution.
+    let credential =
+        beacon_datafusion_ext::remote::RemoteCredential::from_parts(token, username, password)?;
     let tls = statement
         .options
         .get("tls")
@@ -235,6 +243,7 @@ pub(crate) fn attach_plan(statement: AttachStatement) -> anyhow::Result<LogicalP
             statement.name,
             statement.url,
             credential,
+            secret,
             tls,
         )),
     }))
@@ -245,6 +254,214 @@ pub(crate) fn detach_plan(statement: DetachStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::DetachNode::new(statement.name)),
     })
+}
+
+/// Build the logical plan for `CREATE SECRET <name> (TYPE …, …, SCOPE …)`.
+///
+/// Fallible: `TYPE` is required and validated here, and `SCOPE` defaults to the backend's
+/// scheme-wide prefix. The remaining parameters are credential options, with the common DuckDB
+/// names (`KEY_ID`, `SECRET`, `REGION`, …) mapped to `object_store` config keys.
+pub(crate) fn create_secret_plan(statement: CreateSecretStatement) -> anyhow::Result<LogicalPlan> {
+    use beacon_datafusion_ext::secrets::SecretType;
+
+    let mut params = statement.params;
+    let type_value = take_ci(&mut params, "type").ok_or_else(|| {
+        anyhow::anyhow!("CREATE SECRET requires a TYPE (S3, GCS, AZURE, HTTP, or BEACON)")
+    })?;
+    let secret_type = SecretType::parse(&type_value).ok_or_else(|| {
+        anyhow::anyhow!("unknown secret TYPE '{type_value}'; use S3, GCS, AZURE, HTTP, or BEACON")
+    })?;
+    let scope =
+        take_ci(&mut params, "scope").unwrap_or_else(|| secret_type.default_scope().to_string());
+
+    let mut options: Vec<(String, String)> = params
+        .into_iter()
+        .map(|(key, value)| {
+            // Beacon secrets carry Flight SQL creds (`token`/`username`/`password`) verbatim; only
+            // object-store secrets get the DuckDB→object_store option-name aliasing.
+            let key = if secret_type.is_beacon() {
+                key.to_ascii_lowercase()
+            } else {
+                normalize_secret_option_key(&key)
+            };
+            (key, value)
+        })
+        .collect();
+    // Sorted so the node hashes/compares deterministically.
+    options.sort();
+
+    Ok(LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::CreateSecretNode::new(
+            statement.name,
+            secret_type,
+            scope,
+            options,
+            statement.persistent,
+        )),
+    }))
+}
+
+/// Build the logical plan for `DROP SECRET [IF EXISTS] <name>`.
+pub(crate) fn drop_secret_plan(statement: DropSecretStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::DropSecretNode::new(
+            statement.name,
+            statement.if_exists,
+        )),
+    })
+}
+
+/// Build the logical plan for `SHOW SECRETS`.
+pub(crate) fn show_secrets_plan() -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::ShowSecretsNode),
+    })
+}
+
+/// Build the logical plan for `SUMMARIZE <source>`.
+///
+/// Lowers to a generated, single-pass aggregate `SELECT` (no custom node): one CTE computes every
+/// column's stats in one scan, and a `UNION ALL` re-projects that one row into one output row per
+/// column. Because the result is an ordinary query, `SUMMARIZE` works on a read-only database and
+/// needs no special privileges.
+pub(crate) async fn summarize_plan(
+    session_ctx: &SessionContext,
+    statement: SummarizeStatement,
+) -> anyhow::Result<LogicalPlan> {
+    // Plan the source once (no execution) to learn its columns and types.
+    let source_plan = session_ctx
+        .state()
+        .create_logical_plan(&statement.source)
+        .await
+        .map_err(|e| anyhow::anyhow!("SUMMARIZE source could not be planned: {e}"))?;
+    let fields = source_plan.schema().fields();
+    anyhow::ensure!(
+        !fields.is_empty(),
+        "SUMMARIZE requires a source with at least one column"
+    );
+
+    let sql = build_summarize_sql(&statement.source, fields);
+    session_ctx
+        .state()
+        .create_logical_plan(&sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to plan SUMMARIZE: {e}"))
+}
+
+/// Generate the single-pass profiling SQL for `SUMMARIZE` over `source`'s `fields`.
+fn build_summarize_sql(source: &str, fields: &arrow::datatypes::Fields) -> String {
+    use arrow::datatypes::DataType;
+
+    let is_numeric = |dt: &DataType| {
+        matches!(
+            dt,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Float16
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Decimal128(..)
+                | DataType::Decimal256(..)
+        )
+    };
+    let is_orderable = |dt: &DataType| {
+        is_numeric(dt)
+            || matches!(
+                dt,
+                DataType::Utf8
+                    | DataType::LargeUtf8
+                    | DataType::Utf8View
+                    | DataType::Boolean
+                    | DataType::Date32
+                    | DataType::Date64
+                    | DataType::Time32(_)
+                    | DataType::Time64(_)
+                    | DataType::Timestamp(..)
+                    | DataType::Duration(_)
+            )
+    };
+
+    let mut aggs: Vec<String> = vec!["CAST(count(*) AS BIGINT) AS __n".to_string()];
+    let mut branches: Vec<String> = Vec::new();
+
+    for (i, field) in fields.iter().enumerate() {
+        let col = summarize_quote_ident(field.name());
+        let dt = field.data_type();
+        let (orderable, numeric) = (is_orderable(dt), is_numeric(dt));
+
+        // Every stat is cast to a uniform output type so all UNION branches align; unsupported
+        // stats (min/max of an unorderable type, avg/std of a non-numeric) become NULL.
+        let null_v = "CAST(NULL AS VARCHAR)";
+        let null_i = "CAST(NULL AS BIGINT)";
+        let null_d = "CAST(NULL AS DOUBLE)";
+        let min = if orderable { format!("CAST(min({col}) AS VARCHAR)") } else { null_v.into() };
+        let max = if orderable { format!("CAST(max({col}) AS VARCHAR)") } else { null_v.into() };
+        // Exact distinct (approx_distinct doesn't cover floats); fine for a profiling summary.
+        let uniq = if orderable { format!("CAST(count(DISTINCT {col}) AS BIGINT)") } else { null_i.into() };
+        let avg = if numeric { format!("CAST(avg(TRY_CAST({col} AS DOUBLE)) AS DOUBLE)") } else { null_d.into() };
+        let std = if numeric { format!("CAST(stddev(TRY_CAST({col} AS DOUBLE)) AS DOUBLE)") } else { null_d.into() };
+
+        aggs.push(format!("{min} AS c{i}_min"));
+        aggs.push(format!("{max} AS c{i}_max"));
+        aggs.push(format!("{uniq} AS c{i}_uniq"));
+        aggs.push(format!("{avg} AS c{i}_avg"));
+        aggs.push(format!("{std} AS c{i}_std"));
+        aggs.push(format!("CAST(count({col}) AS BIGINT) AS c{i}_cnt"));
+
+        let name_lit = summarize_string_literal(field.name());
+        let type_lit = summarize_string_literal(&dt.to_string());
+        // `__ord` keeps the output in the source's column order (UNION ALL is unordered).
+        branches.push(format!(
+            "SELECT {i} AS __ord, {name_lit} AS column_name, {type_lit} AS column_type, \
+             c{i}_min AS \"min\", c{i}_max AS \"max\", c{i}_uniq AS \"distinct\", \
+             c{i}_avg AS \"avg\", c{i}_std AS \"std\", c{i}_cnt AS \"count\", \
+             CAST(CASE WHEN __n = 0 THEN 0 ELSE (__n - c{i}_cnt) * 100.0 / __n END AS DOUBLE) \
+             AS null_percentage FROM __summarize_agg"
+        ));
+    }
+
+    format!(
+        "WITH __summarize_agg AS (SELECT {} FROM ({source}) AS __summarize_src) \
+         SELECT column_name, column_type, \"min\", \"max\", \"distinct\", \"avg\", \"std\", \
+         \"count\", null_percentage FROM ({}) AS __summarize_out ORDER BY __ord",
+        aggs.join(", "),
+        branches.join(" UNION ALL ")
+    )
+}
+
+fn summarize_quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn summarize_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Remove a key from `params` case-insensitively, returning its value.
+fn take_ci(params: &mut HashMap<String, String>, key: &str) -> Option<String> {
+    let found = params.keys().find(|k| k.eq_ignore_ascii_case(key)).cloned()?;
+    params.remove(&found)
+}
+
+/// Map DuckDB `CREATE SECRET` parameter names to `object_store` config keys; unknown keys pass
+/// through lowercased, so native `object_store` keys (`access_key_id`, `region`, …) work directly.
+fn normalize_secret_option_key(key: &str) -> String {
+    match key.to_ascii_uppercase().as_str() {
+        "KEY_ID" => "access_key_id".to_string(),
+        "SECRET" => "secret_access_key".to_string(),
+        "REGION" => "region".to_string(),
+        "SESSION_TOKEN" => "session_token".to_string(),
+        "ENDPOINT" => "endpoint".to_string(),
+        "ACCOUNT_NAME" => "account_name".to_string(),
+        "ACCOUNT_KEY" => "account_key".to_string(),
+        _ => key.to_ascii_lowercase(),
+    }
 }
 
 /// Build the logical plan for `SHOW CRAWLERS`.

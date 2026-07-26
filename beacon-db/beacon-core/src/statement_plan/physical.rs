@@ -29,7 +29,7 @@ use super::{
     actions, crawler,
     logical::{
         count_arrow_schema, run_crawler_arrow_schema, show_crawlers_arrow_schema,
-        show_indexes_arrow_schema, AlterTableSpec,
+        show_indexes_arrow_schema, show_secrets_arrow_schema, AlterTableSpec,
         Mutation,
     },
     materialized_view, SessionCell,
@@ -415,6 +415,7 @@ pub(crate) struct AttachExec {
     name: String,
     url: String,
     credential: beacon_datafusion_ext::remote::RemoteCredential,
+    secret: Option<String>,
     tls: bool,
     session: SessionCell,
     cache: Arc<PlanProperties>,
@@ -425,6 +426,7 @@ impl AttachExec {
         name: String,
         url: String,
         credential: beacon_datafusion_ext::remote::RemoteCredential,
+        secret: Option<String>,
         tls: bool,
         session: SessionCell,
     ) -> Self {
@@ -432,6 +434,7 @@ impl AttachExec {
             name,
             url,
             credential,
+            secret,
             tls,
             session,
             cache: Arc::new(side_effect_properties()),
@@ -448,9 +451,10 @@ side_effect_exec!(AttachExec, "AttachExec", |exec: &AttachExec| {
     let name = exec.name.clone();
     let url = exec.url.clone();
     let credential = exec.credential.clone();
+    let secret = exec.secret.clone();
     let tls = exec.tls;
     Ok(side_effect_stream(async move {
-        actions::attach_remote(&session, &name, &url, credential, tls)
+        actions::attach_remote(&session, &name, &url, credential, secret, tls)
             .await
             .map_err(to_df_err)
     }))
@@ -486,6 +490,156 @@ side_effect_exec!(DetachExec, "DetachExec", |exec: &DetachExec| {
             .map_err(to_df_err)
     }))
 });
+
+/// Physical node for `CREATE SECRET <name> (...)`.
+#[derive(Debug)]
+pub(crate) struct CreateSecretExec {
+    name: String,
+    secret_type: beacon_datafusion_ext::secrets::SecretType,
+    scope: String,
+    options: Vec<(String, String)>,
+    persistent: bool,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl CreateSecretExec {
+    pub(crate) fn new(
+        name: String,
+        secret_type: beacon_datafusion_ext::secrets::SecretType,
+        scope: String,
+        options: Vec<(String, String)>,
+        persistent: bool,
+        session: SessionCell,
+    ) -> Self {
+        Self {
+            name,
+            secret_type,
+            scope,
+            options,
+            persistent,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Credential values are never printed.
+        write!(
+            f,
+            "CreateSecretExec: name={} type={} scope={} persistent={}",
+            self.name,
+            self.secret_type.as_str(),
+            self.scope,
+            self.persistent
+        )
+    }
+}
+
+side_effect_exec!(CreateSecretExec, "CreateSecretExec", |exec: &CreateSecretExec| {
+    let session = upgrade_session(&exec.session)?;
+    let name = exec.name.clone();
+    let secret_type = exec.secret_type;
+    let scope = exec.scope.clone();
+    let options = exec.options.clone();
+    let persistent = exec.persistent;
+    Ok(side_effect_stream(async move {
+        actions::create_secret(&session, name, secret_type, scope, options, persistent)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `DROP SECRET [IF EXISTS] <name>`.
+#[derive(Debug)]
+pub(crate) struct DropSecretExec {
+    name: String,
+    if_exists: bool,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl DropSecretExec {
+    pub(crate) fn new(name: String, if_exists: bool, session: SessionCell) -> Self {
+        Self {
+            name,
+            if_exists,
+            session,
+            cache: Arc::new(side_effect_properties()),
+        }
+    }
+    fn fmt_label(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DropSecretExec: name={}", self.name)
+    }
+}
+
+side_effect_exec!(DropSecretExec, "DropSecretExec", |exec: &DropSecretExec| {
+    let session = upgrade_session(&exec.session)?;
+    let name = exec.name.clone();
+    let if_exists = exec.if_exists;
+    Ok(side_effect_stream(async move {
+        actions::drop_secret(&session, &name, if_exists)
+            .await
+            .map_err(to_df_err)
+    }))
+});
+
+/// Physical node for `SHOW SECRETS` — produces one row per secret.
+#[derive(Debug)]
+pub(crate) struct ShowSecretsExec {
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl ShowSecretsExec {
+    pub(crate) fn new(session: SessionCell) -> Self {
+        Self {
+            session,
+            cache: Arc::new(plan_properties(show_secrets_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for ShowSecretsExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => write!(f, "ShowSecretsExec"),
+            DisplayFormatType::TreeRender => write!(f, "ShowSecretsExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for ShowSecretsExec {
+    fn name(&self) -> &str {
+        "ShowSecretsExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let schema = show_secrets_arrow_schema();
+        let stream = futures::stream::once(async move {
+            actions::show_secrets(&session).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
 
 /// Physical node for `CREATE VIEW`.
 #[derive(Debug)]

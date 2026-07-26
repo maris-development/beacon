@@ -259,9 +259,13 @@ def test_unknown_table_is_a_programming_error(mem):
         mem.sql("SELECT * FROM does_not_exist").fetchall()
 
 
-def test_unsupported_features_refuse_rather_than_pretend(mem):
-    with pytest.raises(beacondb.NotSupportedError):
-        beacondb.connect(":memory:", read_only=True)
+def test_read_only_opens_and_refuses_writes(mem):
+    # read_only=True now opens a genuine read-only handle (writes refused), not a NotSupportedError.
+    ro = beacondb.connect(":memory:", read_only=True)
+    assert ro.sql("SELECT 1 AS a").fetchall() == [(1,)]
+    with pytest.raises(beacondb.Error, match="read-only"):
+        ro.execute("CREATE TABLE t (a INT)")
+    ro.close()
 
 
 def test_closed_connection_raises_interface_error():

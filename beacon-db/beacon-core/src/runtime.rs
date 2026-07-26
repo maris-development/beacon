@@ -33,6 +33,10 @@ pub struct Runtime {
     /// Whether table-level grants are enforced for non-super-users.
     pub(crate) auth_enforce: bool,
 
+    /// Whether this runtime was opened read-only: any statement that does not produce a result set
+    /// (writes, DDL/DML, and beacon's side-effecting extension statements) is refused.
+    pub(crate) read_only: bool,
+
     /// tmp directory for storing temporary files (e.g. for query output)
     pub(crate) tmp_dir: PathBuf,
 }
@@ -100,6 +104,15 @@ impl Runtime {
                 .map_err(|e| anyhow::anyhow!("failed to bind query parameters: {e}"))?;
         }
         crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
+        // A read-only database refuses anything that would mutate it. `plan_produces_result_set`
+        // is the read/write discriminator: reads (SELECT, VALUES, `SHOW …`) produce rows; every
+        // write (DDL/DML/COPY/SET and beacon's side-effecting extension statements, e.g. `ATTACH`,
+        // `CREATE SECRET`) reports an empty schema.
+        if self.read_only && !crate::statement_plan::plan_produces_result_set(&plan) {
+            anyhow::bail!(
+                "this database was opened read-only; writes are not permitted on this connection"
+            );
+        }
         crate::statement_plan::authorize_logical_plan(
             &plan,
             &self.session_ctx,
@@ -278,6 +291,16 @@ impl Runtime {
             }
             BeaconStatement::Detach(statement) => {
                 Ok(crate::statement_plan::detach_plan(statement))
+            }
+            BeaconStatement::CreateSecret(statement) => {
+                crate::statement_plan::create_secret_plan(statement)
+            }
+            BeaconStatement::DropSecret(statement) => {
+                Ok(crate::statement_plan::drop_secret_plan(statement))
+            }
+            BeaconStatement::ShowSecrets => Ok(crate::statement_plan::show_secrets_plan()),
+            BeaconStatement::Summarize(statement) => {
+                crate::statement_plan::summarize_plan(&self.session_ctx, statement).await
             }
             BeaconStatement::DFStatement(statement) => {
                 crate::statement_plan::lower_df_statement(&self.session_ctx, *statement).await

@@ -3,45 +3,46 @@ layout: home
 
 hero:
   name: "Beacon"
-  text: "A modern open-source data lakehouse for scientific data"
-  tagline: "Manage, query, and serve climate and scientific datasets from S3 Buckets, or local storage through SQL and JSON APIs."
+  text: "One query engine for scientific data — embed it or serve it"
+  tagline: "Query NetCDF, Zarr, Parquet, GeoTIFF and more in place, from local files or S3, with SQL. Embed the engine in Python with beacondb, or run it as a server with beacon-datalake."
   image:
     src: /hero.png
-    alt: VitePress
+    alt: Beacon
   actions:
     - theme: brand
       text: Get Started
-      link: /docs/1.8.0/getting-started
+      link: /docs/2.0.0/introduction
     - theme: alt
-      text: Read the Docs
-      link: /docs/1.8.0/introduction
-    - theme: alt
-      text: Explore Public Nodes 
+      text: Explore Public Nodes
       link: /available-nodes/available-nodes
 
 features:
+  - title: beacondb — embed it
+    icon: 🧪
+    details: "pip install beacondb — the whole engine in-process, DuckDB-class, backed by one portable beacon.db file. Query files from a notebook or ship it inside an app."
+    link: /docs/2.0.0/beacondb/
+    linkText: beacondb docs
+
+  - title: beacon-datalake — serve it
+    icon: 🛰️
+    details: The same engine as a server — HTTP + Arrow Flight SQL, a datasets store, crawlers, RBAC, a web admin UI, and client SDKs. Serve datasets to many clients.
+    link: /docs/2.0.0/getting-started
+    linkText: Run the server
+
   - title: Fast analytical queries
-    details: Built in Rust with Apache Arrow and DataFusion, Beacon is designed for efficient filtering, projection, and retrieval across large scientific datasets.
     icon: 🚀
+    details: Built in Rust with Apache Arrow and DataFusion, Beacon is designed for efficient filtering, projection, and retrieval across large scientific datasets.
 
   - title: Works with existing formats
-    details: Query NetCDF, Zarr, Parquet, CSV, ODV, Arrow, TIFF, Atlas and BBF datasets without converting everything into a proprietary warehouse.
     icon: 🧩
+    details: Query NetCDF, Zarr, Parquet, GeoParquet, CSV, ODV, HDF5, Arrow, TIFF, Atlas, Delta and BBF datasets in place — no converting everything into a proprietary warehouse.
 
-  - title: Create tables and views
-    details: Define external tables over existing files, create reusable SQL views, and expose curated datasets to downstream users and applications.
-    icon: 🧱
-
-  - title: SQL and JSON APIs
-    details: Serve scientific data through queryable SQL and JSON interfaces for portals, dashboards, notebooks, services, and data products.
+  - title: One SQL, everywhere
     icon: 🔌
-
-  - title: Query from your favorite tools
-    details: Use Arrow Flight SQL to connect Beacon to JDBC-compatible SQL clients such as DataGrip and DBeaver, or query datasets directly through JSON APIs.
-    icon: 🧭
+    details: The same SQL dialect and formats in both products. Create external and managed tables, views, secrets, and ATTACH remote Beacons — embedded or served.
 
   - title: Open source and self-hosted
-    details: Beacon is available under the AGPL-3.0 license, giving teams full control over deployment, data access, and infrastructure.
     icon: 🤝
+    details: Beacon is available under the AGPL-3.0 license, giving teams full control over deployment, data access, and infrastructure.
 
 ---

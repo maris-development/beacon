@@ -22,6 +22,38 @@ pub enum BeaconStatement {
     ShowIndexes(ShowIndexesStatement),
     Attach(AttachStatement),
     Detach(DetachStatement),
+    CreateSecret(CreateSecretStatement),
+    DropSecret(DropSecretStatement),
+    ShowSecrets,
+    Summarize(SummarizeStatement),
+}
+
+/// SUMMARIZE <table> | SUMMARIZE <query>
+#[derive(Debug, Clone)]
+pub struct SummarizeStatement {
+    /// The source to profile, as a SQL query string (a bare table name is wrapped as
+    /// `SELECT * FROM <name>`). The per-column statistics are generated from this.
+    pub source: String,
+}
+
+/// CREATE [PERSISTENT|TEMPORARY] SECRET <name> (TYPE <type>, <key> '<value>', …, SCOPE '<scope>')
+#[derive(Debug, Clone)]
+pub struct CreateSecretStatement {
+    /// Unique secret name.
+    pub name: String,
+    /// The `(...)` parameters verbatim (keys as typed). `TYPE` and `SCOPE` are extracted when the
+    /// plan is built; the rest become the credential options.
+    pub params: HashMap<String, String>,
+    /// `true` for `CREATE PERSISTENT SECRET` — encrypted into the database file. Default (and
+    /// `TEMPORARY`) is session-only.
+    pub persistent: bool,
+}
+
+/// DROP SECRET [IF EXISTS] <name>
+#[derive(Debug, Clone)]
+pub struct DropSecretStatement {
+    pub name: String,
+    pub if_exists: bool,
 }
 
 /// ATTACH '<url>' AS <name> [WITH ('token' '<t>', 'tls' 'true')]
@@ -331,6 +363,14 @@ impl Display for BeaconStatement {
             // The token, if any, is a credential — never render it.
             Self::Attach(s) => write!(f, "ATTACH '{}' AS {}", s.url, s.name),
             Self::Detach(s) => write!(f, "DETACH {}", s.name),
+            // Secret parameters are credentials — render only the name.
+            Self::CreateSecret(s) => write!(f, "CREATE SECRET {}", s.name),
+            Self::DropSecret(s) => {
+                let if_exists = if s.if_exists { "IF EXISTS " } else { "" };
+                write!(f, "DROP SECRET {if_exists}{}", s.name)
+            }
+            Self::ShowSecrets => write!(f, "SHOW SECRETS"),
+            Self::Summarize(s) => write!(f, "SUMMARIZE {}", s.source),
         }
     }
 }

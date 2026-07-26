@@ -85,7 +85,12 @@ export default defineConfig({
       {
         text: 'Docs', items: [
           {
-            text: '1.8.0 (latest)',
+            text: '2.0.0 (latest)',
+            link: '/docs/2.0.0/introduction',
+            activeMatch: '/docs/2.0.0/'
+          },
+          {
+            text: '1.8.0',
             link: '/docs/1.8.0/introduction',
             activeMatch: '/docs/1.8.0/introduction'
           },
@@ -114,6 +119,112 @@ export default defineConfig({
     ],
 
     sidebar: {
+      '/docs/2.0.0/': [
+        {
+          text: 'Overview',
+          items: [
+            { text: 'Introduction', link: '/docs/2.0.0/introduction' },
+            { text: 'Concepts', link: '/docs/2.0.0/concepts' },
+          ]
+        },
+        {
+          text: 'beacondb — The Database',
+          collapsed: false,
+          items: [
+            { text: 'Overview', link: '/docs/2.0.0/beacondb/' },
+            {
+              text: 'SQL Reference',
+              link: '/docs/2.0.0/beacondb/sql/',
+              collapsed: false,
+              items: [
+                { text: 'SELECT', link: '/docs/2.0.0/beacondb/sql/select' },
+                { text: 'WHERE', link: '/docs/2.0.0/beacondb/sql/where' },
+                { text: 'GROUP BY', link: '/docs/2.0.0/beacondb/sql/group-by' },
+                { text: 'JOIN', link: '/docs/2.0.0/beacondb/sql/join' },
+                { text: 'UNION BY NAME', link: '/docs/2.0.0/beacondb/sql/union-by-name' },
+                { text: 'CREATE TABLE', link: '/docs/2.0.0/beacondb/sql/create-table' },
+                { text: 'CREATE VIEW', link: '/docs/2.0.0/beacondb/sql/create-view' },
+                { text: 'CREATE MATERIALIZED VIEW', link: '/docs/2.0.0/beacondb/sql/create-materialized-view' },
+                { text: 'Managed Tables', link: '/docs/2.0.0/beacondb/sql/managed-tables' },
+                { text: 'Remote Tables & ATTACH', link: '/docs/2.0.0/beacondb/sql/remote-tables' },
+                { text: 'CREATE SECRET', link: '/docs/2.0.0/beacondb/sql/secrets' },
+                { text: 'SUMMARIZE', link: '/docs/2.0.0/beacondb/sql/summarize' },
+                { text: 'Table Functions', link: '/docs/2.0.0/beacondb/sql/table-functions' },
+                { text: 'Utility Table Functions', link: '/docs/2.0.0/beacondb/sql/table-functions-utility' },
+                { text: 'GeoParquet', link: '/docs/2.0.0/beacondb/sql/geoparquet' },
+                { text: 'Function Reference', link: '/docs/2.0.0/beacondb/sql/function-reference' },
+              ]
+            },
+            {
+              text: 'Python binding',
+              link: '/docs/2.0.0/beacondb/python/',
+              collapsed: false,
+              items: [
+                { text: 'Getting Started', link: '/docs/2.0.0/beacondb/python/getting-started' },
+                { text: 'Querying', link: '/docs/2.0.0/beacondb/python/querying' },
+                { text: 'Bringing data in', link: '/docs/2.0.0/beacondb/python/data-in' },
+                { text: 'Remote catalogs (ATTACH)', link: '/docs/2.0.0/beacondb/python/remote-catalogs' },
+                { text: 'Secrets', link: '/docs/2.0.0/beacondb/python/secrets' },
+                { text: 'SQLAlchemy', link: '/docs/2.0.0/beacondb/python/sqlalchemy' },
+                { text: 'API reference', link: '/docs/2.0.0/beacondb/python/api-reference' },
+                { text: 'Building from source', link: '/docs/2.0.0/beacondb/python/building' },
+              ]
+            },
+          ]
+        },
+        {
+          text: 'beacon-datalake — Server',
+          collapsed: false,
+          items: [
+            { text: 'Getting Started', link: '/docs/2.0.0/getting-started' },
+            {
+              text: 'Data Lakehouse Setup',
+              link: '/docs/2.0.0/data-lake',
+              collapsed: true,
+              items: [
+                { text: 'Supported Formats', link: '/docs/2.0.0/data-lake/datasets' },
+                { text: 'External Tables', link: '/docs/2.0.0/data-lake/external-tables' },
+                { text: 'GeoParquet', link: '/docs/2.0.0/data-lake/geoparquet' },
+                { text: 'Delta Lake', link: '/docs/2.0.0/data-lake/delta-lake' },
+                { text: 'SQL Databases', link: '/docs/2.0.0/data-lake/sql-databases' },
+                { text: 'Remote Tables (Federation)', link: '/docs/2.0.0/data-lake/remote-tables' },
+                { text: 'Views', link: '/docs/2.0.0/data-lake/view' },
+                { text: 'Crawlers', link: '/docs/2.0.0/data-lake/crawlers' },
+                { text: 'Extensions', link: '/docs/2.0.0/data-lake/extensions' },
+                { text: 'Configuration', link: '/docs/2.0.0/data-lake/configuration' },
+                { text: 'Performance Tuning', link: '/docs/2.0.0/data-lake/performance-tuning' },
+              ]
+            },
+            {
+              text: 'Connect',
+              collapsed: true,
+              items: [
+                { text: 'Python SDK', link: '/docs/2.0.0/connect/beacon-python-sdk' },
+                { text: 'TypeScript SDK', link: '/docs/2.0.0/connect/beacon-typescript-sdk' },
+                { text: 'CLI', link: '/docs/2.0.0/connect/beacon-datalake-cli' },
+                { text: 'Web Admin UI', link: '/docs/2.0.0/connect/web-admin-ui' },
+                { text: 'DataGrip / JDBC', link: '/docs/2.0.0/connect/jetbrains-datagrip' },
+                { text: 'Python ADBC', link: '/docs/2.0.0/connect/python-adbc' },
+              ]
+            },
+            {
+              text: 'API',
+              collapsed: true,
+              items: [
+                { text: 'Overview', link: '/docs/2.0.0/api/' },
+                { text: 'Querying', link: '/docs/2.0.0/api/querying/' },
+                { text: 'SQL Queries', link: '/docs/2.0.0/api/querying/sql' },
+                { text: 'JSON Queries', link: '/docs/2.0.0/api/querying/json' },
+                { text: 'Examples', link: '/docs/2.0.0/api/querying/examples' },
+                { text: 'Exploring the Lake', link: '/docs/2.0.0/api/exploring-data-lake' },
+              ]
+            },
+            { text: 'Access Control', link: '/docs/2.0.0/security/access-control' },
+            { text: 'MCP', link: '/docs/2.0.0/mcp' },
+            { text: 'SQL Reference →', link: '/docs/2.0.0/beacondb/sql/' },
+          ]
+        },
+      ],
       '/docs/1.8.0/': [
         {
           text: 'Introduction',

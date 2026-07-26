@@ -99,6 +99,8 @@ pub struct RuntimeBuilder {
     pub anonymous_username: Option<String>,
     /// Whether table-level grants are enforced for non-super-users.
     pub auth_enforce: bool,
+    /// Whether the runtime refuses all writes (a read-only open).
+    pub read_only: bool,
 
     pub type_widening: Option<Arc<dyn ArrowTypeWideningStrategy>>,
 }
@@ -239,6 +241,11 @@ impl RuntimeBuilder {
 
     /// Enables table-level grant enforcement for non-super-users. Off by default:
     /// without it, any authenticated identity may read any table.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
     pub fn with_auth_enforcement(mut self, enforce: bool) -> Self {
         self.auth_enforce = enforce;
         self
@@ -325,6 +332,7 @@ impl RuntimeBuilder {
             query_metrics,
             auth: auth_context,
             auth_enforce: self.auth_enforce,
+            read_only: self.read_only,
 
             tmp_dir,
         })
@@ -445,14 +453,17 @@ async fn init_session_ctx(
     auth_context: Arc<AuthContext>,
     session_cell: SessionCell,
 ) -> anyhow::Result<Arc<SessionContext>> {
-    let secrets_store = Arc::new(SecretStore::new_with_master_key(
-        builder.secrets_encryption_key,
-    ));
-
     let db_store: Arc<dyn ObjectStore> = match &builder.db_path {
         Some(db_path) => Arc::new(RedbStore::open(db_path)?),
         None => Arc::new(object_store::memory::InMemory::new()),
     };
+
+    // Persistent secrets live in the database file's own store; an in-memory database has nowhere
+    // durable to keep them, so persistence is unavailable there.
+    let secrets_store = Arc::new(
+        SecretStore::new_with_master_key(builder.secrets_encryption_key)
+            .with_persistence_store(builder.db_path.is_some().then(|| db_store.clone())),
+    );
 
     let config = build_session_config(
         builder,
@@ -525,7 +536,40 @@ async fn register_schema_provider(
     )
     .await?;
 
+    load_persisted_secrets_into_store(session_ctx).await;
+
     Ok(())
+}
+
+/// Load any secrets persisted (encrypted) in the database file into the in-memory secret store.
+///
+/// Requires both a master key and a persistence store (a file-backed database); with either
+/// absent there is nothing to load. A decrypt failure for one secret is logged and skipped by
+/// [`crate::secret_persistence::load_persisted_secrets`], so it never blocks opening the database.
+async fn load_persisted_secrets_into_store(session_ctx: &Arc<SessionContext>) {
+    let Some(secret_store) = session_ctx
+        .state()
+        .config()
+        .get_extension::<SecretStore>()
+    else {
+        return;
+    };
+    // Copy the key and clone the store handle so the extension is not borrowed across `add`.
+    let Some((key, store)) = secret_store
+        .master_key()
+        .copied()
+        .zip(secret_store.persistence_store().cloned())
+    else {
+        return;
+    };
+    match crate::secret_persistence::load_persisted_secrets(&store, &key).await {
+        Ok(secrets) => {
+            for secret in secrets {
+                secret_store.add(secret);
+            }
+        }
+        Err(error) => tracing::error!("failed to load persisted secrets: {error:#}"),
+    }
 }
 
 /// Registers the read-only `beacon.system` schema (functions, table functions,

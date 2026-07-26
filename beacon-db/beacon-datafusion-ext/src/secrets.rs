@@ -13,21 +13,30 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
+use object_store::ObjectStore;
 use parking_lot::RwLock;
 use url::Url;
 
 /// The object-store backend a [`Secret`] provides credentials for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum SecretType {
     S3,
     Gcs,
     Azure,
     Http,
+    /// Credentials for a remote Beacon instance's Flight SQL server (a bearer `token`, or
+    /// `username`/`password`). Unlike the object-store types this is not resolved by URL — it is
+    /// looked up by name when `ATTACH` references it.
+    Beacon,
 }
 
 impl SecretType {
-    /// Whether this secret type applies to a URL of the given scheme.
+    /// Whether this secret type applies to a URL of the given scheme. [`SecretType::Beacon`] is
+    /// never resolved by URL (it is referenced by name), so it matches no scheme.
     pub fn matches_scheme(&self, scheme: &str) -> bool {
         matches!(
             (self, scheme),
@@ -39,6 +48,46 @@ impl SecretType {
                 )
                 | (SecretType::Http, "http" | "https")
         )
+    }
+
+    /// Parse a `TYPE` token (case-insensitive), accepting the common aliases.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_uppercase().as_str() {
+            "S3" => Some(SecretType::S3),
+            "GCS" | "GS" => Some(SecretType::Gcs),
+            "AZURE" | "AZ" => Some(SecretType::Azure),
+            "HTTP" | "HTTPS" => Some(SecretType::Http),
+            "BEACON" => Some(SecretType::Beacon),
+            _ => None,
+        }
+    }
+
+    /// The lowercase name (for `SHOW SECRETS` and error messages).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SecretType::S3 => "s3",
+            SecretType::Gcs => "gcs",
+            SecretType::Azure => "azure",
+            SecretType::Http => "http",
+            SecretType::Beacon => "beacon",
+        }
+    }
+
+    /// The scheme-wide scope used when `SCOPE` is omitted (all of that backend).
+    pub fn default_scope(&self) -> &'static str {
+        match self {
+            SecretType::S3 => "s3://",
+            SecretType::Gcs => "gs://",
+            SecretType::Azure => "az://",
+            SecretType::Http => "https://",
+            SecretType::Beacon => "beacon://",
+        }
+    }
+
+    /// Whether the credential keys are Beacon Flight SQL credentials (`token`/`username`/`password`)
+    /// rather than `object_store` config keys — used to skip the S3-style option-name aliasing.
+    pub fn is_beacon(&self) -> bool {
+        matches!(self, SecretType::Beacon)
     }
 }
 
@@ -56,6 +105,9 @@ pub struct Secret {
     /// `secret_access_key`, `region`, `endpoint`, `session_token`,
     /// `allow_http`). Applied verbatim to the backend builder.
     pub options: HashMap<String, String>,
+    /// Whether this secret is persisted (encrypted) in the database file and reloaded at open, vs.
+    /// session-only (in memory for this process).
+    pub persistent: bool,
 }
 
 // Manual Debug: never print credential *values* (only the option keys), so a
@@ -69,6 +121,7 @@ impl fmt::Debug for Secret {
             .field("secret_type", &self.secret_type)
             .field("scope", &self.scope)
             .field("option_keys", &keys)
+            .field("persistent", &self.persistent)
             .finish()
     }
 }
@@ -83,6 +136,9 @@ impl fmt::Debug for Secret {
 pub struct SecretStore {
     secrets: RwLock<HashMap<String, Secret>>,
     master_key: Option<[u8; 32]>,
+    /// The object store persistent secrets are written to and reloaded from. `None` for an
+    /// in-memory database (`:memory:`), where persistence has nowhere durable to go.
+    persistence_store: Option<Arc<dyn ObjectStore>>,
 }
 
 impl SecretStore {
@@ -99,14 +155,32 @@ impl SecretStore {
         }
     }
 
+    /// Attach the object store persistent secrets live in (the database file's store). `None`
+    /// leaves persistence unavailable (persisting a secret then fails closed).
+    pub fn with_persistence_store(mut self, store: Option<Arc<dyn ObjectStore>>) -> Self {
+        self.persistence_store = store;
+        self
+    }
+
     /// The deployment master key, or `None` when credential encryption is disabled.
     pub fn master_key(&self) -> Option<&[u8; 32]> {
         self.master_key.as_ref()
     }
 
+    /// The store persistent secrets are written to, or `None` when persistence is unavailable
+    /// (an in-memory database).
+    pub fn persistence_store(&self) -> Option<&Arc<dyn ObjectStore>> {
+        self.persistence_store.as_ref()
+    }
+
     /// Insert (or replace) a secret, returning the previous one with that name.
     pub fn add(&self, secret: Secret) -> Option<Secret> {
         self.secrets.write().insert(secret.name.clone(), secret)
+    }
+
+    /// Look up a secret by name (a clone).
+    pub fn get(&self, name: &str) -> Option<Secret> {
+        self.secrets.read().get(name).cloned()
     }
 
     /// Remove a secret by name, returning it if present.
@@ -165,6 +239,7 @@ mod tests {
             secret_type: ty,
             scope: scope.to_string(),
             options: HashMap::new(),
+            persistent: false,
         }
     }
 
@@ -265,6 +340,7 @@ mod tests {
             secret_type: SecretType::S3,
             scope: "s3://".into(),
             options,
+            persistent: false,
         };
         let dbg = format!("{s:?}");
         assert!(!dbg.contains("AKIASECRET"), "leaked key id: {dbg}");

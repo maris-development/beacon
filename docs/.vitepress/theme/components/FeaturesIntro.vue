@@ -2,8 +2,8 @@
   <div class="feat-intro">
     <h2 class="feat-intro-title">Built for scientific data</h2>
     <p class="feat-intro-sub">
-      Serve your existing NetCDF, Zarr, Parquet and more as-is — fast,
-      standards-based SQL, fully open source.
+      Query your existing NetCDF, Zarr, Parquet and more as-is — fast,
+      standards-based SQL, fully open source. Embed it, or serve it.
     </p>
   </div>
 </template>

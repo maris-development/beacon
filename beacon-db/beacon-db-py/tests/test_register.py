@@ -122,3 +122,33 @@ def test_persist_over_an_existing_name_is_refused(con):
     # Refuse rather than silently overwrite persisted data — drop it first to replace.
     with pytest.raises(beacondb.Error):
         con.register("t", pa.table({"a": [2]}), persist=True)
+
+
+# ----------------------------------------------------------------------------------------
+# append (INSERT INTO an existing managed table)
+# ----------------------------------------------------------------------------------------
+
+
+def test_append_inserts_into_an_existing_table(con):
+    con.execute("CREATE TABLE obs (a BIGINT, b VARCHAR)")
+    con.append("obs", pa.table({"a": [1, 2], "b": ["x", "y"]}))
+    con.append("obs", pa.table({"a": [3], "b": ["z"]}))
+    assert con.sql("SELECT count(*) FROM obs").fetchall() == [(3,)]
+    assert con.sql("SELECT sum(a) FROM obs").fetchall() == [(6,)]
+
+
+def test_append_to_a_missing_table_errors(con):
+    with pytest.raises(beacondb.Error):
+        con.append("nope", pa.table({"a": [1]}))
+
+
+def test_append_survives_reopen_for_a_managed_table(tmp_path):
+    path = str(tmp_path / "beacon.db")
+    con = beacondb.connect(path)
+    con.execute("CREATE TABLE t (a BIGINT)")
+    con.append("t", pa.table({"a": [1, 2]}))
+    con.close()
+
+    reopened = beacondb.connect(path)
+    assert reopened.sql("SELECT sum(a) FROM t").fetchall() == [(3,)]
+    reopened.close()

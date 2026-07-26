@@ -10,6 +10,7 @@ pub mod query_result;
 pub mod runtime;
 pub mod runtime_builder;
 pub mod schema_persistence;
+pub(crate) mod secret_persistence;
 pub mod settings;
 mod statement_plan;
 pub(crate) mod system_schema;

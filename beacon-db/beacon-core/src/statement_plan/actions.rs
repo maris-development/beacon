@@ -80,8 +80,20 @@ pub(crate) async fn attach_remote(
     name: &str,
     url: &str,
     credential: beacon_datafusion_ext::remote::RemoteCredential,
+    secret: Option<String>,
     tls: bool,
 ) -> anyhow::Result<()> {
+    // A named `TYPE BEACON` secret is resolved now, from the session's secret store; otherwise the
+    // inline credential (if any) is used.
+    let credential = match secret {
+        Some(secret_name) => {
+            let stored = secret_store(session)?.get(&secret_name).ok_or_else(|| {
+                anyhow::anyhow!("ATTACH references secret '{secret_name}', which does not exist")
+            })?;
+            beacon_datafusion_ext::remote::RemoteCredential::from_secret(&stored)?
+        }
+        None => credential,
+    };
     crate::embedded::attach_remote_catalog(session, name, url, credential, tls).await
 }
 
@@ -92,6 +104,116 @@ pub(crate) async fn detach_remote(session: &Arc<SessionContext>, name: &str) -> 
         anyhow::bail!("no remote catalog named `{name}` is attached");
     }
     Ok(())
+}
+
+/// Recover the session's [`SecretStore`](beacon_datafusion_ext::secrets::SecretStore) extension.
+fn secret_store(
+    session: &SessionContext,
+) -> anyhow::Result<Arc<beacon_datafusion_ext::secrets::SecretStore>> {
+    session
+        .state()
+        .config()
+        .get_extension::<beacon_datafusion_ext::secrets::SecretStore>()
+        .ok_or_else(|| anyhow::anyhow!("secret store is not registered on the session"))
+}
+
+/// `CREATE [PERSISTENT] SECRET <name> (...)`: register object-store credentials.
+///
+/// A session (non-persistent) secret is added to the in-memory store only. A `PERSISTENT` secret is
+/// additionally written, encrypted, into the database file — which requires a master key and a
+/// file-backed database; beacon refuses to write a plaintext secret or to persist to `:memory:`.
+pub(crate) async fn create_secret(
+    session: &Arc<SessionContext>,
+    name: String,
+    secret_type: beacon_datafusion_ext::secrets::SecretType,
+    scope: String,
+    options: Vec<(String, String)>,
+    persistent: bool,
+) -> anyhow::Result<()> {
+    let store = secret_store(session)?;
+    let secret = beacon_datafusion_ext::secrets::Secret {
+        name,
+        secret_type,
+        scope,
+        options: options.into_iter().collect(),
+        persistent,
+    };
+    if persistent {
+        let key = store.master_key().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot persist secret '{}': no encryption key is configured (set \
+                 BEACON_SECRETS_KEY to a base64 32-byte key)",
+                secret.name
+            )
+        })?;
+        let persistence = store.persistence_store().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot persist secret '{}': persistent secrets require a file-backed database, \
+                 not an in-memory one",
+                secret.name
+            )
+        })?;
+        crate::secret_persistence::persist_secret(persistence, &secret, key).await?;
+    }
+    store.add(secret);
+    Ok(())
+}
+
+/// `DROP SECRET [IF EXISTS] <name>`. Also removes the persisted copy if the secret was persistent.
+pub(crate) async fn drop_secret(
+    session: &Arc<SessionContext>,
+    name: &str,
+    if_exists: bool,
+) -> anyhow::Result<()> {
+    let store = secret_store(session)?;
+    match store.remove(name) {
+        Some(secret) => {
+            if secret.persistent {
+                if let Some(persistence) = store.persistence_store() {
+                    crate::secret_persistence::remove_persisted_secret(persistence, name).await?;
+                }
+            }
+            Ok(())
+        }
+        None if if_exists => Ok(()),
+        None => anyhow::bail!("secret '{name}' does not exist"),
+    }
+}
+
+/// `SHOW SECRETS`: one row per secret — name, type, scope, and option *keys* (never values).
+pub(crate) async fn show_secrets(
+    session: &Arc<SessionContext>,
+) -> anyhow::Result<arrow::array::RecordBatch> {
+    use arrow::array::{ArrayRef, BooleanArray, StringArray};
+
+    let store = secret_store(session)?;
+    let mut secrets = store.list();
+    secrets.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let names: Vec<&str> = secrets.iter().map(|s| s.name.as_str()).collect();
+    let types: Vec<&str> = secrets.iter().map(|s| s.secret_type.as_str()).collect();
+    let scopes: Vec<&str> = secrets.iter().map(|s| s.scope.as_str()).collect();
+    let option_keys: Vec<String> = secrets
+        .iter()
+        .map(|s| {
+            let mut keys: Vec<&str> = s.options.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            keys.join(",")
+        })
+        .collect();
+    let persistent: Vec<bool> = secrets.iter().map(|s| s.persistent).collect();
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(names)),
+        Arc::new(StringArray::from(types)),
+        Arc::new(StringArray::from(scopes)),
+        Arc::new(StringArray::from(option_keys)),
+        Arc::new(BooleanArray::from(persistent)),
+    ];
+    Ok(arrow::array::RecordBatch::try_new(
+        super::logical::show_secrets_arrow_schema(),
+        columns,
+    )?)
 }
 
 /// Register a `CREATE EXTERNAL TABLE` via the listing-table factory and persist

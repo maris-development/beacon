@@ -38,6 +38,19 @@ impl std::fmt::Debug for RemoteCredential {
 }
 
 impl RemoteCredential {
+    /// Build a credential from a stored `TYPE BEACON` secret's options (`token`, or
+    /// `username`/`password`).
+    pub fn from_secret(secret: &crate::secrets::Secret) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            secret.secret_type == crate::secrets::SecretType::Beacon,
+            "secret '{}' is a {} secret, not a beacon secret",
+            secret.name,
+            secret.secret_type.as_str()
+        );
+        let option = |key: &str| secret.options.get(key).cloned();
+        Self::from_parts(option("token"), option("username"), option("password"))
+    }
+
     /// Build a credential from the individual pieces a user may supply (via keywords or SQL
     /// `WITH (...)`), rejecting ambiguous or incomplete combinations. Shared by the Python `attach`
     /// and the SQL `ATTACH` paths so both validate identically.

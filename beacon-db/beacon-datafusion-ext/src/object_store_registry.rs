@@ -221,6 +221,7 @@ mod tests {
             secret_type: SecretType::S3,
             scope: "s3://bucket".into(),
             options,
+            persistent: false,
         });
 
         let registry = LazyObjectStoreRegistry::new(secrets);
