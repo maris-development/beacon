@@ -1,22 +1,22 @@
-//! Compatibility helpers between atlas types and Beacon ND arrays.
+//! Conversion between atlas arrays/attributes and `beacon-nd-array` types.
 
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use atlas::{Attr, DType};
+use atlas::{ArraySchema, Attr, DType, FillValue, MergedSchema};
 use beacon_nd_array::{NdArray, NdArrayD, datatypes::TimestampNanosecond};
 
 use crate::backend::{AtlasArrayBackend, AtlasReadable, AttributeBackend};
 
-/// Arrow data type for an atlas array dtype, or `None` for dtypes that
-/// cannot be read through Beacon (`Bool`, `FixedSizeList`, `List`).
+/// Arrow type for a scalar atlas [`DType`], or `None` for the list dtypes
+/// (`List`, `FixedSizeList`) that have no rank-0 / column analogue in Beacon.
 ///
-/// Kept in lock-step with [`array_to_nd_array`] so the two paths produce
-/// matching field sets — every dtype that yields `Some(_)` here is one
-/// that `array_to_nd_array` will build a backend for.
-pub fn atlas_array_dtype_to_arrow(dtype: &DType) -> Option<DataType> {
+/// Kept in lock-step with the [`NdArrayType`](beacon_nd_array::datatypes::NdArrayType)
+/// → Arrow mapping the read path produces, so a schema derived here and a batch
+/// produced by the scan carry matching types.
+fn scalar_dtype_to_arrow(dtype: &DType) -> Option<DataType> {
     Some(match dtype {
-        DType::Bool => return None,
+        DType::Bool => DataType::Boolean,
         DType::Int8 => DataType::Int8,
         DType::Int16 => DataType::Int16,
         DType::Int32 => DataType::Int32,
@@ -30,138 +30,89 @@ pub fn atlas_array_dtype_to_arrow(dtype: &DType) -> Option<DataType> {
         DType::String => DataType::Utf8,
         DType::Binary => DataType::Binary,
         DType::TimestampNs => DataType::Timestamp(TimeUnit::Nanosecond, None),
-        DType::FixedSizeList { .. } | DType::List { .. } => return None,
+        DType::List { .. } | DType::FixedSizeList { .. } => return None,
     })
 }
 
-/// Arrow data type for an atlas attribute value.
-pub fn atlas_attr_to_arrow(attr: &Attr) -> DataType {
-    match attr {
-        Attr::Bool(_) => DataType::Boolean,
-        Attr::BoolList(_) => DataType::List(Arc::new(Field::new("item", DataType::Boolean, false))),
-        Attr::Int8(_) => DataType::Int8,
-        Attr::Int16(_) => DataType::Int16,
-        Attr::Int32(_) => DataType::Int32,
-        Attr::Int64(_) => DataType::Int64,
-        Attr::UInt8(_) => DataType::UInt8,
-        Attr::UInt16(_) => DataType::UInt16,
-        Attr::UInt32(_) => DataType::UInt32,
-        Attr::UInt64(_) => DataType::UInt64,
-        Attr::Float32(_) => DataType::Float32,
-        Attr::Float64(_) => DataType::Float64,
-        Attr::Int8List(_) => DataType::List(Arc::new(Field::new("item", DataType::Int8, false))),
-        Attr::Int16List(_) => DataType::List(Arc::new(Field::new("item", DataType::Int16, false))),
-        Attr::Int32List(_) => DataType::List(Arc::new(Field::new("item", DataType::Int32, false))),
-        Attr::Int64List(_) => DataType::List(Arc::new(Field::new("item", DataType::Int64, false))),
-        Attr::UInt8List(_) => DataType::List(Arc::new(Field::new("item", DataType::UInt8, false))),
-        Attr::UInt16List(_) => {
-            DataType::List(Arc::new(Field::new("item", DataType::UInt16, false)))
-        }
-        Attr::UInt32List(_) => {
-            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false)))
-        }
-        Attr::UInt64List(_) => {
-            DataType::List(Arc::new(Field::new("item", DataType::UInt64, false)))
-        }
-        Attr::Float32List(_) => {
-            DataType::List(Arc::new(Field::new("item", DataType::Float32, false)))
-        }
-        Attr::Float64List(_) => {
-            DataType::List(Arc::new(Field::new("item", DataType::Float64, false)))
-        }
-        Attr::String(_) => DataType::Utf8,
-        Attr::StringList(_) => DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
-        Attr::Binary(_) => DataType::Binary,
-        Attr::BinaryList(_) => {
-            DataType::List(Arc::new(Field::new("item", DataType::Binary, false)))
-        }
-        Attr::TimestampNanoseconds(_) => DataType::Timestamp(TimeUnit::Nanosecond, None),
+/// Arrow type for an atlas **array** dtype, or `None` for dtypes Beacon can't
+/// read as a column. `Bool` is excluded here (atlas's `ArrayElement` isn't
+/// implemented for `bool`), matching [`array_to_nd_array`]'s rejection.
+pub fn atlas_array_dtype_to_arrow(dtype: &DType) -> Option<DataType> {
+    match dtype {
+        DType::Bool => None,
+        other => scalar_dtype_to_arrow(other),
     }
 }
 
-/// Build the Arrow schema for an atlas dataset directly from its metadata
-/// — no NdArray backends are constructed.
-///
-/// Fields are sorted alphabetically by name to match the post-`sort_keys`
-/// ordering produced by [`crate::reader::dataset_from_atlas`], so the
-/// indices returned by `SchemaAdapter::map_schema` line up with the
-/// arrays/attributes a subsequent `dataset_from_atlas` call will include.
-///
-/// Arrays whose dtype is unsupported (see [`atlas_array_dtype_to_arrow`])
-/// are silently skipped, mirroring the runtime behavior of
-/// `dataset_from_atlas` which `warn!`-skips them.
-///
-/// When `read_dimensions` is `Some`, the result keeps only arrays whose
-/// dimensions are a subset of the requested list (attributes are rank-0
-/// and always survive). This mirrors
-/// `Dataset::project_with_dimensions`: requested dimensions must exist
-/// in the dataset, otherwise the function errors.
-pub fn atlas_view_arrow_schema(
-    view: &atlas::DatasetView,
-    read_dimensions: Option<&[String]>,
-) -> anyhow::Result<Schema> {
-    // let meta = view.schema();
-
-    // if let Some(requested) = read_dimensions {
-    //     let available: std::collections::HashSet<&str> = meta
-    //         .arrays
-    //         .values()
-    //         .flat_map(|s| s.dimension_names.iter().map(String::as_str))
-    //         .collect();
-    //     for dim in requested {
-    //         if !available.contains(dim.as_str()) {
-    //             anyhow::bail!(
-    //                 "dimension '{dim}' not found in atlas dataset '{}'",
-    //                 view.name()
-    //             );
-    //         }
-    //     }
-    // }
-
-    // let mut fields: Vec<Field> = Vec::with_capacity(meta.arrays.len());
-
-    // for (name, schema) in &meta.arrays {
-    //     let Some(dtype) = atlas_array_dtype_to_arrow(&schema.dtype) else {
-    //         continue;
-    //     };
-    //     if let Some(requested) = read_dimensions {
-    //         if !schema
-    //             .dimension_names
-    //             .iter()
-    //             .all(|d| requested.iter().any(|r| r == d))
-    //         {
-    //             continue;
-    //         }
-    //     }
-    //     fields.push(Field::new(name, dtype, true));
-    // }
-    // for (name, attr) in &meta.array_attrs {
-    //     fields.push(Field::new(name, atlas_attr_to_arrow(attr), true));
-    // }
-    // for (name, attr) in &meta.attrs {
-    //     fields.push(Field::new(name, atlas_attr_to_arrow(attr), true));
-    // }
-
-    // fields.sort_by(|a, b| a.name().cmp(b.name()));
-    // Ok(Schema::new(fields))
-    todo!()
+/// Arrow type for an atlas **attribute** dtype, or `None` for list-valued
+/// attributes (no rank-0 analogue). Scalar `Bool` attributes *are* supported.
+pub fn atlas_attr_dtype_to_arrow(dtype: &DType) -> Option<DataType> {
+    scalar_dtype_to_arrow(dtype)
 }
 
-/// Convert an atlas array (described by its [`atlas::ArraySchema`]) into a
-/// lazy [`NdArrayD`] backed by [`AtlasArrayBackend`].
+/// Build the Arrow schema for a whole atlas store from its collection-wide
+/// [`MergedSchema`] — **no per-dataset iteration and no disk I/O**.
 ///
-/// `FixedSizeList` and `List` dtypes are rejected with an explicit error —
-/// they have no analogue in Beacon's ND array model and silently skipping
-/// them would propagate dimension mismatches.
+/// The merged schema already widens every array/attribute dtype across all
+/// datasets (the same union `super_type_schema` would compute), so this is the
+/// scale-friendly replacement for opening and typing each dataset in turn.
 ///
-/// `fill_value` comes from [`atlas::DatasetView::array_fill_value`] and is
-/// converted to the per-dtype `T` via [`AtlasReadable::fill_element`].
+/// Columns mirror the reader's naming: arrays by name, per-array attributes as
+/// `{array}.{attr}`, dataset-level attributes by their bare key. Fields are
+/// sorted by name so the layout is stable (adaptation is by name, so order is
+/// cosmetic). When `read_dimensions` is `Some`, only arrays whose dimensions are
+/// a subset survive; rank-0 attributes (empty dimensions) always survive, so
+/// per-array attributes are emitted regardless of their array's dimensionality —
+/// matching what the scan produces after `resolve_read_dimensions`.
+pub fn atlas_merged_schema_to_arrow(
+    merged: &MergedSchema,
+    read_dimensions: Option<&[String]>,
+) -> Schema {
+    let mut fields: Vec<Field> = Vec::new();
+
+    for (name, arr) in &merged.arrays {
+        let dims_ok = read_dimensions
+            .map_or(true, |dims| arr.dimension_names.iter().all(|d| dims.contains(d)));
+        if dims_ok
+            && let Some(dt) = atlas_array_dtype_to_arrow(&arr.dtype.0)
+        {
+            fields.push(Field::new(name, dt, true));
+        }
+        for (attr, ty) in &arr.attributes {
+            if let Some(dt) = atlas_attr_dtype_to_arrow(&ty.0) {
+                fields.push(Field::new(format!("{name}.{attr}"), dt, true));
+            }
+        }
+    }
+
+    for (key, ty) in &merged.global_attributes {
+        if let Some(dt) = atlas_attr_dtype_to_arrow(&ty.0) {
+            fields.push(Field::new(key, dt, true));
+        }
+    }
+
+    fields.sort_by(|a, b| a.name().cmp(b.name()));
+    Schema::new(fields)
+}
+
+/// Convert an atlas array (described by its [`ArraySchema`]) into a lazy
+/// [`NdArrayD`] backed by [`AtlasArrayBackend`].
+///
+/// `Bool`, `FixedSizeList` and `List` dtypes are rejected with an explicit
+/// error — atlas's `ArrayElement` isn't implemented for `bool`, and Beacon's
+/// ND array model has no analogue for list dtypes. Silently skipping them would
+/// propagate dimension mismatches, so the caller (the reader) `warn!`-skips the
+/// column instead.
+///
+/// `fill_value` comes from
+/// [`DatasetView::array_fill_value`](atlas::DatasetView::array_fill_value) and
+/// is converted to the per-dtype `T` via [`AtlasReadable::fill_element`].
 pub fn array_to_nd_array(
     atlas: Arc<atlas::Atlas>,
     dataset_name: &str,
     array_name: &str,
-    schema: &atlas::ArraySchema,
-    fill_value: Option<atlas::FillValue>,
+    schema: &ArraySchema,
+    fill_value: Option<FillValue>,
 ) -> anyhow::Result<Arc<dyn NdArrayD>> {
     let shape = schema.shape.clone();
     let dimensions = schema.dimension_names.clone();
@@ -188,8 +139,8 @@ pub fn array_to_nd_array(
 
     match &schema.dtype {
         DType::Bool => Err(anyhow::anyhow!(
-            "Atlas array '{}' has dtype Bool which is not currently readable through Beacon \
-             (atlas's ArrayElement does not yet impl bool)",
+            "Atlas array '{}' has dtype Bool which is not readable through Beacon \
+             (atlas's ArrayElement does not implement bool)",
             array_name
         )),
         DType::Int8 => mk!(i8),
@@ -206,42 +157,68 @@ pub fn array_to_nd_array(
         DType::Binary => mk!(Vec<u8>),
         DType::TimestampNs => mk!(TimestampNanosecond),
         DType::FixedSizeList { .. } => Err(anyhow::anyhow!(
-            "Atlas array '{}' has unsupported dtype FixedSizeList — Beacon does not currently model fixed-size lists",
+            "Atlas array '{}' has unsupported dtype FixedSizeList — Beacon does not model \
+             fixed-size lists",
             array_name
         )),
         DType::List { .. } => Err(anyhow::anyhow!(
-            "Atlas array '{}' has unsupported dtype List — Beacon does not currently model variable-length lists",
+            "Atlas array '{}' has unsupported dtype List — Beacon does not model \
+             variable-length lists",
             array_name
         )),
     }
 }
 
-/// Convert an atlas attribute value into a rank-0 ND array.
-pub fn attribute_to_nd_array(_name: &str, attr: Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
-    // match attr {
-    //     Attr::Bool(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
-    //         v,
-    //     ))?)),
-    //     Attr::Int64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
-    //         v,
-    //     ))?)),
-    //     Attr::Float64(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
-    //         v,
-    //     ))?)),
-    //     Attr::String(v) => Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
-    //         v,
-    //     ))?)),
-    //     Attr::TimestampNanoseconds(v) => Ok(Arc::new(NdArray::new_with_backend(
-    //         AttributeBackend::new(TimestampNanosecond(v)),
-    //     )?)),
-    // }
-    todo!()
+/// Convert a scalar atlas attribute value into a rank-0 [`NdArrayD`].
+///
+/// List-valued attributes have no rank-0 scalar analogue in Beacon's ND array
+/// model and are rejected with an error (the caller `warn!`-skips them).
+pub fn attribute_to_nd_array(attr: &Attr) -> anyhow::Result<Arc<dyn NdArrayD>> {
+    macro_rules! scalar {
+        ($value:expr) => {
+            Ok(Arc::new(NdArray::new_with_backend(AttributeBackend::new(
+                $value,
+            ))?) as Arc<dyn NdArrayD>)
+        };
+    }
+
+    match attr {
+        Attr::Bool(v) => scalar!(*v),
+        Attr::Int8(v) => scalar!(*v),
+        Attr::Int16(v) => scalar!(*v),
+        Attr::Int32(v) => scalar!(*v),
+        Attr::Int64(v) => scalar!(*v),
+        Attr::UInt8(v) => scalar!(*v),
+        Attr::UInt16(v) => scalar!(*v),
+        Attr::UInt32(v) => scalar!(*v),
+        Attr::UInt64(v) => scalar!(*v),
+        Attr::Float32(v) => scalar!(*v),
+        Attr::Float64(v) => scalar!(*v),
+        Attr::String(v) => scalar!(v.clone()),
+        Attr::Binary(v) => scalar!(v.clone()),
+        Attr::TimestampNanoseconds(v) => scalar!(TimestampNanosecond(*v)),
+        Attr::BoolList(_)
+        | Attr::Int8List(_)
+        | Attr::Int16List(_)
+        | Attr::Int32List(_)
+        | Attr::Int64List(_)
+        | Attr::UInt8List(_)
+        | Attr::UInt16List(_)
+        | Attr::UInt32List(_)
+        | Attr::UInt64List(_)
+        | Attr::Float32List(_)
+        | Attr::Float64List(_)
+        | Attr::StringList(_)
+        | Attr::BinaryList(_) => Err(anyhow::anyhow!(
+            "list-valued attributes are not representable as Beacon rank-0 arrays"
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas::{ArraySchema, Codec, DType};
+    use atlas::{Atlas, Codec, DType, StoreConfig};
     use beacon_nd_array::{NdArray, datatypes::NdArrayDataType};
 
     fn schema_with_dtype(dtype: DType) -> ArraySchema {
@@ -254,50 +231,32 @@ mod tests {
         }
     }
 
-    // We can't actually open an atlas for the type-dispatch happy paths
-    // without a real store; instead exercise the rejection branches and
-    // the attribute conversion (which has no atlas dependency).
+    async fn dummy_atlas() -> Arc<Atlas> {
+        // The rejection branches return before touching the atlas handle, so we
+        // need a value but never read from it.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let atlas = Atlas::create_path(tmp.path(), StoreConfig::default())
+            .await
+            .expect("create dummy atlas");
+        std::mem::forget(tmp);
+        Arc::new(atlas)
+    }
 
-    #[test]
-    fn array_to_nd_array_rejects_bool() {
-        let dummy_atlas = dummy_atlas();
-        let err = array_to_nd_array(
-            dummy_atlas,
-            "ds",
-            "flag",
-            &schema_with_dtype(DType::Bool),
-            None,
-        )
-        .expect_err("Bool should be rejected");
+    #[tokio::test]
+    async fn array_to_nd_array_rejects_bool() {
+        let atlas = dummy_atlas().await;
+        let err = array_to_nd_array(atlas, "ds", "flag", &schema_with_dtype(DType::Bool), None)
+            .expect_err("Bool should be rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("Bool"), "{msg}");
         assert!(msg.contains("flag"), "{msg}");
     }
 
-    #[test]
-    fn array_to_nd_array_rejects_fixed_size_list() {
-        let dummy_atlas = dummy_atlas();
+    #[tokio::test]
+    async fn array_to_nd_array_rejects_list() {
+        let atlas = dummy_atlas().await;
         let err = array_to_nd_array(
-            dummy_atlas,
-            "ds",
-            "vectors",
-            &schema_with_dtype(DType::FixedSizeList {
-                child: Box::new(DType::Float32),
-                size: 4,
-            }),
-            None,
-        )
-        .expect_err("FixedSizeList should be rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("FixedSizeList"), "{msg}");
-        assert!(msg.contains("vectors"), "{msg}");
-    }
-
-    #[test]
-    fn array_to_nd_array_rejects_list() {
-        let dummy_atlas = dummy_atlas();
-        let err = array_to_nd_array(
-            dummy_atlas,
+            atlas,
             "ds",
             "events",
             &schema_with_dtype(DType::List {
@@ -311,28 +270,9 @@ mod tests {
         assert!(msg.contains("events"), "{msg}");
     }
 
-    fn dummy_atlas() -> Arc<atlas::Atlas> {
-        // The rejection branches return before touching the atlas handle,
-        // so we need a value but never invoke it. Build one on a fresh
-        // temp dir to keep the type system honest.
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let rt = tokio::runtime::Runtime::new().expect("rt");
-        let atlas = rt.block_on(async {
-            atlas::Atlas::create_path(tmp.path(), atlas::StoreConfig::default())
-                .await
-                .expect("create dummy atlas")
-        });
-        // Leak the tempdir so it stays alive for the duration of the test;
-        // the rejection paths never touch the filesystem so this is safe.
-        std::mem::forget(tmp);
-        Arc::new(atlas)
-    }
-
-    // ── attribute_to_nd_array ──────────────────────────────────────────
-
     #[tokio::test]
     async fn attribute_bool_round_trips() {
-        let nd = attribute_to_nd_array("flag", Attr::Bool(true)).expect("convert");
+        let nd = attribute_to_nd_array(&Attr::Bool(true)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::Bool);
         assert!(nd.shape().is_empty());
         let typed = nd
@@ -344,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn attribute_int64_round_trips() {
-        let nd = attribute_to_nd_array("count", Attr::Int64(42)).expect("convert");
+        let nd = attribute_to_nd_array(&Attr::Int64(42)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::I64);
         let typed = nd
             .as_any()
@@ -354,19 +294,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attribute_float64_round_trips() {
-        let nd = attribute_to_nd_array("scale", Attr::Float64(1.5)).expect("convert");
-        assert_eq!(nd.datatype(), NdArrayDataType::F64);
-        let typed = nd
-            .as_any()
-            .downcast_ref::<NdArray<f64>>()
-            .expect("downcast");
-        assert_eq!(typed.clone_into_raw_vec().await, vec![1.5f64]);
-    }
-
-    #[tokio::test]
     async fn attribute_string_round_trips() {
-        let nd = attribute_to_nd_array("season", Attr::String("winter".into())).expect("convert");
+        let nd = attribute_to_nd_array(&Attr::String("winter".into())).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::String);
         let typed = nd
             .as_any()
@@ -378,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn attribute_timestamp_round_trips() {
         let nanos = 1_700_000_000_000_000_000i64;
-        let nd = attribute_to_nd_array("ts", Attr::TimestampNanoseconds(nanos)).expect("convert");
+        let nd = attribute_to_nd_array(&Attr::TimestampNanoseconds(nanos)).expect("convert");
         assert_eq!(nd.datatype(), NdArrayDataType::Timestamp);
         let typed = nd
             .as_any()
@@ -388,5 +317,12 @@ mod tests {
             typed.clone_into_raw_vec().await,
             vec![TimestampNanosecond(nanos)]
         );
+    }
+
+    #[tokio::test]
+    async fn attribute_list_rejected() {
+        let err = attribute_to_nd_array(&Attr::Int32List(vec![1, 2, 3]))
+            .expect_err("list attribute should be rejected");
+        assert!(format!("{err:#}").contains("list-valued"));
     }
 }

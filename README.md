@@ -191,7 +191,7 @@ Beacon is configured entirely through `BEACON_*` environment variables. The most
 | `BEACON_PORT` | `5001` | HTTP server port. |
 | `BEACON_ADMIN_USERNAME` | `beacon-admin` | Admin username for management endpoints. |
 | `BEACON_ADMIN_PASSWORD` | `beacon-password` | Admin password — **change this in production**. |
-| `BEACON_LOG_LEVEL` | `info` | Log verbosity (`trace`, `debug`, `info`, `warn`, `error`). |
+| `RUST_LOG` | _(built-in)_ | Log filter in `tracing-subscriber` EnvFilter syntax (e.g. `info`, `beacon_core=trace`). |
 | `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. |
 | `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request specifies no source. |
 | `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |

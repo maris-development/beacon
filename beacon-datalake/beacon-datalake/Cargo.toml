@@ -54,9 +54,6 @@ object_store = { workspace = true }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 sysinfo = { workspace = true }
-# `DataLake::open_ephemeral` builds its data root in a temp dir, so this belongs
-# to the library, not only to the tests.
-tempfile = { workspace = true }
 
 # Local dependencies
 beacon-datalake-config = { path = "../beacon-datalake-config" }
@@ -65,8 +62,10 @@ beacon-datafusion-ext = { path = "../../beacon-db/beacon-datafusion-ext" }
 beacon-mcp = { path = "../beacon-mcp" }
 
 [dev-dependencies]
-# Tests build runtimes directly via `RuntimeBuilder` (ephemeral temp dirs + an
-# in-memory auth provider), so no test-only feature is needed.
+# Tests build runtimes directly via `RuntimeBuilder`, so no test-only feature is
+# needed.
 beacon-core = { path = "../../beacon-db/beacon-core" }
+# The test harness roots each lake in a temp dir; the library itself never does.
+tempfile = { workspace = true }
 # `tower::ServiceExt::oneshot` for driving the axum router in the HTTP auth tests.
 tower = { version = "0.5", features = ["util"] }

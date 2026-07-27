@@ -32,6 +32,7 @@ pub struct Config {
     pub api_docs: ApiDocsConfig,
     /// Resolved data-directory paths (root + sub-directories).
     pub data: DataDirsConfig,
+    pub s3: S3Config,
     pub secrets: SecretsConfig,
 }
 
@@ -74,7 +75,6 @@ pub struct OidcConfig {
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
-    pub log_level: String,
     pub worker_threads: usize,
     /// URL prefix for all HTTP routes, e.g. `/base-path`. Empty string means serve at `/`.
     pub base_path: String,
@@ -90,8 +90,6 @@ pub struct ServerConfig {
 pub struct RuntimeConfig {
     /// Query memory pool size, in **megabytes** (the runtime builder takes bytes).
     pub vm_memory_size: usize,
-    pub sanitize_schema: bool,
-    pub st_within_point_cache_size: usize,
     pub enable_sys_info: bool,
     pub batch_size: usize,
 }
@@ -195,18 +193,77 @@ impl std::fmt::Debug for SecretsConfig {
 /// ignored `BEACON_DATA_DIR` for everything except `indexes` and `cache`.)
 #[derive(Debug, Clone)]
 pub struct DataDirsConfig {
-    /// The root every other path below is derived from.
-    pub root: PathBuf,
     /// Datasets store: the files the lake uploads, downloads, and queries.
     pub datasets: PathBuf,
-    /// Directory holding the single-file tables store.
-    pub tables: PathBuf,
     /// The tables store itself: catalog plus managed table data, one redb file.
     pub db_file: PathBuf,
-    /// Scratch space for query output files.
     pub tmp: PathBuf,
-    pub indexes: PathBuf,
-    pub cache: PathBuf,
+}
+
+/// Settings for backing the **datasets** store with an S3-compatible bucket
+/// instead of the local `datasets/` directory.
+///
+/// Credentials, endpoint and region are *not* re-read here: the store is built
+/// with `AmazonS3Builder::from_env()`, so the whole standard `AWS_*` chain
+/// applies. `endpoint` and `region` are captured only to reconstruct the same
+/// bucket's base URL for native readers (netCDF-c), which open by URL rather
+/// than going through the object store.
+#[derive(Debug, Clone)]
+pub struct S3Config {
+    /// Whether the datasets store is an S3 bucket. When false every other field
+    /// here is inert and the datasets store is `BEACON_DATA_DIR/datasets`.
+    pub data_lake: bool,
+    /// Bucket holding the datasets. Required when `data_lake` is set;
+    /// [`Config::load`] rejects the combination if it is missing.
+    pub bucket: Option<String>,
+    /// Virtual-hosted-style addressing (`{bucket}.{host}`) instead of path-style
+    /// (`{endpoint}/{bucket}`).
+    pub enable_virtual_hosting: bool,
+    /// Allow plain `http://` endpoints. Useful for a local MinIO; leave off in
+    /// production.
+    pub allow_http: bool,
+    /// `AWS_ENDPOINT`, when set. Absent means real AWS.
+    pub endpoint: Option<String>,
+    /// `AWS_REGION`, when set.
+    pub region: Option<String>,
+}
+
+impl S3Config {
+    /// The base URL of the datasets bucket, for readers that open by URL instead
+    /// of through the object store.
+    ///
+    /// Mirrors the addressing `AmazonS3Builder` will use, so a native read and an
+    /// object-store read of the same dataset resolve to the same bytes. Returns
+    /// `None` when no bucket is configured.
+    pub fn native_base_url(&self) -> Option<String> {
+        let bucket = self.bucket.as_deref()?;
+        let base = match self.endpoint.as_deref() {
+            Some(endpoint) => {
+                let endpoint = endpoint.trim_end_matches('/');
+                if self.enable_virtual_hosting {
+                    // Splice the bucket in as the leading host label:
+                    // `https://minio:9000` -> `https://bucket.minio:9000`.
+                    match endpoint.split_once("://") {
+                        Some((scheme, host)) => format!("{scheme}://{bucket}.{host}"),
+                        None => format!("{bucket}.{endpoint}"),
+                    }
+                } else {
+                    format!("{endpoint}/{bucket}")
+                }
+            }
+            // No endpoint configured: address the bucket on real AWS. Region is
+            // part of the hostname there, defaulting to us-east-1 as the AWS SDKs do.
+            None => {
+                let region = self.region.as_deref().unwrap_or("us-east-1");
+                if self.enable_virtual_hosting {
+                    format!("https://{bucket}.s3.{region}.amazonaws.com")
+                } else {
+                    format!("https://s3.{region}.amazonaws.com/{bucket}")
+                }
+            }
+        };
+        Some(base)
+    }
 }
 
 #[derive(Debug, Envconfig)]
@@ -237,8 +294,6 @@ struct RawConfig {
     port: u16,
     #[envconfig(from = "BEACON_HOST", default = "0.0.0.0")]
     host: String,
-    #[envconfig(from = "BEACON_LOG_LEVEL", default = "info")]
-    log_level: String,
 
     //VM Settings
     /// Query memory pool size, in **megabytes**.
@@ -246,8 +301,6 @@ struct RawConfig {
     vm_memory_size: usize,
     #[envconfig(from = "BEACON_DEFAULT_TABLE", default = "default")]
     default_table: String,
-    #[envconfig(from = "BEACON_SANITIZE_SCHEMA", default = "false")]
-    sanitize_schema: bool,
     #[envconfig(from = "BEACON_ENABLE_SQL", default = "true")]
     enable_sql: bool,
     #[envconfig(from = "BEACON_FLIGHT_SQL_ENABLE", default = "true")]
@@ -275,8 +328,6 @@ struct RawConfig {
     sql_stream_coalesce_flush_timeout_ms: u64,
     #[envconfig(from = "BEACON_SQL_STREAM_COALESCE_MAX_ROWS", default = "262144")]
     sql_stream_coalesce_max_rows: usize,
-    #[envconfig(from = "BEACON_ST_WITHIN_POINT_CACHE_SIZE", default = "10000")]
-    st_within_point_cache_size: usize,
     #[envconfig(from = "BEACON_WORKER_THREADS", default = "8")]
     worker_threads: usize,
     #[envconfig(from = "BEACON_BASE_PATH", default = "")]
@@ -286,42 +337,28 @@ struct RawConfig {
     #[envconfig(from = "BEACON_WEB_UI_DIR", default = "web")]
     web_ui_dir: String,
 
+    // S3-backed datasets store. Off by default: the datasets store is the local
+    // `datasets/` directory unless BEACON_S3_DATA_LAKE is set.
+    #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
+    s3_data_lake: bool,
     #[envconfig(from = "BEACON_S3_BUCKET")]
     s3_bucket: Option<String>,
     #[envconfig(from = "BEACON_S3_ENABLE_VIRTUAL_HOSTING", default = "false")]
     s3_enable_virtual_hosting: bool,
-    #[envconfig(from = "BEACON_S3_DATA_LAKE", default = "false")]
-    s3_data_lake: bool,
-    // S3-compatible endpoint and region. Read from the standard AWS env vars so
-    // they can be captured into `S3Config` (the single source of truth) instead
-    // of being re-read from the environment at use time.
+    #[envconfig(from = "BEACON_S3_ALLOW_HTTP", default = "true")]
+    s3_allow_http: bool,
+    // S3-compatible endpoint and region. The store itself is built with
+    // `AmazonS3Builder::from_env()`, which reads these directly; they are captured
+    // here only so the native-reader base URL is derived from the same values.
     #[envconfig(from = "AWS_ENDPOINT")]
     aws_endpoint: Option<String>,
     #[envconfig(from = "AWS_REGION")]
     aws_region: Option<String>,
-    #[envconfig(from = "BEACON_S3_ALLOW_HTTP", default = "true")]
-    s3_allow_http: bool,
-    // Filesystem change events for the local datasets store. Off by default: the
-    // OS watcher (notify/FSEvents) can lag or replay stale events, and listings now
-    // read straight through to the backing store, so the watcher-maintained cache
-    // is not needed for correctness. Enable (BEACON_ENABLE_FS_EVENTS=true) to get
-    // live auto-refresh of external tables and event-driven crawler triggering when
-    // files change on disk (crawlers otherwise still run on their interval).
-    #[envconfig(from = "BEACON_ENABLE_FS_EVENTS", default = "false")]
-    enable_fs_events: bool,
-    #[envconfig(from = "BEACON_ENABLE_S3_EVENTS", default = "false")]
-    enable_s3_events: bool,
+
     // Maximum size, in bytes, accepted for a single dataset upload through the
     // admin API. `0` disables the cap. Default ~5 GiB.
     #[envconfig(from = "BEACON_MAX_UPLOAD_BYTES", default = "5368709120")]
     max_upload_bytes: u64,
-    // Part size advertised for chunked (resumable) uploads. Default 8 MiB (≥ S3's
-    // 5 MiB minimum part size).
-    #[envconfig(from = "BEACON_UPLOAD_PART_SIZE", default = "8388608")]
-    upload_part_size: usize,
-    // Idle timeout (seconds) before an abandoned chunked upload session is aborted.
-    #[envconfig(from = "BEACON_UPLOAD_SESSION_TTL_SECS", default = "3600")]
-    upload_session_ttl_secs: u64,
 
     // Others
     #[envconfig(from = "BEACON_ENABLE_SYS_INFO", default = "false")]
@@ -366,6 +403,8 @@ struct RawConfig {
     atlas_use_reader_cache: bool,
     #[envconfig(from = "BEACON_ATLAS_READER_CACHE_SIZE", default = "32")]
     atlas_reader_cache_size: u64,
+    #[envconfig(from = "BEACON_ATLAS_USE_PRUNING", default = "true")]
+    atlas_use_pruning: bool,
 
     /// The batch size for NetCDF reads, in number of rows. This is used for both local and MPIO reads.
     #[envconfig(from = "BEACON_BATCH_SIZE", default = "64000")]
@@ -433,7 +472,6 @@ impl From<RawConfig> for Config {
             server: ServerConfig {
                 port: raw.port,
                 host: raw.host,
-                log_level: raw.log_level,
                 worker_threads: raw.worker_threads,
                 base_path: raw.base_path,
                 web_ui_dir: raw.web_ui_dir,
@@ -441,8 +479,6 @@ impl From<RawConfig> for Config {
             },
             runtime: RuntimeConfig {
                 vm_memory_size: raw.vm_memory_size,
-                sanitize_schema: raw.sanitize_schema,
-                st_within_point_cache_size: raw.st_within_point_cache_size,
                 enable_sys_info: raw.enable_sys_info,
                 batch_size: raw.beacon_batch_size,
             },
@@ -483,6 +519,7 @@ impl From<RawConfig> for Config {
             atlas: AtlasConfig {
                 use_reader_cache: raw.atlas_use_reader_cache,
                 reader_cache_size: raw.atlas_reader_cache_size,
+                use_pruning: raw.atlas_use_pruning,
             },
             bbf: BbfConfig {
                 split_streams_slice: raw.bbf_split_streams_slice,
@@ -506,18 +543,37 @@ impl From<RawConfig> for Config {
                 let root = PathBuf::from(&raw.data_dir);
                 DataDirsConfig {
                     datasets: root.join("datasets"),
-                    tables: root.join("tables"),
                     db_file: root.join("tables").join("beacon.db"),
                     tmp: root.join("tmp"),
-                    indexes: root.join("indexes"),
-                    cache: root.join("cache"),
-                    root,
                 }
+            },
+            s3: S3Config {
+                data_lake: raw.s3_data_lake,
+                bucket: raw.s3_bucket,
+                enable_virtual_hosting: raw.s3_enable_virtual_hosting,
+                allow_http: raw.s3_allow_http,
+                endpoint: raw.aws_endpoint,
+                region: raw.aws_region,
             },
             // Decoded and validated in `Config::load` (see `secrets_key`).
             secrets: SecretsConfig { master_key: None },
         }
     }
+}
+
+/// Rejects storage settings that cannot produce a working datasets store.
+///
+/// An S3 lake without a bucket would otherwise surface as an opaque object-store
+/// error on the first query rather than at startup.
+fn validate_storage(s3: &S3Config) -> Result<()> {
+    if s3.data_lake && s3.bucket.is_none() {
+        return Err(ConfigError::InvalidStorage(
+            "BEACON_S3_DATA_LAKE is set but BEACON_S3_BUCKET is missing; \
+             the bucket is never inferred from AWS_ENDPOINT"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Decode a base64-encoded 32-byte master key from `BEACON_SECRETS_KEY`.
@@ -573,16 +629,20 @@ impl Config {
         }
         config.server.base_path =
             normalize_base_path(&config.server.base_path).map_err(ConfigError::InvalidBasePath)?;
+
+        validate_storage(&config.s3)?;
+
         // Create the configured data directories (idempotent). `db_file` is a file,
-        // not a directory — its parent (`tables`) is created here.
-        for dir in [
-            &config.data.root,
-            &config.data.datasets,
-            &config.data.tables,
-            &config.data.tmp,
-            &config.data.indexes,
-            &config.data.cache,
-        ] {
+        // not a directory — its parent is created here. The local datasets
+        // directory is skipped when the datasets store lives in S3.
+        let mut dirs = vec![config.data.tmp.clone()];
+        if let Some(parent) = config.data.db_file.parent() {
+            dirs.push(parent.to_path_buf());
+        }
+        if !config.s3.data_lake {
+            dirs.push(config.data.datasets.clone());
+        }
+        for dir in &dirs {
             create_dir(dir)?;
         }
         tracing::debug!(
@@ -660,7 +720,7 @@ fn create_dir(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, PathBuf, RawConfig, decode_master_key, normalize_base_path};
+    use super::{decode_master_key, normalize_base_path, validate_storage, Config, PathBuf, RawConfig};
     use envconfig::Envconfig;
     use std::collections::HashMap;
 
@@ -691,13 +751,97 @@ mod tests {
         let config = config(&[("BEACON_DATA_DIR", "/srv/beacon")]);
         let root = PathBuf::from("/srv/beacon");
 
-        assert_eq!(config.data.root, root);
         assert_eq!(config.data.datasets, root.join("datasets"));
-        assert_eq!(config.data.tables, root.join("tables"));
         assert_eq!(config.data.db_file, root.join("tables").join("beacon.db"));
         assert_eq!(config.data.tmp, root.join("tmp"));
-        assert_eq!(config.data.indexes, root.join("indexes"));
-        assert_eq!(config.data.cache, root.join("cache"));
+    }
+
+    /// The datasets store is local unless `BEACON_S3_DATA_LAKE` opts in, and the
+    /// bucket is never guessed from the endpoint.
+    #[test]
+    fn s3_datasets_store_is_opt_in() {
+        assert!(!config(&[]).s3.data_lake);
+        assert!(config(&[]).s3.bucket.is_none());
+
+        let s3 = config(&[
+            ("BEACON_S3_DATA_LAKE", "true"),
+            ("BEACON_S3_BUCKET", "my-bucket"),
+        ])
+        .s3;
+        assert!(s3.data_lake);
+        assert_eq!(s3.bucket.as_deref(), Some("my-bucket"));
+        // Path-style addressing and plain HTTP are the defaults (local MinIO).
+        assert!(!s3.enable_virtual_hosting);
+        assert!(s3.allow_http);
+    }
+
+    /// The native-reader base URL must address the same bucket the object store
+    /// does, under every combination of endpoint and addressing style.
+    #[test]
+    fn native_base_url_mirrors_the_object_store_addressing() {
+        let with = |vars: &[(&str, &str)]| config(vars).s3.native_base_url();
+
+        // A custom endpoint (MinIO): path-style appends the bucket, virtual-hosted
+        // splices it in as the leading host label — port and scheme preserved.
+        let minio = [
+            ("BEACON_S3_DATA_LAKE", "true"),
+            ("BEACON_S3_BUCKET", "datasets"),
+            ("AWS_ENDPOINT", "http://minio:9000"),
+        ];
+        assert_eq!(with(&minio).as_deref(), Some("http://minio:9000/datasets"));
+
+        let mut virtual_minio = minio.to_vec();
+        virtual_minio.push(("BEACON_S3_ENABLE_VIRTUAL_HOSTING", "true"));
+        assert_eq!(
+            with(&virtual_minio).as_deref(),
+            Some("http://datasets.minio:9000")
+        );
+
+        // A trailing slash on the endpoint must not double up.
+        let mut slashed = minio.to_vec();
+        slashed[2] = ("AWS_ENDPOINT", "http://minio:9000/");
+        assert_eq!(with(&slashed).as_deref(), Some("http://minio:9000/datasets"));
+
+        // No endpoint: real AWS, where the region is part of the hostname.
+        let aws = [
+            ("BEACON_S3_DATA_LAKE", "true"),
+            ("BEACON_S3_BUCKET", "datasets"),
+            ("AWS_REGION", "eu-west-1"),
+        ];
+        assert_eq!(
+            with(&aws).as_deref(),
+            Some("https://s3.eu-west-1.amazonaws.com/datasets")
+        );
+
+        let mut virtual_aws = aws.to_vec();
+        virtual_aws.push(("BEACON_S3_ENABLE_VIRTUAL_HOSTING", "true"));
+        assert_eq!(
+            with(&virtual_aws).as_deref(),
+            Some("https://datasets.s3.eu-west-1.amazonaws.com")
+        );
+
+        // Without a bucket there is nothing to address.
+        assert_eq!(with(&[]), None);
+    }
+
+    /// An S3 lake with no bucket is rejected at load time rather than failing as
+    /// an opaque object-store error on the first query.
+    #[test]
+    fn s3_lake_without_a_bucket_is_rejected() {
+        let err = validate_storage(&config(&[("BEACON_S3_DATA_LAKE", "true")]).s3)
+            .expect_err("an S3 lake with no bucket must not load");
+        assert!(err.to_string().contains("BEACON_S3_BUCKET"), "got: {err}");
+
+        // With a bucket it passes, and a local lake never needs one.
+        validate_storage(
+            &config(&[
+                ("BEACON_S3_DATA_LAKE", "true"),
+                ("BEACON_S3_BUCKET", "my-bucket"),
+            ])
+            .s3,
+        )
+        .expect("bucket supplied");
+        validate_storage(&config(&[]).s3).expect("local lake needs no bucket");
     }
 
     /// The out-of-the-box deployment posture. These defaults decide how a Beacon
@@ -731,19 +875,6 @@ mod tests {
         assert!(config.secrets.master_key().is_none());
     }
 
-    /// Every data sub-directory hangs off `BEACON_DATA_DIR`; the conversion only
-    /// derives the paths (creation happens in `Config::load`).
-    #[test]
-    fn data_dirs_derive_from_data_dir() {
-        let default = config(&[]);
-        assert_eq!(default.data.indexes, PathBuf::from("./data/indexes"));
-        assert_eq!(default.data.cache, PathBuf::from("./data/cache"));
-
-        let custom = config(&[("BEACON_DATA_DIR", "/srv/beacon")]);
-        assert_eq!(custom.data.indexes, PathBuf::from("/srv/beacon/indexes"));
-        assert_eq!(custom.data.cache, PathBuf::from("/srv/beacon/cache"));
-    }
-
     /// Booleans are parsed by `bool::from_str`, which accepts only the exact
     /// lowercase literals. Anything else is a hard error — a security-relevant
     /// setting is never silently coerced to `false`.
@@ -770,10 +901,7 @@ mod tests {
         assert!(raw(&[("BEACON_WORKER_THREADS", "-1")]).is_err());
         // Zero is accepted as-is (no floor is applied anywhere).
         assert_eq!(config(&[("BEACON_PORT", "0")]).server.port, 0);
-        assert_eq!(
-            config(&[("BEACON_BATCH_SIZE", "0")]).runtime.batch_size,
-            0
-        );
+        assert_eq!(config(&[("BEACON_BATCH_SIZE", "0")]).runtime.batch_size, 0);
     }
 
     /// A parse failure names the offending variable, so `ConfigError::EnvLoad`
@@ -797,7 +925,10 @@ mod tests {
         let printed = format!("{:?}", config);
         assert!(printed.contains("<set>"), "got: {printed}");
         assert!(!printed.contains("171"), "raw key bytes leaked: {printed}");
-        assert!(!printed.contains("ab, ab"), "raw key bytes leaked: {printed}");
+        assert!(
+            !printed.contains("ab, ab"),
+            "raw key bytes leaked: {printed}"
+        );
     }
 
     #[test]

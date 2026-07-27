@@ -117,8 +117,11 @@ impl FromFormat {
         &self,
         session_context: &SessionContext,
     ) -> datafusion::error::Result<Arc<dyn TableSource>> {
-        let file_format = self.file_format(session_context).await?;
+        // URLs first: a natively-read format needs the root store its location
+        // resolves against, so the format cannot be built until the paths are
+        // resolved. See `file_format`.
         let urls = self.listing_table_urls(session_context)?;
+        let file_format = self.file_format(session_context, &urls).await?;
 
         // Create a FileCollection as the table provider.
         let table =
@@ -138,6 +141,7 @@ impl FromFormat {
     async fn file_format(
         &self,
         session_context: &SessionContext,
+        urls: &[ListingTableUrl],
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
         match self {
             FromFormat::Csv { delimiter, .. } => Ok(Arc::new(CsvFormat::new(
@@ -145,12 +149,14 @@ impl FromFormat {
                 10_000,
             )) as Arc<dyn FileFormat>),
             FromFormat::Odv { .. } => Ok(Arc::new(OdvFormat::new()) as Arc<dyn FileFormat>),
-            FromFormat::Parquet { .. } => file_format_from_session(session_context, "parquet"),
-            FromFormat::Arrow { .. } => file_format_from_session(session_context, "arrow"),
-            FromFormat::NetCDF { .. } => file_format_from_session(session_context, "nc"),
-            FromFormat::Tiff { .. } => file_format_from_session(session_context, "tiff"),
-            FromFormat::Zarr { .. } => file_format_from_session(session_context, "zarr"),
-            FromFormat::Bbf { .. } => file_format_from_session(session_context, "bbf"),
+            FromFormat::Parquet { .. } => {
+                file_format_from_session(session_context, "parquet", urls)
+            }
+            FromFormat::Arrow { .. } => file_format_from_session(session_context, "arrow", urls),
+            FromFormat::NetCDF { .. } => file_format_from_session(session_context, "nc", urls),
+            FromFormat::Tiff { .. } => file_format_from_session(session_context, "tiff", urls),
+            FromFormat::Zarr { .. } => file_format_from_session(session_context, "zarr", urls),
+            FromFormat::Bbf { .. } => file_format_from_session(session_context, "bbf", urls),
         }
     }
 
@@ -192,17 +198,48 @@ impl FromFormat {
 /// Build a [`FileFormat`] from the factory registered on the session under
 /// `format` (its `get_ext` identity), with default options. This shares the
 /// runtime's configured factory rather than constructing a default format.
+///
+/// Built through [`FileFormatFactoryExt::create_with_native_root`] when the
+/// format has a beacon `Ext` factory and the query resolved at least one URL.
+/// A natively-read format (netCDF, HDF5) is opened by an external reader rather
+/// than streamed through the object store, so it needs the
+/// [`RootStore`](beacon_datafusion_ext::listing_factory::RootStore) its location
+/// resolves against in order to turn each listed object into a path that reader
+/// can open. Plain `create` yields a resolver that cannot resolve anything, which
+/// surfaces at scan time as "only supports local files and http/https".
+///
+/// Every path in one `FROM` resolves under the same configured datasets store, so
+/// the first URL anchors the root for all of them.
 fn file_format_from_session(
     session_context: &SessionContext,
     format: &str,
+    urls: &[ListingTableUrl],
 ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
     let state = session_context.state();
+    let options = std::collections::HashMap::new();
+
+    if let Some(url) = urls.first() {
+        if let Some(factory) =
+            beacon_datafusion_ext::format_ext::try_file_format_factory_ext(&state, format)
+        {
+            let listing_factory = state
+                .config()
+                .get_extension::<beacon_datafusion_ext::listing_factory::ListingFactory>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "listing factory is not registered on the session".to_string(),
+                    )
+                })?;
+            return factory.create_with_native_root(&state, &options, url, &listing_factory);
+        }
+    }
+
     let factory = state.get_file_format_factory(format).ok_or_else(|| {
         datafusion::error::DataFusionError::Execution(format!(
             "file format '{format}' is not registered on the session"
         ))
     })?;
-    factory.create(&state, &std::collections::HashMap::new())
+    factory.create(&state, &options)
 }
 
 // #[cfg(test)]

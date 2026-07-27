@@ -131,7 +131,7 @@ When `schedule` is set, Beacon runs the crawl on that interval. Scheduling re-li
 When `event_driven` is `true` **and** storage events are available, Beacon subscribes to change events under the prefix and runs an incremental crawl shortly after new or changed files appear (debounced to coalesce bursts). This gives lower latency than polling.
 
 :::warning Event availability
-Filesystem events require `BEACON_ENABLE_FS_EVENTS=true` (disabled by default; enable it for the local backend). On S3, change events are not yet wired up. If a crawler requests `event_driven` where events cannot fire **and** it has no `schedule`, Beacon falls back to a default poll interval so the crawler still makes progress rather than sitting idle, see [Configuration](#configuration).
+Storage change events are not currently wired up on any backend, so `event_driven` crawlers do not fire on file changes today. If a crawler requests `event_driven` **and** has no `schedule`, Beacon falls back to a default poll interval so the crawler still makes progress rather than sitting idle, see [Configuration](#configuration).
 :::
 
 ## Configuration

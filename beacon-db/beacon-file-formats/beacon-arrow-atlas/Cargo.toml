@@ -1,6 +1,6 @@
 [package]
 name = "beacon-arrow-atlas"
-version = "0.1.0"
+version = "1.7.3"
 edition = "2024"
 
 [dependencies]
@@ -12,17 +12,12 @@ anyhow = { workspace = true }
 futures = { workspace = true }
 indexmap = { workspace = true }
 tracing = { workspace = true }
-chrono = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-rmp-serde = {workspace = true}
-zstd = {workspace = true}
-lz4_flex = {workspace = true}
-ndarray = {workspace = true}
-atlas-rust = "0.12.0"
+ndarray = { workspace = true }
+chrono = { workspace = true }
 crossbeam = { workspace = true }
 moka = { workspace = true }
+atlas-rust = "0.14.0"
 
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
 beacon-nd-array = { path = "../beacon-nd-array" }

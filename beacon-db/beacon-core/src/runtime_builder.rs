@@ -6,6 +6,7 @@ use std::{
 
 use crate::crawler::{new_crawler_manager_handle, CrawlerConfig, CrawlerManager};
 use crate::schema_persistence::{init_tables, PersistentSchemaProvider};
+use beacon_arrow_atlas::datafusion::AtlasFormatFactory;
 use beacon_arrow_bbf::datafusion::BBFFormatFactory;
 use beacon_arrow_csv::datafusion::CsvFormatFactory;
 use beacon_arrow_geoparquet::datafusion::GeoParquetFormatFactory;
@@ -132,7 +133,7 @@ impl RuntimeBuilder {
     ///
     /// The backing object store is derived from `root` and registered under `url`
     /// (a local root becomes a `LocalFileSystem`, an https base an HTTP store), and
-    /// the native readers (netCDF/Atlas) open files under `root` directly. Without
+    /// the native readers (netCDF) open files under `root` directly. Without
     /// this call the runtime is in dynamic mode: paths resolve by their own scheme,
     /// or against the cwd when schemeless.
     pub fn with_default_store(mut self, url: ObjectStoreUrl, root: RootStore) -> Self {
@@ -619,6 +620,7 @@ fn register_file_formats(
         Arc::new(ArrowFormatFactory),
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory),
+        Arc::new(AtlasFormatFactory::new(Default::default(), Default::default())),
         Arc::new(BBFFormatFactory::new(Default::default())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(

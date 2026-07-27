@@ -1,7 +1,8 @@
 //! Shared harness for the transport integration tests.
 //!
-//! Each test gets its own lake with a temporary datasets root and an in-memory
-//! tables store, so nothing leaks between tests and nothing survives the run.
+//! Each test gets its own lake rooted in a fresh temporary directory — datasets,
+//! tables store and scratch space alike — so nothing leaks between tests and the
+//! whole lot is removed when the `TempDir` drops.
 
 use std::sync::Arc;
 
@@ -38,11 +39,31 @@ pub async fn test_lake() -> TestLake {
     lake_with(config(false)).await
 }
 
-/// A lake built from `config`.
-pub async fn lake_with(config: beacon_datalake_config::Config) -> TestLake {
-    let (lake, root) = DataLake::open_ephemeral(config)
+/// A lake built from `config`, with every path relocated under a fresh temp root.
+///
+/// The lake itself is an ordinary persistent one; throwaway state comes from the
+/// directory it is pointed at, not from a special mode on `DataLake`.
+pub async fn lake_with(mut config: beacon_datalake_config::Config) -> TestLake {
+    let root = tempfile::tempdir().expect("create temp data dir");
+    let base = root.path();
+
+    config.data.datasets = base.join("datasets");
+    config.data.tmp = base.join("tmp");
+    config.data.db_file = base.join("tables").join("beacon.db");
+    // A bucket would outlive the temp root, so tests are always local.
+    config.s3.data_lake = false;
+
+    for dir in [
+        &config.data.datasets,
+        &config.data.tmp,
+        &base.join("tables"),
+    ] {
+        std::fs::create_dir_all(dir).expect("create temp data dir");
+    }
+
+    let lake = DataLake::open(Arc::new(config))
         .await
-        .expect("ephemeral lake should open");
+        .expect("lake should open");
     TestLake {
         lake: Arc::new(lake),
         _root: root,

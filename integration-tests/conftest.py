@@ -207,7 +207,9 @@ def beacon_container(request, beacon_image, datasets_dir, tables_dir, docker_net
         "-e", f"BEACON_ADMIN_USERNAME={ADMIN_USERNAME}",
         "-e", f"BEACON_ADMIN_PASSWORD={ADMIN_PASSWORD}",
         "-e", f"BEACON_SECRETS_KEY={SECRETS_KEY}",
-        "-e", "BEACON_LOG_LEVEL=info",
+        # Log filter is RUST_LOG (tracing-subscriber EnvFilter); beacon applies a
+        # sensible built-in default when it is unset.
+        "-e", "RUST_LOG=info",
         beacon_image,
     ]
     started = _run(run_cmd)
@@ -304,7 +306,9 @@ def run_beacon_container(
         "-e", f"BEACON_ADMIN_USERNAME={ADMIN_USERNAME}",
         "-e", f"BEACON_ADMIN_PASSWORD={ADMIN_PASSWORD}",
         "-e", f"BEACON_SECRETS_KEY={SECRETS_KEY}",
-        "-e", "BEACON_LOG_LEVEL=info",
+        # Log filter is RUST_LOG (tracing-subscriber EnvFilter); beacon applies a
+        # sensible built-in default when it is unset.
+        "-e", "RUST_LOG=info",
     ]
     for key, value in (extra_env or {}).items():
         cmd += ["-e", f"{key}={value}"]

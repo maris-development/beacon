@@ -209,9 +209,8 @@ remote-pushed predicates to standard SQL comparisons where it matters.
 
 ### New files aren't picked up automatically
 
-Filesystem events require `BEACON_ENABLE_FS_EVENTS=true` and are disabled by default. Mounted Docker
-volumes can interfere with filesystem events, so test it in your deployment. On S3, change events are
-not yet wired up. A [crawler](/docs/2.0.0/data-lake/crawlers) with a schedule is the reliable option.
+Beacon does not watch storage for changes — neither local filesystem nor S3 change events are wired
+up. A [crawler](/docs/2.0.0/data-lake/crawlers) with a schedule is the way to pick up new files.
 
 ## Python
 

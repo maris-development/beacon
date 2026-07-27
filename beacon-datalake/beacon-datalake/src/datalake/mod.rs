@@ -22,11 +22,11 @@ pub mod uploads;
 use std::sync::Arc;
 
 use anyhow::Context;
-use beacon_datalake_config::Config;
 use beacon_core::runtime::Runtime;
 use beacon_core::runtime_builder::RuntimeBuilder;
 use beacon_core::settings::{SqlSettings, SqlStreamCoalesceSettings};
 use beacon_datafusion_ext::listing_factory::RootStore;
+use beacon_datalake_config::Config;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use object_store::ObjectStore;
 
@@ -50,23 +50,16 @@ pub struct DataLake {
 impl DataLake {
     /// Open the data lake described by `config`: build the datasets store, then
     /// start a runtime over it.
+    ///
+    /// A lake is always persistent — the tables store is the single redb file at
+    /// `config.data.db_file`. To get throwaway state, point `config` at a
+    /// temporary directory; there is no separate in-memory mode.
     pub async fn open(config: Arc<Config>) -> anyhow::Result<Self> {
-        Self::open_with(config, true).await
-    }
+        let (store, root) = build_datasets_store(&config)?;
+        let store_url =
+            ObjectStoreUrl::parse(DATASETS_STORE_URL).context("invalid datasets store URL")?;
 
-    /// `persist` selects the tables store: a single redb file at
-    /// `config.data.db_file`, or in-memory when false.
-    async fn open_with(config: Arc<Config>, persist: bool) -> anyhow::Result<Self> {
-        let datasets_dir = config.data.datasets.clone();
-        let store: Arc<dyn ObjectStore> = Arc::new(
-            object_store::local::LocalFileSystem::new_with_prefix(&datasets_dir).with_context(
-                || format!("failed to open the datasets store at {}", datasets_dir.display()),
-            )?,
-        );
-        let store_url = ObjectStoreUrl::parse(DATASETS_STORE_URL)
-            .context("invalid datasets store URL")?;
-
-        let runtime = build_runtime(&config, store_url, datasets_dir, store.clone(), persist)
+        let runtime = build_runtime(&config, store_url, root, store.clone())
             .await
             .context("failed to start the beacon runtime")?;
 
@@ -182,46 +175,6 @@ impl DataLake {
         self.uploads.abort(id).await
     }
 
-    /// Open a lake whose state is entirely ephemeral: datasets under a fresh
-    /// temporary directory, and — because no db path is set — an in-memory tables
-    /// store, so the catalog, managed data and auth directory all vanish with it.
-    ///
-    /// The returned [`TempDir`](tempfile::TempDir) owns the directory; drop it and
-    /// the datasets root disappears from under the runtime, so a caller must hold
-    /// it for as long as the lake is in use.
-    pub async fn open_ephemeral(
-        mut config: Config,
-    ) -> anyhow::Result<(Self, tempfile::TempDir)> {
-        let root = tempfile::tempdir().context("failed to create a temporary data directory")?;
-        let base = root.path();
-
-        config.data.root = base.to_path_buf();
-        config.data.datasets = base.join("datasets");
-        config.data.tables = base.join("tables");
-        config.data.tmp = base.join("tmp");
-        config.data.indexes = base.join("indexes");
-        config.data.cache = base.join("cache");
-        // Left pointing inside the temp root, but never used: `build_runtime`
-        // skips `with_db_path` for an ephemeral lake, which is what selects the
-        // in-memory tables store.
-        config.data.db_file = base.join("tables").join("beacon.db");
-
-        for dir in [
-            &config.data.datasets,
-            &config.data.tables,
-            &config.data.tmp,
-            &config.data.indexes,
-            &config.data.cache,
-        ] {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("failed to create {}", dir.display()))?;
-        }
-
-        let config = Arc::new(config);
-        let lake = Self::open_with(config, false).await?;
-        Ok((lake, root))
-    }
-
     /// The processing unit: authenticate a caller, then run queries.
     pub fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
@@ -238,6 +191,49 @@ impl DataLake {
     }
 }
 
+/// Build the datasets store: the bucket named by `BEACON_S3_BUCKET` when
+/// `BEACON_S3_DATA_LAKE` is set, otherwise the local `datasets/` directory.
+///
+/// Returns the store together with the [`RootStore`] describing the same data for
+/// native readers (netCDF-c), which open by path/URL instead of going through the
+/// object store. Both views must address the same bytes, so they are always
+/// derived together here.
+fn build_datasets_store(config: &Config) -> anyhow::Result<(Arc<dyn ObjectStore>, RootStore)> {
+    let s3 = &config.s3;
+    if !s3.data_lake {
+        let dir = config.data.datasets.clone();
+        let store = object_store::local::LocalFileSystem::new_with_prefix(&dir)
+            .with_context(|| format!("failed to open the datasets store at {}", dir.display()))?;
+        return Ok((Arc::new(store), RootStore::FileSystem(dir)));
+    }
+
+    // `Config::load` rejects the S3 lake without a bucket, so this only fires for
+    // a hand-built config.
+    let bucket = s3
+        .bucket
+        .as_deref()
+        .context("BEACON_S3_DATA_LAKE is set but no bucket is configured")?;
+
+    // Credentials, endpoint and region come from the standard AWS environment
+    // chain; only the bucket and addressing are Beacon's own settings.
+    let mut builder = object_store::aws::AmazonS3Builder::from_env()
+        .with_bucket_name(bucket)
+        .with_allow_http(s3.allow_http);
+    if s3.enable_virtual_hosting {
+        builder = builder.with_virtual_hosted_style_request(true);
+    }
+    let store = builder
+        .build()
+        .with_context(|| format!("failed to open the S3 datasets store for bucket '{bucket}'"))?;
+
+    let base = s3
+        .native_base_url()
+        .context("failed to derive the S3 datasets base URL")?;
+    tracing::info!(bucket, base_url = %base, "datasets store backed by S3");
+
+    Ok((Arc::new(store), RootStore::HttpsStore(base)))
+}
+
 /// Map the application config onto a runtime.
 ///
 /// This is the single place `beacon_datalake_config::Config` meets `RuntimeBuilder`: the
@@ -246,21 +242,17 @@ impl DataLake {
 async fn build_runtime(
     config: &Config,
     store_url: ObjectStoreUrl,
-    datasets_dir: std::path::PathBuf,
+    root: RootStore,
     store: Arc<dyn ObjectStore>,
-    persist: bool,
 ) -> anyhow::Result<Runtime> {
     let mut builder = RuntimeBuilder::new()
         .with_runtime_handle(tokio::runtime::Handle::current())
         // The store the lake owns; the root is what native readers (netCDF-c)
         // translate object paths against.
-        .with_default_store(store_url, RootStore::FileSystem(datasets_dir))
+        .with_default_store(store_url, root)
         .with_default_object_store(store)
         .with_tmp_dir_path(config.data.tmp.clone())
-        .with_admin_credentials(
-            config.admin.username.clone(),
-            config.admin.password.clone(),
-        )
+        .with_admin_credentials(config.admin.username.clone(), config.admin.password.clone())
         .with_auth_enforcement(config.auth.enforce)
         .with_batch_size(config.runtime.batch_size)
         // `BEACON_VM_MEMORY_SIZE` is megabytes (default 8192 = 8 GiB); the
@@ -280,12 +272,9 @@ async fn build_runtime(
             },
         });
 
-    // The single-file tables store (catalog + managed data + the auth directory).
-    // Without it the whole lot is in memory — there is no third mode where some
-    // of it persists.
-    if persist {
-        builder = builder.with_db_path(config.data.db_file.clone());
-    }
+    // The single-file tables store: catalog, managed data, and the auth directory.
+    builder = builder.with_db_path(config.data.db_file.clone());
+
     if config.sql.enable_nd_pipeline {
         builder = builder.with_nd_pipeline();
     }

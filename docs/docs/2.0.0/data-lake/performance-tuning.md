@@ -56,30 +56,16 @@ SQL parsing/execution is guarded by this flag.
 - Set to `true` to allow SQL queries.
 - Keep `false` if you only use the JSON query API and want to reduce exposed surface area.
 
-### Geospatial function cache
+### Object-store listing
 
-#### `BEACON_ST_WITHIN_POINT_CACHE_SIZE`
+#### `BEACON_S3_DATA_LAKE`, `BEACON_S3_BUCKET`, `BEACON_S3_ENABLE_VIRTUAL_HOSTING`
 
-Controls the cache capacity used by the `ST_WithinPoint` implementation.
-
-- Increase this if you run many repeated point-in-polygon style queries over similar geometries.
-- Reduce it if memory pressure is an issue and you don’t benefit from reuse.
-
-### Filesystem and object-store listing
-
-#### `BEACON_ENABLE_FS_EVENTS`
-
-When using local filesystem datasets, enabling filesystem events allows Beacon’s object-store layer to maintain an in-memory view of changes and avoid expensive directory rescans.
-
-- Enable (`true`) when datasets change frequently and you care about fast “list/search datasets” operations.
-- Keep disabled if you are on a platform where file watching is noisy/unsupported.
-
-#### `BEACON_S3_DATA_LAKE`, `BEACON_ENABLE_S3_EVENTS`, `BEACON_S3_BUCKET`, `BEACON_S3_ENABLE_VIRTUAL_HOSTING`
-
-These control whether Beacon uses S3-compatible object storage for datasets and how it addresses buckets.
+These control whether the datasets store lives in an S3-compatible bucket and how it is addressed.
+Object-store reads pay network latency on every listing and read.
 
 - For performance, prefer placing Beacon close (network-wise) to the object store.
-- If you see high latency when listing, consider enabling event-driven updates (`BEACON_ENABLE_S3_EVENTS`) if your S3 backend supports it.
+- If listings are slow, use a [crawler](/docs/2.0.0/data-lake/crawlers) so the catalog is
+  maintained in the background instead of rescanning at query time.
 
 ## NetCDF Tuning
 

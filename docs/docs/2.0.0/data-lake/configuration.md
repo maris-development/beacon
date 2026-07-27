@@ -21,7 +21,7 @@ the standard `AWS_*` names so they interoperate with existing AWS tooling (see
 | `BEACON_HOST` | `0.0.0.0` | IP address the HTTP API listens on. |
 | `BEACON_PORT` | `5001` | Port the HTTP API listens on. |
 | `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |
-| `BEACON_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` (case-insensitive). |
+| `RUST_LOG` | _(see below)_ | Log filter, in [`tracing-subscriber` EnvFilter](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax (e.g. `info`, `debug`, `beacon_core=trace`). When unset, Beacon applies a built-in filter of `info` with its own crates at `debug`. |
 | `BEACON_BASE_PATH` | _(empty)_ | Optional URL path prefix for the HTTP API, OpenAPI document, and Swagger UI (e.g. `/beacon`). Useful behind a reverse proxy. Normalized to exactly one leading slash and no trailing slash, so `beacon`, `/beacon`, and `/beacon/` are equivalent. Only URL-safe characters are allowed (letters, digits, `-`, `_`, `.`, `~`, and `/` as a separator); any other character causes Beacon to exit at startup with a descriptive error. |
 | `BEACON_WEB_UI_DIR` | `web` | Directory holding the built admin web UI. Served at `{BEACON_BASE_PATH}/admin` when the directory exists, and skipped otherwise. Resolved relative to the working directory (`/beacon/web` in the Docker image). |
 
@@ -74,8 +74,6 @@ rejected rather than writing plaintext.
 | `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request omits the source. Only applies to the JSON query API, SQL queries must always specify a source. |
 | `BEACON_ENABLE_PUSHDOWN_PROJECTION` | `true` | Push column projection down into file readers so only requested columns are decoded. |
 | `BEACON_ENABLE_ND_PIPELINE` | `false` | Enable the N-dimensional pipeline optimizer for zarr/netcdf reads: sink element-wise projections below the grid broadcast so `lat * 2` and similar run on the coordinate axis instead of the full cross-product. The base nd pipeline always runs; this only enables the node-rewriting optimization. |
-| `BEACON_SANITIZE_SCHEMA` | `false` | Sanitize dataset schemas (normalize column names/types) during discovery. |
-| `BEACON_ST_WITHIN_POINT_CACHE_SIZE` | `10000` | Cache size for `st_within_point` geometry lookups. |
 | `BEACON_BATCH_SIZE` | `64000` | Batch size, in rows, for NetCDF reads (local and MPIO). |
 | `BEACON_STATS_CACHE_CAPACITY` | `10000` | Maximum number of per-file statistics entries cached for query pruning. Read once at startup. |
 
@@ -115,42 +113,39 @@ Beacon keeps all local state under a single root directory.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_DATA_DIR` | `./data` | Root directory for all local data. |
-| `BEACON_ENABLE_FS_EVENTS` | `false` | Watch the local datasets directory so new files are picked up automatically (uses inotify on Linux). Set to `true` to enable live auto-refresh of external tables and event-driven crawler triggering. Not used with the S3 data lake. Mounted Docker volumes can interfere with filesystem events, test this in your deployment environment. |
 
-The following sub-directories are created under `BEACON_DATA_DIR` and used by
-Beacon:
+The following paths are created under `BEACON_DATA_DIR` and used by Beacon:
 
-| Sub-directory | Purpose |
+| Path | Purpose |
 | --- | --- |
 | `datasets/` | Local datasets store (the files you query in place). |
-| `tables/` | Persisted external tables, views, and managed-table definitions. |
+| `tables/beacon.db` | The single-file tables store: catalog, managed table data, and the auth directory. |
 | `tmp/` | Temporary files (e.g. materialized query output). |
-| `indexes/` | Dataset path/index data. |
-| `cache/` | Internal caches. |
 
 When mounting volumes with Docker, mount the sub-directories you want to persist
 (e.g. `-v ./datasets:/beacon/data/datasets`, `-v ./tables:/beacon/data/tables`).
 
 ## S3 object storage
 
-Set `BEACON_S3_DATA_LAKE=true` to back the **datasets** store with S3-compatible
-object storage instead of the local filesystem. The `tables/`, `tmp/`, `indexes/`,
-and `cache/` directories remain on local disk.
+Set `BEACON_S3_DATA_LAKE=true` to back the **datasets** store with an
+S3-compatible bucket instead of the local `datasets/` directory. Every file in the
+bucket is then discoverable and queryable, exactly as with a local datasets
+directory. `tables/beacon.db` and `tmp/` stay on local disk, so `BEACON_DATA_DIR`
+still applies.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_S3_DATA_LAKE` | `false` | Use S3-compatible object storage as the datasets store. When `false`, the local filesystem is used. |
-| `BEACON_S3_BUCKET` | _(none)_ | Bucket name. **Required** when `BEACON_S3_DATA_LAKE=true`, Beacon exits at startup if it is missing. Never inferred from the endpoint. |
+| `BEACON_S3_DATA_LAKE` | `false` | Use an S3-compatible bucket as the datasets store. When `false`, the local filesystem is used. |
+| `BEACON_S3_BUCKET` | _(none)_ | Bucket name. **Required** when `BEACON_S3_DATA_LAKE=true`; Beacon exits at startup if it is missing. Never inferred from the endpoint. |
 | `BEACON_S3_ENABLE_VIRTUAL_HOSTING` | `false` | Use virtual-hosted-style addressing (bucket in the host) instead of path-style (`{endpoint}/{bucket}/{key}`). |
 | `BEACON_S3_ALLOW_HTTP` | `true` | Allow plain `http://` endpoints (useful for local MinIO; disable for production). |
-| `BEACON_ENABLE_S3_EVENTS` | `false` | Reserved: wire S3 change notifications into the event listener. |
 
 ### S3 credentials and endpoint (`AWS_*`)
 
-Credentials and the endpoint are resolved through the standard AWS environment
-chain (object-store's `from_env`), so the usual `AWS_*` variables apply. The
-endpoint and region Beacon captures here always override the corresponding
-environment values.
+The bucket is opened with object-store's `AmazonS3Builder::from_env()`, so
+credentials, endpoint and region come from the standard AWS environment chain.
+The same variables also apply to `s3://` URLs used in external tables, where a
+per-table Beacon secret is layered on top and takes precedence.
 
 | Variable | Default | Description |
 | --- | --- | --- |

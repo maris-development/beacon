@@ -58,6 +58,9 @@ docker run -d --name beacon -p 5001:5001 \
   ghcr.io/maris-development/beacon:latest
 ```
 
+The bucket is opened through the standard AWS environment chain, so the same `AWS_*` variables also
+apply to `s3://` URLs in external tables. A secret attached to a specific table takes precedence.
+
 | Variable | Purpose |
 | --- | --- |
 | `BEACON_S3_DATA_LAKE` | Set to `true` to use object storage as the datasets store. |
@@ -67,8 +70,8 @@ docker run -d --name beacon -p 5001:5001 \
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Credentials, when the store requires them. |
 | `AWS_SKIP_SIGNATURE` | Set to `true` for public or anonymous buckets. |
 
-See [Configuration](/docs/2.0.0/data-lake/configuration#s3-object-storage) for every option, including virtual-hosted
-addressing and plain-HTTP endpoints for local MinIO.
+See [Configuration](/docs/2.0.0/data-lake/configuration#s3-object-storage) for every option, including
+virtual-hosted addressing and plain-HTTP endpoints for local MinIO.
 
 ## Performance notes
 

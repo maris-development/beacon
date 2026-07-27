@@ -34,6 +34,32 @@ pub fn parse_listing_table_url(
     // `split_path_and_glob`, and object stores want the plain path anyway, so
     // strip it up front. No-op on non-Windows / non-verbatim paths.
     let normalized = strip_windows_verbatim_prefix(glob_path);
+
+    // `file://` names a local path, so with no default store reduce it to the
+    // bare path and let it take exactly the same branch as a schemeless local
+    // one. Two things make this more than a shortcut:
+    //
+    // - The verbatim prefix has to be stripped *after* the scheme is removed. A
+    //   caller that URL-wraps a canonicalized path produces `file://\\?\C:\data`,
+    //   where `\\?\` is no longer leading; left in, it becomes `//?/` and the `?`
+    //   is then parsed as the URL's query, collapsing the whole location to
+    //   `file:///`.
+    // - The local branch preserves directory semantics (trailing slash), which
+    //   the verbatim-scheme path did not.
+    //
+    // With a default store the rewrite is skipped, so the mutual-exclusion check
+    // below still rejects a schemed path instead of silently treating it as
+    // relative to the default store.
+    let normalized = match default_store_url
+        .is_none()
+        .then(|| strip_file_scheme(normalized.as_ref()))
+        .flatten()
+    {
+        Some(local) => std::borrow::Cow::Owned(
+            strip_windows_verbatim_prefix(&local).into_owned(),
+        ),
+        None => normalized,
+    };
     let glob_path = normalized.as_ref();
 
     // Split the path into (base, optional glob) and detect a leading scheme
@@ -173,6 +199,32 @@ pub(crate) fn scheme_of(path: &str) -> Option<&str> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
         .then_some(scheme)
+}
+
+/// Reduce a `file://` URL to the local path it names, or `None` when `path` is
+/// not a `file://` URL.
+///
+/// `file:///C:/data` and `file://C:/data` both name `C:/data`; `file:///data`
+/// names `/data`. The scheme is matched case-insensitively (URL schemes are).
+/// A non-empty non-drive authority (`file://server/share`) keeps its leading
+/// slashes, so it stays a UNC path rather than being rewritten to a rooted one.
+fn strip_file_scheme(path: &str) -> Option<String> {
+    const PREFIX: &str = "file://";
+    let rest = path
+        .get(..PREFIX.len())
+        .filter(|p| p.eq_ignore_ascii_case(PREFIX))
+        .map(|_| &path[PREFIX.len()..])?;
+
+    // `file:///C:/data` leaves `/C:/data`; drop the slash that precedes a drive
+    // letter so the result is a plain Windows path.
+    let b = rest.as_bytes();
+    if b.first() == Some(&b'/')
+        && b.get(1).is_some_and(u8::is_ascii_alphabetic)
+        && b.get(2) == Some(&b':')
+    {
+        return Some(rest[1..].to_string());
+    }
+    Some(rest.to_string())
 }
 
 /// Strip a Windows extended-length (verbatim) path prefix — `\\?\C:\…` or the
@@ -452,6 +504,69 @@ mod tests {
         // Plain paths are untouched.
         assert_eq!(strip_windows_verbatim_prefix(r"C:\data\x.nc"), r"C:\data\x.nc");
         assert_eq!(strip_windows_verbatim_prefix("rel/x.nc"), "rel/x.nc");
+    }
+
+    /// A `file://` URL names a local path and must resolve to exactly what the
+    /// same path resolves to bare — including its directory semantics.
+    #[test]
+    fn file_urls_resolve_like_the_bare_local_path() {
+        let registry = DefaultObjectStoreRegistry::new();
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Canonicalized, so on Windows this is a `\\?\C:\…` verbatim path — the
+        // form that used to collapse to `file:///` once wrapped in a URL.
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        std::fs::write(canonical.join("a.csv"), "v\n1\n").expect("write");
+
+        let bare = format!("{}/", canonical.display());
+        let via_url = format!("file://{bare}");
+
+        let from_bare = parse_listing_table_url(None, &bare, &registry).unwrap();
+        let from_url = parse_listing_table_url(None, &via_url, &registry).unwrap();
+
+        assert_eq!(
+            from_url.as_str(),
+            from_bare.as_str(),
+            "a file:// URL must resolve identically to the bare path"
+        );
+        // Not degenerate: the location survived rather than collapsing to the root.
+        assert!(from_url.as_str().len() > "file:///".len(), "url={}", from_url.as_str());
+        // Trailing slash preserved, so the directory is listed, not opened.
+        assert!(from_url.as_str().ends_with('/'), "url={}", from_url.as_str());
+    }
+
+    #[test]
+    fn strip_file_scheme_handles_each_authority_form() {
+        // Rooted POSIX path.
+        assert_eq!(strip_file_scheme("file:///data/x.nc").as_deref(), Some("/data/x.nc"));
+        // Drive letter, with and without the extra slash.
+        assert_eq!(strip_file_scheme("file:///C:/data/x.nc").as_deref(), Some("C:/data/x.nc"));
+        assert_eq!(strip_file_scheme("file://C:/data/x.nc").as_deref(), Some("C:/data/x.nc"));
+        // Schemes are case-insensitive.
+        assert_eq!(strip_file_scheme("FILE:///data").as_deref(), Some("/data"));
+        // A non-drive authority stays a UNC path.
+        assert_eq!(
+            strip_file_scheme("file://server/share/x.nc").as_deref(),
+            Some("server/share/x.nc")
+        );
+        // Anything else is not a file URL.
+        assert_eq!(strip_file_scheme("s3://bucket/x.nc"), None);
+        assert_eq!(strip_file_scheme("/data/x.nc"), None);
+        assert_eq!(strip_file_scheme("file"), None);
+    }
+
+    /// With a default store configured, a `file://` path stays schemed so the
+    /// mutual-exclusion check rejects it — rather than being silently rewritten
+    /// into a path relative to the default store.
+    #[test]
+    fn file_url_with_a_default_store_is_still_rejected() {
+        let registry = registry_with_datasets();
+        let err = parse_listing_table_url(
+            Some(ObjectStoreUrl::parse("datasets://").unwrap()),
+            "file:///data/x.nc",
+            &registry,
+        )
+        .expect_err("a schemed path plus a default store must not resolve");
+        assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
     }
 
     #[cfg(windows)]

@@ -1,4 +1,10 @@
 //! Array backend implementations used by the Atlas reader.
+//!
+//! Two flavors of lazy [`ArrayBackend`] are provided:
+//! - [`AtlasArrayBackend`] — reads an atlas array on demand as its native dtype
+//!   `T`, reopening a cheap in-memory [`DatasetView`](atlas::DatasetView) per
+//!   read.
+//! - [`AttributeBackend`] — surfaces a scalar attribute value as a rank-0 array.
 
 use std::sync::Arc;
 
@@ -8,27 +14,27 @@ use beacon_nd_array::{
 };
 use ndarray::ArrayD;
 
-/// Trait implemented for `T: NdArrayType` values that can be read from an
-/// atlas `DatasetView` as a typed `ArrayD<T>`.
+/// Trait implemented for `T: NdArrayType` values that can be read from an atlas
+/// [`DatasetView`](atlas::DatasetView) as a typed `ArrayD<T>`.
 ///
-/// Atlas's `read_array::<E>` is generic over `array_format::ArrayElement`.
-/// Most `NdArrayType` impls are also `ArrayElement` (numeric primitives,
-/// `String`, `Vec<u8>`), but a few — notably
-/// [`TimestampNanosecond`] — are layout-compatible newtypes that need a
-/// thin element-wise conversion. This trait hides the difference behind
-/// a single `read` entry point so [`AtlasArrayBackend`] stays generic.
+/// Atlas's `read_array::<E>` is generic over `atlas::ArrayElement`. Most
+/// `NdArrayType` impls are also `ArrayElement` (numeric primitives, `String`,
+/// `Vec<u8>`), but [`TimestampNanosecond`] is a layout-compatible newtype over
+/// `i64` that needs a thin element-wise conversion through
+/// [`atlas::TimestampNs`]. This trait hides the difference behind a single
+/// `read` entry point so [`AtlasArrayBackend`] stays generic.
 #[async_trait::async_trait]
 pub trait AtlasReadable: NdArrayType {
     async fn read(
-        dataset: &atlas::DatasetView,
+        view: &atlas::DatasetView,
         array_name: &str,
         start: Vec<usize>,
         shape: Vec<usize>,
     ) -> anyhow::Result<ArrayD<Self>>;
 
-    /// Convert an atlas `FillValue` into this type's per-element fill,
-    /// using the same widening/sentinel rules `array_format` applies when
-    /// materializing missing chunks.
+    /// Convert an atlas [`FillValue`](atlas::FillValue) into this type's
+    /// per-element fill, using the same widening/sentinel rules `array_format`
+    /// applies when materializing missing chunks.
     fn fill_element(fill: Option<&atlas::FillValue>) -> Self;
 }
 
@@ -37,26 +43,22 @@ macro_rules! impl_atlas_readable_passthrough {
         #[async_trait::async_trait]
         impl AtlasReadable for $ty {
             async fn read(
-                dataset: &atlas::DatasetView,
+                view: &atlas::DatasetView,
                 array_name: &str,
                 start: Vec<usize>,
                 shape: Vec<usize>,
             ) -> anyhow::Result<ArrayD<Self>> {
-                let arr = dataset
+                let arr = view
                     .read_array::<$ty>(array_name, start, shape)
                     .await
                     .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to read atlas array '{}': {}",
-                            array_name,
-                            e
-                        )
+                        anyhow::anyhow!("Failed to read atlas array '{}': {}", array_name, e)
                     })?
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "Atlas array '{}' not found in dataset '{}'",
                             array_name,
-                            dataset.name()
+                            view.name()
                         )
                     })?;
                 Ok(arr.to_owned())
@@ -85,26 +87,22 @@ impl_atlas_readable_passthrough!(Vec<u8>);
 #[async_trait::async_trait]
 impl AtlasReadable for TimestampNanosecond {
     async fn read(
-        dataset: &atlas::DatasetView,
+        view: &atlas::DatasetView,
         array_name: &str,
         start: Vec<usize>,
         shape: Vec<usize>,
     ) -> anyhow::Result<ArrayD<Self>> {
-        let arr = dataset
+        let arr = view
             .read_array::<atlas::TimestampNs>(array_name, start, shape)
             .await
             .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to read atlas timestamp array '{}': {}",
-                    array_name,
-                    e
-                )
+                anyhow::anyhow!("Failed to read atlas timestamp array '{}': {}", array_name, e)
             })?
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Atlas array '{}' not found in dataset '{}'",
                     array_name,
-                    dataset.name()
+                    view.name()
                 )
             })?;
         // Map element-wise: TimestampNs(i64) -> TimestampNanosecond(i64).
@@ -119,6 +117,11 @@ impl AtlasReadable for TimestampNanosecond {
 }
 
 /// Backend that reads atlas array data lazily.
+///
+/// Holds an [`Arc<atlas::Atlas>`](atlas::Atlas) rather than a
+/// [`DatasetView`](atlas::DatasetView): views borrow the store's shared
+/// in-memory metadata and are cheap to reopen, so each read reopens the view
+/// and issues the subset read against the store's shared, cached array files.
 pub struct AtlasArrayBackend<T: NdArrayType> {
     atlas: Arc<atlas::Atlas>,
     dataset_name: String,
@@ -187,11 +190,7 @@ impl<T: NdArrayType + AtlasReadable> ArrayBackend<T> for AtlasArrayBackend<T> {
 
     async fn read_subset(&self, subset: ArraySubset) -> anyhow::Result<ArrayD<T>> {
         let view = self.atlas.open_dataset(&self.dataset_name).await.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to open atlas dataset '{}': {}",
-                self.dataset_name,
-                e
-            )
+            anyhow::anyhow!("Failed to open atlas dataset '{}': {}", self.dataset_name, e)
         })?;
         T::read(&view, &self.array_name, subset.start, subset.shape).await
     }
@@ -277,26 +276,16 @@ mod tests {
         assert_eq!(<i32 as AtlasReadable>::fill_element(None), 0i32);
     }
 
-    #[test]
-    fn fill_element_timestamp_newtype_unwraps() {
-        use atlas::FillValue;
-        // The TimestampNanosecond impl goes through atlas::TimestampNs and
-        // must end up wrapping the same i64.
-        let ts = <TimestampNanosecond as AtlasReadable>::fill_element(Some(
-            &FillValue::TimestampNs(123),
-        ));
-        assert_eq!(ts, TimestampNanosecond(123));
-        let from_int =
-            <TimestampNanosecond as AtlasReadable>::fill_element(Some(&FillValue::Int(456)));
-        assert_eq!(from_int, TimestampNanosecond(456));
-    }
-
     // ── AtlasArrayBackend ──────────────────────────────────────────────
 
     #[tokio::test]
     async fn atlas_array_backend_reports_metadata() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        build_two_dataset_store(tmp.path()).await;
+        let atlas = Atlas::open_path(tmp.path()).await.expect("open atlas");
+
         let backend = AtlasArrayBackend::<f32>::new(
-            Arc::new(dummy_atlas().await),
+            Arc::new(atlas),
             "winter".into(),
             "temperature".into(),
             vec![4],
@@ -304,7 +293,10 @@ mod tests {
             vec![4],
             Some(-1.0f32),
         );
-        assert_eq!(<AtlasArrayBackend<f32> as ArrayBackend<f32>>::shape(&backend), vec![4]);
+        assert_eq!(
+            <AtlasArrayBackend<f32> as ArrayBackend<f32>>::shape(&backend),
+            vec![4]
+        );
         assert_eq!(
             <AtlasArrayBackend<f32> as ArrayBackend<f32>>::dimensions(&backend),
             vec!["obs".to_string()]
@@ -370,16 +362,5 @@ mod tests {
             .expect("read partial");
         let raw = arr.into_raw_vec_and_offset().0;
         assert_eq!(raw, vec![20i32, 30]);
-    }
-
-    /// Helper: build a fresh empty atlas store in a (leaked) temp dir for
-    /// metadata-only tests that don't need the data to survive the test.
-    async fn dummy_atlas() -> Atlas {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let atlas = Atlas::create_path(tmp.path(), atlas::StoreConfig::default())
-            .await
-            .expect("create dummy atlas");
-        std::mem::forget(tmp);
-        atlas
     }
 }

@@ -237,9 +237,9 @@ dependencies = [
 
 [[package]]
 name = "array-format"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f894cd59132aa6a00c360fef55469100c39da19c556bbf44a46bd647f7252fae"
+checksum = "f7379c3303a9b9f0693ccd040d85da31e302a601efeafae8a6cb69341e42de41"
 dependencies = [
  "bytes",
  "futures",
@@ -1112,9 +1112,9 @@ dependencies = [
 
 [[package]]
 name = "atlas-rust"
-version = "0.12.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4caa9e7261b05e05bfaddb29dd15b7af95d061ae516638a4e0f8823f68715267"
+checksum = "b7a1d869e138e920030d87dc4dc54f78d6c84cbd9e78ffbdbbd793f887dee3b9"
 dependencies = [
  "array-format",
  "chrono",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-atlas"
-version = "0.1.0"
+version = "1.7.3"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1345,17 +1345,12 @@ dependencies = [
  "datafusion",
  "futures",
  "indexmap 2.14.0",
- "lz4_flex 0.11.6",
  "moka",
  "ndarray 0.17.2",
  "object_store 0.13.2",
- "rmp-serde",
- "serde",
- "serde_json",
  "tempfile",
  "tokio",
  "tracing",
- "zstd",
 ]
 
 [[package]]
@@ -1669,6 +1664,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64",
+ "beacon-arrow-atlas",
  "beacon-arrow-bbf",
  "beacon-arrow-csv",
  "beacon-arrow-geoparquet",
