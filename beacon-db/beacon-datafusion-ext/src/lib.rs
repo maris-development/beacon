@@ -1,3 +1,4 @@
+pub mod ordered_union;
 pub mod analyzer_rules;
 pub mod consts;
 pub mod file_collection;

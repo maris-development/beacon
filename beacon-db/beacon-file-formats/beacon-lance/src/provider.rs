@@ -18,7 +18,6 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::Dataset;
@@ -26,6 +25,7 @@ use lance::datafusion::LanceTableProvider;
 use lance::session::Session as LanceSession;
 
 use crate::definition::LanceTableDefinition;
+use beacon_datafusion_ext::ordered_union::OrderedUnionExec;
 use crate::io::WriteKind;
 use crate::sink::LanceDataSink;
 use crate::warehouse::LanceWarehouse;
@@ -130,9 +130,10 @@ async fn scan_fragment_group(
         scan.filter_expr(expr);
     }
 
-    // Row order across the union is not meaningful anyway, and an unordered scan
-    // lets Lance read within the group concurrently.
-    scan.scan_in_order(false);
+    // Scan each group in fragment order. Groups cover contiguous fragment ranges
+    // and OrderedUnionExec concatenates them in order, so the overall row order
+    // matches an unsplit scan exactly.
+    scan.scan_in_order(true);
     scan.create_plan().await.map_err(DataFusionError::from)
 }
 
@@ -183,8 +184,12 @@ impl TableProvider for LanceTable {
             start = end;
         }
 
-        // `try_new` returns the sole input unchanged when there is only one.
-        UnionExec::try_new(plans)
+        // OrderedUnionExec, not UnionExec: the children still decode concurrently,
+        // but their batches are emitted in child order through a single output
+        // partition, so row order is reproducible run to run. UnionExec exposes
+        // the children as separate partitions, which are collected in completion
+        // order and therefore shuffle rows between runs.
+        OrderedUnionExec::try_new(plans)
     }
 
     fn supports_filters_pushdown(

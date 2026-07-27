@@ -699,6 +699,14 @@ fn build_session_state(
             state_builder.with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
     }
 
+    // Make every partition merge order-preserving so query results are
+    // reproducible run to run. Appended last so it sees the CoalescePartitionsExec
+    // nodes the built-in rules insert (notably under a LIMIT).
+    // See beacon_datafusion_ext::ordered_union::OrderedCoalesce.
+    state_builder = state_builder.with_physical_optimizer_rule(Arc::new(
+        beacon_datafusion_ext::ordered_union::OrderedCoalesce,
+    ));
+
     Ok(state_builder.build())
 }
 
