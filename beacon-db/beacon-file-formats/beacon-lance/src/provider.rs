@@ -18,8 +18,10 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::Dataset;
 use lance::datafusion::LanceTableProvider;
 use lance::session::Session as LanceSession;
 
@@ -68,17 +70,70 @@ impl LanceTable {
 }
 
 /// Open the latest dataset version at `uri` (resolved through `session`'s
-/// object-store registry) as a Lance read provider.
-async fn open_read_provider(
-    uri: &str,
-    session: Arc<LanceSession>,
-) -> DataFusionResult<LanceTableProvider> {
+/// object-store registry).
+async fn open_dataset(uri: &str, session: Arc<LanceSession>) -> DataFusionResult<Arc<Dataset>> {
     let dataset = DatasetBuilder::from_uri(uri)
         .with_session(session)
         .load()
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-    Ok(LanceTableProvider::new(Arc::new(dataset), false, false))
+    Ok(Arc::new(dataset))
+}
+
+/// Open the latest dataset version at `uri` as a Lance read provider.
+async fn open_read_provider(
+    uri: &str,
+    session: Arc<LanceSession>,
+) -> DataFusionResult<LanceTableProvider> {
+    let dataset = open_dataset(uri, session).await?;
+    Ok(LanceTableProvider::new(dataset, false, false))
+}
+
+/// Build a scan plan restricted to `fragments`.
+///
+/// Lance's own `LanceTableProvider` scans every fragment through one scanner,
+/// which yields a single DataFusion partition; its internal reader concurrency
+/// then caps the whole scan at ~4 fragments in flight. Building one plan per
+/// fragment group and unioning them gives DataFusion real partitions, so the
+/// read and decode fan out across the runtime's threads.
+async fn scan_fragment_group(
+    dataset: &Arc<Dataset>,
+    schema: &SchemaRef,
+    range: std::ops::Range<usize>,
+    projection: Option<&Vec<usize>>,
+    filters: &[Expr],
+) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    let mut scan = dataset.scan();
+    // Slice here so the concrete `Fragment` type never appears in the signature
+    // (it lives in lance-table, which beacon-lance does not depend on directly).
+    scan.with_fragments(dataset.fragments()[range].to_vec());
+
+    match projection {
+        Some(p) if p.is_empty() => {
+            scan.empty_project().map_err(DataFusionError::from)?;
+        }
+        Some(p) => {
+            let columns: Vec<String> = p
+                .iter()
+                .map(|i| schema.field(*i).name().clone())
+                .collect();
+            scan.project(&columns).map_err(DataFusionError::from)?;
+        }
+        None => {}
+    }
+
+    if let Some((first, rest)) = filters.split_first() {
+        let mut expr = first.clone();
+        for f in rest {
+            expr = Expr::and(expr, f.clone());
+        }
+        scan.filter_expr(expr);
+    }
+
+    // Row order across the union is not meaningful anyway, and an unordered scan
+    // lets Lance read within the group concurrently.
+    scan.scan_in_order(false);
+    scan.create_plan().await.map_err(DataFusionError::from)
 }
 
 #[async_trait]
@@ -103,18 +158,43 @@ impl TableProvider for LanceTable {
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         // Reopen to the latest version so scans observe prior inserts/replaces.
-        let provider =
-            open_read_provider(&self.definition.location, self.warehouse.session()).await?;
-        provider.scan(state, projection, filters, limit).await
+        let dataset = open_dataset(&self.definition.location, self.warehouse.session()).await?;
+
+        let target = state.config_options().execution.target_partitions;
+        let n_frags = dataset.fragments().len();
+
+        // A LIMIT must not be applied per group (each would return `limit` rows),
+        // and splitting is pointless below two fragments or one target partition.
+        if limit.is_some() || target <= 1 || n_frags < 2 {
+            let provider = LanceTableProvider::new(dataset, false, false);
+            return provider.scan(state, projection, filters, limit).await;
+        }
+
+        // Spread fragments over at most `target` groups.
+        let groups = target.min(n_frags);
+        let per = n_frags.div_ceil(groups);
+        let mut plans = Vec::with_capacity(groups);
+        let mut start = 0;
+        while start < n_frags {
+            let end = (start + per).min(n_frags);
+            plans.push(
+                scan_fragment_group(&dataset, &self.schema, start..end, projection, filters).await?,
+            );
+            start = end;
+        }
+
+        // `try_new` returns the sole input unchanged when there is only one.
+        UnionExec::try_new(plans)
     }
 
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        // Report Inexact: Lance may use the predicate to prune, and DataFusion
-        // re-applies it for correctness.
-        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+        // Lance applies the predicate exactly (its own provider reports Exact for
+        // the same reason), so DataFusion does not need to re-apply it above the
+        // scan. Reporting Inexact here added a redundant FilterExec over every row.
+        Ok(vec![TableProviderFilterPushDown::Exact; filters.len()])
     }
 
     async fn insert_into(
