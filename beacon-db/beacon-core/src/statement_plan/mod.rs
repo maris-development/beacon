@@ -586,8 +586,15 @@ pub(crate) async fn execute_statement_plan_tracked(
     }
 
     let physical_plan = session_ctx.state().create_physical_plan(&plan).await?;
-    let stream =
-        datafusion::physical_plan::execute_stream(physical_plan.clone(), session_ctx.task_ctx())?;
+    // Order-preserving collect. DataFusion's `execute_stream` coalesces a
+    // multi-partition plan in *completion* order, which makes results
+    // non-reproducible run to run (most visibly `read_parquet(...) LIMIT 5`).
+    // This variant concatenates the partitions in index order instead; they still
+    // execute concurrently, bounded by the memory pool.
+    let stream = beacon_datafusion_ext::ordered_union::execute_stream_ordered(
+        physical_plan.clone(),
+        session_ctx.task_ctx(),
+    )?;
     let stream = CoalesceSqlStream::from_session(session_ctx).coalesce(stream);
 
     if stream.schema().fields().is_empty() {

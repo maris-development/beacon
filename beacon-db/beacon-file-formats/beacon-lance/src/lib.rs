@@ -19,7 +19,7 @@ pub mod definition;
 pub mod index;
 pub mod io;
 pub mod mutate;
-pub mod provider;
+mod provider;
 pub mod sink;
 pub mod warehouse;
 
