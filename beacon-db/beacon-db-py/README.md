@@ -15,8 +15,8 @@ else is referenced from it: netCDF/Zarr/Parquet files on disk or in S3, Delta an
 tables, remote Postgres/MySQL. Copy `beacon.db` and the managed lake travels with you.
 
 This is the engine linked **in-process**. There is no server and no HTTP; for talking to a
-running Beacon server, use [`beacon-datalake-cli`](../../clients/beacon-datalake-cli/) or
-[`@beacon/client`](../../clients/beacon-ts/).
+running Beacon server, use [`beacon-datalake-cli`](../../beacon-datalake-clients/beacon-datalake-cli/) or
+[`@beacon/client`](../../beacon-datalake-clients/beacon-ts/).
 
 ## Install
 

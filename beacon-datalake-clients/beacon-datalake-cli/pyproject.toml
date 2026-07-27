@@ -49,7 +49,7 @@ Homepage = "https://github.com/maris-development/beacon"
 Repository = "https://github.com/maris-development/beacon"
 Documentation = "https://maris-development.github.io/beacon/"
 Issues = "https://github.com/maris-development/beacon/issues"
-Source = "https://github.com/maris-development/beacon/tree/main/clients/beacon-datalake-cli"
+Source = "https://github.com/maris-development/beacon/tree/main/beacon-datalake-clients/beacon-datalake-cli"
 
 [project.scripts]
 beacon-datalake-cli = "beacon_datalake_cli.cli:app"

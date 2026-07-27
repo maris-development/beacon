@@ -151,15 +151,15 @@ The response is a streamed file in the chosen `output.format` (here, CSV). See t
 
 ### CLI
 
-Prefer the terminal? [`beacon-datalake-cli`](clients/beacon-datalake-cli) is a Python
+Prefer the terminal? [`beacon-datalake-cli`](beacon-datalake-clients/beacon-datalake-cli) is a Python
 terminal client that talks to a running server over the same `/api/*` endpoints —
 run SQL, explore tables/datasets/schemas, and export results without leaving the
 shell. Install it from a checkout of the repo:
 
 ```bash
-pip install -e clients/beacon-datalake-cli
+pip install -e beacon-datalake-clients/beacon-datalake-cli
 # or, with uv:
-uv pip install -e clients/beacon-datalake-cli
+uv pip install -e beacon-datalake-clients/beacon-datalake-cli
 ```
 
 This installs the `beacon-datalake-cli` console script:

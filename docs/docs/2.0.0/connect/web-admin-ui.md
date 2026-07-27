@@ -58,11 +58,11 @@ and expose `/admin` only to trusted operators.
 ## Running it standalone
 
 The bundled copy is enough for most deployments. To run the UI from source (for
-development) it lives in the `clients/` npm workspace and depends on the SDK,
+development) it lives in the `beacon-datalake-clients/` npm workspace and depends on the SDK,
 which must be built first:
 
 ```bash
-# from clients/
+# from beacon-datalake-clients/
 npm install                       # installs the JS workspace (beacon-ts + beacon-web)
 npm run build -w @beacon/client   # build the SDK so beacon-web can import it
 npm run dev -w @beacon/web        # start the Vite dev server
@@ -70,4 +70,4 @@ npm run dev -w @beacon/web        # start the Vite dev server
 
 Point it at any running Beacon server; the default CORS policy permits the dev
 server to call the API directly. The app source is in
-[`clients/beacon-web`](https://github.com/maris-development/beacon/tree/main/clients/beacon-web).
+[`beacon-datalake-clients/beacon-web`](https://github.com/maris-development/beacon/tree/main/beacon-datalake-clients/beacon-web).

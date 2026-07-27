@@ -3,11 +3,11 @@ name: TypeScript client
 on:
   push:
     paths:
-      - "clients/beacon-ts/**"
+      - "beacon-datalake-clients/beacon-ts/**"
       - ".github/workflows/client-ts.yml"
   pull_request:
     paths:
-      - "clients/beacon-ts/**"
+      - "beacon-datalake-clients/beacon-ts/**"
       - ".github/workflows/client-ts.yml"
 
 permissions:
@@ -15,7 +15,7 @@ permissions:
 
 defaults:
   run:
-    working-directory: clients/beacon-ts
+    working-directory: beacon-datalake-clients/beacon-ts
 
 jobs:
   build:
