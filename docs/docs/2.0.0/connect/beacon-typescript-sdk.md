@@ -10,7 +10,7 @@ server. It runs in **Node.js (18+)** and the **browser**, built on the global
 decodes Beacon's zstd-compressed Arrow IPC results into plain JS row objects, and
 ships a fluent, EF Core / LINQ-style query builder.
 
-It lives in the Beacon repository under [`clients/beacon-ts`](https://github.com/maris-development/beacon/tree/main/clients/beacon-ts).
+It lives in the Beacon repository under [`beacon-datalake-clients/beacon-ts`](https://github.com/maris-development/beacon/tree/main/beacon-datalake-clients/beacon-ts).
 
 ## Install
 

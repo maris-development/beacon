@@ -28,11 +28,11 @@ server URL and the admin Basic-auth credentials (`BEACON_ADMIN_USERNAME` /
 
 ## Prerequisites
 
-This package lives in the `clients/` npm workspace and depends on `@beacon/client`, which must
+This package lives in the `beacon-datalake-clients/` npm workspace and depends on `@beacon/client`, which must
 be built first (it resolves through its `dist/` output):
 
 ```bash
-# from clients/
+# from beacon-datalake-clients/
 npm install                       # installs the whole JS workspace (beacon-ts + beacon-web)
 npm run build -w @beacon/client   # build the SDK so beacon-web can import it
 ```
@@ -51,7 +51,7 @@ server to call it directly.
 ## Develop
 
 ```bash
-# from clients/beacon-web
+# from beacon-datalake-clients/beacon-web
 npm run dev        # Vite dev server on http://localhost:5173
 npm run typecheck  # tsc --noEmit
 npm run build      # production build to dist/

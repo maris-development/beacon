@@ -11,16 +11,16 @@ leaving the shell. It talks to the server's `/api/*` HTTP endpoints, decoding th
 zstd-compressed Arrow IPC result stream, and offers both one-shot subcommands and
 an interactive REPL.
 
-It ships in the Beacon repository under [`clients/beacon-datalake-cli`](https://github.com/maris-development/beacon/tree/main/clients/beacon-datalake-cli).
+It ships in the Beacon repository under [`beacon-datalake-clients/beacon-datalake-cli`](https://github.com/maris-development/beacon/tree/main/beacon-datalake-clients/beacon-datalake-cli).
 
 ## Install
 
 Requires Python 3.10+. Install it (editable) from a checkout of the repo:
 
 ```bash
-pip install -e clients/beacon-datalake-cli
+pip install -e beacon-datalake-clients/beacon-datalake-cli
 # or, with uv:
-uv pip install -e clients/beacon-datalake-cli
+uv pip install -e beacon-datalake-clients/beacon-datalake-cli
 ```
 
 This installs the `beacon-datalake-cli` console script.
@@ -105,5 +105,5 @@ beacon> \format parquet     -- set export format
 beacon> \x                  -- toggle expanded (vertical) rendering
 ```
 
-See the [`clients/beacon-datalake-cli` README](https://github.com/maris-development/beacon/tree/main/clients/beacon-datalake-cli)
+See the [`beacon-datalake-clients/beacon-datalake-cli` README](https://github.com/maris-development/beacon/tree/main/beacon-datalake-clients/beacon-datalake-cli)
 for the full command list and export options.

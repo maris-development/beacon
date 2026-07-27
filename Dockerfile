@@ -37,10 +37,10 @@ RUN cargo build --release -p beacon-datalake --features jemalloc
 # Build the admin web UI (Vite SPA) from the JS client workspace. The SDK
 # (@beacon/client) must be built before the web app, which imports from its dist.
 FROM node:20-slim AS webui
-WORKDIR /clients
-COPY clients/package.json clients/package-lock.json ./
-COPY clients/beacon-ts/ ./beacon-ts/
-COPY clients/beacon-web/ ./beacon-web/
+WORKDIR /beacon-datalake-clients
+COPY beacon-datalake-clients/package.json beacon-datalake-clients/package-lock.json ./
+COPY beacon-datalake-clients/beacon-ts/ ./beacon-ts/
+COPY beacon-datalake-clients/beacon-web/ ./beacon-web/
 RUN npm ci
 RUN npm run build --workspace beacon-ts
 RUN npm run build --workspace beacon-web
@@ -49,7 +49,7 @@ FROM ubuntu:latest AS runtime
 WORKDIR /beacon
 COPY --from=builder /target/release/beacon-datalake /beacon/
 # Bundle the built admin UI; beacon-datalake serves it at /admin (BEACON_WEB_UI_DIR=web).
-COPY --from=webui /clients/beacon-web/dist /beacon/web
+COPY --from=webui /beacon-datalake-clients/beacon-web/dist /beacon/web
 
 #Install Dependencies
 RUN apt-get update

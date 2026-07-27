@@ -14,9 +14,9 @@ on-demand formatting, and a status bar.
 ## Install
 
 ```bash
-pip install -e clients/beacon-datalake-cli
+pip install -e beacon-datalake-clients/beacon-datalake-cli
 # or, with uv:
-uv pip install -e clients/beacon-datalake-cli
+uv pip install -e beacon-datalake-clients/beacon-datalake-cli
 ```
 
 This installs the `beacon-datalake-cli` console script.
@@ -344,7 +344,7 @@ tests/              one test module per unit (client, config, formats, …)
 ## Development
 
 ```bash
-pip install -e "clients/beacon-datalake-cli[dev]"
-ruff check clients/beacon-datalake-cli
-pytest clients/beacon-datalake-cli
+pip install -e "beacon-datalake-clients/beacon-datalake-cli[dev]"
+ruff check beacon-datalake-clients/beacon-datalake-cli
+pytest beacon-datalake-clients/beacon-datalake-cli
 ```
