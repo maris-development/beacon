@@ -32,7 +32,9 @@ use object_store::{ObjectStore, ObjectStoreExt};
 
 pub use alter::{SchemaChange, alter_table};
 pub use definition::LanceTableDefinition;
-pub use index::{IndexInfo, ScalarIndexKind, create_index, drop_index, list_indices};
+pub use index::{
+    IndexInfo, ScalarIndexKind, create_default_indexes, create_index, drop_index, list_indices,
+};
 pub use io::WriteKind;
 pub use mutate::{delete_rows, update_rows};
 pub use provider::LanceTable;

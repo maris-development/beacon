@@ -1812,6 +1812,7 @@ dependencies = [
  "futures",
  "pyo3",
  "serde_json",
+ "tikv-jemallocator",
  "tokio",
 ]
 
@@ -1889,6 +1890,7 @@ dependencies = [
  "futures",
  "lance",
  "lance-core",
+ "lance-encoding",
  "lance-index",
  "lance-io",
  "object_store 0.13.2",

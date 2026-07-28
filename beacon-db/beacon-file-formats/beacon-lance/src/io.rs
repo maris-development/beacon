@@ -14,6 +14,7 @@ use futures::StreamExt;
 use lance::dataset::write::InsertBuilder;
 use lance::dataset::{WriteMode, WriteParams};
 use lance::session::Session;
+use lance_encoding::version::LanceFileVersion;
 
 /// Map an Arrow data type to one Lance can store. Lance 7.x does not support the
 /// Arrow "view" types (`Utf8View`/`BinaryView`) that DataFusion 53 produces for
@@ -28,18 +29,146 @@ pub(crate) fn lance_compatible_type(data_type: &DataType) -> DataType {
 
 /// A Lance-writable version of `schema` (view types widened to non-view).
 pub(crate) fn lance_compatible_schema(schema: &Schema) -> SchemaRef {
+    // Lance takes per-field encoding hints from Arrow field metadata.
+    //
+    // Lance used to store this data about 2x larger than parquet (27GB vs 14GB on
+    // ClickBench). Writing file version 2.2 (see `lance_storage_version`) closes
+    // most of that on its own, for free. Every *explicit* encoding lever was
+    // measured on a 20M-row subset and all of them cost more than the disk they
+    // save, so none is enabled by default:
+    //   zstd/lz4 on strings  -14%  but ~11x slower string scans
+    //   fsst on strings      +13%  (larger)
+    //   dictionary encoding   +5%  and 31x slower GROUP BY
+    //   max_rows_per_group      0%  (legacy-format knob, inert on v2.1)
+    //   minichunk 64KB          0%  and slightly slower numeric scans
+    // Note `compression = none` on a numeric column is a trap: it does not merely
+    // skip block compression, it short-circuits Lance's whole encoder chain and
+    // disables bitpacking and RLE too. That measured *larger* than the default
+    // (6.61GB vs 3.80GB on the 20M subset) and no faster.
+    //
+    // Note this also preserves any metadata already on the field: rebuilding with
+    // `Field::new` alone silently dropped it.
+    let compression = lance_string_compression();
+    let numeric_compression = lance_numeric_compression();
+    let minichunk = lance_minichunk_size();
     let fields = schema
         .fields()
         .iter()
         .map(|f| {
-            Arc::new(Field::new(
-                f.name(),
-                lance_compatible_type(f.data_type()),
-                f.is_nullable(),
-            ))
+            let mut metadata = f.metadata().clone();
+            if let Some(scheme) = compression.as_deref() {
+                if is_string_like(f.data_type()) {
+                    metadata
+                        .entry(COMPRESSION_META_KEY.to_string())
+                        .or_insert_with(|| scheme.to_string());
+                }
+            }
+            if let Some(scheme) = numeric_compression.as_deref() {
+                if !is_string_like(f.data_type()) {
+                    metadata
+                        .entry(COMPRESSION_META_KEY.to_string())
+                        .or_insert_with(|| scheme.to_string());
+                }
+            }
+            if let Some(size) = minichunk.as_deref() {
+                if !is_string_like(f.data_type()) {
+                    metadata
+                        .entry(MINICHUNK_SIZE_META_KEY.to_string())
+                        .or_insert_with(|| size.to_string());
+                }
+            }
+            Arc::new(
+                Field::new(
+                    f.name(),
+                    lance_compatible_type(f.data_type()),
+                    f.is_nullable(),
+                )
+                .with_metadata(metadata),
+            )
         })
         .collect::<Vec<_>>();
     Arc::new(Schema::new(fields))
+}
+
+/// Arrow field-metadata key Lance reads for a per-column compression scheme.
+const COMPRESSION_META_KEY: &str = "lance-encoding:compression";
+
+/// Optional compression scheme for managed Lance *string* columns.
+///
+/// Compression is applied only to string/binary columns, and only when asked
+/// for. Measured on a 20M-row ClickBench subset:
+///   * no compression : 5.15GB, string scan  126ms, int scan 12.5ms
+///   * zstd (all cols): 4.13GB, string scan 1334ms, int scan 42.1ms
+/// Block-compressing numerics is a bad trade (3x slower scans for little size),
+/// so numeric columns are never compressed here regardless of the setting.
+///
+/// `BEACON_LANCE_COMPRESSION=fsst|zstd|lz4` opts in; unset or `none` disables.
+fn lance_string_compression() -> Option<String> {
+    match std::env::var("BEACON_LANCE_COMPRESSION") {
+        Ok(v) if v.trim().is_empty() || v.eq_ignore_ascii_case("none") => None,
+        Ok(v) => Some(v),
+        Err(_) => None,
+    }
+}
+
+/// Optional compression scheme for managed Lance *numeric* columns.
+///
+/// From file version 2.2 Lance block-compresses any buffer over 32KB by default,
+/// which shrinks the dataset but slows numeric scans. Setting `none` here opts
+/// numeric columns back out while leaving strings compressed.
+///
+/// `BEACON_LANCE_NUMERIC_COMPRESSION=none|zstd|lz4`; unset means Lance's default.
+fn lance_numeric_compression() -> Option<String> {
+    let v = std::env::var("BEACON_LANCE_NUMERIC_COMPRESSION").ok()?;
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+/// Arrow field-metadata key for Lance's minichunk size (its decode unit for
+/// fixed-width columns). Sizes of 32KB and up need file version 2.2 or later;
+/// on 2.1 Lance logs a warning and ignores them.
+const MINICHUNK_SIZE_META_KEY: &str = "lance-encoding:minichunk-size";
+
+/// Lance file format version for new data.
+///
+/// Beacon writes 2.2, not Lance's 2.1 default. 2.2 is a stable version (Lance
+/// only treats `>= Next` as unstable) and adds RLE for whole blocks plus
+/// automatic block compression for buffers over 32KB. Measured on a 100M-row
+/// ClickBench table: 27GB -> 21.9GB (-19%) with query time unchanged
+/// (96.99s vs 95.01s over the 43-query suite, within run-to-run noise).
+///
+/// Appends to an existing table keep that table's own version, so this only
+/// affects newly created tables.
+///
+/// `BEACON_LANCE_VERSION=2.0|2.1|2.2` overrides.
+fn lance_storage_version() -> Option<LanceFileVersion> {
+    match std::env::var("BEACON_LANCE_VERSION")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("2.0") => Some(LanceFileVersion::V2_0),
+        Some("2.1") => Some(LanceFileVersion::V2_1),
+        _ => Some(LanceFileVersion::V2_2),
+    }
+}
+
+/// Optional minichunk size, in bytes, for fixed-width columns.
+///
+/// `BEACON_LANCE_MINICHUNK=<bytes>`; needs `BEACON_LANCE_VERSION=2.2` to take
+/// effect above 32KB.
+fn lance_minichunk_size() -> Option<String> {
+    let v = std::env::var("BEACON_LANCE_MINICHUNK").ok()?;
+    v.trim().parse::<i64>().ok().map(|n| n.to_string())
+}
+
+/// True for the types where block compression can pay for itself.
+fn is_string_like(dt: &arrow::datatypes::DataType) -> bool {
+    use arrow::datatypes::DataType::*;
+    matches!(
+        dt,
+        Utf8 | LargeUtf8 | Utf8View | Binary | LargeBinary | BinaryView
+    )
 }
 
 /// Cast a single batch to `target` (only the differing columns are cast).
@@ -120,6 +249,7 @@ pub async fn write_stream(
     let params = WriteParams {
         mode: kind.into(),
         session: Some(session),
+        data_storage_version: lance_storage_version(),
         ..Default::default()
     };
     InsertBuilder::new(uri)

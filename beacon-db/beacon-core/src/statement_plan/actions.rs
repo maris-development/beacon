@@ -471,7 +471,9 @@ pub(crate) async fn create_table(
     let warehouse = lance_warehouse(session)?;
     let namespace = beacon_lance::beacon_namespace();
     let table =
-        beacon_lance::create_lance_table(warehouse, &namespace, &table_name, &arrow_schema).await?;
+        beacon_lance::create_lance_table(warehouse.clone(), &namespace, &table_name, &arrow_schema)
+            .await?;
+    let location = table.definition().location.clone();
     let provider: Arc<dyn datafusion::catalog::TableProvider> = Arc::new(table);
 
     // Registration persists the table's `table.json` pointer via the PersistentSchemaProvider.
@@ -479,10 +481,48 @@ pub(crate) async fn create_table(
 
     if is_ctas {
         let stream = insert_into(session, &table_name, InsertOp::Append, child).await?;
-        Ok(Some(stream))
+        Ok(Some(build_default_indexes_after(
+            stream,
+            warehouse,
+            location,
+            arrow_schema,
+        )))
     } else {
         Ok(None)
     }
+}
+
+/// Run `stream` to completion, then build the table's default indexes.
+///
+/// The indexes have to be built after the rows exist, and CTAS hands its insert
+/// stream back to the caller rather than draining it here, so the build is
+/// chained onto the end of that stream instead of awaited inline.
+///
+/// A failure here is logged and swallowed: indexes are an optimisation, and a
+/// `CREATE TABLE AS SELECT` that wrote its rows correctly must not report failure
+/// because an index could not be built.
+fn build_default_indexes_after(
+    stream: SendableRecordBatchStream,
+    warehouse: Arc<beacon_lance::LanceWarehouse>,
+    location: String,
+    schema: datafusion::arrow::datatypes::SchemaRef,
+) -> SendableRecordBatchStream {
+    use futures::StreamExt;
+
+    let stream_schema = stream.schema();
+    let tail = futures::stream::once(async move {
+        if let Err(e) = beacon_lance::create_default_indexes(&warehouse, &location, &schema).await {
+            tracing::warn!(uri = %location, error = %e, "failed to build default indexes");
+        }
+    })
+    .filter_map(|()| std::future::ready(None));
+
+    Box::pin(
+        datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            stream_schema,
+            stream.chain(tail),
+        ),
+    )
 }
 
 /// Insert the rows produced by `child` into an existing table, returning the

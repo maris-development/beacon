@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lance::dataset::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE};
 use lance::session::Session;
 use lance_core::Result as LanceResult;
 use lance_io::object_store::{
@@ -97,9 +98,38 @@ pub struct LanceWarehouse {
     locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
+/// Memory pool for Lance's index builds, in bytes. Lance's own default is
+/// 100MB, which is not enough to sort a column of a large table: `CREATE INDEX`
+/// on a 100M-row table failed with "Resources exhausted ... 32.0 KB remain
+/// available for the total pool". With 1GB the same index builds in ~7s.
+const INDEX_BUILD_MEM_POOL: &str = "1073741824";
+
+/// Raise the memory limit Lance uses when building an index.
+///
+/// Lance reads this from the environment and offers no way to pass it in:
+/// `lance::index::scalar` hardcodes `LanceExecutionOptions::default()`, whose
+/// `mem_pool_size()` falls back to `$LANCE_MEM_POOL_SIZE`. So the environment is
+/// the only lever available to us.
+///
+/// Called from `LanceWarehouse::new` (runtime startup) rather than from
+/// `create_index`, because `set_var` is only sound while no other thread is
+/// reading the environment; startup is the safest point we control. An explicit
+/// `LANCE_MEM_POOL_SIZE` from the operator always wins.
+fn raise_index_build_memory_limit() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("LANCE_MEM_POOL_SIZE").is_none() {
+            // SAFETY: runs once, at runtime construction, before any beacon
+            // worker threads that might concurrently read the environment.
+            unsafe { std::env::set_var("LANCE_MEM_POOL_SIZE", INDEX_BUILD_MEM_POOL) };
+        }
+    });
+}
+
 impl LanceWarehouse {
     /// Build a warehouse over `store` (beacon's tables object store).
     pub fn new(store: Arc<DynObjectStore>) -> Self {
+        raise_index_build_memory_limit();
         let registry = ObjectStoreRegistry::default();
         registry.insert(
             SCHEME,
@@ -107,9 +137,17 @@ impl LanceWarehouse {
                 inner: store.clone(),
             }),
         );
-        // Cache sizes mirror Lance's classic entry-count defaults; they affect
-        // only caching, not correctness.
-        let session = Arc::new(Session::new(128, 128, Arc::new(registry)));
+        // Lance's cache capacities are in BYTES, weighed by each entry's size.
+        // They used to be entry counts, and the old `128, 128` here survived that
+        // API change as 128 *bytes* per cache: effectively no caching, so every
+        // scan re-read the dataset and column metadata. That is invisible on
+        // narrow tables and very expensive on wide ones (Lance notes column
+        // metadata alone can be ~40MB for a few hundred columns).
+        let session = Arc::new(Session::new(
+            DEFAULT_INDEX_CACHE_SIZE,
+            DEFAULT_METADATA_CACHE_SIZE,
+            Arc::new(registry),
+        ));
         Self {
             store,
             session,

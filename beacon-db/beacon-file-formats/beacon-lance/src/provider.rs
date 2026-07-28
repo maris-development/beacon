@@ -18,14 +18,15 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::scanner::MaterializationStyle;
 use lance::dataset::Dataset;
 use lance::datafusion::LanceTableProvider;
 use lance::session::Session as LanceSession;
 
 use crate::definition::LanceTableDefinition;
-use beacon_datafusion_ext::ordered_union::OrderedUnionExec;
 use crate::io::WriteKind;
 use crate::sink::LanceDataSink;
 use crate::warehouse::LanceWarehouse;
@@ -103,6 +104,7 @@ async fn scan_fragment_group(
     projection: Option<&Vec<usize>>,
     filters: &[Expr],
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    let projected_columns = projection.map_or_else(|| schema.fields().len(), |p| p.len());
     let mut scan = dataset.scan();
     // Slice here so the concrete `Fragment` type never appears in the signature
     // (it lives in lance-table, which beacon-lance does not depend on directly).
@@ -128,13 +130,63 @@ async fn scan_fragment_group(
             expr = Expr::and(expr, f.clone());
         }
         scan.filter_expr(expr);
+
+        // Only meaningful alongside a filter: materialization style decides which
+        // columns are read in full and filtered in memory ("early") versus read
+        // only at the matching row offsets ("late").
+        //
+        // Lance's heuristic decides per column: local storage calls a column early
+        // when its fixed byte width is under 10. It never considers how *many*
+        // columns are projected, so a wide projection makes almost every numeric
+        // column early and the scan reads the whole table no matter how few rows
+        // match. Measured on the 100M-row, 105-column ClickBench table, selecting
+        // all columns under a filter matching 0.016% of rows: 16.4s early vs 11.5s
+        // late; at 0.74% (738k rows) it is 3.4s vs 1.0s.
+        //
+        // Late is not free: it fetches matching rows individually, so it loses when
+        // the filter matches most of the table. Measured crossover, by fraction of
+        // rows matched:
+        //     0.016% ->  late 1.43x faster      1.6%  -> late 1.80x faster
+        //     0.74%  ->  late 3.28x faster       38%  -> late 1.09x slower
+        //     100%   ->  late 1.26x slower
+        // So the rule is width, not selectivity (which we cannot know at plan
+        // time): above `LATE_MATERIALIZATION_MIN_COLUMNS` the downside is a bounded
+        // ~10-25% on unselective filters and the upside is several fold, while
+        // narrow projections keep Lance's heuristic, where early costs little.
+        match lance_materialization_style() {
+            Some(style) => scan.materialization_style(style),
+            None if projected_columns > LATE_MATERIALIZATION_MIN_COLUMNS => {
+                scan.materialization_style(MaterializationStyle::AllLate)
+            }
+            None => &mut scan,
+        };
     }
 
     // Scan each group in fragment order. Groups cover contiguous fragment ranges
-    // and OrderedUnionExec concatenates them in order, so the overall row order
-    // matches an unsplit scan exactly.
+    // and land on output partitions in the same order, so concatenating the
+    // partitions in index order reproduces an unsplit scan exactly.
     scan.scan_in_order(true);
     scan.create_plan().await.map_err(DataFusionError::from)
+}
+
+/// Projection width above which a filtered scan switches to late materialization.
+/// See the crossover measurements in `scan_fragment_group`.
+const LATE_MATERIALIZATION_MIN_COLUMNS: usize = 16;
+
+/// Override for Lance's column materialization heuristic.
+///
+/// `BEACON_LANCE_MATERIALIZATION=late|early` forces all columns one way; unset
+/// keeps Lance's per-column heuristic.
+fn lance_materialization_style() -> Option<MaterializationStyle> {
+    match std::env::var("BEACON_LANCE_MATERIALIZATION")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("late") => Some(MaterializationStyle::AllLate),
+        Some("early") => Some(MaterializationStyle::AllEarly),
+        _ => None,
+    }
 }
 
 #[async_trait]
@@ -184,12 +236,23 @@ impl TableProvider for LanceTable {
             start = end;
         }
 
-        // OrderedUnionExec, not UnionExec: the children still decode concurrently,
-        // but their batches are emitted in child order through a single output
-        // partition, so row order is reproducible run to run. UnionExec exposes
-        // the children as separate partitions, which are collected in completion
-        // order and therefore shuffle rows between runs.
-        OrderedUnionExec::try_new(plans)
+        // Plain UnionExec: it maps child `i` onto output partition `i`, so the scan
+        // exposes one partition per fragment group and downstream operators (hash
+        // repartition, aggregation) fan out over them exactly as they do over a
+        // multi-file parquet scan.
+        //
+        // This does not cost determinism. UnionExec's child-to-partition mapping is
+        // itself deterministic; the run-to-run row shuffling comes from *merging*
+        // partitions in completion order, which happens in `CoalescePartitionsExec`.
+        // `OrderedCoalesce` rewrites every such node into an `OrderedUnionExec`, and
+        // `execute_stream_ordered` does the same for the final collection, so order
+        // is restored at the points where partitions actually converge.
+        //
+        // Collapsing to a single partition here instead (which is what this used to
+        // do) made the scan a serialization point: DataFusion put a
+        // `RepartitionExec: RoundRobinBatch(N)` directly above it to fan the rows
+        // back out, so every row crossed one channel and was then copied again.
+        Ok(Arc::new(UnionExec::new(plans)))
     }
 
     fn supports_filters_pushdown(

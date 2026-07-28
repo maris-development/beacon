@@ -2,9 +2,17 @@
 //!
 //! Lance supports native secondary indexes — something Iceberg/Delta lack.
 //! Beacon exposes the scalar kinds useful for admin filtering: BTREE (range /
-//! equality), BITMAP (low-cardinality), and INVERTED (full-text search on string
-//! columns). Index creation scans the column once and commits a new dataset
-//! version; queries then use the index automatically.
+//! equality), BITMAP (low-cardinality), ZONEMAP (block pruning), BLOOMFILTER
+//! (equality on high-cardinality columns), and INVERTED (full-text search on
+//! string columns). Index creation scans the column once and commits a new
+//! dataset version; queries then use the index automatically.
+//!
+//! ZONEMAP matters more here than it looks. Parquet writes row-group min/max
+//! statistics automatically, and DataFusion prunes with them for free. Lance
+//! file version 2.1 and later writes no such statistics at all: its pruning path
+//! (`LancePushdownScanExec`) reads them via `legacy_read_page_stats`, which only
+//! finds anything in pre-2.1 files. A zone map is the explicit equivalent, and
+//! without one a selective filter over a Lance table decodes every row.
 
 use lance::dataset::builder::DatasetBuilder;
 use lance::index::DatasetIndexExt;
@@ -21,6 +29,13 @@ pub enum ScalarIndexKind {
     BTree,
     /// Low-cardinality columns (few distinct values).
     Bitmap,
+    /// Min/max per block of rows: the explicit equivalent of parquet's row-group
+    /// statistics. Cheap to build and small on disk, and the right default for
+    /// pruning a large table by a range or equality predicate.
+    ZoneMap,
+    /// Equality lookups on high-cardinality columns, where a btree's key storage
+    /// would be large.
+    BloomFilter,
     /// Full-text search over string columns.
     Inverted,
 }
@@ -30,6 +45,8 @@ impl ScalarIndexKind {
         match self {
             ScalarIndexKind::BTree => "btree",
             ScalarIndexKind::Bitmap => "bitmap",
+            ScalarIndexKind::ZoneMap => "zonemap",
+            ScalarIndexKind::BloomFilter => "bloomfilter",
             ScalarIndexKind::Inverted => "inverted",
         }
     }
@@ -38,6 +55,8 @@ impl ScalarIndexKind {
         match self {
             ScalarIndexKind::BTree => IndexType::BTree,
             ScalarIndexKind::Bitmap => IndexType::Bitmap,
+            ScalarIndexKind::ZoneMap => IndexType::ZoneMap,
+            ScalarIndexKind::BloomFilter => IndexType::BloomFilter,
             ScalarIndexKind::Inverted => IndexType::Inverted,
         }
     }
@@ -50,9 +69,12 @@ impl std::str::FromStr for ScalarIndexKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "btree" => Ok(ScalarIndexKind::BTree),
             "bitmap" => Ok(ScalarIndexKind::Bitmap),
+            "zonemap" | "zone_map" => Ok(ScalarIndexKind::ZoneMap),
+            "bloomfilter" | "bloom_filter" | "bloom" => Ok(ScalarIndexKind::BloomFilter),
             "inverted" | "fts" => Ok(ScalarIndexKind::Inverted),
             other => Err(format!(
-                "unknown index type '{other}', expected 'btree', 'bitmap', or 'inverted'"
+                "unknown index type '{other}', expected one of 'btree', 'bitmap', \
+                 'zonemap', 'bloomfilter', or 'inverted'"
             )),
         }
     }
@@ -97,8 +119,20 @@ pub async fn create_index(
                 .create_index(&[column], index_type, Some(name.to_string()), &params, false)
                 .await
         }
-        ScalarIndexKind::BTree | ScalarIndexKind::Bitmap => {
-            let params = ScalarIndexParams::default();
+        ScalarIndexKind::BTree
+        | ScalarIndexKind::Bitmap
+        | ScalarIndexKind::ZoneMap
+        | ScalarIndexKind::BloomFilter => {
+            // Build the params from `index_type` rather than using
+            // `ScalarIndexParams::default()`, which hardcodes `index_type:
+            // "btree"`. Lance happens to ignore that field here (it rebuilds the
+            // params from the `IndexType` argument and only reads our `params`
+            // JSON), but a struct that claims "btree" while creating a zone map
+            // is one refactor away from silently creating the wrong index.
+            let builtin = index_type.try_into().map_err(|e| {
+                anyhow::anyhow!("Lance has no builtin scalar index for {index_type:?}: {e}")
+            })?;
+            let params = ScalarIndexParams::for_builtin(builtin);
             dataset
                 .create_index(&[column], index_type, Some(name.to_string()), &params, false)
                 .await
@@ -213,4 +247,57 @@ mod tests {
         }
         assert_eq!(ScalarIndexKind::Inverted.as_str(), "inverted");
     }
+}
+
+/// Create the default indexes for a newly written table.
+///
+/// * **Zone map on every column.** Lance file version 2.1 and later writes no
+///   per-page statistics, so an unindexed Lance scan cannot skip blocks the way
+///   a parquet reader skips row groups with its min/max statistics. A zone map is
+///   the explicit equivalent. Measured on a 100M-row, 105-column table: 17 zone
+///   maps took 15.8s to build and added 7MB to a 22.35GB table, while making
+///   filtered scans 2.9-4.4x faster.
+/// * **Bloom filter on every string column.** Zone maps only help when a column's
+///   values are clustered by block; for high-cardinality strings a min/max range
+///   usually spans everything and prunes nothing. A bloom filter answers equality
+///   probes directly instead.
+///
+/// Columns Lance cannot index are skipped rather than failing the whole call: an
+/// index is an optimisation, and losing one must not fail the `CREATE TABLE` that
+/// triggered it.
+pub async fn create_default_indexes(
+    warehouse: &LanceWarehouse,
+    uri: &str,
+    schema: &arrow::datatypes::Schema,
+) -> anyhow::Result<usize> {
+    let mut created = 0;
+    for field in schema.fields() {
+        let column = field.name();
+        let mut kinds = vec![(ScalarIndexKind::ZoneMap, format!("zm_{column}"))];
+        if is_string_like(field.data_type()) {
+            kinds.push((ScalarIndexKind::BloomFilter, format!("bf_{column}")));
+        }
+        for (kind, name) in kinds {
+            match create_index(warehouse, uri, column, &name, kind).await {
+                Ok(()) => created += 1,
+                Err(e) => {
+                    tracing::debug!(
+                        uri = %uri, column, kind = kind.as_str(), error = %e,
+                        "skipping default index"
+                    );
+                }
+            }
+        }
+    }
+    tracing::info!(uri = %uri, created, columns = schema.fields().len(), "created default indexes");
+    Ok(created)
+}
+
+/// String/binary columns, which get a bloom filter in addition to a zone map.
+fn is_string_like(dt: &arrow::datatypes::DataType) -> bool {
+    use arrow::datatypes::DataType::*;
+    matches!(
+        dt,
+        Utf8 | LargeUtf8 | Utf8View | Binary | LargeBinary | BinaryView
+    )
 }

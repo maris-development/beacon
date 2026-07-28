@@ -319,7 +319,13 @@ mod tests {
     }
 
     /// `force_view_types(false)` is deliberate: string columns must come back as
-    /// `Utf8`, not `Utf8View`, because the rest of Beacon assumes the former.
+    /// `Utf8`, not `Utf8View`.
+    ///
+    /// Measured on ClickBench (100M rows) with DataFusion 53: emitting `Utf8View`
+    /// made every grouped string aggregation dramatically slower - Q17 1.0s ->
+    /// 50.1s, Q16 1.0s -> 35.3s, Q13 0.8s -> 17.5s, Q18 4.2s -> 90.6s. The view
+    /// layout costs 16 bytes per value against 4 for an offset, and DataFusion's
+    /// group-by hashes it far less efficiently at this cardinality.
     #[tokio::test]
     async fn infer_schema_keeps_utf8_instead_of_utf8_view() {
         let store = Arc::new(InMemory::new());

@@ -10,6 +10,14 @@
 
 use pyo3::prelude::*;
 
+// The extension module owns its allocator. Rust-allocated memory that leaves this
+// module (Arrow buffers handed to pyarrow over the C Data Interface) is released
+// through a Rust-provided callback, so it is freed by the same allocator that
+// made it.
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod connection;
 mod errors;
 mod exec;
