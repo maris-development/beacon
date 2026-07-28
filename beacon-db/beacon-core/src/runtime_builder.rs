@@ -548,11 +548,7 @@ async fn register_schema_provider(
 /// absent there is nothing to load. A decrypt failure for one secret is logged and skipped by
 /// [`crate::secret_persistence::load_persisted_secrets`], so it never blocks opening the database.
 async fn load_persisted_secrets_into_store(session_ctx: &Arc<SessionContext>) {
-    let Some(secret_store) = session_ctx
-        .state()
-        .config()
-        .get_extension::<SecretStore>()
-    else {
+    let Some(secret_store) = session_ctx.state().config().get_extension::<SecretStore>() else {
         return;
     };
     // Copy the key and clone the store handle so the extension is not borrowed across `add`.
@@ -620,7 +616,10 @@ fn register_file_formats(
         Arc::new(ArrowFormatFactory),
         Arc::new(TiffFormatFactory::new(Default::default())),
         Arc::new(ZarrFormatFactory),
-        Arc::new(AtlasFormatFactory::new(Default::default(), Default::default())),
+        Arc::new(AtlasFormatFactory::new(
+            Default::default(),
+            Default::default(),
+        )),
         Arc::new(BBFFormatFactory::new(Default::default())),
         Arc::new(GeoParquetFormatFactory::default()),
         Arc::new(NetCDFFormatFactory::new(
@@ -724,7 +723,7 @@ fn build_session_config(
         // Beacon's tables live in `beacon.public`; the schema is later replaced by
         // the PersistentSchemaProvider.
         .with_default_catalog_and_schema("beacon", "public")
-        .with_batch_size(builder.batch_size.unwrap_or(64 * 1024))
+        .with_batch_size(builder.batch_size.unwrap_or(32 * 1024))
         .with_coalesce_batches(true)
         .with_target_partitions(builder.vm_cpu_limit.unwrap_or(num_cpus::get()))
         .with_information_schema(true)
@@ -765,7 +764,10 @@ fn build_session_config(
         .with_extension(Arc::new(CoalesceSqlStream::new(
             builder.sql.stream_coalesce,
         )));
-
+    config
+        .options_mut()
+        .execution
+        .skip_partial_aggregation_probe_ratio_threshold = 0.1; // todo: Should we make this configurable? 0.8 is the default in DataFusion.
     config.options_mut().sql_parser.enable_ident_normalization = false;
     config
         .options_mut()
