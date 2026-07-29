@@ -261,7 +261,7 @@ impl Relation {
         self.with_select(select)
     }
 
-    /// Alias of [`Self::project`], matching DuckDB's `select`.
+    /// Alias of [`Self::project`], under the conventional name `select`.
     fn select(&self, expressions: &str) -> Self {
         self.project(expressions)
     }
@@ -295,7 +295,7 @@ impl Relation {
         self.with_select(select)
     }
 
-    /// Alias of [`Self::order`], matching DuckDB's `sort`.
+    /// Alias of [`Self::order`], under the conventional name `sort`.
     fn sort(&self, expressions: &str) -> Self {
         self.order(expressions)
     }
@@ -511,7 +511,7 @@ impl Relation {
         )
     }
 
-    /// Alias of [`Self::record_batch`], matching DuckDB's `fetch_record_batch`.
+    /// Alias of [`Self::record_batch`], under the conventional name `fetch_record_batch`.
     #[pyo3(signature = (batch_size=None))]
     fn fetch_record_batch<'py>(
         &self,
@@ -718,7 +718,7 @@ impl Relation {
         Ok(format_batches(&result))
     }
 
-    /// Prints the first `limit` rows as a table (DuckDB's `show`). Returns nothing.
+    /// Prints the first `limit` rows as a table (the conventional `show`). Returns nothing.
     #[pyo3(signature = (limit=10))]
     fn show(&self, py: Python<'_>, limit: i64) -> PyResult<()> {
         let result = run_sql(

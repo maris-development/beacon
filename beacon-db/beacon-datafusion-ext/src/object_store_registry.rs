@@ -1,5 +1,5 @@
 //! A lazy [`ObjectStoreRegistry`] that materializes remote object stores on
-//! demand, DataFusion-CLI / DuckDB style.
+//! demand, DataFusion-CLI style.
 //!
 //! [`LazyObjectStoreRegistry`] wraps a [`DefaultObjectStoreRegistry`] (which
 //! holds beacon's eagerly-registered stores — `datasets://`, `db://`, `tmp://`,

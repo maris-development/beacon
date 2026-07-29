@@ -10,17 +10,26 @@ name: Publish beacondb
 # HDF5/netCDF packages are required. The wheel is abi3 (one wheel per platform covers CPython
 # >= 3.10).
 #
-# Triggered by a `beacondb-v*` tag (distinct from the workspace's own `v*` release tag) or
-# manually.
+# Triggered by the workspace release tag `v*`, same as every other publish workflow — one tag
+# releases the whole line. A `beacondb-v*` tag is still honoured for shipping a beacondb-only fix
+# without cutting a full release; both forms resolve to the same version number.
+#
+# Release candidates: a pre-release tag (v2.0.0-rc.1) publishes as PyPI version 2.0.0rc1 — PyPI
+# normalizes the SemVer suffix to PEP 440. No dist-tag equivalent is needed: pip ignores
+# pre-releases unless asked, so `pip install beacondb` stays on the last stable release and RC users
+# opt in with `pip install --pre beacondb`.
 
 on:
   push:
     tags:
+      # Covers stable (v1.8.0) and pre-release (v2.0.0-rc.1) tags alike.
+      - "v*"
+      # beacondb-only release, decoupled from the workspace version line.
       - "beacondb-v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 1.8.0. Empty = latest beacondb-v* tag."
+        description: "Version to publish, e.g. 1.8.0 or 2.0.0-rc.1. Empty = latest stable v* tag."
         required: false
         type: string
         default: ""
@@ -30,24 +39,25 @@ permissions:
 
 jobs:
   build:
-    name: Build wheel (${{ matrix.platform.target }})
+    name: Build wheel (${{ matrix.platform.key }})
     strategy:
       fail-fast: false
       matrix:
         platform:
-          - { runner: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { key: manylinux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: "2_28" }
           # Native aarch64 Linux runner — the static netCDF/HDF5 build compiles from source, so
           # QEMU emulation would be prohibitively slow. GitHub-hosted `ubuntu-*-arm` runners are
           # free for public repos; private repos must have ARM64 runners enabled.
-          - { runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
-          # musllinux (Alpine) — manylinux wheels do NOT install on musl, so Alpine/Docker users
-          # need these separately. Built in an Alpine container (apk, not dnf); the from-source
-          # static HDF5/netCDF build under musl is the part most likely to need a first-run fix.
-          - { runner: ubuntu-latest, target: x86_64, manylinux: "musllinux_1_2" }
-          - { runner: ubuntu-24.04-arm, target: aarch64, manylinux: "musllinux_1_2" }
-          - { runner: macos-14, target: aarch64, manylinux: "off" }
-          - { runner: macos-13, target: x86_64, manylinux: "off" }
-          - { runner: windows-latest, target: x64, manylinux: "off" }
+          - { key: manylinux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
+          # musllinux (Alpine) wheels are deliberately NOT built for now. manylinux wheels do not
+          # install on musl, so on Alpine pip falls through to the sdist and builds from source,
+          # which needs a Rust toolchain plus system HDF5/netCDF. Documented in
+          # beacon-db/beacon-db-py/README.md and the 2.0.0-rc1 docs.
+          # To restore: add the two musllinux_1_2 entries back here, and re-add the smoke-test
+          # guard below (a musllinux wheel can't be installed on the glibc runner that builds it).
+          - { key: macos-aarch64, runner: macos-14, target: aarch64, manylinux: "off" }
+          - { key: macos-x86_64, runner: macos-13, target: x86_64, manylinux: "off" }
+          - { key: windows-x64, runner: windows-latest, target: x64, manylinux: "off" }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout (with submodules)
@@ -65,13 +75,19 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "$EVENT" = "push" ]; then
-            version="${REF_NAME#beacondb-}"                 # beacondb-v1.8.0 -> v1.8.0
+            # Strips the optional beacondb- prefix, so both trigger forms land on the same version:
+            #   v1.8.0          -> v1.8.0   (no-op)
+            #   beacondb-v1.8.0 -> v1.8.0
+            version="${REF_NAME#beacondb-}"
           elif [ -n "$INPUT_VERSION" ]; then
             version="$INPUT_VERSION"
           else
-            tag=$(git tag --list 'beacondb-v*' --sort=-v:refname | head -n1)
-            [ -n "$tag" ] || { echo "::error::No beacondb-v* tags found; provide a version input."; exit 1; }
-            version="${tag#beacondb-}"
+            # Latest *stable* tag on the workspace release line. git's version sort has no SemVer
+            # pre-release semantics and ranks v2.0.0-rc.1 above v2.0.0, so drop pre-releases here;
+            # to republish an RC by hand, name it explicitly in the `version` input.
+            tag=$(git tag --list 'v*' --sort=-v:refname | grep -vE '^v.*-' | head -n1)
+            [ -n "$tag" ] || { echo "::error::No stable v* tags found; provide a version input."; exit 1; }
+            version="$tag"                                  # latest stable release tag
           fi
           version="${version#v}"                            # v1.8.0 -> 1.8.0
           [ -n "$version" ] || { echo "::error::Could not resolve a version."; exit 1; }
@@ -122,8 +138,8 @@ jobs:
           manylinux: ${{ matrix.platform.manylinux }}
           # Inside the build container, install only the toolchain the static build needs
           # (protoc for Lance, cmake + a C/C++ compiler + perl to build netCDF/HDF5 from source).
-          # The container differs by target: manylinux is AlmaLinux (dnf), musllinux is Alpine
-          # (apk) — so detect the package manager rather than assume one.
+          # The manylinux container is AlmaLinux (dnf); the apk branch is kept so restoring the
+          # musllinux entries (Alpine) needs no change here.
           before-script-linux: |
             if command -v apk >/dev/null 2>&1; then
               apk add --no-cache build-base cmake perl protobuf protobuf-dev linux-headers
@@ -131,10 +147,10 @@ jobs:
               dnf install -y protobuf-compiler cmake perl || yum install -y protobuf-compiler cmake perl
             fi
 
-      # A musllinux wheel can't be installed on the glibc runner, so its smoke-test is skipped
-      # (it would need an Alpine container); the metadata check below still runs for every wheel.
+      # Every wheel currently built is installable on the runner that built it. If the musllinux
+      # entries come back, this needs `if: ${{ !startsWith(matrix.platform.manylinux, 'musllinux') }}`
+      # again — a musl wheel won't install on the glibc runner.
       - name: Smoke-test the wheel
-        if: ${{ !startsWith(matrix.platform.manylinux, 'musllinux') }}
         shell: bash
         run: |
           python3 -m pip install --upgrade pip
@@ -150,10 +166,31 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          # Include the libc tag: the same runner+target builds both a manylinux and a musllinux
-          # wheel, so the artifact names must differ.
-          name: beacondb-wheel-${{ matrix.platform.runner }}-${{ matrix.platform.target }}-${{ matrix.platform.manylinux }}
+          # `key` is unique per matrix entry, which matters once a single runner+target builds more
+          # than one wheel (as manylinux + musllinux did) — artifact names must differ.
+          name: beacondb-wheel-${{ matrix.platform.key }}
           path: dist/*.whl
+          if-no-files-found: error
+
+      # The sdist is platform-independent, so exactly one matrix entry builds it. It rides along
+      # here rather than in its own job to reuse the checkout (submodules included) and the version
+      # already stamped into pyproject.toml/Cargo.toml above — a separate job would have to repeat
+      # both. maturin walks the path dependencies and emits a self-contained tree: the ~23 beacon-db
+      # crates it needs, a trimmed workspace Cargo.toml, and Cargo.lock.
+      - name: Build sdist
+        if: matrix.platform.key == 'manylinux-x86_64'
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade maturin
+          maturin sdist --out dist --manifest-path beacon-db/beacon-db-py/Cargo.toml
+          python3 -m twine check dist/*.tar.gz
+
+      - name: Upload sdist
+        if: matrix.platform.key == 'manylinux-x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: beacondb-sdist
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   publish:
@@ -166,10 +203,10 @@ jobs:
     permissions:
       id-token: write # OIDC token for PyPI Trusted Publishing
     steps:
-      - name: Download all wheels
+      - name: Download all wheels and the sdist
         uses: actions/download-artifact@v4
         with:
-          pattern: beacondb-wheel-*
+          pattern: beacondb-* # beacondb-wheel-<key> plus beacondb-sdist
           path: dist
           merge-multiple: true
 

@@ -3,6 +3,7 @@ name = "beacon-core"
 version = "2.0.0-rc.1"
 edition = "2021"
 
+rust-version.workspace = true
 [features]
 # Statically build+link netCDF/HDF5 (see beacon-arrow-netcdf). Passed through for the Python
 # wheels; off by default.

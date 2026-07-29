@@ -1,13 +1,21 @@
 name: Publish beacon-datalake-cli
 
+# Publishes the `beacon-datalake-cli` Python package to PyPI.
+#
+# Release candidates: a pre-release tag (v2.0.0-rc.1) publishes as PyPI version 2.0.0rc1 — PyPI
+# normalizes the SemVer suffix to PEP 440. No dist-tag equivalent is needed: pip ignores
+# pre-releases unless asked, so `pip install beacon-datalake-cli` stays on the last stable release
+# and RC users opt in with `pip install --pre beacon-datalake-cli`.
+
 on:
   push:
     tags:
+      # Covers stable (v1.8.0) and pre-release (v2.0.0-rc.1) tags alike.
       - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 1.8.0. Leave empty to use the latest v* release tag."
+        description: "Version to publish, e.g. 1.8.0 or 2.0.0-rc.1. Empty = latest stable v* tag."
         required: false
         type: string
         default: ""
@@ -55,9 +63,12 @@ jobs:
           elif [ -n "$INPUT_VERSION" ]; then
             version="$INPUT_VERSION"                     # from the manual input
           else
-            tag=$(git tag --list 'v*' --sort=-v:refname | head -n1)
-            [ -n "$tag" ] || { echo "::error::No v* tags found; provide a version input."; exit 1; }
-            version="$tag"                               # latest release tag
+            # Latest *stable* tag. git's version sort has no SemVer pre-release semantics and ranks
+            # v2.0.0-rc.1 above v2.0.0, so drop pre-releases here; to republish an RC by hand, name
+            # it explicitly in the `version` input.
+            tag=$(git tag --list 'v*' --sort=-v:refname | grep -vE '^v.*-' | head -n1)
+            [ -n "$tag" ] || { echo "::error::No stable v* tags found; provide a version input."; exit 1; }
+            version="$tag"                               # latest stable release tag
           fi
           version="${version#v}"                         # strip the leading 'v' -> X.Y.Z
           [ -n "$version" ] || { echo "::error::Could not resolve a version."; exit 1; }

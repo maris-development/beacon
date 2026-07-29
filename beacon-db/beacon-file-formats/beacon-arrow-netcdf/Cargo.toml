@@ -3,6 +3,7 @@ name = "beacon-arrow-netcdf"
 version = "2.0.0-rc.1"
 edition = "2021"
 
+rust-version.workspace = true
 [features]
 # Build netCDF-c and HDF5 from source and link them statically, instead of linking the system
 # libraries. Off by default (dynamic linking is faster to build and fine for local dev / the

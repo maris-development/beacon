@@ -3,6 +3,7 @@ name = "beacon-sql-databases"
 version = "0.1.0"
 edition = "2021"
 
+rust-version.workspace = true
 [features]
 # Each engine is opt-in. An engine feature turns on the matching
 # `<engine>-federation` feature in datafusion-table-providers so scans push

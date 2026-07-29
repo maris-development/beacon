@@ -1,7 +1,7 @@
 //! The materialized result of a statement, and the two ways Python gets at it.
 //!
 //! - **Columnar** (`__arrow_c_stream__`): the Arrow PyCapsule protocol. Any Arrow consumer —
-//!   pyarrow, polars, duckdb, nanoarrow, lonboard — ingests this with no conversion and no
+//!   pyarrow, polars, nanoarrow, lonboard — ingests this with no conversion and no
 //!   hard pyarrow dependency on our side. This is the path that should carry real data.
 //! - **Row tuples** (`fetchone`/`fetchmany`/`fetchall`): PEP 249. This is the only place that
 //!   converts Arrow values into Python objects one at a time, so it is the only place that
@@ -212,7 +212,7 @@ impl ResultSet {
     }
 
     /// PEP 249 `description`: a 7-tuple per column. Only name, type and null_ok are meaningful
-    /// for a columnar engine; the size/precision slots stay `None`, as DuckDB's do.
+    /// for a columnar engine; the size/precision slots stay `None`, as is usual.
     #[getter]
     pub fn description<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut columns = Vec::with_capacity(self.schema.fields().len());
@@ -311,7 +311,7 @@ impl ResultSet {
         Self::arrow(slf)?.call_method0("to_pandas")
     }
 
-    /// Alias of [`Self::df`], matching DuckDB's `fetchdf`.
+    /// Alias of [`Self::df`], under the conventional name `fetchdf`.
     fn fetchdf<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         Self::df(slf)
     }

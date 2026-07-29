@@ -3,6 +3,7 @@ name = "beacon-arrow-hdf5"
 version = "2.0.0-rc.1"
 edition = "2021"
 
+rust-version.workspace = true
 [features]
 # Build netCDF-c and HDF5 from source and link them statically. Forwarded to
 # `beacon-arrow-netcdf` (the reader this crate delegates to); off by default. Used for the

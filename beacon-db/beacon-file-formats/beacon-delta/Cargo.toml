@@ -3,6 +3,7 @@ name = "beacon-delta"
 version = "0.1.0"
 edition = "2021"
 
+rust-version.workspace = true
 [dependencies]
 beacon-common = { path = "../../beacon-common" }
 beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }

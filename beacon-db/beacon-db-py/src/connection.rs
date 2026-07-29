@@ -225,7 +225,7 @@ impl Connection {
         ))
     }
 
-    /// Alias for [`Connection::sql`], matching DuckDB.
+    /// Alias for [`Connection::sql`], for familiarity with other embedded engines.
     fn query(&self, query: &str) -> PyResult<Relation> {
         self.sql(query)
     }
@@ -445,7 +445,7 @@ impl Connection {
         ))
     }
 
-    /// Alias of [`Self::table`], matching DuckDB.
+    /// Alias of [`Self::table`], for familiarity with other embedded engines.
     fn view(&self, name: &str) -> PyResult<Relation> {
         self.table(name)
     }
@@ -946,7 +946,7 @@ pub fn connect(
     }
 
     let database = match DbPath::parse(database) {
-        // In-memory databases share nothing: each connect() gets its own, as in DuckDB.
+        // In-memory databases share nothing: each connect() gets its own, as is conventional.
         DbPath::Memory => {
             let opened = block_on(
                 py,

@@ -1,9 +1,9 @@
-"""DuckDB-style object-store secrets: CREATE / DROP / SHOW SECRET.
+"""Object-store secrets: CREATE / DROP / SHOW SECRET.
 
 Secrets are registered in-process in the same `SecretStore` the object-store registry resolves
 against when it builds an S3/GCS/Azure/HTTP store — so a `CREATE SECRET` here is what supplies
 credentials to a later `read_parquet('s3://…')`, no environment variables needed. These tests run
-entirely in-process (no cloud), pinning the SQL surface, the DuckDB→object_store key mapping, and
+entirely in-process (no cloud), pinning the SQL surface, the alias→object_store key mapping, and
 the DROP/IF EXISTS semantics. The scope resolution itself is unit-tested in the Rust `secrets`
 module.
 """
@@ -25,7 +25,7 @@ def _secrets(con):
     return {row[0]: row for row in con.sql("SHOW SECRETS").fetchall()}
 
 
-def test_create_secret_maps_duckdb_params_to_object_store_keys(con):
+def test_create_secret_maps_aliased_params_to_object_store_keys(con):
     con.execute(
         "CREATE SECRET my_s3 (TYPE S3, KEY_ID 'AKIA', SECRET 'shh', "
         "REGION 'eu-west-1', SCOPE 's3://bucket')"
@@ -44,7 +44,7 @@ def test_scope_defaults_to_the_scheme_wide_prefix(con):
 
 
 def test_native_object_store_keys_pass_through(con):
-    # An object_store key given directly (not a DuckDB alias) is kept as-is.
+    # An object_store key given directly (not an alias) is kept as-is.
     con.execute(
         "CREATE SECRET direct (TYPE S3, 'access_key_id' 'x', 'endpoint' 'http://minio:9000')"
     )

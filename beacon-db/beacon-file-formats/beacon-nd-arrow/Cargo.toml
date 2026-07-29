@@ -2,6 +2,7 @@
 name = "beacon-nd-arrow"
 version = "0.2.0"
 edition = "2024"
+rust-version.workspace = true
 readme = "README.md"
 
 [features]

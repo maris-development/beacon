@@ -1,6 +1,6 @@
 //! A bare `RuntimeBuilder` — no `with_default_store` / `with_default_object_store`
 //! — resolves *relative* dataset paths against the process's current working
-//! directory, DuckDB-style, and creates nothing on the way.
+//! directory, as an embedded database does, and creates nothing on the way.
 //!
 //! beacon-core has no opinion about storage: the datasets store and the URL it is
 //! registered under are builder inputs. This pins what an embedder gets when it
@@ -106,7 +106,7 @@ async fn bare_builder_reads_from_the_cwd_and_writes_nothing_to_it() {
     let _guard = set_cwd(&cwd);
 
     // No `with_default_store`: the runtime is in dynamic mode, so a relative path
-    // resolves against the process's current working directory (DuckDB-style).
+    // resolves against the process's current working directory.
     let runtime = bare_runtime().await;
 
     sql(&runtime, "CREATE EXTERNAL TABLE obs STORED AS CSV LOCATION 'obs/'").await;
@@ -117,7 +117,7 @@ async fn bare_builder_reads_from_the_cwd_and_writes_nothing_to_it() {
         "a relative LOCATION should resolve against the cwd and list its files"
     );
 
-    // DuckDB-style: `db_path` is `None`, so the catalog `CREATE EXTERNAL TABLE`
+    // No `db_path`, so the catalog `CREATE EXTERNAL TABLE`
     // persists lives in the in-memory tables store, not in a file next to the data.
     let mut entries: Vec<String> = std::fs::read_dir(&cwd)
         .expect("read cwd")

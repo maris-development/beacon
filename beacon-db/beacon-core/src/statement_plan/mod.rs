@@ -259,7 +259,7 @@ pub(crate) fn detach_plan(statement: DetachStatement) -> LogicalPlan {
 /// Build the logical plan for `CREATE SECRET <name> (TYPE …, …, SCOPE …)`.
 ///
 /// Fallible: `TYPE` is required and validated here, and `SCOPE` defaults to the backend's
-/// scheme-wide prefix. The remaining parameters are credential options, with the common DuckDB
+/// scheme-wide prefix. The remaining parameters are credential options, with the conventional
 /// names (`KEY_ID`, `SECRET`, `REGION`, …) mapped to `object_store` config keys.
 pub(crate) fn create_secret_plan(statement: CreateSecretStatement) -> anyhow::Result<LogicalPlan> {
     use beacon_datafusion_ext::secrets::SecretType;
@@ -278,7 +278,7 @@ pub(crate) fn create_secret_plan(statement: CreateSecretStatement) -> anyhow::Re
         .into_iter()
         .map(|(key, value)| {
             // Beacon secrets carry Flight SQL creds (`token`/`username`/`password`) verbatim; only
-            // object-store secrets get the DuckDB→object_store option-name aliasing.
+            // object-store secrets get the conventional→object_store option-name aliasing.
             let key = if secret_type.is_beacon() {
                 key.to_ascii_lowercase()
             } else {
@@ -449,7 +449,7 @@ fn take_ci(params: &mut HashMap<String, String>, key: &str) -> Option<String> {
     params.remove(&found)
 }
 
-/// Map DuckDB `CREATE SECRET` parameter names to `object_store` config keys; unknown keys pass
+/// Map conventional `CREATE SECRET` parameter names to `object_store` config keys; unknown keys pass
 /// through lowercased, so native `object_store` keys (`access_key_id`, `region`, …) work directly.
 fn normalize_secret_option_key(key: &str) -> String {
     match key.to_ascii_uppercase().as_str() {

@@ -1,16 +1,30 @@
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+requires = [
+    # >=1.8.4 is the release that installs a Rust toolchain into a temp dir when `cargo` is
+    # missing, which a source build (sdist on a platform with no wheel) relies on.
+    "maturin>=1.8.4,<2.0",
+    # `prost-build` (reached through Lance) needs protoc at build time and does not bundle one.
+    # pip installs this into the isolated build environment and puts that environment's scripts
+    # directory on PATH, so prost-build finds it like a system install. Pinned to one protoc major
+    # so a protobuf release cannot silently change the compiler used.
+    #
+    # Gated on architecture: wheels exist for x86_64/aarch64/arm64/AMD64 (manylinux, musllinux,
+    # macOS, Windows) but not for e.g. ppc64le or s390x. Requiring it unconditionally would break
+    # source builds on those even where a perfectly good system protoc is installed; there, this
+    # is skipped and the system one is used.
+    "protoc-wheel-0>=30,<31; platform_machine == 'x86_64' or platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'AMD64'",
+]
 build-backend = "maturin"
 
 [project]
 name = "beacondb"
 version = "2.0.0rc1"
-description = "An embeddable, DuckDB-class database for scientific data — one file, Arrow-native, netCDF/Zarr/Parquet/Delta/Lance."
+description = "An embeddable, in-process analytical database for scientific data — one file, Arrow-native, netCDF/Zarr/Parquet/Delta/Lance."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Beacon" }]
-keywords = ["beacon", "database", "sql", "arrow", "duckdb", "netcdf", "zarr", "parquet"]
+keywords = ["beacon", "database", "sql", "arrow", "embedded", "olap", "analytics", "netcdf", "zarr", "parquet"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -36,6 +50,11 @@ arrow = ["pyarrow>=14.0"]
 pandas = ["pyarrow>=14.0", "pandas>=2.0"]
 polars = ["polars>=1.0"]
 sqlalchemy = ["sqlalchemy>=2.0"]
+# Every optional runtime integration in one install: `pip install "beacondb[all]"`.
+# Written as a self-referential extra (PEP 508 recursive extras) rather than a copied dependency
+# list, so adding an extra above cannot leave this one silently behind. `dev` is deliberately not
+# included — pytest/ruff/h5py are our test tooling, not something a user of the library wants.
+all = ["beacondb[arrow,pandas,polars,sqlalchemy]"]
 dev = ["pytest>=8.0", "pyarrow>=14.0", "pandas>=2.0", "polars>=1.0", "h5py>=3.0", "sqlalchemy>=2.0", "ruff>=0.6"]
 
 # Registers the `beacondb://` dialect so `create_engine("beacondb:///...")` works with no manual

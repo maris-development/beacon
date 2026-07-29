@@ -3,6 +3,7 @@ name = "beacon-datalake"
 version = "2.0.0-rc.1"
 edition = "2021"
 
+rust-version.workspace = true
 [target.'cfg(not(windows))'.dependencies]
 # jemalloc is a production allocator; building its C source costs ~23s. Gate it
 # behind a non-default feature so dev/CI builds skip it. Release images enable

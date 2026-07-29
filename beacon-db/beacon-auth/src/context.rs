@@ -69,7 +69,7 @@ impl AuthIdentity {
     ///
     /// Same privileges as [`Self::system`], but a distinct username so query metrics and audit
     /// records tell an embedded caller apart from an engine-initiated query. Handing this out is
-    /// what makes `beacondb.connect("beacon.db")` behave like SQLite/DuckDB — possession of the
+    /// what makes `beacondb.connect("beacon.db")` behave like an embedded database — possession of the
     /// file grants full control — so it belongs only to the embedded entry point
     /// (`beacon_core::embedded`), never to a served transport.
     pub fn local() -> Self {

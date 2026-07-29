@@ -1,4 +1,4 @@
-//! In-memory, DuckDB-style secret store for object-store credentials.
+//! In-memory `CREATE SECRET` store for object-store credentials.
 //!
 //! A [`Secret`] is a named set of credentials scoped to a URL prefix (its
 //! `scope`, e.g. `s3://bucket` or `s3://` for all of S3). When an object store
@@ -99,7 +99,7 @@ pub struct Secret {
     /// Which backend these credentials are for.
     pub secret_type: SecretType,
     /// URL-prefix scope this secret applies to, e.g. `s3://bucket` or `s3://`
-    /// (all S3). Matched against a path as a longest-prefix (DuckDB-style).
+    /// (all S3). Matched against a path as a longest-prefix.
     pub scope: String,
     /// `object_store` config keys → values (e.g. `access_key_id`,
     /// `secret_access_key`, `region`, `endpoint`, `session_token`,

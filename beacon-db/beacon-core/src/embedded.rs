@@ -1,4 +1,4 @@
-//! Opening a beacon database **in-process**, the way DuckDB and SQLite are opened.
+//! Opening a beacon database **in-process**, the way an embedded database is opened.
 //!
 //! [`Runtime`] is deliberately narrow — authenticate a caller, then run a query — because it
 //! is designed to sit behind a server that already knows who the caller is. An embedder has no
@@ -12,7 +12,7 @@
 //!
 //! - [`AuthMode::Disabled`] (default) — every query runs as [`AuthIdentity::local`], a
 //!   super-user, with grant enforcement off. Opening the file requires no credentials and
-//!   permits everything. **This is the SQLite/DuckDB contract: possession of the file is
+//!   permits everything. **This is the embedded-database contract: possession of the file is
 //!   full control.**
 //! - [`AuthMode::Enabled`] — grant enforcement on, sessions resolve to the anonymous
 //!   principal until a [`Credential`] is supplied, and DDL/DML requires the single configured
@@ -44,7 +44,7 @@ use crate::runtime::Runtime;
 use crate::runtime_builder::RuntimeBuilder;
 use crate::schema_persistence::PersistentSchemaProvider;
 
-/// The spelling that selects an in-memory database, shared with DuckDB and SQLite.
+/// The spelling that selects an in-memory database, as embedded databases conventionally use.
 pub const MEMORY_PATH: &str = ":memory:";
 
 /// Double-quotes a SQL identifier, escaping embedded quotes, so a name with spaces or a
@@ -74,7 +74,7 @@ pub enum DbPath {
 }
 
 impl DbPath {
-    /// Parses the DuckDB-style database spec: `":memory:"` (or empty) is in-memory, anything
+    /// Parses the database spec: `":memory:"` (or empty) is in-memory, anything
     /// else is a filesystem path.
     pub fn parse(spec: &str) -> Self {
         if spec.is_empty() || spec == MEMORY_PATH {

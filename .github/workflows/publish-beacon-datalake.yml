@@ -1,0 +1,209 @@
+name: Publish beacon-datalake
+
+# Builds the Beacon data lake server image for linux/amd64 + linux/arm64 and publishes a
+# multi-arch manifest to GHCR.
+#
+# Each architecture is built on its own native runner and pushed by digest (no tag); the `merge`
+# job then stitches the digests into one manifest list and applies the human-readable tags. This
+# avoids QEMU emulation for the actual compile.
+#
+# Release candidates
+# ------------------
+# The `v*` trigger already covers pre-release tags, so `git tag v2.0.0-rc.1 && git push --tags`
+# publishes an RC. Tagging behaviour for `v2.0.0-rc.1`:
+#
+#   ghcr.io/<owner>/beacon:v2.0.0-rc.1   <- type=ref,event=tag
+#   ghcr.io/<owner>/beacon:2.0.0-rc.1    <- type=semver,pattern={{version}}
+#
+# and deliberately NOT `2.0` or `latest` — docker/metadata-action skips the {{major}}.{{minor}}
+# pattern for pre-releases, and the `latest` tag below is gated on the tag having no `-` in it.
+# Use any SemVer-valid pre-release suffix: `-rc.1`, `-rc1`, `-beta.2`, `-alpha.1`.
+
+on:
+  push:
+    tags:
+      # Covers stable (v1.8.0) and pre-release (v2.0.0-rc.1) tags alike.
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: >-
+          Comma-separated platforms to build, or "all". Known keys: linux-amd64, linux-arm64.
+          A subset produces a single-arch manifest — fine for a branch build, not for a release.
+        required: false
+        type: string
+        default: "all"
+
+permissions:
+  packages: write
+  contents: write
+  attestations: write
+  id-token: write
+
+env:
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/beacon
+
+jobs:
+  # Turns the `platforms` input into the build matrix. A tag push always builds every platform;
+  # only a manual run can narrow it.
+  setup:
+    name: Select platforms
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Select platforms
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          # The full build matrix. `key` is the name the `platforms` input selects by; each arch
+          # builds on a native runner so the Rust compile never runs under QEMU.
+          cat > all.json <<'JSON'
+          [
+            {"key": "linux-amd64", "docker_platform": "linux/amd64", "runner": "ubuntu-24.04"},
+            {"key": "linux-arm64", "docker_platform": "linux/arm64", "runner": "ubuntu-24.04-arm"}
+          ]
+          JSON
+
+          if [ "$EVENT" != "workflow_dispatch" ]; then
+            selection="all"                              # a release tag always builds everything
+          else
+            selection="${PLATFORMS:-all}"
+          fi
+
+          known=$(jq -r '.[].key' all.json)
+          if [ "$selection" = "all" ]; then
+            matrix=$(jq -c . all.json)
+          else
+            # Accept commas and/or whitespace as separators.
+            wanted=$(printf '%s' "$selection" | tr ',' ' ')
+            for k in $wanted; do
+              printf '%s\n' "$known" | grep -qxF -- "$k" || {
+                echo "::error::Unknown platform '$k'. Known keys: $(printf '%s ' $known)"
+                exit 1
+              }
+            done
+            want_json=$(printf '%s\n' $wanted | jq -Rc . | jq -sc .)
+            matrix=$(jq -c --argjson want "$want_json" \
+              'map(select(.key as $k | $want | index($k)))' all.json)
+          fi
+
+          count=$(jq 'length' <<< "$matrix")
+          [ "$count" -gt 0 ] || { echo "::error::No platforms selected."; exit 1; }
+          echo "Building $count platform(s):"
+          jq -r '.[] | "  - \(.key) (\(.runner))"' <<< "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.platform.key }})
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    runs-on: ${{ matrix.platform.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform.docker_platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.REGISTRY_IMAGE }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform.key }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Create multi-arch manifest
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          # Order matters: the first tag produced becomes `steps.meta.outputs.version`, which the
+          # inspect step below looks up.
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            # Skipped automatically for pre-releases, so an RC never moves the 2.0 line.
+            type=semver,pattern={{major}}.{{minor}}
+            # workflow_dispatch has no tag ref — give the manual run a branch-named tag so the
+            # manifest step still has something to push (and so it can't silently claim `latest`).
+            type=ref,event=branch
+            # `latest` only ever points at a stable release: a real tag push whose name carries no
+            # SemVer pre-release suffix (`-rc.1`, `-beta.2`, ...).
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+
+      - name: Create and push manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}

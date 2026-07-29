@@ -37,10 +37,48 @@ pip install beacondb                 # core
 pip install "beacondb[pandas]"       # + .df()
 pip install "beacondb[polars]"       # + .pl()
 pip install "beacondb[sqlalchemy]"   # + the beacondb:// dialect
+pip install "beacondb[all]"          # all of the above
 ```
 
 Nothing is required at runtime beyond the wheel: results cross the Arrow PyCapsule protocol, so
 pyarrow/pandas/polars are only needed by the methods that return their types.
+
+### Platform support
+
+`beacondb` embeds the whole engine, so it ships as a compiled wheel — one **abi3** wheel per
+platform covers CPython 3.10+. Wheels are published for:
+
+| Platform | Architectures |
+| --- | --- |
+| Linux (glibc, `manylinux_2_28`) | `x86_64`, `aarch64` |
+| macOS | `arm64` (Apple silicon), `x86_64` (Intel) |
+| Windows | `x64` |
+
+A **source distribution** is published alongside them, so `pip install beacondb` still works on a
+platform with no wheel — it just compiles the engine instead of downloading it, which needs a full
+build toolchain and takes a long time.
+
+::: warning No Alpine / musl wheel
+There is currently **no musllinux wheel**, so on Alpine or any musl-based image
+(`python:3.12-alpine`, `alpine`) pip falls through to the sdist and builds the whole engine from
+source. Rust and `protoc` are provisioned automatically, but you still need a C toolchain and
+system HDF5/netCDF (`apk add build-base linux-headers hdf5-dev netcdf-dev`), and the compile takes
+a long time.
+
+Use a glibc-based image instead. `python:3.12-slim` (Debian) is the smallest drop-in, gets the
+prebuilt wheel, and needs no other change:
+
+```dockerfile
+FROM python:3.12-slim      # not python:3.12-alpine
+RUN pip install beacondb
+```
+
+If you must stay on Alpine, [build from source](/docs/2.0.0-rc1/beacondb/python/building#building-on-alpine-musl)
+has the `apk` prerequisites. musllinux wheels are expected to return; this is a temporary gap.
+:::
+
+To force a source build on a platform that *does* have a wheel (to compile against your own HDF5,
+say), use `pip install beacondb --no-binary beacondb`.
 
 ## Next steps
 

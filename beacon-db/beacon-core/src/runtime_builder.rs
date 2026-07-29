@@ -750,7 +750,7 @@ fn build_session_config(
         // Resolves user-supplied dataset paths (a `LOCATION`, a `read_*` argument)
         // to object-store URLs and to native reader paths. Configured against the
         // default datasets store when one is set, otherwise dynamic (schemed paths
-        // by their scheme, bare paths against the cwd — DuckDB style).
+        // by their scheme, bare paths against the cwd).
         .with_extension(Arc::new(build_listing_factory(builder)))
         // The store a `CREATE EXTERNAL TABLE` LOCATION is resolved against.
         .with_extension(Arc::new(ListingTableFactoryExt))
@@ -792,7 +792,7 @@ fn build_session_config(
 /// - `Some(default)` → a configured factory that prepends the store URL to bare
 ///   paths and resolves native reads against the store's [`RootStore`].
 /// - `None` → a dynamic factory: schemed paths keep their scheme, bare paths
-///   resolve against the cwd (DuckDB style). This is what a bare builder gets.
+///   resolve against the cwd, as an embedded database does. This is what a bare builder gets.
 fn build_listing_factory(builder: &RuntimeBuilder) -> ListingFactory {
     ListingFactory::new(builder.default_store.clone())
 }

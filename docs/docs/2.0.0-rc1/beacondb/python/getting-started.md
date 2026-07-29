@@ -9,9 +9,13 @@ description: Install BeaconDB, open a database, run your first query, and unders
 ```bash
 pip install beacondb
 pip install "beacondb[pandas]"   # optional: .df()
+pip install "beacondb[all]"      # optional: every integration at once
 ```
 
-The wheel is **abi3** (`cp310-abi3`), so one wheel per platform covers CPython 3.10+.
+The wheel is **abi3** (`cp310-abi3`), so one wheel per platform covers CPython 3.10+. Wheels exist
+for Linux glibc (`x86_64`/`aarch64`), macOS (`arm64`/`x86_64`) and Windows (`x64`) — but **not for
+Alpine/musl**, where pip falls back to the source distribution and compiles the engine. See
+[platform support](/docs/2.0.0-rc1/beacondb/python/#platform-support).
 
 ## Open a database and query
 

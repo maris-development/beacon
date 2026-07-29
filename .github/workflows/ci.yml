@@ -9,8 +9,24 @@ permissions:
 
 jobs:
   ci:
-    name: Clippy, test, and build
+    name: Clippy, test, and build (Rust ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
+
+    strategy:
+      # Report both legs; one failing shouldn't hide the other's result.
+      fail-fast: false
+      matrix:
+        include:
+          # The declared MSRV (`rust-version` in the workspace Cargo.toml). Building at the floor is
+          # what keeps that claim honest — a post-1.91 feature fails here rather than silently
+          # breaking source builds for anyone on distro Rust.
+          - toolchain: "1.91"
+            lint: true
+          # What the released wheels are actually compiled with: maturin-action defaults to stable
+          # inside the manylinux container, and the host builds follow rust-toolchain.toml. Without
+          # this leg a stable-only regression would first surface during a release build.
+          - toolchain: stable
+            lint: false
 
     steps:
       - name: Checkout
@@ -39,16 +55,21 @@ jobs:
             sqlite3 \
             wget
 
-      - name: Install Rust (1.91)
+      - name: Install Rust (${{ matrix.toolchain }})
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.91"
-          components: clippy
+          toolchain: ${{ matrix.toolchain }}
+          components: ${{ matrix.lint && 'clippy' || '' }}
 
       - name: Cargo cache
+        # Keys include the rustc version, so the two legs cache independently.
         uses: Swatinem/rust-cache@v2
 
+      # Lints are pinned to the MSRV leg on purpose. Clippy gains lints every release, so running
+      # it on a floating toolchain lets an unrelated Rust bump redden CI on code that was fine when
+      # it was written. Compile and test regressions are what the stable leg is for.
       - name: Run clippy
+        if: matrix.lint
         run: cargo clippy --workspace --lib --bins --tests
 
       - name: Run tests

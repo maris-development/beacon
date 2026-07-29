@@ -1,6 +1,6 @@
 # beacondb
 
-Python bindings for **beacon-db**: an embeddable, DuckDB-class database for scientific data.
+Python bindings for **beacon-db**: an embeddable, in-process analytical database for scientific data.
 
 ```python
 import beacondb
@@ -24,16 +24,61 @@ running Beacon server, use [`beacon-datalake-cli`](../../beacon-datalake-clients
 pip install beacondb                 # core
 pip install "beacondb[pandas]"       # + .df()
 pip install "beacondb[polars]"       # + .pl()
+pip install "beacondb[sqlalchemy]"   # + the beacondb:// dialect
+pip install "beacondb[all]"          # all of the above
 ```
 
 Nothing is required at runtime: results cross into Python over the Arrow PyCapsule
 protocol (`__arrow_c_stream__`), so any Arrow consumer can read them with no dependency of
 ours. pyarrow/pandas/polars are only needed by the methods that return their types.
 
+### Platform support
+
+`beacondb` embeds the whole engine, so it ships as a compiled **abi3** wheel — one per platform,
+covering CPython 3.10+:
+
+| Platform | Architectures |
+| --- | --- |
+| Linux (glibc, `manylinux_2_28`) | `x86_64`, `aarch64` |
+| macOS | `arm64` (Apple silicon), `x86_64` (Intel) |
+| Windows | `x64` |
+
+A **source distribution** is published alongside them, so `pip install beacondb` still works where
+there is no wheel — it compiles the engine instead of downloading it, which takes a long time.
+
+**Rust and protoc install themselves.** maturin bootstraps a Rust toolchain when `cargo` is
+missing, and `protoc` — required by `prost-build` via Lance, which does not bundle it — is a
+declared build dependency (`protoc-wheel-0`) that pip installs for you. Both go into pip's
+isolated build environment, so nothing lands on your system. Opt out of the Rust bootstrap with
+`MATURIN_NO_INSTALL_RUST=1`.
+
+What you *do* need is a C/C++ toolchain and system HDF5/netCDF, because a source build uses the
+crate's default features and links them dynamically. For the static, self-contained variant
+instead, pass the feature through maturin's PEP 517 hook:
+
+```bash
+MATURIN_PEP517_ARGS="--features static-netcdf" pip install beacondb   # needs cmake, not hdf5-dev
+pip install beacondb --no-binary beacondb                             # force source on a wheel platform
+```
+
+**No Alpine / musl wheel.** There is currently no musllinux wheel, so on Alpine or any musl-based
+image (`python:3.12-alpine`, `alpine`) pip falls through to the sdist and builds the whole engine
+from source. Use a glibc-based image instead; `python:3.12-slim` (Debian) is the smallest drop-in,
+gets the prebuilt wheel, and needs no other change:
+
+```dockerfile
+FROM python:3.12-slim      # not python:3.12-alpine
+RUN pip install beacondb
+```
+
+If you must stay on Alpine, `apk add --no-cache build-base linux-headers hdf5-dev netcdf-dev`
+first, then `pip install beacondb`. musllinux wheels are expected to return; this is a temporary
+gap.
+
 ## Auth is off by default
 
-Opening a database locally needs no credentials and permits everything — the same contract
-as SQLite and DuckDB: **possession of the file is full control.**
+Opening a database locally needs no credentials and permits everything — the usual contract
+for a file-backed embedded database: **possession of the file is full control.**
 
 ```python
 con = beacondb.connect("beacon.db")
@@ -200,8 +245,8 @@ con.append("obs", pd.DataFrame({"a": [4, 5]}))   # appends; errors if `obs` does
 ## Attaching another Beacon (remote catalogs)
 
 Point beacondb at a running **beacon-datalake** server and mirror its whole catalog under a local
-name — every remote schema and table becomes queryable as `name.schema.table`, DuckDB-`ATTACH`
-style:
+name — every remote schema and table becomes queryable as `name.schema.table`, in the usual
+`ATTACH` style:
 
 ```python
 con.attach("lake", "beacon://datalake.example.org:50051",
@@ -228,7 +273,7 @@ con.execute("DETACH lake")
 
 ## Secrets for object stores (S3, GCS, Azure)
 
-Give beacon credentials for a cloud object store the DuckDB way — a named, scoped `SECRET` — instead
+Give beacon credentials for a cloud object store as a named, scoped `SECRET` — instead
 of environment variables. A `read_parquet('s3://…')` then resolves the best-matching secret by
 longest scope prefix:
 
@@ -242,8 +287,9 @@ con.execute("DROP SECRET my_s3")
 ```
 
 `TYPE` is `S3`/`GCS`/`AZURE`/`HTTP`; `SCOPE` defaults to the whole backend (`s3://`) so one secret
-can be the default and a longer scope overrides it per bucket. The DuckDB parameter names
-(`KEY_ID`, `SECRET`, `REGION`, `SESSION_TOKEN`, `ENDPOINT`, …) map to `object_store` config keys, and
+can be the default and a longer scope overrides it per bucket. The conventional `CREATE SECRET`
+parameter names (`KEY_ID`, `SECRET`, `REGION`, `SESSION_TOKEN`, `ENDPOINT`, …) map to
+`object_store` config keys, and
 any native `object_store` key works directly.
 
 **Session vs. persistent.** By default a secret is session-only (in memory for the process). A
@@ -321,7 +367,7 @@ con.sql("SUMMARIZE obs").df()
 con.sql("SUMMARIZE SELECT * FROM read_parquet('s3://bucket/obs/*.parquet')").df()
 ```
 
-Beyond that, beacon inherits DuckDB-style *friendly SQL* from DataFusion: `SELECT * EXCLUDE (col)`
+Beyond that, beacon inherits DataFusion's *friendly SQL* extensions: `SELECT * EXCLUDE (col)`
 / `REPLACE (…)`, `GROUP BY ALL`, `QUALIFY`, `UNION BY NAME`, `FROM`-first (`FROM t SELECT …`),
 `DESCRIBE`, `SHOW TABLES`/`SHOW COLUMNS`, list literals, and trailing commas all work.
 
@@ -332,7 +378,7 @@ links — not just a Rust compiler:
 
 - **protoc** (Lance generates protobuf at build time)
 - **HDF5 + netCDF** headers/libraries (the netCDF reader/writer)
-- a Rust toolchain (pinned to 1.91 by `rust-toolchain`)
+- a Rust toolchain — **1.91 or later**, enforced by `rust-version` in the workspace `Cargo.toml`
 
 ```bash
 # macOS
@@ -357,10 +403,11 @@ way to ship a portable **Windows** wheel (there's no `apt`/`brew` for HDF5 there
 maturin build --release --features static-netcdf   # needs protoc + cmake only
 ```
 
-CI (`.github/workflows/publish-beacondb.yml`, triggered by a `beacondb-v*` tag) builds this way
-for Linux (x86_64, manylinux_2_28), macOS (arm64 + x86_64), and Windows (x64), then publishes to
-PyPI via trusted publishing. Local `maturin develop` stays **dynamic** (links system libs) since
-it's much faster to iterate on.
+CI (`.github/workflows/publish-beacondb.yml`, triggered by the release tag `v*`, or by a
+`beacondb-v*` tag for a beacondb-only release) builds this way for Linux (manylinux_2_28,
+x86_64 + aarch64), macOS (arm64 + x86_64), and Windows (x64), then publishes to PyPI via trusted
+publishing. Local `maturin develop` stays **dynamic** (links system libs) since it's much faster
+to iterate on.
 
 Two honest caveats: the wheel is **large** (~100 MB — it contains a full DataFusion/Lance/netCDF
 engine), and there is **no minimal build** yet. `beacon-core` compiles every format

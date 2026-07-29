@@ -1,4 +1,4 @@
-"""beacondb — an embeddable, DuckDB-class database for scientific data.
+"""beacondb — an embeddable, in-process analytical database for scientific data.
 
 One file holds the catalog and the data beacon manages; everything else — S3 objects,
 netCDF/Zarr/Parquet files on disk, remote SQL databases — is referenced from it.
@@ -9,8 +9,8 @@ netCDF/Zarr/Parquet files on disk, remote SQL databases — is referenced from i
     con.sql("SELECT 1 AS a").fetchall()
 
 Auth is off by default: opening a file locally needs no credentials and permits everything,
-the same contract as SQLite and DuckDB. Pass ``auth=True`` to switch on beacon's RBAC, where a
-session is anonymous and read-only until credentials are supplied::
+the usual contract for a file-backed embedded database. Pass ``auth=True`` to switch on
+beacon's RBAC, where a session is anonymous and read-only until credentials are supplied::
 
     con = beacondb.connect("beacon.db", auth=True, username="analyst", password=...)
     con.whoami()
@@ -89,7 +89,7 @@ def sql(query: str) -> Relation:
 
 
 def query(query_text: str) -> Relation:
-    """Alias of :func:`sql`, matching DuckDB."""
+    """Alias of :func:`sql`, for familiarity with other embedded engines."""
     return _default().sql(query_text)
 
 

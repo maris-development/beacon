@@ -3,6 +3,7 @@ name = "beacon-redb-store"
 version = "0.1.0"
 edition = "2024"
 
+rust-version.workspace = true
 [lints.clippy]
 # A future object_store bump must not silently fall back to a broken default
 # trait method — force us to implement each one explicitly.

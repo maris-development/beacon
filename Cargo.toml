@@ -5,6 +5,15 @@ resolver = "3"
 members = ["beacon-datalake/beacon-datalake", "beacon-datalake/beacon-datalake-config", "beacon-datalake/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
 exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
+[workspace.package]
+# Minimum supported Rust version, inherited by every member via `rust-version.workspace = true`.
+# This is the "1.91 or later" contract: cargo refuses to build on anything older with a clear
+# message naming the version, instead of failing deep in a compile. A `rust-toolchain` file cannot
+# express a floor — its channel is one exact version (or `stable`/`beta`/`nightly`) — so the two
+# work together: rust-toolchain picks what CI and contributors *use*, this sets what the code
+# *requires*. It matters most for source builds from the sdist, which don't ship rust-toolchain.
+rust-version = "1.91"
+
 [workspace.dependencies]
 tokio = {version = "1.47.1", features = ["full"]}
 tokio-util = {version = "0.7.13", features = ["io"]}

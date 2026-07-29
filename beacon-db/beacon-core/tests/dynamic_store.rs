@@ -1,7 +1,7 @@
 //! A bare `RuntimeBuilder` — no `with_default_store` / `with_default_object_store`
 //! — puts the runtime in *dynamic* storage mode: there is no datasets root to
 //! resolve bare paths against, so every path is resolved on the fly by its own
-//! form (DuckDB-style). A schemeless path is a local filesystem path; a
+//! form. A schemeless path is a local filesystem path; a
 //! `file://` URL is local; object-store schemes (`s3://`, …) route to their own
 //! store.
 //!

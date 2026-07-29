@@ -222,6 +222,7 @@ The dataframe helpers are optional extras:
 pip install "beacondb[pandas]"       # .df()
 pip install "beacondb[polars]"       # .pl()
 pip install "beacondb[sqlalchemy]"   # the beacondb:// dialect
+pip install "beacondb[all]"          # all of the above
 ```
 
 `.arrow()` works without any extra.

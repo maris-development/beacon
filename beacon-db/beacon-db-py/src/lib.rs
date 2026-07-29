@@ -1,4 +1,4 @@
-//! `beacondb` — Python bindings for beacon-db, an embeddable DuckDB-class database.
+//! `beacondb` — Python bindings for beacon-db, an embeddable, in-process analytical database.
 //!
 //! This crate is the thin layer between CPython and [`beacon_core::embedded`]: it owns the
 //! Tokio runtime, maps engine errors onto the PEP 249 exception tree, and moves results across
