@@ -5,7 +5,7 @@ import { LATEST_VERSION, LATEST_ENTRY } from '../version.js'
 
 // GitHub Pages serves 404.html for any unknown path, which lets this component
 // act as a catch-all rewrite for the `/docs/latest/...` alias:
-//   /docs/latest/beacondb/how-it-works  ->  /docs/2.0.0/beacondb/how-it-works
+//   /docs/latest/data-lake  ->  /docs/1.8.0/data-lake
 // Anything else renders the normal 404.
 const redirecting = ref(false)
 

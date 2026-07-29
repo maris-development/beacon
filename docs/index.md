@@ -11,7 +11,9 @@ hero:
   actions:
     - theme: brand
       text: Get Started
-      link: /docs/2.0.0/introduction
+      # Points at the newest *stable* docs. 2.0.0-rc1 is a pre-release and is
+      # reached deliberately via the version dropdown, not from the hero CTA.
+      link: /docs/1.8.0/introduction
     - theme: alt
       text: Explore Public Nodes
       link: /available-nodes/available-nodes

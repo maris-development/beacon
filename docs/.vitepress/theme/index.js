@@ -13,6 +13,7 @@ import ProductSplit from './components/ProductSplit.vue'
 import SystemDiagram from './components/SystemDiagram.vue'
 import LatestRedirect from './components/LatestRedirect.vue'
 import NotFound from './components/NotFound.vue'
+import PreReleaseNotice from './components/PreReleaseNotice.vue'
 import './custom.css'
 
 // Reveal sections as they scroll into view. No-JS safe (the hidden state is only
@@ -106,6 +107,9 @@ const Layout = {
                 ]),
             'home-features-before': () => h(FeaturesIntro),
             'home-features-after': () => h(GetStartedCta),
+            // Banner above the content on pre-release docs pages; the component
+            // renders nothing on every other version.
+            'doc-before': () => h(PreReleaseNotice),
             // Doubles as the `/docs/latest/...` catch-all: GitHub Pages serves
             // 404.html for unknown paths, so this rewrites the alias client-side
             // before falling back to a normal 404.

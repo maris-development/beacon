@@ -51,7 +51,7 @@ changes), and **Fixed** (bug fixes).
 - **`beacon-datalake-cli`.** A Python terminal client (interactive REPL and one-shot
   subcommands) that runs SQL, explores tables / datasets / schemas, and exports
   to CSV, Parquet, Arrow IPC, or NetCDF. See the
-  [Beacon Datalake CLI guide](/docs/1.8.0/connect/beacon-datalake-cli).
+  [Beacon Datalake CLI guide](/docs/1.8.0/connect/beacon-cli).
 - **`EXPLAIN ANALYZE` endpoint.** `POST /api/explain-analyze-query` runs a query
   and returns the physical plan annotated with per-operator runtime metrics
   (rows, bytes, time). See the [API querying chapter](/docs/1.8.0/api/querying/).

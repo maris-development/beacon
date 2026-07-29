@@ -11,7 +11,9 @@ const paths = [
     blurb: 'Run the engine in-process, straight from Python.',
     cmd: 'pip install beacondb',
     cta: 'Get started with BeaconDB',
-    link: withBase('/docs/2.0.0/beacondb/python/getting-started'),
+    // BeaconDB only exists in 2.0.0, so this necessarily lands on the
+    // pre-release docs (which carry the pre-release banner).
+    link: withBase('/docs/2.0.0-rc1/beacondb/python/getting-started'),
   },
   {
     key: 'lake',
@@ -21,7 +23,8 @@ const paths = [
     blurb: 'Run the server and share one lakehouse with your team.',
     cmd: 'docker pull ghcr.io/maris-development/beacon:latest',
     cta: 'Run the server',
-    link: withBase('/docs/2.0.0/getting-started'),
+    // Data Lake ships in the stable release, so point at it rather than the RC.
+    link: withBase('/docs/1.8.0/getting-started'),
   },
 ]
 </script>

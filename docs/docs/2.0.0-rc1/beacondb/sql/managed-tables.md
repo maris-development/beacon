@@ -6,35 +6,13 @@ INSERT INTO observations VALUES (1, 'a'), (2, 'b');
 SELECT * FROM observations;
 ```
 
-A **managed table** is a SQL table whose data Beacon owns and stores itself. Unlike an [external table](../data-lake/external-tables.md) — which only points at existing files — a managed table is created empty (or from a query) and populated with `INSERT`. It supports `UPDATE`, `DELETE`, schema evolution with `ALTER TABLE`, and secondary `INDEX`es. Table definitions and data survive restarts.
+A **managed table** is a SQL table whose data Beacon owns and stores itself. Unlike an [external table](/docs/2.0.0-rc1/beacondb/data-sources/external-tables), which only points at existing files, a managed table is created empty (or from a query) and populated with `INSERT`. It supports `UPDATE`, `DELETE`, schema evolution with `ALTER TABLE`, and secondary `INDEX`es. Table definitions and data survive restarts.
 
 Managed tables are an authenticated, write capability: `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, and `CREATE/DROP INDEX` require admin credentials. Anonymous access remains read-only.
 
-## Choosing the storage engine
+## Storage engine
 
-Managed tables can be backed by one of two engines:
-
-| Engine | Best for | Storage | Updates/Deletes | Indexes |
-| --- | --- | --- | --- | --- |
-| **Lance** *(default)* | fast local CRUD, secondary indexes | local filesystem (tables directory) | native — deletion vectors / fragment rewrite | ✅ scalar (btree, bitmap, full‑text) |
-| **Iceberg** | object‑store / cloud deployments | object store (alongside datasets, local or S3) | copy‑on‑write | ❌ |
-
-The engine is chosen **when the table is created** and recorded with the table; later `INSERT`/`UPDATE`/`DELETE`/`ALTER` automatically use the right engine.
-
-The default is **Lance**. Override it per session before creating a table:
-
-```sql
-SET beacon.table_engine = 'iceberg';
-CREATE TABLE archived (id BIGINT, name VARCHAR);   -- Iceberg-backed
-
-SET beacon.table_engine = 'lance';                 -- back to the default
-```
-
-Or change the deployment-wide default with the `BEACON_DEFAULT_TABLE_ENGINE` environment variable (`lance` or `iceberg`).
-
-::: tip
-Lance managed tables live on the **local filesystem** (the tables directory), even when your datasets are on S3. If you run Beacon with an S3 data lake and want managed tables on object storage, use the Iceberg engine.
-:::
+Managed tables are backed by **[Lance](https://lancedb.github.io/lance/)**: a columnar, versioned format with native row-level updates/deletes (deletion vectors / fragment rewrite) and scalar secondary indexes (btree, bitmap, full-text). Table data and definitions live in Beacon's single-file `db://` store (`beacon.db`) alongside each table's `table.json`, regardless of where your datasets are stored (S3 only ever applies to the datasets store).
 
 ## `CREATE TABLE`
 
@@ -94,7 +72,7 @@ DELETE FROM measurements WHERE value IS NULL;
 DELETE FROM measurements;        -- empties the table
 ```
 
-On **Lance** tables this is a native delete (deletion vectors) — it does not rewrite the whole table. On **Iceberg** tables it is copy-on-write.
+On **Lance** tables this is a native delete (deletion vectors), it does not rewrite the whole table. On **Iceberg** tables it is copy-on-write.
 
 ## `UPDATE`
 
@@ -134,7 +112,7 @@ On **Lance** tables schema changes are applied natively (no table rebuild). On *
 Secondary indexes are a feature of the **Lance** engine. They are not available on Iceberg-backed tables.
 :::
 
-Create a scalar index on a column to speed up filters. Once created, queries use it automatically — no query changes are needed.
+Create a scalar index on a column to speed up filters. Once created, queries use it automatically, no query changes are needed.
 
 ```sql
 -- Default (BTREE) index; auto-named <table>_<column>_idx

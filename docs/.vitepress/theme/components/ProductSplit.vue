@@ -19,7 +19,9 @@ const products = [
       'Python binding today, more coming',
       'Arrow-native, streaming results',
     ],
-    link: withBase('/docs/2.0.0/beacondb/'),
+    // BeaconDB only exists in 2.0.0, so this necessarily lands on the
+    // pre-release docs (which carry the pre-release banner).
+    link: withBase('/docs/2.0.0-rc1/beacondb/'),
     linkText: 'Explore BeaconDB',
   },
   {
@@ -36,7 +38,8 @@ const products = [
       'Crawlers & managed dataset store',
       'MCP server for AI agents',
     ],
-    link: withBase('/docs/2.0.0/getting-started'),
+    // Data Lake ships in the stable release, so point at it rather than the RC.
+    link: withBase('/docs/1.8.0/getting-started'),
     linkText: 'Run the server',
   },
 ]
