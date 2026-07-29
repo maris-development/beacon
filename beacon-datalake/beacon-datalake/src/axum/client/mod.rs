@@ -8,6 +8,7 @@ use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod datasets;
+mod functions;
 mod info;
 mod query;
 mod tables;
@@ -18,6 +19,7 @@ mod tables;
     (name = "query", description = "Execute and validate queries."),
     (name = "datasets", description = "Discover dataset files in the datasets store and inspect their schemas."),
     (name = "tables", description = "List registered tables and inspect their schemas."),
+    (name = "functions", description = "Browse the scalar, aggregate, and table-valued functions available in queries."),
     (name = "system", description = "Beacon runtime version and host information.")
 ))]
 pub struct ClientApiDoc;
@@ -31,6 +33,9 @@ pub(crate) fn setup_client_router() -> (Router<Arc<DataLake>>, utoipa::openapi::
     OpenApiRouter::with_openapi(ClientApiDoc::openapi())
         .routes(routes!(query::query))
         .routes(routes!(query::parse_query))
+        .routes(routes!(query::query_metrics))
+        .routes(routes!(query::explain_query))
+        .routes(routes!(query::explain_analyze_query))
         .routes(routes!(query::available_columns))
         .routes(routes!(datasets::datasets))
         .routes(routes!(datasets::list_datasets))
@@ -42,6 +47,8 @@ pub(crate) fn setup_client_router() -> (Router<Arc<DataLake>>, utoipa::openapi::
         .routes(routes!(tables::list_table_schema))
         .routes(routes!(tables::list_table_extensions))
         .routes(routes!(tables::default_table_schema))
+        .routes(routes!(functions::list_functions))
+        .routes(routes!(functions::list_table_functions))
         .routes(routes!(info::system_info))
         .split_for_parts()
 }

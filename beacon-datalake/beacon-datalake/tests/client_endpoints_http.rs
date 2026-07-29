@@ -243,6 +243,150 @@ async fn parse_query_validates_without_executing() {
 }
 
 // --------------------------------------------------------------------------
+// /api/explain-query, /api/explain-analyze-query, /api/query/metrics/{id}
+//
+// The admin UI's Explain/Analyze buttons and its metrics panel are the only
+// consumers of these three. They were dropped from the router once already,
+// which 404'd the whole workbench panel with nothing failing in CI — so each
+// one is pinned here.
+// --------------------------------------------------------------------------
+
+/// The pgjson shape plan visualizers (and `PlanTree` in the web UI) consume:
+/// `[{ "Plan": { "Node Type": ..., "Plans": [...] } }]`.
+fn assert_pg_json_plan(body: &[u8]) {
+    let plan = json(body);
+    let root = plan
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or_else(|| panic!("plan should be a non-empty array, got: {plan}"));
+    let node = root
+        .get("Plan")
+        .unwrap_or_else(|| panic!("plan[0] should have a `Plan` key, got: {root}"));
+    assert!(
+        node.get("Node Type").and_then(Value::as_str).is_some(),
+        "the root plan node should carry a `Node Type`, got: {node}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_query_returns_a_pg_json_plan_without_executing() {
+    let (router, lake, _cfg) = app(config(false)).await;
+    seed(lake.lake.runtime(), "CREATE TABLE ex (a BIGINT)").await;
+    seed(lake.lake.runtime(), "INSERT INTO ex VALUES (1), (2)").await;
+
+    let res = send(
+        &router,
+        post_json("/api/explain-query", json!({ "sql": "SELECT a FROM ex" }), None),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_pg_json_plan(&res.body);
+
+    // EXPLAIN does not run the query, so an unresolvable table is a plan error.
+    let bad = send(
+        &router,
+        post_json("/api/explain-query", json!({ "sql": "SELECT * FROM missing" }), None),
+    )
+    .await;
+    assert!(
+        bad.status.is_client_error(),
+        "explaining an unplannable query should be a client error, got: {}",
+        bad.status
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_analyze_query_returns_a_plan_with_execution_metrics() {
+    let (router, lake, _cfg) = app(config(false)).await;
+    seed(lake.lake.runtime(), "CREATE TABLE an (a BIGINT)").await;
+    seed(lake.lake.runtime(), "INSERT INTO an VALUES (1), (2), (3)").await;
+
+    let res = send(
+        &router,
+        post_json(
+            "/api/explain-analyze-query",
+            json!({ "sql": "SELECT a FROM an" }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_pg_json_plan(&res.body);
+
+    // ANALYZE executes the plan, so the nodes carry actual row counts — that is
+    // the whole difference from `/api/explain-query`.
+    let text = String::from_utf8(res.body).expect("plan should be UTF-8");
+    assert!(
+        text.contains("Actual Rows"),
+        "an analyzed plan should carry per-node `Actual Rows`, got: {text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_analyze_respects_the_sql_enable_gate() {
+    // ANALYZE executes the query, so it must honour `sql.enable` exactly like
+    // `/api/query` — otherwise it is a hole around the setting.
+    let mut cfg = config(false);
+    cfg.sql.enable = false;
+    let (router, _lake, _cfg) = app(cfg).await;
+
+    let res = send(
+        &router,
+        post_json(
+            "/api/explain-analyze-query",
+            json!({ "sql": "SELECT 1 AS v" }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        res.status,
+        StatusCode::BAD_REQUEST,
+        "SQL analyze must be refused while sql.enable is false"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn query_metrics_are_retrievable_by_query_id() {
+    let (router, _lake, _cfg) = app(config(false)).await;
+
+    let query = send(
+        &router,
+        post_json("/api/query", json!({ "sql": "SELECT 1 AS v" }), None),
+    )
+    .await;
+    assert_eq!(query.status, StatusCode::OK);
+    let query_id = query
+        .headers
+        .get("x-beacon-query-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("a successful query returns its id")
+        .to_string();
+
+    let res = send(&router, get(&format!("/api/query/metrics/{query_id}"), None)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let metrics = json(&res.body);
+    assert!(
+        metrics.get("result_num_rows").is_some(),
+        "metrics should report result_num_rows, got: {metrics}"
+    );
+
+    // A well-formed but unknown id is a 404; a malformed one is a 400.
+    let missing = send(
+        &router,
+        get(
+            "/api/query/metrics/00000000-0000-0000-0000-000000000000",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+
+    let malformed = send(&router, get("/api/query/metrics/not-a-uuid", None)).await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+}
+
+// --------------------------------------------------------------------------
 // Table discovery
 // --------------------------------------------------------------------------
 

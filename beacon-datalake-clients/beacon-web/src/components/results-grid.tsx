@@ -45,9 +45,8 @@ export function ResultsGrid({ rows, table }: ResultsGridProps) {
           <TableRow key={i}>
             <TableCell className="text-right text-muted-foreground">{i + 1}</TableCell>
             {columns.map((col) => {
-              const tsUnit = tsColumns.get(col);
-              const text =
-                tsUnit !== undefined ? formatTimestamp(row[col], tsUnit) : formatCell(row[col]);
+              const isTimestamp = tsColumns.has(col);
+              const text = isTimestamp ? formatTimestamp(row[col]) : formatCell(row[col]);
               return (
                 <TableCell
                   key={col}

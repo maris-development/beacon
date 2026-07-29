@@ -232,6 +232,120 @@ impl Runtime {
         })
     }
 
+    /// The storage format and options the named table is configured with, or
+    /// `None` when the table has no persisted definition (an unknown name, or a
+    /// session-only table that was never written to the tables store).
+    ///
+    /// Read from `db://<name>/table.json` rather than from the live provider:
+    /// the definition is what the table was *declared* as, which is what an
+    /// operator inspecting a table wants to see. Credentials and internal
+    /// (double-underscore) option keys are redacted by `TableConfigView`.
+    pub async fn table_config(&self, table_name: &str) -> Option<crate::api::TableConfigView> {
+        let store = self
+            .session_ctx
+            .runtime_env()
+            .object_store(&*beacon_datafusion_ext::consts::DEFAULT_DB_STORE_URL_OBJECT_URL)
+            .inspect_err(|error| tracing::error!(%error, "failed to open the tables object store"))
+            .ok()?;
+
+        let definition =
+            crate::schema_persistence::load_table_definition(&store, table_name).await?;
+
+        crate::api::TableConfigView::try_from(definition)
+            .inspect_err(|error| {
+                tracing::error!(table_name, ?error, "failed to map table definition into API contract")
+            })
+            .ok()
+    }
+
+    /// Recorded metrics for a previously executed query, or `None` when the id
+    /// is unknown. The same data the `beacon.system.query_metrics` table serves,
+    /// mapped into the API contract for transports that address a single query
+    /// by id.
+    pub fn get_query_metrics(&self, query_id: uuid::Uuid) -> Option<crate::api::QueryMetricsView> {
+        self.query_metrics
+            .lock()
+            .get(&query_id)
+            .cloned()
+            .and_then(|metrics| match crate::api::QueryMetricsView::try_from(metrics) {
+                Ok(metrics) => Some(metrics),
+                Err(error) => {
+                    tracing::error!(%query_id, ?error, "failed to map query metrics into API contract");
+                    None
+                }
+            })
+    }
+
+    /// Explain a query without running it: returns its logical plan as
+    /// PostgreSQL-style JSON (pgjson), the shape plan visualizers consume.
+    ///
+    /// `EXPLAIN` is read-only — nothing is executed — so the plan is validated
+    /// against the *anonymous* permission set regardless of who is asking. A
+    /// caller must still be authorized to read the tables the plan touches.
+    pub async fn explain_query(
+        &self,
+        query: crate::query::Query,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<String> {
+        // `output` (file format) is meaningless here: only the query body is planned.
+        let plan = self.lower_query(query.inner).await?;
+        crate::statement_plan::validate_query_plan(&plan, false)?;
+        crate::statement_plan::authorize_logical_plan(
+            &plan,
+            &self.session_ctx,
+            &self.auth,
+            &identity,
+            self.auth_enforce,
+        )?;
+        // Bound to a local: the `Display` wrapper borrows `plan`, so formatting
+        // it inline would drop `plan` while the temporary still holds the borrow.
+        let pg_json = plan.display_pg_json().to_string();
+        Ok(pg_json)
+    }
+
+    /// Run a query and return its physical plan as pgjson annotated with
+    /// per-node runtime metrics — the `EXPLAIN ANALYZE` analog of
+    /// [`Self::explain_query`].
+    ///
+    /// Unlike `explain_query` this **executes** the plan to completion to
+    /// populate the metrics, so it applies the same gate the normal query path
+    /// uses: anonymous/role callers are held to `validate_query_plan`, while a
+    /// super-user may also analyze DDL/DML — with the same side effects running
+    /// it through `run_query` would have. A read-only runtime therefore refuses
+    /// anything that does not produce a result set, exactly as `run_query` does.
+    pub async fn explain_analyze_query(
+        &self,
+        query: crate::query::Query,
+        identity: beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<String> {
+        let plan = self.lower_query(query.inner).await?;
+        crate::statement_plan::validate_query_plan(&plan, identity.is_super_user)?;
+        if self.read_only && !crate::statement_plan::plan_produces_result_set(&plan) {
+            anyhow::bail!(
+                "this database was opened read-only; writes are not permitted on this connection"
+            );
+        }
+        crate::statement_plan::authorize_logical_plan(
+            &plan,
+            &self.session_ctx,
+            &self.auth,
+            &identity,
+            self.auth_enforce,
+        )?;
+
+        // Keep the `Arc` so per-node metrics can be read once the stream drains.
+        // `execute_statement_plan` discards the plan, so create/execute are inlined.
+        let physical_plan = self.session_ctx.state().create_physical_plan(&plan).await?;
+        let mut stream = datafusion::physical_plan::execute_stream(
+            physical_plan.clone(),
+            self.session_ctx.task_ctx(),
+        )?;
+        // Drain to completion so every node's metrics are fully recorded.
+        while stream.try_next().await?.is_some() {}
+
+        Ok(crate::metrics::explain_analyze_pg_json(physical_plan.as_ref()).to_string())
+    }
+
     /// Lower the body of a client query (JSON or SQL) to a `LogicalPlan` without
     /// executing or validating it (permission checks and output formatting happen
     /// in `run_query` on the lowered plan).

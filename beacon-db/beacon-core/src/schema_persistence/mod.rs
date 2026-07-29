@@ -17,6 +17,7 @@ mod ordering;
 pub mod provider;
 pub mod service;
 
+pub use loading::load_table_definition;
 pub use provider::PersistentSchemaProvider;
 pub use service::{definition_from_provider, SchemaPersistenceService};
 

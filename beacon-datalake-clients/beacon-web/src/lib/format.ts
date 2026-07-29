@@ -26,9 +26,10 @@ export function formatCell(value: unknown): string {
 
 /**
  * Maps each Arrow `Timestamp` column to its unit (SECOND/MILLISECOND/…), read
- * from the decoded table's schema. apache-arrow returns timestamp values as raw
- * numbers, so we need the type to render them as dates. Defensive: returns an
- * empty map if the table or its schema is unavailable.
+ * from the decoded table's schema. The unit is not needed to scale the value
+ * (see [`formatTimestamp`]) — it only tells us *which* columns are timestamps,
+ * so the grid renders them as dates rather than as bare numbers. Defensive:
+ * returns an empty map if the table or its schema is unavailable.
  */
 export function timestampColumns(table: unknown): Map<string, string> {
   const map = new Map<string, string>();
@@ -42,19 +43,21 @@ export function timestampColumns(table: unknown): Map<string, string> {
   return map;
 }
 
-const TS_UNIT_TO_MS: Record<string, number> = {
-  SECOND: 1000,
-  MILLISECOND: 1,
-  MICROSECOND: 1 / 1000,
-  NANOSECOND: 1 / 1_000_000,
-};
-
-/** Formats a raw Arrow timestamp value (in `unit`) as an ISO-8601 UTC string. */
-export function formatTimestamp(value: unknown, unit: string): string {
+/**
+ * Formats an Arrow timestamp value as an ISO-8601 UTC string.
+ *
+ * apache-arrow's element getters already normalise every timestamp to
+ * **milliseconds** regardless of the column's unit (`visitor/get.ts`:
+ * SECOND ×1000, MICROSECOND ÷1e3, NANOSECOND ÷1e6). Scaling by the unit again
+ * here would apply the conversion twice — a nanosecond column then landed
+ * within half an hour of the epoch, so every row rendered as 1969/1970.
+ */
+export function formatTimestamp(value: unknown): string {
   if (value === null || value === undefined) return "";
-  const raw = typeof value === "bigint" ? Number(value) : Number(value);
-  if (!Number.isFinite(raw)) return formatCell(value);
-  const date = new Date(raw * (TS_UNIT_TO_MS[unit] ?? 1));
+  if (value instanceof Date) return value.toISOString();
+  const millis = typeof value === "bigint" ? Number(value) : Number(value);
+  if (!Number.isFinite(millis)) return formatCell(value);
+  const date = new Date(millis);
   return Number.isNaN(date.getTime()) ? formatCell(value) : date.toISOString();
 }
 
