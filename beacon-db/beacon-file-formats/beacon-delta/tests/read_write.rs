@@ -1,16 +1,16 @@
 //! End-to-end tests for `open_delta_provider`: read, time travel, and
-//! `INSERT INTO`, all through Beacon's `DatasetsStore` backend.
+//! `INSERT INTO`, all over the object store backing the `datasets://` scheme.
 
 use std::sync::Arc;
 
 use arrow::array::{Int32Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use beacon_delta::{open_delta_provider, TimeTravel};
-use beacon_object_storage::DatasetsStore;
 use datafusion::prelude::SessionContext;
 use deltalake::protocol::SaveMode;
 use deltalake::DeltaTableBuilder;
 use object_store::local::LocalFileSystem;
+use object_store::ObjectStore;
 use url::Url;
 
 fn batch(ids: &[i32]) -> RecordBatch {
@@ -37,9 +37,12 @@ async fn write_fixture(root: &std::path::Path) {
         .unwrap();
 }
 
-async fn datasets_store(root: &std::path::Path) -> Arc<DatasetsStore> {
-    let local = Arc::new(LocalFileSystem::new_with_prefix(root).unwrap());
-    Arc::new(DatasetsStore::new(local, None).await)
+/// The store backing `datasets://` locations, rooted at `root`.
+///
+/// `open_delta_provider` scopes this to the table's prefix itself (via
+/// `PrefixStore`), so `datasets://tbl` resolves to `<root>/tbl`.
+fn datasets_store(root: &std::path::Path) -> Arc<dyn ObjectStore> {
+    Arc::new(LocalFileSystem::new_with_prefix(root).unwrap())
 }
 
 async fn row_count(ctx: &Arc<SessionContext>, table: &str) -> usize {
@@ -57,7 +60,7 @@ async fn row_count(ctx: &Arc<SessionContext>, table: &str) -> usize {
 async fn reads_latest_and_time_travels() {
     let tmp = tempfile::tempdir().unwrap();
     write_fixture(tmp.path()).await;
-    let store = datasets_store(tmp.path()).await;
+    let store = datasets_store(tmp.path());
 
     // Latest version: 4 rows.
     let ctx = Arc::new(SessionContext::new());
@@ -84,7 +87,7 @@ async fn reads_latest_and_time_travels() {
 async fn insert_into_appends_a_new_version() {
     let tmp = tempfile::tempdir().unwrap();
     write_fixture(tmp.path()).await;
-    let store = datasets_store(tmp.path()).await;
+    let store = datasets_store(tmp.path());
 
     let ctx = Arc::new(SessionContext::new());
     let provider = open_delta_provider(ctx.clone(), store.clone(), "datasets://tbl", None)
