@@ -1,0 +1,41 @@
+[package]
+name = "beacon-datafusion-ext"
+version = "2.0.0-rc.1"
+edition = "2024"
+
+[dependencies]
+datafusion = { workspace = true }
+datafusion-federation = { workspace = true }
+chrono = { workspace = true }
+arrow-flight = { workspace = true, features = ["flight-sql"] }
+tonic = { workspace = true }
+# Encodes remote-Beacon HTTP Basic credentials (`authorization: Basic <base64(user:pass)>`).
+base64 = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+typetag =  { workspace=true}
+anyhow = { workspace = true }
+arrow = { workspace = true }
+# `arrow` re-exports `arrow-schema`; enabling its `serde` feature here makes
+# `arrow::datatypes::Schema` (de)serializable for this crate's persisted table
+# definitions (`table_ext.rs`) even when built standalone (`-p`), not only when
+# the feature is unified across a full workspace build.
+arrow-schema = { workspace = true, features = ["serde"] }
+ordered-float = { workspace = true }
+indexmap = { workspace = true }
+moka = { workspace = true }
+parking_lot = { workspace = true }
+futures = { workspace = true }
+object_store = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = {workspace = true}
+glob = {workspace = true}
+
+beacon-common = { path = "../beacon-common" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+chrono = { workspace = true }

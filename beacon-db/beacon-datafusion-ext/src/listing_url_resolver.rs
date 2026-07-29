@@ -1,0 +1,614 @@
+use std::path::PathBuf;
+
+use datafusion::{
+    common::exec_datafusion_err,
+    datasource::listing::ListingTableUrl,
+    execution::object_store::{ObjectStoreRegistry, ObjectStoreUrl},
+};
+use url::Url;
+
+use crate::object_store_registry::{build_object_store, store_key_url};
+
+/// Resolve a user-supplied glob/path into a DataFusion [`ListingTableUrl`],
+/// registering the backing object store on demand when the path carries its own scheme.
+///
+/// Resolution rules (the `default_store_url` and an in-path scheme are mutually
+/// exclusive):
+/// - `Some(default)` + a schemed path (`s3://…`) → **error**: the default is
+///   prepended, so a schemed path would be nonsensical.
+/// - `Some(default)` + a relative path → prepend the default store URL (the
+///   historical behavior). The default store must already be registered.
+/// - `None` + a schemed path → use the scheme verbatim; if it is a remote
+///   backend (`s3`/`gs`/`az`/`http`…) and not yet registered, build the store
+///   from the environment and register it on `registry`.
+/// - `None` + a relative/absolute path → treat it as a **local** filesystem
+///   path (`file://` + the absolute path), ensuring the local store is
+///   registered.
+pub fn parse_listing_table_url(
+    default_store_url: Option<ObjectStoreUrl>,
+    glob_path: &str,
+    registry: &dyn ObjectStoreRegistry,
+) -> datafusion::error::Result<ListingTableUrl> {
+    // On Windows, `std::fs::canonicalize` yields an extended-length path such as
+    // `\\?\C:\data`. The `?` in that verbatim prefix reads as a glob wildcard to
+    // `split_path_and_glob`, and object stores want the plain path anyway, so
+    // strip it up front. No-op on non-Windows / non-verbatim paths.
+    let normalized = strip_windows_verbatim_prefix(glob_path);
+
+    // `file://` names a local path, so with no default store reduce it to the
+    // bare path and let it take exactly the same branch as a schemeless local
+    // one. Two things make this more than a shortcut:
+    //
+    // - The verbatim prefix has to be stripped *after* the scheme is removed. A
+    //   caller that URL-wraps a canonicalized path produces `file://\\?\C:\data`,
+    //   where `\\?\` is no longer leading; left in, it becomes `//?/` and the `?`
+    //   is then parsed as the URL's query, collapsing the whole location to
+    //   `file:///`.
+    // - The local branch preserves directory semantics (trailing slash), which
+    //   the verbatim-scheme path did not.
+    //
+    // With a default store the rewrite is skipped, so the mutual-exclusion check
+    // below still rejects a schemed path instead of silently treating it as
+    // relative to the default store.
+    let normalized = match default_store_url
+        .is_none()
+        .then(|| strip_file_scheme(normalized.as_ref()))
+        .flatten()
+    {
+        Some(local) => std::borrow::Cow::Owned(
+            strip_windows_verbatim_prefix(&local).into_owned(),
+        ),
+        None => normalized,
+    };
+    let glob_path = normalized.as_ref();
+
+    // Split the path into (base, optional glob) and detect a leading scheme
+    // (e.g. `s3://`) on the raw input.
+    let (base_path, glob_pattern) = split_path_and_glob(glob_path);
+    let scheme = scheme_of(glob_path);
+
+    // Build the complete base URL string (no glob yet), per the branch.
+    let mut full_path: String = match (default_store_url.as_ref(), scheme) {
+        // Mutually exclusive: a default store URL AND a schemed path.
+        (Some(_), Some(scheme)) => {
+            return Err(exec_datafusion_err!(
+                "a default object store URL was provided but the path already \
+                 contains a `{scheme}://` scheme; these are mutually exclusive"
+            ));
+        }
+        // Default store URL + relative path → prepend the default (historical
+        // behavior). Verify the default store is registered first.
+        (Some(default), None) => {
+            let default_url = Url::parse(default.as_str()).map_err(|e| {
+                exec_datafusion_err!("invalid default store URL {}: {e}", default.as_str())
+            })?;
+            if registry.get_store(&default_url).is_err() {
+                return Err(exec_datafusion_err!(
+                    "no object store registered for default store URL `{default_url}`"
+                ));
+            }
+
+            let mut prefix = default.to_string();
+            if base_path.components().next().is_some() {
+                let normalized = base_path.as_os_str().to_string_lossy().replace('\\', "/");
+                if prefix.ends_with('/') {
+                    prefix.push_str(normalized.as_str());
+                } else {
+                    prefix.push('/');
+                    prefix.push_str(normalized.as_str());
+                }
+            }
+            prefix
+        }
+        // No default + schemed path → the path carries its own store. Lazily
+        // build + register the backing store, then use the path verbatim.
+        (None, Some(_)) => {
+            let base_str = base_path.as_os_str().to_string_lossy().replace('\\', "/");
+            let base_url = Url::parse(&base_str)
+                .map_err(|e| exec_datafusion_err!("failed to parse URL {base_str}: {e}"))?;
+            ensure_store_registered(registry, &base_url)?;
+            base_str
+        }
+        // No default + no scheme → a local filesystem path.
+        (None, None) => {
+            let abs = std::path::absolute(base_path.as_path()).map_err(|e| {
+                exec_datafusion_err!("failed to absolutize path {}: {e}", base_path.display())
+            })?;
+            let file_url = Url::from_file_path(&abs).map_err(|_| {
+                exec_datafusion_err!("failed to build file URL for {}", abs.display())
+            })?;
+            ensure_store_registered(registry, &file_url)?;
+            let mut url = file_url.to_string();
+            // Preserve directory semantics. `ListingTableUrl` treats a `file://`
+            // URL without a trailing slash as a single file and *opens* it; a
+            // directory `LOCATION 'obs/'` must stay a collection prefix so it is
+            // listed instead. `Url::from_file_path` drops the trailing separator,
+            // so restore it when the input asked for a directory (trailing
+            // separator) or the path is in fact a directory.
+            let is_dir =
+                glob_path.ends_with('/') || glob_path.ends_with('\\') || abs.is_dir();
+            if is_dir && !url.ends_with('/') {
+                url.push('/');
+            }
+            url
+        }
+    };
+
+    let glob_pattern_parsed = if let Some(pattern) = glob_pattern {
+        if !full_path.ends_with('/') {
+            full_path.push('/');
+        }
+        Some(glob::Pattern::new(&pattern).map_err(|e| {
+            tracing::warn!(pattern = %pattern, error = %e, "failed to parse glob pattern");
+            exec_datafusion_err!("Failed to parse glob pattern: {}", e)
+        })?)
+    } else {
+        None
+    };
+
+    let url = Url::parse(&full_path).map_err(|e| {
+        tracing::warn!(url = %full_path, error = %e, "failed to parse listing URL");
+        exec_datafusion_err!("Failed to parse URL: {}", e)
+    })?;
+
+    let table_url = ListingTableUrl::try_new(url, glob_pattern_parsed).map_err(|e| {
+        tracing::warn!(path = %full_path, error = %e, "failed to create listing table URL");
+        exec_datafusion_err!("Failed to create table URL: {}", e)
+    })?;
+
+    tracing::debug!(table_url = %table_url, "resolved listing table URL");
+    Ok(table_url)
+}
+
+/// Ensure a store for `url`'s scheme+authority is registered, lazily building
+/// it (via the shared [`build_object_store`]) on a miss. If `registry` is itself
+/// a [`crate::object_store_registry::LazyObjectStoreRegistry`], the `get_store`
+/// call already materializes the store, so this is a cheap no-op.
+fn ensure_store_registered(
+    registry: &dyn ObjectStoreRegistry,
+    url: &Url,
+) -> datafusion::error::Result<()> {
+    let key = store_key_url(url);
+    if registry.get_store(&key).is_err() {
+        let store = build_object_store(&key, None)?;
+        registry.register_store(&key, store);
+        tracing::debug!(store = %key, "lazily registered object store");
+    }
+    Ok(())
+}
+
+/// Detect a leading URL scheme (`scheme://…`) on a raw path, returning the
+/// scheme without the `://`. Returns `None` for relative paths, bare filenames,
+/// and Windows drive paths (which contain no `://`).
+///
+/// scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+pub(crate) fn scheme_of(path: &str) -> Option<&str> {
+    if !path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let idx = path.find("://")?;
+    let scheme = &path[..idx];
+    // A single ASCII letter before `://` is a Windows drive letter (`C:`), not a
+    // URL scheme — real schemes are at least two characters. This keeps
+    // `C://users/x.nc` (a local path with a doubled separator) local rather than
+    // misreading it as a `c://` object store.
+    if scheme.len() < 2 {
+        return None;
+    }
+    scheme
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        .then_some(scheme)
+}
+
+/// Reduce a `file://` URL to the local path it names, or `None` when `path` is
+/// not a `file://` URL.
+///
+/// `file:///C:/data` and `file://C:/data` both name `C:/data`; `file:///data`
+/// names `/data`. The scheme is matched case-insensitively (URL schemes are).
+/// A non-empty non-drive authority (`file://server/share`) keeps its leading
+/// slashes, so it stays a UNC path rather than being rewritten to a rooted one.
+fn strip_file_scheme(path: &str) -> Option<String> {
+    const PREFIX: &str = "file://";
+    let rest = path
+        .get(..PREFIX.len())
+        .filter(|p| p.eq_ignore_ascii_case(PREFIX))
+        .map(|_| &path[PREFIX.len()..])?;
+
+    // `file:///C:/data` leaves `/C:/data`; drop the slash that precedes a drive
+    // letter so the result is a plain Windows path.
+    let b = rest.as_bytes();
+    if b.first() == Some(&b'/')
+        && b.get(1).is_some_and(u8::is_ascii_alphabetic)
+        && b.get(2) == Some(&b':')
+    {
+        return Some(rest[1..].to_string());
+    }
+    Some(rest.to_string())
+}
+
+/// Strip a Windows extended-length (verbatim) path prefix — `\\?\C:\…` or the
+/// UNC form `\\?\UNC\server\share\…` — which `std::fs::canonicalize` produces on
+/// Windows. The embedded `?` otherwise looks like a glob wildcard, and object
+/// stores expect the plain path. Returns the input untouched on other platforms
+/// and for paths without the prefix.
+#[cfg(windows)]
+fn strip_windows_verbatim_prefix(path: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        // `\\?\UNC\server\share` → `\\server\share`; `\\?\C:\x` → `C:\x`.
+        if let Some(unc) = rest.strip_prefix(r"UNC\") {
+            return Cow::Owned(format!(r"\\{unc}"));
+        }
+        return Cow::Borrowed(rest);
+    }
+    Cow::Borrowed(path)
+}
+
+#[cfg(not(windows))]
+fn strip_windows_verbatim_prefix(path: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(path)
+}
+
+/// Splits a path containing an optional glob pattern into
+/// (base_path, optional_glob_pattern).
+///
+/// Examples:
+/// - "src/**/*.rs" -> ("src", Some("**/*.rs"))
+/// - "src/*.rs"    -> ("src", Some("*.rs"))
+/// - "*.rs"        -> (".", Some("*.rs"))
+/// - "src/main.rs" -> ("src/main.rs", None)
+pub fn split_path_and_glob(input: &str) -> (PathBuf, Option<String>) {
+    let glob_chars = ['*', '?', '[', ']'];
+
+    // Split the path into components manually (cross-platform)
+    let parts: Vec<&str> = input.split(['/', '\\']).collect();
+
+    // Find the index of the first segment that contains any glob char
+    if let Some(i) = parts
+        .iter()
+        .position(|p| p.chars().any(|c| glob_chars.contains(&c)))
+    {
+        let base = if i == 0 {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(parts[..i].join("/"))
+        };
+        let glob = parts[i..].join("/");
+        (base, Some(glob))
+    } else {
+        // No glob pattern at all
+        (PathBuf::from(input), None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::MAIN_SEPARATOR;
+    use std::sync::Arc;
+
+    use datafusion::execution::object_store::{
+        DefaultObjectStoreRegistry, ObjectStoreRegistry, ObjectStoreUrl,
+    };
+    use object_store::memory::InMemory;
+
+    use super::*;
+
+    /// A registry with a store registered under `datasets://`, mirroring the
+    /// eager registration beacon performs at boot.
+    fn registry_with_datasets() -> DefaultObjectStoreRegistry {
+        let registry = DefaultObjectStoreRegistry::new();
+        registry.register_store(
+            &Url::parse("datasets://").unwrap(),
+            Arc::new(InMemory::new()),
+        );
+        registry
+    }
+
+    #[test]
+    fn test_no_glob() {
+        let (base, glob) = split_path_and_glob("src/main.rs");
+        assert_eq!(base, PathBuf::from("src/main.rs"));
+        assert_eq!(glob, None);
+    }
+
+    #[test]
+    fn test_simple_glob() {
+        let (base, glob) = split_path_and_glob("src/*.rs");
+        assert_eq!(base, PathBuf::from("src"));
+        assert_eq!(glob, Some("*.rs".to_string()));
+    }
+
+    #[test]
+    fn test_recursive_glob() {
+        let (base, glob) = split_path_and_glob("src/**/*.rs");
+        assert_eq!(base, PathBuf::from("src"));
+        assert_eq!(glob, Some("**/*.rs".to_string()));
+    }
+
+    #[test]
+    fn test_glob_at_start() {
+        let (base, glob) = split_path_and_glob("*.txt");
+        assert_eq!(base, PathBuf::from("."));
+        assert_eq!(glob, Some("*.txt".to_string()));
+    }
+
+    #[test]
+    #[ignore = "This needs to be fixed"]
+    fn test_glob_in_middle_segment() {
+        let (base, glob) = split_path_and_glob("foo[ab]/bar?.txt");
+        assert_eq!(base, PathBuf::from("foo[ab]"));
+        assert_eq!(glob, Some("bar?.txt".to_string()));
+    }
+
+    #[test]
+    fn test_no_separator_but_glob_present() {
+        let (base, glob) = split_path_and_glob("file[0-9].log");
+        assert_eq!(base, PathBuf::from("."));
+        assert_eq!(glob, Some("file[0-9].log".to_string()));
+    }
+
+    #[test]
+    fn test_windows_style_path() {
+        // Works on both Unix and Windows separators
+        let input = format!("dir{}**{}*.txt", MAIN_SEPARATOR, MAIN_SEPARATOR);
+        let (base, glob) = split_path_and_glob(&input);
+        assert_eq!(base, PathBuf::from("dir"));
+        assert_eq!(glob, Some("**/*.txt".to_string()));
+    }
+
+    #[test]
+    fn test_scheme_of() {
+        assert_eq!(scheme_of("s3://bucket/a"), Some("s3"));
+        assert_eq!(scheme_of("gs://bucket/a"), Some("gs"));
+        assert_eq!(scheme_of("file:///abs/x"), Some("file"));
+        assert_eq!(scheme_of("http://host/a"), Some("http"));
+        assert_eq!(scheme_of("rel/path/x.nc"), None);
+        assert_eq!(scheme_of("/abs/path/x.nc"), None);
+        assert_eq!(scheme_of("file[0-9].log"), None);
+        // Windows drive path with a single separator has no `://`.
+        assert_eq!(scheme_of("C:/data/x.nc"), None);
+        // A drive letter followed by a doubled separator (`C://…`) must NOT be
+        // read as a one-letter URL scheme — it is a local path.
+        assert_eq!(scheme_of("C://data/x.nc"), None);
+        assert_eq!(scheme_of("d://some_user/file.nc"), None);
+        // Two-letter schemes are still schemes.
+        assert_eq!(scheme_of("s3://bucket"), Some("s3"));
+    }
+
+    #[test]
+    fn test_default_store_relative_no_glob() {
+        let registry = registry_with_datasets();
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        let url = parse_listing_table_url(Some(store_url), "foo/zarr.json", &registry).unwrap();
+        let dbg = format!("{:?}", url);
+        assert!(dbg.contains("/foo/") || dbg.contains("foo"), "dbg={}", dbg);
+    }
+
+    #[test]
+    fn test_default_store_relative_with_glob() {
+        let registry = registry_with_datasets();
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        let url = parse_listing_table_url(Some(store_url), "subdir/*.json", &registry).unwrap();
+        assert_eq!(url.prefix().to_string(), "subdir");
+        assert_eq!(
+            url.get_glob().as_ref().map(glob::Pattern::as_str),
+            Some("*.json")
+        );
+    }
+
+    #[test]
+    fn test_default_store_parent_dir_and_glob() {
+        let registry = registry_with_datasets();
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        let url =
+            parse_listing_table_url(Some(store_url), "argo-floats/pub/**/*.nc", &registry).unwrap();
+        assert_eq!(url.prefix().to_string(), "argo-floats/pub");
+        assert_eq!(
+            url.get_glob().as_ref().map(glob::Pattern::as_str),
+            Some("**/*.nc")
+        );
+    }
+
+    #[test]
+    fn test_default_store_with_scheme_in_path_errors() {
+        let registry = registry_with_datasets();
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        // A schemed path combined with a default store URL is rejected.
+        let res = parse_listing_table_url(Some(store_url), "s3://bucket/x.parquet", &registry);
+        assert!(res.is_err(), "expected error for default + schemed path");
+    }
+
+    #[test]
+    fn test_default_store_not_registered_errors() {
+        // Empty registry: `datasets://` is not registered.
+        let registry = DefaultObjectStoreRegistry::new();
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        let res = parse_listing_table_url(Some(store_url), "foo/bar.parquet", &registry);
+        assert!(
+            res.is_err(),
+            "expected error when default store not registered"
+        );
+    }
+
+    #[test]
+    fn test_default_store_invalid_glob() {
+        let registry = registry_with_datasets();
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        let res = parse_listing_table_url(Some(store_url), "subdir/[invalid", &registry);
+        assert!(res.is_err(), "expected error for invalid glob pattern");
+    }
+
+    #[test]
+    fn test_schemed_s3_path_registers_store() {
+        let registry = DefaultObjectStoreRegistry::new();
+        // Store not present beforehand.
+        assert!(
+            registry
+                .get_store(&Url::parse("s3://bucket").unwrap())
+                .is_err()
+        );
+
+        let url = parse_listing_table_url(None, "s3://bucket/a/*.parquet", &registry).unwrap();
+        assert!(
+            url.as_str().starts_with("s3://bucket"),
+            "url={}",
+            url.as_str()
+        );
+        assert_eq!(
+            url.get_glob().as_ref().map(glob::Pattern::as_str),
+            Some("*.parquet")
+        );
+
+        // The s3://bucket store was lazily registered as a side effect.
+        assert!(
+            registry
+                .get_store(&Url::parse("s3://bucket/a/x.parquet").unwrap())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_no_default_absolute_local_path() {
+        let registry = DefaultObjectStoreRegistry::new();
+        let url = parse_listing_table_url(None, "/abs/dir/x.nc", &registry).unwrap();
+        assert!(url.as_str().starts_with("file:///"), "url={}", url.as_str());
+        assert!(url.as_str().contains("/abs/dir/"), "url={}", url.as_str());
+    }
+
+    #[test]
+    fn test_no_default_relative_local_path_with_glob() {
+        let registry = DefaultObjectStoreRegistry::new();
+        let url = parse_listing_table_url(None, "rel/dir/*.nc", &registry).unwrap();
+        assert!(url.as_str().starts_with("file:///"), "url={}", url.as_str());
+        assert!(url.as_str().contains("rel/dir"), "url={}", url.as_str());
+        assert_eq!(
+            url.get_glob().as_ref().map(glob::Pattern::as_str),
+            Some("*.nc")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strips_windows_verbatim_prefixes() {
+        // Disk verbatim: `\\?\C:\data` → `C:\data`.
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\C:\data\x.nc"),
+            r"C:\data\x.nc"
+        );
+        // UNC verbatim: `\\?\UNC\server\share` → `\\server\share`.
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\UNC\server\share\x.nc"),
+            r"\\server\share\x.nc"
+        );
+        // Plain paths are untouched.
+        assert_eq!(strip_windows_verbatim_prefix(r"C:\data\x.nc"), r"C:\data\x.nc");
+        assert_eq!(strip_windows_verbatim_prefix("rel/x.nc"), "rel/x.nc");
+    }
+
+    /// A `file://` URL names a local path and must resolve to exactly what the
+    /// same path resolves to bare — including its directory semantics.
+    #[test]
+    fn file_urls_resolve_like_the_bare_local_path() {
+        let registry = DefaultObjectStoreRegistry::new();
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Canonicalized, so on Windows this is a `\\?\C:\…` verbatim path — the
+        // form that used to collapse to `file:///` once wrapped in a URL.
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        std::fs::write(canonical.join("a.csv"), "v\n1\n").expect("write");
+
+        let bare = format!("{}/", canonical.display());
+        let via_url = format!("file://{bare}");
+
+        let from_bare = parse_listing_table_url(None, &bare, &registry).unwrap();
+        let from_url = parse_listing_table_url(None, &via_url, &registry).unwrap();
+
+        assert_eq!(
+            from_url.as_str(),
+            from_bare.as_str(),
+            "a file:// URL must resolve identically to the bare path"
+        );
+        // Not degenerate: the location survived rather than collapsing to the root.
+        assert!(from_url.as_str().len() > "file:///".len(), "url={}", from_url.as_str());
+        // Trailing slash preserved, so the directory is listed, not opened.
+        assert!(from_url.as_str().ends_with('/'), "url={}", from_url.as_str());
+    }
+
+    #[test]
+    fn strip_file_scheme_handles_each_authority_form() {
+        // Rooted POSIX path.
+        assert_eq!(strip_file_scheme("file:///data/x.nc").as_deref(), Some("/data/x.nc"));
+        // Drive letter, with and without the extra slash.
+        assert_eq!(strip_file_scheme("file:///C:/data/x.nc").as_deref(), Some("C:/data/x.nc"));
+        assert_eq!(strip_file_scheme("file://C:/data/x.nc").as_deref(), Some("C:/data/x.nc"));
+        // Schemes are case-insensitive.
+        assert_eq!(strip_file_scheme("FILE:///data").as_deref(), Some("/data"));
+        // A non-drive authority stays a UNC path.
+        assert_eq!(
+            strip_file_scheme("file://server/share/x.nc").as_deref(),
+            Some("server/share/x.nc")
+        );
+        // Anything else is not a file URL.
+        assert_eq!(strip_file_scheme("s3://bucket/x.nc"), None);
+        assert_eq!(strip_file_scheme("/data/x.nc"), None);
+        assert_eq!(strip_file_scheme("file"), None);
+    }
+
+    /// With a default store configured, a `file://` path stays schemed so the
+    /// mutual-exclusion check rejects it — rather than being silently rewritten
+    /// into a path relative to the default store.
+    #[test]
+    fn file_url_with_a_default_store_is_still_rejected() {
+        let registry = registry_with_datasets();
+        let err = parse_listing_table_url(
+            Some(ObjectStoreUrl::parse("datasets://").unwrap()),
+            "file:///data/x.nc",
+            &registry,
+        )
+        .expect_err("a schemed path plus a default store must not resolve");
+        assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_paths_resolve_to_local_file_urls() {
+        let registry = DefaultObjectStoreRegistry::new();
+
+        // Backslash drive path with a space in a directory name.
+        let url =
+            parse_listing_table_url(None, r"D:\rws-inlaad\RWS DataV2\test.nc", &registry).unwrap();
+        assert!(url.as_str().starts_with("file:///D:/"), "url={}", url.as_str());
+        // The space is percent-encoded in the URL.
+        assert!(url.as_str().contains("RWS%20DataV2"), "url={}", url.as_str());
+        assert!(url.get_glob().is_none(), "unexpected glob: {:?}", url.get_glob());
+
+        // Forward-slash drive path with a doubled separator (`C://…`) must be
+        // treated as a local file, not a `c://` object store.
+        let url = parse_listing_table_url(None, "C://some_user/file.nc", &registry).unwrap();
+        assert!(url.as_str().starts_with("file:///C:/"), "url={}", url.as_str());
+        assert!(url.as_str().contains("some_user/file.nc"), "url={}", url.as_str());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefixed_glob_resolves_without_treating_the_prefix_as_a_glob() {
+        // A `\\?\C:\...\*.nc` path must resolve to a `file://` URL whose glob is
+        // exactly `*.nc` — the `?` in the verbatim prefix must not leak in.
+        let registry = DefaultObjectStoreRegistry::new();
+        let url =
+            parse_listing_table_url(None, r"\\?\C:\data\dir\*.nc", &registry).unwrap();
+        assert!(url.as_str().starts_with("file:///"), "url={}", url.as_str());
+        assert!(url.as_str().contains("C:/data/dir"), "url={}", url.as_str());
+        assert_eq!(
+            url.get_glob().as_ref().map(glob::Pattern::as_str),
+            Some("*.nc")
+        );
+    }
+
+    #[test]
+    fn test_object_store_urls() {
+        let store_url = ObjectStoreUrl::parse("datasets://").unwrap();
+        let url = Url::parse(store_url.as_str()).unwrap();
+        assert_eq!(url.scheme(), "datasets");
+    }
+}

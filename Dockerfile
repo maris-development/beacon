@@ -24,55 +24,32 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # COPY SOURCE
 
-COPY beacon-api/ /beacon-api/
-COPY beacon-auth/ /beacon-auth/
-COPY beacon-file-formats/beacon-arrow-atlas/ /beacon-file-formats/beacon-arrow-atlas/
-COPY beacon-file-formats/beacon-arrow-netcdf/ /beacon-file-formats/beacon-arrow-netcdf/
-COPY beacon-file-formats/beacon-arrow-tiff/ /beacon-file-formats/beacon-arrow-tiff/
-COPY beacon-file-formats/beacon-arrow-zarr/ /beacon-file-formats/beacon-arrow-zarr/
-COPY beacon-file-formats/beacon-arrow-odv/ /beacon-file-formats/beacon-arrow-odv/
-COPY beacon-file-formats/beacon-binary-format/ /beacon-file-formats/beacon-binary-format/
-COPY beacon-common/ /beacon-common/
-COPY beacon-config/ /beacon-config/
-COPY beacon-core/ /beacon-core/
-COPY beacon-data-lake/ /beacon-data-lake/
-COPY beacon-datafusion-ext/ /beacon-datafusion-ext/
-COPY beacon-file-formats/beacon-arrow-ipc/ /beacon-file-formats/beacon-arrow-ipc/
-COPY beacon-file-formats/beacon-arrow-csv/ /beacon-file-formats/beacon-arrow-csv/
-COPY beacon-file-formats/beacon-arrow-parquet/ /beacon-file-formats/beacon-arrow-parquet/
-COPY beacon-file-formats/beacon-arrow-geoparquet/ /beacon-file-formats/beacon-arrow-geoparquet/
-COPY beacon-file-formats/beacon-arrow-bbf/ /beacon-file-formats/beacon-arrow-bbf/
-COPY beacon-functions/ /beacon-functions/
-COPY beacon-file-formats/beacon-iceberg/ /beacon-file-formats/beacon-iceberg/
-COPY beacon-file-formats/beacon-lance/ /beacon-file-formats/beacon-lance/
-COPY beacon-file-formats/beacon-nd-array/ /beacon-file-formats/beacon-nd-array/
-COPY beacon-file-formats/beacon-nd-arrow/ /beacon-file-formats/beacon-nd-arrow/
-COPY beacon-object-storage/ /beacon-object-storage/
-COPY beacon-sql-databases/ /beacon-sql-databases/
-COPY beacon-file-formats/beacon-delta/ /beacon-file-formats/beacon-delta/
+# Two source trees: the engine and the application that runs on it.
+COPY beacon-db/ /beacon-db/
+COPY beacon-datalake/ /beacon-datalake/
 COPY Cargo.toml /
 COPY Cargo.lock /
 COPY rust-toolchain /
 
 #Build the project (only the server binary the image ships; jemalloc on for prod)
-RUN cargo build --release -p beacon-api --features jemalloc
+RUN cargo build --release -p beacon-datalake --features jemalloc
 
 # Build the admin web UI (Vite SPA) from the JS client workspace. The SDK
 # (@beacon/client) must be built before the web app, which imports from its dist.
 FROM node:20-slim AS webui
-WORKDIR /clients
-COPY clients/package.json clients/package-lock.json ./
-COPY clients/beacon-ts/ ./beacon-ts/
-COPY clients/beacon-web/ ./beacon-web/
+WORKDIR /beacon-datalake-clients
+COPY beacon-datalake-clients/package.json beacon-datalake-clients/package-lock.json ./
+COPY beacon-datalake-clients/beacon-ts/ ./beacon-ts/
+COPY beacon-datalake-clients/beacon-web/ ./beacon-web/
 RUN npm ci
 RUN npm run build --workspace beacon-ts
 RUN npm run build --workspace beacon-web
 
 FROM ubuntu:latest AS runtime
 WORKDIR /beacon
-COPY --from=builder /target/release/beacon-api /beacon/
-# Bundle the built admin UI; beacon-api serves it at /admin (BEACON_WEB_UI_DIR=web).
-COPY --from=webui /clients/beacon-web/dist /beacon/web
+COPY --from=builder /target/release/beacon-datalake /beacon/
+# Bundle the built admin UI; beacon-datalake serves it at /admin (BEACON_WEB_UI_DIR=web).
+COPY --from=webui /beacon-datalake-clients/beacon-web/dist /beacon/web
 
 #Install Dependencies
 RUN apt-get update
@@ -83,4 +60,4 @@ RUN apt-get install -y libnetcdf-dev
 # 5001: HTTP API + admin UI. 32011: Arrow Flight SQL (BEACON_FLIGHT_SQL_PORT).
 EXPOSE 5001 32011
 
-ENTRYPOINT ["/beacon/beacon-api"]
+ENTRYPOINT ["/beacon/beacon-datalake"]

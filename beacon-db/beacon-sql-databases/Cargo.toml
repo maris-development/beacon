@@ -1,0 +1,48 @@
+[package]
+name = "beacon-sql-databases"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Each engine is opt-in. An engine feature turns on the matching
+# `<engine>-federation` feature in datafusion-table-providers so scans push
+# filters/projections/aggregations down to the source database.
+default = ["postgres", "mysql"]
+postgres = ["datafusion-table-providers/postgres-federation"]
+mysql = ["datafusion-table-providers/mysql-federation"]
+# ODBC — reaches SQL Server (and any ODBC source) via a connection string. NOT default: it
+# links `odbc-api`/`arrow-odbc`, which need a system ODBC driver manager (unixODBC) at build and
+# a vendor driver (e.g. msodbcsql18) at runtime — so it is opt-in.
+odbc = ["datafusion-table-providers/odbc-federation", "dep:arrow-odbc", "dep:odbc-api"]
+
+[dependencies]
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+
+datafusion = { workspace = true }
+datafusion-federation = { workspace = true }
+datafusion-table-providers = { workspace = true }
+arrow = { workspace = true }
+
+# Version-pins only (enabled with the `odbc` feature), working around a resolution conflict in
+# `datafusion-table-providers 0.11`'s ODBC path: its `arrow-odbc "23.1"` otherwise resolves to
+# 23.2.0, which loosened `odbc-api` to `>=23,<26` and lets the resolver pick 25.x — a second,
+# incompatible `odbc-api` that breaks dtp's own ODBC module. `arrow-odbc =23.1.0` keeps `odbc-api`
+# at `>=23,<25`, and the explicit `odbc-api =24.1.1` pins the single instance all three share.
+# Neither is used directly by beacon.
+arrow-odbc = { version = "=23.1.0", optional = true }
+odbc-api = { version = "=24.1.1", optional = true }
+
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+typetag = { workspace = true }
+secrecy = {workspace = true}
+# XChaCha20-Poly1305 AEAD for encrypting persisted DB credentials at rest.
+# `getrandom` (default) provides OsRng for nonce generation.
+chacha20poly1305 = {workspace = true}
+base64 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

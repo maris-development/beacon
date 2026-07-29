@@ -151,15 +151,15 @@ The response is a streamed file in the chosen `output.format` (here, CSV). See t
 
 ### CLI
 
-Prefer the terminal? [`beacon-datalake-cli`](clients/beacon-datalake-cli) is a Python
+Prefer the terminal? [`beacon-datalake-cli`](beacon-datalake-clients/beacon-datalake-cli) is a Python
 terminal client that talks to a running server over the same `/api/*` endpoints —
 run SQL, explore tables/datasets/schemas, and export results without leaving the
 shell. Install it from a checkout of the repo:
 
 ```bash
-pip install -e clients/beacon-datalake-cli
+pip install -e beacon-datalake-clients/beacon-datalake-cli
 # or, with uv:
-uv pip install -e clients/beacon-datalake-cli
+uv pip install -e beacon-datalake-clients/beacon-datalake-cli
 ```
 
 This installs the `beacon-datalake-cli` console script:
@@ -191,7 +191,7 @@ Beacon is configured entirely through `BEACON_*` environment variables. The most
 | `BEACON_PORT` | `5001` | HTTP server port. |
 | `BEACON_ADMIN_USERNAME` | `beacon-admin` | Admin username for management endpoints. |
 | `BEACON_ADMIN_PASSWORD` | `beacon-password` | Admin password — **change this in production**. |
-| `BEACON_LOG_LEVEL` | `info` | Log verbosity (`trace`, `debug`, `info`, `warn`, `error`). |
+| `RUST_LOG` | _(built-in)_ | Log filter in `tracing-subscriber` EnvFilter syntax (e.g. `info`, `beacon_core=trace`). |
 | `BEACON_VM_MEMORY_SIZE` | `8192` | Working memory (MB) available to the query engine. |
 | `BEACON_DEFAULT_TABLE` | `default` | Table queried when a request specifies no source. |
 | `BEACON_WORKER_THREADS` | `8` | Number of worker threads for the async runtime. |

@@ -1,0 +1,27 @@
+[package]
+name = "beacon-arrow-atlas"
+version = "2.0.0-rc.1"
+edition = "2024"
+
+[dependencies]
+object_store = { workspace = true }
+datafusion = { workspace = true }
+arrow = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+indexmap = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+ndarray = { workspace = true }
+chrono = { workspace = true }
+crossbeam = { workspace = true }
+moka = { workspace = true }
+atlas-rust = "0.14.0"
+
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-common = { path = "../../beacon-common" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

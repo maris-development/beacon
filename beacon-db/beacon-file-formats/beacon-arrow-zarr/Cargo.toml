@@ -1,0 +1,28 @@
+[package]
+name = "beacon-arrow-zarr"
+version = "2.0.0-rc.1"
+edition = "2024"
+
+[dependencies]
+zarrs = {workspace = true}
+zarrs_object_store = {workspace = true}
+zarrs_storage = {workspace = true}
+object_store = { workspace = true }
+tokio = { workspace = true }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+ndarray = {workspace = true}
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+tracing = { workspace = true }
+hifitime = {workspace = true}
+futures = { workspace = true }
+
+beacon-nd-array = { path = "../beacon-nd-array" }
+beacon-datafusion-ext = { path = "../../beacon-datafusion-ext" }
+beacon-common = { path = "../../beacon-common" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

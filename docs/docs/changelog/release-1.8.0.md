@@ -28,24 +28,12 @@ DELETE FROM observations WHERE temperature < 10;
 CREATE INDEX ON observations (platform);
 ```
 
-The [**Apache Iceberg**](https://iceberg.apache.org/) engine introduced in 1.7 is
-still here for object-store and cloud deployments, where table data and metadata
-live alongside your datasets on S3. You choose per session — or set a
-deployment-wide default:
-
-```sql
-SET beacon.table_engine = 'iceberg';   -- next CREATE TABLE is Iceberg-backed
-SET beacon.table_engine = 'lance';     -- back to the default
-```
-
-```bash
-# Or deployment-wide:
-BEACON_DEFAULT_TABLE_ENGINE=iceberg
-```
-
-Lance tables live on the local filesystem (the tables directory) even when your
-datasets are on S3; if you want managed tables on object storage, use Iceberg.
-The full reference is in [CREATE TABLE (Managed)](/docs/1.8.0/sql/managed-tables).
+Lance is now the sole managed-table engine: the Apache Iceberg engine that
+briefly backed managed tables in 1.7 has been removed. Managed table data and
+definitions live in Beacon's single-file `db://` store (`beacon.db`). Iceberg
+support will return as an **external** table source (read-in-place), rather than
+as a managed-table engine. The full reference is in
+[CREATE TABLE (Managed)](/docs/1.8.0/sql/managed-tables).
 
 ## Delta Lake
 
@@ -229,9 +217,9 @@ the [changelog](/docs/changelog/).
 
 - **Datasets and external tables** (NetCDF, Zarr, Parquet, Atlas, Delta, …) are
   unaffected and need no migration.
-- **Managed tables** default to the new **Lance** engine. Existing Iceberg tables
-  keep working; set `BEACON_DEFAULT_TABLE_ENGINE=iceberg` if you want new tables
-  to stay on Iceberg.
+- **Managed tables** are now **Lance**-only; the short-lived Iceberg managed-table
+  engine has been removed. `CREATE TABLE` always produces a Lance table, and the
+  `BEACON_DEFAULT_TABLE_ENGINE` / `SET beacon.table_engine` knobs are gone.
 - **PostgreSQL/MySQL external tables** require `BEACON_SECRETS_KEY` to be set when
   a `password` is supplied — `CREATE` fails closed without it.
 - **Access control is opt-in.** Existing deployments are unaffected until you set

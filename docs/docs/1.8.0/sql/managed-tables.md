@@ -10,31 +10,9 @@ A **managed table** is a SQL table whose data Beacon owns and stores itself. Unl
 
 Managed tables are an authenticated, write capability: `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, and `CREATE/DROP INDEX` require admin credentials. Anonymous access remains read-only.
 
-## Choosing the storage engine
+## Storage engine
 
-Managed tables can be backed by one of two engines:
-
-| Engine | Best for | Storage | Updates/Deletes | Indexes |
-| --- | --- | --- | --- | --- |
-| **Lance** *(default)* | fast local CRUD, secondary indexes | local filesystem (tables directory) | native — deletion vectors / fragment rewrite | ✅ scalar (btree, bitmap, full‑text) |
-| **Iceberg** | object‑store / cloud deployments | object store (alongside datasets, local or S3) | copy‑on‑write | ❌ |
-
-The engine is chosen **when the table is created** and recorded with the table; later `INSERT`/`UPDATE`/`DELETE`/`ALTER` automatically use the right engine.
-
-The default is **Lance**. Override it per session before creating a table:
-
-```sql
-SET beacon.table_engine = 'iceberg';
-CREATE TABLE archived (id BIGINT, name VARCHAR);   -- Iceberg-backed
-
-SET beacon.table_engine = 'lance';                 -- back to the default
-```
-
-Or change the deployment-wide default with the `BEACON_DEFAULT_TABLE_ENGINE` environment variable (`lance` or `iceberg`).
-
-::: tip
-Lance managed tables live on the **local filesystem** (the tables directory), even when your datasets are on S3. If you run Beacon with an S3 data lake and want managed tables on object storage, use the Iceberg engine.
-:::
+Managed tables are backed by **[Lance](https://lancedb.github.io/lance/)**: a columnar, versioned format with native row-level updates/deletes (deletion vectors / fragment rewrite) and scalar secondary indexes (btree, bitmap, full-text). Table data and definitions live in Beacon's single-file `db://` store (`beacon.db`) alongside each table's `table.json`, regardless of where your datasets are stored (S3 only ever applies to the datasets store).
 
 ## `CREATE TABLE`
 

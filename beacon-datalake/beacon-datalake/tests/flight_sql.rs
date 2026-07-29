@@ -1,0 +1,801 @@
+mod common;
+
+use std::{net::SocketAddr, time::Duration};
+
+use arrow_flight::sql::{CommandGetDbSchemas, CommandGetTables};
+use arrow_flight::sql::client::FlightSqlServiceClient;
+use futures::TryStreamExt;
+use tonic::transport::{Channel, Endpoint, Server};
+
+/// A running loopback Flight SQL server: its address, the lake it serves (held
+/// so its temp root outlives the server), and the serve task's handle.
+struct TestServer {
+    addr: SocketAddr,
+    lake: common::TestLake,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+/// Spawns a Flight SQL server on an ephemeral loopback port, backed by a fresh
+/// ephemeral lake. `allow_anonymous` sets the service's anonymous-access policy.
+async fn spawn_server(allow_anonymous: bool) -> TestServer {
+    let tmp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tmp.local_addr().unwrap().port();
+    drop(tmp);
+
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let lake = common::test_lake().await;
+    let service =
+        beacon_datalake::flight_sql::flight_service(lake.lake.clone(), allow_anonymous).unwrap();
+
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(service)
+            .serve(addr)
+            .await
+            .unwrap();
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::net::TcpStream::connect(addr).is_ok() {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("Flight SQL test server did not become ready within 5 seconds");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    TestServer { addr, lake, handle }
+}
+
+async fn run_sql_rows(
+    runtime: &beacon_core::runtime::Runtime,
+    sql: &str,
+) -> Vec<arrow::array::RecordBatch> {
+    runtime
+        .run_query(beacon_core::query::Query::sql(sql.to_string()), beacon_core::AuthIdentity::system())
+        .await
+        .expect("query should run")
+        .into_record_stream()
+        .expect("streamed result")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("stream should drain")
+}
+
+async fn client(addr: SocketAddr) -> FlightSqlServiceClient<Channel> {
+    let channel = Endpoint::new(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    FlightSqlServiceClient::new(channel)
+}
+
+/// End-to-end federation over a loopback: one Runtime serves `obs` over Flight
+/// SQL, and a `remote_obs` table in the same Runtime points back at that port.
+/// Querying `remote_obs` pushes a filtered aggregate to the (loopback) remote and
+/// streams the reduced result back.
+#[tokio::test(flavor = "multi_thread")]
+async fn federated_remote_table_pushes_down_and_streams() {
+    // Anonymous access on the remote: remote tables connect without credentials.
+    let server = spawn_server(true).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    // Unique names so the shared process-wide test state can't collide.
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+    let remote_obs = format!("remote_obs_{suffix}");
+
+    // Seed the "remote" table.
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT, val DOUBLE)")).await;
+    run_sql_rows(
+        runtime,
+        &format!("INSERT INTO {obs} VALUES (1, 10.0), (2, 20.0), (3, 30.0)"),
+    )
+    .await;
+
+    // Register a federated remote table pointing at the loopback Flight SQL port.
+    // No credentials — the remote allows anonymous access.
+    run_sql_rows(
+        runtime,
+        &format!(
+            "CREATE EXTERNAL TABLE {remote_obs} STORED AS REMOTE \
+             LOCATION 'beacon://127.0.0.1:{port}/{obs}'"
+        ),
+    )
+    .await;
+
+    // Schema was fetched from the remote at registration: two columns are
+    // visible through the catalog (`information_schema.columns`).
+    let column_count = run_sql_rows(
+        runtime,
+        &format!(
+            "SELECT count(*) FROM information_schema.columns WHERE table_name = '{remote_obs}'"
+        ),
+    )
+    .await;
+    let columns = column_count[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(columns, 2, "the remote table should expose its two columns");
+
+    // A filtered aggregate over the remote table returns the correct result.
+    let batches = run_sql_rows(
+        runtime,
+        &format!("SELECT count(*) AS c, sum(val) AS s FROM {remote_obs} WHERE id > 1"),
+    )
+    .await;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 1);
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count column is Int64")
+        .value(0);
+    assert_eq!(count, 2, "id > 1 should match two rows");
+
+    // The plan federates the scan (pushed to the remote), rather than scanning
+    // locally — confirm a federated/virtual node appears in the physical plan.
+    let explain = run_sql_rows(
+        runtime,
+        &format!("EXPLAIN SELECT count(*) FROM {remote_obs} WHERE id > 1"),
+    )
+    .await;
+    let explain_text = arrow::util::pretty::pretty_format_batches(&explain)
+        .expect("explain should format")
+        .to_string();
+    assert!(
+        explain_text.contains("Virtual")
+            || explain_text.to_lowercase().contains("federat")
+            || explain_text.contains("SchemaCast"),
+        "expected a federated scan node in the plan, got:\n{explain_text}"
+    );
+
+    run_sql_rows(runtime, &format!("DROP TABLE {remote_obs}")).await;
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+
+    server.handle.abort();
+}
+
+/// Collect a query run against a local embedded [`Database`].
+async fn run_local(
+    db: &beacon_core::embedded::Database,
+    sql: &str,
+) -> Vec<arrow::array::RecordBatch> {
+    db.sql(sql.to_string(), beacon_core::AuthIdentity::local())
+        .await
+        .expect("local query should run")
+        .into_record_stream()
+        .expect("streamed result")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("stream should drain")
+}
+
+/// End-to-end catalog federation: a *separate* embedded Beacon attaches a loopback
+/// remote as a catalog, then queries its tables as `remote.<schema>.<table>` — the
+/// remote's schemas/tables are enumerated at attach, each table resolves lazily, and
+/// a filtered aggregate pushes down to the remote. Detaching stops it resolving.
+#[tokio::test(flavor = "multi_thread")]
+async fn attached_remote_catalog_resolves_and_queries_tables() {
+    use beacon_core::embedded::{Database, DbPath, OpenOptions, RemoteCredential};
+
+    // Anonymous access on the remote: attach connects without credentials.
+    let server = spawn_server(true).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+
+    // Seed the remote table.
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT, val DOUBLE)")).await;
+    run_sql_rows(
+        runtime,
+        &format!("INSERT INTO {obs} VALUES (1, 10.0), (2, 20.0), (3, 30.0)"),
+    )
+    .await;
+
+    // A separate, LOCAL embedded database attaches the remote as a catalog.
+    let local = Database::open(DbPath::Memory, OpenOptions::default())
+        .await
+        .expect("open local embedded database");
+    local
+        .attach_remote(
+            "remote",
+            &format!("beacon://127.0.0.1:{port}"),
+            RemoteCredential::Anonymous,
+            false,
+        )
+        .await
+        .expect("attach should enumerate the remote");
+    assert_eq!(local.attached_catalogs(), vec!["remote".to_string()]);
+
+    // The remote table is queryable as `remote.public.<obs>`; the filtered aggregate
+    // is pushed to the remote and only the one-row result comes back.
+    let batches = run_local(
+        &local,
+        &format!("SELECT count(*) AS c, sum(val) AS s FROM remote.public.{obs} WHERE id > 1"),
+    )
+    .await;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    let c = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    let s = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .expect("sum is Float64")
+        .value(0);
+    assert_eq!(c, 2, "id > 1 matches two rows");
+    assert_eq!(s, 50.0, "20.0 + 30.0");
+
+    // The scan federates to the remote rather than running locally.
+    let explain = run_local(
+        &local,
+        &format!("EXPLAIN SELECT count(*) FROM remote.public.{obs} WHERE id > 1"),
+    )
+    .await;
+    let explain_text = arrow::util::pretty::pretty_format_batches(&explain)
+        .expect("explain should format")
+        .to_string();
+    assert!(
+        explain_text.contains("Virtual")
+            || explain_text.to_lowercase().contains("federat")
+            || explain_text.contains("SchemaCast"),
+        "expected a federated scan node in the plan, got:\n{explain_text}"
+    );
+
+    // Detaching removes it: the catalog list is empty and the table no longer resolves.
+    assert!(local.detach("remote").expect("detach"));
+    assert!(local.attached_catalogs().is_empty());
+    assert!(
+        local
+            .sql(
+                format!("SELECT * FROM remote.public.{obs}"),
+                beacon_core::AuthIdentity::local(),
+            )
+            .await
+            .is_err(),
+        "after detach the remote table must not resolve"
+    );
+
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+    server.handle.abort();
+}
+
+/// The same catalog federation, driven entirely from **SQL** (`ATTACH`/`DETACH`) instead of the
+/// embedded API — so it works over any SQL entry point (server, CLI, SQLAlchemy). Also pins that
+/// a SQL-attached catalog shows up in `attached_catalogs()` (the state is session-derived, so the
+/// SQL and embedded paths agree).
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_attach_and_detach_a_remote_catalog() {
+    use beacon_core::embedded::{Database, DbPath, OpenOptions};
+
+    let server = spawn_server(true).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT, val DOUBLE)")).await;
+    run_sql_rows(runtime, &format!("INSERT INTO {obs} VALUES (1, 10.0), (2, 20.0)")).await;
+
+    let local = Database::open(DbPath::Memory, OpenOptions::default())
+        .await
+        .expect("open local embedded database");
+
+    // ATTACH over SQL, not the embedded method.
+    run_local(
+        &local,
+        &format!("ATTACH 'beacon://127.0.0.1:{port}' AS remote"),
+    )
+    .await;
+    // The SQL-attached catalog is visible through the embedded introspection (shared state).
+    assert_eq!(local.attached_catalogs(), vec!["remote".to_string()]);
+
+    let batches = run_local(
+        &local,
+        &format!("SELECT sum(val) AS s FROM remote.public.{obs}"),
+    )
+    .await;
+    let s = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .expect("sum is Float64")
+        .value(0);
+    assert_eq!(s, 30.0, "10.0 + 20.0");
+
+    // DETACH over SQL; the catalog is gone and a typo'd detach errors.
+    run_local(&local, "DETACH remote").await;
+    assert!(local.attached_catalogs().is_empty());
+    assert!(
+        local
+            .sql("DETACH nope", beacon_core::AuthIdentity::local())
+            .await
+            .is_err(),
+        "detaching an unattached catalog must error"
+    );
+
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+    server.handle.abort();
+}
+
+/// Attaching a remote that requires authentication: username/password (HTTP Basic) authenticates
+/// and lets the catalog resolve, while an anonymous attach is refused. Proves the `RemoteCredential`
+/// path end to end against a server with anonymous access disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_authenticates_with_username_and_password() {
+    use beacon_core::embedded::{Database, DbPath, OpenOptions, RemoteCredential};
+
+    // Anonymous access disabled: the remote demands credentials.
+    let server = spawn_server(false).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT)")).await;
+    run_sql_rows(runtime, &format!("INSERT INTO {obs} VALUES (1), (2), (3)")).await;
+
+    let local = Database::open(DbPath::Memory, OpenOptions::default())
+        .await
+        .expect("open local embedded database");
+    let url = format!("beacon://127.0.0.1:{port}");
+
+    // Anonymous attach is rejected — enumeration needs credentials the remote won't waive.
+    assert!(
+        local
+            .attach_remote("nope", &url, RemoteCredential::Anonymous, false)
+            .await
+            .is_err(),
+        "anonymous attach must fail when the remote disallows anonymous access"
+    );
+    assert!(local.attached_catalogs().is_empty());
+
+    // Username/password authenticates (sent as HTTP Basic).
+    local
+        .attach_remote(
+            "remote",
+            &url,
+            RemoteCredential::Basic {
+                username: common::ADMIN_USERNAME.to_string(),
+                password: common::ADMIN_PASSWORD.to_string(),
+            },
+            false,
+        )
+        .await
+        .expect("username/password attach should authenticate");
+    assert_eq!(local.attached_catalogs(), vec!["remote".to_string()]);
+
+    let batches = run_local(
+        &local,
+        &format!("SELECT count(*) AS c FROM remote.public.{obs}"),
+    )
+    .await;
+    let c = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(c, 3);
+
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+    server.handle.abort();
+}
+
+/// `ATTACH … WITH ('secret' '<name>')` authenticates from a stored `TYPE BEACON` secret rather than
+/// inline credentials, and `DROP SECRET` removes it. Runs against a remote with anonymous disabled,
+/// so the secret's username/password is what makes the attach succeed.
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_uses_a_stored_beacon_secret() {
+    use beacon_core::embedded::{Database, DbPath, OpenOptions};
+
+    let server = spawn_server(false).await;
+    let port = server.addr.port();
+    let runtime = server.lake.lake.runtime();
+
+    let suffix = uuid::Uuid::new_v4().simple();
+    let obs = format!("obs_{suffix}");
+    run_sql_rows(runtime, &format!("CREATE TABLE {obs} (id BIGINT)")).await;
+    run_sql_rows(runtime, &format!("INSERT INTO {obs} VALUES (1), (2)")).await;
+
+    let local = Database::open(DbPath::Memory, OpenOptions::default())
+        .await
+        .expect("open local embedded database");
+
+    // Store the remote's credentials as a session BEACON secret, then attach by referencing it.
+    run_local(
+        &local,
+        &format!(
+            "CREATE SECRET lake_creds (TYPE BEACON, USERNAME '{}', PASSWORD '{}')",
+            common::ADMIN_USERNAME,
+            common::ADMIN_PASSWORD
+        ),
+    )
+    .await;
+    let secrets = run_local(&local, "SHOW SECRETS").await;
+    let secret_type = arrow::util::pretty::pretty_format_batches(&secrets)
+        .unwrap()
+        .to_string();
+    assert!(secret_type.contains("beacon"), "secret type shown: {secret_type}");
+
+    run_local(
+        &local,
+        &format!("ATTACH 'beacon://127.0.0.1:{port}' AS remote WITH ('secret' 'lake_creds')"),
+    )
+    .await;
+    assert_eq!(local.attached_catalogs(), vec!["remote".to_string()]);
+
+    let batches = run_local(
+        &local,
+        &format!("SELECT count(*) AS c FROM remote.public.{obs}"),
+    )
+    .await;
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(count, 2, "the attach authenticated via the stored secret");
+
+    // The secret can be removed from the store.
+    run_local(&local, "DROP SECRET lake_creds").await;
+    assert!(run_local(&local, "SHOW SECRETS").await.iter().all(|b| b.num_rows() == 0));
+
+    run_sql_rows(runtime, &format!("DROP TABLE {obs}")).await;
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handshake_execute_and_metadata_work() {
+    let server = spawn_server(false).await;
+    let mut client = client(server.addr).await;
+
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+    assert!(client.token().is_some());
+
+    let flight_info = client
+        .execute("SELECT 1 AS value".to_string(), None)
+        .await
+        .unwrap();
+    let ticket = flight_info.endpoint[0].ticket.clone().unwrap();
+    let batches = client
+        .do_get(ticket)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), 1);
+
+    let catalogs = client.get_catalogs().await.unwrap();
+    let catalog_batches = client
+        .do_get(catalogs.endpoint[0].ticket.clone().unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(!catalog_batches.is_empty());
+
+    let schemas = client
+        .get_db_schemas(CommandGetDbSchemas {
+            catalog: None,
+            db_schema_filter_pattern: None,
+        })
+        .await
+        .unwrap();
+    let schema_batches = client
+        .do_get(schemas.endpoint[0].ticket.clone().unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(!schema_batches.is_empty());
+
+    let tables = client
+        .get_tables(CommandGetTables {
+            catalog: None,
+            db_schema_filter_pattern: None,
+            table_name_filter_pattern: None,
+            table_types: vec![],
+            include_schema: false,
+        })
+        .await
+        .unwrap();
+    let table_batches = client
+        .do_get(tables.endpoint[0].ticket.clone().unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(!table_batches.is_empty());
+
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_statement_flow_works() {
+    let server = spawn_server(false).await;
+    let mut client = client(server.addr).await;
+
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    let mut prepared = client
+        .prepare("SELECT 42 AS value".to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(prepared.dataset_schema().unwrap().fields().len(), 1);
+
+    let flight_info = prepared.execute().await.unwrap();
+    let ticket = flight_info.endpoint[0].ticket.clone().unwrap();
+    let batches = client
+        .do_get(ticket)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), 1);
+
+    prepared.close().await.unwrap();
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn anonymous_metadata_and_select_work() {
+    let server = spawn_server(true).await;
+    let mut client = client(server.addr).await;
+
+    let catalogs = client.get_catalogs().await.unwrap();
+    let catalog_batches = client
+        .do_get(catalogs.endpoint[0].ticket.clone().unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(!catalog_batches.is_empty());
+
+    let flight_info = client
+        .execute("SELECT 7 AS value".to_string(), None)
+        .await
+        .unwrap();
+    let ticket = flight_info.endpoint[0].ticket.clone().unwrap();
+    let batches = client
+        .do_get(ticket)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), 1);
+
+    let mut prepared = client
+        .prepare("SELECT 9 AS value".to_string(), None)
+        .await
+        .unwrap();
+    let prepared_info = prepared.execute().await.unwrap();
+    let prepared_ticket = prepared_info.endpoint[0].ticket.clone().unwrap();
+    let prepared_batches = client
+        .do_get(prepared_ticket)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(prepared_batches.len(), 1);
+    assert_eq!(prepared_batches[0].num_rows(), 1);
+
+    prepared.close().await.unwrap();
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn anonymous_write_statement_is_rejected() {
+    let server = spawn_server(true).await;
+    let mut client = client(server.addr).await;
+
+    let error = client
+        .execute(
+            "CREATE VIEW anonymous_view AS SELECT 1 AS value".to_string(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    let error_message = error.to_string();
+    assert!(
+        error_message.contains("DDL not supported")
+            || error_message.contains("anonymous Flight SQL access only supports")
+    );
+
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_credentials_are_rejected_at_handshake() {
+    let server = spawn_server(false).await;
+    let mut client = client(server.addr).await;
+
+    let err = client
+        .handshake(common::ADMIN_USERNAME, "not-the-password")
+        .await
+        .expect_err("a wrong password must not authenticate");
+    assert!(!err.to_string().is_empty());
+    assert!(
+        client.token().is_none(),
+        "no session token should be issued on a failed handshake"
+    );
+
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unauthenticated_execute_is_rejected_when_anonymous_is_off() {
+    let server = spawn_server(false).await;
+    let mut client = client(server.addr).await;
+
+    // No handshake, anonymous disabled → the statement is refused.
+    let err = client
+        .execute("SELECT 1".to_string(), None)
+        .await
+        .expect_err("an unauthenticated query must be rejected when anonymous is off");
+    assert!(!err.to_string().is_empty());
+
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_over_a_managed_table_returns_the_rows() {
+    let server = spawn_server(false).await;
+    let runtime = server.lake.lake.runtime();
+
+    // Seed a managed table directly against the shared runtime.
+    let table = format!("fsql_{}", uuid::Uuid::new_v4().simple());
+    run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+    run_sql_rows(runtime, &format!("INSERT INTO {table} VALUES (1), (2), (3)")).await;
+
+    let mut client = client(server.addr).await;
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    let info = client
+        .execute(format!("SELECT a FROM {table} ORDER BY a"), None)
+        .await
+        .unwrap();
+    let ticket = info.endpoint[0].ticket.clone().unwrap();
+    let batches = client
+        .do_get(ticket)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    let values: Vec<i64> = batches
+        .iter()
+        .flat_map(|b| {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("a is Int64");
+            (0..col.len()).map(|i| col.value(i)).collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(values, vec![1, 2, 3], "the streamed rows should match the table");
+
+    run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_tables_metadata_includes_a_created_table() {
+    let server = spawn_server(false).await;
+    let runtime = server.lake.lake.runtime();
+
+    let table = format!("meta_{}", uuid::Uuid::new_v4().simple());
+    run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+
+    let mut client = client(server.addr).await;
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    let info = client
+        .get_tables(CommandGetTables {
+            catalog: None,
+            db_schema_filter_pattern: None,
+            table_name_filter_pattern: None,
+            table_types: vec![],
+            include_schema: true,
+        })
+        .await
+        .unwrap();
+    let batches = client
+        .do_get(info.endpoint[0].ticket.clone().unwrap())
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    let rendered = arrow::util::pretty::pretty_format_batches(&batches)
+        .expect("format tables metadata")
+        .to_string();
+    assert!(
+        rendered.contains(&table),
+        "get_tables should list the created table `{table}`, got:\n{rendered}"
+    );
+
+    run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
+    server.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_update_inserts_rows() {
+    let server = spawn_server(false).await;
+    let runtime = server.lake.lake.runtime();
+
+    let table = format!("upd_{}", uuid::Uuid::new_v4().simple());
+    run_sql_rows(runtime, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+
+    let mut client = client(server.addr).await;
+    client
+        .handshake(common::ADMIN_USERNAME, common::ADMIN_PASSWORD)
+        .await
+        .unwrap();
+
+    // A prepared write (DML) executed over Flight SQL as the super-user.
+    let mut prepared = client
+        .prepare(format!("INSERT INTO {table} VALUES (7), (8)"), None)
+        .await
+        .unwrap();
+    // The affected-row count DataFusion reports for an INSERT is not contractually
+    // 2 here (it reports per-statement, not per-row); the row count below is the
+    // real proof the write happened.
+    let _affected = prepared.execute_update().await.unwrap();
+    prepared.close().await.unwrap();
+
+    // The rows really landed.
+    let rows = run_sql_rows(runtime, &format!("SELECT count(*) FROM {table}")).await;
+    let count = rows[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(count, 2, "the prepared INSERT should have added two rows");
+
+    run_sql_rows(runtime, &format!("DROP TABLE {table}")).await;
+    server.handle.abort();
+}

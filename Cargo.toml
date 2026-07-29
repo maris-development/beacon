@@ -2,7 +2,7 @@
 # Edition-2024 members imply resolver 3; set it explicitly so features aren't
 # over-unified across normal/build/dev deps (fewer features compiled).
 resolver = "3"
-members = ["beacon-api", "beacon-mcp", "beacon-auth", "beacon-file-formats/beacon-arrow-netcdf", "beacon-file-formats/beacon-arrow-odv", "beacon-common", "beacon-config", "beacon-core", "beacon-functions", "beacon-data-lake", "beacon-sql-databases", "beacon-file-formats/beacon-delta", "beacon-file-formats/beacon-arrow-zarr", "beacon-file-formats/beacon-binary-format", "beacon-object-storage", "beacon-file-formats/beacon-nd-arrow", "beacon-datafusion-ext", "beacon-file-formats/beacon-iceberg", "beacon-file-formats/beacon-lance", "beacon-file-formats/beacon-nd-array", "beacon-file-formats/beacon-arrow-tiff", "beacon-file-formats/beacon-arrow-atlas", "beacon-file-formats/beacon-arrow-geoparquet", "beacon-file-formats/beacon-arrow-bbf", "beacon-file-formats/beacon-arrow-ipc", "beacon-file-formats/beacon-arrow-csv", "beacon-file-formats/beacon-arrow-parquet"]
+members = ["beacon-datalake/beacon-datalake", "beacon-datalake/beacon-datalake-config", "beacon-datalake/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
 exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.dependencies]
@@ -52,6 +52,15 @@ lazy_static = "1.5.0"
 base64 = "0.22"
 bloomfilter = { version = "1", features = ["serde"] }
 bincode = "1"
+# Embedded, transactional, single-file key-value store backing beacon-redb-store
+# (the redb-backed `object_store::ObjectStore`). redb is copy-on-write with a
+# dual-slot header — no WAL/-shm sidecars — which is what lets a whole Beacon
+# deployment live in one file. Pinned exactly to 4.1.0.
+# Requires rustc >= 1.89 (we ship 1.91).
+redb = "=4.1.0"
+# mmap for zero-copy reads of the blob heap that lives inside the same single
+# file as redb. 0.9.10 matches the version already resolved in the tree.
+memmap2 = "=0.9.10"
 
 # Delta Lake support. 0.32.x pins datafusion 53 / arrow 58 / object_store 0.13,
 # matching our versions. We keep default features (`rustls`, required by the
@@ -70,12 +79,8 @@ datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 # feature that enables the matching `<engine>-federation` feature (pushdown).
 datafusion-table-providers = { version = "=0.11.0", default-features = false }
 geodatafusion = "0.4.0"
-object_store = { version = "0.13.1", features = ["aws"] }
+object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 tonic = "0.14.1"
-
-iceberg-rust = "0.10"
-datafusion_iceberg = "0.10"
-iceberg-file-catalog = "0.10"
 
 # Lance managed-table engine. 7.0.0 pins arrow 58 / datafusion 53 / object_store
 # 0.13, matching our versions. Provides `lance::datafusion::LanceTableProvider`
@@ -85,7 +90,7 @@ iceberg-file-catalog = "0.10"
 # default-features = false drops the bundled cloud backends (aws/azure/gcp/oss/
 # tencent/huggingface SDKs + the aws-config/aws-smithy stack) and `geo`: beacon
 # routes Lance through its own injected object store via a custom
-# `beacon-tables://` scheme, so Lance's native cloud schemes are never used.
+# `db://` scheme, so Lance's native cloud schemes are never used.
 lance = { version = "=7.0.0", default-features = false }
 # Lance index types (IndexType, ScalarIndexParams) for managed-table indexing.
 # Version-locked to `lance` so the shared types are a single compilation.
@@ -96,6 +101,8 @@ lance-index = "=7.0.0"
 # uses lives in core lance-io, not behind the aws/azure/gcp features.
 lance-io = { version = "=7.0.0", default-features = false }
 lance-core = "=7.0.0"
+# For LanceFileVersion, which `lance` takes in WriteParams but does not re-export.
+lance-encoding = "=7.0.0"
 
 arrow = { version = "^58", features = ["prettyprint"]}
 arrow-schema = { version = "^58", features = ["serde"] }

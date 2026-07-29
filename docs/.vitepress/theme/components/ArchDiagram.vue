@@ -1,44 +1,45 @@
 <script setup>
 import { withBase } from 'vitepress'
+import Icon from './Icon.vue'
 
 const logo = withBase('/beacon-logo-small.png')
 
 const cards = [
   {
     key: 'cloud',
-    icon: '☁️',
+    icon: 'cloud',
     title: 'Cloud (AWS)',
     nodes: [
-      { ico: '💻', name: 'Jupyter', sub: 'remote notebook' },
-      { logo: true, name: 'Beacon', sub: 'on EC2' },
-      { ico: '🪣', name: 'S3 Bucket', sub: 'object storage' },
+      { ico: 'notebook-text', name: 'Jupyter', sub: 'remote notebook' },
+      { logo: true, name: 'Beacon Data Lake', sub: 'on EC2' },
+      { ico: 'box', name: 'S3 Bucket', sub: 'object storage' },
     ],
     links: ['SQL / Flight SQL', 'reads via S3 API'],
-    foot: 'Managed cloud — Beacon on EC2, data in S3.',
+    foot: 'Managed cloud. Beacon Data Lake on EC2, data in S3.',
   },
   {
     key: 'onprem',
-    icon: '🖥️',
+    icon: 'server',
     title: 'On-premise',
     nodes: [
-      { ico: '💻', name: 'Jupyter', sub: 'remote notebook' },
-      { logo: true, name: 'Beacon', sub: 'your server' },
-      { ico: '💾', name: 'Local disk', sub: 'NetCDF · Parquet' },
+      { ico: 'notebook-text', name: 'Jupyter', sub: 'remote notebook' },
+      { logo: true, name: 'Beacon Data Lake', sub: 'your server' },
+      { ico: 'hard-drive', name: 'Local disk', sub: 'NetCDF · Parquet' },
     ],
     links: ['SQL / Flight SQL', 'reads local files'],
-    foot: 'Self-hosted — Beacon and data on one server.',
+    foot: 'Self-hosted. Beacon Data Lake and data on one server.',
   },
   {
     key: 'local',
-    icon: '💻',
+    icon: 'monitor',
     title: 'Local',
     nodes: [
-      { ico: '📓', name: 'Jupyter', sub: 'same machine' },
-      { logo: true, name: 'Beacon', sub: 'localhost:5001' },
-      { ico: '💾', name: 'Local files', sub: 'on disk' },
+      { ico: 'notebook-text', name: 'Jupyter', sub: 'same machine' },
+      { logo: true, name: 'Beacon Data Lake', sub: 'localhost:5001' },
+      { ico: 'folder', name: 'Local files', sub: 'on disk' },
     ],
     links: ['localhost', 'reads local files'],
-    foot: 'All on one machine — ideal for development.',
+    foot: 'All on one machine, ideal for development.',
   },
 ]
 </script>
@@ -49,13 +50,13 @@ const cards = [
 
     <div class="depcards">
       <article v-for="c in cards" :key="c.key" :class="['depcard', 'accent-' + c.key]">
-        <div class="depcard-head"><span class="dh-ico">{{ c.icon }}</span>{{ c.title }}</div>
+        <div class="depcard-head"><span class="dh-ico"><Icon :name="c.icon" :size="18" /></span>{{ c.title }}</div>
 
         <div class="depflow">
           <template v-for="(n, i) in c.nodes" :key="i">
             <div class="dep-node">
               <img v-if="n.logo" class="dn-logo" :src="logo" alt="" />
-              <span v-else class="dn-ico">{{ n.ico }}</span>
+              <span v-else class="dn-ico"><Icon :name="n.ico" :size="18" /></span>
               <span class="dn-text"><b>{{ n.name }}</b><small>{{ n.sub }}</small></span>
             </div>
             <div v-if="i < c.nodes.length - 1" class="dep-link">
@@ -116,7 +117,14 @@ const cards = [
   font-weight: 700;
   color: var(--vp-c-text-1);
 }
-.dh-ico { font-size: 18px; }
+.dh-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.accent-cloud  .dh-ico { color: var(--vp-c-brand-1); }
+.accent-onprem .dh-ico { color: var(--vp-c-green-1); }
+.accent-local  .dh-ico { color: var(--vp-c-yellow-1, var(--vp-c-brand-1)); }
 
 .depflow {
   display: flex;
@@ -133,9 +141,11 @@ const cards = [
   background: var(--vp-c-bg);
 }
 .dn-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
-  text-align: center;
-  font-size: 20px;
+  color: var(--vp-c-text-2);
   flex: none;
 }
 .dn-logo {

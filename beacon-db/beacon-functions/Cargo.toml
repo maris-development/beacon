@@ -1,0 +1,43 @@
+[package]
+name = "beacon-functions"
+version = "2.0.0-rc.1"
+edition = "2021"
+
+[dependencies]
+datafusion = {workspace = true}
+arrow = {workspace = true}
+geo = {workspace = true}
+geojson = {workspace = true}
+wkt = {workspace = true}
+strsim = {workspace = true}
+anyhow = { workspace = true}
+serde = { workspace = true}
+serde_json = { workspace = true}
+csv = {workspace = true}
+object_store = { workspace = true }
+once_cell = { workspace = true }
+
+lazy_static = {workspace = true}
+gsw = {workspace = true}
+lru = {workspace = true}
+ordered-float = {workspace = true}
+tracing = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
+
+beacon-common = { path = "../beacon-common" }
+beacon-arrow-atlas = { path = "../beacon-file-formats/beacon-arrow-atlas" }
+beacon-arrow-odv = { path = "../beacon-file-formats/beacon-arrow-odv" }
+beacon-arrow-netcdf = { path = "../beacon-file-formats/beacon-arrow-netcdf" }
+beacon-arrow-hdf5 = { path = "../beacon-file-formats/beacon-arrow-hdf5" }
+beacon-arrow-tiff = { path = "../beacon-file-formats/beacon-arrow-tiff" }
+beacon-delta = { path = "../beacon-file-formats/beacon-delta" }
+beacon-arrow-zarr = { path = "../beacon-file-formats/beacon-arrow-zarr" }
+beacon-arrow-ipc = { path = "../beacon-file-formats/beacon-arrow-ipc" }
+beacon-arrow-csv = { path = "../beacon-file-formats/beacon-arrow-csv" }
+beacon-arrow-parquet = { path = "../beacon-file-formats/beacon-arrow-parquet" }
+beacon-arrow-geoparquet = { path = "../beacon-file-formats/beacon-arrow-geoparquet" }
+beacon-arrow-bbf = { path = "../beacon-file-formats/beacon-arrow-bbf" }
+beacon-datafusion-ext = { path = "../beacon-datafusion-ext" }
+geodatafusion = { workspace=true }
