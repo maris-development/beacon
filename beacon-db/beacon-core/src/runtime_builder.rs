@@ -23,7 +23,7 @@ use beacon_datafusion_ext::{
     format_ext::{new_file_format_registry_handle, FileFormatFactoryExt, FileFormatRegistry},
     listing_factory::{DefaultStore, ListingFactory, RootStore},
     listing_table_factory_ext::ListingTableFactoryExt,
-    nd::NdProjectionPushdown,
+    nd::{NdFilterPushdown, NdProjectionPushdown},
     object_store_registry::LazyObjectStoreRegistry,
     secrets::SecretStore,
     stats_cache::BeaconFileStatisticsCache,
@@ -690,14 +690,16 @@ fn build_session_state(
         .with_optimizer_rules(optimizer_rules)
         .with_query_planner(Arc::new(BeaconQueryPlanner::new(session_cell.clone())));
 
-    // Opt-in nd-pipeline optimizer. Appended to (never replacing) the default
-    // physical rules: it must see the planned `ProjectionExec` above
-    // `NdBroadcastExec`, and dropping the defaults would remove
+    // Opt-in nd-pipeline optimizers. Appended to (never replacing) the default
+    // physical rules: they must see the planned `ProjectionExec`/`FilterExec`
+    // above `NdBroadcastExec`, and dropping the defaults would remove
     // `EnforceDistribution` — without which a Final aggregate never merges its
-    // partitions and `count(*)` returns one row per file group.
+    // partitions and `count(*)` returns one row per file group. Filter runs
+    // before projection so the selection is established first.
     if builder.nd_pipeline {
-        state_builder =
-            state_builder.with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
+        state_builder = state_builder
+            .with_physical_optimizer_rule(Arc::new(NdFilterPushdown::new()))
+            .with_physical_optimizer_rule(Arc::new(NdProjectionPushdown::new()));
     }
 
     // Make every partition merge order-preserving so query results are

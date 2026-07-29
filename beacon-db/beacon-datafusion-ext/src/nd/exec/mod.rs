@@ -8,6 +8,8 @@
 //! also a correct plan on its own.
 
 mod broadcast_exec;
+mod expr_column;
+mod filter_exec;
 mod projection_exec;
 mod source_exec;
 
@@ -25,6 +27,7 @@ use futures::stream::BoxStream;
 use super::batch::NdRecordBatch;
 
 pub use broadcast_exec::NdBroadcastExec;
+pub use filter_exec::NdFilterExec;
 pub use projection_exec::NdProjectionExec;
 pub use source_exec::NdSourceExec;
 
@@ -50,6 +53,9 @@ pub fn as_nd_plan(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn NdExecutionPl
     }
     if let Some(projection) = any.downcast_ref::<NdProjectionExec>() {
         return Some(Arc::new(projection.clone()));
+    }
+    if let Some(filter) = any.downcast_ref::<NdFilterExec>() {
+        return Some(Arc::new(filter.clone()));
     }
     None
 }

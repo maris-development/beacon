@@ -1,7 +1,7 @@
 //! Grid-shaped record batches: columns with heterogeneous dimension subsets
 //! over a shared target grid.
 
-use arrow::array::{ArrayRef, RecordBatchOptions};
+use arrow::array::{Array, ArrayRef, RecordBatchOptions, UInt64Array};
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use datafusion::common::plan_err;
@@ -15,11 +15,20 @@ use super::dimensions::Dimensions;
 /// attribute, a 1-D coordinate, a full-rank data variable, …). Columns stay
 /// un-broadcast until [`NdRecordBatch::materialize`], which broadcasts each one
 /// onto the full target grid.
+///
+/// An optional [`selection`](Self::selection) restricts the batch to a subset of
+/// the target cells (their row-major linear indices). It is how an
+/// [`NdFilterExec`](crate::nd::exec::NdFilterExec) records a predicate without
+/// moving data: the columns are untouched, and materialization gathers only the
+/// retained cells — the broadcast and the selection fuse into one gather per
+/// column, so the filtered-out cross-product never exists.
 #[derive(Debug, Clone)]
 pub struct NdRecordBatch {
     schema: SchemaRef,
     columns: Vec<NdArrowArray>,
     target: Dimensions,
+    /// Retained target-cell indices (row-major), or `None` for the full grid.
+    selection: Option<UInt64Array>,
 }
 
 impl NdRecordBatch {
@@ -52,7 +61,29 @@ impl NdRecordBatch {
             schema,
             columns,
             target,
+            selection: None,
         })
+    }
+
+    /// Attach (or clear) a selection restricting the batch to a subset of target
+    /// cells, given as their row-major linear indices. Consumes and returns the
+    /// batch. Indices are validated to fall within the target grid.
+    pub fn with_selection(mut self, selection: Option<UInt64Array>) -> Result<Self> {
+        if let Some(sel) = &selection {
+            let n = self.target.num_elements() as u64;
+            if sel.null_count() > 0 {
+                return plan_err!("nd selection must not contain null indices");
+            }
+            if let Some(&max) = sel.values().iter().max() {
+                if max >= n {
+                    return plan_err!(
+                        "nd selection index {max} is out of bounds for target grid of {n} cells"
+                    );
+                }
+            }
+        }
+        self.selection = selection;
+        Ok(self)
     }
 
     pub fn schema(&self) -> &SchemaRef {
@@ -71,9 +102,18 @@ impl NdRecordBatch {
         &self.target
     }
 
-    /// Rows in the materialized (fully broadcast) grid.
+    /// The retained target-cell indices, or `None` when the full grid is kept.
+    pub fn selection(&self) -> Option<&UInt64Array> {
+        self.selection.as_ref()
+    }
+
+    /// Rows in the materialized batch: the selection size when filtered, else
+    /// the full broadcast grid.
     pub fn num_rows(&self) -> usize {
-        self.target.num_elements()
+        match &self.selection {
+            Some(sel) => sel.len(),
+            None => self.target.num_elements(),
+        }
     }
 
     /// Materialize into a flat Arrow [`RecordBatch`] by broadcasting each
@@ -95,12 +135,20 @@ impl NdRecordBatch {
             .iter()
             .map(|column| {
                 let map = column.broadcast_map(&self.target)?;
+                // The broadcast shape drives the metric even under a selection:
+                // a full-rank column is a pass-through, a lower-rank one a
+                // broadcast — the selection only narrows which cells are gathered.
                 if map.is_identity() {
                     passthroughs += 1;
                 } else {
                     broadcasts += 1;
                 }
-                column.materialize_with_map(&map)
+                match &self.selection {
+                    // Broadcast and selection fuse into one gather: source
+                    // offsets for exactly the retained target cells.
+                    Some(sel) => column.take_indices(&map.gather_indices_at(sel)),
+                    None => column.materialize_with_map(&map),
+                }
             })
             .collect::<Result<_>>()?;
 
@@ -115,7 +163,7 @@ impl NdRecordBatch {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{AsArray, Float64Array, Int32Array};
+    use arrow::array::{AsArray, Float64Array, Int32Array, UInt64Array};
     use arrow::datatypes::{DataType, Field, Float64Type, Int32Type, Schema};
 
     use super::*;
@@ -175,6 +223,39 @@ mod tests {
             batch.column(2).as_primitive::<Float64Type>().values(),
             &[0.0, 0.1, 0.2, 1.0, 1.1, 1.2]
         );
+    }
+
+    #[test]
+    fn materialize_with_selection_gathers_retained_cells() {
+        // Keep target cells 1, 3, 5 of the (time=2, lat=3) grid.
+        let batch = test_batch()
+            .with_selection(Some(UInt64Array::from(vec![1u64, 3, 5])))
+            .unwrap();
+        assert_eq!(batch.num_rows(), 3);
+
+        let out = batch.materialize().unwrap();
+        assert_eq!(out.num_rows(), 3);
+        // Full grid: time=[7,7,7,8,8,8], lat=[10,20,30,10,20,30], sst=[..].
+        // Cells 1,3,5 → time=[7,8,8], lat=[20,10,30], sst=[0.1,1.0,1.2].
+        assert_eq!(
+            out.column(0).as_primitive::<Int32Type>().values(),
+            &[7, 8, 8]
+        );
+        assert_eq!(
+            out.column(1).as_primitive::<Int32Type>().values(),
+            &[20, 10, 30]
+        );
+        assert_eq!(
+            out.column(2).as_primitive::<Float64Type>().values(),
+            &[0.1, 1.0, 1.2]
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_selection_rejected() {
+        // Grid has 6 cells; index 6 is out of range.
+        let result = test_batch().with_selection(Some(UInt64Array::from(vec![0u64, 6])));
+        assert!(result.is_err());
     }
 
     #[test]

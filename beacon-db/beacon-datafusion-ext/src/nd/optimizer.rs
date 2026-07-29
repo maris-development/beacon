@@ -27,13 +27,14 @@ use datafusion::physical_expr::expressions::{
     BinaryExpr, CaseExpr, CastExpr, Column, IsNotNullExpr, IsNullExpr, Literal, NegativeExpr,
     NotExpr, TryCastExpr,
 };
-use datafusion::physical_expr::ScalarFunctionExpr;
+use datafusion::physical_expr::{ScalarFunctionExpr, conjunction, split_conjunction};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::logical_expr::Volatility;
 
-use super::exec::{NdBroadcastExec, NdProjectionExec};
+use super::exec::{NdBroadcastExec, NdFilterExec, NdProjectionExec};
 
 /// Sinks element-wise `ProjectionExec`s below an [`NdBroadcastExec`] into an
 /// [`NdProjectionExec`], so they evaluate before broadcasting.
@@ -95,6 +96,93 @@ impl PhysicalOptimizerRule for NdProjectionPushdown {
 
     fn name(&self) -> &str {
         "NdProjectionPushdown"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+/// Sinks the element-wise conjuncts of a `FilterExec` below an
+/// [`NdBroadcastExec`] into an [`NdFilterExec`], so the predicate selects rows on
+/// the un-broadcast nd columns and the broadcast fuses with the selection.
+///
+/// DataFusion plans a `FilterExec` above [`NdBroadcastExec`], so the `WHERE`
+/// predicate runs *after* the full grid is materialized. A predicate is a
+/// conjunction; each element-wise conjunct (its value at a grid cell depends only
+/// on its inputs there) can instead be evaluated before broadcast — on its
+/// footprint sub-grid — and recorded as a grid selection the broadcast applies.
+/// This rule rewrites
+///
+/// ```text
+/// FilterExec[a AND b AND c]          FilterExec[c]            (residual, only if any)
+///   NdBroadcastExec           ->       NdBroadcastExec
+///     nd-child                           NdFilterExec[a, b]   (element-wise conjuncts)
+///                                          nd-child
+/// ```
+///
+/// where `a`, `b` are element-wise ([`is_pushable_expr`]) and `c` is not (e.g. a
+/// volatile function or a subquery). If every conjunct is pushable, the residual
+/// `FilterExec` is dropped entirely. The rewrite is schema-preserving: a filter
+/// never changes columns.
+#[derive(Debug, Default)]
+pub struct NdFilterPushdown;
+
+impl NdFilterPushdown {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PhysicalOptimizerRule for NdFilterPushdown {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        plan.transform_down(|node| {
+            let Some(filter) = node.as_any().downcast_ref::<FilterExec>() else {
+                return Ok(Transformed::no(node));
+            };
+            // A `FilterExec` carrying an embedded projection also changes the
+            // schema; leave those in place so the rewrite stays a pure row
+            // selection.
+            if filter.projection().is_some() {
+                return Ok(Transformed::no(node));
+            }
+            let Some(broadcast) = filter.input().as_any().downcast_ref::<NdBroadcastExec>() else {
+                return Ok(Transformed::no(node));
+            };
+
+            // Split the predicate and route each conjunct: element-wise ones sink
+            // into the nd filter, the rest stay in a residual filter above.
+            let mut push: Vec<Arc<dyn PhysicalExpr>> = Vec::new();
+            let mut keep: Vec<Arc<dyn PhysicalExpr>> = Vec::new();
+            for conjunct in split_conjunction(filter.predicate()) {
+                if is_pushable_expr(conjunct) {
+                    push.push(conjunct.clone());
+                } else {
+                    keep.push(conjunct.clone());
+                }
+            }
+            if push.is_empty() {
+                return Ok(Transformed::no(node));
+            }
+
+            let nd_filter = Arc::new(NdFilterExec::try_new(broadcast.input().clone(), push)?);
+            let new_broadcast = Arc::new(NdBroadcastExec::try_new(nd_filter)?);
+            let rewritten: Arc<dyn ExecutionPlan> = if keep.is_empty() {
+                new_broadcast
+            } else {
+                Arc::new(FilterExec::try_new(conjunction(keep), new_broadcast)?)
+            };
+            Ok(Transformed::yes(rewritten))
+        })
+        .map(|t| t.data)
+    }
+
+    fn name(&self) -> &str {
+        "NdFilterPushdown"
     }
 
     fn schema_check(&self) -> bool {

@@ -65,8 +65,15 @@ impl NdArrowArray {
         if map.is_identity() {
             return Ok(self.values.clone());
         }
-        let indices = map.gather_indices();
-        arrow::compute::take(self.values.as_ref(), &indices, None)
+        self.take_indices(&map.gather_indices())
+    }
+
+    /// Gather `indices` from the flat values with a single Arrow `take`. Used to
+    /// materialize a broadcast-and-select in one pass: `indices` are the source
+    /// offsets for the retained target cells (see
+    /// [`BroadcastMap::gather_indices_at`]).
+    pub fn take_indices(&self, indices: &arrow::array::UInt64Array) -> Result<ArrayRef> {
+        arrow::compute::take(self.values.as_ref(), indices, None)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 }
