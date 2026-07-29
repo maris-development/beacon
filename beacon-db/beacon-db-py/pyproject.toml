@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "beacondb"
-version = "1.8.0"
+version = "2.0.0rc1"
 description = "An embeddable, DuckDB-class database for scientific data — one file, Arrow-native, netCDF/Zarr/Parquet/Delta/Lance."
 readme = "README.md"
 requires-python = ">=3.10"

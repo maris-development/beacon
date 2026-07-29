@@ -1,6 +1,6 @@
 [package]
 name = "beacon-datalake-config"
-version = "1.7.3"
+version = "2.0.0-rc.1"
 edition = "2021"
 
 [dependencies]

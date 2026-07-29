@@ -1,6 +1,6 @@
 [package]
 name = "beacon-datalake"
-version = "1.8.0"
+version = "2.0.0-rc.1"
 edition = "2021"
 
 [target.'cfg(not(windows))'.dependencies]
