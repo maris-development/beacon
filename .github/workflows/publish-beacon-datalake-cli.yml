@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 1.8.0 or 2.0.0-rc.1. Empty = latest stable v* tag."
+        description: "Expected version, cross-checked against pyproject.toml. Empty = publish what it declares."
         required: false
         type: string
         default: ""
@@ -34,8 +34,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # full history + tags, so we can find the latest tag
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -51,47 +49,15 @@ jobs:
       - name: Test
         run: python -m pytest
 
-      - name: Resolve version
-        id: version
+      - name: Verify version
+        shell: bash
         env:
-          EVENT: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_VERSION: ${{ inputs.version }}
+          # On a tag push the tag is the expected version; on a manual run the (optional) input is.
+          # Empty means "no assertion" — publish whatever the manifests declare.
+          EXPECTED: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
-          if [ "$EVENT" = "push" ]; then
-            version="$REF_NAME"                          # the pushed release tag, e.g. v1.8.0
-          elif [ -n "$INPUT_VERSION" ]; then
-            version="$INPUT_VERSION"                     # from the manual input
-          else
-            # Latest *stable* tag. git's version sort has no SemVer pre-release semantics and ranks
-            # v2.0.0-rc.1 above v2.0.0, so drop pre-releases here; to republish an RC by hand, name
-            # it explicitly in the `version` input.
-            tag=$(git tag --list 'v*' --sort=-v:refname | grep -vE '^v.*-' | head -n1)
-            [ -n "$tag" ] || { echo "::error::No stable v* tags found; provide a version input."; exit 1; }
-            version="$tag"                               # latest stable release tag
-          fi
-          version="${version#v}"                         # strip the leading 'v' -> X.Y.Z
-          [ -n "$version" ] || { echo "::error::Could not resolve a version."; exit 1; }
-          echo "Resolved version: $version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Set package version
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          python - <<'PY'
-          import os, re, pathlib
-          v = os.environ["VERSION"]
-          if not re.fullmatch(r"\d+\.\d+\.\d+([.\-+a-zA-Z0-9]*)?", v):
-              raise SystemExit(f"Version '{v}' does not look like a valid version")
-          path = pathlib.Path("pyproject.toml")
-          text = path.read_text()
-          new = re.sub(r'(?m)^version = "[^"]*"', f'version = "{v}"', text, count=1)
-          if new == text:
-              raise SystemExit("Could not find a 'version = \"...\"' line in pyproject.toml")
-          path.write_text(new)
-          print("pyproject version set to", v)
-          PY
+          python3 -m pip install --quiet --upgrade packaging
+          python3 "$GITHUB_WORKSPACE/scripts/check-version.py" "$EXPECTED"
 
       - name: Build sdist and wheel
         run: |

@@ -532,3 +532,105 @@ impl FileOpener for AtlasOpener {
         Ok(Box::pin(fut))
     }
 }
+
+#[cfg(test)]
+mod adapter_tests {
+    //! The per-dataset schema adaptation contract, exercised directly.
+    //!
+    //! [`stream_adapted`] leans entirely on `BatchAdapterFactory`: a dataset is
+    //! read at its own native dtypes and every batch is mapped onto the merged
+    //! table schema. These pin that mapping — cast up, null-fill by name — without
+    //! building an atlas store or a DataFusion session, so a behaviour change in
+    //! the adapter surfaces here rather than as a wrong query result.
+
+    use std::sync::Arc;
+
+    use arrow::array::{Array, Int16Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::physical_expr_adapter::BatchAdapterFactory;
+
+    /// Map `batch` (in `source`) onto `target`, exactly as `stream_adapted` does.
+    fn adapt(
+        source: Arc<Schema>,
+        target: Arc<Schema>,
+        batch: RecordBatch,
+    ) -> datafusion::error::Result<RecordBatch> {
+        BatchAdapterFactory::new(target)
+            .make_adapter(&source)?
+            .adapt_batch(&batch)
+    }
+
+    #[test]
+    fn casts_a_narrower_dataset_dtype_up_to_the_merged_type() {
+        // The widening case: one dataset stores Int16, the collection merged to Float32.
+        let source = Arc::new(Schema::new(vec![Field::new("value", DataType::Int16, true)]));
+        let target = Arc::new(Schema::new(vec![Field::new("value", DataType::Float32, true)]));
+        let batch = RecordBatch::try_new(
+            source.clone(),
+            vec![Arc::new(Int16Array::from(vec![1, 2]))],
+        )
+        .expect("source batch");
+
+        let out = adapt(source, target, batch).expect("adapt");
+        assert_eq!(out.schema().field(0).data_type(), &DataType::Float32);
+        let col = out
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .expect("Float32 column");
+        assert_eq!(col.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn null_fills_a_column_the_dataset_does_not_declare() {
+        // The dataset has `value`; the table also has `flag`, which this dataset
+        // lacks. Its rows must survive with `flag` null — union semantics.
+        let source = Arc::new(Schema::new(vec![Field::new("value", DataType::Int64, true)]));
+        let target = Arc::new(Schema::new(vec![
+            Field::new("flag", DataType::Int32, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            source.clone(),
+            vec![Arc::new(Int64Array::from(vec![10, 20]))],
+        )
+        .expect("source batch");
+
+        let out = adapt(source, target, batch).expect("adapt");
+        assert_eq!(out.num_rows(), 2, "rows are kept, not dropped");
+        let flag = out.column(out.schema().index_of("flag").expect("flag"));
+        assert_eq!(flag.null_count(), 2, "missing column is entirely null");
+        let value = out
+            .column(out.schema().index_of("value").expect("value"))
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("Int64 column");
+        assert_eq!(value.values(), &[10, 20], "declared column is untouched");
+    }
+
+    #[test]
+    fn stringifies_a_numeric_dataset_when_the_merge_widened_to_utf8() {
+        // Non-numeric conflict: atlas merges String ∪ Int64 to String, so the
+        // integer dataset must be cast *into* Utf8 rather than erroring. This is
+        // what makes a mixed-dtype collection readable at all.
+        let source = Arc::new(Schema::new(vec![Field::new("value", DataType::Int64, true)]));
+        let target = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            source.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2]))],
+        )
+        .expect("source batch");
+
+        let out = adapt(source, target, batch).expect("Int64 -> Utf8 must be castable");
+        let col = out
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("Utf8 column");
+        assert_eq!(
+            (0..col.len()).map(|i| col.value(i)).collect::<Vec<_>>(),
+            vec!["1", "2"],
+        );
+    }
+}

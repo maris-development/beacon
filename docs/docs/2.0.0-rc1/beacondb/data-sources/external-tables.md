@@ -127,7 +127,7 @@ LOCATION 'cruises/'
 ### ODV ASCII
 
 ODV ASCII is **not** an external-table format, there is no `STORED AS ODV`. Read
-ODV files directly with the [`read_odv_ascii()`](/docs/2.0.0-rc1/beacondb/sql/table-functions#read_odv_ascii)
+ODV files directly with the [`read_odv_ascii()`](/docs/2.0.0-rc1/beacondb/sql/table-functions#read-odv-ascii)
 table function (or the `odv` source in the JSON query API):
 
 ```sql

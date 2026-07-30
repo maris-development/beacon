@@ -24,7 +24,7 @@ Beacon registers and reads (and appends to) an **existing** Delta table. It does
 
 ### Ad-hoc with `read_delta`
 
-Query a Delta table directly in a `FROM` clause without registering it first, useful for exploration. See the [`read_delta`](/docs/2.0.0-rc1/beacondb/sql/table-functions#read_delta) table function.
+Query a Delta table directly in a `FROM` clause without registering it first, useful for exploration. See the [`read_delta`](/docs/2.0.0-rc1/beacondb/sql/table-functions#read-delta) table function.
 
 ```sql
 SELECT count(*) FROM read_delta('delta/ocean_profiles');

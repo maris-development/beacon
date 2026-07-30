@@ -48,7 +48,15 @@ pub(crate) async fn table_schema_view(
     table: &str,
     identity: AuthIdentity,
 ) -> anyhow::Result<Option<SchemaView>> {
-    match table_arrow_schema(lake, &quote_ident(table), identity).await {
+    // A `TableReference`, not an interpolated SQL string — the name is passed to
+    // the catalog as-is, so it needs no quoting and cannot be re-parsed.
+    match table_arrow_schema(
+        lake,
+        datafusion::sql::TableReference::bare(table.to_string()),
+        identity,
+    )
+    .await
+    {
         Ok(schema) => Ok(Some(SchemaView::from(schema.as_ref()))),
         // A table that does not resolve surfaces as a planning error; the API
         // contract for that is `None` (→ 404), not a 500.
@@ -106,24 +114,24 @@ pub(crate) async fn list_qualified_tables(
         .collect())
 }
 
-/// A table's true Arrow schema, via a zero-row scan.
+/// A table's true Arrow schema, taken from its table provider.
 ///
 /// `information_schema` renders types as strings, which cannot be turned back
-/// into Arrow types faithfully; planning `SELECT * FROM t LIMIT 0` yields the
-/// real schema, which is what Flight SQL has to return.
+/// into Arrow types faithfully, so it is not a usable source for the schema
+/// Flight SQL must return.
+///
+/// This asks the provider rather than planning `SELECT * FROM t LIMIT 0`. A
+/// zero-row scan still forces the whole read path to resolve, and an
+/// N-dimensional table whose variables cannot be broadcast onto a common shape
+/// fails there — reporting no schema for a table whose schema is perfectly well
+/// defined. The provider answers without planning or I/O, and the runtime
+/// applies the same read authorization the scan would have.
 pub(crate) async fn table_arrow_schema(
     lake: &Arc<DataLake>,
-    qualified_name: &str,
+    table: impl Into<datafusion::sql::TableReference>,
     identity: AuthIdentity,
 ) -> anyhow::Result<arrow::datatypes::SchemaRef> {
-    let result = lake
-        .runtime()
-        .run_query(
-            beacon_core::query::Query::sql(format!("SELECT * FROM {qualified_name} LIMIT 0")),
-            identity,
-        )
-        .await?;
-    Ok(result.into_record_stream()?.schema())
+    lake.runtime().table_arrow_schema(table, &identity).await
 }
 
 /// Discover datasets via the `list_datasets` table function.

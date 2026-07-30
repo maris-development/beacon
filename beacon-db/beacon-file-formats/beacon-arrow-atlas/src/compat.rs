@@ -325,4 +325,34 @@ mod tests {
             .expect_err("list attribute should be rejected");
         assert!(format!("{err:#}").contains("list-valued"));
     }
+
+    /// Two datasets giving the same array *non-numeric* conflicting dtypes
+    /// (`String` vs `Int64`) still resolve: atlas widens the union to `String`,
+    /// so the table column is `Utf8` rather than the merge failing or the column
+    /// being dropped. Pins the assumption the scan relies on — that every merged
+    /// dtype is something Arrow can cast each dataset's native type *into*.
+    #[tokio::test]
+    async fn incompatible_array_dtypes_merge_to_string() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        crate::reader::test_support::build_incompatible_store(tmp.path()).await;
+        let atlas = Atlas::open_path(tmp.path()).await.expect("open atlas");
+
+        let merged = atlas.merged_schema();
+        assert_eq!(
+            merged.arrays.get("value").expect("value in merged schema").dtype.0,
+            DType::String,
+            "String ∪ Int64 must widen to String, not fail or drop the array"
+        );
+
+        let schema = atlas_merged_schema_to_arrow(&merged, None);
+        assert_eq!(
+            schema.field_with_name("value").expect("value field").data_type(),
+            &DataType::Utf8
+        );
+        // The column only one dataset declares still appears, at its own type.
+        assert_eq!(
+            schema.field_with_name("only_a").expect("only_a field").data_type(),
+            &DataType::Int32
+        );
+    }
 }

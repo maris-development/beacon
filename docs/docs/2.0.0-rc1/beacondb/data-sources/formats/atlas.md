@@ -68,7 +68,7 @@ What it does:
 - **Compact, self-describing layout.** Arrays are stored compressed (zstd) and the `atlas.json` registry is opened once and cached for the lifetime of the process, avoiding repeated metadata parsing across queries.
 - **Object-store friendly.** Atlas stores can live on local disk or S3-compatible object storage.
 
-Query an Atlas store with the [`read_atlas()`](/docs/2.0.0-rc1/beacondb/sql/table-functions#read_atlas) table function, pointing at its `atlas.json` marker file, an exact path or a glob such as `**/atlas.json`. An optional second argument filters the arrays to those matching the listed dimensions.
+Query an Atlas store with the [`read_atlas()`](/docs/2.0.0-rc1/beacondb/sql/table-functions#read-atlas) table function, pointing at its `atlas.json` marker file, an exact path or a glob such as `**/atlas.json`. An optional second argument filters the arrays to those matching the listed dimensions.
 
 ```sql
 SELECT * FROM read_atlas(['collections/sensor/atlas.json'])

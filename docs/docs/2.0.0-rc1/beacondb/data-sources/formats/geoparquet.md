@@ -55,7 +55,7 @@ con.sql("SELECT * FROM read_geoparquet('spatial/**/*.geoparquet') LIMIT 0").arro
 - Column projection is applied, only the columns a query selects are materialized.
 - Works over local disk and S3-compatible object stores.
 
-Query a GeoParquet file with the [`read_geoparquet()`](/docs/2.0.0-rc1/beacondb/sql/table-functions#read_geoparquet) table function:
+Query a GeoParquet file with the [`read_geoparquet()`](/docs/2.0.0-rc1/beacondb/sql/table-functions#read-geoparquet) table function:
 
 ```sql
 SELECT * FROM read_geoparquet(['spatial/**/*.geoparquet']) LIMIT 100
@@ -82,7 +82,7 @@ FROM stations
 
 ### Spatial filtering
 
-Geometry pairs naturally with Beacon's [geospatial functions](/docs/2.0.0-rc1/beacondb/sql/function-reference#geospatial-functions). For example, keep only rows inside a bounding polygon with [`st_within_point`](/docs/2.0.0-rc1/beacondb/sql/function-reference#st_within_point):
+Geometry pairs naturally with Beacon's [geospatial functions](/docs/2.0.0-rc1/beacondb/sql/function-reference#geospatial-functions). For example, keep only rows inside a bounding polygon with [`st_within_point`](/docs/2.0.0-rc1/beacondb/sql/function-reference#st-within-point-wkt-lon-lat):
 
 ```sql
 SELECT station_id, geometry
@@ -110,6 +110,6 @@ STORED AS GEOPARQUET
 LOCATION 'spatial/stations/*.geoparquet'
 ```
 
-Geometry columns are decoded to their native [GeoArrow](https://geoarrow.org/) representation on read. See [GeoParquet in Supported Formats](/docs/2.0.0-rc1/data-lake/datasets#geoparquet) for details.
+Geometry columns are decoded to their native [GeoArrow](https://geoarrow.org/) representation on read. See [GeoParquet in Supported Formats](/docs/2.0.0-rc1/data-lake/datasets#supported-formats) for details.
 
 See [Creating External Tables](/docs/2.0.0-rc1/beacondb/data-sources/external-tables) for the full DDL, and [Reading External Files](/docs/2.0.0-rc1/beacondb/data-sources/) for the general reading model.

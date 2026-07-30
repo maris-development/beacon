@@ -57,8 +57,10 @@ def test_read_hdf5(con, tmp_path):
     rel = con.read_hdf5(path)
     assert rel.columns == ["depth", "temperature"]
     assert rel.fetchall() == [(0.0, 10.0), (50.0, 20.0), (100.0, 30.0)]
-    # composes like any reader, and the _schema counterpart exists
-    assert con.read_hdf5(path).filter("depth <= 50").order("depth desc").fetchall() == [
+    # the reader is usable as a table function inside plain SQL
+    assert con.sql(
+        f"SELECT * FROM read_hdf5('{path}') WHERE depth <= 50 ORDER BY depth desc"
+    ).fetchall() == [
         (50.0, 20.0),
         (0.0, 10.0),
     ]
@@ -102,15 +104,15 @@ def test_read_parquet_returns_a_lazy_relation(con, parquet_file):
     assert rel.fetchall() == [(1, "a", 1.5), (2, "b", 2.5), (3, "a", 3.5)]
 
 
-def test_a_reader_composes_like_any_relation(con, parquet_file):
-    rel = con.read_parquet(parquet_file).filter("g = 'a'").order("x desc").limit(1)
-    # order + limit fold onto the reader's select — a correct top-1.
-    assert rel.sql.endswith("ORDER BY x desc LIMIT 1")
+def test_a_reader_is_queryable_from_sql(con, parquet_file):
+    rel = con.sql(
+        f"SELECT * FROM read_parquet('{parquet_file}') WHERE g = 'a' ORDER BY x desc LIMIT 1"
+    )
     assert rel.fetchall() == [(3, "a", 3.5)]
 
 
 def test_generic_read_escape_hatch(con, parquet_file):
-    assert con.read("read_parquet", parquet_file).count().fetchall() == [(3,)]
+    assert con.sql(f"SELECT count(*) FROM read_parquet('{parquet_file}')").fetchall() == [(3,)]
 
 
 def test_schema_reader_is_free_via_the_catalog(con, parquet_file):
@@ -142,7 +144,9 @@ def test_reader_columns_keyword_projects(con, parquet_file):
     rel = con.read_parquet(parquet_file, columns=["id", "x"])
     assert rel.columns == ["id", "x"]
     assert rel.fetchall() == [(1, 1.5), (2, 2.5), (3, 3.5)]
-    assert rel.filter("id = 2").fetchall() == [(2, 2.5)]
+    assert con.sql(
+        f"SELECT id, x FROM read_parquet('{parquet_file}') WHERE id = 2"
+    ).fetchall() == [(2, 2.5)]
     # a single column name (not a list) is accepted too
     assert con.read_parquet(parquet_file, columns="g").columns == ["g"]
 
@@ -263,7 +267,7 @@ def test_geoparquet_sink_handles_multiple_rows(con, tmp_path):
     con.sql(
         "SELECT * FROM (VALUES (1.0,2.0),(3.0,4.0),(5.0,6.0)) AS t(lon, lat)"
     ).to_geoparquet(path, longitude="lon", latitude="lat")
-    assert con.read_geoparquet(path).count().fetchall() == [(3,)]
+    assert con.sql(f"SELECT count(*) FROM read_geoparquet('{path}')").fetchall() == [(3,)]
 
 
 def test_sink_to_url_scheme_is_refused(con):

@@ -15,7 +15,7 @@ use arrow_flight::sql::{
 };
 use arrow_flight::sql::{CommandGetDbSchemas, CommandGetSqlInfo, CommandGetTables, SqlInfo};
 
-use crate::datalake::{catalog, sql};
+use crate::datalake::catalog;
 use crate::flight_sql::util::to_internal_status;
 
 const DEFAULT_TABLE_TYPE: &str = "TABLE";
@@ -92,18 +92,18 @@ impl FlightSqlMetadata {
             .await
             .map_err(to_internal_status)?;
         for (catalog_name, schema_name, table_name) in tables {
-            let qualified_table_name = format!(
-                "{}.{}.{}",
-                sql::quote_ident(&catalog_name),
-                sql::quote_ident(&schema_name),
-                sql::quote_ident(&table_name)
+            // The three parts go to the catalog as-is, so no quoting is needed —
+            // the reference is never re-parsed as SQL.
+            let table_ref = datafusion::sql::TableReference::full(
+                catalog_name.clone(),
+                schema_name.clone(),
+                table_name.clone(),
             );
-            let table_schema =
-                catalog::table_arrow_schema(&self.lake, &qualified_table_name, identity.clone())
-                    .await
-                    // A table the caller cannot scan still appears in the listing,
-                    // with an empty schema rather than failing the whole response.
-                    .unwrap_or_else(|_| Arc::new(Schema::empty()));
+            let table_schema = catalog::table_arrow_schema(&self.lake, table_ref, identity.clone())
+                .await
+                // A table the caller cannot read still appears in the listing,
+                // with an empty schema rather than failing the whole response.
+                .unwrap_or_else(|_| Arc::new(Schema::empty()));
 
             builder
                 .append(

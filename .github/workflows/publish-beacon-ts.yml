@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 1.8.0 or 2.0.0-rc.1. Empty = latest stable v* tag."
+        description: "Expected version, cross-checked against package.json. Empty = publish what it declares."
         required: false
         type: string
         default: ""
@@ -39,8 +39,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # full history + tags, so we can find the latest tag
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -57,31 +55,22 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Resolve version
-        id: version
+      - name: Verify version
         env:
-          EVENT: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_VERSION: ${{ inputs.version }}
+          # On a tag push the tag is the expected version; on a manual run the (optional) input is.
+          # Empty means "no assertion" — publish whatever the manifests declare.
+          EXPECTED: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
-          if [ "$EVENT" = "push" ]; then
-            version="$REF_NAME"                          # the pushed release tag, e.g. v1.8.0
-          elif [ -n "$INPUT_VERSION" ]; then
-            version="$INPUT_VERSION"                     # from the manual input
-          else
-            # Latest *stable* tag. git's version sort has no SemVer pre-release semantics and ranks
-            # v2.0.0-rc.1 above v2.0.0, so drop pre-releases here; to republish an RC by hand, name
-            # it explicitly in the `version` input.
-            tag=$(git tag --list 'v*' --sort=-v:refname | grep -vE '^v.*-' | head -n1)
-            [ -n "$tag" ] || { echo "::error::No stable v* tags found; provide a version input."; exit 1; }
-            version="$tag"                               # latest stable release tag
-          fi
-          version="${version#v}"                         # strip the leading 'v' -> X.Y.Z
-          [ -n "$version" ] || { echo "::error::Could not resolve a version."; exit 1; }
+          python3 -m pip install --quiet --upgrade packaging
+          python3 "$GITHUB_WORKSPACE/scripts/check-version.py" "$EXPECTED"
 
-          # npm dist-tag. `npm publish` with no --tag defaults to `latest`, which would make an RC
-          # the default install for everyone. Derive the dist-tag from the SemVer pre-release
-          # identifier instead: 2.0.0-rc.1 -> rc, 2.0.0-beta.2 -> beta, 1.8.0 -> latest.
+      - name: Derive npm dist-tag
+        id: version
+        run: |
+          # `npm publish` with no --tag defaults to `latest`, which would make an RC the default
+          # install for everyone. Derive it from the SemVer pre-release identifier instead:
+          # 2.0.0-rc.1 -> rc, 2.0.0-beta.2 -> beta, 1.8.0 -> latest.
+          version=$(node -p "require('./package.json').version")
           case "$version" in
             *-*)
               pre="${version#*-}"                        # 2.0.0-rc.1 -> rc.1
@@ -91,15 +80,8 @@ jobs:
               ;;
             *) npm_tag="latest" ;;
           esac
-
-          echo "Resolved version: $version (npm dist-tag: $npm_tag)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing $version under npm dist-tag: $npm_tag"
           echo "npm_tag=$npm_tag" >> "$GITHUB_OUTPUT"
-
-      - name: Set package version
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Build
         run: npm run build

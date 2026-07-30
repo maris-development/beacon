@@ -739,6 +739,50 @@ mod tests {
         assert_eq!(nulls, 2, "dataset b's rows null-fill the missing flag column");
     }
 
+    /// A collection whose datasets give the same array *non-numeric* conflicting
+    /// dtypes still reads: atlas widens `String` ∪ `Int64` to `String`, and the
+    /// integer dataset is cast into `Utf8` rather than the scan failing. Guards
+    /// the assumption that every merged dtype is castable-into from each
+    /// dataset's native type.
+    #[tokio::test]
+    async fn incompatible_dtype_union_reads_both_datasets_as_strings() {
+        use arrow::array::{Array, StringArray};
+        use arrow::datatypes::DataType;
+
+        let ctx = SessionContext::new();
+        let tmp = tempfile::tempdir().unwrap();
+        crate::reader::test_support::build_incompatible_store(tmp.path()).await;
+        let dir = tmp.path().to_string_lossy().replace('\\', "/");
+        let table_path = ListingTableUrl::parse(format!("file:///{dir}/")).unwrap();
+        let format: Arc<dyn FileFormat> = Arc::new(AtlasFormat::default());
+        let listing_options = ListingOptions::new(format).with_file_extension("atlas.json");
+        let config = ListingTableConfig::new(table_path)
+            .with_listing_options(listing_options)
+            .infer_schema(&ctx.state())
+            .await
+            .unwrap();
+        ctx.register_table("m", Arc::new(ListingTable::try_new(config).unwrap()))
+            .unwrap();
+
+        let df = ctx.sql("SELECT value FROM m ORDER BY value").await.unwrap();
+        assert_eq!(
+            df.schema().field_with_unqualified_name("value").unwrap().data_type(),
+            &DataType::Utf8,
+            "String wins the union, so the column is Utf8"
+        );
+
+        let batches = df.collect().await.unwrap();
+        let mut vals: Vec<String> = Vec::new();
+        for b in &batches {
+            let col = b.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..col.len() {
+                vals.push(col.value(i).to_string());
+            }
+        }
+        // a.value = ["x","y"] (native String); b.value = [1,2] (Int64, stringified).
+        assert_eq!(vals, vec!["1", "2", "x", "y"], "both datasets contribute, integers cast to text");
+    }
+
     // ── partition splitting ─────────────────────────────────────────────
 
     #[test]

@@ -93,11 +93,6 @@ impl Select {
         }
     }
 
-    /// Whether a projection has already been chosen (i.e. this is no longer `SELECT *`).
-    fn has_projection(&self) -> bool {
-        self.projection != "*" || self.distinct || self.group_by.is_some()
-    }
-
     /// Whether any row-shaping clause that a later operation could reinterpret is present.
     fn has_tail(&self) -> bool {
         self.order_by.is_some() || self.limit.is_some() || self.offset.is_some()
@@ -155,12 +150,6 @@ impl Select {
         }
         sql
     }
-
-    /// Turns the current select into the `FROM` of a fresh `SELECT *`, so a new clause starts
-    /// from a clean slate. This is the "wrap" half of fold-or-wrap.
-    fn wrapped(&self) -> Self {
-        Self::from_fragment(format!("({}) AS _rel", self.render()))
-    }
 }
 
 /// A lazily-composed query over an open [`Database`].
@@ -200,16 +189,6 @@ impl Relation {
         }
     }
 
-    /// A new relation sharing the database/identity, carrying `select`.
-    fn with_select(&self, select: Select) -> Self {
-        Self {
-            database: self.database.clone(),
-            identity: self.identity.clone(),
-            select,
-            materialized: None,
-        }
-    }
-
     /// The rendered SQL.
     fn sql_text(&self) -> String {
         self.select.render()
@@ -223,204 +202,10 @@ impl Relation {
         }
         Ok(self.materialized.as_mut().expect("just materialized"))
     }
-
-    /// Wraps the current select as a subquery and starts a fresh `SELECT *` over it. Used by
-    /// aggregate/scalar/join/set operations that always need a clean scope.
-    fn derived_from_subquery(&self) -> Select {
-        Select::from_fragment(format!("({}) AS _rel", self.sql_text()))
-    }
 }
 
 #[pymethods]
 impl Relation {
-    // ---- relational, lazy, chainable ---------------------------------------------------
-
-    /// Keeps rows matching a SQL boolean expression: `filter("depth <= 100")`.
-    fn filter(&self, condition: &str) -> Self {
-        // A WHERE evaluated in the same select as a projection would see pre-projection columns,
-        // not the filtered-relation columns the caller means — so fold only over a bare
-        // `SELECT * ... [WHERE ...]`, and wrap otherwise.
-        let mut select = if self.select.has_projection() || self.select.has_tail() {
-            self.select.wrapped()
-        } else {
-            self.select.clone()
-        };
-        select.filters.push(format!("({condition})"));
-        self.with_select(select)
-    }
-
-    /// Projects a SQL select list: `project("user_id, count(*) AS n")`.
-    #[pyo3(text_signature = "(self, expressions)")]
-    fn project(&self, expressions: &str) -> Self {
-        let mut select = if self.select.has_projection() || self.select.has_tail() {
-            self.select.wrapped()
-        } else {
-            self.select.clone()
-        };
-        select.projection = expressions.to_string();
-        self.with_select(select)
-    }
-
-    /// Alias of [`Self::project`], under the conventional name `select`.
-    fn select(&self, expressions: &str) -> Self {
-        self.project(expressions)
-    }
-
-    /// Groups and aggregates: `aggregate("user_id, count(*) AS n", "user_id")`. An empty
-    /// `groups` aggregates the whole relation.
-    #[pyo3(signature = (expressions, groups=""))]
-    fn aggregate(&self, expressions: &str, groups: &str) -> Self {
-        let mut select = if self.select.has_projection() || self.select.has_tail() {
-            self.select.wrapped()
-        } else {
-            self.select.clone()
-        };
-        select.projection = expressions.to_string();
-        if !groups.trim().is_empty() {
-            select.group_by = Some(groups.to_string());
-        }
-        self.with_select(select)
-    }
-
-    /// Orders rows: `order("n desc")`.
-    fn order(&self, expressions: &str) -> Self {
-        // Fold onto the current select unless it already has an ordering or a limit — keeping
-        // ORDER BY and a following LIMIT in one select is the whole point (see the module docs).
-        let mut select = if self.select.has_tail() {
-            self.select.wrapped()
-        } else {
-            self.select.clone()
-        };
-        select.order_by = Some(expressions.to_string());
-        self.with_select(select)
-    }
-
-    /// Alias of [`Self::order`], under the conventional name `sort`.
-    fn sort(&self, expressions: &str) -> Self {
-        self.order(expressions)
-    }
-
-    /// Limits the row count, optionally skipping `offset` rows first.
-    #[pyo3(signature = (n, offset=0))]
-    fn limit(&self, n: i64, offset: i64) -> Self {
-        let mut select = if self.select.limit.is_some() || self.select.offset.is_some() {
-            self.select.wrapped()
-        } else {
-            self.select.clone()
-        };
-        select.limit = Some(n);
-        if offset > 0 {
-            select.offset = Some(offset);
-        }
-        self.with_select(select)
-    }
-
-    /// Removes duplicate rows.
-    fn distinct(&self) -> Self {
-        // DISTINCT applies to the projection; if a limit/order is already in place it must run
-        // after DISTINCT, so wrap. A repeated DISTINCT also wraps.
-        let mut select = if self.select.distinct || self.select.has_tail() {
-            self.select.wrapped()
-        } else {
-            self.select.clone()
-        };
-        select.distinct = true;
-        self.with_select(select)
-    }
-
-    /// Joins another relation: `join(other, "l.id = r.id", how="inner")`.
-    ///
-    /// `how` is one of `inner`, `left`, `right`, `full`, `cross`. The left relation is aliased
-    /// `_l` and the right `_r`, so write the condition in those terms.
-    #[pyo3(signature = (other, on=None, how="inner"))]
-    fn join(&self, other: &Relation, on: Option<&str>, how: &str) -> PyResult<Self> {
-        let keyword = match how.to_ascii_lowercase().as_str() {
-            "inner" => "INNER JOIN",
-            "left" => "LEFT JOIN",
-            "right" => "RIGHT JOIN",
-            "full" | "outer" | "full outer" => "FULL JOIN",
-            "cross" => "CROSS JOIN",
-            other => {
-                return Err(crate::errors::programming_error(format!(
-                    "unknown join type `{other}`; use inner, left, right, full, or cross"
-                )))
-            }
-        };
-        let from = if keyword == "CROSS JOIN" {
-            format!(
-                "({}) AS _l CROSS JOIN ({}) AS _r",
-                self.sql_text(),
-                other.sql_text()
-            )
-        } else {
-            let condition = on.ok_or_else(|| {
-                crate::errors::programming_error(format!(
-                    "a {how} join needs an `on` condition (e.g. \"_l.id = _r.id\")"
-                ))
-            })?;
-            format!(
-                "({}) AS _l {keyword} ({}) AS _r ON {condition}",
-                self.sql_text(),
-                other.sql_text()
-            )
-        };
-        Ok(self.with_select(Select::from_fragment(from)))
-    }
-
-    /// Stacks another relation's rows, keeping duplicates.
-    fn union_all(&self, other: &Relation) -> Self {
-        let from = format!(
-            "({} UNION ALL {}) AS _rel",
-            self.sql_text(),
-            other.sql_text()
-        );
-        self.with_select(Select::from_fragment(from))
-    }
-
-    /// Stacks another relation's rows, removing duplicates.
-    fn union(&self, other: &Relation) -> Self {
-        let from = format!("({} UNION {}) AS _rel", self.sql_text(), other.sql_text());
-        self.with_select(Select::from_fragment(from))
-    }
-
-    /// Counts rows: a one-row relation with a single `count` column.
-    fn count(&self) -> Self {
-        let mut select = self.derived_from_subquery();
-        select.projection = "count(*) AS \"count\"".to_string();
-        self.with_select(select)
-    }
-
-    /// Aggregates a column with `sum`. One-row relation with a single `sum` column.
-    fn sum(&self, column: &str) -> Self {
-        self.scalar_aggregate("sum", column)
-    }
-
-    fn min(&self, column: &str) -> Self {
-        self.scalar_aggregate("min", column)
-    }
-
-    fn max(&self, column: &str) -> Self {
-        self.scalar_aggregate("max", column)
-    }
-
-    /// Aggregates a column with the mean (`avg`).
-    fn mean(&self, column: &str) -> Self {
-        self.scalar_aggregate("avg", column)
-    }
-
-    /// Runs SQL that refers to this relation by `name`, via a CTE — no view is registered.
-    ///
-    /// `rel.query("t", "SELECT * FROM t WHERE x > 3")` renders
-    /// `WITH t AS (<rel>) SELECT * FROM t WHERE x > 3`. `sql` must be a single statement.
-    fn query(&self, name: &str, sql: &str) -> Self {
-        let cte = format!("WITH {} AS ({}) {}", quote_ident(name), self.sql_text(), sql);
-        Self::over(
-            self.database.clone(),
-            self.identity.clone(),
-            format!("({cte}) AS _rel"),
-        )
-    }
-
     // ---- terminal: materialize ---------------------------------------------------------
 
     fn fetchone<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
@@ -781,12 +566,6 @@ impl Relation {
             format,
             PathBuf::from(path),
         )
-    }
-
-    fn scalar_aggregate(&self, func: &str, column: &str) -> Self {
-        let mut select = self.derived_from_subquery();
-        select.projection = format!("{func}({column}) AS \"{func}\"");
-        self.with_select(select)
     }
 
     /// Counts rows without disturbing the relation's own materialization cache.

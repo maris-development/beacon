@@ -78,7 +78,9 @@ impl FileFormatFactory for BBFFormatFactory {
         if let Some(value) = format_options.get("split_streams_slice") {
             split_streams_slice = parse_bool_option("split_streams_slice", value)?;
         }
-        Ok(Arc::new(BBFFormat { split_streams_slice }))
+        Ok(Arc::new(BBFFormat {
+            split_streams_slice,
+        }))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -97,6 +99,7 @@ impl FileFormatFactoryExt for BBFFormatFactory {
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
+        println!("Discovering datasets from {} objects", objects.len());
         let datasets = objects
             .iter()
             .filter(|obj| {
@@ -153,6 +156,7 @@ impl FileFormat for BBFFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
+        println!("Inferring schema from {} BBF objects", objects.len());
         let schemas = stream::iter(objects.iter().cloned())
             .map(|object| {
                 let store = Arc::clone(store);
@@ -174,6 +178,7 @@ impl FileFormat for BBFFormat {
         let super_schema = super_type_schema(&schemas).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
         })?;
+        println!("Inferred schema: {:?}", super_schema);
 
         Ok(Arc::new(super_schema))
     }
@@ -376,7 +381,12 @@ mod tests {
             split_streams_slice: true,
         });
         assert!(downcast(&FileFormatFactory::default(&factory)).split_streams_slice);
-        assert!(!downcast(&FileFormatFactory::default(&<BBFFormatFactory as Default>::default())).split_streams_slice);
+        assert!(
+            !downcast(&FileFormatFactory::default(
+                &<BBFFormatFactory as Default>::default()
+            ))
+            .split_streams_slice
+        );
     }
 
     fn downcast(format: &Arc<dyn FileFormat>) -> &BBFFormat {
@@ -406,7 +416,10 @@ mod tests {
         let paths: Vec<&str> = datasets.iter().map(|d| d.file_path.as_str()).collect();
         assert_eq!(paths, vec!["x/a.bbf"]);
         assert_eq!(datasets[0].format, "bbf");
-        assert_eq!(<BBFFormatFactory as Default>::default().file_extensions(), vec!["bbf"]);
+        assert_eq!(
+            <BBFFormatFactory as Default>::default().file_extensions(),
+            vec!["bbf"]
+        );
     }
 
     /// BBF carries its own internal compression, so the container extension is
@@ -469,5 +482,4 @@ mod tests {
                 .is_err()
         );
     }
-
 }

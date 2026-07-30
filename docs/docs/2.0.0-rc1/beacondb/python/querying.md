@@ -1,38 +1,54 @@
 ---
-description: Lazy relations, the catalog-driven readers with keyword options, streaming results, file sinks, and EXPLAIN in beacondb.
+description: Writing SQL against beacondb — lazy execution, the catalog-driven readers with keyword options, streaming results, file sinks, and EXPLAIN.
 ---
 
 # Querying
 
-## Lazy relations
+## SQL in, results out
 
-`sql()`, `query()`, `table()`, and `view()` return a **relation**: a query you compose without
-running it. Relational methods chain; nothing touches the engine until a terminal method:
+`sql()`, `query()`, `table()`, and `view()` return a **relation**: a query that has been built but
+not yet run. You shape it in SQL, and nothing touches the engine until a terminal method:
 
 ```python
-rel = (con.table("events")
-          .filter("kind = 'click'")
-          .aggregate("user_id, count(*) AS n", "user_id")
-          .order("n desc")
-          .limit(10))
+rel = con.sql("""
+    SELECT user_id, count(*) AS n
+    FROM events
+    WHERE kind = 'click'
+    GROUP BY user_id
+    ORDER BY n DESC
+    LIMIT 10
+""")
 
 rel.sql          # inspect the SQL — runs nothing
 rel.explain()    # logical + physical plan; rel.explain(analyze=True) runs it with metrics
 rel.df()         # now it runs
 ```
 
-The builder keeps `ORDER BY` and `LIMIT` in one `SELECT`, so `.order(...).limit(n)` is a correct
-top-N. Relations are immutable, so a relation is safe to branch into two derived queries. Terminals:
-`fetchall`/`fetchmany`/`fetchone`, `arrow`/`df`/`pl`, `record_batch`, `show`, `create`/`create_view`.
+Terminals are `fetchall`/`fetchmany`/`fetchone`, `arrow`/`df`/`pl`, `record_batch`, `show`,
+`create`/`create_view`, and the `to_*` sinks. Everything before one of those is free, so
+`rel.sql`, `rel.columns` and `rel.types` are cheap ways to check a query before paying for it.
+
+::: info No method chaining
+BeaconDB does not currently expose relational composition (`.filter()`, `.aggregate()`,
+`.join()`, …). Write the SQL instead — it is the same engine, and one statement reads back more
+clearly than the equivalent chain.
+:::
 
 ## Reading files
 
 The readers are Beacon's table functions surfaced as methods; every one returns a lazy relation:
 
 ```python
-con.read_parquet("obs/*.parquet").filter("depth <= 100").df()
-con.read_netcdf("argo/float.nc").aggregate("platform, avg(temperature) AS t", "platform").df()
+con.read_parquet("obs/*.parquet").df()
 con.read_hdf5("data.h5").df()          # netCDF-4 is HDF5; plain HDF5 reads too
+
+# to filter or aggregate, call the reader as a table function in SQL
+con.sql("SELECT * FROM read_parquet('obs/*.parquet') WHERE depth <= 100").df()
+con.sql("""
+    SELECT platform, avg(temperature) AS t
+    FROM read_netcdf('argo/float.nc')
+    GROUP BY platform
+""").df()
 con.read_csv("stations.csv"); con.read_zarr(...); con.read_delta(...); con.list_datasets()
 ```
 

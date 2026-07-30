@@ -19,7 +19,7 @@ SELECT * FROM read_parquet('obs/**/*.parquet') LIMIT 100
 Before writing a query it is usually worth checking which columns a file actually has, and
 what their types are.
 
-[`read_schema()`](/docs/2.0.0-rc1/beacondb/sql/table-functions-utility#read_schema) returns the
+[`read_schema()`](/docs/2.0.0-rc1/beacondb/sql/table-functions-utility#read-schema) returns the
 inferred column names and types **without reading any data**, which makes it the cheapest
 option on large collections:
 

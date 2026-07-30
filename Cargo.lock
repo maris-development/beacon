@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-arrow-tiff"
-version = "0.1.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1818,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-delta"
-version = "0.1.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-lance"
-version = "0.1.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-mcp"
-version = "0.1.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-array"
-version = "0.1.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1947,7 +1947,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-nd-arrow"
-version = "0.2.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-redb-store"
-version = "0.1.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "async-trait",
  "bincode",
@@ -1988,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "beacon-sql-databases"
-version = "0.1.0"
+version = "2.0.0-rc.1"
 dependencies = [
  "anyhow",
  "arrow 58.3.0",

@@ -277,6 +277,28 @@ impl RuntimeBuilder {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize session context: {:?}", e))?;
 
+        // Formats and functions FIRST — before any persisted table is rebuilt.
+        //
+        // Startup recovery reconstructs each table from its stored definition, and an
+        // external table's definition names its format (`STORED AS BBF`), which is
+        // resolved through `SessionState::get_file_format_factory`. Register these
+        // after recovery and only DataFusion's built-ins (CSV/Parquet/Arrow/JSON) are
+        // present, so every table in a *beacon* format — BBF, Atlas, Zarr, GeoTIFF,
+        // GeoParquet, NetCDF, HDF5 — fails to rebuild with "Could not find FileFormat"
+        // and is skipped, i.e. silently vanishes from the catalog on restart.
+        // Table functions come along for the same reason: a persisted view's SQL can
+        // call `read_bbf(...)`, which must resolve while the view is being rebuilt.
+        //
+        // Neither depends on the catalog: both read only the session config
+        // (`ListingFactory`, the `FileFormatRegistry` handle) set up with the session.
+        let file_formats = register_file_formats(&self, &session_ctx)?;
+        // Register UDFs and Table Functions, returning their docs (only for udtfs) for cataloging. The functions are registered on the session context.
+        let table_function_docs = register_functions(
+            session_ctx.clone(),
+            runtime_handle.clone(),
+            file_formats.clone(),
+        );
+
         // Install the persistent schema provider and load the tables already in the
         // tables store into the catalog. This must run before `ensure_tables` below:
         // on a restart the auth `__beacon_*` tables already exist in the store, and
@@ -292,15 +314,6 @@ impl RuntimeBuilder {
         auth_store.ensure_tables().await?;
         auth_context.hydrate().await?;
         bootstrap_auth(&self, &auth_context).await?;
-
-        // Register File Formats
-        let file_formats = register_file_formats(&self, &session_ctx)?;
-        // Register UDFs and Table Functions, returning their docs (only for udtfs) for cataloging. The functions are registered on the session context.
-        let table_function_docs = register_functions(
-            session_ctx.clone(),
-            runtime_handle.clone(),
-            file_formats.clone(),
-        );
 
         // The metrics map is created here rather than in the `Runtime` literal below
         // because the `beacon.system.query_metrics` table reads the same handle: the

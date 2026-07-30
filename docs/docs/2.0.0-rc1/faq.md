@@ -34,7 +34,7 @@ ASCII. Each has its own chapter in [File Formats](/docs/2.0.0-rc1/beacondb/data-
 
 ### How do I see what columns and types a file has?
 
-[`read_schema()`](/docs/2.0.0-rc1/beacondb/sql/table-functions-utility#read_schema) returns the schema
+[`read_schema()`](/docs/2.0.0-rc1/beacondb/sql/table-functions-utility#read-schema) returns the schema
 without reading any data:
 
 ```sql

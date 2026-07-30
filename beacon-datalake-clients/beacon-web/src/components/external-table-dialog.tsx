@@ -22,15 +22,42 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-/** Storage types accepted by `CREATE EXTERNAL TABLE ... STORED AS <type>`. */
-const FILE_TYPES = ["PARQUET", "CSV", "NETCDF", "ARROW", "ZARR", "ODV", "DELTA", "ICEBERG", "REMOTE"];
+/**
+ * Storage types accepted by `CREATE EXTERNAL TABLE ... STORED AS <type>`.
+ *
+ * Keep in step with the formats registered in `register_file_formats`
+ * (beacon-core/src/runtime_builder.rs) — anything registered there but absent
+ * here is usable from SQL yet invisible in the UI. Grouped by family:
+ * columnar, tabular, scientific/N-D, raster, Beacon-native, then table formats.
+ */
+const FILE_TYPES = [
+  "PARQUET",
+  "GEOPARQUET",
+  "CSV",
+  "ARROW",
+  "NETCDF",
+  "HDF5",
+  "ZARR",
+  "ATLAS",
+  "TIFF",
+  "BBF",
+  "ODV",
+  "DELTA",
+  "ICEBERG",
+  "REMOTE",
+];
 
 const TYPE_HINTS: Record<string, string> = {
   PARQUET: "Datasets-store path or glob, e.g. obs/ or data/**/*.parquet.",
+  GEOPARQUET: "Datasets-store path or glob. Geometry columns decode to GeoArrow on read.",
   CSV: "Datasets-store path or glob. Use options like delimiter to tune parsing.",
-  NETCDF: "Datasets-store path or glob, e.g. argo/**/*.nc.",
   ARROW: "Datasets-store path or glob to Arrow IPC files.",
-  ZARR: "Datasets-store path to a Zarr store.",
+  NETCDF: "Datasets-store path or glob, e.g. argo/**/*.nc.",
+  HDF5: "Datasets-store path or glob, e.g. data/**/*.h5. NetCDF-4 files are HDF5.",
+  ZARR: "Datasets-store path to a Zarr v3 store (the zarr.json marker).",
+  ATLAS: "Datasets-store path to an Atlas store (the atlas.json marker).",
+  TIFF: "Datasets-store path or glob to GeoTIFF/COG files.",
+  BBF: "Datasets-store path or glob to Beacon Binary Format files.",
   ODV: "Datasets-store path or glob to ODV files.",
   DELTA: "Scheme-qualified location of the Delta table.",
   ICEBERG: "Scheme-qualified location of the Iceberg table.",

@@ -44,7 +44,7 @@ directly.
 ## Seeing what is inside a file
 
 Before querying an unfamiliar dataset, check which columns it has and what their types are.
-[`read_schema()`](/docs/2.0.0-rc1/beacondb/sql/table-functions-utility#read_schema) does this **without
+[`read_schema()`](/docs/2.0.0-rc1/beacondb/sql/table-functions-utility#read-schema) does this **without
 reading any data**:
 
 ```sql

@@ -118,18 +118,20 @@ side-effecting statements (`ATTACH`, `CREATE SECRET`, `INSERT`, …) — is refu
 and `SHOW …` work. (The file is still opened exclusively, so this is a per-connection writability
 guarantee, not multi-process concurrency yet.)
 
-## Lazy relations
+## SQL in, results out
 
-`sql()`, `query()`, `table()` and `view()` return a **relation**: a query you compose
-without running it. Relational methods chain; nothing touches the engine until a terminal
-method:
+`sql()`, `query()`, `table()` and `view()` return a **relation**: a query that has been built
+but not yet run. You shape it in SQL, and nothing touches the engine until a terminal method:
 
 ```python
-rel = (con.table("events")
-          .filter("kind = 'click'")
-          .aggregate("user_id, count(*) AS n", "user_id")
-          .order("n desc")
-          .limit(10))
+rel = con.sql("""
+    SELECT user_id, count(*) AS n
+    FROM events
+    WHERE kind = 'click'
+    GROUP BY user_id
+    ORDER BY n DESC
+    LIMIT 10
+""")
 
 rel.sql              # inspect the SQL — runs nothing
 rel.explain()        # the logical + physical plan, still without running the query
@@ -137,9 +139,9 @@ rel.explain(analyze=True)  # run it and annotate each operator with rows/time/by
 rel.df()             # now it runs
 ```
 
-The builder keeps `ORDER BY` and `LIMIT` in one `SELECT`, so `.order(...).limit(n)` is a
-correct top-N rather than an unspecified inner-`ORDER BY`. Relations are immutable, so a
-relation is safe to branch into two derived queries.
+Relational method chaining (`.filter()`, `.aggregate()`, `.join()`, …) is not currently
+exposed — write the SQL instead. Inspecting `rel.sql`, `rel.columns` or `rel.types` stays
+free, so you can check a query before paying to run it.
 
 ### Streaming large results
 
@@ -162,13 +164,15 @@ query afresh.
 ## Reading files, and beacon's own formats
 
 The readers are beacon's table functions, surfaced as methods. Every one returns a lazy
-relation you can compose further:
+relation:
 
 ```python
-con.read_parquet("obs/*.parquet").filter("depth <= 100").df()
-con.read_netcdf("argo/float.nc").aggregate("platform, avg(temperature) AS t", "platform").df()
+con.read_parquet("obs/*.parquet").df()
 con.read_hdf5("data.h5").df()   # netCDF-4 is HDF5; plain HDF5 (array datasets) reads too
 con.read_csv("stations.csv"); con.read_zarr(...); con.read_delta(...); con.list_datasets()
+
+# to filter or aggregate, call the reader as a table function in SQL
+con.sql("SELECT * FROM read_parquet('obs/*.parquet') WHERE depth <= 100").df()
 ```
 
 They are resolved from the catalog (`beacon.system.table_functions`), so *any* table

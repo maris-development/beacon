@@ -240,6 +240,77 @@ impl Runtime {
     /// the definition is what the table was *declared* as, which is what an
     /// operator inspecting a table wants to see. Credentials and internal
     /// (double-underscore) option keys are redacted by `TableConfigView`.
+    /// A registered table's Arrow schema, taken from the table provider itself.
+    ///
+    /// Deliberately **not** `SELECT * FROM t LIMIT 0`: planning a scan forces the
+    /// whole read path to resolve, and for an N-dimensional table whose variables
+    /// cannot be broadcast onto a common shape that fails — so a zero-row query
+    /// errors on a table whose schema is perfectly well defined. Asking the
+    /// provider skips planning entirely, costs no I/O, and answers for every table
+    /// a scan could not.
+    ///
+    /// Authorization matches the read path in
+    /// [`authorize_logical_plan`](crate::statement_plan::authorize_logical_plan):
+    /// the internal `__beacon_*` and `beacon.system` auth tables are super-user
+    /// only regardless of enforcement, and otherwise a non-super-user needs
+    /// `Select` on the table. A schema is metadata about data the caller may not
+    /// read, so it is gated the same way the rows are.
+    pub async fn table_arrow_schema(
+        &self,
+        table: impl Into<datafusion::sql::TableReference>,
+        identity: &beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<arrow::datatypes::SchemaRef> {
+        use beacon_auth::{ConcreteTarget, Privilege};
+        use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
+
+        let table: datafusion::sql::TableReference = table.into();
+
+        if !identity.is_super_user {
+            if table.table().starts_with(INTERNAL_TABLE_PREFIX) {
+                anyhow::bail!(
+                    "permission denied: the internal '{INTERNAL_TABLE_PREFIX}*' tables are \
+                     restricted to the super-user"
+                );
+            }
+            let in_system_schema = table
+                .schema()
+                .is_some_and(|s| s.eq_ignore_ascii_case(crate::system_schema::SYSTEM_SCHEMA_NAME));
+            if in_system_schema
+                && crate::system_schema::AUTH_TABLES
+                    .iter()
+                    .any(|name| table.table().eq_ignore_ascii_case(name))
+            {
+                anyhow::bail!(
+                    "permission denied: the 'beacon.{}' auth tables are restricted to the \
+                     super-user",
+                    crate::system_schema::SYSTEM_SCHEMA_NAME
+                );
+            }
+        }
+
+        let is_information_schema = table
+            .schema()
+            .is_some_and(|s| s.eq_ignore_ascii_case("information_schema"));
+        if self.auth_enforce
+            && !identity.is_super_user
+            && !is_information_schema
+            && !self.auth.is_allowed(
+                &identity.roles,
+                Privilege::Select,
+                &ConcreteTarget::Table(table.table().to_string()),
+            )
+        {
+            anyhow::bail!("permission denied: SELECT on table {}", table.table());
+        }
+
+        let provider = self
+            .session_ctx
+            .table_provider(table.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("table '{table}' could not be resolved: {e}"))?;
+        Ok(provider.schema())
+    }
+
     pub async fn table_config(&self, table_name: &str) -> Option<crate::api::TableConfigView> {
         let store = self
             .session_ctx

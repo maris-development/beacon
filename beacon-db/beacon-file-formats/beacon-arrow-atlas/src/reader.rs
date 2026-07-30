@@ -278,6 +278,54 @@ pub(crate) mod test_support {
         atlas.flush().await.expect("flush atlas store");
     }
 
+    /// Build a store whose two datasets give the *same* array genuinely
+    /// incompatible dtypes:
+    ///
+    /// - `a`: `value: String[2] = ["x", "y"]`
+    /// - `b`: `value: Int64[2]  = [1, 2]`
+    ///
+    /// Unlike [`build_widening_store`], there is no numeric super-type here, so
+    /// this pins what the merged schema resolves to and whether a scan can still
+    /// read both datasets. `a` also carries `only_a: Int32[2]`, so the
+    /// "dataset declares none of the projected columns" path can be exercised by
+    /// projecting just that column.
+    pub async fn build_incompatible_store(path: &Path) {
+        let mut atlas = Atlas::create_path(path, StoreConfig::default())
+            .await
+            .expect("create atlas store");
+        {
+            let mut a = atlas.create_dataset("a").await.expect("create a");
+            a.define_array::<String>("value", vec!["obs".into()], vec![2], None, None)
+                .await
+                .expect("define a.value");
+            a.define_array::<i32>("only_a", vec!["obs".into()], vec![2], None, None)
+                .await
+                .expect("define a.only_a");
+            a.write_array(
+                "value",
+                vec![0],
+                ndarray::arr1(&["x".to_string(), "y".to_string()])
+                    .into_dyn()
+                    .view(),
+            )
+            .await
+            .expect("write a.value");
+            a.write_array("only_a", vec![0], ndarray::arr1(&[7i32, 8]).into_dyn().view())
+                .await
+                .expect("write a.only_a");
+        }
+        {
+            let mut b = atlas.create_dataset("b").await.expect("create b");
+            b.define_array::<i64>("value", vec!["obs".into()], vec![2], None, None)
+                .await
+                .expect("define b.value");
+            b.write_array("value", vec![0], ndarray::arr1(&[1i64, 2]).into_dyn().view())
+                .await
+                .expect("write b.value");
+        }
+        atlas.flush().await.expect("flush atlas store");
+    }
+
     /// Build a store of `n` datasets each holding `temperature: Float32[4]`,
     /// where dataset `i` covers the disjoint range `[10*i, 10*i + 3]`. A
     /// predicate like `temperature > T` then matches only the datasets whose

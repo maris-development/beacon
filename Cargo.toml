@@ -6,6 +6,15 @@ members = ["beacon-datalake/beacon-datalake", "beacon-datalake/beacon-datalake-c
 exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.package]
+# The release version for every crate in the workspace, inherited via `version.workspace = true`.
+# One number rather than 28 hand-maintained copies — which had already drifted into four different
+# values, seven of them still at the original 0.1.0. Bump it with `scripts/bump-version.py`, which
+# also updates the Python and npm manifests, then commit and tag; CI verifies the tag matches.
+#
+# Two crates deliberately do NOT inherit this: `beacon-binary-format` (a submodule) and
+# `beacon-binary-format-toolbox` both version the *binary format* (2.2.0), not the beacon release.
+version = "2.0.0-rc.1"
+
 # Minimum supported Rust version, inherited by every member via `rust-version.workspace = true`.
 # This is the "1.91 or later" contract: cargo refuses to build on anything older with a clear
 # message naming the version, instead of failing deep in a compile. A `rust-toolchain` file cannot

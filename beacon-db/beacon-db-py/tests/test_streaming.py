@@ -33,7 +33,7 @@ def test_record_batch_returns_a_pyarrow_reader(con):
 
 def test_batch_size_rechunks_without_losing_rows(con):
     pytest.importorskip("pyarrow")
-    rel = con.sql("SELECT i, i * i AS sq FROM range(0, 2500) t(i)").order("i")
+    rel = con.sql("SELECT i, i * i AS sq FROM range(0, 2500) t(i) ORDER BY i")
     batches = list(rel.record_batch(1000))
     # every batch is at most the requested size, and the concat/slice keeps every row in order
     assert all(b.num_rows <= 1000 for b in batches)
@@ -57,13 +57,10 @@ def test_reader_is_lazy_batch_by_batch(con):
         reader.read_next_batch()
 
 
-def test_streaming_composes_with_relational_ops(con):
+def test_streaming_works_with_a_filtered_ordered_query(con):
     pytest.importorskip("pyarrow")
-    rel = (
-        con.sql("SELECT i FROM range(0, 100) t(i)")
-        .filter("i % 2 = 0")
-        .order("i desc")
-        .limit(3)
+    rel = con.sql(
+        "SELECT i FROM range(0, 100) t(i) WHERE i % 2 = 0 ORDER BY i desc LIMIT 3"
     )
     rows = [v for b in rel.record_batch() for v in b.column("i").to_pylist()]
     assert rows == [98, 96, 94]
