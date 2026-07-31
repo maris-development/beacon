@@ -29,7 +29,7 @@ COPY beacon-db/ /beacon-db/
 COPY beacon-datalake/ /beacon-datalake/
 COPY Cargo.toml /
 COPY Cargo.lock /
-COPY rust-toolchain /
+COPY rust-toolchain.toml /
 
 #Build the project (only the server binary the image ships; jemalloc on for prod)
 RUN cargo build --release -p beacon-datalake --features jemalloc

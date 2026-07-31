@@ -1,18 +1,9 @@
 [workspace]
-# Edition-2024 members imply resolver 3; set it explicitly so features aren't
-# over-unified across normal/build/dev deps (fewer features compiled).
 resolver = "3"
 members = ["beacon-datalake/beacon-datalake", "beacon-datalake/beacon-datalake-config", "beacon-datalake/beacon-mcp", "beacon-db/beacon-auth", "beacon-db/beacon-common", "beacon-db/beacon-core", "beacon-db/beacon-datafusion-ext", "beacon-db/beacon-db-py", "beacon-db/beacon-file-formats/beacon-arrow-atlas", "beacon-db/beacon-file-formats/beacon-arrow-bbf", "beacon-db/beacon-file-formats/beacon-arrow-csv", "beacon-db/beacon-file-formats/beacon-arrow-geoparquet", "beacon-db/beacon-file-formats/beacon-arrow-hdf5", "beacon-db/beacon-file-formats/beacon-arrow-ipc", "beacon-db/beacon-file-formats/beacon-arrow-netcdf", "beacon-db/beacon-file-formats/beacon-arrow-odv", "beacon-db/beacon-file-formats/beacon-arrow-parquet", "beacon-db/beacon-file-formats/beacon-arrow-tiff", "beacon-db/beacon-file-formats/beacon-arrow-zarr", "beacon-db/beacon-file-formats/beacon-binary-format", "beacon-db/beacon-file-formats/beacon-binary-format-toolbox", "beacon-db/beacon-file-formats/beacon-delta", "beacon-db/beacon-file-formats/beacon-lance", "beacon-db/beacon-file-formats/beacon-nd-array", "beacon-db/beacon-file-formats/beacon-nd-arrow", "beacon-db/beacon-functions", "beacon-db/beacon-redb-store", "beacon-db/beacon-sql-databases"]
-exclude = ["beacon-file-formats/beacon-binary-format-toolbox"]
 
 [workspace.package]
-# The release version for every crate in the workspace, inherited via `version.workspace = true`.
-# One number rather than 28 hand-maintained copies — which had already drifted into four different
-# values, seven of them still at the original 0.1.0. Bump it with `scripts/bump-version.py`, which
-# also updates the Python and npm manifests, then commit and tag; CI verifies the tag matches.
-#
-# Two crates deliberately do NOT inherit this: `beacon-binary-format` (a submodule) and
-# `beacon-binary-format-toolbox` both version the *binary format* (2.2.0), not the beacon release.
+
 version = "2.0.0-rc.1"
 
 # Minimum supported Rust version, inherited by every member via `rust-version.workspace = true`.
@@ -51,12 +42,9 @@ tracing-appender = "0.2.4"
 tracing-test = { version = "0.2.5", features = ["no-env-filter"]}
 glob = "0.3.2"
 tempfile = "3.15.0"
-# SQLite-backed auth directory (users/roles/grants). Bundled so no system libsqlite
-# is required. Pinned: 0.32.1 predates our no-fresh-packages window.
+
 rusqlite = { version = "0.32.1", features = ["bundled"] }
-# OIDC/OAuth2 JWT validation for the external identity provider. Pinned to stable
-# releases that predate our no-fresh-packages window. reqwest reuses the rustls
-# stack already in the tree (no second TLS backend) for JWKS fetches.
+
 jsonwebtoken = "9.3.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 typetag = "0.2.19"
@@ -70,53 +58,25 @@ lazy_static = "1.5.0"
 base64 = "0.22"
 bloomfilter = { version = "1", features = ["serde"] }
 bincode = "1"
-# Embedded, transactional, single-file key-value store backing beacon-redb-store
-# (the redb-backed `object_store::ObjectStore`). redb is copy-on-write with a
-# dual-slot header — no WAL/-shm sidecars — which is what lets a whole Beacon
-# deployment live in one file. Pinned exactly to 4.1.0.
-# Requires rustc >= 1.89 (we ship 1.91).
+
 redb = "=4.1.0"
-# mmap for zero-copy reads of the blob heap that lives inside the same single
-# file as redb. 0.9.10 matches the version already resolved in the tree.
+
 memmap2 = "=0.9.10"
 
-# Delta Lake support. 0.32.x pins datafusion 53 / arrow 58 / object_store 0.13,
-# matching our versions. We keep default features (`rustls`, required by the
-# delta-kernel default engine) and add `datafusion`, but do NOT enable the cloud
-# backends (`s3`/`azure`/`gcs`): Beacon injects its own object store
-# (DatasetsStore) so S3/local both reach Delta through that.
+
 deltalake = { version = "=0.32.4", features = ["datafusion"] }
 datafusion = "^53"
-# Pinned exactly: 0.5.3 is the release whose `datafusion` dep resolves to ^53
-# (matching our 53.1.0). Its `sql` feature gates the SQLExecutor/SQLTableSource
-# types used by the federated remote-table provider.
+
 datafusion-federation = { version = "=0.5.3", features = ["sql"] }
-# External SQL-database table providers (Postgres/MySQL). 0.11.0 is the release
-# whose `datafusion` dep resolves to ^53 and `datafusion-federation` to 0.5.3,
-# matching ours. No default features; each engine is opt-in via a beacon-side
-# feature that enables the matching `<engine>-federation` feature (pushdown).
+
 datafusion-table-providers = { version = "=0.11.0", default-features = false }
 geodatafusion = "0.4.0"
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
 tonic = "0.14.1"
 
-# Lance managed-table engine. 7.0.0 pins arrow 58 / datafusion 53 / object_store
-# 0.13, matching our versions. Provides `lance::datafusion::LanceTableProvider`
-# plus the `Dataset` write/append/delete API used by beacon-lance. Requires
-# `protoc` at build time (Lance generates protobuf in its build script).
-#
-# default-features = false drops the bundled cloud backends (aws/azure/gcp/oss/
-# tencent/huggingface SDKs + the aws-config/aws-smithy stack) and `geo`: beacon
-# routes Lance through its own injected object store via a custom
-# `db://` scheme, so Lance's native cloud schemes are never used.
+
 lance = { version = "=7.0.0", default-features = false }
-# Lance index types (IndexType, ScalarIndexParams) for managed-table indexing.
-# Version-locked to `lance` so the shared types are a single compilation.
 lance-index = "=7.0.0"
-# Lance IO + core: the ObjectStoreProvider/ObjectStoreRegistry mechanism used to
-# route Lance through beacon's tables object store. Version-locked to `lance`.
-# Cloud backends disabled (see `lance` above) — the registry mechanism beacon
-# uses lives in core lance-io, not behind the aws/azure/gcp features.
 lance-io = { version = "=7.0.0", default-features = false }
 lance-core = "=7.0.0"
 # For LanceFileVersion, which `lance` takes in WriteParams but does not re-export.
@@ -131,8 +91,6 @@ geoarrow = "^0.8"
 geoarrow-array = "^0.8"
 geoarrow-schema = "^0.8"
 geoparquet = "^0.8"
-
-beacon-nd-arrow = { path = "beacon-file-formats/beacon-nd-arrow" }
 
 arrow-csv = "^58"
 async-stream = "0.3.6"

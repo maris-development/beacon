@@ -8,7 +8,7 @@ package, `beacon-datalake-cli`, and `@beacon/client`, shares one version and is 
 single `v*` tag. Releases before 2.0.0 are recorded in the
 [GitHub releases](https://github.com/maris-development/beacon/releases).
 
-## [2.0.0-rc.1] — unreleased
+## [2.0.0-rc.1] — 2026-07-31
 
 The 2.0 line turns Beacon from a server into an engine you can also embed. The same SQL, readers
 and catalog now run in three places: in-process from Python, behind the HTTP/Flight SQL server, and
@@ -57,4 +57,4 @@ over MCP.
 - One handle per database file: the container is held under an exclusive lock, so
   `read_only=True` is a per-connection guarantee, not multi-process concurrency.
 
-[2.0.0-rc.1]: https://github.com/maris-development/beacon/compare/v1.8.0...HEAD
+[2.0.0-rc.1]: https://github.com/maris-development/beacon/compare/v1.8.0...v2.0.0-rc.1

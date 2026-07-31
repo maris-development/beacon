@@ -44,10 +44,32 @@ env:
   REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/beacon
 
 jobs:
+  # Same gate as the PyPI/npm publishes: the committed manifests are the source of truth and the
+  # tag is a cross-check. The image tag comes from the git ref while the version the server reports
+  # (`/sys`, Flight SQL `FlightSqlServerVersion`) comes from Cargo.toml, so without this a mistyped
+  # tag would ship `beacon:2.0.0-rc.1` running a binary that calls itself something else.
+  version:
+    name: Verify version
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify version
+        shell: bash
+        env:
+          # On a tag push the tag is the expected version. A manual run has no version input, so
+          # this is empty: the manifests are only checked against each other.
+          EXPECTED: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: |
+          python3 -m pip install --quiet --upgrade packaging
+          python3 scripts/check-version.py "$EXPECTED"
+
   # Turns the `platforms` input into the build matrix. A tag push always builds every platform;
   # only a manual run can narrow it.
   setup:
     name: Select platforms
+    needs: version
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.select.outputs.matrix }}

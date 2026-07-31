@@ -1,5 +1,5 @@
 # Keep the Docker build context small. The Dockerfile COPYs individual crate
-# directories plus Cargo.{toml,lock} and rust-toolchain, so none of the entries
+# directories plus Cargo.{toml,lock} and rust-toolchain.toml, so none of the entries
 # below are needed inside the image — excluding them avoids shipping multi-GB
 # directories (notably target/ and data/) to the daemon on a clean build.
 .git

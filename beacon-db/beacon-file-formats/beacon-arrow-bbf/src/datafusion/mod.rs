@@ -99,7 +99,6 @@ impl FileFormatFactoryExt for BBFFormatFactory {
         &self,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<Vec<DatasetMetadata>> {
-        println!("Discovering datasets from {} objects", objects.len());
         let datasets = objects
             .iter()
             .filter(|obj| {
@@ -156,7 +155,6 @@ impl FileFormat for BBFFormat {
         store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
-        println!("Inferring schema from {} BBF objects", objects.len());
         let schemas = stream::iter(objects.iter().cloned())
             .map(|object| {
                 let store = Arc::clone(store);
@@ -178,7 +176,6 @@ impl FileFormat for BBFFormat {
         let super_schema = super_type_schema(&schemas).map_err(|e| {
             datafusion::error::DataFusionError::Execution(format!("Failed to infer schema: {}", e))
         })?;
-        println!("Inferred schema: {:?}", super_schema);
 
         Ok(Arc::new(super_schema))
     }
