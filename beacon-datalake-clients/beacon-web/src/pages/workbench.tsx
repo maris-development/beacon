@@ -1,6 +1,5 @@
 import * as React from "react";
 import { useLocation } from "react-router-dom";
-import type { ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { rowsFromBatch, type ArrowRecordBatch, type ArrowTable, type Row } from "@beacon/client";
 import {
   AlertCircle,
@@ -25,7 +24,13 @@ import {
   type SavedQuery,
 } from "@/lib/saved-queries";
 import { DataPanel } from "@/components/data-panel";
-import { SqlEditor } from "@/components/sql-editor";
+import {
+  disposeEditorModel,
+  SqlEditor,
+  type SqlEditorHandle,
+} from "@/components/sql-editor-lazy";
+import { QueryTabs } from "@/components/query-tabs";
+import { useQueryTabs } from "@/lib/query-tabs";
 import { ResultsGrid } from "@/components/results-grid";
 import { PlanTree } from "@/components/plan-tree";
 import { Button } from "@/components/ui/button";
@@ -73,8 +78,6 @@ const DOWNLOAD_FORMATS: DownloadFormat[] = [
   { format: "netcdf", label: "NetCDF", ext: "nc" },
 ];
 
-const STARTER_SQL = "SELECT 1 AS n";
-
 /**
  * How many rows to render for a result preview. Once this many have streamed in
  * the query is aborted, so a `SELECT *` over a huge table fills the grid quickly
@@ -85,15 +88,21 @@ const PREVIEW_ROW_LIMIT = 500;
 export function WorkbenchPage() {
   const beacon = useBeacon();
   const location = useLocation();
-  const editorRef = React.useRef<ReactCodeMirrorRef>(null);
+  const editorRef = React.useRef<SqlEditorHandle>(null);
   // Tracks the in-flight streaming query so it can be cancelled by the user.
   const abortRef = React.useRef<AbortController | null>(null);
   // Tracks the in-flight EXPLAIN ANALYZE run so it can be cancelled.
   const analyzeAbortRef = React.useRef<AbortController | null>(null);
-  // Another page (e.g. Datasets → "Query") can open the editor pre-filled by
-  // navigating to `/query` with `{ state: { sql } }`.
-  const initialSql = (location.state as { sql?: string } | null)?.sql;
-  const [sql, setSql] = React.useState(initialSql ?? STARTER_SQL);
+  // Open queries, one per tab, kept in local storage so they survive leaving the
+  // page (and the browser).
+  const queryTabs = useQueryTabs();
+  const { active, activeId, setSql: setTabSql, open: openTab, close: closeTab } = queryTabs;
+  const sql = active.sql;
+  const setSql = React.useCallback(
+    (next: string) => setTabSql(activeId, next),
+    [setTabSql, activeId],
+  );
+
   const [running, setRunning] = React.useState(false);
   const [explaining, setExplaining] = React.useState(false);
   const [analyzing, setAnalyzing] = React.useState(false);
@@ -104,9 +113,29 @@ export function WorkbenchPage() {
   const [analyzed, setAnalyzed] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
+  // Another page (e.g. Datasets → "Query") can open the editor pre-filled by
+  // navigating to `/query` with `{ state: { sql } }`. It lands in a tab of its
+  // own rather than overwriting whatever was being written.
+  const handedOver = (location.state as { sql?: string } | null)?.sql;
+  const handedOverRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!handedOver || handedOverRef.current === handedOver) return;
+    handedOverRef.current = handedOver;
+    openTab(handedOver);
+  }, [handedOver, openTab]);
+
   const [saveOpen, setSaveOpen] = React.useState(false);
   const [savedOpen, setSavedOpen] = React.useState(false);
   const [metricsId, setMetricsId] = React.useState<string | null>(null);
+
+  // Results describe the query that produced them, so switching tabs clears the
+  // panel rather than showing one tab's rows under another tab's SQL.
+  React.useEffect(() => {
+    setResult(null);
+    setPlan(null);
+    setError(null);
+    setMode("results");
+  }, [activeId]);
 
   const run = React.useCallback(async () => {
     const text = sql.trim();
@@ -248,17 +277,21 @@ export function WorkbenchPage() {
     }
   }
 
+  /** Closing a tab drops its editor model too, undo history and all. */
+  const closeWithModel = React.useCallback(
+    (id: string) => {
+      closeTab(id);
+      void disposeEditorModel(id);
+    },
+    [closeTab],
+  );
+
   function insert(textToInsert: string) {
-    const view = editorRef.current?.view;
-    if (view) {
-      const { from, to } = view.state.selection.main;
-      view.dispatch({
-        changes: { from, to, insert: textToInsert },
-        selection: { anchor: from + textToInsert.length },
-      });
-      view.focus();
+    if (editorRef.current) {
+      editorRef.current.insert(textToInsert);
     } else {
-      setSql((prev) => (prev ? `${prev} ${textToInsert}` : textToInsert));
+      // Before the editor has mounted there is no cursor to insert at.
+      setSql(sql ? `${sql} ${textToInsert}` : textToInsert);
     }
   }
 
@@ -269,6 +302,8 @@ export function WorkbenchPage() {
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <QueryTabs {...queryTabs} close={closeWithModel} />
+
         {/* Toolbar */}
         <div className="flex items-center gap-2 border-b bg-card px-4 py-2">
           {running ? (
@@ -351,7 +386,13 @@ export function WorkbenchPage() {
 
         {/* Editor */}
         <div className="h-[38%] min-h-[120px] border-b">
-          <SqlEditor ref={editorRef} value={sql} onChange={setSql} onRun={run} />
+          <SqlEditor
+            ref={editorRef}
+            modelKey={activeId}
+            value={sql}
+            onChange={setSql}
+            onRun={run}
+          />
         </div>
 
         {/* Results / plan header */}

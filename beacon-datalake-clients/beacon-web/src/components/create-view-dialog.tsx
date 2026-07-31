@@ -4,7 +4,7 @@ import { Loader2 } from "lucide-react";
 
 import { useBeacon } from "@/lib/beacon-context";
 import { errorMessage } from "@/lib/errors";
-import { SqlEditor } from "@/components/sql-editor";
+import { SqlEditor } from "@/components/sql-editor-lazy";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -52,6 +52,7 @@ export function CreateViewDialog({ open, onOpenChange, materialized, onCreated }
     mutationFn: () => beacon.query(`CREATE ${keyword} ${quoteIdent(name.trim())} AS ${sql}`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["tables"] });
+      qc.invalidateQueries({ queryKey: ["catalogs"] });
       onCreated(name.trim());
       onOpenChange(false);
     },

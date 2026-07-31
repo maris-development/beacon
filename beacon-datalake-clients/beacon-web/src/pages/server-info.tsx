@@ -91,18 +91,14 @@ export function ServerInfoPage() {
     queryKey: ["functions"],
     queryFn: async () => normalizeFns(await beacon.functions()),
   });
-  const tableFnsQuery = useQuery({
-    queryKey: ["table-functions"],
-    queryFn: async () => normalizeFns(await beacon.tableFunctions()),
-  });
-
   const info = infoQuery.data;
   const host = info?.system_info ?? null;
 
-  const allFns = [
-    ...(fnsQuery.data ?? []).map((f) => ({ ...f, kind: "scalar" })),
-    ...(tableFnsQuery.data ?? []).map((f) => ({ ...f, kind: "table" })),
-  ].filter((f) => f.name.toLowerCase().includes(fnFilter.toLowerCase()));
+  // Scalar, aggregate, and window functions — the server lists no table
+  // functions (DataFusion does not catalog them); those are in the docs.
+  const allFns = (fnsQuery.data ?? []).filter((f) =>
+    f.name.toLowerCase().includes(fnFilter.toLowerCase()),
+  );
 
   return (
     <PageContainer
@@ -251,16 +247,13 @@ export function ServerInfoPage() {
               className="pl-8"
             />
           </div>
-          {(fnsQuery.isLoading || tableFnsQuery.isLoading) && <Spinner />}
+          {fnsQuery.isLoading && <Spinner />}
           <div className="grid max-h-[28rem] gap-1 overflow-auto sm:grid-cols-2">
             {allFns.map((f) => (
               <div
-                key={`${f.kind}-${f.name}`}
+                key={f.name}
                 className="flex items-start gap-2 rounded px-2 py-1.5 hover:bg-secondary/60"
               >
-                <Badge variant={f.kind === "table" ? "secondary" : "muted"} className="mt-0.5">
-                  {f.kind}
-                </Badge>
                 <div className="min-w-0">
                   <div className="font-mono text-sm">{f.name}</div>
                   {f.description && (
