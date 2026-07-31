@@ -23,12 +23,17 @@ fn parquet_fixture() -> std::path::PathBuf {
         .join("test-datasets/test_file.parquet")
 }
 
-/// The schema functions are registered and discoverable, one per reader.
+/// The schema functions are registered, one per reader.
+///
+/// Checked by planning a call to each: an unregistered name fails as a missing
+/// *table function*, while a registered one gets as far as resolving the file
+/// (and fails on that instead). There is no catalog of table functions to count
+/// from — DataFusion does not enumerate UDTFs, and beacon no longer keeps its own
+/// list — so this is what registration looks like from the outside.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_functions_are_registered_for_each_reader() {
     let rt = runtime("schema-fn-registered").await;
 
-    // Every `read_*` reader has a `<name>_schema` counterpart, and both return TABLE.
     for name in [
         "read_parquet_schema",
         "read_csv_schema",
@@ -36,37 +41,17 @@ async fn schema_functions_are_registered_for_each_reader() {
         "read_arrow_schema",
         "read_delta_schema",
     ] {
-        assert_eq!(
-            scalar_i64(
-                &rt.sql(&format!(
-                    "SELECT count(*) FROM beacon.system.table_functions \
-                     WHERE function_name = '{name}' AND return_type = 'TABLE'"
-                ))
-                .await
-            ),
-            1,
-            "`{name}` should be a registered table function"
+        let error = rt
+            .try_sql(&format!("SELECT * FROM {name}('no-such-file')"))
+            .await
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            !error.contains("table function"),
+            "`{name}` should be a registered table function, got: {error}"
         );
     }
-
-    // There are exactly as many `*_schema` functions as `read_*` readers.
-    let readers = scalar_i64(
-        &rt.sql(
-            "SELECT count(*) FROM beacon.system.table_functions \
-             WHERE function_name LIKE 'read\\_%' ESCAPE '\\' \
-               AND function_name NOT LIKE '%\\_schema' ESCAPE '\\'",
-        )
-        .await,
-    );
-    let schemas = scalar_i64(
-        &rt.sql(
-            "SELECT count(*) FROM beacon.system.table_functions \
-             WHERE function_name LIKE 'read\\_%\\_schema' ESCAPE '\\'",
-        )
-        .await,
-    );
-    assert_eq!(readers, schemas, "one schema function per reader");
-    assert!(readers >= 5, "sanity: several readers are registered");
 }
 
 #[tokio::test(flavor = "multi_thread")]

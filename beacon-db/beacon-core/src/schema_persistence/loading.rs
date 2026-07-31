@@ -39,26 +39,6 @@ pub async fn load_tables_from_object_store(
     discovered_tables
 }
 
-/// Load a single table's persisted definition (`<name>/table.json`), or `None`
-/// when that table has none — an unknown name, or a session-only/temporary table
-/// that was never written to the tables store.
-///
-/// Used to answer "what is this table configured as?" for one table, without
-/// paying for a full `load_tables_from_object_store` sweep of the store.
-pub async fn load_table_definition(
-    tables_object_store: &Arc<dyn ObjectStore>,
-    table_name: &str,
-) -> Option<Arc<dyn TableDefinition>> {
-    let table_json = object_store::path::Path::from(table_name).child("table.json");
-    match open_table_definition(tables_object_store, &table_json).await {
-        Ok(table) => Some(table),
-        Err(error) => {
-            tracing::debug!(table_name, %error, "no persisted definition for table");
-            None
-        }
-    }
-}
-
 /// Read a `table.json` and parse it as a serializable [`TableDefinition`] (the
 /// typetag format every managed definition is persisted in).
 async fn open_table_definition(

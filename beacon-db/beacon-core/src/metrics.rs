@@ -34,6 +34,12 @@ pub struct ConsolidatedMetrics {
     pub query: serde_json::Value,
     /// Unique identifier for the query.
     pub query_id: uuid::Uuid,
+    /// The principal that ran the query. `anonymous` when the caller presented no
+    /// identity of their own.
+    pub username: String,
+    /// When the query finished, in UTC — the moment these metrics were
+    /// consolidated. What makes "the last hour of queries" expressible.
+    pub finished_at: chrono::DateTime<chrono::Utc>,
     /// Parsed logical plan as JSON.
     pub parsed_logical_plan: serde_json::Value,
     /// Optimized logical plan as JSON.
@@ -54,6 +60,8 @@ pub struct MetricsTracker {
     pub start_time: std::time::Instant,
     pub query: serde_json::Value,
     pub query_id: uuid::Uuid,
+    /// The principal this query runs as; recorded with its metrics.
+    pub username: String,
     pub parsed_logical_plan: Arc<Mutex<Option<LogicalPlan>>>,
     pub optimized_logical_plan: Arc<Mutex<Option<LogicalPlan>>>,
     pub file_paths: Arc<Mutex<Vec<String>>>,
@@ -62,11 +70,24 @@ pub struct MetricsTracker {
 
 impl MetricsTracker {
     /// Create a new metrics tracker for a query.
-    pub fn new(input_query: serde_json::Value, query_id: uuid::Uuid) -> Arc<Self> {
+    pub fn new(
+        input_query: serde_json::Value,
+        query_id: uuid::Uuid,
+        username: impl Into<String>,
+    ) -> Arc<Self> {
+        // An empty username means nobody authenticated, which is what anonymous
+        // is — recording it as such keeps the column answerable.
+        let username = username.into();
+        let username = if username.is_empty() {
+            "anonymous".to_string()
+        } else {
+            username
+        };
         Arc::new(Self {
             start_time: std::time::Instant::now(),
             query: input_query,
             query_id,
+            username,
             input_rows: AtomicU64::new(0),
             input_bytes: AtomicU64::new(0),
             result_rows: AtomicU64::new(0),
@@ -145,6 +166,8 @@ impl MetricsTracker {
         ConsolidatedMetrics {
             query_id: self.query_id,
             query: self.query.clone(),
+            username: self.username.clone(),
+            finished_at: chrono::Utc::now(),
             input_rows: self.input_rows.load(std::sync::atomic::Ordering::Relaxed),
             input_bytes: self.input_bytes.load(std::sync::atomic::Ordering::Relaxed),
             result_num_rows: self.result_rows.load(std::sync::atomic::Ordering::Relaxed),
@@ -349,13 +372,18 @@ mod tests {
     #[test]
     fn consolidates_without_a_physical_or_logical_plan() {
         let query_id = uuid::Uuid::new_v4();
-        let tracker = MetricsTracker::new(serde_json::json!({"sql": "SELECT 1"}), query_id);
+        let tracker = MetricsTracker::new(serde_json::json!({"sql": "SELECT 1"}), query_id, "alice");
         tracker.add_output_rows(3);
         tracker.add_output_bytes(128);
         tracker.add_file_paths(vec!["argo/a.parquet".to_string()]);
 
         let metrics = tracker.get_consolidated_metrics();
         assert_eq!(metrics.query_id, query_id);
+        assert_eq!(metrics.username, "alice", "the caller is carried through");
+        assert!(
+            metrics.finished_at <= chrono::Utc::now(),
+            "consolidation stamps the finish time"
+        );
         assert_eq!(metrics.result_num_rows, 3);
         assert_eq!(metrics.result_size_in_bytes, 128);
         assert_eq!(metrics.file_paths, vec!["argo/a.parquet".to_string()]);
@@ -368,7 +396,9 @@ mod tests {
     /// files a source records while streaming still land in the query's metrics.
     #[test]
     fn the_file_tracer_writes_through_to_the_tracker() {
-        let tracker = MetricsTracker::new(serde_json::Value::Null, uuid::Uuid::new_v4());
+        // An empty username is nobody authenticating, i.e. the anonymous caller.
+        let tracker = MetricsTracker::new(serde_json::Value::Null, uuid::Uuid::new_v4(), "");
+        assert_eq!(tracker.username, "anonymous");
         tracker
             .get_as_file_tracer()
             .lock()

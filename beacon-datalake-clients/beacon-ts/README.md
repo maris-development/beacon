@@ -182,7 +182,7 @@ npm run build
 
 - **Query builder:** `from`, `select` → fluent `QueryBuilder` (see above)
 - **Query:** `query`, `queryArrow`, `queryStream`, `queryCsv`, `queryRaw`, `parseQuery`, `explainQuery`, `queryMetrics`
-- **Tables:** `tables`, `tablesWithSchema`, `tableSchema`, `tableConfig`, `defaultTable`, `defaultTableSchema`
+- **Tables:** `tables`, `catalogs`, `tablesWithSchema`, `tableSchema`, `defaultTable`, `defaultTableSchema` (`tableConfig` is deprecated)
 - **Datasets:** `datasets`, `datasetSchema`, `totalDatasets`
-- **Functions / info:** `functions`, `tableFunctions`, `info`, `health`
+- **Functions / info:** `functions`, `info`, `health`
 - **Admin (`beacon.admin`):** `check`, `listCrawlers`, `createCrawler`, `getCrawler`, `runCrawler`, `dropCrawler`, `createExternalTable`

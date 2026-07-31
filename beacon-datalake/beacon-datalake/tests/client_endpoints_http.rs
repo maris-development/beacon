@@ -3,8 +3,9 @@
 //! - `/api/info` (system info, anonymous),
 //! - `/api/query` (SQL + JSON, stream and file output, the `sql.enable` gate),
 //! - `/api/parse-query`, `/api/query/available-columns`,
-//! - the table-discovery endpoints (`/api/tables`, `/api/tables-with-schema`,
-//!   `/api/table-schema`, `/api/table-extensions`, `/api/default-table[-schema]`),
+//! - the table-discovery endpoints (`/api/tables`, `/api/catalogs`,
+//!   `/api/tables-with-schema`, `/api/table-schema`, `/api/table-extensions`,
+//!   `/api/default-table[-schema]`),
 //! - the dataset-discovery endpoints (`/api/datasets`, `/api/list-datasets`,
 //!   `/api/dataset-schema`, `/api/total-datasets`).
 
@@ -18,7 +19,7 @@ use ::axum::{
     Router,
 };
 use beacon_core::runtime::Runtime;
-use common::{basic, config};
+use common::{basic, config, ADMIN_PASSWORD, ADMIN_USERNAME};
 use futures::TryStreamExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -429,6 +430,104 @@ async fn table_discovery_endpoints_reflect_a_created_table() {
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
     // (`/api/table-extensions` reads via `SHOW EXTENSIONS`, which is super-user
     // gated, so it is exercised with admin auth in `admin_endpoints_http`.)
+}
+
+/// The catalog listing is per-caller: the super-user browses the whole
+/// namespace, everyone else sees the default schema and nothing else. (The
+/// role-level filtering underneath is covered in `rbac_http`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn catalogs_endpoint_covers_every_schema_for_the_super_user_only() {
+    let (router, lake, _cfg) = app(config(false)).await;
+    seed(lake.lake.runtime(), "CREATE TABLE obs (id BIGINT, name VARCHAR)").await;
+    let admin = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
+
+    let body = json(&send(&router, get("/api/catalogs", Some(&admin))).await.body);
+    assert_eq!(body["default_catalog"], "beacon");
+    assert_eq!(body["default_schema"], "public");
+
+    let beacon_catalog = |body: &Value| -> Value {
+        body["catalogs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "beacon")
+            .expect("the beacon catalog is listed")
+            .clone()
+    };
+    let schema_names = |catalog: &Value| -> Vec<String> {
+        catalog["schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let table_names = |catalog: &Value, schema: &str| -> Vec<String> {
+        catalog["schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == schema)
+            .unwrap_or_else(|| panic!("schema {schema} is listed, got: {catalog}"))["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // For the super-user: the created table, plus the metadata schemas that
+    // `/api/tables` hides.
+    let catalog = beacon_catalog(&body);
+    assert!(table_names(&catalog, "public").contains(&"obs".to_string()));
+    assert!(table_names(&catalog, "information_schema").contains(&"tables".to_string()));
+    assert!(table_names(&catalog, "system").contains(&"users".to_string()));
+
+    // A table outside the default schema resolves when its catalog + schema are named.
+    let qualified = send(
+        &router,
+        get(
+            "/api/table-schema?table_name=users&catalog=beacon&schema=system",
+            Some(&admin),
+        ),
+    )
+    .await;
+    assert_eq!(qualified.status, StatusCode::OK);
+    let schema_view = json(&qualified.body);
+    let names: Vec<&str> = schema_view["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"username"), "got fields: {names:?}");
+
+    // …and does not resolve without them (it is not in the default schema).
+    let unqualified = send(
+        &router,
+        get("/api/table-schema?table_name=users", Some(&admin)),
+    )
+    .await;
+    assert_eq!(unqualified.status, StatusCode::NOT_FOUND);
+
+    // An unauthenticated caller is not a super-user: the metadata schemas are
+    // absent from their listing entirely, and unreachable by name.
+    let anonymous = json(&send(&router, get("/api/catalogs", None)).await.body);
+    let catalog = beacon_catalog(&anonymous);
+    assert_eq!(
+        schema_names(&catalog),
+        vec!["public".to_string()],
+        "a non-super caller sees only the default schema, got: {catalog}"
+    );
+    let denied = send(
+        &router,
+        get(
+            "/api/table-schema?table_name=users&catalog=beacon&schema=system",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]

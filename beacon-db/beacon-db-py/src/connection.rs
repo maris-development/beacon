@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 
-use arrow::array::{Array, AsArray};
+use arrow::array::AsArray;
 
 use beacon_core::embedded::{AuthMode, Database, DbPath, OpenOptions};
 use beacon_core::query::{InnerQuery, Query};
@@ -332,13 +332,18 @@ impl Connection {
         run_query_collected(py, self.database()?, &self.identity, query)
     }
 
-    /// The registered scalar/aggregate functions, as a lazy [`Relation`] over
-    /// `beacon.system.functions` (name, description, return type, parameters).
+    /// The registered scalar, aggregate, and window functions, as a lazy [`Relation`]
+    /// over DataFusion's own function catalog (name, kind, return type, description).
+    ///
+    /// One row per name: `information_schema.routines` carries a row per overload
+    /// signature, which is a detail of dispatch rather than something to browse.
     fn functions(&self) -> PyResult<Relation> {
         Ok(Relation::from_query(
             self.database()?.clone(),
             self.identity.clone(),
-            "SELECT * FROM beacon.system.functions",
+            "SELECT DISTINCT routine_name AS function_name, function_type, \
+                    data_type AS return_type, description, syntax_example \
+             FROM information_schema.routines",
         ))
     }
 
@@ -457,7 +462,7 @@ impl Connection {
     /// table function beacon registers is reachable without a hand-written method here.
     ///
     /// Format options can be passed positionally or by keyword. Keyword options are matched to the
-    /// reader's declared parameters (from `beacon.system.table_functions`) by name, so
+    /// reader's declared parameters (from the runtime's table-function registry) by name, so
     /// `read_csv(path, delimiter=';')` fills the `delimiter` slot and leaves the rest defaulted.
     /// The universal `columns=[...]` keyword projects the named columns instead of being passed to
     /// the function.
@@ -714,69 +719,71 @@ impl Connection {
     }
 }
 
-/// The table-function names, queried once and cached for the process.
+/// Every table function beacon registers, mapped to its declared parameter names in order.
 ///
-/// beacon registers the same built-in table functions for every runtime, so the set does not
-/// vary between connections or databases — a process-global cache is correct and spares every
-/// `con.read_*` attribute access a catalog round-trip. `beacon.system.table_functions` is not
-/// an auth table, so this works for any identity, anonymous included.
-static TABLE_FUNCTIONS: OnceLock<Arc<BTreeMap<String, Vec<String>>>> = OnceLock::new();
+/// The first parameter is the path/glob a reader takes positionally; the rest are the format
+/// options `read(...)` accepts as keywords, and `con.read_*` resolves against these names.
+///
+/// Hardcoded rather than read from the engine: DataFusion does not catalog UDTFs (they are absent
+/// from `information_schema`), and beacon no longer keeps a catalog of its own for one consumer.
+/// Keep in step with the registrations in `beacon_functions::register_functions` —
+/// `tests/test_readers_sinks.py::test_hardcoded_table_functions_all_resolve` fails when a name
+/// here is not a real table function. A build without an optional format still lists its reader
+/// here; calling it fails at planning time, as it would for any unregistered function.
+const TABLE_FUNCTIONS: &[(&str, &[&str])] = &[
+    ("list_datasets", &[]),
+    ("read_arrow", &["glob_paths"]),
+    ("read_arrow_schema", &["glob_paths"]),
+    ("read_atlas", &["glob_paths", "dimensions"]),
+    ("read_atlas_schema", &["glob_paths", "dimensions"]),
+    ("read_bbf", &["glob_paths"]),
+    ("read_bbf_schema", &["glob_paths"]),
+    ("read_csv", &["glob_paths", "delimiter", "infer_records"]),
+    ("read_csv_schema", &["glob_paths", "delimiter", "infer_records"]),
+    ("read_delta", &["location"]),
+    ("read_delta_schema", &["location"]),
+    ("read_geoparquet", &["glob_paths"]),
+    ("read_geoparquet_schema", &["glob_paths"]),
+    ("read_hdf5", &["glob_paths"]),
+    ("read_hdf5_schema", &["glob_paths"]),
+    ("read_netcdf", &["glob_paths"]),
+    ("read_netcdf_schema", &["glob_paths"]),
+    ("read_odv_ascii", &["glob_paths"]),
+    ("read_odv_ascii_schema", &["glob_paths"]),
+    ("read_parquet", &["glob_paths"]),
+    ("read_parquet_schema", &["glob_paths"]),
+    ("read_tiff", &["glob_paths"]),
+    ("read_tiff_schema", &["glob_paths"]),
+    ("read_zarr", &["glob_paths"]),
+    ("read_zarr_schema", &["glob_paths"]),
+    ("view_dataset_statistics", &["path"]),
+    ("view_external_table_statistics", &["table_name"]),
+    ("view_statistics_cache", &[]),
+];
 
-/// Every table function mapped to its declared parameter names, in order. The first parameter is
-/// the path/glob for the readers; the rest are the format options `read(...)` accepts as keywords.
+/// [`TABLE_FUNCTIONS`] as a map, built once for the process.
+static TABLE_FUNCTION_META: OnceLock<Arc<BTreeMap<String, Vec<String>>>> = OnceLock::new();
+
+/// Every table function mapped to its declared parameter names, in order.
 fn table_function_meta(
-    py: Python<'_>,
-    conn: &Connection,
+    _py: Python<'_>,
+    _conn: &Connection,
 ) -> PyResult<Arc<BTreeMap<String, Vec<String>>>> {
-    if let Some(cached) = TABLE_FUNCTIONS.get() {
-        return Ok(cached.clone());
-    }
-    let result = conn.run(
-        py,
-        "SELECT function_name, parameters FROM beacon.system.table_functions".to_string(),
-    )?;
-    let mut functions = BTreeMap::new();
-    for batch in result.batches() {
-        let names = batch.column(0).as_string_opt::<i32>();
-        let params = batch.column(1).as_string_opt::<i32>();
-        let (Some(names), Some(params)) = (names, params) else {
-            continue;
-        };
-        for row in 0..batch.num_rows() {
-            if names.is_null(row) {
-                continue;
-            }
-            let param_names = if params.is_null(row) {
-                Vec::new()
-            } else {
-                parse_param_names(params.value(row))
-            };
-            functions.insert(names.value(row).to_string(), param_names);
-        }
-    }
-    let arc = Arc::new(functions);
-    let _ = TABLE_FUNCTIONS.set(arc.clone());
-    // Whoever won the race owns the canonical set; return that one.
-    Ok(TABLE_FUNCTIONS.get().cloned().unwrap_or(arc))
-}
-
-/// Pulls the ordered `name` fields out of a table function's `parameters` JSON
-/// (`[{"name": "glob_paths", ...}, {"name": "delimiter", ...}]`). Anything unparseable yields no
-/// names, so the function is still callable positionally — it just has no keyword options.
-fn parse_param_names(json: &str) -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|value| {
-            value.as_array().map(|params| {
-                params
+    Ok(TABLE_FUNCTION_META
+        .get_or_init(|| {
+            Arc::new(
+                TABLE_FUNCTIONS
                     .iter()
-                    .filter_map(|param| {
-                        param.get("name").and_then(|n| n.as_str()).map(String::from)
+                    .map(|(name, params)| {
+                        (
+                            (*name).to_string(),
+                            params.iter().map(|p| (*p).to_string()).collect(),
+                        )
                     })
-                    .collect()
-            })
+                    .collect(),
+            )
         })
-        .unwrap_or_default()
+        .clone())
 }
 
 /// Grows `slots` so index `index` is addressable, padding new positions with `None`.

@@ -1,10 +1,11 @@
-"""Tests for the catalog-driven readers and the file sinks.
+"""Tests for the table-function readers and the file sinks.
 
 The readers are not hand-written methods — `con.read_parquet(...)` resolves through
-`__getattr__` against `beacon.system.table_functions`, so these tests also pin that a real
-catalog function is reachable and a bogus name is not. The sinks go through the engine's
-output-format path (the same one the HTTP API uses), so a round-trip read of what a sink wrote
-is the sharpest end-to-end check.
+`__getattr__` against the client's table-function list, so these tests also pin that a real
+function is reachable, that a bogus name is not, and that every name on the list is one the
+engine actually registers (nothing catalogs UDTFs, so the list is hardcoded and can drift).
+The sinks go through the engine's output-format path (the same one the HTTP API uses), so a
+round-trip read of what a sink wrote is the sharpest end-to-end check.
 """
 
 from __future__ import annotations
@@ -35,12 +36,29 @@ def parquet_file(con, tmp_path):
 # ----------------------------------------------------------------------------------------
 
 
-def test_table_functions_are_discovered_from_the_catalog(con):
+def test_table_functions_are_listed(con):
     names = con.table_functions()
     assert "read_parquet" in names
     assert "read_netcdf" in names
     assert "read_hdf5" in names
     assert "read_csv" in names
+
+
+def test_hardcoded_table_functions_all_resolve(con):
+    """Every listed name is a function the engine registers.
+
+    The list is hardcoded in the client (DataFusion does not catalog UDTFs), so it can drift
+    from `beacon_functions::register_functions`. Calling one with a nonsense argument fails on
+    the argument; calling an unregistered name fails as a missing table function — which is the
+    difference this asserts.
+    """
+    for name in con.table_functions():
+        try:
+            con.sql(f"SELECT * FROM {name}('no-such-file')").fetchall()
+        except Exception as error:  # noqa: BLE001 - the message is the assertion
+            assert "table function" not in str(error).lower(), (
+                f"`{name}` is listed but not registered: {error}"
+            )
 
 
 def test_read_hdf5(con, tmp_path):

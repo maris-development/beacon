@@ -1,22 +1,18 @@
-//! Beacon-core-owned contracts for outer layers such as beacon-datalake.
+//! The wire contract: the JSON shapes this server accepts and returns.
+//!
+//! These live here, with the handlers that serialize them and the `ToSchema`
+//! derives that document them, rather than in the runtime. The runtime deals in
+//! Arrow and its own domain types — `SchemaRef`, `RecordBatch`,
+//! `ConsolidatedMetrics`, `CrawlerDefinition` — and this module is where those
+//! become the JSON a client sees.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
-use arrow::datatypes::{Field, Schema};
-use crate::crawler::{CrawlReport, CrawlerDefinition, TableNaming};
+use beacon_core::beacon_auth::{PrivilegeRule, PrivilegeTarget, Role, UserRecord};
+use beacon_core::crawler::{CrawlReport, CrawlerDefinition, TableNaming};
 use beacon_datafusion_ext::format_ext::DatasetMetadata;
-use beacon_datafusion_ext::table_ext::TableDefinition;
-use beacon_functions::function_doc::FunctionDoc;
-use crate::metrics::ConsolidatedMetrics;
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
-
-/// Re-exported typed table-extension contracts (see [`crate::extensions`]).
-pub use crate::extensions::{
-    ColumnDoc, ExposedColumn, McpExtension, Preset, PresetExtension, PresetFilter, PresetOp,
-    TableExtensions,
-};
 
 /// A single parameter of a registered function.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -31,8 +27,8 @@ pub struct FunctionParameterInfo {
     pub data_type: String,
 }
 
-/// Documentation for a single function registered with the runtime
-/// (scalar, aggregate, or table-valued).
+/// Documentation for a single function available in queries (scalar, aggregate,
+/// or window), shaped from DataFusion's function catalog.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct FunctionInfo {
     /// The name the function is invoked by in queries.
@@ -45,14 +41,6 @@ pub struct FunctionInfo {
     pub return_type: String,
     /// Ordered list of the function's parameters.
     pub params: Vec<FunctionParameterInfo>,
-}
-
-impl TryFrom<FunctionDoc> for FunctionInfo {
-    type Error = anyhow::Error;
-
-    fn try_from(value: FunctionDoc) -> Result<Self, Self::Error> {
-        Ok(serde_json::from_value(serde_json::to_value(value)?)?)
-    }
 }
 
 /// Metadata about a single dataset file discovered in the datasets store.
@@ -99,8 +87,8 @@ pub struct AuthUserView {
     pub is_anonymous: bool,
 }
 
-impl From<beacon_auth::UserRecord> for AuthUserView {
-    fn from(value: beacon_auth::UserRecord) -> Self {
+impl From<UserRecord> for AuthUserView {
+    fn from(value: UserRecord) -> Self {
         Self {
             username: value.username,
             roles: value.roles,
@@ -121,12 +109,12 @@ pub struct AuthRuleView {
     pub target_value: Option<String>,
 }
 
-impl From<&beacon_auth::PrivilegeRule> for AuthRuleView {
-    fn from(rule: &beacon_auth::PrivilegeRule) -> Self {
+impl From<&PrivilegeRule> for AuthRuleView {
+    fn from(rule: &PrivilegeRule) -> Self {
         let (target_type, target_value) = match &rule.target {
-            None | Some(beacon_auth::PrivilegeTarget::All) => ("all".to_string(), None),
-            Some(beacon_auth::PrivilegeTarget::Table(t)) => ("table".to_string(), Some(t.clone())),
-            Some(beacon_auth::PrivilegeTarget::Path(p)) => ("path".to_string(), Some(p.clone())),
+            None | Some(PrivilegeTarget::All) => ("all".to_string(), None),
+            Some(PrivilegeTarget::Table(t)) => ("table".to_string(), Some(t.clone())),
+            Some(PrivilegeTarget::Path(p)) => ("path".to_string(), Some(p.clone())),
         };
         Self {
             privilege: rule.privilege.to_string(),
@@ -144,10 +132,10 @@ pub struct AuthRoleView {
     pub denies: Vec<AuthRuleView>,
 }
 
-impl From<beacon_auth::Role> for AuthRoleView {
-    fn from(role: beacon_auth::Role) -> Self {
+impl From<Role> for AuthRoleView {
+    fn from(role: Role) -> Self {
         // Rules live in a HashSet; sort for a stable, readable order.
-        let to_sorted = |rules: &std::collections::HashSet<beacon_auth::PrivilegeRule>| {
+        let to_sorted = |rules: &std::collections::HashSet<PrivilegeRule>| {
             let mut views: Vec<AuthRuleView> = rules.iter().map(AuthRuleView::from).collect();
             views.sort_by(|a, b| {
                 (&a.privilege, &a.target_type, &a.target_value).cmp(&(
@@ -166,53 +154,19 @@ impl From<beacon_auth::Role> for AuthRoleView {
     }
 }
 
-/// A single field (column) of an Arrow schema, projected for the API.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
-pub struct SchemaFieldView {
-    /// Column name.
-    #[schema(example = "temperature")]
-    pub name: String,
-    /// Arrow data type rendered as a string (e.g. `Float64`, `Utf8`, `Timestamp(...)`).
-    #[schema(example = "Float64")]
-    pub data_type: String,
-    /// Whether the column may contain null values.
-    pub nullable: bool,
-    /// Arbitrary field-level metadata carried on the Arrow field.
-    pub metadata: BTreeMap<String, String>,
-}
-
-impl From<&Field> for SchemaFieldView {
-    fn from(value: &Field) -> Self {
-        Self {
-            name: value.name().to_string(),
-            data_type: value.data_type().to_string(),
-            nullable: value.is_nullable(),
-            metadata: value.metadata().clone().into_iter().collect(),
-        }
-    }
-}
-
-/// An Arrow schema (the ordered fields plus schema-level metadata), projected for the API.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
-pub struct SchemaView {
-    /// The schema's fields (columns), in order.
-    pub fields: Vec<SchemaFieldView>,
-    /// Arbitrary schema-level metadata key/value pairs.
-    pub metadata: BTreeMap<String, String>,
-}
-
-impl From<&Schema> for SchemaView {
-    fn from(value: &Schema) -> Self {
-        Self {
-            fields: value
-                .fields()
-                .iter()
-                .map(|field| SchemaFieldView::from(field.as_ref()))
-                .collect(),
-            metadata: value.metadata().clone().into_iter().collect(),
-        }
-    }
-}
+/// How an Arrow schema reaches a client.
+///
+/// Schemas are serialized as Arrow serializes them — `{ "fields": [...],
+/// "metadata": {...} }`, each field carrying `name`, `data_type`, `nullable` and
+/// `metadata` — rather than through a projection of beacon's own. The runtime
+/// hands out a `SchemaRef`, and that *is* the contract: a simple type renders as
+/// a string (`"Float64"`), a parameterized one as a single-key object
+/// (`{"Timestamp": ["Microsecond", null]}`), which is exactly enough for a client
+/// to reconstruct the type rather than parse a display string.
+///
+/// Documented as an opaque object because `arrow::datatypes::Schema` is not a
+/// `ToSchema`; the example above is the shape.
+pub const SCHEMA_RESPONSE: &str = "An Arrow schema: { fields: [{ name, data_type, nullable, metadata }], metadata }";
 
 /// A Beacon query request body. The payload is a free-form JSON object describing
 /// either a structured JSON query or a SQL query (`{"sql": "SELECT ..."}`), along
@@ -228,7 +182,7 @@ pub struct QueryRequest {
 }
 
 impl QueryRequest {
-    pub fn into_query(self) -> anyhow::Result<crate::query::Query> {
+    pub fn into_query(self) -> anyhow::Result<beacon_core::query::Query> {
         Ok(serde_json::from_value(Value::Object(
             self.query.into_iter().collect::<Map<String, Value>>(),
         ))?)
@@ -256,72 +210,86 @@ pub struct QueryMetricsView {
     pub query: Value,
     /// The query's unique identifier (UUID).
     pub query_id: String,
-    /// The logical plan as parsed, before optimization (JSON).
-    #[schema(value_type = Object)]
+    /// The principal that ran the query (`anonymous` when none authenticated).
+    #[schema(example = "beacon-admin")]
+    pub username: String,
+    /// When the query finished, RFC 3339 in UTC.
+    #[schema(example = "2026-07-30T18:21:03.114Z")]
+    pub finished_at: String,
+    /// The logical plan as parsed, before optimization: the PostgreSQL-style
+    /// `[{ "Plan": … }]` document plan viewers consume — an array, not an object.
+    #[schema(value_type = Vec<Object>)]
     pub parsed_logical_plan: Value,
-    /// The logical plan after the optimizer ran (JSON).
-    #[schema(value_type = Object)]
+    /// The logical plan after the optimizer ran, in the same shape.
+    #[schema(value_type = Vec<Object>)]
     pub optimized_logical_plan: Value,
     /// Per-node execution metrics from the physical plan (JSON).
     #[schema(value_type = Object)]
     pub node_metrics: Value,
 }
 
-impl TryFrom<ConsolidatedMetrics> for QueryMetricsView {
-    type Error = anyhow::Error;
-
-    fn try_from(value: ConsolidatedMetrics) -> Result<Self, Self::Error> {
-        Ok(Self {
-            input_rows: value.input_rows,
-            input_bytes: value.input_bytes,
-            result_num_rows: value.result_num_rows,
-            result_size_in_bytes: value.result_size_in_bytes,
-            file_paths: value.file_paths,
-            execution_time_ms: value.execution_time_ms,
-            query: value.query,
-            query_id: value.query_id.to_string(),
-            parsed_logical_plan: value.parsed_logical_plan,
-            optimized_logical_plan: value.optimized_logical_plan,
-            node_metrics: serde_json::to_value(value.node_metrics)?,
-        })
+/// Marks a timestamp as UTC when it carries no offset.
+///
+/// `finished_at` is stored as a zone-less timestamp holding a UTC instant, so it
+/// renders without an offset — and a bare timestamp is read as *local* time by
+/// most clients (JavaScript's `Date` among them). The wire contract is RFC 3339,
+/// so the `Z` is supplied here.
+fn utc_rfc3339(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    let time = value.rsplit('T').next().unwrap_or_default();
+    let has_offset = value.ends_with('Z') || time.contains('+') || time.contains('-');
+    if has_offset {
+        value.to_string()
+    } else {
+        format!("{value}Z")
     }
 }
 
-/// The storage format and options of a registered table, as a flattened
-/// configuration object. Internal (double-underscore) option keys are stripped.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
-pub struct TableConfigView {
-    /// The flattened table configuration (type, location, options, ...).
-    #[schema(value_type = Object)]
-    #[serde(flatten)]
-    pub config: BTreeMap<String, Value>,
+impl QueryMetricsView {
+    /// Maps one `beacon.system.query_metrics` row onto the wire shape.
+    ///
+    /// The table stores the open-ended parts — the query, both plans, the metric
+    /// tree, the file list — as JSON strings, because their shape follows
+    /// DataFusion's and would otherwise pin the table schema to it. The contract
+    /// here has always been nested JSON, so they are parsed back; anything
+    /// unparseable degrades to `null` rather than failing the response.
+    pub fn from_row(row: &Value) -> Self {
+        let text = |key: &str| row.get(key).and_then(Value::as_str).unwrap_or_default();
+        let count = |key: &str| row.get(key).and_then(Value::as_u64).unwrap_or_default();
+        let json = |key: &str| serde_json::from_str(text(key)).unwrap_or(Value::Null);
+
+        Self {
+            input_rows: count("input_rows"),
+            input_bytes: count("input_bytes"),
+            result_num_rows: count("result_num_rows"),
+            result_size_in_bytes: count("result_size_in_bytes"),
+            file_paths: serde_json::from_str(text("file_paths")).unwrap_or_default(),
+            execution_time_ms: count("execution_time_ms"),
+            query: json("query"),
+            query_id: text("query_id").to_string(),
+            username: text("username").to_string(),
+            finished_at: utc_rfc3339(text("finished_at")),
+            parsed_logical_plan: json("parsed_logical_plan"),
+            optimized_logical_plan: json("optimized_logical_plan"),
+            node_metrics: json("node_metrics"),
+        }
+    }
 }
 
-impl TryFrom<Arc<dyn TableDefinition>> for TableConfigView {
-    type Error = anyhow::Error;
+/// The body of an endpoint that is kept routed but no longer does anything, so a
+/// client that still calls it is told why rather than left with a 404.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct DeprecationNotice {
+    /// What replaced the endpoint, in a sentence a human can act on.
+    pub message: String,
+}
 
-    fn try_from(value: Arc<dyn TableDefinition>) -> Result<Self, Self::Error> {
-        match serde_json::to_value(value)? {
-            Value::Object(mut config) => {
-                // Hide internal (double-underscore) option keys — e.g. the crawler
-                // ownership marker — from the user-facing config. They are an
-                // implementation detail of the definition, not user-set options.
-                if let Some(Value::Object(options)) = config.get_mut("options") {
-                    options.retain(|key, _| !key.starts_with("__"));
-                }
-                // Never expose a persisted credential — even encrypted — through
-                // the admin table-config endpoint (external SQL-database tables
-                // carry one in `secret`).
-                if config.contains_key("secret") {
-                    config.insert("secret".to_string(), Value::String("***".to_string()));
-                }
-                Ok(Self {
-                    config: config.into_iter().collect(),
-                })
-            }
-            other => Err(anyhow::anyhow!(
-                "expected table config object, got {other:?}"
-            )),
+impl DeprecationNotice {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
         }
     }
 }
@@ -528,70 +496,6 @@ pub struct CreateExternalTableRequest {
 }
 
 #[cfg(test)]
-mod table_config_redaction_tests {
-    use super::*;
-    use beacon_sql_databases::{EncryptedSecret, SqlDatabaseTableDefinition, SqlEngine};
-
-    /// The admin table-config view must never expose a persisted credential,
-    /// even in its encrypted form — the `secret` field is replaced with `***`.
-    #[test]
-    fn sql_database_secret_is_redacted_in_config_view() {
-        let mut options = BTreeMap::new();
-        options.insert("host".to_string(), "db.internal".to_string());
-        let definition: Arc<dyn TableDefinition> = Arc::new(SqlDatabaseTableDefinition {
-            name: "orders".to_string(),
-            engine: SqlEngine::Postgres,
-            remote_table: "public.orders".to_string(),
-            schema: beacon_sql_databases::unresolved_schema(),
-            options,
-            secret: Some(EncryptedSecret::encrypt("super-secret-password", &[9u8; 32]).unwrap()),
-        });
-
-        let view = TableConfigView::try_from(definition).unwrap();
-        let json = serde_json::to_string(&view).unwrap();
-
-        assert!(!json.contains("super-secret-password"));
-        // The encrypted material (ciphertext/nonce) must not leak either.
-        assert!(!json.contains("ciphertext"));
-        assert_eq!(view.config.get("secret"), Some(&Value::String("***".to_string())));
-        // Non-secret connection options remain visible.
-        assert!(json.contains("db.internal"));
-    }
-
-    /// Internal double-underscore options — e.g. the crawler ownership marker a
-    /// crawled table carries — are an implementation detail of the definition and
-    /// must not surface in the user-facing config view.
-    #[test]
-    fn internal_option_keys_are_hidden_from_config_view() {
-        let mut options = BTreeMap::new();
-        options.insert("host".to_string(), "db.internal".to_string());
-        options.insert(
-            crate::crawler::CRAWLER_OWNER_OPTION.to_string(),
-            "my_crawler".to_string(),
-        );
-        let definition: Arc<dyn TableDefinition> = Arc::new(SqlDatabaseTableDefinition {
-            name: "crawled".to_string(),
-            engine: SqlEngine::Postgres,
-            remote_table: "public.crawled".to_string(),
-            schema: beacon_sql_databases::unresolved_schema(),
-            options,
-            secret: None,
-        });
-
-        let view = TableConfigView::try_from(definition).unwrap();
-        let json = serde_json::to_string(&view).unwrap();
-
-        assert!(
-            !json.contains(crate::crawler::CRAWLER_OWNER_OPTION),
-            "internal ownership marker must be hidden from table config: {json}"
-        );
-        assert!(!json.contains("my_crawler"));
-        // Ordinary options are untouched.
-        assert!(json.contains("db.internal"));
-    }
-}
-
-#[cfg(test)]
 mod query_request_tests {
     use super::*;
 
@@ -600,7 +504,7 @@ mod query_request_tests {
     }
 
     /// The request body is a free-form flattened map that is re-serialized into a
-    /// [`crate::query::Query`]; the SQL form must survive that round trip with its
+    /// [`Query`](beacon_core::query::Query); the SQL form must survive that round trip with its
     /// output options intact, since this is the only path a REST client's query
     /// takes into the runtime.
     #[test]
@@ -609,7 +513,7 @@ mod query_request_tests {
             .into_query()
             .expect("a SQL body should convert");
 
-        assert!(matches!(query.inner, crate::query::InnerQuery::Sql(sql) if sql == "SELECT 1"));
+        assert!(matches!(query.inner, beacon_core::query::InnerQuery::Sql(sql) if sql == "SELECT 1"));
         assert!(query.output.is_some());
     }
 
@@ -622,7 +526,7 @@ mod query_request_tests {
             .into_query()
             .expect("a structured body should convert");
 
-        assert!(matches!(query.inner, crate::query::InnerQuery::Json(_)));
+        assert!(matches!(query.inner, beacon_core::query::InnerQuery::Json(_)));
         assert!(query.output.is_none());
     }
 

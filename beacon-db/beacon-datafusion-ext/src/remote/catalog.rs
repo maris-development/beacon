@@ -1,7 +1,7 @@
 //! A lazy [`CatalogProvider`] over a whole remote Beacon instance.
 //!
 //! Attaching a remote enumerates its schemas and tables once (over Flight SQL, via the remote's
-//! `information_schema`), then exposes each remote table as a federated [`TableProvider`] built on
+//! `GetTables` metadata command), then exposes each remote table as a federated [`TableProvider`] built on
 //! demand. Because every table shares one endpoint (compute context), the federation optimizer
 //! pushes joins and aggregates *between* remote tables down to the remote, not just single scans.
 //!
@@ -168,49 +168,54 @@ async fn build_federated_provider(
     Ok(Arc::new(FederatedTableProviderAdaptor::new(source)))
 }
 
-/// Enumerate the remote's user schemas and tables via its `information_schema` (over Flight SQL).
+/// Enumerate the remote's schemas and tables through Flight SQL's `GetTables`.
 ///
-/// `information_schema` itself is excluded (it is DataFusion's own reflection schema, not user
-/// data); everything else the remote exposes — `public`, beacon's `system`, and any other schema —
-/// is mirrored.
+/// The remote answers from its own catalog, already filtered to what this connection's credential
+/// may see — so an attached catalog mirrors exactly the tables that credential could query.
+/// `information_schema` is dropped from the mirror (it is DataFusion's own reflection schema, and
+/// the local session has one of its own); everything else the remote reports is kept.
 async fn enumerate_remote(
     connection: &RemoteConnection,
 ) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
-    let batches = connection
-        .collect_query(
-            "SELECT table_schema, table_name FROM information_schema.tables \
-             WHERE table_schema <> 'information_schema' \
-             ORDER BY table_schema, table_name",
-        )
-        .await?;
+    let batches = connection.collect_tables().await?;
 
     let mut listing: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for batch in &batches {
-        let schemas = string_column(batch, 0)?;
-        let tables = string_column(batch, 1)?;
+        // `GetTables` names its columns; positions are not part of the contract.
+        let schemas = string_column(batch, "db_schema_name")?;
+        let tables = string_column(batch, "table_name")?;
         for row in 0..batch.num_rows() {
             if schemas.is_null(row) || tables.is_null(row) {
                 continue;
             }
+            let schema = schemas.value(row);
+            if schema.eq_ignore_ascii_case("information_schema") {
+                continue;
+            }
             listing
-                .entry(schemas.value(row).to_string())
+                .entry(schema.to_string())
                 .or_default()
                 .push(tables.value(row).to_string());
         }
     }
+    for tables in listing.values_mut() {
+        tables.sort();
+    }
     Ok(listing)
 }
 
-/// Downcast a result column to a `Utf8` array, erroring clearly if the remote returned another
-/// type for an `information_schema` column (it should not).
-fn string_column(batch: &arrow::record_batch::RecordBatch, index: usize) -> anyhow::Result<&StringArray> {
+/// Downcast a named result column to a `Utf8` array, erroring clearly if the remote returned
+/// another type (or omitted the column).
+fn string_column<'a>(
+    batch: &'a arrow::record_batch::RecordBatch,
+    name: &str,
+) -> anyhow::Result<&'a StringArray> {
     batch
-        .column(index)
+        .column_by_name(name)
+        .ok_or_else(|| anyhow::anyhow!("remote GetTables response has no `{name}` column"))?
         .as_any()
         .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            anyhow::anyhow!("remote information_schema column {index} was not Utf8 as expected")
-        })
+        .ok_or_else(|| anyhow::anyhow!("remote GetTables column `{name}` was not Utf8 as expected"))
 }
 
 #[cfg(test)]

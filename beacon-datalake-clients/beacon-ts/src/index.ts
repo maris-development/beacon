@@ -55,6 +55,10 @@ export type {
   QueryInput,
   Row,
   QueryMetricsView,
+  Catalog,
+  CatalogSchema,
+  CatalogTable,
+  CatalogsView,
   Crawler,
   ExternalTableSpec,
 } from "./types.js";

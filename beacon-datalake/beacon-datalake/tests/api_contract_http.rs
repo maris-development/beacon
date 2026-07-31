@@ -8,6 +8,12 @@
 //! `/api/table-functions`, `/api/admin/table-config` were all dropped by "wip"
 //! commits while their callers stayed).
 //!
+//! `/api/table-functions` and `/api/admin/table-config` are deprecated but still
+//! routed: nothing catalogs table-valued functions any more, and a table's
+//! persisted definition is no longer served over HTTP, so they answer with an
+//! empty list and a notice rather than disappearing out from under a client that
+//! calls them.
+//!
 //! This test pins the wire contract by asserting each client-called path is
 //! present in the router's own OpenAPI document. Add a client call → add it
 //! here; intentionally retire an endpoint → remove both, deliberately.
@@ -47,10 +53,12 @@ const CLIENT_ENDPOINTS: &[(&str, &str)] = &[
     ("get", "/api/total-datasets"),
     // -- functions & info ----------------------------------------------------
     ("get", "/api/functions"),
+    // Deprecated, kept routed and answering `[]` — see the module docs.
     ("get", "/api/table-functions"),
     ("get", "/api/info"),
     // -- admin ---------------------------------------------------------------
     ("get", "/api/admin/check"),
+    // Deprecated, kept routed and answering a notice — see the module docs.
     ("get", "/api/admin/table-config"),
     ("get", "/api/admin/auth/users"),
     ("get", "/api/admin/auth/roles"),
@@ -233,6 +241,8 @@ async fn query_metrics_json_keeps_its_documented_shape() {
         ("file_paths", |v| v.is_array(), "array"),
         ("query", |v| v.is_object(), "object"),
         ("query_id", |v| v.is_string(), "string"),
+        ("username", |v| v.is_string(), "string"),
+        ("finished_at", |v| v.is_string(), "string"),
         ("parsed_logical_plan", |v| !v.is_null(), "non-null"),
         ("optimized_logical_plan", |v| !v.is_null(), "non-null"),
         ("node_metrics", |v| v.is_object(), "object"),
@@ -247,6 +257,18 @@ async fn query_metrics_json_keeps_its_documented_shape() {
     // The two counters the panel headlines must reflect the query that ran.
     assert_eq!(m["result_num_rows"], 1, "one row was selected");
     assert_eq!(m["query"]["sql"], "SELECT 1 AS v");
+
+    // Who ran it and when. The request carried no credentials, so the caller is
+    // the anonymous principal; the timestamp is the RFC 3339 rendering of the
+    // table's `finished_at`.
+    assert_eq!(m["username"], "anonymous");
+    let finished_at = m["finished_at"].as_str().unwrap_or_default();
+    assert!(
+        // e.g. `2026-07-30T18:21:03.114`: a date, `T`, and a time — enough to
+        // catch an empty or unformatted cell without pulling in a date parser.
+        finished_at.len() >= 19 && finished_at.contains('T') && finished_at.starts_with("20"),
+        "finished_at should be a timestamp, got: {finished_at:?}"
+    );
 
     // The plan fields are the pgjson `[{Plan: …}]` shape, and `node_metrics`
     // names the executed operator. Both were left empty by the pre-rewrite
@@ -266,10 +288,10 @@ async fn query_metrics_json_keeps_its_documented_shape() {
     );
 }
 
-/// `table-config` backs the Tables page's config panel. It reads the table's
-/// *persisted definition*, so it needs a real managed table to answer for.
+/// `table-config` is retired: it answers every caller with a deprecation notice
+/// instead of a definition, stays admin-only, and never 404s.
 #[tokio::test(flavor = "multi_thread")]
-async fn table_config_reports_a_created_table_and_404s_for_an_unknown_one() {
+async fn table_config_answers_with_a_deprecation_notice() {
     let (router, lake) = app().await;
     lake.lake
         .runtime()
@@ -281,49 +303,70 @@ async fn table_config_reports_a_created_table_and_404s_for_an_unknown_one() {
         .expect("create table");
 
     let auth = basic(ADMIN_USERNAME, ADMIN_PASSWORD);
-    let (status, body) = send(
-        &router,
-        Request::builder()
-            .method("GET")
-            .uri("/api/admin/table-config?table_name=cfg")
-            .header(header::AUTHORIZATION, &auth)
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "table-config should describe a created table, got {status}: {}",
-        String::from_utf8_lossy(&body)
-    );
-    let config: Value = serde_json::from_slice(&body).expect("config should be JSON");
-    assert!(
-        config.as_object().is_some_and(|o| !o.is_empty()),
-        "the config should be a non-empty object, got: {config}"
-    );
+    // Same answer for a real table and an unknown one — there is nothing to look up.
+    for table in ["cfg", "nope"] {
+        let (status, body) = send(
+            &router,
+            Request::builder()
+                .method("GET")
+                .uri(&format!("/api/admin/table-config?table_name={table}"))
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "table-config should answer, not 404");
+        let notice: Value = serde_json::from_slice(&body).expect("notice should be JSON");
+        assert!(
+            notice["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("no longer supported")),
+            "expected a deprecation notice, got: {notice}"
+        );
+        // Whatever it says, it must not carry a definition any more.
+        assert!(notice.get("definition_type").is_none(), "got: {notice}");
+    }
 
+    // Still the super-user's endpoint.
     let (status, _) = send(
         &router,
         Request::builder()
             .method("GET")
-            .uri("/api/admin/table-config?table_name=nope")
-            .header(header::AUTHORIZATION, &auth)
+            .uri("/api/admin/table-config?table_name=cfg")
             .body(Body::empty())
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "an unknown table should 404");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "admin auth is still required");
+
+    // And the OpenAPI document says it is deprecated.
+    let (_, spec) = send(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri("/openapi.json")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let spec: Value = serde_json::from_slice(&spec).expect("openapi should be JSON");
+    assert_eq!(
+        spec.pointer("/paths/~1api~1admin~1table-config/get/deprecated"),
+        Some(&Value::Bool(true))
+    );
 }
 
-/// The two function listings back the SQL editor's autocomplete, which reads
+/// The function listing backs the SQL editor's autocomplete, which reads
 /// `function_name` and a `params` array off each entry. A shape change silently
 /// empties the completion popup, so the contract is pinned here.
+///
+/// Its deprecated sibling `/api/table-functions` is checked separately: it is
+/// contractually empty, so there is no entry to read a shape off.
 #[tokio::test(flavor = "multi_thread")]
-async fn function_listings_carry_the_shape_autocomplete_reads() {
+async fn function_listing_carries_the_shape_autocomplete_reads() {
     let (router, _lake) = app().await;
 
-    for uri in ["/api/functions", "/api/table-functions"] {
+    for uri in ["/api/functions"] {
         let (status, body) = send(
             &router,
             Request::builder()
@@ -352,4 +395,45 @@ async fn function_listings_carry_the_shape_autocomplete_reads() {
              from it), got: {first}"
         );
     }
+}
+
+/// The deprecated table-function listing answers with an empty array — routed, so
+/// a client that still calls it gets a listing rather than a 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn deprecated_table_function_listing_is_empty_not_missing() {
+    let (router, _lake) = app().await;
+
+    let (status, body) = send(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri("/api/table-functions")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let listing: Value = serde_json::from_slice(&body).expect("listing should be JSON");
+    assert_eq!(
+        listing.as_array().map(Vec::len),
+        Some(0),
+        "the deprecated listing is contractually empty, got: {listing}"
+    );
+
+    // And the OpenAPI document says so.
+    let (_, spec) = send(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri("/openapi.json")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let spec: Value = serde_json::from_slice(&spec).expect("openapi should be JSON");
+    assert_eq!(
+        spec.pointer("/paths/~1api~1table-functions/get/deprecated"),
+        Some(&Value::Bool(true)),
+        "the operation should be marked deprecated in the OpenAPI document"
+    );
 }

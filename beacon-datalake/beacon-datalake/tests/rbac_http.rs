@@ -6,7 +6,9 @@
 //!   revoke → drop) reflected in those endpoints,
 //! - the model guards (read-only roles, reserved super-user, protected anonymous
 //!   user, non-super users can't manage or enumerate auth),
-//! - with enforcement on, that grants allow and denies block query results.
+//! - with enforcement on, that grants allow and denies block query results,
+//! - that the catalog listings (`/api/tables`, `/api/catalogs`) show a caller
+//!   only what their roles let them read.
 
 mod common;
 
@@ -309,5 +311,94 @@ async fn enforcement_grants_allow_and_denies_block() {
     assert_eq!(
         send(&router, post_query(&format!("SELECT * FROM {t2}"), Some(&mallory))).await.0,
         StatusCode::BAD_REQUEST
+    );
+}
+
+/// The listings are per-caller: with enforcement on, a user sees the tables their
+/// roles grant and nothing else — and never beacon's metadata schemas, which are
+/// the super-user's.
+#[tokio::test(flavor = "multi_thread")]
+async fn listings_show_only_what_the_callers_role_grants() {
+    let (lake, config) = lake(config(true)).await;
+    let admin = basic(&config.admin.username, &config.admin.password);
+
+    let granted = unique("granted");
+    let hidden = unique("hidden");
+    let rt = lake.lake.runtime();
+    for table in [&granted, &hidden] {
+        seed(rt, &format!("CREATE TABLE {table} (a BIGINT)")).await;
+    }
+
+    let router = setup_router(lake.lake.clone(), config.clone()).unwrap();
+    admin_ok(&router, &admin, "CREATE ROLE reader").await;
+    admin_ok(
+        &router,
+        &admin,
+        &format!("GRANT SELECT ON TABLE {granted} TO ROLE reader"),
+    )
+    .await;
+    admin_ok(&router, &admin, "CREATE USER alice WITH PASSWORD 'pw'").await;
+    admin_ok(&router, &admin, "GRANT ROLE reader TO USER alice").await;
+    let alice = basic("alice", "pw");
+
+    // /api/tables holds the granted table only.
+    let (status, body) = send(&router, get("/api/tables", Some(&alice))).await;
+    assert_eq!(status, StatusCode::OK);
+    let tables: Vec<String> = serde_json::from_slice(&body).expect("a JSON array of names");
+    assert_eq!(
+        tables,
+        vec![granted.clone()],
+        "alice should see only the table her role grants"
+    );
+
+    // The catalog tree agrees, and carries no metadata schema.
+    let (status, body) = send(&router, get("/api/catalogs", Some(&alice))).await;
+    assert_eq!(status, StatusCode::OK);
+    let catalogs: Value = serde_json::from_slice(&body).expect("catalogs JSON");
+    let schemas = catalogs["catalogs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|catalog| catalog["schemas"].as_array().unwrap())
+        .map(|schema| schema["name"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(schemas, vec!["public".to_string()], "got: {catalogs}");
+    let listed: Vec<String> = catalogs["catalogs"][0]["schemas"][0]["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|table| table["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(listed, vec![granted.clone()]);
+    assert!(!listed.contains(&hidden), "got: {listed:?}");
+
+    // Reading the metadata schemas directly is refused, not merely hidden.
+    for sql in [
+        "SELECT table_name FROM information_schema.tables",
+        "SHOW TABLES",
+        "SELECT * FROM beacon.system.users",
+    ] {
+        let (status, body) = send(&router, post_query(sql, Some(&alice))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "`{sql}` should be refused");
+        assert!(
+            String::from_utf8_lossy(&body).contains("super-user"),
+            "`{sql}` should fail as a permissions error, got: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    // The admin still sees everything, metadata schemas included.
+    let (_, body) = send(&router, get("/api/catalogs", Some(&admin))).await;
+    let catalogs: Value = serde_json::from_slice(&body).expect("catalogs JSON");
+    let schemas: Vec<String> = catalogs["catalogs"][0]["schemas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|schema| schema["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        schemas.contains(&"information_schema".to_string())
+            && schemas.contains(&"system".to_string()),
+        "got: {schemas:?}"
     );
 }

@@ -7,45 +7,52 @@
 
 use std::sync::Arc;
 
-use beacon_core::api::{SchemaFieldView, SchemaView};
+use arrow::array::AsArray;
+use arrow::datatypes::{Field, SchemaRef};
 use beacon_core::extensions::{
     McpExtension, PresetExtension, PresetFilter, PresetOp, TableExtensions,
 };
 use beacon_core::runtime::Runtime;
-use beacon_core::AuthIdentity;
+use beacon_core::{AuthIdentity, TableReference};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
 use crate::result::{run_sql_rows, run_sql_to_json, MAX_ROWS};
 
-/// Quote a SQL string literal, escaping any embedded single quotes.
-fn quote_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-/// The tables in beacon's own schema, sorted.
+/// The tables in beacon's own schema that `identity` is entitled to see, sorted.
 ///
-/// Replaces `Runtime::list_tables`. Unlike that method this runs as `identity`,
-/// so the listing is subject to the same authorization as any other query.
+/// Replaces `Runtime::list_tables`. The enumeration cannot be run as `identity`
+/// — `information_schema` is super-user-only — so it goes through
+/// `Runtime::visible_tables`, which reads the catalog as the engine and returns
+/// only the tables that identity's roles grant `Select` on.
 async fn list_table_names(
     runtime: &Arc<Runtime>,
     identity: &AuthIdentity,
 ) -> anyhow::Result<Vec<String>> {
-    let rows = run_sql_rows(
-        runtime,
-        "SELECT table_name FROM information_schema.tables \
-         WHERE table_catalog = 'beacon' AND table_schema = 'public' \
-         ORDER BY table_name"
-            .to_string(),
-        identity.clone(),
-    )
-    .await?;
+    let (default_catalog, default_schema) = runtime.default_catalog_and_schema();
+    let batches = runtime.visible_tables(identity).await?;
 
-    Ok(rows
-        .iter()
-        .filter_map(|row| row.get("table_name").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect())
+    let mut names = Vec::new();
+    for batch in &batches {
+        let column = |name: &str| {
+            batch
+                .column_by_name(name)
+                .and_then(|array| array.as_string_opt::<i32>())
+        };
+        let (Some(catalogs), Some(schemas), Some(tables)) = (
+            column("table_catalog"),
+            column("table_schema"),
+            column("table_name"),
+        ) else {
+            anyhow::bail!("the catalog listing is missing an expected column");
+        };
+        for row in 0..batch.num_rows() {
+            if catalogs.value(row) == default_catalog && schemas.value(row) == default_schema {
+                names.push(tables.value(row).to_string());
+            }
+        }
+    }
+    Ok(names)
 }
 
 /// A table's extensions, or the empty set when it has none (or is unreadable).
@@ -69,50 +76,22 @@ async fn table_extensions(
         .unwrap_or_default()
 }
 
-/// A table's columns as a [`SchemaView`], or `None` when the table is unknown.
+/// A table's Arrow schema, or `None` when the table is unknown (or `identity`
+/// may not read it).
 ///
-/// Replaces `Runtime::list_table_schema_view`. `information_schema` carries no
-/// Arrow field metadata, so the `metadata` maps are always empty here — the MCP
-/// catalog only reads name/type/nullability.
-async fn table_schema_view(
+/// Replaces `Runtime::list_table_schema_view`. Taken from the table provider
+/// rather than `information_schema.columns` — that schema is super-user-only, and
+/// the provider answers with the real Arrow types and field metadata under the
+/// same authorization a scan of the table would face.
+async fn table_schema(
     runtime: &Arc<Runtime>,
     table: &str,
     identity: &AuthIdentity,
-) -> Option<SchemaView> {
-    let sql = format!(
-        "SELECT column_name, data_type, is_nullable FROM information_schema.columns \
-         WHERE table_catalog = 'beacon' AND table_schema = 'public' AND table_name = {} \
-         ORDER BY ordinal_position",
-        quote_literal(table)
-    );
-    let rows = run_sql_rows(runtime, sql, identity.clone()).await.ok()?;
-    if rows.is_empty() {
-        return None;
-    }
-
-    let fields = rows
-        .iter()
-        .filter_map(|row| {
-            Some(SchemaFieldView {
-                name: row.get("column_name").and_then(Value::as_str)?.to_string(),
-                data_type: row
-                    .get("data_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                nullable: row
-                    .get("is_nullable")
-                    .and_then(Value::as_str)
-                    .is_some_and(|n| n.eq_ignore_ascii_case("YES")),
-                metadata: Default::default(),
-            })
-        })
-        .collect();
-
-    Some(SchemaView {
-        fields,
-        metadata: Default::default(),
-    })
+) -> Option<SchemaRef> {
+    runtime
+        .table_arrow_schema(TableReference::bare(table.to_string()), identity)
+        .await
+        .ok()
 }
 
 /// Build the full tool list: generic tools + per-table tools from extensions.
@@ -327,7 +306,7 @@ async fn describe_table_json(
         .get("table_name")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing required 'table_name' argument"))?;
-    let schema = table_schema_view(runtime, table, identity)
+    let schema = table_schema(runtime, table, identity)
         .await
         .ok_or_else(|| anyhow::anyhow!("table '{table}' not found"))?;
     let ext = table_extensions(runtime, table, identity).await;
@@ -361,45 +340,47 @@ struct ResolvedColumn {
 /// Scoped to `exposed_columns` (in that order) when set, otherwise every column.
 /// A column's description comes from the extension entry, falling back to the
 /// Arrow field's `description`/`comment` metadata when present.
-fn resolve_columns(schema: &SchemaView, mcp: Option<&McpExtension>) -> Vec<ResolvedColumn> {
+fn resolve_columns(schema: &SchemaRef, mcp: Option<&McpExtension>) -> Vec<ResolvedColumn> {
+    let resolved = |field: &Field, name: String, description: Option<String>| ResolvedColumn {
+        name,
+        // Arrow renders its own types (`Float64`, `Timestamp(Nanosecond, None)`).
+        data_type: field.data_type().to_string(),
+        nullable: field.is_nullable(),
+        description,
+    };
+
     match mcp.and_then(|m| m.exposed_columns.as_ref()) {
         Some(cols) => {
-            let by_name: std::collections::HashMap<&str, &SchemaFieldView> =
-                schema.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+            let by_name: std::collections::HashMap<&str, &Field> = schema
+                .fields()
+                .iter()
+                .map(|f| (f.name().as_str(), f.as_ref()))
+                .collect();
             cols.iter()
                 .filter_map(|c| {
                     let field = by_name.get(c.name())?;
-                    Some(ResolvedColumn {
-                        name: c.name().to_string(),
-                        data_type: field.data_type.clone(),
-                        nullable: field.nullable,
-                        description: c
-                            .description()
-                            .map(String::from)
-                            .or_else(|| field_description(field)),
-                    })
+                    let description = c
+                        .description()
+                        .map(String::from)
+                        .or_else(|| field_description(field));
+                    Some(resolved(field, c.name().to_string(), description))
                 })
                 .collect()
         }
         None => schema
-            .fields
+            .fields()
             .iter()
-            .map(|f| ResolvedColumn {
-                name: f.name.clone(),
-                data_type: f.data_type.clone(),
-                nullable: f.nullable,
-                description: field_description(f),
-            })
+            .map(|f| resolved(f, f.name().clone(), field_description(f)))
             .collect(),
     }
 }
 
 /// A column description carried in the Arrow field metadata, if any.
-fn field_description(field: &SchemaFieldView) -> Option<String> {
+fn field_description(field: &Field) -> Option<String> {
     field
-        .metadata
+        .metadata()
         .get("description")
-        .or_else(|| field.metadata.get("comment"))
+        .or_else(|| field.metadata().get("comment"))
         .cloned()
 }
 
@@ -464,7 +445,7 @@ async fn table_tool(
     // Merge the table schema (types) with the extension's per-column descriptions,
     // scoped to `exposed_columns` when set, or all columns otherwise, so the model
     // sees name + data type + meaning for every queryable column.
-    let resolved = match table_schema_view(runtime, table, identity).await {
+    let resolved = match table_schema(runtime, table, identity).await {
         Some(schema) => resolve_columns(&schema, Some(mcp)),
         None => Vec::new(),
     };
@@ -691,22 +672,29 @@ mod tests {
         assert!(export_query_recipe(&bad).is_err());
     }
 
-    fn field(name: &str, data_type: &str) -> SchemaFieldView {
-        SchemaFieldView {
-            name: name.into(),
-            data_type: data_type.into(),
-            nullable: true,
-            metadata: Default::default(),
-        }
+    /// An Arrow field of the named type — the tests only use `Float64`/`Int64`,
+    /// so the type is parsed from the two names rather than a full type parser.
+    fn field(name: &str, data_type: &str) -> Field {
+        let data_type = match data_type {
+            "Float64" => arrow::datatypes::DataType::Float64,
+            "Int64" => arrow::datatypes::DataType::Int64,
+            other => panic!("unhandled test data type: {other}"),
+        };
+        Field::new(name, data_type, true)
+    }
+
+    fn schema_of(fields: Vec<Field>) -> SchemaRef {
+        Arc::new(arrow::datatypes::Schema::new(fields))
     }
 
     #[test]
     fn resolve_columns_merges_types_and_descriptions() {
         use beacon_core::extensions::{ColumnDoc, ExposedColumn};
-        let schema = SchemaView {
-            fields: vec![field("lat", "Float64"), field("depth", "Float64"), field("x", "Int64")],
-            metadata: Default::default(),
-        };
+        let schema = schema_of(vec![
+            field("lat", "Float64"),
+            field("depth", "Float64"),
+            field("x", "Int64"),
+        ]);
 
         // No exposed_columns -> all columns, types included, no descriptions.
         let all = resolve_columns(&schema, Some(&mcp(None)));
@@ -995,10 +983,7 @@ mod tests {
     /// (filter_map), so a stale extension can't crash `describe_table`.
     #[test]
     fn resolve_columns_skips_exposed_columns_missing_from_schema() {
-        let schema = SchemaView {
-            fields: vec![field("lat", "Float64")],
-            metadata: Default::default(),
-        };
+        let schema = schema_of(vec![field("lat", "Float64")]);
         let cols = resolve_columns(&schema, Some(&mcp(Some(vec!["lat", "ghost"]))));
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "lat");
@@ -1008,14 +993,11 @@ mod tests {
     /// `description` (then `comment`) is used as a fallback.
     #[test]
     fn resolve_columns_falls_back_to_field_metadata_description() {
-        let mut with_desc = field("lat", "Float64");
-        with_desc.metadata.insert("description".into(), "latitude".into());
-        let mut with_comment = field("lon", "Float64");
-        with_comment.metadata.insert("comment".into(), "longitude".into());
-        let schema = SchemaView {
-            fields: vec![with_desc, with_comment],
-            metadata: Default::default(),
-        };
+        let with_desc = field("lat", "Float64")
+            .with_metadata([("description".to_string(), "latitude".to_string())].into());
+        let with_comment = field("lon", "Float64")
+            .with_metadata([("comment".to_string(), "longitude".to_string())].into());
+        let schema = schema_of(vec![with_desc, with_comment]);
         let cols = resolve_columns(&schema, None);
         assert_eq!(cols[0].description.as_deref(), Some("latitude"));
         assert_eq!(cols[1].description.as_deref(), Some("longitude"));

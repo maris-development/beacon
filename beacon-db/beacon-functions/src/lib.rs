@@ -6,27 +6,28 @@ use tokio::runtime::Handle;
 
 use crate::{
     blue_cloud::register_blue_cloud_udfs, file_formats::register_table_functions,
-    function_doc::FunctionDoc, geo::register_geo_udfs, metadata::register_metadata_functions,
+    geo::register_geo_udfs, metadata::register_metadata_functions,
     util::register_util_udfs,
 };
 
 pub mod blue_cloud;
 pub mod file_formats;
-pub mod function_doc;
 pub mod geo;
 pub mod metadata;
 pub mod util;
 
-/// Registers every Beacon UDF and table function on `session_context`, returning the
-/// table functions' documentation.
+/// Registers every Beacon UDF and table function on `session_context`.
 ///
-/// The docs are returned because DataFusion's UDTF registry cannot be enumerated with
-/// metadata afterwards, so callers that expose a function catalog must snapshot them here.
+/// DataFusion catalogs the scalar and aggregate functions itself (they surface in
+/// `information_schema.routines`, which `SHOW FUNCTIONS` reads). Its UDTF registry cannot be
+/// enumerated with metadata afterwards, so beacon's table functions are catalogued nowhere — a
+/// consumer that needs to know them (the embedded Python client, for `con.read_*`) carries its
+/// own list.
 pub fn register_functions(
     session_context: Arc<datafusion::prelude::SessionContext>,
     runtime_handle: Handle,
     file_formats: Vec<Arc<dyn FileFormatFactoryExt>>,
-) -> Vec<FunctionDoc> {
+) {
     geodatafusion::register(session_context.as_ref());
     register_util_udfs(session_context.as_ref());
     register_blue_cloud_udfs(session_context.as_ref());
@@ -51,9 +52,4 @@ pub fn register_functions(
             Arc::clone(table_function) as Arc<dyn TableFunctionImpl>,
         );
     }
-
-    table_functions
-        .iter()
-        .map(|f| FunctionDoc::from_beacon_table_function(f.as_ref()))
-        .collect()
 }

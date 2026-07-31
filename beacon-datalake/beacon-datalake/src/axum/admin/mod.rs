@@ -32,6 +32,9 @@ pub struct AdminApiDoc;
 ///
 /// The super-user `basic_auth` middleware is attached by `setup_router`, where the runtime is
 /// available as middleware state.
+// `table-config` is retired but still routed, so registering it means naming a
+// deprecated handler on purpose.
+#[allow(deprecated)]
 pub(crate) fn setup_admin_router() -> (Router<Arc<DataLake>>, utoipa::openapi::OpenApi) {
     let (admin_router, admin_api) = OpenApiRouter::with_openapi(AdminApiDoc::openapi())
         .routes(routes!(check::check))

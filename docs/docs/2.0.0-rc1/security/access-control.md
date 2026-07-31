@@ -55,6 +55,27 @@ BEACON_AUTH_ENFORCE=true
 Only **reads** (table and file scans) are subject to grant evaluation. All writes
 and DDL/DML are gated separately and always require the super-user.
 
+### Metadata schemas are the super-user's
+
+Two schemas describe the instance rather than hold user data, and reading either
+requires the super-user — **always**, whatever `BEACON_AUTH_ENFORCE` is set to:
+
+| Schema | What it exposes |
+| --- | --- |
+| `information_schema` | Every catalog, schema, table and column name in the instance |
+| `beacon.system` | The auth directory (`users`, `roles`) and `query_metrics` — who ran every query, when it finished, and its text and plans, kept across restarts |
+
+So does the internal `__beacon_*` table family. A non-super principal that reads
+one gets `permission denied`, including through `SHOW TABLES` (which DataFusion
+rewrites onto `information_schema.tables`).
+
+Catalog listings are built for them instead. `GET /api/tables`,
+`GET /api/catalogs`, Flight SQL's metadata commands and the MCP `list_tables`
+tool all enumerate the catalog as the engine and return only what the caller is
+entitled to see: no metadata schemas, no internal tables, and — with enforcement
+on — only the tables their roles grant `SELECT` on. What a principal is shown is
+what they could go on to read.
+
 ## Roles, privileges and targets
 
 A **role** holds a set of **grant** and **deny** rules. A rule is a *privilege*

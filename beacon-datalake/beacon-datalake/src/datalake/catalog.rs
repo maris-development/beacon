@@ -1,63 +1,77 @@
 //! Catalog reads, expressed as SQL and mapped back to the API's view types.
 //!
 //! Each function here replaces a typed accessor that used to live on `Runtime`.
-//! They all run as the calling identity, so catalog reads are authorized exactly
-//! like any other query rather than bypassing authorization entirely.
+//! They run as the calling identity, so catalog reads are authorized exactly like
+//! any other query rather than bypassing authorization entirely.
+//!
+//! The one thing a caller cannot ask for themselves is the catalog listing:
+//! `information_schema` is the super-user's alone, so the enumeration goes
+//! through [`Runtime::visible_tables`](beacon_core::runtime::Runtime::visible_tables),
+//! which reads it as the engine and returns the rows that identity is entitled to
+//! see — as Arrow, which this module translates like any other result.
 
 use std::sync::Arc;
 
-use beacon_core::api::{DatasetInfo, SchemaView};
+use crate::api::DatasetInfo;
 use beacon_core::extensions::TableExtensions;
 use beacon_core::AuthIdentity;
 use serde_json::Value;
 
-use super::sql::{query_rows, quote_ident, quote_literal, str_field};
+use super::sql::{query_rows, quote_ident, quote_literal, rows_from_batches, str_field};
 use super::DataLake;
 
-/// The tables registered in beacon's own schema, sorted.
+/// The tables `identity` may see in beacon's own schema, sorted.
 pub(crate) async fn list_table_names(
     lake: &Arc<DataLake>,
     identity: AuthIdentity,
 ) -> anyhow::Result<Vec<String>> {
-    let rows = query_rows(
-        lake,
-        "SELECT table_name FROM information_schema.tables \
-         WHERE table_catalog = 'beacon' AND table_schema = 'public' \
-         ORDER BY table_name",
-        identity,
-    )
-    .await?;
+    let (catalog, schema) = default_catalog_and_schema(lake);
 
-    Ok(rows
-        .iter()
-        .map(|row| str_field(row, "table_name").to_string())
+    Ok(list_catalog_tables(lake, identity)
+        .await?
+        .into_iter()
+        .filter(|entry| entry.catalog == catalog && entry.schema == schema)
+        .map(|entry| entry.table)
         .filter(|name| !name.is_empty())
         .collect())
 }
 
-/// A table's schema as a [`SchemaView`], or `None` when it is not registered.
+/// A [`TableReference`](datafusion::sql::TableReference) for `table`, qualified
+/// by `schema` and `catalog` when the caller named them.
+///
+/// The parts are passed to the catalog as-is rather than being interpolated into
+/// a SQL string, so they need no quoting and cannot be re-parsed. A catalog
+/// without a schema cannot be expressed as a reference, so it is ignored.
+pub(crate) fn table_reference(
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+) -> datafusion::sql::TableReference {
+    use datafusion::sql::TableReference;
+    match (catalog, schema) {
+        (Some(catalog), Some(schema)) => {
+            TableReference::full(catalog.to_string(), schema.to_string(), table.to_string())
+        }
+        (None, Some(schema)) => TableReference::partial(schema.to_string(), table.to_string()),
+        _ => TableReference::bare(table.to_string()),
+    }
+}
+
+/// A table's Arrow schema, or `None` when it is not registered.
 ///
 /// Uses a zero-row scan (`SELECT * FROM t LIMIT 0`) rather than
 /// `information_schema.columns`: tables in the persistent schema provider load
 /// their schema lazily, so `information_schema.columns` can be empty for a table
 /// that is nonetheless listed in `information_schema.tables`. The scan is the
 /// same reliable source [`table_arrow_schema`] (Flight SQL) and
-/// [`dataset_schema_view`] use.
-pub(crate) async fn table_schema_view(
+/// [`dataset_schema`] use.
+pub(crate) async fn table_schema(
     lake: &Arc<DataLake>,
-    table: &str,
+    table: impl Into<datafusion::sql::TableReference>,
     identity: AuthIdentity,
-) -> anyhow::Result<Option<SchemaView>> {
-    // A `TableReference`, not an interpolated SQL string — the name is passed to
-    // the catalog as-is, so it needs no quoting and cannot be re-parsed.
-    match table_arrow_schema(
-        lake,
-        datafusion::sql::TableReference::bare(table.to_string()),
-        identity,
-    )
-    .await
-    {
-        Ok(schema) => Ok(Some(SchemaView::from(schema.as_ref()))),
+) -> anyhow::Result<Option<arrow::datatypes::SchemaRef>> {
+    match table_arrow_schema(lake, table, identity).await {
+        Ok(schema) => Ok(Some(schema)),
         // A table that does not resolve surfaces as a planning error; the API
         // contract for that is `None` (→ 404), not a 500.
         Err(_) => Ok(None),
@@ -87,6 +101,39 @@ pub(crate) async fn table_extensions(
     Ok(serde_json::from_str(document).unwrap_or_default())
 }
 
+/// One entry of the catalog listing: a table and where it lives.
+pub(crate) struct QualifiedTable {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    /// `BASE TABLE`, `VIEW`, … as `information_schema` reports it.
+    pub table_type: String,
+}
+
+/// Every table `identity` is entitled to see, across all catalogs and schemas,
+/// sorted by catalog, then schema, then table.
+///
+/// For the super-user that is the whole namespace — beacon's `public` and
+/// `system` schemas, `information_schema`, and any attached remote catalog. For
+/// anyone else it is the tables their roles grant `Select` on, with beacon's
+/// metadata schemas and internal tables omitted entirely.
+pub(crate) async fn list_catalog_tables(
+    lake: &Arc<DataLake>,
+    identity: AuthIdentity,
+) -> anyhow::Result<Vec<QualifiedTable>> {
+    let batches = lake.runtime().visible_tables(&identity).await?;
+
+    Ok(rows_from_batches(&batches)?
+        .iter()
+        .map(|row| QualifiedTable {
+            catalog: str_field(row, "table_catalog").to_string(),
+            schema: str_field(row, "table_schema").to_string(),
+            table: str_field(row, "table_name").to_string(),
+            table_type: str_field(row, "table_type").to_string(),
+        })
+        .collect())
+}
+
 /// The catalogs, schemas, and tables visible to `identity`, as
 /// `(catalog, schema, table)` triples — what Flight SQL's metadata endpoints
 /// enumerate.
@@ -94,24 +141,17 @@ pub(crate) async fn list_qualified_tables(
     lake: &Arc<DataLake>,
     identity: AuthIdentity,
 ) -> anyhow::Result<Vec<(String, String, String)>> {
-    let rows = query_rows(
-        lake,
-        "SELECT table_catalog, table_schema, table_name FROM information_schema.tables \
-         ORDER BY table_catalog, table_schema, table_name",
-        identity,
-    )
-    .await?;
-
-    Ok(rows
-        .iter()
-        .map(|row| {
-            (
-                str_field(row, "table_catalog").to_string(),
-                str_field(row, "table_schema").to_string(),
-                str_field(row, "table_name").to_string(),
-            )
-        })
+    Ok(list_catalog_tables(lake, identity)
+        .await?
+        .into_iter()
+        .map(|entry| (entry.catalog, entry.schema, entry.table))
         .collect())
+}
+
+/// The catalog and schema an unqualified table name resolves against, read from
+/// the session's own settings rather than assumed.
+pub(crate) fn default_catalog_and_schema(lake: &Arc<DataLake>) -> (String, String) {
+    lake.runtime().default_catalog_and_schema()
 }
 
 /// A table's true Arrow schema, taken from its table provider.
@@ -195,11 +235,11 @@ fn read_function_for_extension(ext: &str) -> Option<&'static str> {
 /// Arrow schema, the same trick [`table_arrow_schema`] uses for tables. The
 /// reader is chosen from the file extension (there is no format-agnostic
 /// `read_*` function).
-pub(crate) async fn dataset_schema_view(
+pub(crate) async fn dataset_schema(
     lake: &Arc<DataLake>,
     file: &str,
     identity: AuthIdentity,
-) -> anyhow::Result<SchemaView> {
+) -> anyhow::Result<arrow::datatypes::SchemaRef> {
     let ext = std::path::Path::new(file)
         .extension()
         .and_then(|e| e.to_str())
@@ -218,8 +258,7 @@ pub(crate) async fn dataset_schema_view(
             identity,
         )
         .await?;
-    let schema = result.into_record_stream()?.schema();
-    Ok(SchemaView::from(schema.as_ref()))
+    Ok(result.into_record_stream()?.schema())
 }
 
 /// The table a JSON query without a `from` resolves against. Configuration, not

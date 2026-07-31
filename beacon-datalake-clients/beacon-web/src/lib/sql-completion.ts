@@ -1,40 +1,44 @@
+/**
+ * What the SQL editor completes, and where it comes from.
+ *
+ * The suggestions are the runtime's live metadata:
+ * - table names, including the `catalog.schema.table` path of every catalog and
+ *   schema (from `catalogs`), so tables outside the default schema —
+ *   `beacon.system`, `information_schema`, attached remotes — are reachable too,
+ * - scalar, aggregate, and window functions (from `functions`), inserted with a
+ *   `(` and documented with their signature, description, and parameters. Table
+ *   functions (`read_parquet`, …) are absent: DataFusion does not catalog UDTFs,
+ *   so the server has no list to serve,
+ * - SQL keywords.
+ *
+ * **Not** column names. A beacon table can carry 100K+ columns — an
+ * N-dimensional dataset flattened into one — so completing them would mean
+ * downloading schemas the browser cannot afford. Columns are browsed instead:
+ * expand a table in the data panel, or open it on the Tables page.
+ */
+
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { sql, type SQLNamespace } from "@codemirror/lang-sql";
-import type { Extension } from "@codemirror/state";
-import type {
-  Completion,
-  CompletionContext,
-  CompletionResult,
-} from "@codemirror/autocomplete";
 
 import { useBeacon } from "@/lib/beacon-context";
+import { isDefaultSchema, sqlName, useCatalogTree } from "@/lib/catalog";
 
-/** Stable empty-extension identity (a fresh `[]` each render reconfigures CodeMirror). */
-const NO_EXTENSIONS: Extension[] = [];
-
-/**
- * Max column completions to build per table. A wide table (we've seen 100K+
- * columns) would otherwise allocate that many `Completion` objects and feed them
- * all to `sql({ schema })` synchronously on the main thread — enough to hang the
- * renderer. Beyond this many columns the dropdown is unusable to a human anyway,
- * so we take the first N; the table name itself still completes.
- */
-const MAX_COMPLETION_COLUMNS_PER_TABLE = 100;
-
-/** Shape of one entry from `GET /api/tables-with-schema`. */
-interface TableWithSchema {
-  table_name: string;
-  columns: { name: string; data_type?: string; nullable?: boolean }[];
-}
-
-/** Parsed function metadata used to build completions and their doc tooltips. */
-interface FnMeta {
+/** Parsed function metadata used to build completions and their documentation. */
+export interface FnMeta {
   name: string;
   description?: string;
   returnType?: string;
   params: { name: string; dataType?: string; description?: string }[];
 }
+
+/** Everything the editor's completion provider offers. */
+export interface SqlMetadata {
+  /** Table names as they would be written in SQL (qualified when they must be). */
+  tables: string[];
+  functions: FnMeta[];
+}
+
+export const EMPTY_METADATA: SqlMetadata = { tables: [], functions: [] };
 
 /** Pull a function name out of a metadata object (the API isn't uniform). */
 function fnName(o: Record<string, unknown>): string | undefined {
@@ -43,11 +47,11 @@ function fnName(o: Record<string, unknown>): string | undefined {
 }
 
 /** True for the API's placeholder text, which we don't want to render as docs. */
-function isPlaceholder(s: string | undefined): boolean {
+export function isPlaceholder(s: string | undefined): boolean {
   return !s || /^No (documentation|description) available$/i.test(s);
 }
 
-/** Parse a raw `/api/functions` (or table-functions) entry into {@link FnMeta}. */
+/** Parse a raw `/api/functions` entry into {@link FnMeta}. */
 function parseFn(o: Record<string, unknown>): FnMeta | null {
   const name = fnName(o);
   if (!name) return null;
@@ -64,140 +68,76 @@ function parseFn(o: Record<string, unknown>): FnMeta | null {
   };
 }
 
-/** Build a documentation tooltip (signature + description + params) for a function. */
-function renderFnDoc(fn: FnMeta): HTMLElement {
-  const dom = document.createElement("div");
-  dom.style.maxWidth = "32rem";
-
-  const paramSig = fn.params
+/** `name(a: T, b: U) → R`, the signature line of a function's documentation. */
+export function fnSignature(fn: FnMeta): string {
+  const params = fn.params
     .map((p) => (p.dataType ? `${p.name}: ${p.dataType}` : p.name))
     .join(", ");
-  const sig = document.createElement("div");
-  sig.style.fontFamily = "monospace";
-  sig.style.fontWeight = "600";
-  sig.textContent = `${fn.name}(${paramSig})${fn.returnType ? ` → ${fn.returnType}` : ""}`;
-  dom.appendChild(sig);
+  return `${fn.name}(${params})${fn.returnType ? ` → ${fn.returnType}` : ""}`;
+}
 
-  if (!isPlaceholder(fn.description)) {
-    const desc = document.createElement("div");
-    desc.style.marginTop = "4px";
-    desc.textContent = fn.description as string;
-    dom.appendChild(desc);
-  }
-
+/** A function's documentation as markdown, for the suggestion's detail pane. */
+export function fnDocumentation(fn: FnMeta): string {
+  const lines = [`\`\`\`\n${fnSignature(fn)}\n\`\`\``];
+  if (!isPlaceholder(fn.description)) lines.push(fn.description as string);
   const documented = fn.params.filter((p) => p.name && !isPlaceholder(p.description));
   if (documented.length > 0) {
-    const ul = document.createElement("ul");
-    ul.style.margin = "6px 0 0";
-    ul.style.paddingLeft = "1.1rem";
-    for (const p of documented) {
-      const li = document.createElement("li");
-      const code = document.createElement("code");
-      code.textContent = p.name;
-      li.appendChild(code);
-      li.appendChild(document.createTextNode(` — ${p.description}`));
-      ul.appendChild(li);
-    }
-    dom.appendChild(ul);
+    lines.push(documented.map((p) => `- \`${p.name}\` — ${p.description}`).join("\n"));
   }
-  return dom;
+  return lines.join("\n\n");
 }
 
 /**
- * CodeMirror SQL completion fed by the runtime's live metadata:
- * - table names and their columns (from `tables-with-schema`) — including
- *   `table.column` / `alias.column` completion, with each column's data type,
- * - scalar/aggregate and table-valued function names (inserted with a `(`), each
- *   with a documentation tooltip (signature, description, parameters),
- * - SQL keywords (provided by `@codemirror/lang-sql` out of the box).
+ * Loads the metadata the completion provider offers.
  *
- * Returns a CodeMirror extension that updates as the metadata loads.
+ * Both sources are small and cached: the catalog tree is names only, and the
+ * function catalog is a few hundred entries fetched once per session.
  */
-export function useSqlCompletion(enabled = true) {
+export function useSqlMetadata(enabled = true): SqlMetadata {
   const beacon = useBeacon();
-
-  const tablesQuery = useQuery({
-    queryKey: ["tables-with-schema"],
-    queryFn: () => beacon.tablesWithSchema<TableWithSchema[]>(),
-    staleTime: 60_000,
-    enabled,
-  });
+  const { tree } = useCatalogTree(enabled);
 
   const fnQuery = useQuery({
     queryKey: ["sql-function-docs"],
     queryFn: async () => {
-      const [scalar, table] = await Promise.all([
-        beacon.functions<Record<string, unknown>[]>(),
-        beacon.tableFunctions<Record<string, unknown>[]>(),
-      ]);
-      const parse = (arr: Record<string, unknown>[]) => {
-        const seen = new Set<string>();
-        const out: FnMeta[] = [];
-        for (const o of arr) {
-          const fn = parseFn(o);
-          if (!fn || seen.has(fn.name)) continue;
-          seen.add(fn.name);
-          out.push(fn);
-        }
-        return out.sort((a, b) => a.name.localeCompare(b.name));
-      };
-      return { scalar: parse(scalar), table: parse(table) };
+      const functions = await beacon.functions<Record<string, unknown>[]>();
+      const seen = new Set<string>();
+      const out: FnMeta[] = [];
+      for (const o of functions) {
+        const fn = parseFn(o);
+        if (!fn || seen.has(fn.name)) continue;
+        seen.add(fn.name);
+        out.push(fn);
+      }
+      return out.sort((a, b) => a.name.localeCompare(b.name));
     },
     staleTime: 60_000,
     enabled,
   });
 
   return React.useMemo(() => {
-    // When autocomplete is disabled we never fetched metadata; skip building the
-    // (potentially very large) completion schema entirely.
-    if (!enabled) return NO_EXTENSIONS;
-    // Build the table → columns namespace. Columns are Completion objects so the
-    // popup shows each column's data type (detail) and a small info tooltip.
-    const schema: SQLNamespace = {};
-    for (const t of tablesQuery.data ?? []) {
-      const named = (t.columns ?? []).filter((c) => c.name);
-      // Cap very wide tables so building completions can't lock up the renderer.
-      const cols =
-        named.length > MAX_COMPLETION_COLUMNS_PER_TABLE
-          ? named.slice(0, MAX_COMPLETION_COLUMNS_PER_TABLE)
-          : named;
-      (schema as Record<string, Completion[]>)[t.table_name] = cols.map((c) => ({
-        label: c.name,
-        type: "property",
-        detail: c.data_type,
-        info: c.data_type
-          ? `${t.table_name}.${c.name} — ${c.data_type}${c.nullable === false ? " (not null)" : ""}`
-          : undefined,
-      }));
-    }
-
-    // Function completions: insert `name(` and attach a doc tooltip. Scalar
-    // functions show their return type as detail; table functions are labelled.
-    const toOption = (f: FnMeta, detail: string | undefined): Completion => ({
-      label: f.name,
-      type: "function",
-      detail,
-      apply: `${f.name}(`,
-      info: () => renderFnDoc(f),
-    });
-    const fnOptions: Completion[] = [
-      ...(fnQuery.data?.scalar ?? []).map((f) => toOption(f, f.returnType)),
-      ...(fnQuery.data?.table ?? []).map((f) => toOption(f, "table function")),
-    ];
-
-    const lang = sql({ schema });
-    const fnSource = (ctx: CompletionContext): CompletionResult | null => {
-      if (fnOptions.length === 0) return null;
-      const word = ctx.matchBefore(/\w+/);
-      if (!word || (word.from === word.to && !ctx.explicit)) return null;
-      // Don't suggest functions in member-access position (after `table.`/`alias.`),
-      // where only the resolved table's columns — handled by the language's own
-      // source, including FROM-clause alias resolution — should appear.
-      if (word.from > 0 && ctx.state.sliceDoc(word.from - 1, word.from) === ".") return null;
-      return { from: word.from, options: fnOptions, validFor: /^\w*$/ };
-    };
-
-    // Merge our function source with the language's built-in (tables/columns/keywords).
-    return [lang, lang.language.data.of({ autocomplete: fnSource })];
-  }, [enabled, tablesQuery.data, fnQuery.data]);
+    if (!enabled) return EMPTY_METADATA;
+    // A table in the default schema completes bare; anything else completes as
+    // the qualified name that would actually resolve.
+    const tables = tree.tables.map((table) =>
+      isDefaultSchema(table, tree.defaults) ? table.name : sqlName(table, tree.defaults),
+    );
+    return { tables, functions: fnQuery.data ?? [] };
+  }, [enabled, tree, fnQuery.data]);
 }
+
+/**
+ * The keywords offered alongside the metadata. Monaco's SQL mode is a tokenizer
+ * only — it highlights keywords but suggests nothing — so the list lives here.
+ */
+export const SQL_KEYWORDS = [
+  "SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "OFFSET",
+  "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "CROSS JOIN", "ON", "USING",
+  "AS", "AND", "OR", "NOT", "IN", "IS NULL", "IS NOT NULL", "BETWEEN", "LIKE", "ILIKE",
+  "CASE", "WHEN", "THEN", "ELSE", "END", "DISTINCT", "UNION", "UNION ALL",
+  "INTERSECT", "EXCEPT", "WITH", "ASC", "DESC", "NULLS FIRST", "NULLS LAST",
+  "CREATE TABLE", "CREATE VIEW", "CREATE MATERIALIZED VIEW", "CREATE EXTERNAL TABLE",
+  "STORED AS", "LOCATION", "OPTIONS", "INSERT INTO", "VALUES", "UPDATE", "SET",
+  "DELETE FROM", "DROP TABLE", "ALTER TABLE", "REFRESH", "EXPLAIN", "ANALYZE",
+  "SHOW TABLES", "SHOW EXTENSIONS FOR", "DESCRIBE",
+];

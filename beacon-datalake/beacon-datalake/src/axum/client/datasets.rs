@@ -7,7 +7,7 @@ use ::axum::{
     http::StatusCode,
     Extension, Json,
 };
-use beacon_core::api::{DatasetInfo, SchemaView};
+use crate::api::DatasetInfo;
 use beacon_core::AuthIdentity;
 use crate::datalake::{catalog, DataLake};
 use utoipa::{IntoParams, ToSchema};
@@ -116,7 +116,7 @@ pub struct ListDatasetSchemaQuery {
     path = "/api/dataset-schema",
     params(ListDatasetSchemaQuery),
     responses(
-        (status = 200, description = "The Arrow schema produced when reading the dataset", body = SchemaView),
+        (status = 200, description = "The Arrow schema produced when reading the dataset", body = Object),
         (status = 500, description = "Failed to read the dataset schema"),
     ),
     security(
@@ -129,8 +129,8 @@ pub(crate) async fn list_dataset_schema(
     State(state): State<Arc<DataLake>>,
     Extension(identity): Extension<AuthIdentity>,
     Query(query): Query<ListDatasetSchemaQuery>,
-) -> Result<Json<SchemaView>, (StatusCode, String)> {
-    let result = catalog::dataset_schema_view(&state, &query.file, identity).await;
+) -> Result<Json<arrow::datatypes::SchemaRef>, (StatusCode, String)> {
+    let result = catalog::dataset_schema(&state, &query.file, identity).await;
 
     match result {
         Ok(schema) => Ok(Json(schema)),

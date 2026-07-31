@@ -53,7 +53,7 @@ use crate::{
     runtime::Runtime,
     settings::{SqlSettings, SqlStreamCoalesceSettings},
     statement_plan::{new_session_cell, BeaconQueryPlanner, CoalesceSqlStream, SessionCell},
-    system_schema::{QueryMetricsMap, SystemSchemaProvider, SYSTEM_SCHEMA_NAME},
+    system_schema::{SystemSchemaProvider, SYSTEM_SCHEMA_NAME},
 };
 
 #[derive(Default)]
@@ -292,8 +292,13 @@ impl RuntimeBuilder {
         // Neither depends on the catalog: both read only the session config
         // (`ListingFactory`, the `FileFormatRegistry` handle) set up with the session.
         let file_formats = register_file_formats(&self, &session_ctx)?;
-        // Register UDFs and Table Functions, returning their docs (only for udtfs) for cataloging. The functions are registered on the session context.
-        let table_function_docs = register_functions(
+        // Register UDFs and table functions on the session context. The docs it
+        // returns are dropped: DataFusion catalogs the scalar/aggregate functions
+        // itself in `information_schema.routines` (what `SHOW FUNCTIONS`, and so
+        // `Runtime::function_docs`, reads), and nothing consumes a beacon-side
+        // catalog of the table functions — the embedded Python client, the last
+        // consumer, carries its own list of them.
+        register_functions(
             session_ctx.clone(),
             runtime_handle.clone(),
             file_formats.clone(),
@@ -315,21 +320,18 @@ impl RuntimeBuilder {
         auth_context.hydrate().await?;
         bootstrap_auth(&self, &auth_context).await?;
 
-        // The metrics map is created here rather than in the `Runtime` literal below
-        // because the `beacon.system.query_metrics` table reads the same handle: the
-        // table observes what `run_query` records.
-        let query_metrics: QueryMetricsMap = Arc::new(Mutex::new(HashMap::new()));
-
-        // `beacon.system` — the functions, table functions and query metrics as SQL
-        // tables. Registered after `register_functions` so the table-function docs it
-        // returns are available.
-        register_system_schema(
-            &session_ctx,
+        // Query metrics land in an internal managed table, so they survive a restart
+        // and are queryable like anything else. Created here — after the schema
+        // provider is installed, so the managed engine can build it — and exposed as
+        // `beacon.system.query_metrics`.
+        let query_metrics = Arc::new(crate::query_metrics_store::QueryMetricsStore::new(
             session_cell.clone(),
-            table_function_docs,
-            query_metrics.clone(),
-            auth_context.clone(),
-        )?;
+            self.read_only,
+        ));
+        query_metrics.ensure_table().await?;
+
+        // `beacon.system` — the auth directory and query metrics as SQL tables.
+        register_system_schema(&session_ctx, session_cell.clone(), auth_context.clone())?;
 
         init_crawler_manager(&self, &session_ctx, session_cell, file_formats).await?;
 
@@ -582,21 +584,16 @@ async fn load_persisted_secrets_into_store(session_ctx: &Arc<SessionContext>) {
     }
 }
 
-/// Registers the read-only `beacon.system` schema (functions, table functions,
-/// query metrics) so runtime introspection is reachable through SQL.
+/// Registers the read-only `beacon.system` schema (users, roles, query metrics)
+/// so runtime introspection is reachable through SQL. Takes the session cell
+/// rather than the session: `query_metrics` resolves to its managed table on
+/// each access, and a strong handle here would leak the session.
 fn register_system_schema(
     session_ctx: &Arc<SessionContext>,
     session_cell: SessionCell,
-    table_function_docs: Vec<beacon_functions::function_doc::FunctionDoc>,
-    query_metrics: QueryMetricsMap,
     auth: Arc<AuthContext>,
 ) -> anyhow::Result<()> {
-    let provider = Arc::new(SystemSchemaProvider::new(
-        session_cell,
-        table_function_docs,
-        query_metrics,
-        auth,
-    ));
+    let provider = Arc::new(SystemSchemaProvider::new(session_cell, auth));
 
     session_ctx
         .catalog("beacon")
