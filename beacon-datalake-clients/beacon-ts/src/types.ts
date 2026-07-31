@@ -144,7 +144,41 @@ export interface QueryMetricsView {
   input_bytes: number;
   result_num_rows: number;
   result_size_in_bytes: number;
+  /** The principal that ran the query (`anonymous` when none authenticated). */
+  username: string;
+  /** When the query finished, RFC 3339 in UTC. */
+  finished_at: string;
   [key: string]: unknown;
+}
+
+/** A table in a catalog listing (`GET /api/catalogs`). */
+export interface CatalogTable {
+  name: string;
+  /** `BASE TABLE`, `VIEW`, … as `information_schema` reports it. */
+  table_type: string;
+}
+
+/** A schema and its tables. */
+export interface CatalogSchema {
+  name: string;
+  tables: CatalogTable[];
+}
+
+/** A catalog and its schemas. */
+export interface Catalog {
+  name: string;
+  schemas: CatalogSchema[];
+}
+
+/**
+ * The full catalog tree (`GET /api/catalogs`): every catalog, schema, and table
+ * visible to the caller, plus the catalog and schema an unqualified table name
+ * resolves against.
+ */
+export interface CatalogsView {
+  default_catalog: string;
+  default_schema: string;
+  catalogs: Catalog[];
 }
 
 /** A registered crawler definition. Shape mirrors the admin crawler payload. */

@@ -7,9 +7,10 @@ use ::axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
+use crate::api::{QueryMetricsView, QueryRequest};
+use crate::datalake::sql::rows_from_batches;
 use crate::datalake::DataLake;
 use beacon_core::{
-    api::{QueryMetricsView, QueryRequest},
     query::Query,
     query_result::QueryOutputFile,
     AuthIdentity,
@@ -221,14 +222,37 @@ pub(crate) async fn query_metrics(
         )
     })?;
 
-    let metrics = state.runtime().get_query_metrics(query_id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json("Query ID not found".to_string()),
-        )
-    })?;
+    // The metrics live in a managed table, so this is a row read: an empty result
+    // means nothing was recorded under that id.
+    let batches = state
+        .runtime()
+        .get_query_metrics(query_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%query_id, ?error, "failed to read query metrics");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json("Failed to read query metrics".to_string()),
+            )
+        })?;
+    let row = rows_from_batches(&batches)
+        .map_err(|error| {
+            tracing::error!(%query_id, ?error, "failed to decode query metrics");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json("Failed to read query metrics".to_string()),
+            )
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json("Query ID not found".to_string()),
+            )
+        })?;
 
-    Ok(Json(metrics))
+    Ok(Json(QueryMetricsView::from_row(&row)))
 }
 
 /// Returns a JSON-encoded explanation of the plan the runtime would produce for
@@ -357,11 +381,15 @@ pub(crate) async fn available_columns(
     State(state): State<Arc<DataLake>>,
     Extension(identity): Extension<AuthIdentity>,
 ) -> Json<Vec<String>> {
-    let table = crate::datalake::catalog::default_table(&state);
-    let columns = crate::datalake::catalog::table_schema_view(&state, &table, identity)
+    let table = crate::datalake::catalog::table_reference(
+        None,
+        None,
+        &crate::datalake::catalog::default_table(&state),
+    );
+    let columns = crate::datalake::catalog::table_schema(&state, table, identity)
         .await
         .unwrap_or(None)
-        .map(|schema| schema.fields.iter().map(|f| f.name.clone()).collect())
+        .map(|schema| schema.fields().iter().map(|f| f.name().clone()).collect())
         .unwrap_or_default();
     Json(columns)
 }

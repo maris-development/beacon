@@ -43,11 +43,9 @@ GET /api/table-schema?table_name=default
 
 Table functions let you query files without registering a table first. Paths are resolved relative to Beacon's dataset root and support glob patterns.
 
-List available table functions:
-
-```http
-GET /api/table-functions
-```
+Every table function and its signature is in the
+[table function reference](/docs/2.0.0-rc1/beacondb/sql/table-functions) —
+`GET /api/table-functions` is deprecated and returns an empty list.
 
 ### NetCDF
 

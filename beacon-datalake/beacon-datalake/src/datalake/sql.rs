@@ -21,8 +21,16 @@ pub(crate) async fn query_rows(
     sql: impl Into<String>,
     identity: AuthIdentity,
 ) -> anyhow::Result<Vec<Value>> {
-    let batches = collect(lake, sql, identity).await?;
-    Ok(serde_json::from_str(&batches_to_json(&batches)?)?)
+    rows_from_batches(&collect(lake, sql, identity).await?)
+}
+
+/// Record batches as JSON objects, keyed by column.
+///
+/// The same translation [`query_rows`] applies, for the batches the runtime hands
+/// back from a read it had to make itself (the catalog listing, the function
+/// catalog) rather than from a query run as the caller.
+pub(crate) fn rows_from_batches(batches: &[RecordBatch]) -> anyhow::Result<Vec<Value>> {
+    Ok(serde_json::from_str(&batches_to_json(batches)?)?)
 }
 
 /// Run `sql` as `identity`, discarding any rows. For statements executed for

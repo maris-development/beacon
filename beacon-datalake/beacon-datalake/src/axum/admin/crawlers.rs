@@ -7,11 +7,10 @@ use ::axum::{
     http::StatusCode,
     Extension, Json,
 };
-use beacon_core::api::{
-    CrawlReportView, CrawlerView, CreateCrawlerRequest, TableNamingView,
-};
 use beacon_core::AuthIdentity;
 use serde_json::Value;
+
+use crate::api::{CrawlReportView, CrawlerView, CreateCrawlerRequest, TableNamingView};
 use crate::datalake::{
     sql::{query_rows, quote_ident, quote_literal, str_field},
     DataLake,

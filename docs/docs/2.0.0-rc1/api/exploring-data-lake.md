@@ -61,7 +61,23 @@ To infer a merged schema across multiple files using a glob:
 GET /api/dataset-schema?file=argo/**/*.nc
 ```
 
-The response contains an Arrow schema JSON. Column names are under `.fields[].name`.
+The response is the Arrow schema, serialized as Arrow serializes it:
+
+```json
+{
+  "fields": [
+    { "name": "TEMP", "data_type": "Float64", "nullable": true, "metadata": {} },
+    { "name": "TIME", "data_type": { "Timestamp": ["Microsecond", null] }, "nullable": true, "metadata": {} }
+  ],
+  "metadata": {}
+}
+```
+
+Column names are under `.fields[].name`. A simple `data_type` is a string; a
+parameterized one is a single-key object carrying its arguments, so a client can
+reconstruct the exact type rather than parse a display string. (Arrow also emits
+`dict_id`/`dict_is_ordered` per field; they are dictionary-encoding internals and
+can be ignored.)
 
 ## Tables
 
@@ -79,10 +95,53 @@ Beacon uses this table when a query omits `from`:
 GET /api/default-table
 ```
 
+### Catalogs
+
+`GET /api/tables` lists only the tables in the default schema
+(`beacon.public`). To browse the whole namespace — for the super-user that
+includes beacon's `system` schema, `information_schema`, and any catalog added
+with `ATTACH` — ask for the catalog tree:
+
+```http
+GET /api/catalogs
+```
+
+```json
+{
+  "default_catalog": "beacon",
+  "default_schema": "public",
+  "catalogs": [
+    {
+      "name": "beacon",
+      "schemas": [
+        { "name": "public", "tables": [{ "name": "default", "table_type": "BASE TABLE" }] },
+        { "name": "system", "tables": [{ "name": "query_metrics", "table_type": "BASE TABLE" }] }
+      ]
+    }
+  ]
+}
+```
+
+Tables outside `default_catalog`.`default_schema` need their qualified name in
+SQL (`beacon.system.query_metrics`).
+
+Both this and `/api/tables` answer per caller: the metadata schemas
+(`information_schema`, `beacon.system`) are the super-user's alone, and everyone
+else is listed only the tables their roles grant `SELECT` on — so a listing shows
+exactly what that caller could go on to read. See
+[Access control](/docs/2.0.0-rc1/security/access-control).
+
 ### Table schema
 
 ```http
 GET /api/table-schema?table_name=default
+```
+
+The table is resolved in the default catalog and schema. Add `catalog` and
+`schema` for one that lives elsewhere:
+
+```http
+GET /api/table-schema?table_name=query_metrics&catalog=beacon&schema=system
 ```
 
 ### Default table schema
@@ -110,31 +169,43 @@ GET /api/tables-with-schema
 
 ### Table configuration
 
-Shows how a table was constructed, paths, file format, statistics settings, etc.
-This endpoint is **admin-only** (see [Admin](#admin)) and requires HTTP Basic
-auth; unauthenticated requests get `401`. Sensitive options such as SQL-database
-passwords are redacted (the `secret` field is returned as `***`).
+::: warning Deprecated — no longer supported
+`GET /api/admin/table-config` no longer returns a table's configuration. A
+table's stored definition is how Beacon rebuilds it — credentials and internal
+option keys included — which is engine bookkeeping rather than an API contract,
+so it is not served over HTTP at all.
 
-```http
-GET /api/admin/table-config?table_name=default
-Authorization: Basic <base64(username:password)>
+The endpoint stays routed (still admin-only) and answers `200` with a notice:
+
+```json
+{ "message": "Table configuration is no longer supported. ..." }
 ```
+
+Use `GET /api/table-schema` for a table's columns, and
+`SHOW EXTENSIONS FOR <table>` through `/api/query` for its extensions.
+:::
 
 ## Functions
 
-List all registered DataFusion scalar functions:
+List the scalar, aggregate, and window functions available in queries, with their
+signatures and descriptions:
 
 ```http
 GET /api/functions
 ```
 
-List all registered Beacon table functions (e.g. `read_netcdf`, `read_zarr`):
+This is DataFusion's own function catalog (the same one `SHOW FUNCTIONS` reads).
+Table functions (`read_netcdf`, `read_zarr`, …) are **not** in it — DataFusion
+does not catalog table-valued functions.
 
-```http
-GET /api/table-functions
-```
+::: info Deprecated
+`GET /api/table-functions` is still routed for clients that call it, but nothing
+catalogs table-valued functions, so it always returns an empty list.
+:::
 
-See the [Function Reference](/docs/2.0.0-rc1/beacondb/sql/function-reference) for descriptions and signatures.
+See the [table function reference](/docs/2.0.0-rc1/beacondb/sql/table-functions)
+for every table function and its signature, and the
+[Function Reference](/docs/2.0.0-rc1/beacondb/sql/function-reference) for the rest.
 
 ## Table lifecycle
 
@@ -170,7 +241,7 @@ addition, these dedicated, JSON-typed admin endpoints are available:
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | `GET` | `/api/admin/check` | Connectivity check; returns `{ "is_admin": true }` |
-| `GET` | `/api/admin/table-config` | Inspect a table's storage format and configuration |
+| `GET` | `/api/admin/table-config` | **Deprecated** — answers a notice; table configuration is no longer served |
 | `POST` | `/api/admin/crawlers` | Define (or replace) a crawler |
 | `GET` | `/api/admin/crawlers` | List defined crawlers |
 | `GET` | `/api/admin/crawlers/{name}` | Get one crawler (or `404`) |
@@ -187,13 +258,6 @@ Check that your credentials are accepted:
 ```http
 GET /api/admin/check
 Authorization: Basic <base64(username:password)>
-```
-
-Inspect a table's storage format and configuration (sensitive options such as
-SQL-database passwords are returned as `***`):
-
-```http
-GET /api/admin/table-config?table_name=default
 ```
 
 Create a crawler (the structured equivalent of [`CREATE CRAWLER`](/docs/2.0.0-rc1/data-lake/crawlers)):

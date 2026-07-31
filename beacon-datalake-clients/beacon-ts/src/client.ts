@@ -12,6 +12,7 @@ import { Http, type ClientOptions } from "./http.js";
 import { QueryBuilder } from "./query-builder.js";
 import { responseByteStream } from "./stream.js";
 import type {
+  CatalogsView,
   From,
   Output,
   OutputFormat,
@@ -209,19 +210,55 @@ export class BeaconClient {
     return this.http.fetchJson<string[]>("GET", "/api/tables");
   }
 
-  /** Lists registered tables together with their Arrow schemas. */
+  /**
+   * Lists every catalog, schema, and table visible to the caller
+   * (`GET /api/catalogs`).
+   *
+   * Where {@link tables} covers only the default schema, this also covers
+   * beacon's `system` schema, `information_schema`, and any attached remote
+   * catalog.
+   */
+  catalogs(): Promise<CatalogsView> {
+    return this.http.fetchJson<CatalogsView>("GET", "/api/catalogs");
+  }
+
+  /**
+   * Lists registered tables together with their Arrow schemas.
+   *
+   * Returns *every* column of every table, so it is heavy on an instance with
+   * wide tables (a beacon table can carry 100K+ columns) — fetch one table's
+   * schema with {@link tableSchema} when that is all you need.
+   */
   tablesWithSchema<T = unknown[]>(): Promise<T> {
     return this.http.fetchJson<T>("GET", "/api/tables-with-schema");
   }
 
-  /** Gets the Arrow schema of a table (`GET /api/table-schema`). */
-  tableSchema<T = unknown>(tableName: string): Promise<T> {
-    return this.http.fetchJson<T>("GET", "/api/table-schema", { query: { table_name: tableName } });
+  /**
+   * Gets the Arrow schema of a table (`GET /api/table-schema`).
+   *
+   * The body is the Arrow schema as Arrow serializes it: `{ fields: [{ name,
+   * data_type, nullable, metadata }], metadata }`, where `data_type` is a string
+   * for a simple type and a single-key object for a parameterized one
+   * (`{ "Timestamp": ["Microsecond", null] }`).
+   *
+   * The table resolves in the default catalog and schema unless `in` names
+   * another one — pass `{ catalog, schema }` for a table outside it (e.g. one
+   * in `information_schema` or an attached remote catalog).
+   */
+  tableSchema<T = unknown>(
+    tableName: string,
+    in_: { catalog?: string; schema?: string } = {},
+  ): Promise<T> {
+    return this.http.fetchJson<T>("GET", "/api/table-schema", {
+      query: { table_name: tableName, catalog: in_.catalog, schema: in_.schema },
+    });
   }
 
   /**
-   * Gets a table's configuration (`GET /api/admin/table-config`). This is an
-   * admin-only endpoint, so the client must be configured with credentials.
+   * @deprecated Table configuration is no longer served: a table's stored
+   * definition is engine bookkeeping, not an API contract. The endpoint is still
+   * routed (admin-only) and answers `{ message }` explaining as much. Use
+   * `tableSchema()` for columns and `SHOW EXTENSIONS FOR <table>` for extensions.
    */
   tableConfig<T = unknown>(tableName: string): Promise<T> {
     return this.http.fetchJson<T>("GET", "/api/admin/table-config", {
@@ -248,7 +285,10 @@ export class BeaconClient {
     });
   }
 
-  /** Gets the schema of a single dataset file (`GET /api/dataset-schema`). */
+  /**
+   * Gets the schema of a single dataset file (`GET /api/dataset-schema`), in the
+   * same Arrow-native shape as {@link tableSchema}.
+   */
   datasetSchema<T = unknown>(file: string): Promise<T> {
     return this.http.fetchJson<T>("GET", "/api/dataset-schema", { query: { file } });
   }
@@ -260,14 +300,16 @@ export class BeaconClient {
 
   // -- functions & info -------------------------------------------------------
 
-  /** Lists available scalar/aggregate functions (`GET /api/functions`). */
+  /**
+   * Lists the scalar, aggregate, and window functions available in queries
+   * (`GET /api/functions`).
+   *
+   * Table-valued functions (`read_parquet`, `read_netcdf`, …) are not included:
+   * DataFusion does not catalog them, so the server has nothing to list them
+   * from. See the docs for the table-function reference.
+   */
   functions<T = unknown[]>(): Promise<T> {
     return this.http.fetchJson<T>("GET", "/api/functions");
-  }
-
-  /** Lists available table-valued functions (`GET /api/table-functions`). */
-  tableFunctions<T = unknown[]>(): Promise<T> {
-    return this.http.fetchJson<T>("GET", "/api/table-functions");
   }
 
   /** Returns runtime system information — version, host, resources (`GET /api/info`). */

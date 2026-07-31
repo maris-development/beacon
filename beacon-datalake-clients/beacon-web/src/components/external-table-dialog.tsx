@@ -127,6 +127,7 @@ export function ExternalTableDialog({
     mutationFn: () => beacon.admin.createExternalTable(payload),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["tables"] });
+      qc.invalidateQueries({ queryKey: ["catalogs"] });
       onCreated(name.trim());
       onOpenChange(false);
     },

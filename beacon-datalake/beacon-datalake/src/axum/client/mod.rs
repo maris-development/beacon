@@ -19,7 +19,7 @@ mod tables;
     (name = "query", description = "Execute and validate queries."),
     (name = "datasets", description = "Discover dataset files in the datasets store and inspect their schemas."),
     (name = "tables", description = "List registered tables and inspect their schemas."),
-    (name = "functions", description = "Browse the scalar, aggregate, and table-valued functions available in queries."),
+    (name = "functions", description = "Browse the scalar, aggregate, and window functions available in queries."),
     (name = "system", description = "Beacon runtime version and host information.")
 ))]
 pub struct ClientApiDoc;
@@ -42,6 +42,7 @@ pub(crate) fn setup_client_router() -> (Router<Arc<DataLake>>, utoipa::openapi::
         .routes(routes!(datasets::list_dataset_schema))
         .routes(routes!(datasets::total_datasets))
         .routes(routes!(tables::list_tables))
+        .routes(routes!(tables::list_catalogs))
         .routes(routes!(tables::list_tables_with_schema))
         .routes(routes!(tables::default_table))
         .routes(routes!(tables::list_table_schema))

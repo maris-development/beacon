@@ -52,9 +52,8 @@ con.sql("""
 con.read_csv("stations.csv"); con.read_zarr(...); con.read_delta(...); con.list_datasets()
 ```
 
-They resolve from the catalog (`beacon.system.table_functions`), so *any* table function Beacon
-registers is a method, `con.table_functions()` lists them, and `con.read(fn, *args)` is the general
-form.
+Every table function Beacon registers is a method, `con.table_functions()` lists them, and
+`con.read(fn, *args)` is the general form.
 
 **Reader options.** Pass format options positionally or by keyword (matched to the reader's declared
 parameters), plus a universal `columns=[...]` projection:
