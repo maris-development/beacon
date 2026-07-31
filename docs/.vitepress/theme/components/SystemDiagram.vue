@@ -12,7 +12,7 @@ const consumers = [
   { icon: 'notebook-text', name: 'Python & notebooks', sub: 'pandas, Polars, Arrow' },
   { icon: 'terminal', name: 'SQL clients', sub: 'DataGrip, DBeaver, JDBC' },
   { icon: 'chart-column', name: 'Dashboards & BI', sub: 'over HTTP or Flight SQL' },
-  { icon: 'bot', name: 'AI agents', sub: 'via the MCP server' },
+  { icon: 'package', name: 'Exports & pipelines', sub: 'Parquet, NetCDF, CSV, ODV' },
 ]
 </script>
 
@@ -47,7 +47,7 @@ const consumers = [
             <span>Access control</span>
             <span>Admin UI</span>
             <span>Crawlers</span>
-            <span>MCP</span>
+            <span>Exports</span>
           </div>
 
           <div class="sysd-db">

@@ -30,13 +30,13 @@ const products = [
     icon: 'server',
     name: 'Beacon Data Lake',
     lede: 'The same engine, as a service.',
-    body: 'The exact same engine behind an HTTP + Arrow Flight SQL service. Add a managed dataset store, crawlers, role-based access control, a web admin UI, MCP for AI agents, and client SDKs. One lakehouse for your whole team.',
+    body: 'The exact same engine behind an HTTP + Arrow Flight SQL service. Add a managed dataset store, crawlers, role-based access control, a web admin UI, and client SDKs. One lakehouse for your whole team.',
     cmd: 'docker pull ghcr.io/maris-development/beacon',
     points: [
       'HTTP + Arrow Flight SQL',
       'Role-based access control & admin UI',
       'Crawlers & managed dataset store',
-      'MCP server for AI agents',
+      'Export to Parquet, NetCDF, CSV & ODV',
     ],
     // Data Lake ships in the stable release, so point at it rather than the RC.
     link: withBase('/docs/1.8.0/getting-started'),
