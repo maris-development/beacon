@@ -20,6 +20,15 @@ crate-type = ["cdylib"]
 # `maturin develop` and local iteration. Requires `cmake` at build time.
 static-netcdf = ["beacon-core/static-netcdf"]
 
+# Build OpenSSL from source and link it statically, so the wheel carries no system libssl.
+# The MySQL/PostgreSQL federation drivers (datafusion-table-providers -> native-tls) need
+# OpenSSL, but only on Linux: native-tls uses SChannel on Windows and Security.framework on
+# macOS. The dependency below is therefore Linux-only, and this feature is a no-op elsewhere —
+# the release workflow can pass it unconditionally for every platform.
+# Enabled for the distributable wheels, off for `maturin develop` and local iteration (where a
+# system libssl-dev/openssl-devel is the faster path). Requires cmake, make and perl at build time.
+vendored-openssl = ["dep:openssl"]
+
 # Use jemalloc instead of the platform allocator. Query execution is dominated by
 # short-lived per-batch allocations across many threads (hash aggregation over
 # string columns especially), which the macOS system allocator handles poorly.
@@ -47,3 +56,11 @@ futures = { workspace = true }
 # Deserializes the `json_query()` dict (as JSON text) into beacon's `InnerQuery`.
 serde_json = { workspace = true }
 tokio = { workspace = true }
+
+# Never called from this crate. It exists so `vendored-openssl` can reach `openssl-sys`'s
+# `vendored` feature; cargo unifies features per package, so the transitive `native-tls` build
+# (MySQL/PostgreSQL federation) then compiles and statically links its own OpenSSL instead of
+# looking for one via pkg-config. Only Linux resolves openssl-sys at all, so the dependency is
+# declared for Linux alone — the manylinux containers ship no `openssl-devel`.
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"], optional = true }
