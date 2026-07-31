@@ -1,15 +1,20 @@
 //! The `beacon.system` schema: runtime introspection reachable through SQL.
 //!
-//! These tables replaced `Runtime::list_functions`, `Runtime::list_table_functions`
-//! and `Runtime::get_query_metrics` (and the HTTP routes over them), so the
-//! coverage here is what guarantees that information is still obtainable.
+//! These tables replaced `Runtime::get_query_metrics` (and the HTTP routes over
+//! it), so the coverage here is what guarantees that information is still
+//! obtainable. Functions are not among them: DataFusion's own catalog
+//! (`SHOW FUNCTIONS`) is the only one, read through `Runtime::show_functions`.
+//!
+//! `query_metrics` is the internal managed table `__beacon_query_metrics` under a
+//! public name, so the rows a query writes are durable — see
+//! `query_metrics_survive_a_restart`.
 
 mod common;
 
-use common::{runtime, scalar_i64, total_rows};
-use datafusion::arrow::array::{Array, StringArray, UInt64Array};
+use common::{restartable_runtime, runtime, scalar_i64, total_rows};
+use datafusion::arrow::array::{Array, AsArray, StringArray, UInt64Array};
 
-/// The three tables are registered and visible through the standard catalog.
+/// The tables are registered and visible through the standard catalog.
 #[tokio::test(flavor = "multi_thread")]
 async fn system_tables_are_listed_in_information_schema() {
     let rt = runtime("system-schema-listing").await;
@@ -37,76 +42,47 @@ async fn system_tables_are_listed_in_information_schema() {
 
     assert_eq!(
         names,
-        vec![
-            "functions",
-            "query_metrics",
-            "roles",
-            "table_functions",
-            "users"
-        ],
+        vec!["query_metrics", "roles", "users"],
         "the system schema should expose exactly these tables"
     );
 }
 
-/// `beacon.system.functions` lists the session's scalar functions with their docs.
+/// `Runtime::show_functions` reads DataFusion's own function catalog and hands
+/// back its rows as Arrow — one row per overload signature, which is what the
+/// transports shape into a per-name listing.
 #[tokio::test(flavor = "multi_thread")]
-async fn functions_table_lists_scalar_functions() {
+async fn show_functions_returns_the_function_catalog() {
     let rt = runtime("system-schema-functions").await;
 
-    let count = scalar_i64(
-        &rt.sql("SELECT count(*) FROM beacon.system.functions")
-            .await,
-    );
-    assert!(
-        count > 0,
-        "the functions table should list the registered scalar functions"
-    );
-
-    // A function every DataFusion session has, with its documented return type.
     let batches = rt
-        .sql(
-            "SELECT return_type, parameters FROM beacon.system.functions \
-             WHERE function_name = 'abs'",
-        )
-        .await;
-    assert_eq!(total_rows(&batches), 1, "`abs` should be listed once");
+        .runtime
+        .show_functions()
+        .await
+        .expect("the function catalog is readable");
 
-    // `parameters` is a JSON array, not an opaque debug string.
-    let parameters = batches[0]
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("parameters is Utf8")
-        .value(0);
-    serde_json::from_str::<serde_json::Value>(parameters)
-        .expect("parameters should be valid JSON")
-        .as_array()
-        .expect("parameters should be a JSON array");
-}
+    let mut names = Vec::new();
+    let mut described_abs = false;
+    for batch in &batches {
+        let column = |name: &str| {
+            batch
+                .column_by_name(name)
+                .and_then(|array| array.as_string_opt::<i32>())
+                .unwrap_or_else(|| panic!("SHOW FUNCTIONS should carry a `{name}` column"))
+        };
+        let (functions, descriptions) = (column("function_name"), column("description"));
+        for row in 0..batch.num_rows() {
+            let name = functions.value(row);
+            names.push(name.to_string());
+            if name == "abs" && !descriptions.is_null(row) {
+                described_abs = true;
+            }
+        }
+    }
 
-/// `beacon.system.table_functions` lists the table-valued functions — the listing
-/// that has no `information_schema` equivalent, which is why this table exists.
-#[tokio::test(flavor = "multi_thread")]
-async fn table_functions_table_lists_read_functions() {
-    let rt = runtime("system-schema-table-functions").await;
-
-    let count = scalar_i64(
-        &rt.sql(
-            "SELECT count(*) FROM beacon.system.table_functions \
-             WHERE function_name = 'read_parquet'",
-        )
-        .await,
-    );
-    assert_eq!(count, 1, "`read_parquet` should be listed once");
-
-    // Every row reports TABLE as its return type.
-    let non_table = scalar_i64(
-        &rt.sql(
-            "SELECT count(*) FROM beacon.system.table_functions WHERE return_type <> 'TABLE'",
-        )
-        .await,
-    );
-    assert_eq!(non_table, 0, "table functions should all return TABLE");
+    assert!(names.iter().any(|name| name == "abs"), "got: {names:?}");
+    assert!(described_abs, "`abs` carries its description");
+    // One row per overload signature: `abs` alone has several.
+    assert!(names.iter().filter(|name| *name == "abs").count() > 1);
 }
 
 /// A completed query is observable in `beacon.system.query_metrics`: its row
@@ -266,16 +242,19 @@ async fn auth_tables_expose_the_directory_to_the_super_user() {
     );
 }
 
-/// The auth tables are super-user-only *unconditionally* — this runtime has
-/// grant enforcement off, which is the default and the case where a gate that
-/// depended on enforcement would leak the directory.
+/// The whole schema — not just the auth tables — is super-user-only, and
+/// *unconditionally* so: this runtime has grant enforcement off, which is the
+/// default and the case where a gate that depended on enforcement would leak.
 #[tokio::test(flavor = "multi_thread")]
-async fn auth_tables_are_super_user_only_even_without_enforcement() {
+async fn system_schema_is_super_user_only_even_without_enforcement() {
     let rt = runtime("system-schema-auth-gate").await;
 
     for sql in [
         "SELECT * FROM beacon.system.users",
         "SELECT * FROM beacon.system.roles",
+        // The rest of the schema is no more readable: query_metrics carries the
+        // text and plans of what other users ran.
+        "SELECT count(*) FROM beacon.system.query_metrics",
         // Reached indirectly: the gate matches the scan, not the statement shape.
         "SELECT count(*) FROM (SELECT * FROM beacon.system.users)",
     ] {
@@ -290,10 +269,81 @@ async fn auth_tables_are_super_user_only_even_without_enforcement() {
         );
     }
 
-    // The non-auth system tables stay readable — the gate is scoped, not blanket.
-    rt.sql_as(
-        "SELECT count(*) FROM beacon.system.functions",
-        beacon_core::AuthIdentity::empty(),
-    )
-    .await;
+    // `information_schema` is no more readable than `beacon.system`, and function
+    // documentation stays available to every caller through the accessor the
+    // transports use, which reads that catalog as the engine.
+    assert!(rt
+        .try_sql_as(
+            "SELECT count(*) FROM information_schema.routines",
+            beacon_core::AuthIdentity::empty()
+        )
+        .await
+        .is_err_and(|err| err.to_string().contains("super-user")));
+    assert!(!rt
+        .runtime
+        .show_functions()
+        .await
+        .expect("the function catalog is readable")
+        .is_empty());
+}
+
+/// Metrics are persisted, not held in memory: a query recorded before a restart
+/// is still readable after one, through both the SQL name and the accessor the
+/// transports use.
+#[tokio::test(flavor = "multi_thread")]
+async fn query_metrics_survive_a_restart() {
+    let rt = restartable_runtime("system-schema-metrics-restart", |builder| builder).await;
+
+    rt.sql("CREATE TABLE persisted_src (a BIGINT)").await;
+    rt.sql("INSERT INTO persisted_src VALUES (1), (2)").await;
+    rt.sql("SELECT a FROM persisted_src").await;
+
+    let batches = rt
+        .sql(
+            "SELECT query_id, username FROM beacon.system.query_metrics \
+             WHERE query LIKE '%SELECT a FROM persisted_src%' \
+               AND finished_at IS NOT NULL",
+        )
+        .await;
+    assert_eq!(total_rows(&batches), 1, "the SELECT should be recorded");
+    assert_eq!(
+        common::column_strings(&batches, 1),
+        vec![common::ADMIN_USERNAME],
+        "the row names the principal that ran the query"
+    );
+    let query_id: uuid::Uuid = common::column_strings(&batches, 0)[0]
+        .parse()
+        .expect("query_id is a uuid");
+
+    let rt = rt.restart().await;
+
+    // The row is still there after the restart. Matched on the id, not the query
+    // text: reading the metrics table is itself a query, so a `LIKE` over the text
+    // also matches the read that went looking for it.
+    assert_eq!(
+        scalar_i64(
+            &rt.sql(&format!(
+                "SELECT count(*) FROM beacon.system.query_metrics WHERE query_id = '{query_id}'"
+            ))
+            .await,
+        ),
+        1,
+        "recorded metrics should survive a restart"
+    );
+
+    // …and reachable by id through the accessor the HTTP layer uses.
+    let rows = rt
+        .runtime
+        .get_query_metrics(query_id)
+        .await
+        .expect("reading metrics by id succeeds");
+    assert_eq!(total_rows(&rows), 1, "the id should resolve to its row");
+
+    // An unknown id resolves to nothing rather than erroring.
+    let unknown = rt
+        .runtime
+        .get_query_metrics(uuid::Uuid::nil())
+        .await
+        .expect("reading an unknown id succeeds");
+    assert_eq!(total_rows(&unknown), 0);
 }

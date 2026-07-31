@@ -1,11 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use crate::metrics::{ConsolidatedMetrics, MetricsTracker};
+use crate::metrics::MetricsTracker;
 use crate::query::temp_object::TempObject;
 use datafusion::execution::SendableRecordBatchStream;
-use futures::Stream;
-use parking_lot::Mutex;
+use futures::{future::BoxFuture, Future, Stream};
 
 pub struct QueryResult {
     pub query_output: QueryOutput,
@@ -99,13 +98,38 @@ impl QueryOutputFile {
     }
 }
 
+/// The result stream a client drains, counting rows and bytes as they go past and
+/// recording the query's metrics when it ends.
 pub struct ArrowOutputStream {
-    pub stream: SendableRecordBatchStream,
-    pub metrics: Arc<MetricsTracker>,
-    pub all_consolidated_metrics: Arc<Mutex<HashMap<uuid::Uuid, ConsolidatedMetrics>>>,
+    stream: SendableRecordBatchStream,
+    metrics: Arc<MetricsTracker>,
+    store: Arc<crate::query_metrics_store::QueryMetricsStore>,
+    /// The in-flight metrics write, once the inner stream has ended.
+    ///
+    /// Recording is a write to a managed table, so it cannot happen inline in a
+    /// `poll`. Holding the future here — and polling it before reporting the end
+    /// of the stream — means the metrics are durable by the time a caller sees
+    /// the stream finish, which is what makes them readable immediately after.
+    recording: Option<BoxFuture<'static, ()>>,
 }
 
 impl ArrowOutputStream {
+    /// Built by `Runtime::run_query`, which owns the metrics store this records
+    /// into — hence crate-visible, though the stream itself is public (the
+    /// embedded Python client drains one).
+    pub(crate) fn new(
+        stream: SendableRecordBatchStream,
+        metrics: Arc<MetricsTracker>,
+        store: Arc<crate::query_metrics_store::QueryMetricsStore>,
+    ) -> Self {
+        Self {
+            stream,
+            metrics,
+            store,
+            recording: None,
+        }
+    }
+
     pub fn schema(&self) -> SchemaRef {
         self.stream.schema()
     }
@@ -118,6 +142,17 @@ impl Stream for ArrowOutputStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
+        // The inner stream has ended; finish recording before ending this one.
+        if let Some(recording) = self.recording.as_mut() {
+            return match recording.as_mut().poll(cx) {
+                std::task::Poll::Ready(()) => {
+                    self.recording = None;
+                    std::task::Poll::Ready(None)
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            };
+        }
+
         let poll = std::pin::Pin::new(&mut self.stream).poll_next(cx);
         match &poll {
             // On receiving a batch, update the output metrics.
@@ -126,7 +161,9 @@ impl Stream for ArrowOutputStream {
                 self.metrics
                     .add_output_bytes(batch.get_array_memory_size() as u64);
             }
-            // When the stream is finished, store the consolidated metrics.
+            // When the stream is finished, record the consolidated metrics. The
+            // write is polled on the next turn (below), so this poll yields
+            // rather than reporting the end straight away.
             std::task::Poll::Ready(None) => {
                 let consolidated = self.metrics.get_consolidated_metrics();
                 tracing::info!(
@@ -134,9 +171,10 @@ impl Stream for ArrowOutputStream {
                     consolidated.result_size_in_bytes
                 );
                 tracing::info!("Stream output rows: {}", consolidated.result_num_rows);
-                self.all_consolidated_metrics
-                    .lock()
-                    .insert(self.metrics.query_id, consolidated);
+                let store = self.store.clone();
+                self.recording = Some(Box::pin(async move { store.record(consolidated).await }));
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
             }
             _ => {}
         }

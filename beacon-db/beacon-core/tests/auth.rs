@@ -33,6 +33,34 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
 }
 
+/// `(schema, table)` for every row of a catalog listing.
+fn qualified_names(batches: &[arrow::record_batch::RecordBatch]) -> Vec<(String, String)> {
+    use arrow::array::AsArray;
+
+    let mut rows = Vec::new();
+    for batch in batches {
+        let column = |name: &str| {
+            batch
+                .column_by_name(name)
+                .and_then(|array| array.as_string_opt::<i32>())
+                .expect("the listing carries the information_schema columns")
+        };
+        let (schemas, tables) = (column("table_schema"), column("table_name"));
+        for row in 0..batch.num_rows() {
+            rows.push((schemas.value(row).to_string(), tables.value(row).to_string()));
+        }
+    }
+    rows
+}
+
+/// Just the table names of a catalog listing.
+fn table_names(batches: &[arrow::record_batch::RecordBatch]) -> Vec<String> {
+    qualified_names(batches)
+        .into_iter()
+        .map(|(_, table)| table)
+        .collect()
+}
+
 // --------------------------------------------------------------------------------------------
 // Authentication
 // --------------------------------------------------------------------------------------------
@@ -431,27 +459,76 @@ async fn enforcement_off_allows_ungranted_reads() {
     assert_eq!(total_rows(&result.expect("read allowed when enforce=off")), 1);
 }
 
+/// The metadata schemas are the super-user's, and a regular caller's catalog
+/// listing is built for them instead — showing only the tables their roles grant.
 #[tokio::test(flavor = "multi_thread")]
-async fn information_schema_is_exempt_from_enforcement() {
+async fn metadata_schemas_are_super_user_only_and_listings_are_role_filtered() {
     let rt = auth_runtime("auth-info-schema", true, true).await;
-    let table = unique("t");
+    let granted = unique("granted");
+    let hidden = unique("hidden");
+    for table in [&granted, &hidden] {
+        rt.sql_as(
+            &format!("CREATE TABLE {table} (a BIGINT)"),
+            AuthIdentity::system(),
+        )
+        .await;
+    }
+    rt.sql_as("CREATE ROLE reader", AuthIdentity::system()).await;
     rt.sql_as(
-        &format!("CREATE TABLE {table} (a BIGINT)"),
+        &format!("GRANT SELECT ON TABLE {granted} TO ROLE reader"),
         AuthIdentity::system(),
     )
     .await;
+    let reader = AuthIdentity {
+        username: "reader-user".to_string(),
+        roles: vec!["reader".to_string()],
+        is_super_user: false,
+    };
 
-    // A role-less user can still introspect information_schema even with enforcement on.
-    let result = rt
-        .try_sql_as(
-            "SELECT table_name FROM information_schema.tables",
-            AuthIdentity::empty(),
-        )
-        .await;
+    // Neither metadata schema is readable, however it is reached.
+    for sql in [
+        "SELECT table_name FROM information_schema.tables",
+        "SHOW TABLES",
+        "SELECT count(*) FROM beacon.system.query_metrics",
+    ] {
+        let err = rt
+            .try_sql_as(sql, reader.clone())
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("non-super read should be rejected: {sql}"));
+        assert!(
+            err.to_string().contains("super-user"),
+            "expected a super-user error for `{sql}`, got: {err}"
+        );
+    }
+
+    // The listing they get instead holds the granted table and not the other one.
+    let visible = table_names(&rt.runtime.visible_tables(&reader).await
+        .expect("listing succeeds for a non-super caller"));
     assert!(
-        result.is_ok(),
-        "information_schema must be readable: {result:?}"
+        visible.contains(&granted),
+        "a granted table must be listed, got: {visible:?}"
     );
+    assert!(
+        !visible.contains(&hidden),
+        "an ungranted table must not be listed, got: {visible:?}"
+    );
+    assert!(
+        !visible.iter().any(|table| table == "functions"),
+        "the metadata schemas must not appear in a listing, got: {visible:?}"
+    );
+
+    // The super-user still sees everything, metadata schemas included.
+    let batches = rt
+        .runtime
+        .visible_tables(&AuthIdentity::system())
+        .await
+        .expect("listing succeeds for the super-user");
+    let all = table_names(&batches);
+    assert!(all.contains(&hidden));
+    assert!(qualified_names(&batches)
+        .iter()
+        .any(|(schema, table)| schema == "information_schema" && table == "tables"));
 }
 
 // --------------------------------------------------------------------------------------------

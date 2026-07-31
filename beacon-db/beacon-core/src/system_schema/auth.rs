@@ -25,10 +25,6 @@ use datafusion::common::Result as DFResult;
 
 use super::table::{Snapshot, SystemTable};
 
-/// Table names in `beacon.system` that expose the auth directory. Reading either
-/// requires super-user, always.
-pub const AUTH_TABLES: [&str; 2] = ["users", "roles"];
-
 fn users_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("username", DataType::Utf8, false),

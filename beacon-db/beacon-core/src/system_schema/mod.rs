@@ -1,78 +1,102 @@
 //! `beacon.system`: runtime introspection exposed as ordinary SQL tables.
 //!
-//! Everything the runtime knows about itself that is not user data lives here —
-//! the registered functions, the recorded query metrics — so it is reachable
-//! through the one query endpoint rather than through a typed method on
+//! What the runtime knows about itself that is not user data lives here — the
+//! auth directory and the recorded query metrics — so it is reachable through
+//! the one query endpoint rather than through a typed method on
 //! [`Runtime`](crate::runtime::Runtime) and a bespoke HTTP route per item.
+//!
+//! `query_metrics` is not a table of its own: it is the internal managed table
+//! [`QUERY_METRICS_TABLE`] under a public name, resolved on each access, so what
+//! this schema shows is exactly what was persisted.
+//! Functions are the exception: DataFusion already catalogs them in
+//! `information_schema.routines`, which `SHOW FUNCTIONS` reads, so beacon does
+//! not keep a second copy.
 //!
 //! The tables are in-memory and read-only: each is a fixed schema plus a closure
 //! that snapshots the runtime's state at scan time (see [`table::SystemTable`]).
 //! Making one persistent later is a change of snapshot source, not of the SQL
 //! surface consumers see.
 //!
-//! Unlike `information_schema`, this schema is **not** exempt from grant checks
-//! (see `statement_plan::authz`), because `query_metrics` exposes the full text
-//! and plans of queries other users ran. `users` and `roles` go further still:
-//! they are super-user-only unconditionally, independent of grant enforcement.
+//! Reads of this schema — like reads of `information_schema` — are
+//! **super-user-only, unconditionally** (see [`is_metadata_schema`] and
+//! `statement_plan::authz`). It describes the instance rather than holding user
+//! data: `users`/`roles` are the auth directory, `query_metrics` carries the
+//! text and plans of queries other users ran, and `information_schema` names
+//! every table in every catalog. Regular callers enumerate the catalog through
+//! [`Runtime::visible_tables`](crate::runtime::Runtime::visible_tables), which
+//! returns only what their roles grant.
 
 mod auth;
-mod functions;
-mod query_metrics;
 mod table;
 
 use std::{any::Any, collections::HashMap, sync::Arc};
 
-use beacon_functions::function_doc::FunctionDoc;
 use datafusion::{
     catalog::{SchemaProvider, TableProvider},
     error::DataFusionError,
 };
 
-pub use auth::AUTH_TABLES;
-pub use query_metrics::QueryMetricsMap;
-
-use crate::statement_plan::SessionCell;
+use crate::query_metrics_store::QUERY_METRICS_TABLE;
+use crate::statement_plan::{upgrade_session, SessionCell};
 
 /// The schema name these tables are registered under, in the `beacon` catalog.
 pub const SYSTEM_SCHEMA_NAME: &str = "system";
 
+/// The schema DataFusion registers its own catalog views under.
+pub const INFORMATION_SCHEMA_NAME: &str = "information_schema";
+
+/// Whether `schema` is one of beacon's metadata schemas — this one or
+/// `information_schema`.
+///
+/// Both are super-user-only, and unconditionally so: like the internal
+/// `__beacon_*` tables, a gate that depended on grant enforcement (which is off
+/// by default) would leave the auth directory and every table name in the
+/// instance readable on a default runtime.
+///
+/// Matched on the schema name alone, as beacon's other schema gates are, so an
+/// attached catalog's `information_schema` (or a schema it happens to call
+/// `system`) is covered too — erring toward hiding metadata rather than
+/// exposing it.
+pub fn is_metadata_schema(schema: &str) -> bool {
+    schema.eq_ignore_ascii_case(SYSTEM_SCHEMA_NAME)
+        || schema.eq_ignore_ascii_case(INFORMATION_SCHEMA_NAME)
+}
+
+/// The name `query_metrics` carries in this schema.
+const QUERY_METRICS: &str = "query_metrics";
+
 /// A fixed, read-only set of runtime-introspection tables.
 #[derive(Debug)]
 pub struct SystemSchemaProvider {
+    /// The snapshot tables built over live runtime state.
     tables: HashMap<String, Arc<dyn TableProvider>>,
+    /// Late-filled weak handle to the session, used to resolve `query_metrics`
+    /// to the managed table that backs it.
+    session: SessionCell,
 }
 
 impl SystemSchemaProvider {
-    /// Builds the schema over the runtime's live state.
-    ///
-    /// `session` is the planner's late-filled weak handle rather than an
-    /// `Arc<SessionContext>`: the session owns the catalog that owns this
-    /// provider, so holding a strong reference back would leak the whole runtime.
-    pub fn new(
-        session: SessionCell,
-        table_function_docs: Vec<FunctionDoc>,
-        query_metrics: QueryMetricsMap,
-        auth: Arc<beacon_auth::AuthContext>,
-    ) -> Self {
+    /// Builds the schema over the runtime's live state: the auth context that
+    /// owns users and roles, and the session through which `query_metrics`
+    /// resolves to its managed table.
+    pub fn new(session: SessionCell, auth: Arc<beacon_auth::AuthContext>) -> Self {
         let mut tables: HashMap<String, Arc<dyn TableProvider>> = HashMap::new();
-        tables.insert(
-            "functions".to_string(),
-            Arc::new(functions::functions_table(session)),
-        );
-        tables.insert(
-            "table_functions".to_string(),
-            Arc::new(functions::table_functions_table(table_function_docs)),
-        );
-        tables.insert(
-            "query_metrics".to_string(),
-            Arc::new(query_metrics::query_metrics_table(query_metrics)),
-        );
         tables.insert(
             "users".to_string(),
             Arc::new(auth::users_table(auth.clone())),
         );
         tables.insert("roles".to_string(), Arc::new(auth::roles_table(auth)));
-        Self { tables }
+        Self { tables, session }
+    }
+
+    /// The managed table behind `query_metrics`, or `None` when it was never
+    /// created (a read-only database records nothing).
+    async fn query_metrics_table(&self) -> Option<Arc<dyn TableProvider>> {
+        upgrade_session(&self.session, "beacon.system.query_metrics")
+            .ok()?
+            .table_provider(QUERY_METRICS_TABLE)
+            .await
+            .ok()
     }
 }
 
@@ -84,15 +108,19 @@ impl SchemaProvider for SystemSchemaProvider {
 
     fn table_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tables.keys().cloned().collect();
+        names.push(QUERY_METRICS.to_string());
         names.sort();
         names
     }
 
     fn table_exist(&self, name: &str) -> bool {
-        self.tables.contains_key(name)
+        self.tables.contains_key(name) || name == QUERY_METRICS
     }
 
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
+        if name == QUERY_METRICS {
+            return Ok(self.query_metrics_table().await);
+        }
         Ok(self.tables.get(name).cloned())
     }
 

@@ -3,6 +3,7 @@
 use anyhow::Context as _;
 use arrow::record_batch::RecordBatch;
 use arrow_flight::sql::client::FlightSqlServiceClient;
+use arrow_flight::FlightInfo;
 use base64::Engine as _;
 use futures::TryStreamExt as _;
 use tonic::transport::{Channel, Endpoint};
@@ -129,19 +130,47 @@ impl RemoteConnection {
             .execute(sql.into(), None)
             .await
             .context("remote beacon rejected the metadata query")?;
-
-        let mut batches = Vec::new();
-        for endpoint in info.endpoint {
-            let ticket = endpoint
-                .ticket
-                .context("remote flight endpoint missing ticket")?;
-            let mut stream = client.do_get(ticket).await.context("remote beacon do_get failed")?;
-            while let Some(batch) = stream.try_next().await.context("remote beacon stream error")? {
-                batches.push(batch);
-            }
-        }
-        Ok(batches)
+        drain(&mut client, info).await
     }
+
+    /// List the remote's tables through Flight SQL's `GetTables` metadata command.
+    ///
+    /// The supported way to enumerate a remote: the remote answers from its own catalog, filtered
+    /// to what the credential this connection carries is allowed to see. Reading its
+    /// `information_schema` directly would not work — that schema is the remote's super-user's
+    /// alone.
+    pub async fn collect_tables(&self) -> anyhow::Result<Vec<RecordBatch>> {
+        let mut client = self.connect().await?;
+        let info = client
+            .get_tables(arrow_flight::sql::CommandGetTables {
+                catalog: None,
+                db_schema_filter_pattern: None,
+                table_name_filter_pattern: None,
+                table_types: Vec::new(),
+                include_schema: false,
+            })
+            .await
+            .context("remote beacon rejected the metadata query")?;
+        drain(&mut client, info).await
+    }
+}
+
+/// Fetch every endpoint of `info` and collect the batches.
+async fn drain(
+    client: &mut FlightSqlServiceClient<Channel>,
+    info: FlightInfo,
+) -> anyhow::Result<Vec<RecordBatch>> {
+    let mut batches = Vec::new();
+    for endpoint in info.endpoint {
+        let ticket = endpoint
+            .ticket
+            .context("remote flight endpoint missing ticket")?;
+        let mut stream = client.do_get(ticket).await.context("remote beacon do_get failed")?;
+        while let Some(batch) = stream.try_next().await.context("remote beacon stream error")? {
+            batches.push(batch);
+        }
+    }
+    Ok(batches)
 }
 
 #[cfg(test)]

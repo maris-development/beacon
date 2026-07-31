@@ -10,23 +10,30 @@ use futures::TryStreamExt;
 
 use crate::{
     parser::{beacon_parser::BeaconParser, statement::BeaconStatement},
+    query_metrics_store::QueryMetricsStore,
     query_result::{ArrowOutputStream, QueryOutput, QueryResult},
-    system_schema::QueryMetricsMap,
 };
 
 /// Beacon's single execution layer.
 ///
 /// The interface is deliberately narrow: authenticate a caller, then run a query.
-/// Everything else — the catalog, table schemas, extensions, functions, query
-/// metrics — is reachable as SQL (`information_schema`, `SHOW EXTENSIONS`,
-/// `beacon.system.*`), so consumers query it and map the resulting
-/// `RecordBatch`es into their own types rather than calling a typed accessor per
-/// thing they want to know.
+/// Most of what a consumer wants to know — extensions, crawlers, the tables in a
+/// schema — is reachable as SQL (`SHOW EXTENSIONS`, `SHOW CRAWLERS`, a scan), so
+/// they ask for it in a query and map the resulting `RecordBatch`es into their
+/// own types rather than calling a typed accessor per thing.
+///
+/// What is left here is what a caller *cannot* ask for themselves: reads of the
+/// metadata schemas, which are the super-user's alone ([`Self::visible_tables`],
+/// [`Self::show_functions`]), a table's schema straight from its provider
+/// ([`Self::table_arrow_schema`]), and the runtime's own bookkeeping
+/// ([`Self::get_query_metrics`]). Those answer in Arrow and in beacon's own
+/// types; turning them into a wire format is the transport's job, not this
+/// one's.
 pub struct Runtime {
     pub(crate) session_ctx: Arc<SessionContext>,
-    /// Metrics recorded per executed query. Shared with the
-    /// `beacon.system.query_metrics` table, which is how callers read them.
-    pub(crate) query_metrics: QueryMetricsMap,
+    /// Where a completed query's metrics are written: the managed table that
+    /// `beacon.system.query_metrics` exposes, which is how callers read them.
+    pub(crate) query_metrics: Arc<QueryMetricsStore>,
     /// Authentication + authorization context (users, roles, grants). Shared, owned by the runtime.
     pub(crate) auth: Arc<beacon_auth::AuthContext>,
 
@@ -133,10 +140,13 @@ impl Runtime {
                          (e.g. SELECT); this statement produces no result set to export"
                     );
                 }
-                self.run_query_to_file(plan, output, query_id, query_json)
+                self.run_query_to_file(plan, output, query_id, query_json, &identity.username)
                     .await
             }
-            None => self.run_query_to_stream(plan, query_id, query_json).await,
+            None => {
+                self.run_query_to_stream(plan, query_id, query_json, &identity.username)
+                    .await
+            }
         }
     }
 
@@ -147,8 +157,9 @@ impl Runtime {
         plan: datafusion::logical_expr::LogicalPlan,
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
+        username: &str,
     ) -> anyhow::Result<QueryResult> {
-        let metrics = MetricsTracker::new(query_json, query_id);
+        let metrics = MetricsTracker::new(query_json, query_id, username);
         metrics.set_logical_plan(&plan);
         // Record the optimized logical plan alongside the parsed one. `optimize`
         // errors for `Statement` plans (`SET ...`), which have nothing to
@@ -164,11 +175,7 @@ impl Runtime {
         if let Some(physical_plan) = physical_plan {
             metrics.set_physical_plan(physical_plan);
         }
-        let output_stream = ArrowOutputStream {
-            stream,
-            metrics,
-            all_consolidated_metrics: self.query_metrics.clone(),
-        };
+        let output_stream = ArrowOutputStream::new(stream, metrics, self.query_metrics.clone());
         Ok(QueryResult {
             query_output: QueryOutput::Stream(output_stream),
             query_id,
@@ -184,6 +191,7 @@ impl Runtime {
         output: crate::query::output::Output,
         query_id: uuid::Uuid,
         query_json: serde_json::Value,
+        username: &str,
     ) -> anyhow::Result<QueryResult> {
         // `Output::parse` wraps the (already validated) plan in a `COPY TO` the
         // temp file; this COPY is beacon-generated, so it is not re-validated.
@@ -203,7 +211,7 @@ impl Runtime {
             )
             .await?;
 
-        let metrics = MetricsTracker::new(query_json, query_id);
+        let metrics = MetricsTracker::new(query_json, query_id, username);
         metrics.set_logical_plan(&copy_plan);
         if let Ok(optimized) = self.session_ctx.state().optimize(&copy_plan) {
             metrics.set_optimized_logical_plan(&optimized);
@@ -222,9 +230,11 @@ impl Runtime {
             }
         }
         metrics.add_output_bytes(output_file.size()?);
+        // The file is written, so this query is complete — record it here rather
+        // than at stream end, as the streamed path does.
         self.query_metrics
-            .lock()
-            .insert(query_id, metrics.get_consolidated_metrics());
+            .record(metrics.get_consolidated_metrics())
+            .await;
 
         Ok(QueryResult {
             query_output: QueryOutput::File(output_file),
@@ -232,14 +242,6 @@ impl Runtime {
         })
     }
 
-    /// The storage format and options the named table is configured with, or
-    /// `None` when the table has no persisted definition (an unknown name, or a
-    /// session-only table that was never written to the tables store).
-    ///
-    /// Read from `db://<name>/table.json` rather than from the live provider:
-    /// the definition is what the table was *declared* as, which is what an
-    /// operator inspecting a table wants to see. Credentials and internal
-    /// (double-underscore) option keys are redacted by `TableConfigView`.
     /// A registered table's Arrow schema, taken from the table provider itself.
     ///
     /// Deliberately **not** `SELECT * FROM t LIMIT 0`: planning a scan forces the
@@ -251,10 +253,11 @@ impl Runtime {
     ///
     /// Authorization matches the read path in
     /// [`authorize_logical_plan`](crate::statement_plan::authorize_logical_plan):
-    /// the internal `__beacon_*` and `beacon.system` auth tables are super-user
-    /// only regardless of enforcement, and otherwise a non-super-user needs
-    /// `Select` on the table. A schema is metadata about data the caller may not
-    /// read, so it is gated the same way the rows are.
+    /// the internal `__beacon_*` tables and the metadata schemas
+    /// (`beacon.system`, `information_schema`) are super-user only regardless of
+    /// enforcement, and otherwise a non-super-user needs `Select` on the table. A
+    /// schema is metadata about data the caller may not read, so it is gated the
+    /// same way the rows are.
     pub async fn table_arrow_schema(
         &self,
         table: impl Into<datafusion::sql::TableReference>,
@@ -272,28 +275,18 @@ impl Runtime {
                      restricted to the super-user"
                 );
             }
-            let in_system_schema = table
+            if let Some(schema) = table
                 .schema()
-                .is_some_and(|s| s.eq_ignore_ascii_case(crate::system_schema::SYSTEM_SCHEMA_NAME));
-            if in_system_schema
-                && crate::system_schema::AUTH_TABLES
-                    .iter()
-                    .any(|name| table.table().eq_ignore_ascii_case(name))
+                .filter(|s| crate::system_schema::is_metadata_schema(s))
             {
                 anyhow::bail!(
-                    "permission denied: the 'beacon.{}' auth tables are restricted to the \
-                     super-user",
-                    crate::system_schema::SYSTEM_SCHEMA_NAME
+                    "permission denied: the '{schema}' schema is restricted to the super-user"
                 );
             }
         }
 
-        let is_information_schema = table
-            .schema()
-            .is_some_and(|s| s.eq_ignore_ascii_case("information_schema"));
         if self.auth_enforce
             && !identity.is_super_user
-            && !is_information_schema
             && !self.auth.is_allowed(
                 &identity.roles,
                 Privilege::Select,
@@ -311,40 +304,131 @@ impl Runtime {
         Ok(provider.schema())
     }
 
-    pub async fn table_config(&self, table_name: &str) -> Option<crate::api::TableConfigView> {
-        let store = self
-            .session_ctx
-            .runtime_env()
-            .object_store(&*beacon_datafusion_ext::consts::DEFAULT_DB_STORE_URL_OBJECT_URL)
-            .inspect_err(|error| tracing::error!(%error, "failed to open the tables object store"))
-            .ok()?;
-
-        let definition =
-            crate::schema_persistence::load_table_definition(&store, table_name).await?;
-
-        crate::api::TableConfigView::try_from(definition)
-            .inspect_err(|error| {
-                tracing::error!(table_name, ?error, "failed to map table definition into API contract")
-            })
-            .ok()
+    /// The catalog and schema an unqualified table name resolves against.
+    pub fn default_catalog_and_schema(&self) -> (String, String) {
+        let options = self.session_ctx.copied_config().options().catalog.clone();
+        (options.default_catalog, options.default_schema)
     }
 
-    /// Recorded metrics for a previously executed query, or `None` when the id
-    /// is unknown. The same data the `beacon.system.query_metrics` table serves,
-    /// mapped into the API contract for transports that address a single query
-    /// by id.
-    pub fn get_query_metrics(&self, query_id: uuid::Uuid) -> Option<crate::api::QueryMetricsView> {
-        self.query_metrics
-            .lock()
-            .get(&query_id)
-            .cloned()
-            .and_then(|metrics| match crate::api::QueryMetricsView::try_from(metrics) {
-                Ok(metrics) => Some(metrics),
-                Err(error) => {
-                    tracing::error!(%query_id, ?error, "failed to map query metrics into API contract");
-                    None
-                }
-            })
+    /// The `information_schema.tables` rows `identity` is entitled to see, as
+    /// Arrow batches — `table_catalog`, `table_schema`, `table_name`,
+    /// `table_type`, ordered by the first three.
+    ///
+    /// This is how a transport lists the catalog. It cannot query
+    /// `information_schema` as the caller any more — that schema is the
+    /// super-user's — so the runtime reads it as the engine and drops every row
+    /// [`Self::can_list_table`] rejects: no metadata schemas, no internal tables,
+    /// and, with grant enforcement on, only the tables the caller's roles grant
+    /// `Select` on. A listing therefore shows exactly what the caller could go on
+    /// to read.
+    pub async fn visible_tables(
+        &self,
+        identity: &beacon_auth::AuthIdentity,
+    ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
+        // Read directly through the session rather than `run_query`: this is the
+        // engine reading its own catalog on a caller's behalf, so it is neither
+        // subject to the caller's authorization (the filter below is) nor worth
+        // recording as one of their queries.
+        let batches = self
+            .session_ctx
+            .sql(
+                "SELECT table_catalog, table_schema, table_name, table_type \
+                 FROM information_schema.tables \
+                 ORDER BY table_catalog, table_schema, table_name",
+            )
+            .await?
+            .collect()
+            .await?;
+
+        // A super-user keeps every row, so there is nothing to filter or rebuild.
+        if identity.is_super_user {
+            return Ok(batches);
+        }
+
+        let mut visible = Vec::with_capacity(batches.len());
+        for batch in &batches {
+            let column = |name: &str| {
+                batch
+                    .column_by_name(name)
+                    .map(|array| array.as_string::<i32>())
+            };
+            let (Some(schemas), Some(names)) = (column("table_schema"), column("table_name"))
+            else {
+                anyhow::bail!("information_schema.tables is missing an expected column");
+            };
+            let mask: arrow::array::BooleanArray = (0..batch.num_rows())
+                .map(|row| {
+                    Some(self.can_list_table(identity, Some(schemas.value(row)), names.value(row)))
+                })
+                .collect();
+            visible.push(arrow::compute::filter_record_batch(batch, &mask)?);
+        }
+        Ok(visible)
+    }
+
+    /// Whether `identity` may see `schema`.`table` in a catalog listing.
+    ///
+    /// The same rule the read path enforces, asked ahead of time: a name a caller
+    /// could not read is a name they are not shown. `schema` is `None` for an
+    /// unqualified reference, which resolves in the default schema.
+    pub fn can_list_table(
+        &self,
+        identity: &beacon_auth::AuthIdentity,
+        schema: Option<&str>,
+        table: &str,
+    ) -> bool {
+        use beacon_auth::{ConcreteTarget, Privilege};
+        use beacon_datafusion_ext::table_ext::INTERNAL_TABLE_PREFIX;
+
+        if identity.is_super_user {
+            return true;
+        }
+        if table.starts_with(INTERNAL_TABLE_PREFIX) {
+            return false;
+        }
+        if schema.is_some_and(crate::system_schema::is_metadata_schema) {
+            return false;
+        }
+        // With enforcement off every table is readable, so listing them all is
+        // what the listing promises: what you see is what you can read.
+        !self.auth_enforce
+            || self.auth.is_allowed(
+                &identity.roles,
+                Privilege::Select,
+                &ConcreteTarget::Table(table.to_string()),
+            )
+    }
+
+    /// DataFusion's function catalog — the `SHOW FUNCTIONS` result, as Arrow
+    /// batches: `function_name`, `return_type`, `parameters`, `parameter_types`,
+    /// `function_type`, `description`, `syntax_example`, one row per overload
+    /// signature.
+    ///
+    /// The only catalog of the scalar, aggregate, and window functions: beacon
+    /// keeps no copy. Table-valued functions are not in it — DataFusion does not
+    /// catalog UDTFs.
+    ///
+    /// Engine documentation, not user data, so every caller may read it —
+    /// including an anonymous one. That is why it is served from here rather than
+    /// by running the statement as the caller: it reads `information_schema`,
+    /// which is super-user-only.
+    pub async fn show_functions(&self) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
+        Ok(self
+            .session_ctx
+            .sql("SHOW FUNCTIONS")
+            .await?
+            .collect()
+            .await?)
+    }
+
+    /// The metrics recorded for one previously executed query, as Arrow — the
+    /// row `beacon.system.query_metrics` holds for it, for transports that
+    /// address a single query by id. Empty batches when the id is unknown.
+    pub async fn get_query_metrics(
+        &self,
+        query_id: uuid::Uuid,
+    ) -> anyhow::Result<Vec<arrow::record_batch::RecordBatch>> {
+        self.query_metrics.read(query_id).await
     }
 
     /// Explain a query without running it: returns its logical plan as
@@ -498,7 +582,6 @@ impl Runtime {
         parser.parse_statement().map_err(Into::into)
     }
 }
-
 
 #[cfg(test)]
 mod test_support {
@@ -679,7 +762,7 @@ mod materialized_view_tests {
 mod client_query_tests {
     use super::test_support::{test_runtime, TestRt};
     use super::Runtime;
-    use crate::{api::QueryRequest, query_result::QueryOutput};
+    use crate::query_result::QueryOutput;
     use futures::TryStreamExt;
 
     async fn run_sql(runtime: &Runtime, sql: &str) {
@@ -712,11 +795,10 @@ mod client_query_tests {
         Ok(())
     }
 
+    /// A client query, as the transport hands it over: the request body's keys
+    /// are flattened onto `Query` itself.
     fn query(value: serde_json::Value) -> crate::query::Query {
-        serde_json::from_value::<QueryRequest>(value)
-            .expect("query request should deserialize")
-            .into_query()
-            .expect("query request should convert")
+        serde_json::from_value(value).expect("query body should deserialize")
     }
 
     /// A JSON client query is lowered to a `LogicalPlan` and executed through the

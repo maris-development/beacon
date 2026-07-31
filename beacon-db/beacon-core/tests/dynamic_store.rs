@@ -29,8 +29,16 @@ use tempfile::TempDir;
 
 /// A bare runtime in dynamic storage mode: no default store, in-memory tables,
 /// a default tmp dir. Auth is off, so queries run as the system identity.
+/// A bare runtime — no configured stores — with a tmp directory of its own.
+///
+/// The tmp directory matters: building a runtime sweeps leftover `beacon_out_*`
+/// files from it, so runtimes sharing the default one delete each other's live
+/// query-output files. Tests here run concurrently, so each gets its own.
 async fn dynamic_runtime() -> Runtime {
+    let tmp_dir = std::env::temp_dir().join(format!("beacon-dynamic-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp_dir).expect("create the runtime's tmp dir");
     RuntimeBuilder::new()
+        .with_tmp_dir_path(tmp_dir)
         .build()
         .await
         .expect("a bare builder should build")

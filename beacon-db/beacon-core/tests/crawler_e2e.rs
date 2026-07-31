@@ -81,9 +81,9 @@ async fn crawler_discovers_partitioned_parquet() {
     let reloaded = scalar_i64(&rt.sql("SELECT count(*) FROM crawl_src").await);
     assert_eq!(reloaded, 2, "crawled table should reload after restart");
 
-    // (The config view's hiding of the internal `__crawler__` ownership marker is
-    // covered by `api::table_config_redaction_tests`: `Runtime::list_table_config`
-    // no longer exists, and the hiding is a pure function of the definition.)
+    // (Nothing serves a table's stored definition any more — `/api/admin/table-config`
+    // is retired — so the internal `__crawler__` ownership marker it carries has no
+    // way out of the engine.)
 
     // The crawler definition reloaded too.
     assert!(

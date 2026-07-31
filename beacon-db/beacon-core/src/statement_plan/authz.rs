@@ -44,14 +44,19 @@ pub(crate) fn authorize_logical_plan(
         );
     }
 
-    // Same treatment, same reason, for the auth directory exposed as SQL:
-    // `beacon.system.users` / `beacon.system.roles` are who-can-do-what, so they
-    // must not be readable just because enforcement happens to be off.
-    if !identity.is_super_user && plan_touches_auth_system_tables(plan) {
-        anyhow::bail!(
-            "permission denied: the 'beacon.{}' auth tables are restricted to the super-user",
-            crate::system_schema::SYSTEM_SCHEMA_NAME
-        );
+    // Same treatment, same reason, for beacon's metadata schemas. `beacon.system`
+    // is the auth directory plus what every user ran; `information_schema` names
+    // every table in every catalog. Both describe the instance rather than hold
+    // user data, so they belong to the super-user — and, exactly as above, that
+    // cannot depend on enforcement being on. Regular callers do not query them:
+    // they enumerate the catalog through `Runtime::visible_tables`, which returns
+    // only the tables their roles grant.
+    if !identity.is_super_user {
+        if let Some(schema) = metadata_schema_touched(plan) {
+            anyhow::bail!(
+                "permission denied: the '{schema}' schema is restricted to the super-user"
+            );
+        }
     }
 
     if !enforce || identity.is_super_user {
@@ -77,29 +82,26 @@ pub(crate) fn authorize_logical_plan(
     Ok(())
 }
 
-/// Whether any table scan in `plan` references `beacon.system.users` or
-/// `beacon.system.roles`. Matched on schema + table name so it catches the table
-/// however it is reached (including through a subquery or a view).
-fn plan_touches_auth_system_tables(plan: &LogicalPlan) -> bool {
-    let mut touches = false;
+/// The name of the first metadata schema (`beacon.system` / `information_schema`)
+/// any table scan in `plan` reads, or `None`.
+///
+/// Matched on the scan's schema so it catches the read however it is reached —
+/// through a subquery, a view, or a rewrite (`SHOW TABLES` becomes a scan of
+/// `information_schema.tables`).
+fn metadata_schema_touched(plan: &LogicalPlan) -> Option<String> {
+    let mut found = None;
     let _ = plan.apply_with_subqueries(|node| {
         if let LogicalPlan::TableScan(scan) = node {
-            let in_system_schema = scan
-                .table_name
-                .schema()
-                .is_some_and(|s| s.eq_ignore_ascii_case(crate::system_schema::SYSTEM_SCHEMA_NAME));
-            if in_system_schema
-                && crate::system_schema::AUTH_TABLES
-                    .iter()
-                    .any(|name| scan.table_name.table().eq_ignore_ascii_case(name))
-            {
-                touches = true;
-                return Ok(TreeNodeRecursion::Stop);
+            if let Some(schema) = scan.table_name.schema() {
+                if crate::system_schema::is_metadata_schema(schema) {
+                    found = Some(schema.to_string());
+                    return Ok(TreeNodeRecursion::Stop);
+                }
             }
         }
         Ok(TreeNodeRecursion::Continue)
     });
-    touches
+    found
 }
 
 /// Whether any table scan in `plan` (including subqueries and write inputs) references one of
@@ -121,16 +123,14 @@ fn plan_touches_internal_tables(plan: &LogicalPlan) -> bool {
 
 /// Resolves the concrete resource(s) a table scan touches.
 ///
-/// - System schemas (`information_schema`) and unintrospectable sources are exempt (empty).
+/// - Unintrospectable sources are exempt (empty).
 /// - A scan of a registered catalog table → `Table(name)` (admins grant by name).
 /// - An ad-hoc file scan (a `read_*` UDTF / listing) → `Path` per underlying listing URL.
+///
+/// The metadata schemas never reach here: a non-super-user's plan that touches
+/// one is rejected above, and a super-user's plan returns before any target is
+/// resolved.
 fn scan_targets(scan: &TableScan, session_ctx: &SessionContext) -> Vec<ConcreteTarget> {
-    if let Some(schema) = scan.table_name.schema() {
-        if schema.eq_ignore_ascii_case("information_schema") {
-            return vec![];
-        }
-    }
-
     if session_ctx
         .table_exist(scan.table_name.clone())
         .unwrap_or(false)
@@ -269,10 +269,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn information_schema_is_exempt() {
+    async fn metadata_schemas_are_super_user_only_even_without_enforcement() {
         let ctx = ctx_with_table("observations").await;
+        let auth = auth_with_reader_grant(Some(PrivilegeRule::new(Privilege::Select, None))).await;
+
+        for sql in [
+            "SELECT table_name FROM information_schema.tables",
+            // `SHOW TABLES` is rewritten onto `information_schema.tables`, so the
+            // scan-level gate catches it too.
+            "SHOW TABLES",
+            "SELECT count(*) FROM (SELECT * FROM information_schema.columns)",
+        ] {
+            let plan = plan_for(&ctx, sql).await;
+            // Denied with enforcement on despite a blanket SELECT grant…
+            let err = authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), true)
+                .err()
+                .unwrap_or_else(|| panic!("non-super read should be rejected: {sql}"));
+            assert!(
+                err.to_string().contains("super-user"),
+                "expected a super-user error for `{sql}`, got: {err}"
+            );
+            // …and denied with enforcement off, where a grant-based gate would leak.
+            assert!(
+                authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), false).is_err(),
+                "`{sql}` must stay denied with enforcement off"
+            );
+        }
+
+        // The super-user still reads them.
+        let mut su = identity(&[]);
+        su.is_super_user = true;
         let plan = plan_for(&ctx, "SELECT table_name FROM information_schema.tables").await;
-        let auth = auth_with_reader_grant(None).await;
-        assert!(authorize_logical_plan(&plan, &ctx, &auth, &identity(&["reader"]), true).is_ok());
+        assert!(authorize_logical_plan(&plan, &ctx, &auth, &su, true).is_ok());
     }
 }
