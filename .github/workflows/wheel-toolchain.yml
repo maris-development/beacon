@@ -1,0 +1,61 @@
+name: Wheel build toolchain
+
+# Pre-flight for the beacondb wheel containers.
+#
+# The wheel jobs in publish-beacondb.yml only run on a `beacondb-v*` tag, so a broken build
+# container was previously discovered *after* a release was tagged — for example manylinux_2_28
+# (AlmaLinux 8) shipping libprotoc 3.5.0, too old for the flag prost-build passes. This job
+# runs that workflow's own `before-script-linux:` block, extracted verbatim, in the same
+# containers, and fails if the resulting toolchain is unusable.
+#
+# It checks the toolchain contract, not the build: it takes ~2 minutes instead of the release
+# build's hour. To exercise a real end-to-end wheel, run `scripts/build-wheel-docker.sh`
+# locally, or dispatch publish-beacondb.yml with `dry_run: true` for the full platform matrix.
+
+on:
+  push:
+    paths:
+      - "scripts/wheel-build-deps.sh"
+      - ".github/workflows/wheel-toolchain.yml"
+      - ".github/workflows/publish-beacondb.yml"
+      - "scripts/build-wheel-docker.sh"
+      # A dependency bump is how the protoc break actually arrived: a new Lance release
+      # raised the minimum protoc the build scripts need.
+      - "Cargo.lock"
+      - "beacon-db/beacon-db-py/**"
+  pull_request:
+    paths:
+      - "scripts/wheel-build-deps.sh"
+      - ".github/workflows/wheel-toolchain.yml"
+      - ".github/workflows/publish-beacondb.yml"
+      - "scripts/build-wheel-docker.sh"
+      - "Cargo.lock"
+      - "beacon-db/beacon-db-py/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  toolchain:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 only — the script's arch handling is exercised by the aarch64 release job and
+        # by scripts/build-wheel-docker.sh on an arm64 dev machine, and this pre-flight is not
+        # worth an emulated run.
+        image:
+          - quay.io/pypa/manylinux_2_28_x86_64
+          - quay.io/pypa/musllinux_1_2_x86_64
+    container: ${{ matrix.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # `sh` explicitly: the musllinux container is Alpine, where GitHub's default shell
+      # lookup finds no bash.
+      - name: Install the wheel build toolchain
+        run: sh -c "$(sh ./scripts/wheel-build-deps.sh)"
+        shell: sh -e {0}

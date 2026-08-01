@@ -24,6 +24,11 @@ on:
         required: false
         type: string
         default: ""
+      dry_run:
+        description: "Build every wheel but skip publishing. Use this to exercise a build before tagging."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -63,6 +68,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           if [ "$EVENT" = "push" ]; then
             version="${REF_NAME#beacondb-}"                 # beacondb-v1.8.0 -> v1.8.0
@@ -70,7 +76,11 @@ jobs:
             version="$INPUT_VERSION"
           else
             tag=$(git tag --list 'beacondb-v*' --sort=-v:refname | head -n1)
-            [ -n "$tag" ] || { echo "::error::No beacondb-v* tags found; provide a version input."; exit 1; }
+            if [ -z "$tag" ]; then
+              # A dry run only needs *a* valid version to build against; it never publishes.
+              [ "$DRY_RUN" = "true" ] || { echo "::error::No beacondb-v* tags found; provide a version input."; exit 1; }
+              tag="beacondb-v0.0.0"
+            fi
             version="${tag#beacondb-}"
           fi
           version="${version#v}"                            # v1.8.0 -> 1.8.0
@@ -98,8 +108,8 @@ jobs:
               print(f"set {path} -> {v}")
           PY
 
-      # protoc + cmake are the only build tools needed (netCDF/HDF5 are compiled from source by
-      # the static-netcdf feature). On Linux this happens inside the manylinux container via
+      # protoc + cmake are the build tools needed (netCDF/HDF5 are compiled from source by the
+      # static-netcdf feature). On Linux this happens inside the build container via
       # `before-script-linux` below; here we provision macOS and Windows.
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
@@ -120,16 +130,58 @@ jobs:
             --manifest-path beacon-db/beacon-db-py/Cargo.toml
             --features static-netcdf
           manylinux: ${{ matrix.platform.manylinux }}
-          # Inside the build container, install only the toolchain the static build needs
-          # (protoc for Lance, cmake + a C/C++ compiler + perl to build netCDF/HDF5 from source).
-          # The container differs by target: manylinux is AlmaLinux (dnf), musllinux is Alpine
-          # (apk) — so detect the package manager rather than assume one.
+          # The container build toolchain: `protoc` for Lance's protobuf definitions, `cmake` +
+          # a compiler + perl to build netCDF/HDF5 from source, and OpenSSL headers for
+          # openssl-sys (auditwheel then bundles the library into the wheel, so it stays
+          # self-contained).
+          #
+          # The two branches are not just different spellings of one package list. manylinux is
+          # AlmaLinux 8, whose `protobuf-compiler` package is libprotoc 3.5.0 (2017) — it
+          # predates the `--experimental_allow_proto3_optional` flag that prost-build always
+          # passes, so Lance's build script dies with "protoc failed: Unknown flag". Hence
+          # protoc comes from the upstream release there. Alpine's own protobuf is current
+          # (29.x), and the upstream binaries are glibc-linked and would not run on musl anyway.
+          #
+          # POSIX sh, not bash: the musllinux container is Alpine, which has no bash.
+          # `scripts/build-wheel-docker.sh` reads this exact block and runs it in the same
+          # container locally, so a toolchain break is reproducible before a tag is cut.
           before-script-linux: |
+            set -eu
+            PROTOC_VERSION=25.3
             if command -v apk >/dev/null 2>&1; then
-              apk add --no-cache build-base cmake perl protobuf protobuf-dev linux-headers
+              apk add --no-cache build-base cmake perl pkgconf openssl-dev protobuf protobuf-dev linux-headers
             else
-              dnf install -y protobuf-compiler cmake perl || yum install -y protobuf-compiler cmake perl
+              dnf install -y cmake perl pkgconf-pkg-config openssl-devel \
+                || yum install -y cmake perl pkgconfig openssl-devel
+              case "$(uname -m)" in
+                x86_64) protoc_arch=x86_64 ;;
+                aarch64 | arm64) protoc_arch=aarch_64 ;;
+                *) echo "unsupported architecture for protoc: $(uname -m)" >&2; exit 1 ;;
+              esac
+              curl -fsSL -o /tmp/protoc.zip \
+                "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${protoc_arch}.zip"
+              # `unzip` is not guaranteed in the container; python3 always is.
+              python3 -c 'import zipfile; zipfile.ZipFile("/tmp/protoc.zip").extractall("/usr/local")'
+              chmod +x /usr/local/bin/protoc
+              rm -f /tmp/protoc.zip
+              # /usr/local/bin precedes /usr/bin here, so prost-build's PATH lookup finds this one.
             fi
+            # Fail on the toolchain itself rather than deep inside someone's build script.
+            echo "protoc: $(command -v protoc) -> $(protoc --version)"
+            protoc_major=$(protoc --version | sed 's/^libprotoc //' | cut -d. -f1)
+            protoc_minor=$(protoc --version | sed 's/^libprotoc //' | cut -d. -f2)
+            if [ "$protoc_major" -eq 3 ] && [ "$protoc_minor" -lt 12 ]; then
+              echo "error: protoc $(protoc --version) is too old; prost-build needs >= 3.12" >&2
+              exit 1
+            fi
+            echo "cmake:  $(command -v cmake) -> $(cmake --version | head -n1)"
+            # openssl-sys resolves OpenSSL through pkg-config; a missing .pc is the
+            # "Could not find directory of OpenSSL installation" failure.
+            if ! pkg-config --exists openssl; then
+              echo "error: no openssl pkg-config entry; openssl-sys will fail to build" >&2
+              exit 1
+            fi
+            echo "openssl: $(pkg-config --modversion openssl)"
 
       # A musllinux wheel can't be installed on the glibc runner, so its smoke-test is skipped
       # (it would need an Alpine container); the metadata check below still runs for every wheel.
@@ -159,6 +211,10 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: build
+    # A dry run still builds and smoke-tests every wheel — it just stops before PyPI. That
+    # makes the whole matrix (including macOS and Windows, which no local container can
+    # cover) runnable on demand instead of only on a tag that is already cut.
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
