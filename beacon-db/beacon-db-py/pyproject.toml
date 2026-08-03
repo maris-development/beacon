@@ -18,7 +18,7 @@ build-backend = "maturin"
 
 [project]
 name = "beacondb"
-version = "2.0.0rc1"
+version = "2.0.0rc2"
 description = "An embeddable, in-process analytical database for scientific data — one file, Arrow-native, netCDF/Zarr/Parquet/Delta/Lance."
 readme = "README.md"
 requires-python = ">=3.10"

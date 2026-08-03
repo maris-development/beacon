@@ -168,14 +168,22 @@ docker run --rm --platform "$platform" \
         set -eu
         rm -rf /target/maturin
         find /target -name 'lib_beacondb*.so' -delete
-        maturin build --release \
+        maturin build --profile release-wheel \
             --manifest-path beacon-db/beacon-db-py/Cargo.toml \
             --features '$features' \
             --target '$rust_host' \
             --compatibility '$compat' \
+            --compression-method deflated --compression-level 9 \
             --out /work/target/docker-wheels
     "
 
 echo
 echo "==> wheels in $out_dir"
 ls -la "$out_dir"
+# The size is the reason this profile exists, so report it in the units PyPI rejects on.
+# 100 MiB is the per-project limit; the workflow fails the build job on the same threshold.
+for whl in "$out_dir"/*.whl; do
+    [[ -e $whl ]] || continue
+    awk -v n="$(basename "$whl")" -v s="$(wc -c <"$whl")" \
+        'BEGIN{printf "    %s  %.2f MiB / 100 MiB\n", n, s/1048576}'
+done

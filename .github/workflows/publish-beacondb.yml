@@ -108,12 +108,6 @@ jobs:
               manylinux: "off",
             }
           - {
-              key: macos-x86_64,
-              runner: macos-15-intel,
-              target: x86_64,
-              manylinux: "off",
-            }
-          - {
               key: windows-x64,
               runner: windows-latest,
               target: x64,
@@ -140,14 +134,21 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
+          # Pinned: `--compression-method`/`--compression-level` below are recent maturin flags,
+          # and an unknown flag would only surface after a 30-100 minute compile.
+          maturin-version: v1.14.1
           # abi3 wheel — no per-interpreter build needed. `static-netcdf` builds+links netCDF/HDF5
           # into the wheel so it is self-contained on every platform. `vendored-openssl` does the
           # same for OpenSSL, which the MySQL/PostgreSQL federation drivers need; it applies to the
-          # Linux builds only and is inert on macOS and Windows, so one args string covers all five.
+          # Linux builds only and is inert on macOS and Windows, so one args string covers them all.
+          #
+          # `release-wheel` (workspace Cargo.toml) is `release` plus strip + thin LTO +
+          # codegen-units=1.
           args: >-
-            --release --out dist
+            --profile release-wheel --out dist
             --manifest-path beacon-db/beacon-db-py/Cargo.toml
             --features static-netcdf,vendored-openssl
+            --compression-method deflated --compression-level 9
           manylinux: ${{ matrix.platform.manylinux }}
           # Inside the build container, install only the toolchain the static build needs
           # (protoc for Lance, cmake + a C/C++ compiler + perl to build netCDF/HDF5 and OpenSSL
@@ -201,6 +202,27 @@ jobs:
             # OpenSSL is vendored by the `vendored-openssl` feature, so no openssl-devel here —
             # but Configure needs IPC::Cmd, which is why perl-IPC-Cmd is installed above.
             perl -MIPC::Cmd -e 'print "perl IPC::Cmd ok\n"'
+
+      # PyPI rejects files over its per-project limit ("100 MB" in the error text, 100 MiB in
+      # warehouse) and only does so at upload — i.e. after every platform has finished building,
+      # an hour or more in. That is how v2.0.0-rc1 failed. Checking here puts the error next to
+      # the wheel that caused it and names the platform. Raise `limit_mib` to match if the project
+      # is ever granted a higher limit:
+      # https://docs.pypi.org/project-management/storage-limits#requesting-a-file-size-limit-increase
+      - name: Check wheel size
+        shell: bash
+        run: |
+          limit_mib=100
+          status=0
+          for whl in dist/*.whl; do
+            size=$(wc -c < "$whl")
+            awk -v n="$(basename "$whl")" -v s="$size" 'BEGIN{printf "%s  %.1f MiB\n", n, s/1048576}'
+            if [ "$size" -gt "$((limit_mib * 1024 * 1024))" ]; then
+              echo "::error::$(basename "$whl") is $((size / 1048576)) MiB; PyPI's limit for beacondb is ${limit_mib} MiB."
+              status=1
+            fi
+          done
+          exit $status
 
       - name: Smoke-test the wheel
         shell: bash

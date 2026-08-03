@@ -4,7 +4,7 @@ members = ["beacon-datalake/beacon-datalake", "beacon-datalake/beacon-datalake-c
 
 [workspace.package]
 
-version = "2.0.0-rc.1"
+version = "2.0.0-rc.2"
 
 # Minimum supported Rust version, inherited by every member via `rust-version.workspace = true`.
 # This is the "1.91 or later" contract: cargo refuses to build on anything older with a clear
@@ -153,3 +153,11 @@ debug = false
 # artifacts stay small too.
 [profile.test.package."*"]
 debug = false
+
+[profile.release-wheel]
+inherits = "release"
+# Drops .symtab/.strtab. The dynamic symbol table the loader needs (.dynsym, 10 KB) is untouched;
+# only Rust-side backtrace symbolization inside the extension is lost.
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
