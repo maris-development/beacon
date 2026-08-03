@@ -18,7 +18,7 @@ WEB_DIR ?= beacon-datalake-clients/beacon-web/dist
 export BEACON_ADMIN_USERNAME
 export BEACON_ADMIN_PASSWORD
 
-.PHONY: help ui-deps ui run serve dev-api dev-ui clean-ui
+.PHONY: help ui-deps ui run serve dev-api dev-ui clean-ui wheel-check wheel
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -53,3 +53,15 @@ dev-ui: ## Run the Vite dev server with hot-reload on http://localhost:5173
 
 clean-ui: ## Remove the built SPA
 	rm -rf $(WEB_DIR) beacon-datalake-clients/beacon-ts/dist
+
+# The beacondb wheel is built in a manylinux container whose toolchain is nothing like a dev
+# machine's, and CI only builds it on a release tag. These run that same build locally, so
+# container breakage is found before a tag is cut. musllinux is checked too: it is not in the
+# release matrix today, but publish-beacondb.yml keeps its apk branch so the entries can be
+# restored, and this is what keeps that branch honest.
+wheel-check: ## Verify the beacondb wheel build toolchain in the CI containers (fast)
+	./scripts/build-wheel-docker.sh --deps-only
+	./scripts/build-wheel-docker.sh --libc musllinux --deps-only
+
+wheel: ## Build the beacondb wheel in the CI manylinux container (slow; wheel in target/docker-wheels)
+	./scripts/build-wheel-docker.sh
