@@ -3,8 +3,8 @@
 #
 # The Linux wheel jobs in `.github/workflows/publish-beacondb.yml` only run on a
 # `beacondb-v*` tag, and they build inside manylinux/musllinux containers whose toolchain
-# is nothing like a dev machine's — an AlmaLinux 8 base with a 2017-era protoc, or Alpine
-# with musl. Toolchain breakage there is invisible until a release is already tagged. This
+# is nothing like a dev machine's — an AlmaLinux base with its own protobuf/OpenSSL vintage, or
+# Alpine with musl. Toolchain breakage there is invisible until a release is already tagged. This
 # script runs that same build on demand, in the same container images, installing the toolchain
 # by reading the `before-script-linux:` block straight out of publish-beacondb.yml — so a
 # failure here is the failure CI would hit, not the failure of a stale copy.
@@ -48,9 +48,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+workflow="$repo_root/.github/workflows/publish-beacondb.yml"
+
+# Read the manylinux tag out of the release matrix instead of hardcoding it. That tag is the
+# published wheel's glibc floor; building locally against a different one would exercise a
+# different distro entirely (2_28 is AlmaLinux 8, 2_34 is AlmaLinux 9) and quietly prove
+# nothing about the release.
+manylinux_tag=$(sed -n 's/^[[:space:]]*manylinux:[[:space:]]*"\(2_[0-9]*\)".*/\1/p' "$workflow" | head -n1)
+if [[ -z "$manylinux_tag" ]]; then
+    echo "error: no manylinux tag found in $workflow" >&2
+    exit 1
+fi
+
 case "$libc" in
-    manylinux) image="quay.io/pypa/manylinux_2_28_${arch}"; rust_host="${arch}-unknown-linux-gnu" ;;
-    musllinux) image="quay.io/pypa/musllinux_1_2_${arch}"; rust_host="${arch}-unknown-linux-musl" ;;
+    manylinux)
+        image="quay.io/pypa/manylinux_${manylinux_tag}_${arch}"
+        compat="manylinux_${manylinux_tag}"
+        rust_host="${arch}-unknown-linux-gnu"
+        ;;
+    musllinux)
+        image="quay.io/pypa/musllinux_1_2_${arch}"
+        compat="musllinux_1_2"
+        rust_host="${arch}-unknown-linux-musl"
+        ;;
     *) echo "--libc must be manylinux or musllinux" >&2; exit 1 ;;
 esac
 
@@ -130,8 +150,6 @@ mkdir -p "$out_dir"
 # The repo is mounted read-write (maturin writes Cargo.lock timestamps and the version
 # bump is not applied here), but the target dir is redirected into a volume: host build
 # artifacts are a different libc and arch and must not be mixed in.
-compat=$([[ $libc == manylinux ]] && echo manylinux_2_28 || echo musllinux_1_2)
-
 # Drop the cdylib before building. maturin's auditwheel step rewrites the module's DT_NEEDED
 # entries *in place*, to the hashed names of the libraries it vendors into the wheel
 # (libssl-3f64e418.so.1.1 and friends). Those names exist only inside the wheel, so a second
