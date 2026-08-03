@@ -21,7 +21,7 @@ const products = [
     ],
     // BeaconDB only exists in 2.0.0, so this necessarily lands on the
     // pre-release docs (which carry the pre-release banner).
-    link: withBase('/docs/2.0.0-rc1/beacondb/'),
+    link: withBase('/docs/2.0.0-rc2/beacondb/'),
     linkText: 'Explore BeaconDB',
   },
   {

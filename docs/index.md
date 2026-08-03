@@ -11,7 +11,7 @@ hero:
   actions:
     - theme: brand
       text: Get Started
-      # Points at the newest *stable* docs. 2.0.0-rc1 is a pre-release and is
+      # Points at the newest *stable* docs. 2.0.0-rc2 is a pre-release and is
       # reached deliberately via the version dropdown, not from the hero CTA.
       link: /docs/1.8.0/introduction
     - theme: alt
