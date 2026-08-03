@@ -1,19 +1,21 @@
 ---
-description: Read NetCDF files with read_netcdf(). Streaming chunk-level reads, variable attributes as columns, and an optional dimension filter.
+description: Read NetCDF files with read_netcdf(). Beacon streams chunks, shows variable attributes as columns and takes an optional dimension filter.
 ---
 
 # NetCDF
 
-## Reading
+## Read the files
 
 ```text
 read_netcdf(glob_paths)
 read_netcdf(glob_paths, dimensions)
 ```
 
-Reads NetCDF files matching one or more glob patterns.
+Beacon reads the NetCDF files that match one or more glob patterns.
 
-The optional `dimensions` argument filters which variables are returned: a variable is included only if all of its dimensions are a subset of the provided list. Use it to exclude high-dimensional variables you don't need, or to resolve ambiguity when files contain variables with incompatible dimensionalities.
+The optional `dimensions` argument selects the variables. Beacon returns a variable only if the list
+holds all of its dimensions. Use the argument to drop variables with many dimensions. Also use it
+when the files hold variables with different dimensions.
 
 ```sql
 SELECT time, latitude, longitude, temperature
@@ -24,40 +26,38 @@ SELECT *
 FROM read_netcdf(['argo/**/*.nc'], ['time', 'pressure'])
 ```
 
-## Inspecting the schema
+## Inspect the schema
 
-Before writing a query it is usually worth checking which columns a file actually has, and
-what their types are.
+Check the columns of a file before you write a query. Also check their types.
 
-[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the
-inferred column names and types **without reading any data**, which makes it the cheapest
-option on large collections:
+[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the column names and types **without a read of any data**. It is
+therefore the cheapest option on a large collection:
 
 ```sql
 SELECT * FROM read_schema('argo/**/*.nc', 'netcdf');
 ```
 
-Pass a list to see the combined schema across several locations, which is how you spot files
-that disagree about a column:
+Pass a list to get the combined schema of several locations. This shows the files that disagree
+about a column:
 
 ```sql
 SELECT * FROM read_schema(['argo/**/*.nc', 'other/*.nc'], 'netcdf');
 ```
 
-To go further than names and types, [`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) profiles every column in one pass, adding
-min/max, distinct counts, and the share of nulls:
+[`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) gives more than names and types. It profiles every column in
+one pass. It adds the minimum, the maximum, the distinct count and the share of nulls:
 
 ```sql
 SUMMARIZE (SELECT * FROM read_netcdf('argo/**/*.nc'));
 ```
 
-If the files are registered as a table, `DESCRIBE` works directly:
+If the files have a table name, use `DESCRIBE`:
 
 ```sql
 DESCRIBE argo;
 ```
 
-From Python, the Arrow schema of any relation is available without collecting rows:
+From Python, read the Arrow schema of a relation. Beacon collects no rows:
 
 ```python
 con.sql("SELECT * FROM read_netcdf('argo/**/*.nc') LIMIT 0").arrow().schema
@@ -65,20 +65,25 @@ con.sql("SELECT * FROM read_netcdf('argo/**/*.nc') LIMIT 0").arrow().schema
 
 ## Format details
 
-Streaming reads with chunk-level access, large files are read incrementally rather than loaded entirely into memory.
+Beacon streams the data and reads one chunk at a time. It reads a large file step by step. It does
+not load the whole file into memory.
 
 Supported dialects:
 
 - **NetCDF4** (recommended)
-- **NetCDF3**: `char*` arrays with a string-like dimension (e.g. `STRLEN`) are inferred as fixed-length strings
+- **NetCDF3**: a `char*` array with a string dimension such as `STRLEN` becomes a fixed-length string
 
 ### Variable attributes
 
-NetCDF variables carry metadata attributes (e.g. `units`, `long_name`, `valid_min`). Beacon exposes these as extra columns using dot notation: `<variable>.<attribute>`. For example, a variable `temperature` with a `units` attribute is accessible as the column `temperature.units`.
+A NetCDF variable carries metadata attributes such as `units`, `long_name` and `valid_min`. Beacon
+shows these as extra columns. It uses dot notation: `<variable>.<attribute>`. The `units` attribute
+of the `temperature` variable becomes the column `temperature.units`.
 
-Attribute columns preserve the original type (string, integer, float, …) as stored in the file. They are available alongside the variable columns in every query.
+An attribute column keeps the type from the file: string, integer, float and so on. Every query
+returns these columns next to the variable columns.
 
-File-level global attributes are exposed with a leading dot and no variable prefix: `.<attribute>`. For example, a global attribute `source` is accessible as the column `.source`.
+A file attribute has no variable prefix. Beacon shows it with a leading dot: `.<attribute>`. The
+global attribute `source` becomes the column `.source`.
 
 ```sql
 SELECT temperature, "temperature.units", "temperature.long_name", ".source"
@@ -88,11 +93,14 @@ LIMIT 1
 
 Limitations:
 
-- User-defined types are not supported.
-- S3 / object-store backends only support anonymous access. Authenticated S3 reads are not yet supported.
+- Beacon does not support user-defined types.
+- Object storage supports anonymous access only. Beacon cannot yet do an authenticated S3 read.
 
 :::tip
-For best performance with large NetCDF collections, convert the files into a single [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) collection. Atlas consolidates many NetCDF files into one statistics-aware array store, so Beacon can prune whole datasets and read only the projected arrays, typically much faster than scanning the original NetCDF files.
+For a large NetCDF collection, convert the files into one
+[Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) collection. Atlas merges many NetCDF
+files into one array store with statistics. Beacon can then drop whole datasets and read only the
+arrays that you select. This is much faster than a scan of the original NetCDF files.
 :::
 
 ## As an external table
@@ -103,4 +111,5 @@ STORED AS NC
 LOCATION 'argo/**/*.nc'
 ```
 
-See [Creating External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL, and [Reading External Files](/docs/2.0.0-rc2/beacondb/data-sources/) for the general reading model.
+See [Create External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/) for the
+full read model.

@@ -1,24 +1,24 @@
 ---
-description: Complete reference for the BeaconDB Python API — connect(), Connection, Relation, Result, and the exception hierarchy, with a description of every method.
+description: Full reference for the BeaconDB Python API. It covers connect(), Connection, Relation, Result and the exception hierarchy.
 ---
 
 # API reference
 
-Every public method, grouped by what you are trying to do. The package ships `py.typed` and
-`_beacondb.pyi` stubs, so your editor gives the same signatures inline.
+This page lists every public method. The groups follow your task. The package ships `py.typed` and
+`_beacondb.pyi` stubs. Your editor therefore shows the same signatures.
 
 Three objects carry almost the whole surface:
 
 | Object | You get it from | What it is |
 | --- | --- | --- |
 | [`Connection`](#connection) | `beacondb.connect()` | An open database. Runs SQL, reads files, holds identity. |
-| [`Relation`](#relation) | `con.sql()`, `con.table()`, `con.read_*()` | A **lazy** query — runs only at a terminal method. |
+| [`Relation`](#relation) | `con.sql()`, `con.table()`, `con.read_*()` | A **lazy** query. It runs only at a terminal method. |
 | [`Result`](#result) | `con.json_query()` | An already-executed result set. |
 
 ::: tip Lazy vs eager
-A `Relation` runs nothing when you build it. Inspecting `rel.sql`, `rel.columns` or `rel.types`
-costs nothing; the query executes on the first terminal call — `fetchall`, `df`, `arrow`,
-`record_batch`, `show`, `explain`, or any `to_*` sink.
+A `Relation` runs nothing when you build it. `rel.sql`, `rel.columns` and `rel.types` cost nothing.
+The query runs at the first terminal call: `fetchall`, `df`, `arrow`, `record_batch`, `show`,
+`explain` or a `to_*` sink.
 :::
 
 ## Module functions
@@ -42,18 +42,18 @@ beacondb.connect(
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `database` | `":memory:"` | Path to a `beacon.db` file, or `":memory:"` for a throwaway in-process database. A missing file is created. |
-| `read_only` | `False` | Refuse every write — DDL, DML, and side-effecting statements (`ATTACH`, `CREATE SECRET`, `INSERT`). `SELECT` and `SHOW` still work. |
-| `auth` | `False` | Turn on Beacon's RBAC. Off means possession of the file is full control; see [Getting started](/docs/2.0.0-rc2/beacondb/python/getting-started#authentication). |
-| `username`, `password`, `token` | `None` | Credentials to authenticate as. Only valid with `auth=True` — passing them with auth off is an error, not a no-op. |
-| `admin_username`, `admin_password` | `None` | Bootstrap the super-user on a database that has no auth store yet. |
-| `anonymous` | `True` | Whether the anonymous, read-only principal may connect at all. |
-| `datasets` | `None` | Root directory for relative dataset paths. |
-| `batch_size` | `None` | Rows per Arrow batch the engine produces. Raise for throughput, lower for latency. |
-| `memory_limit` | `None` | Soft memory budget in bytes for query execution. |
-| `cpu_limit` | `None` | Maximum worker threads. Defaults to the machine's core count. |
-| `crawlers` | `False` | Enable background dataset crawlers. |
-| `secrets_key` | `None` | Base64 32-byte key that encrypts persistent secrets (or `$BEACON_SECRETS_KEY`). Required to write one — Beacon refuses to store a plaintext credential. See [Secrets](/docs/2.0.0-rc2/beacondb/python/secrets). |
+| `database` | `":memory:"` | The path to a `beacon.db` file. Use `":memory:"` for a throwaway database in the process. Beacon creates a missing file. |
+| `read_only` | `False` | Refuse every write. This covers DDL, DML and statements with a side effect, such as `ATTACH`, `CREATE SECRET` and `INSERT`. `SELECT` and `SHOW` still work. |
+| `auth` | `False` | Switch the RBAC of Beacon on. With auth off, the file gives full control. See [Getting started](/docs/2.0.0-rc2/beacondb/python/getting-started#authentication). |
+| `username`, `password`, `token` | `None` | The credentials of your identity. They need `auth=True`. With auth off they give an error. Beacon does not ignore them. |
+| `admin_username`, `admin_password` | `None` | Create the super-user on a database without an auth store. |
+| `anonymous` | `True` | `True` lets the anonymous, read-only principal connect. |
+| `datasets` | `None` | The root directory for a relative dataset path. |
+| `batch_size` | `None` | The number of rows in each Arrow batch. A higher value gives more throughput. A lower value gives less latency. |
+| `memory_limit` | `None` | The soft memory budget of a query, in bytes. |
+| `cpu_limit` | `None` | The maximum number of worker threads. The default is the core count of the machine. |
+| `crawlers` | `False` | Switch the background dataset crawlers on. |
+| `secrets_key` | `None` | A base64 key of 32 bytes. It encrypts the persistent secrets. `$BEACON_SECRETS_KEY` also works. A persistent secret needs it, because Beacon never stores a plaintext credential. See [Secrets](/docs/2.0.0-rc2/beacondb/python/secrets). |
 
 ## `Connection`
 
@@ -61,16 +61,16 @@ beacondb.connect(
 
 | Method | Description |
 | --- | --- |
-| `execute(sql, parameters=None)` | Run one statement. `parameters` are **bound**, never interpolated, so they are injection-safe; use `?` or `$1` placeholders. Returns the connection for chaining into `fetch*`. |
+| `execute(sql, parameters=None)` | Run one statement. Beacon **binds** the `parameters`. It never puts them into the string. They are therefore safe against injection. Use a `?` or `$1` placeholder. Returns the connection, so you can chain a `fetch*` call. |
 | `executemany(sql, seq_of_parameters)` | Run the same statement once per parameter row. |
-| `fetchone()` | Next row of the last `execute` as a tuple, or `None` when exhausted. |
-| `fetchmany(size=1)` | Up to `size` further rows. |
-| `fetchall()` | All remaining rows. |
-| `description` | PEP 249 column metadata: one 7-tuple per column. `None` before any query. |
-| `rowcount` | Rows affected (DML) or produced (query) by the last statement. |
-| `cursor()` | An independent result slot on the *same* database, so two queries can be in flight without clobbering each other's rows. |
-| `commit()`, `rollback()` | No-ops. Beacon has no multi-statement transactions; present so DB-API tooling works. |
-| `close()` | Close the connection and release the file lock. Also happens on `__exit__`. |
+| `fetchone()` | The next row of the last `execute`, as a tuple. Returns `None` after the last row. |
+| `fetchmany(size=1)` | The next rows, at most `size` of them. |
+| `fetchall()` | Every remaining row. |
+| `description` | The PEP 249 column metadata: one tuple of 7 items for each column. It is `None` before the first query. |
+| `rowcount` | The number of rows that the last statement changes or returns. |
+| `cursor()` | A separate result slot on the *same* database. Two queries can therefore run together. Neither one overwrites the rows of the other. |
+| `commit()`, `rollback()` | These methods do nothing. Beacon has no transaction over several statements. They exist for DB-API tools. |
+| `close()` | Close the connection and release the file lock. `__exit__` also does this. |
 
 ### Build a query
 
@@ -78,62 +78,62 @@ Each returns a lazy [`Relation`](#relation).
 
 | Method | Description |
 | --- | --- |
-| `sql(query)` | Wrap a SQL string as a relation. Nothing executes yet. |
+| `sql(query)` | Wrap a SQL string as a relation. Beacon runs nothing yet. |
 | `query(query)` | Alias of `sql`. |
-| `table(name)` | The named table as a relation, equivalent to `SELECT * FROM name`. |
+| `table(name)` | The named table as a relation. It equals `SELECT * FROM name`. |
 | `view(name)` | The named view as a relation. |
 
 ### Read files
 
-Readers resolve from the engine's catalog, so any table function Beacon registers is available as a
-method — new ones appear without a client update. All return a lazy `Relation`.
+The readers come from the catalog of the engine. Every table function of Beacon is therefore a
+method. A new function appears without a client update. Each reader returns a lazy `Relation`.
 
 | Method | Description |
 | --- | --- |
-| `read(function, *args, **kwargs)` | General form. Call any table function by name. |
-| `read_parquet`, `read_geoparquet`, `read_csv`, `read_json`, `read_arrow`, `read_netcdf`, `read_hdf5`, `read_zarr`, `read_delta`, `read_odv_ascii`, `read_tiff`, `read_bbf`, `read_atlas` | Format-specific readers. Accept a path or glob, plus that format's options as keywords, and the universal `columns=[...]` to project as you read. |
-| `list_datasets(*args)` | Relation over the datasets Beacon knows about. |
-| `table_functions()` | Names of every reader currently available. |
+| `read(function, *args, **kwargs)` | The general form. Call any table function by name. |
+| `read_parquet`, `read_geoparquet`, `read_csv`, `read_json`, `read_arrow`, `read_netcdf`, `read_hdf5`, `read_zarr`, `read_delta`, `read_odv_ascii`, `read_tiff`, `read_bbf`, `read_atlas` | One reader for each format. Each takes a path or a glob. It also takes the options of that format as keywords. Every reader takes `columns=[...]` to project during the read. |
+| `list_datasets(*args)` | A relation over the datasets that Beacon knows. |
+| `table_functions()` | The names of every available reader. |
 
 ### Bring Python data in
 
 | Method | Description |
 | --- | --- |
-| `register(name, obj, *, persist=False)` | Make a pandas/polars/pyarrow object (or any Arrow-compatible one) queryable by name. Session-only by default — in memory for this process, never written to the file. `persist=True` writes it into `beacon.db` as a managed table, which is real DDL: needs write privileges and refuses to overwrite. Requires `pyarrow`. |
-| `append(name, obj)` | `INSERT INTO` an existing managed table. Errors if it does not exist. |
-| `unregister(name)` | Drop a session-registered table. |
+| `register(name, obj, *, persist=False)` | Give a pandas, polars or pyarrow object a table name. Any Arrow object works. By default the table lives in the session only. Beacon holds it in memory and writes nothing to the file. `persist=True` writes it into `beacon.db` as a managed table. That is real DDL. It needs write privileges and does not overwrite. It needs `pyarrow`. |
+| `append(name, obj)` | Run `INSERT INTO` on an existing managed table. It gives an error if the table does not exist. |
+| `unregister(name)` | Drop a table of the session. |
 
 ### Attach a remote Beacon
 
 | Method | Description |
 | --- | --- |
-| `attach(name, url, *, token=None, username=None, password=None, secret=None, tls=False)` | Mirror a remote Beacon Data Lake's catalog under `name`, so every remote table is queryable as `name.schema.table` and joinable against local data. Contacts the remote immediately, so a bad endpoint fails here rather than on first query. `secret=` names a `TYPE BEACON` secret instead of inline credentials. |
-| `detach(name)` | Remove the attachment. Returns whether it existed. |
-| `attached()` | Names of currently attached catalogs. |
+| `attach(name, url, *, token=None, username=None, password=None, secret=None, tls=False)` | Mirror the catalog of a remote Beacon Data Lake under `name`. You can then query every remote table as `name.schema.table`. You can also join it against local data. Beacon contacts the remote server at once. A bad endpoint therefore fails here, not at the first query. `secret=` names a `TYPE BEACON` secret instead of inline credentials. |
+| `detach(name)` | Remove the attached catalog. Returns `True` if it existed. |
+| `attached()` | The names of the attached catalogs. |
 
 ### Identity
 
 | Method | Description |
 | --- | --- |
-| `connect_as(username=None, password=None, token=None)` | A new connection to the same database under a different identity. |
+| `connect_as(username=None, password=None, token=None)` | A new connection to the same database, with a different identity. |
 | `as_anonymous()` | A new connection as the anonymous, read-only principal. |
-| `whoami()` | Dict describing the current principal: `username`, `roles`, `is_super_user`, `auth`. |
-| `auth_enabled` | Whether RBAC is on for this connection. |
+| `whoami()` | A dict that describes the current principal: `username`, `roles`, `is_super_user` and `auth`. |
+| `auth_enabled` | `True` if RBAC is on for this connection. |
 
 ### Engine extras
 
 | Method | Description |
 | --- | --- |
-| `json_query(spec)` | Run Beacon's structured (non-SQL) query — the same payload the HTTP API and TypeScript client use. Returns a [`Result`](#result). |
-| `functions()` | Relation over every SQL function the engine exposes. |
-| `metrics(query_id=None)` | Per-query execution metrics; narrow to one query with `query_id`. |
-| `list_tables()` | User tables in the default schema. |
-| `refresh(name)` | Re-list an external table, or rebuild a materialized view. |
+| `json_query(spec)` | Run the structured query form of Beacon, without SQL. It takes the same payload as the HTTP API and the TypeScript client. Returns a [`Result`](#result). |
+| `functions()` | A relation over every SQL function of the engine. |
+| `metrics(query_id=None)` | The execution metrics of each query. Give a `query_id` to get one query. |
+| `list_tables()` | The user tables in the default schema. |
+| `refresh(name)` | List the files of an external table again, or build a materialized view again. |
 
 ## `Relation`
 
-A query that has been built but not yet run. Shape it in **SQL**; the relation is what you call to
-get the answer out, convert it, or write it to a file.
+A relation is a query that Beacon builds but does not run. Shape it in **SQL**. Then call the
+relation to get the answer, to convert it, or to write it to a file.
 
 ```python
 rel = con.sql("SELECT kind, count(*) AS n FROM events GROUP BY kind ORDER BY n DESC LIMIT 5")
@@ -142,31 +142,31 @@ rel.df()       # now it runs
 ```
 
 ::: info No method chaining
-BeaconDB does not currently expose relational composition (`.filter()`, `.aggregate()`,
-`.join()`, …). Write the SQL instead — it is the same engine, and one statement is easier to read
-back than an equivalent chain.
+BeaconDB does not yet give relational composition, such as `.filter()`, `.aggregate()` and
+`.join()`. Write the SQL instead. It uses the same engine. One statement also reads better than the
+equal chain.
 :::
 
 ### Get results out
 
-These **execute** the query.
+These methods **run** the query.
 
 | Method | Description |
 | --- | --- |
-| `fetchone()`, `fetchmany(size=1)`, `fetchall()` | Rows as tuples. |
+| `fetchone()`, `fetchmany(size=1)`, `fetchall()` | The rows, as tuples. |
 | `arrow()` | A `pyarrow.Table`. Aliases: `fetch_arrow_table`, `to_arrow_table`. |
 | `df()` | A pandas `DataFrame`. Aliases: `to_df`, `fetchdf`. Needs `beacondb[pandas]`. |
 | `pl()` | A polars `DataFrame`. Needs `beacondb[polars]`. |
-| `record_batch(batch_size=None)` | A `pyarrow.RecordBatchReader` that pulls batches **on demand**, so memory stays bounded on results too large to collect. Omit `batch_size` for the engine's native batches (zero-copy). Aliases: `fetch_record_batch`, `fetch_arrow_reader`. |
-| `__arrow_c_stream__()` | Arrow PyCapsule protocol — any Arrow consumer ingests the relation directly, with no dependency of ours. |
-| `show(limit=10)` | Print the first rows as a table. Returns nothing. |
-| `explain(analyze=False)` | The logical and physical plan as text. `analyze=True` runs the query and annotates each operator with rows, time and bytes. |
-| `create(name)` | Materialize the relation as a table. |
+| `record_batch(batch_size=None)` | A `pyarrow.RecordBatchReader`. It pulls batches **on demand**. The memory therefore stays bounded on a large result. Omit `batch_size` to get the native batches of the engine, with zero copy. Aliases: `fetch_record_batch`, `fetch_arrow_reader`. |
+| `__arrow_c_stream__()` | The Arrow PyCapsule protocol. Any Arrow consumer reads the relation directly. It needs no extra dependency. |
+| `show(limit=10)` | Print the first rows as a table. It returns nothing. |
+| `explain(analyze=False)` | The logical and physical plan, as text. `analyze=True` runs the query. It then adds the rows, the time and the bytes to each operator. |
+| `create(name)` | Store the relation as a table. |
 | `create_view(name)` | Save it as a view. |
 
 ### Write to a file
 
-Local paths only for now; a `scheme://` destination raises `NotSupportedError`.
+A sink writes to a local path only. A `scheme://` destination raises `NotSupportedError`.
 
 | Method | Description |
 | --- | --- |
@@ -174,7 +174,7 @@ Local paths only for now; a `scheme://` destination raises `NotSupportedError`.
 | `to_csv(path)` | CSV. |
 | `to_arrow_ipc(path)` | Arrow IPC. Alias: `to_ipc`. |
 | `to_netcdf(path)` | A real NetCDF-4 file. |
-| `to_hdf5(path)` | Same writer under the HDF5 name — NetCDF-4 *is* HDF5. |
+| `to_hdf5(path)` | The same writer, under the HDF5 name. NetCDF-4 *is* HDF5. |
 | `to_nd_netcdf(path, dimensions)` | Multi-dimensional NetCDF, pivoting on the named dimension columns. |
 | `to_geoparquet(path, longitude=None, latitude=None)` | GeoParquet, building geometry from the named coordinate columns. |
 | `to_odv(path, *, longitude=None, latitude=None, depth=None, time=None, key=None, qf_schema=None)` | Ocean Data View archive. The layout is inferred from the schema, but most data does not use ODV's exact header names, so map them explicitly. `qf_schema` overrides the quality-flag schema (default `SEADATANET`). |
@@ -183,7 +183,7 @@ Local paths only for now; a `scheme://` destination raises `NotSupportedError`.
 
 | Property | Description |
 | --- | --- |
-| `sql` | The SQL this relation would run. Executes nothing — the fastest way to debug a chain. |
+| `sql` | The SQL of this relation. It runs nothing. This is the fastest way to debug a chain. |
 | `columns` | Output column names. |
 | `types` | Output column types. |
 | `shape` | `(rows, columns)`. |
@@ -191,11 +191,12 @@ Local paths only for now; a `scheme://` destination raises `NotSupportedError`.
 
 ## `Result`
 
-Returned by [`json_query()`](#engine-extras). Already executed, so there is nothing to compose.
+[`json_query()`](#engine-extras) returns a `Result`. Beacon has already run the query. You compose
+nothing.
 
 | Member | Description |
 | --- | --- |
-| `fetchone()`, `fetchmany(size=1)`, `fetchall()` | Rows as tuples. |
+| `fetchone()`, `fetchmany(size=1)`, `fetchall()` | The rows, as tuples. |
 | `arrow()`, `df()` / `fetchdf()`, `pl()` | The result as pyarrow / pandas / polars. |
 | `__arrow_c_stream__()` | Arrow PyCapsule protocol. |
 | `description` | PEP 249 column metadata. |
@@ -203,7 +204,7 @@ Returned by [`json_query()`](#engine-extras). Already executed, so there is noth
 
 ## Exceptions
 
-`beacondb.Error` is the root of the PEP 249 hierarchy — catch it to catch everything.
+`beacondb.Error` is the root of the PEP 249 hierarchy. Catch it to catch every error.
 
 ```text
 Error
@@ -219,17 +220,17 @@ Error
 ```
 
 ::: warning `NotPermittedError` is not `PermissionError`
-It subclasses `ProgrammingError`, not CPython's built-in `PermissionError`. Catching the built-in
-will not catch an authorization refusal.
+`NotPermittedError` is a subclass of `ProgrammingError`. It is not a subclass of the built-in
+`PermissionError` of CPython. The built-in class therefore does not catch an authorization refusal.
 :::
 
-`Warning` is also exported, per PEP 249.
+The package also exports `Warning`, as PEP 249 requires.
 
 ## See also
 
-- [Getting started](/docs/2.0.0-rc2/beacondb/python/getting-started) — connecting, auth modes, read-only.
-- [Querying](/docs/2.0.0-rc2/beacondb/python/querying) — relations, readers, sinks, streaming, with examples.
-- [Bringing data in](/docs/2.0.0-rc2/beacondb/python/data-in) — `register()` and `append()`.
-- [Remote catalogs](/docs/2.0.0-rc2/beacondb/python/remote-catalogs) — `ATTACH` and pushdown.
-- [Secrets](/docs/2.0.0-rc2/beacondb/python/secrets) — object-store credentials.
-- [SQLAlchemy](/docs/2.0.0-rc2/beacondb/python/sqlalchemy) — the `beacondb://` dialect.
+- [Getting started](/docs/2.0.0-rc2/beacondb/python/getting-started): connect, auth modes, read-only.
+- [Querying](/docs/2.0.0-rc2/beacondb/python/querying): relations, readers, sinks and streams, with examples.
+- [Bring data in](/docs/2.0.0-rc2/beacondb/python/data-in): `register()` and `append()`.
+- [Remote catalogs](/docs/2.0.0-rc2/beacondb/python/remote-catalogs): `ATTACH` and pushdown.
+- [Secrets](/docs/2.0.0-rc2/beacondb/python/secrets): object store credentials.
+- [SQLAlchemy](/docs/2.0.0-rc2/beacondb/python/sqlalchemy): the `beacondb://` dialect.

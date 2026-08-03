@@ -1,55 +1,53 @@
 ---
-description: Read Arrow IPC stream files (.arrow, .feather) natively with zero-copy column access.
+description: Read Arrow IPC stream files (.arrow, .feather). Beacon reads them directly with zero-copy column access.
 ---
 
 # Arrow IPC
 
-## Reading
+## Read the files
 
 ```text
 read_arrow(glob_paths)
 ```
 
-Reads Arrow IPC stream files (`.arrow`, `.feather`).
+Beacon reads Arrow IPC stream files (`.arrow`, `.feather`).
 
 ```sql
 SELECT * FROM read_arrow('streams/*.arrow')
 ```
 
-## Inspecting the schema
+## Inspect the schema
 
-Before writing a query it is usually worth checking which columns a file actually has, and
-what their types are.
+Check the columns of a file before you write a query. Also check their types.
 
-[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the
-inferred column names and types **without reading any data**, which makes it the cheapest
-option on large collections:
+[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the column names and types **without a read of any data**. It is
+therefore the cheapest option on a large collection:
 
 ```sql
 SELECT * FROM read_schema('cruises/*.arrow', 'arrow');
 ```
 
-Pass a list to see the combined schema across several locations, which is how you spot files
-that disagree about a column:
+Pass a list to get the combined schema of several locations. This shows the files that disagree
+about a column:
 
 ```sql
 SELECT * FROM read_schema(['cruises/*.arrow', 'other/*.arrow'], 'arrow');
 ```
 
-To go further than names and types, [`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) profiles every column in one pass, adding
-min/max, distinct counts, and the share of nulls:
+[`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) gives more than names and types. It profiles every column in
+one pass. It adds the minimum, the maximum, the distinct count and the share of nulls:
 
 ```sql
 SUMMARIZE (SELECT * FROM read_arrow('cruises/*.arrow'));
 ```
 
-If the files are registered as a table, `DESCRIBE` works directly:
+If the files have a table name, use `DESCRIBE`:
 
 ```sql
 DESCRIBE cruise_data;
 ```
 
-From Python, the Arrow schema of any relation is available without collecting rows:
+From Python, read the Arrow schema of a relation. Beacon collects no rows:
 
 ```python
 con.sql("SELECT * FROM read_arrow('cruises/*.arrow') LIMIT 0").arrow().schema
@@ -57,7 +55,8 @@ con.sql("SELECT * FROM read_arrow('cruises/*.arrow') LIMIT 0").arrow().schema
 
 ## Format details
 
-Fully supported. Arrow IPC stream files (`.arrow`, `.feather`) are read natively with zero-copy column access.
+Beacon fully supports this format. It reads an Arrow IPC stream file (`.arrow`, `.feather`) directly
+with zero-copy column access.
 
 ## As an external table
 
@@ -67,4 +66,5 @@ STORED AS ARROW
 LOCATION 'cruises/'
 ```
 
-See [Creating External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL, and [Reading External Files](/docs/2.0.0-rc2/beacondb/data-sources/) for the general reading model.
+See [Create External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/) for the
+full read model.

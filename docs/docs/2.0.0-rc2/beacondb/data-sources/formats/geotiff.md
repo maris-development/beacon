@@ -1,55 +1,53 @@
 ---
-description: Read GeoTIFF and Cloud-Optimized GeoTIFF rasters with read_tiff(), including TIFF tags exposed as columns.
+description: Read GeoTIFF and Cloud-Optimized GeoTIFF rasters with read_tiff(). Beacon also shows the TIFF tags as columns.
 ---
 
 # GeoTIFF
 
-## Reading
+## Read the files
 
 ```text
 read_tiff(glob_paths)
 ```
 
-Reads GeoTIFF and Cloud-Optimized GeoTIFF files.
+Beacon reads GeoTIFF and Cloud-Optimized GeoTIFF files.
 
 ```sql
 SELECT * FROM read_tiff('rasters/elevation.tif')
 ```
 
-## Inspecting the schema
+## Inspect the schema
 
-Before writing a query it is usually worth checking which columns a file actually has, and
-what their types are.
+Check the columns of a file before you write a query. Also check their types.
 
-[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the
-inferred column names and types **without reading any data**, which makes it the cheapest
-option on large collections:
+[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the column names and types **without a read of any data**. It is
+therefore the cheapest option on a large collection:
 
 ```sql
 SELECT * FROM read_schema('rasters/*.tif', 'tiff');
 ```
 
-Pass a list to see the combined schema across several locations, which is how you spot files
-that disagree about a column:
+Pass a list to get the combined schema of several locations. This shows the files that disagree
+about a column:
 
 ```sql
 SELECT * FROM read_schema(['rasters/*.tif', 'other/*.tif'], 'tiff');
 ```
 
-To go further than names and types, [`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) profiles every column in one pass, adding
-min/max, distinct counts, and the share of nulls:
+[`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) gives more than names and types. It profiles every column in
+one pass. It adds the minimum, the maximum, the distinct count and the share of nulls:
 
 ```sql
 SUMMARIZE (SELECT * FROM read_tiff('rasters/*.tif'));
 ```
 
-If the files are registered as a table, `DESCRIBE` works directly:
+If the files have a table name, use `DESCRIBE`:
 
 ```sql
 DESCRIBE elevation;
 ```
 
-From Python, the Arrow schema of any relation is available without collecting rows:
+From Python, read the Arrow schema of a relation. Beacon collects no rows:
 
 ```python
 con.sql("SELECT * FROM read_tiff('rasters/*.tif') LIMIT 0").arrow().schema
@@ -57,15 +55,19 @@ con.sql("SELECT * FROM read_tiff('rasters/*.tif') LIMIT 0").arrow().schema
 
 ## Format details
 
-Raster data in GeoTIFF and Cloud-Optimized GeoTIFF (COG) formats is supported. COG files are particularly efficient over S3 because Beacon can issue range requests to read only the required tiles.
+Beacon supports raster data in GeoTIFF and Cloud-Optimized GeoTIFF (COG) format. A COG file works
+well over S3. Beacon sends range requests and reads only the tiles that it needs.
 
 ### Tag attributes
 
-GeoTIFF files carry TIFF tags and GeoTIFF metadata (e.g. `nodata`, `crs`, `scale`). Beacon exposes these per-band as extra columns using dot notation: `<band>.<attribute>`. For example, a band column `band_1` with a `nodata` tag is accessible as `band_1.nodata`.
+A GeoTIFF file carries TIFF tags and GeoTIFF metadata such as `nodata`, `crs` and `scale`. Beacon
+shows these per band as extra columns. It uses dot notation: `<band>.<attribute>`. The `nodata` tag
+of the `band_1` column becomes `band_1.nodata`.
 
-Attribute columns preserve the original type (string, integer, float, …) as stored in the file.
+An attribute column keeps the type from the file: string, integer, float and so on.
 
-File-level tags that are not tied to a specific band are exposed with a leading dot and no band prefix: `.<attribute>`. For example, a file-level `crs` tag is accessible as the column `.crs`.
+A file tag belongs to no band. Beacon shows it with a leading dot and no band prefix:
+`.<attribute>`. The file tag `crs` becomes the column `.crs`.
 
 ```sql
 SELECT band_1, "band_1.nodata", "band_1.scale", ".crs"
@@ -81,4 +83,5 @@ STORED AS TIFF
 LOCATION 'rasters/elevation.tif'
 ```
 
-See [Creating External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL, and [Reading External Files](/docs/2.0.0-rc2/beacondb/data-sources/) for the general reading model.
+See [Create External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/) for the
+full read model.

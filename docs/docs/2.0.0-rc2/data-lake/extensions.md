@@ -1,28 +1,31 @@
 ---
-description: Table extensions attach optional, named behavior to a registered table — the `preset` extension defines reusable named filter sets.
+description: A table extension adds optional, named behaviour to a registered table. The preset extension defines named filter sets.
 # MCP is unreleased. Restore the original description on release:
-# description: Table extensions attach optional, named behavior to a registered table, the `mcp` extension exposes it to AI agents as a read-only tool, and the `preset` extension defines reusable named filter sets.
+# description: A table extension adds optional, named behaviour to a registered table. The mcp extension gives it to AI agents. The preset extension defines named filter sets.
 ---
 
 # Table Extensions
 
-An **extension** is a named JSON descriptor attached to a registered table that turns on optional behavior without changing the table's data or schema. Extensions are persisted with the table and survive restarts.
+An **extension** is a named JSON descriptor on a registered table. It switches optional behaviour
+on. It changes neither the data nor the schema of the table. Beacon stores an extension with the
+table. It survives a restart.
 
 <!-- MCP is unreleased. Restore on release (and drop the single-extension wording below):
 
-Two extensions ship today:
+Beacon has two extensions today:
 
-- **`mcp`**: expose the table to AI agents as a read-only [MCP](/docs/2.0.0-rc2/mcp) tool.
-- **`preset`**: define named, predefined filter sets that other features (e.g. the `mcp` tool) can reference by name.
+- **`mcp`**: give the table to AI agents as a read-only [MCP](/docs/2.0.0-rc2/mcp) tool.
+- **`preset`**: define named filter sets. Other features, such as the `mcp` tool, use them by name.
 -->
 
-One extension ships today:
+Beacon has one extension today:
 
-- **`preset`**: define named, predefined filter sets that other features can reference by name.
+- **`preset`**: define named filter sets. Other features use them by name.
 
-## Managing extensions
+## Manage extensions
 
-Extensions are set, inspected, and removed with SQL DDL (or the equivalent admin REST API). The value is a JSON object whose shape depends on the extension.
+Set, inspect and remove an extension with SQL DDL. The admin REST API gives the same functions. The
+value is a JSON object. Each extension has its own shape.
 
 ```sql
 -- Attach or replace an extension
@@ -35,13 +38,17 @@ SHOW EXTENSIONS FOR <table>;
 DROP EXTENSION '<name>' FOR <table>;
 ```
 
-Payloads are parsed strictly, unknown keys and invalid values are rejected rather than ignored, so a typo fails loudly instead of silently disabling the feature.
+Beacon parses the payload strictly. It rejects an unknown key and an invalid value. It does not
+ignore them. A spelling error therefore gives an error. It does not switch the feature off in
+silence.
 
 <!-- MCP is unreleased. Restore this whole section on release:
 
 ## The `mcp` extension
 
-Enabling the `mcp` extension makes the table discoverable to AI agents and generates a dedicated per-table tool on Beacon's [MCP Server](/docs/2.0.0-rc2/mcp). The tool is **read-only** and constrained to the columns you expose.
+Enable the `mcp` extension to give the table to AI agents. Beacon then generates a tool for that
+table on its [MCP Server](/docs/2.0.0-rc2/mcp). The tool is **read-only**. It covers the columns
+that you expose.
 
 ```sql
 SET EXTENSION 'mcp' FOR obs TO '{
@@ -59,16 +66,17 @@ SET EXTENSION 'mcp' FOR obs TO '{
 
 | Field | Purpose |
 |---|---|
-| `enabled` | Turns the tool on. Set `false` to hide the table without dropping the extension. |
-| `tool_name` | The generated tool's name (`[A-Za-z0-9_-]`, 1–64 chars). Defaults to `query_<table>`. |
-| `title` | Human-readable label for the tool. |
-| `description` | What the table means, shown to the agent so it picks the right tool. |
-| `exposed_columns` | Whitelist of columns the agent may `select`. Each entry is a bare name (`"temperature"`) or `{"name", "description"}`; the descriptions help the model understand each field. Omit to expose all columns. |
-| `guardrails` | Optional free-form map of advisory hints (see below). |
+| `enabled` | Switches the tool on. Set `false` to hide the table. The extension stays. |
+| `tool_name` | The name of the tool. Use 1 to 64 characters from `[A-Za-z0-9_-]`. The default is `query_<table>`. |
+| `title` | A label for a human reader. |
+| `description` | What the table means. Beacon shows it to the agent, so the agent picks the correct tool. |
+| `exposed_columns` | The columns that the agent can `select`. An entry is a bare name such as `"temperature"`, or an object with `name` and `description`. A description helps the model to understand the field. Omit the key to expose every column. |
+| `guardrails` | An optional free-form map with hints. See below. |
 
 ### Advisory guard rails
 
-The optional `guardrails` map holds arbitrary key/value hints that Beacon surfaces to the agent (appended to the tool description and returned by `describe_table`) but does **not** enforce:
+The optional `guardrails` map holds any key and value hint. Beacon adds the map to the tool
+description. `describe_table` also returns it. Beacon does **not** enforce the map:
 
 ```sql
 SET EXTENSION 'mcp' FOR obs TO '{
@@ -80,7 +88,9 @@ SET EXTENSION 'mcp' FOR obs TO '{
 }';
 ```
 
-These are nudges only. Actual result-size limits come from the built-in `run_sql` preview cap, see the [MCP Server guide](/docs/2.0.0-rc2/mcp) for the full tool set, connecting a client, and authenticating agents.
+These values are hints only. The built-in `run_sql` preview limit controls the result size. The
+[MCP Server guide](/docs/2.0.0-rc2/mcp) gives the full tool set. It also shows how to connect a
+client and how to authenticate an agent.
 
 -->
 
@@ -88,10 +98,13 @@ These are nudges only. Actual result-size limits come from the built-in `run_sql
 
 <!-- MCP is unreleased. Restore this paragraph on release (it replaces the one below):
 
-A **preset** is a named, predefined filter set stored on the table. Presets give agents (and other callers) a curated shorthand for common query shapes, so they can pick `shallow` instead of re-deriving the filter each time. When a table has both the `mcp` and `preset` extensions, its generated MCP tool exposes the preset names as an enum.
+A **preset** is a named filter set on the table. A preset gives an agent or another caller a short
+name for a common query. The caller picks `shallow` instead of the full filter. A table with both
+the `mcp` and the `preset` extension gets an MCP tool. That tool shows the preset names as an enum.
 -->
 
-A **preset** is a named, predefined filter set stored on the table. Presets give callers a curated shorthand for common query shapes, so they can pick `shallow` instead of re-deriving the filter each time.
+A **preset** is a named filter set on the table. A preset gives a caller a short name for a common
+query. The caller picks `shallow` instead of the full filter.
 
 ```sql
 SET EXTENSION 'preset' FOR obs TO '{
@@ -113,12 +126,14 @@ SET EXTENSION 'preset' FOR obs TO '{
 }';
 ```
 
-Each preset has a `name`, a `description` (what it selects), and a list of `filters`. A filter is `{"column", "op", "value"}`; multiple filters in one preset are combined with `AND`.
+Each preset has a `name`, a `description` and a list of `filters`. The description says what the
+preset selects. A filter is `{"column", "op", "value"}`. Beacon combines the filters of one preset
+with `AND`.
 
 ## See also
 
 <!-- MCP is unreleased. Restore on release:
-- [MCP Server](/docs/2.0.0-rc2/mcp), connect an agent, authenticate it, and handle large results.
+- [MCP Server](/docs/2.0.0-rc2/mcp): connect an agent, authenticate it and handle a large result.
 -->
-- [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables), registering the tables you attach extensions to.
-- [Access control](/docs/2.0.0-rc2/security/access-control), the identity and role grants that govern what agents can read.
+- [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables): register the tables that take an extension.
+- [Access control](/docs/2.0.0-rc2/security/access-control): the identity and role grants that control what an agent reads.

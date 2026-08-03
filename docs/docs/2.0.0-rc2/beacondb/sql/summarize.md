@@ -1,11 +1,11 @@
 ---
-description: SUMMARIZE profiles a table or query, one row per column with min/max, distinct count, avg/std, non-null count and null percentage.
+description: SUMMARIZE profiles a table or a query. It returns one row per column with the minimum, maximum, distinct count, average and null share.
 ---
 
 # SUMMARIZE
 
-`SUMMARIZE` produces a **one-row-per-column profile** of a table or query, the first thing to run on
-a new dataset.
+`SUMMARIZE` profiles a table or a query. It returns **one row for each column**. Run it first on a
+new dataset.
 
 ```sql
 SUMMARIZE obs;
@@ -17,7 +17,7 @@ SUMMARIZE obs;
 | depth | Int64 | 0 | 100 | 3 | 62.5 | 47.9 | 4 | 0.0 |
 | platform | Utf8 | A | B | 2 | | | 4 | 0.0 |
 
-Columns are returned in the source's column order.
+Beacon returns the columns in the order of the source.
 
 ## Forms
 
@@ -30,14 +30,14 @@ SUMMARIZE (SELECT * FROM read_parquet('obs/*.parquet'));
 
 ## What each column means
 
-- **min / max**: for orderable columns (numbers, strings, temporal), shown as text.
-- **distinct**: exact number of distinct non-null values.
-- **avg / std**: for numeric columns only (`NULL` otherwise).
-- **count**: number of non-null values.
-- **null_percentage**: share of `NULL`s, `0`–`100`.
+- **min / max**: for columns with an order, such as numbers, strings and timestamps. Beacon returns them as text.
+- **distinct**: the exact number of distinct non-null values.
+- **avg / std**: for numeric columns only. Other columns get `NULL`.
+- **count**: the number of non-null values.
+- **null_percentage**: the share of `NULL` values, from `0` to `100`.
 
 ## Notes
 
-`SUMMARIZE` lowers to an ordinary single-pass aggregate query, so it works on a
-[read-only](/docs/2.0.0-rc2/beacondb/python/getting-started#read-only) database and needs no special privileges.
-It scans the source once.
+`SUMMARIZE` becomes an ordinary aggregate query with one pass. It therefore works on a
+[read-only](/docs/2.0.0-rc2/beacondb/python/getting-started#read-only) database. It needs no special
+privileges. It scans the source once.

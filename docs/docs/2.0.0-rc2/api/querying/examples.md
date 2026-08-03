@@ -1,6 +1,7 @@
 # Query Examples
 
-Copy-paste examples for both query styles. All examples use `"output": { "format": "csv" }`, omit `output` to receive a streaming Arrow IPC response instead.
+These examples cover both query styles. You can copy them. Each example uses
+`"output": { "format": "csv" }`. Omit `output` to get a streamed Arrow IPC response.
 
 ## JSON DSL
 
@@ -137,7 +138,8 @@ Content-Type: application/json
 
 ### Query Zarr with a coordinate range
 
-Predicate pushdown is automatic, Beacon prunes chunks and slices coordinate dimensions from your `filters`:
+Predicate pushdown is automatic. Beacon prunes the chunks and slices the coordinate dimensions. It
+uses your `filters`:
 
 ```http
 POST /api/query
@@ -164,7 +166,7 @@ Content-Type: application/json
 ## SQL
 
 :::warning
-SQL is enabled by default; it can be disabled with `BEACON_ENABLE_SQL=false`.
+SQL is on by default. Set `BEACON_ENABLE_SQL=false` to switch it off.
 :::
 
 ### Select with a computed column
@@ -235,7 +237,8 @@ Content-Type: application/json
 
 ## Validate and explain
 
-Both styles support validate and explain. The request body is identical to a normal query body.
+Both styles support a validate call and an explain call. The request body is the same as a normal
+query body.
 
 ```http
 POST /api/parse-query

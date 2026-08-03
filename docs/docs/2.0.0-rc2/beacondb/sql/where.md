@@ -1,6 +1,6 @@
 # WHERE
 
-Filter rows by adding a `WHERE` clause after `FROM`:
+Add a `WHERE` clause after `FROM` to filter the rows:
 
 ```sql
 SELECT *
@@ -13,7 +13,7 @@ WHERE latitude  BETWEEN 50 AND 60
 
 ## Comparison operators
 
-`=`, `!=`, `<`, `>`, `<=`, `>=` work on numbers, strings, and timestamps:
+`=`, `!=`, `<`, `>`, `<=` and `>=` work on numbers, strings and timestamps:
 
 ```sql
 WHERE quality_flag = 1
@@ -23,7 +23,7 @@ WHERE time > '2024-01-01'
 
 ## BETWEEN
 
-Inclusive range check:
+`BETWEEN` includes both limits:
 
 ```sql
 WHERE depth BETWEEN 0 AND 200
@@ -33,7 +33,7 @@ WHERE latitude BETWEEN -60 AND 60
 
 ## IN
 
-Match against a list of values:
+`IN` matches a value against a list:
 
 ```sql
 WHERE platform_code IN ('6900001', '6900002', '6900003')
@@ -42,7 +42,7 @@ WHERE quality_flag IN (1, 2)
 
 ## LIKE
 
-Pattern matching, `%` matches any sequence of characters, `_` matches one character:
+`LIKE` matches a pattern. `%` matches any number of characters. `_` matches one character:
 
 ```sql
 WHERE cruise_id LIKE '2024%'
@@ -58,7 +58,7 @@ WHERE doxy IS NULL
 
 ## AND / OR / NOT
 
-Combine conditions with logical operators:
+Combine conditions with the logical operators:
 
 ```sql
 WHERE temperature > 0 AND salinity > 30
@@ -71,7 +71,7 @@ WHERE depth BETWEEN 0 AND 200
   AND (temperature IS NOT NULL OR salinity IS NOT NULL)
 ```
 
-## Date and time filtering
+## Date and time filters
 
 ```sql
 WHERE time >= '2024-01-01'

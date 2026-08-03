@@ -1,25 +1,25 @@
 ---
-description: Query files on S3, GCS, and Azure directly with Beacon. Store credentials as named secrets, or back the whole datasets store with an S3-compatible bucket.
+description: Query files on S3, GCS and Azure with Beacon. Store credentials as named secrets, or put the whole datasets store on an S3 bucket.
 ---
 
 # Object Storage (S3, GCS, Azure)
 
-Beacon reads from object storage the same way it reads local files: point a
+Beacon reads object storage in the same way as local files. Point a
 [`read_*` function](/docs/2.0.0-rc2/beacondb/data-sources/formats/) or an
-[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) at a URL and query it. Nothing is downloaded up front, only
-the byte ranges a query needs are fetched.
+[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) at a URL. Then query it.
+Beacon downloads nothing first. It fetches only the byte ranges that a query needs.
 
 ```sql
 SELECT * FROM read_parquet('s3://my-bucket/obs/*.parquet') LIMIT 10;
 ```
 
-Supported schemes are `s3://` (and any S3-compatible store such as MinIO), `gs://` for Google Cloud
-Storage, and `az://` for Azure Blob Storage.
+Beacon supports three schemes. Use `s3://` for S3 and any S3-compatible store such as MinIO. Use
+`gs://` for Google Cloud Storage. Use `az://` for Azure Blob Storage.
 
 ## Credentials as secrets
 
-The recommended way to authenticate is a named [secret](/docs/2.0.0-rc2/beacondb/sql/secrets), which
-keeps credentials out of environment variables and out of your queries:
+Authenticate with a named [secret](/docs/2.0.0-rc2/beacondb/sql/secrets). A secret keeps your
+credentials out of the environment variables and out of your queries:
 
 ```sql
 CREATE SECRET my_s3 (
@@ -31,21 +31,21 @@ CREATE SECRET my_s3 (
 SELECT * FROM read_parquet('s3://my-bucket/obs/*.parquet');   -- uses my_s3
 ```
 
-`SCOPE` is a URL prefix and the longest match wins, so a broad `s3://` secret acts as the default
-while `s3://my-bucket` overrides it for that bucket. Use `CREATE PERSISTENT SECRET` to store it
-encrypted inside the `beacon.db` file so it survives restarts. See
-[Secrets](/docs/2.0.0-rc2/beacondb/sql/secrets) for the full syntax, including `TYPE GCS` and
+`SCOPE` is a URL prefix. The longest match wins. A broad `s3://` secret is therefore the default. A
+`s3://my-bucket` secret then overrides it for that bucket. Use `CREATE PERSISTENT SECRET` to store
+the secret encrypted inside the `beacon.db` file. It then survives a restart. See
+[Secrets](/docs/2.0.0-rc2/beacondb/sql/secrets) for the full syntax, with `TYPE GCS` and
 `TYPE AZURE`.
 
 :::tip Public buckets
-Anonymous access needs no secret at all. For a public S3 bucket, set `AWS_SKIP_SIGNATURE=true` so
-requests are sent unsigned.
+Anonymous access needs no secret. For a public S3 bucket, set `AWS_SKIP_SIGNATURE=true`. Beacon then
+sends unsigned requests.
 :::
 
-## Backing the datasets store with S3
+## Put the datasets store on S3
 
-On Beacon Data Lake you can put the entire **datasets store** on an S3-compatible bucket, so every
-file in the bucket is auto-discovered and queryable without any DDL:
+On Beacon Data Lake you can put the whole **datasets store** on an S3-compatible bucket. Beacon then
+finds every file in the bucket. You can query them without DDL:
 
 ```bash
 docker run -d --name beacon -p 5001:5001 \
@@ -58,27 +58,29 @@ docker run -d --name beacon -p 5001:5001 \
   ghcr.io/maris-development/beacon:latest
 ```
 
-The bucket is opened through the standard AWS environment chain, so the same `AWS_*` variables also
-apply to `s3://` URLs in external tables. A secret attached to a specific table takes precedence.
+Beacon opens the bucket through the standard AWS environment chain. The same `AWS_*` variables
+therefore also apply to an `s3://` URL in an external table. A secret on a specific table wins over
+them.
 
 | Variable | Purpose |
 | --- | --- |
-| `BEACON_S3_DATA_LAKE` | Set to `true` to use object storage as the datasets store. |
-| `BEACON_S3_BUCKET` | Bucket name. Required, and never inferred from the endpoint. |
-| `AWS_ENDPOINT` | Endpoint URL, for example `https://s3.amazonaws.com` or `http://minio:9000`. |
-| `AWS_REGION` | Region. Note that `AWS_DEFAULT_REGION` is not used. |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Credentials, when the store requires them. |
-| `AWS_SKIP_SIGNATURE` | Set to `true` for public or anonymous buckets. |
+| `BEACON_S3_DATA_LAKE` | Set to `true` to put the datasets store on object storage. |
+| `BEACON_S3_BUCKET` | The bucket name. Required. Beacon never derives it from the endpoint. |
+| `AWS_ENDPOINT` | The endpoint URL, for example `https://s3.amazonaws.com` or `http://minio:9000`. |
+| `AWS_REGION` | The region. Beacon does not use `AWS_DEFAULT_REGION`. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | The credentials, if the store needs them. |
+| `AWS_SKIP_SIGNATURE` | Set to `true` for a public or anonymous bucket. |
 
-See [Configuration](/docs/2.0.0-rc2/data-lake/configuration#s3-object-storage) for every option, including
-virtual-hosted addressing and plain-HTTP endpoints for local MinIO.
+See [Configuration](/docs/2.0.0-rc2/data-lake/configuration#s3-object-storage) for every option. It
+also covers virtual-hosted addressing and plain HTTP endpoints for a local MinIO.
 
 ## Performance notes
 
-- **Cloud-optimized formats win.** Parquet, [Zarr](/docs/2.0.0-rc2/beacondb/data-sources/formats/zarr),
-  [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas), and Cloud-Optimized GeoTIFF are designed
-  for range requests, so Beacon fetches only the chunks a query needs.
-- **NetCDF over object storage currently supports anonymous access only.** See
+- **Cloud-optimized formats are faster.** Parquet,
+  [Zarr](/docs/2.0.0-rc2/beacondb/data-sources/formats/zarr),
+  [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) and Cloud-Optimized GeoTIFF support
+  range requests. Beacon fetches only the chunks that a query needs.
+- **NetCDF on object storage supports anonymous access only.** See
   [NetCDF](/docs/2.0.0-rc2/beacondb/data-sources/formats/netcdf) for the details.
-- **Narrow your filters.** Predicate and projection pushdown translate directly into fewer bytes
-  fetched. See [Performance Tuning](/docs/2.0.0-rc2/data-lake/performance-tuning).
+- **Use narrow filters.** Predicate and projection pushdown reduce the bytes that Beacon fetches.
+  See [Performance Tuning](/docs/2.0.0-rc2/data-lake/performance-tuning).

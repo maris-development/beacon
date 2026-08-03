@@ -1,17 +1,17 @@
 ---
-description: Complete reference of Beacon's BEACON_* environment variables, server, query engine, storage, S3, Arrow Flight SQL, crawler, file formats, and API docs metadata, with their defaults.
+description: Full reference of the BEACON_* environment variables. It covers the server, engine, storage, S3, Flight SQL, crawlers and formats, with their defaults.
 ---
 
 # Configuration
 
-Beacon is configured entirely through **environment variables**. There is no
-configuration file: every option below is read from the environment at startup.
-Unset variables fall back to the defaults listed here.
+You configure Beacon with **environment variables** only. There is no
+configuration file. Beacon reads every option below from the environment at
+startup. An unset variable takes the default from this page.
 
 ::: info
-All settings use `BEACON_*` names, except the S3 credential variables, which use
-the standard `AWS_*` names so they interoperate with existing AWS tooling (see
-[S3 object storage](#s3-object-storage)).
+Every setting uses a `BEACON_*` name. The S3 credential variables are the
+exception. They use the standard `AWS_*` names, so they work with your AWS tools.
+See [S3 object storage](#s3-object-storage).
 :::
 
 ## Server
@@ -27,8 +27,8 @@ the standard `AWS_*` names so they interoperate with existing AWS tooling (see
 
 ## Admin
 
-The admin credentials gate the authenticated write/management surface (DDL/DML
-over HTTP and the admin endpoints).
+The admin credentials protect the write operations. This covers DDL and DML over
+HTTP, and the admin endpoints.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -37,10 +37,11 @@ over HTTP and the admin endpoints).
 
 ## Authentication & access control
 
-Beacon adds role-based access control on top of the super-user above: read-only
-SQL-managed users and roles, table/path grants and denies, anonymous access, and
-optional OIDC. See the [Access Control guide](/docs/2.0.0-rc2/security/access-control)
-for the full model and SQL reference. The variables that tune it:
+Beacon adds role-based access control on top of the super-user above. It gives
+read-only users and roles in SQL. It gives grants and denies on a table or a path.
+It also gives anonymous access and optional OIDC. The
+[Access Control guide](/docs/2.0.0-rc2/security/access-control) holds the full
+model and the SQL reference. These variables control it:
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -56,10 +57,11 @@ for the full model and SQL reference. The variables that tune it:
 
 ## Secrets
 
-Master key used to encrypt persisted credentials at rest, currently the
-`password` of external [SQL database tables](/docs/2.0.0-rc2/beacondb/data-sources/sql-databases). It is required
-to create a database table with a password; without it, such a `CREATE` is
-rejected rather than writing plaintext.
+The master key encrypts the stored credentials at rest. Today it covers the
+`password` of an external
+[SQL database table](/docs/2.0.0-rc2/beacondb/data-sources/sql-databases). You need
+the key to create a database table with a password. Without the key, Beacon
+rejects that `CREATE`. Beacon never writes plaintext.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -79,8 +81,9 @@ rejected rather than writing plaintext.
 
 ### SQL result-stream coalescing
 
-Small record batches produced by a query are merged into larger ones before being
-streamed to the client, which improves throughput for fine-grained results.
+A query can produce small record batches. Beacon merges them into larger batches
+before it streams them to the client. This gives more throughput on a result with
+many small batches.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -91,10 +94,10 @@ streamed to the client, which improves throughput for fine-grained results.
 
 ## Arrow Flight SQL
 
-Beacon also exposes an [Arrow Flight SQL](https://arrow.apache.org/docs/format/FlightSql.html)
-endpoint on its own port, used by clients such as JetBrains DataGrip and the
-Python ADBC driver (see [Connect](/docs/2.0.0-rc2/connect/jetbrains-datagrip)). Unlike the
-HTTP API, Flight SQL uses bearer-token authentication.
+Beacon also gives an [Arrow Flight SQL](https://arrow.apache.org/docs/format/FlightSql.html)
+endpoint on its own port. Clients such as JetBrains DataGrip and the Python ADBC
+driver use it. See [Connect](/docs/2.0.0-rc2/connect/jetbrains-datagrip). Flight
+SQL authenticates with a bearer token. The HTTP API works differently.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -108,13 +111,13 @@ HTTP API, Flight SQL uses bearer-token authentication.
 
 ## Storage and data directories
 
-Beacon keeps all local state under a single root directory.
+Beacon keeps all local state under one root directory.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BEACON_DATA_DIR` | `./data` | Root directory for all local data. |
 
-The following paths are created under `BEACON_DATA_DIR` and used by Beacon:
+Beacon creates and uses these paths under `BEACON_DATA_DIR`:
 
 | Path | Purpose |
 | --- | --- |
@@ -122,15 +125,15 @@ The following paths are created under `BEACON_DATA_DIR` and used by Beacon:
 | `tables/beacon.db` | The single-file tables store: catalog, managed table data, and the auth directory. |
 | `tmp/` | Temporary files (e.g. materialized query output). |
 
-When mounting volumes with Docker, mount the sub-directories you want to persist
-(e.g. `-v ./datasets:/beacon/data/datasets`, `-v ./tables:/beacon/data/tables`).
+With Docker, mount the subdirectories that you want to keep. Two examples are
+`-v ./datasets:/beacon/data/datasets` and `-v ./tables:/beacon/data/tables`.
 
 ## S3 object storage
 
-Set `BEACON_S3_DATA_LAKE=true` to back the **datasets** store with an
-S3-compatible bucket instead of the local `datasets/` directory. Every file in the
-bucket is then discoverable and queryable, exactly as with a local datasets
-directory. `tables/beacon.db` and `tmp/` stay on local disk, so `BEACON_DATA_DIR`
+Set `BEACON_S3_DATA_LAKE=true` to put the **datasets** store on an S3-compatible
+bucket. Beacon then does not use the local `datasets/` directory. Beacon finds and
+queries every file in the bucket. This works like a local datasets directory.
+`tables/beacon.db` and `tmp/` stay on local disk. `BEACON_DATA_DIR` therefore
 still applies.
 
 | Variable | Default | Description |
@@ -142,10 +145,10 @@ still applies.
 
 ### S3 credentials and endpoint (`AWS_*`)
 
-The bucket is opened with object-store's `AmazonS3Builder::from_env()`, so
-credentials, endpoint and region come from the standard AWS environment chain.
-The same variables also apply to `s3://` URLs used in external tables, where a
-per-table Beacon secret is layered on top and takes precedence.
+Beacon opens the bucket with `AmazonS3Builder::from_env()` from object-store. The
+credentials, the endpoint and the region therefore come from the standard AWS
+environment chain. The same variables also apply to an `s3://` URL in an external
+table. A Beacon secret on that table wins over them.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -157,8 +160,8 @@ per-table Beacon secret is layered on top and takes precedence.
 
 ## Crawler
 
-The [crawler](/docs/2.0.0-rc2/data-lake/crawlers) discovers files under a prefix and registers them as
-external tables.
+A [crawler](/docs/2.0.0-rc2/data-lake/crawlers) finds the files under a prefix. It
+then registers them as external tables.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -178,8 +181,9 @@ external tables.
 
 ## File formats
 
-Per-format tuning. See [Performance Tuning](/docs/2.0.0-rc2/data-lake/performance-tuning) for guidance
-on when to change these.
+These settings tune one format each. See
+[Performance Tuning](/docs/2.0.0-rc2/data-lake/performance-tuning) to know when to
+change them.
 
 ### NetCDF
 
@@ -204,10 +208,9 @@ on when to change these.
 
 ## API documentation metadata
 
-These customize the top-level metadata of the generated OpenAPI document and the
-Swagger / Scalar UIs, so a deployment can brand its own API docs without
-recompiling. All are optional except the title and description, which have
-defaults.
+These settings change the metadata of the OpenAPI document and of the Swagger and
+Scalar UIs. Your deployment can therefore brand its own API docs. You recompile
+nothing. Every setting is optional. The title and the description have defaults.
 
 | Variable | Default | Description |
 | --- | --- | --- |

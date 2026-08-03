@@ -1,10 +1,12 @@
 # REST API
 
-Beacon exposes an HTTP API for querying datasets, inspecting schemas, and managing the data lake. All surfaces speak JSON over HTTP.
+Beacon gives an HTTP API. Use it to query datasets, to inspect schemas and to manage the data lake.
+Every endpoint uses JSON over HTTP.
 
 ## OpenAPI reference
 
-Beacon generates an OpenAPI spec at runtime. When the server is running, open one of these URLs:
+Beacon generates an OpenAPI specification at run time. Start the server. Then open one of these
+URLs:
 
 | UI | URL |
 | -- | --- |
@@ -14,7 +16,9 @@ Beacon generates an OpenAPI spec at runtime. When the server is running, open on
 
 ## Base URL
 
-All endpoints in these docs are shown as relative paths (e.g. `GET /api/health`). Send requests to your Beacon base URL, by default `http://localhost:5001`. If you run behind a reverse proxy, use that URL instead.
+This documentation shows every endpoint as a relative path, for example `GET /api/health`. Send your
+request to the base URL of your Beacon server. The default is `http://localhost:5001`. Behind a
+reverse proxy, use the URL of that proxy.
 
 ## Health check
 
@@ -22,14 +26,14 @@ All endpoints in these docs are shown as relative paths (e.g. `GET /api/health`)
 GET /api/health
 ```
 
-Returns `200 OK` when Beacon is up and ready.
+Returns `200 OK` when Beacon runs and is ready.
 
 ## What's in the API
 
 | Section | Description |
 | ------- | ----------- |
-| [Exploring the Data Lake](/docs/2.0.0-rc2/api/exploring-data-lake) | Discover datasets, tables, and schemas |
-| [Querying](/docs/2.0.0-rc2/api/querying/) | Run queries (JSON DSL or SQL) and receive results |
-| [JSON Query DSL](/docs/2.0.0-rc2/api/querying/json) | Structured query format for programmatic clients |
-| [SQL](/docs/2.0.0-rc2/api/querying/sql) | Full SQL via DataFusion |
-| [Examples](/docs/2.0.0-rc2/api/querying/examples) | Copy-paste query patterns |
+| [Exploring the Data Lake](/docs/2.0.0-rc2/api/exploring-data-lake) | Find datasets, tables and schemas |
+| [Querying](/docs/2.0.0-rc2/api/querying/) | Run a query with the JSON DSL or with SQL, and get the results |
+| [JSON Query DSL](/docs/2.0.0-rc2/api/querying/json) | A structured query format for a client program |
+| [SQL](/docs/2.0.0-rc2/api/querying/sql) | Full SQL through DataFusion |
+| [Examples](/docs/2.0.0-rc2/api/querying/examples) | Query patterns that you can copy |

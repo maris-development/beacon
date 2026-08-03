@@ -1,27 +1,27 @@
 ---
-description: Everything BeaconDB can query. Read external files from disk or object storage, connect to Postgres and MySQL, federate against other Beacons, or store data in BeaconDB's own beacon.db format.
+description: Everything that BeaconDB can query. Files on disk or object storage, Postgres and MySQL, other Beacons, and the internal beacon.db format.
 ---
 
 # Data Sources
 
-BeaconDB queries data wherever it lives. Most sources are read **in place**, with no import step: you
-point at a path or a connection and query it with SQL. When you want BeaconDB to own the data
-instead, it has [its own internal format](/docs/2.0.0-rc2/beacondb/data-sources/internal-format).
+BeaconDB queries data where it lives. It reads most sources **in place**, with no import step. Point
+at a path or a connection. Then query it with SQL. BeaconDB can also own the data. It then uses
+[its own internal format](/docs/2.0.0-rc2/beacondb/data-sources/internal-format).
 
 | Source | Read with | Chapter |
 | --- | --- | --- |
 | Files on local disk | `read_*()` functions or external tables | [File Formats](/docs/2.0.0-rc2/beacondb/data-sources/formats/) |
 | Object storage (S3, GCS, Azure) | the same, with an `s3://` style path | [Object Storage](/docs/2.0.0-rc2/beacondb/data-sources/object-storage) |
-| A named, reusable set of files | `CREATE EXTERNAL TABLE` | [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) |
+| A named set of files | `CREATE EXTERNAL TABLE` | [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) |
 | Postgres, MySQL, ODBC | federated external tables | [SQL Databases](/docs/2.0.0-rc2/beacondb/data-sources/sql-databases) |
-| A single table on another Beacon | `STORED AS REMOTE` | [Remote Tables](/docs/2.0.0-rc2/beacondb/data-sources/remote-tables) |
-| An entire remote Beacon catalog | `ATTACH` | [ATTACH](/docs/2.0.0-rc2/beacondb/data-sources/attach) |
-| Data BeaconDB owns and can mutate | managed tables in `beacon.db` | [Internal Format](/docs/2.0.0-rc2/beacondb/data-sources/internal-format) |
+| One table on another Beacon | `STORED AS REMOTE` | [Remote Tables](/docs/2.0.0-rc2/beacondb/data-sources/remote-tables) |
+| A whole remote Beacon catalog | `ATTACH` | [ATTACH](/docs/2.0.0-rc2/beacondb/data-sources/attach) |
+| Data that BeaconDB owns and can change | managed tables in `beacon.db` | [Internal Format](/docs/2.0.0-rc2/beacondb/data-sources/internal-format) |
 
-## Reading files
+## Read files
 
-Every supported format has a `read_*` table function that takes a path or a glob, usable directly in
-a `FROM` clause:
+Every supported format has a `read_*` table function. The function takes a path or a glob. Use it
+directly in a `FROM` clause:
 
 ```sql
 -- one file
@@ -36,25 +36,25 @@ WHERE temperature > 20;
 SELECT * FROM read_csv(['a.csv', 'b.csv']);
 ```
 
-Globs (`*`, `**`) expand across directories, so a single query can span thousands of files. Beacon
-merges their schemas and prunes files that cannot match your filters. Array formats such as
-[Zarr](/docs/2.0.0-rc2/beacondb/data-sources/formats/zarr) and
-[Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) point at their marker file (`zarr.json`,
-`atlas.json`) rather than at individual chunks.
+A glob (`*`, `**`) expands across directories. One query can therefore cover thousands of files.
+Beacon merges their schemas. It also prunes the files that cannot match your filters. Array formats
+such as [Zarr](/docs/2.0.0-rc2/beacondb/data-sources/formats/zarr) and
+[Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) use a marker file. Point at `zarr.json`
+or `atlas.json`, not at the chunks.
 
-Each format has its own chapter covering read behaviour, attribute columns, and limitations. See
-[File Formats](/docs/2.0.0-rc2/beacondb/data-sources/formats/) for the full list, or the
-[table functions reference](/docs/2.0.0-rc2/beacondb/sql/table-functions) for every signature in one
-place.
+Each format has its own chapter. The chapter covers the read behaviour, the attribute columns and
+the limitations. See [File Formats](/docs/2.0.0-rc2/beacondb/data-sources/formats/) for the full
+list. The [table functions reference](/docs/2.0.0-rc2/beacondb/sql/table-functions) holds every
+signature in one place.
 
 ## Functions or tables?
 
-Both read the same files the same way. The difference is only whether the source has a name:
+Both read the same files in the same way. Only the name makes the difference:
 
-- A **`read_*()` call** is ideal for ad-hoc queries, notebooks, and exploration.
-- An **[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables)** registers a stable,
-  reusable name in the catalog, which is better when many queries share one source, or when you want
-  to hand a colleague a table name instead of a glob.
+- A **`read_*()` call** fits ad-hoc queries, notebooks and exploration.
+- An **[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables)** puts a stable name
+  in the catalog. Use it when many queries share one source. It also lets you give a colleague a
+  table name instead of a glob.
 
 ```sql
 CREATE EXTERNAL TABLE ocean_profiles
@@ -64,12 +64,12 @@ LOCATION 'profiles/';
 SELECT * FROM ocean_profiles LIMIT 10;
 ```
 
-Either way, BeaconDB reads the bytes on demand and never copies your data.
+Both ways read the bytes on demand. BeaconDB never copies your data.
 
-## Combining sources
+## Combine sources
 
-Because everything becomes a table, sources compose in a single query. You can join a local NetCDF
-collection against a lookup table in Postgres, or against a table on a remote Beacon:
+Every source becomes a table. You can therefore combine sources in one query. Join a local NetCDF
+collection against a lookup table in Postgres. Or join it against a table on a remote Beacon:
 
 ```sql
 SELECT o.platform, avg(o.temperature) AS t, s.station_name
@@ -78,17 +78,17 @@ JOIN stations s ON o.station_id = s.id
 GROUP BY o.platform, s.station_name;
 ```
 
-If files share a concept but not an identical column set, combine them with
+Some files share a concept but have different columns. Combine those files with
 [`UNION BY NAME`](/docs/2.0.0-rc2/beacondb/sql/union-by-name).
 
 ## Where paths resolve
 
-A path may point at local disk or at object storage:
+A path points at local disk or at object storage:
 
-- **Local disk**, for example `argo/**/*.nc`, resolved against BeaconDB's storage root.
+- **Local disk**, for example `argo/**/*.nc`. Beacon resolves the path against its storage root.
 - **Object storage**, for example `s3://my-bucket/obs/*.parquet`. See
   [Object Storage](/docs/2.0.0-rc2/beacondb/data-sources/object-storage).
 
-Access keys for object stores and remote Beacons are stored as named, scoped
-[secrets](/docs/2.0.0-rc2/beacondb/sql/secrets) rather than scattered environment variables, and can be
-persisted encrypted inside the `beacon.db` file.
+Beacon holds the access keys for object stores and remote Beacons as named, scoped
+[secrets](/docs/2.0.0-rc2/beacondb/sql/secrets). Secrets replace scattered environment variables.
+Beacon can store a secret encrypted inside the `beacon.db` file.

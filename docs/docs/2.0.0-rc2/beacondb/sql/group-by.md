@@ -1,6 +1,6 @@
 # GROUP BY
 
-Aggregate rows into groups:
+`GROUP BY` aggregates the rows into groups:
 
 ```sql
 SELECT
@@ -15,7 +15,7 @@ GROUP BY DATE_TRUNC('month', time)
 ORDER BY month
 ```
 
-## Grouping by multiple columns
+## Group by several columns
 
 ```sql
 SELECT
@@ -29,7 +29,7 @@ ORDER BY year, lat_band
 
 ## HAVING
 
-Filter groups after aggregation (unlike `WHERE`, which filters rows before grouping):
+`HAVING` filters the groups after the aggregation. `WHERE` filters the rows before it:
 
 ```sql
 SELECT
@@ -46,13 +46,13 @@ ORDER BY lat_bin
 
 | Function | Description |
 | -------- | ----------- |
-| `COUNT(*)` | Total rows in the group |
-| `COUNT(col)` | Non-NULL values in the group |
-| `SUM(col)` | Sum |
-| `AVG(col)` | Mean |
-| `MIN(col)` | Minimum |
-| `MAX(col)` | Maximum |
-| `STDDEV(col)` | Standard deviation |
-| `MEDIAN(col)` | Median |
+| `COUNT(*)` | The number of rows in the group |
+| `COUNT(col)` | The number of non-null values in the group |
+| `SUM(col)` | The sum |
+| `AVG(col)` | The mean |
+| `MIN(col)` | The minimum |
+| `MAX(col)` | The maximum |
+| `STDDEV(col)` | The standard deviation |
+| `MEDIAN(col)` | The median |
 
 See [Function Reference](/docs/2.0.0-rc2/beacondb/sql/function-reference#aggregate-functions) for the full list.

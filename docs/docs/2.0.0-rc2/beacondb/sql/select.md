@@ -2,7 +2,7 @@
 
 ## Basic select
 
-Choose specific columns or use `*` for all:
+Name the columns that you need. Use `*` for all columns:
 
 ```sql
 SELECT time, latitude, longitude, temperature

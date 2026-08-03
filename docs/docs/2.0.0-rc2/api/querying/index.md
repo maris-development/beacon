@@ -1,26 +1,27 @@
 # Querying
 
-All queries go through a single endpoint:
+Every query goes to one endpoint:
 
 ```http
 POST /api/query
 Content-Type: application/json
 ```
 
-The request body selects between two query styles:
+The request body chooses one of two query styles:
 
 | Style | When to use | Body key |
 | ----- | ----------- | -------- |
-| [JSON DSL](/docs/2.0.0-rc2/api/querying/json) | Programmatic clients, query builders | `select`, `from`, `filters`, … |
-| [SQL](/docs/2.0.0-rc2/api/querying/sql) | Power users, ad-hoc analysis | `sql` |
+| [JSON DSL](/docs/2.0.0-rc2/api/querying/json) | A client program or a query builder | `select`, `from`, `filters`, … |
+| [SQL](/docs/2.0.0-rc2/api/querying/sql) | An expert user or an ad-hoc analysis | `sql` |
 
-Both styles share the same `output` field and the same supporting endpoints.
+Both styles use the same `output` field. They also use the same support endpoints.
 
-## Supporting endpoints
+## Support endpoints
 
 ### Validate
 
-Check that a query body is well-formed (it deserializes into a valid query) without executing it. This is a structural check, not column-level type-checking:
+Check that a query body is correct. Beacon parses it into a valid query. Beacon does not run it.
+This is a check of the structure. It does not check the column types:
 
 ```http
 POST /api/parse-query
@@ -31,7 +32,7 @@ Content-Type: application/json
 
 ### Explain
 
-Return the query plan without executing it, useful for debugging and performance work:
+Returns the query plan. Beacon does not run the query. Use this to debug and to tune performance:
 
 ```http
 POST /api/explain-query
@@ -42,10 +43,10 @@ Content-Type: application/json
 
 ### Explain Analyze
 
-**Run** the query and return the physical plan annotated with per-operator
-runtime metrics (rows, bytes, and time per node), the analog of SQL `EXPLAIN
-ANALYZE`. Because it executes the query, it is subject to the same SQL gating as
-`/api/query` (disabled when `BEACON_ENABLE_SQL=false` for `sql` bodies):
+**Runs** the query. It then returns the physical plan with the runtime metrics of each operator. The
+metrics give the rows, the bytes and the time of each node. This matches `EXPLAIN ANALYZE` in SQL.
+The endpoint runs the query. The same SQL rules as `/api/query` therefore apply. A `sql` body fails
+when `BEACON_ENABLE_SQL=false`:
 
 ```http
 POST /api/explain-analyze-query
@@ -56,7 +57,8 @@ Content-Type: application/json
 
 ### Query metrics
 
-Beacon returns a query ID via the `x-beacon-query-id` response header. Use it to fetch timing and row-count metrics after the query completes:
+Beacon returns a query ID in the `x-beacon-query-id` response header. Use the ID after the query to
+fetch the timing and the row count:
 
 ```http
 GET /api/query/metrics/{query_id}
@@ -64,7 +66,10 @@ GET /api/query/metrics/{query_id}
 
 ## Default response: Arrow IPC stream
 
-When `output` is omitted, `/api/query` returns an [Apache Arrow IPC stream](https://arrow.apache.org/docs/format/Columnar.html#ipc-streaming-format) (`application/vnd.apache.arrow.stream`). This is the most efficient format for downstream processing.
+Without an `output` field, `/api/query` returns an
+[Apache Arrow IPC stream](https://arrow.apache.org/docs/format/Columnar.html#ipc-streaming-format).
+The content type is `application/vnd.apache.arrow.stream`. This is the fastest format for a later
+process.
 
 Client libraries:
 
@@ -74,11 +79,11 @@ Client libraries:
 
 ## Output formats
 
-Add an `output` field to download a single file instead of streaming Arrow IPC.
+Add an `output` field to download one file. Beacon then does not stream Arrow IPC.
 
 ### Simple formats
 
-Set `output.format` to one of: `csv`, `parquet`, `netcdf`, `ipc` (alias: `arrow`).
+Set `output.format` to `csv`, `parquet`, `netcdf` or `ipc`. The alias of `ipc` is `arrow`.
 
 ```http
 POST /api/query
@@ -92,7 +97,7 @@ Content-Type: application/json
 
 ### GeoParquet
 
-Requires longitude and latitude columns:
+This format needs a longitude column and a latitude column:
 
 ```http
 POST /api/query
@@ -113,7 +118,8 @@ Content-Type: application/json
 
 ### N-dimensional NetCDF
 
-Reconstructs a multi-dimensional NetCDF file from the result, using the specified columns as dimension axes:
+Builds a multi-dimensional NetCDF file from the result. The named columns become the dimension
+axes:
 
 ```http
 POST /api/query
@@ -133,9 +139,9 @@ Content-Type: application/json
 
 ### ODV (Ocean Data View)
 
-Exports the result as an Ocean Data View collection, returned as a **ZIP
-archive**. ODV needs to know which columns carry the station coordinates and
-which are data vs. metadata, so the format is configured with an options object:
+Exports the result as an Ocean Data View collection. Beacon returns a **ZIP archive**. ODV needs the
+columns of the station coordinates. It also needs to know the data columns and the metadata columns.
+An options object gives this:
 
 ```http
 POST /api/query
@@ -160,18 +166,19 @@ Content-Type: application/json
 }
 ```
 
-Each `*_column` / `data_columns` / `meta_columns` entry identifies a result
-column (and may carry ODV-specific attributes such as units and quality-flag
-column). `key_column` groups rows into ODV stations and `qf_schema` selects the
-quality-flag scheme. Compression and archiving behavior are configurable; the
-response is always a ZIP.
+Each entry in `*_column`, `data_columns` and `meta_columns` names a result column. An entry can also
+hold ODV attributes, such as the units and the quality flag column. `key_column` groups the rows
+into ODV stations. `qf_schema` selects the quality flag scheme. You can configure the compression
+and the archive. The response is always a ZIP file.
 
 ## Data sources
 
-Most queries target a **registered table** by name:
+Most queries use the name of a **registered table**:
 
 ```json
 { "from": "default", "select": ["time"] }
 ```
 
-Both styles also support querying files directly without a registered table, see the [JSON DSL `from` reference](/docs/2.0.0-rc2/api/querying/json#choosing-the-data-source-from) and the [SQL table functions](/docs/2.0.0-rc2/api/querying/sql#query-files-directly).
+Both styles also query files directly, without a registered table. See the
+[JSON DSL `from` reference](/docs/2.0.0-rc2/api/querying/json#choosing-the-data-source-from) and the
+[SQL table functions](/docs/2.0.0-rc2/api/querying/sql#query-files-directly).

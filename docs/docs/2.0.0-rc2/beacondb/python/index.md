@@ -1,12 +1,12 @@
 ---
-description: BeaconDB is an embeddable analytical database for scientific data, the Beacon engine as a Python package, in-process, backed by a single portable beacon.db file.
+description: BeaconDB is an embeddable analytical database for scientific data. It is the Beacon engine as a Python package, backed by one portable beacon.db file.
 ---
 
 # BeaconDB
 
-**BeaconDB** is the Beacon engine as an embeddable Python package, an in-process analytical database
-for scientific data. `pip install beacondb`, `import beacondb`, and the whole engine runs **in-process**.
-There is no server and no HTTP.
+**BeaconDB** is the Beacon engine as an embeddable Python package. It is an in-process analytical
+database for scientific data. Run `pip install beacondb`, then `import beacondb`. The whole engine
+runs **in your process**. There is no server and no HTTP.
 
 ```python
 import beacondb
@@ -18,17 +18,18 @@ con.sql("SELECT * FROM read_parquet('obs/*.parquet')").df()
 
 ## Why BeaconDB
 
-- **In-process, zero setup.** No server to run; the engine links into your Python process.
-- **Reads your formats in place.** NetCDF, Zarr, Parquet/GeoParquet, CSV, HDF5, ODV, GeoTIFF, Delta,
-  and more, no ingest step. Same [readers](/docs/2.0.0-rc2/beacondb/python/querying#reading-files) and
+- **In-process, no setup.** You run no server. The engine links into your Python process.
+- **Reads your formats in place.** NetCDF, Zarr, Parquet, GeoParquet, CSV, HDF5, ODV, GeoTIFF, Delta
+  and more. There is no import step. It uses the same
+  [readers](/docs/2.0.0-rc2/beacondb/python/querying#reading-files) and the same
   [SQL](/docs/2.0.0-rc2/beacondb/sql/) as Beacon Data Lake.
-- **One portable file.** A single `beacon.db` holds everything Beacon *owns* (its catalog and managed
-  data) and references everything else. Copy the file and the managed lake travels with it.
-- **Arrow-native results.** Results cross into Python over the Arrow PyCapsule protocol, so any Arrow
-  consumer reads them with no dependency of ours; `.df()` / `.pl()` / `.arrow()` are there when you
-  want pandas / polars / pyarrow.
-- **Federates outward.** [`ATTACH`](/docs/2.0.0-rc2/beacondb/python/remote-catalogs) a remote Beacon Data Lake and
-  query it, joining remote tables against local files.
+- **One portable file.** One `beacon.db` holds everything that Beacon *owns*: its catalog and its
+  managed data. It references everything else. Copy the file and the managed lake goes with it.
+- **Arrow-native results.** Results cross into Python over the Arrow PyCapsule protocol. Any Arrow
+  consumer reads them without an extra dependency. Use `.df()`, `.pl()` or `.arrow()` for pandas,
+  polars or pyarrow.
+- **Federates outward.** [`ATTACH`](/docs/2.0.0-rc2/beacondb/python/remote-catalogs) a remote Beacon
+  Data Lake and query it. You can then join remote tables against local files.
 
 ## Install
 
@@ -40,13 +41,13 @@ pip install "beacondb[sqlalchemy]"   # + the beacondb:// dialect
 pip install "beacondb[all]"          # all of the above
 ```
 
-Nothing is required at runtime beyond the wheel: results cross the Arrow PyCapsule protocol, so
-pyarrow/pandas/polars are only needed by the methods that return their types.
+The wheel needs nothing else at run time. Results cross the Arrow PyCapsule protocol. Only the
+methods that return their types need pyarrow, pandas or polars.
 
 ### Platform support
 
-`beacondb` embeds the whole engine, so it ships as a compiled wheel — one **abi3** wheel per
-platform covers CPython 3.10+. Wheels are published for:
+`beacondb` holds the whole engine. It therefore ships as a compiled wheel. One **abi3** wheel per
+platform covers CPython 3.10 and later. Beacon publishes wheels for:
 
 | Platform | Architectures |
 | --- | --- |
@@ -54,38 +55,39 @@ platform covers CPython 3.10+. Wheels are published for:
 | macOS | `arm64` (Apple silicon), `x86_64` (Intel) |
 | Windows | `x64` |
 
-A **source distribution** is published alongside them, so `pip install beacondb` still works on a
-platform with no wheel — it just compiles the engine instead of downloading it, which needs a full
-build toolchain and takes a long time.
+Beacon also publishes a **source distribution**. `pip install beacondb` therefore works on a platform
+without a wheel. Pip then compiles the engine instead of a download. This needs a full build
+toolchain and takes a long time.
 
 ::: warning No Alpine / musl wheel
-There is currently **no musllinux wheel**, so on Alpine or any musl-based image
-(`python:3.12-alpine`, `alpine`) pip falls through to the sdist and builds the whole engine from
-source. Rust and `protoc` are provisioned automatically, but you still need a C toolchain and
-system HDF5/netCDF (`apk add build-base linux-headers hdf5-dev netcdf-dev`), and the compile takes
-a long time.
+There is at this moment **no musllinux wheel**. On Alpine, or on any musl image such as
+`python:3.12-alpine`, pip uses the source distribution. It then builds the whole engine from source.
+Beacon provides Rust and `protoc` automatically. You still need a C toolchain and the system HDF5 and
+netCDF packages (`apk add build-base linux-headers hdf5-dev netcdf-dev`). The compile takes a long
+time.
 
-Use a glibc-based image instead. `python:3.12-slim` (Debian) is the smallest drop-in, gets the
-prebuilt wheel, and needs no other change:
+Use a glibc image instead. `python:3.12-slim` (Debian) is the smallest option. It gets the prebuilt
+wheel. You change nothing else:
 
 ```dockerfile
 FROM python:3.12-slim      # not python:3.12-alpine
 RUN pip install beacondb
 ```
 
-If you must stay on Alpine, [build from source](/docs/2.0.0-rc2/beacondb/python/building#building-on-alpine-musl)
-has the `apk` prerequisites. musllinux wheels are expected to return; this is a temporary gap.
+Must you stay on Alpine? Then see
+[build from source](/docs/2.0.0-rc2/beacondb/python/building#building-on-alpine-musl) for the `apk`
+prerequisites. Beacon plans to publish musllinux wheels again. This gap is temporary.
 :::
 
-To force a source build on a platform that *does* have a wheel (to compile against your own HDF5,
-say), use `pip install beacondb --no-binary beacondb`.
+You can force a source build on a platform that *does* have a wheel. Use
+`pip install beacondb --no-binary beacondb`. This lets you compile against your own HDF5.
 
 ## Next steps
 
-- [Getting started](/docs/2.0.0-rc2/beacondb/python/getting-started), connect, first query, auth modes.
-- [Querying](/docs/2.0.0-rc2/beacondb/python/querying), lazy relations, readers, file sinks, streaming.
-- [Bringing data in](/docs/2.0.0-rc2/beacondb/python/data-in)-`register()` and `append()`.
-- [Remote catalogs](/docs/2.0.0-rc2/beacondb/python/remote-catalogs)-`ATTACH` a remote Beacon.
-- [Secrets](/docs/2.0.0-rc2/beacondb/python/secrets), S3/GCS/Azure and remote-Beacon credentials.
-- [SQLAlchemy](/docs/2.0.0-rc2/beacondb/python/sqlalchemy), the `beacondb://` dialect.
+- [Getting started](/docs/2.0.0-rc2/beacondb/python/getting-started): connect, first query, auth modes.
+- [Querying](/docs/2.0.0-rc2/beacondb/python/querying): lazy relations, readers, file sinks, streams.
+- [Bring data in](/docs/2.0.0-rc2/beacondb/python/data-in): `register()` and `append()`.
+- [Remote catalogs](/docs/2.0.0-rc2/beacondb/python/remote-catalogs): `ATTACH` a remote Beacon.
+- [Secrets](/docs/2.0.0-rc2/beacondb/python/secrets): credentials for S3, GCS, Azure and a remote Beacon.
+- [SQLAlchemy](/docs/2.0.0-rc2/beacondb/python/sqlalchemy): the `beacondb://` dialect.
 - [API reference](/docs/2.0.0-rc2/beacondb/python/api-reference) · [Building from source](/docs/2.0.0-rc2/beacondb/python/building)

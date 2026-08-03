@@ -1,12 +1,11 @@
 ---
-description: BeaconDB is an embeddable SQL engine for scientific data. It reads NetCDF, Zarr, Parquet, GeoTIFF and more in place from disk or object storage, and stores what it owns in one portable beacon.db file.
+description: BeaconDB is an embeddable SQL engine for scientific data. It reads NetCDF, Zarr, Parquet, GeoTIFF and more in place, from disk or object storage.
 ---
 
 # BeaconDB
 
-BeaconDB is an **embeddable SQL engine for scientific data**. It runs inside your process, reads
-your existing files where they already live, and answers SQL over them. There is no server to
-operate and no import step.
+BeaconDB is an **embeddable SQL engine for scientific data**. It runs inside your process. It reads
+your existing files where they are. It answers SQL over them. There is no server and no import step.
 
 ```python
 import beacondb
@@ -16,50 +15,51 @@ con.sql("SELECT platform, avg(temperature) AS t "
         "FROM read_netcdf('argo/**/*.nc') GROUP BY platform").df()
 ```
 
-The model is deliberately simple: one process, one file, full SQL. What sets it apart is what it
-reads. BeaconDB speaks the formats scientific data actually ships in, including multi-dimensional
-array formats that general-purpose engines cannot open.
+The model is simple: one process, one file, full SQL. The formats make the difference. BeaconDB
+reads the formats that scientific data uses. This includes multi-dimensional array formats. Other
+engines cannot open those formats.
 
 ## What it does
 
-- **Reads files in place.** NetCDF, Zarr, Parquet/GeoParquet, CSV, Arrow, GeoTIFF, Atlas, Delta, ODV,
-  and BBF, from local disk or S3/GCS/Azure. No conversion, no loading step.
-- **Answers SQL.** A full analytical dialect built on DataFusion, with joins, aggregates, window
-  functions, views, and materialized views.
-- **Owns data when you want it to.** Managed tables give you `INSERT` / `UPDATE` / `DELETE`, stored
-  inside a single portable `beacon.db` file.
-- **Reaches other systems.** Query Postgres and MySQL, or federate against another Beacon with
-  remote tables and `ATTACH`.
-- **Pushes work down.** Filters and projections are pushed into the files and remote systems it
-  reads, so a query fetches only the bytes it needs.
+- **Reads files in place.** NetCDF, Zarr, Parquet, GeoParquet, CSV, Arrow, GeoTIFF, Atlas, Delta,
+  ODV and BBF, on local disk or on S3, GCS and Azure. There is no conversion and no load step.
+- **Answers SQL.** A full analytical dialect on DataFusion, with joins, aggregates, window
+  functions, views and materialized views.
+- **Owns data when you want it to.** Managed tables give you `INSERT`, `UPDATE` and `DELETE`. One
+  portable `beacon.db` file holds them.
+- **Reaches other systems.** Query Postgres and MySQL. Query another Beacon with remote tables and
+  `ATTACH`.
+- **Pushes work down.** Beacon pushes filters and projections into the files and remote systems that
+  it reads. A query then fetches only the bytes that it needs.
 
 ## What it is used for
 
 | Use case | Why BeaconDB fits |
 | --- | --- |
-| Exploring a collection of NetCDF or Zarr files from a notebook | Query thousands of files with one SQL statement, no preprocessing |
-| Shipping an application with an embedded query engine | The engine is a library, and the database is one file you can copy |
-| Turning array data into tabular results | Multi-dimensional variables become columns you can filter and aggregate |
-| Joining local files against a remote catalog | `ATTACH` a remote Beacon and join it with local data |
-| Preparing extracts for downstream tools | Export results to Parquet, CSV, NetCDF, or Arrow |
+| Explore a collection of NetCDF or Zarr files from a notebook | Query thousands of files with one SQL statement. No preparation step. |
+| Ship an application with an embedded query engine | The engine is a library. The database is one file that you can copy. |
+| Turn array data into tabular results | Multi-dimensional variables become columns. You filter and aggregate them. |
+| Join local files against a remote catalog | `ATTACH` a remote Beacon. Then join it with local data. |
+| Prepare extracts for other tools | Export the results to Parquet, CSV, NetCDF or Arrow. |
 
-If instead you need to serve datasets to many people over the network, with access control and a web
-UI, that is the same engine packaged as
-[Beacon Data Lake](/docs/2.0.0-rc2/getting-started).
+Do you need to serve datasets to many people over the network, with access control and a web UI?
+Then use the same engine as [Beacon Data Lake](/docs/2.0.0-rc2/getting-started).
 
 ## How this chapter is organized
 
-1. **[How It Works](/docs/2.0.0-rc2/beacondb/how-it-works)**: the engine, the query pipeline, and the
+1. **[How It Works](/docs/2.0.0-rc2/beacondb/how-it-works)**: the engine, the query pipeline and the
    storage model.
-2. **[Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/)**: reading external files and object storage,
-   connecting to other databases, and BeaconDB's own internal format.
-3. **[SQL Reference](/docs/2.0.0-rc2/beacondb/sql/)**: statements, functions, and syntax.
-4. **[Python Binding](/docs/2.0.0-rc2/beacondb/python/)**: the client API, from `connect()` to dataframes.
-5. **[Guides](/docs/2.0.0-rc2/beacondb/guides/)**: task-oriented walkthroughs.
+2. **[Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/)**: external files, object storage, other
+   databases and the internal format of BeaconDB.
+3. **[SQL Reference](/docs/2.0.0-rc2/beacondb/sql/)**: statements, functions and syntax.
+4. **[Python Binding](/docs/2.0.0-rc2/beacondb/python/)**: the client API, from `connect()` to
+   dataframes.
+5. **[Guides](/docs/2.0.0-rc2/beacondb/guides/)**: step-by-step instructions for common tasks.
 
 ## Language bindings
 
-Each binding is a thin front-end over the same engine: same SQL, same formats, same `beacon.db`.
+Each binding is a thin front-end over the same engine. The SQL, the formats and the `beacon.db` file
+stay the same.
 
 | Binding | Status | Docs |
 |---|---|---|
@@ -67,7 +67,7 @@ Each binding is a thin front-end over the same engine: same SQL, same formats, s
 | **Rust** | Planned | |
 | **C ABI** (for .NET, Go, Node, Java) | Planned | |
 
-The Python binding is the reference front-end today: a PEP 249 connection, a lazy relation API,
-Arrow-native results, `ATTACH`, secrets, streaming, and file sinks.
+The Python binding is the reference front-end today. It gives a PEP 249 connection, a lazy relation
+API, Arrow-native results, `ATTACH`, secrets, streams and file sinks.
 
 **[Get started with the Python binding](/docs/2.0.0-rc2/beacondb/python/getting-started)**

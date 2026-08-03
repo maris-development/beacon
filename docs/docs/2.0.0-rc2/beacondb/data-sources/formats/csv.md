@@ -1,10 +1,10 @@
 ---
-description: Read CSV and TSV files with read_csv(). Schema is inferred from the file contents.
+description: Read CSV and TSV files with read_csv(). Beacon infers the schema from the file contents.
 ---
 
 # CSV
 
-## Reading
+## Read the files
 
 ```text
 read_csv(glob_paths)
@@ -12,10 +12,10 @@ read_csv(glob_paths, delimiter)
 read_csv(glob_paths, delimiter, infer_records)
 ```
 
-Schema is inferred from the file contents. The first row must be a header row.
+Beacon infers the schema from the file contents. The first row must be a header row.
 
-- `delimiter`, single-character field separator (default: `,`)
-- `infer_records`, number of rows to sample when inferring column types (default: `128000`)
+- `delimiter`: the field separator, one character (default: `,`)
+- `infer_records`: the number of rows that Beacon samples for the column types (default: `128000`)
 
 ```sql
 SELECT * FROM read_csv('metadata/*.csv')
@@ -24,40 +24,38 @@ SELECT * FROM read_csv('metadata/*.csv')
 SELECT * FROM read_csv(['data/*.tsv'], '\t', 500)
 ```
 
-## Inspecting the schema
+## Inspect the schema
 
-Before writing a query it is usually worth checking which columns a file actually has, and
-what their types are.
+Check the columns of a file before you write a query. Also check their types.
 
-[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the
-inferred column names and types **without reading any data**, which makes it the cheapest
-option on large collections:
+[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the column names and types **without a read of any data**. It is
+therefore the cheapest option on a large collection:
 
 ```sql
 SELECT * FROM read_schema('stations/*.csv', 'csv');
 ```
 
-Pass a list to see the combined schema across several locations, which is how you spot files
-that disagree about a column:
+Pass a list to get the combined schema of several locations. This shows the files that disagree
+about a column:
 
 ```sql
 SELECT * FROM read_schema(['stations/*.csv', 'other/*.csv'], 'csv');
 ```
 
-To go further than names and types, [`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) profiles every column in one pass, adding
-min/max, distinct counts, and the share of nulls:
+[`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) gives more than names and types. It profiles every column in
+one pass. It adds the minimum, the maximum, the distinct count and the share of nulls:
 
 ```sql
 SUMMARIZE (SELECT * FROM read_csv('stations/*.csv'));
 ```
 
-If the files are registered as a table, `DESCRIBE` works directly:
+If the files have a table name, use `DESCRIBE`:
 
 ```sql
 DESCRIBE station_metadata;
 ```
 
-From Python, the Arrow schema of any relation is available without collecting rows:
+From Python, read the Arrow schema of a relation. Beacon collects no rows:
 
 ```python
 con.sql("SELECT * FROM read_csv('stations/*.csv') LIMIT 0").arrow().schema
@@ -65,9 +63,9 @@ con.sql("SELECT * FROM read_csv('stations/*.csv') LIMIT 0").arrow().schema
 
 ## Format details
 
-- The first row must be a header row containing column names.
-- Files must be UTF-8 encoded.
-- Schema is inferred from the file contents.
+- The first row must be a header row with the column names.
+- A file must use UTF-8 encoding.
+- Beacon infers the schema from the file contents.
 
 ## As an external table
 
@@ -77,4 +75,5 @@ STORED AS CSV
 LOCATION 'metadata/stations/'
 ```
 
-See [Creating External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL, and [Reading External Files](/docs/2.0.0-rc2/beacondb/data-sources/) for the general reading model.
+See [Create External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/) for the
+full read model.

@@ -10,16 +10,17 @@ CREATE MATERIALIZED VIEW monthly_sales AS
     GROUP BY customer_id, date_trunc('month', order_date)
 ```
 
-A materialized view runs its defining query **once**, at creation time, and persists the result
-set as a single Parquet file. Querying the view reads straight from the persisted Parquet instead of
-recomputing the original query, useful for expensive, repeated, or aggregation-heavy queries.
+A materialized view runs its query **once**, at creation time. It stores the result as one Parquet
+file. A query on the view reads that Parquet file. Beacon does not run the original query again. Use
+a materialized view for an expensive, repeated or aggregate query.
 
-The defining query can read from any source Beacon knows about, registered tables,
-[external tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables), [views](/docs/2.0.0-rc2/beacondb/sql/create-view), or table functions
-such as `read_netcdf()`, `read_zarr()`, or `read_atlas()`.
+The query can read any source that Beacon knows. Sources include registered tables,
+[external tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables),
+[views](/docs/2.0.0-rc2/beacondb/sql/create-view) and table functions such as `read_netcdf()`,
+`read_zarr()` and `read_atlas()`.
 
-Unlike a regular [view](/docs/2.0.0-rc2/beacondb/sql/create-view) (which recomputes on every reference), a materialized
-view only changes when you explicitly [`REFRESH`](#refresh) it.
+A regular [view](/docs/2.0.0-rc2/beacondb/sql/create-view) runs its query on every reference. A
+materialized view changes only when you run [`REFRESH`](#refresh).
 
 ## Syntax
 
@@ -28,25 +29,25 @@ CREATE MATERIALIZED VIEW <view_name> AS
     <select_statement>
 ```
 
-When the statement runs, Beacon:
+The statement makes Beacon do four steps:
 
-1. Stores the materialized view definition in the catalog as a table provider.
-2. Executes the defining query immediately.
-3. Writes the result as a single `part.parquet` file in a per-refresh versioned subdirectory
-   under the reserved `__beacon__/<view_name>/` prefix in the datasets object store.
-4. Serves future reads from the persisted Parquet result.
+1. Beacon stores the materialized view definition in the catalog as a table provider.
+2. Beacon runs the query at once.
+3. Beacon writes the result as one `part.parquet` file. Each refresh gets its own subdirectory. The
+   subdirectories live under the reserved `__beacon__/<view_name>/` prefix in the dataset store.
+4. Beacon serves later reads from the stored Parquet result.
 
-The catalog records the view name, original SQL query, output schema, storage location, creation
-timestamp, and last-refresh timestamp.
+The catalog holds the view name, the original SQL query, the output schema and the storage location.
+It also holds the creation time and the time of the last refresh.
 
-## Querying
+## Query the view
 
 ```sql
 SELECT * FROM monthly_sales
 ```
 
-This scans the Parquet-backed result and benefits from columnar projection and predicate
-pushdown, it does **not** re-run the original query.
+This scans the stored Parquet result. It uses columnar projection and predicate pushdown. It does
+**not** run the original query again.
 
 ## REFRESH
 
@@ -54,18 +55,18 @@ pushdown, it does **not** re-run the original query.
 REFRESH monthly_sales
 ```
 
-A refresh recomputes the original query and replaces the stored Parquet data with the new result
-(full refresh). The new data is written to a fresh directory and the catalog pointer is swapped
-atomically, so a failed refresh leaves the previous result intact and queryable.
+A refresh runs the original query again. It replaces the stored Parquet data with the new result.
+This is a full refresh. Beacon writes the new data to a new directory. It then swaps the catalog
+pointer atomically. A failed refresh therefore keeps the previous result. You can still query it.
 
 ::: info
-Only **full refresh** is supported in this version. Incremental refresh, scheduled refresh, and
-dependency-based invalidation are planned for later releases.
+This version supports **full refresh** only. Beacon plans incremental refresh, scheduled refresh and
+dependency-based invalidation for a later release.
 :::
 
 ### Errors
 
-Refreshing a name that is not a materialized view fails clearly:
+A refresh of a name that is not a materialized view gives a clear error:
 
 ```text
 Materialized view 'unknown_view' does not exist
@@ -83,7 +84,7 @@ DROP TABLE monthly_sales
 DROP TABLE IF EXISTS monthly_sales
 ```
 
-Dropping a materialized view removes it from the catalog and deletes its persisted Parquet data.
+`DROP TABLE` removes a materialized view from the catalog. It also deletes the stored Parquet data.
 
 ## Example
 

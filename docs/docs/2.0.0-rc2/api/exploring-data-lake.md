@@ -1,12 +1,13 @@
-# Exploring the Data Lake (REST API)
+# Explore the Data Lake (REST API)
 
-Use these endpoints to discover what data is available on a running Beacon instance, without running a full query.
+Use these endpoints to see the available data on a Beacon server. You run no full query.
 
 **Concepts:**
 
-- **Datasets**: individual files (a single `.nc` file, a `.parquet` file, a Zarr group, etc.)
-- **Tables**: named logical tables registered in Beacon, often spanning many datasets
-- **Schemas**: Arrow field lists (name + type) describing the columns available for `select` and `filter`
+- **Datasets**: single files, such as one `.nc` file, one `.parquet` file or a Zarr group.
+- **Tables**: named tables in Beacon. One table often covers many datasets.
+- **Schemas**: Arrow field lists with a name and a type. They give the columns for `select` and
+  `filter`.
 
 ## System info
 
@@ -14,7 +15,7 @@ Use these endpoints to discover what data is available on a running Beacon insta
 GET /api/info
 ```
 
-Returns Beacon version, configuration summary, and registered table count.
+Returns the Beacon version, a summary of the configuration and the number of registered tables.
 
 ## Datasets
 
@@ -25,17 +26,17 @@ GET /api/list-datasets
 ```
 
 ::: info Deprecated alias
-`GET /api/datasets` is a deprecated alias of `/api/list-datasets`. Use
-`/api/list-datasets` in new code.
+`GET /api/datasets` is a deprecated alias of `/api/list-datasets`. Use `/api/list-datasets` in new
+code.
 :::
 
-Optional query parameters:
+The optional query parameters are:
 
 | Parameter | Description |
 | --------- | ----------- |
-| `pattern` | Glob to filter paths (e.g. `*.nc`, `**/*.parquet`) |
-| `offset` | Pagination offset |
-| `limit` | Pagination limit |
+| `pattern` | A glob that filters the paths, for example `*.nc` or `**/*.parquet` |
+| `offset` | The offset of the page |
+| `limit` | The size of the page |
 
 ```http
 GET /api/list-datasets?pattern=argo/**/*.nc&limit=50&offset=0
@@ -49,19 +50,19 @@ GET /api/total-datasets
 
 ### Dataset schema
 
-Returns the Arrow schema (fields + types) for a single path:
+Returns the Arrow schema of one path. The schema holds the fields and the types:
 
 ```http
 GET /api/dataset-schema?file=argo/profile_001.nc
 ```
 
-To infer a merged schema across multiple files using a glob:
+Use a glob to get one merged schema over several files:
 
 ```http
 GET /api/dataset-schema?file=argo/**/*.nc
 ```
 
-The response is the Arrow schema, serialized as Arrow serializes it:
+The response is the Arrow schema, in the Arrow serialization form:
 
 ```json
 {
@@ -73,11 +74,10 @@ The response is the Arrow schema, serialized as Arrow serializes it:
 }
 ```
 
-Column names are under `.fields[].name`. A simple `data_type` is a string; a
-parameterized one is a single-key object carrying its arguments, so a client can
-reconstruct the exact type rather than parse a display string. (Arrow also emits
-`dict_id`/`dict_is_ordered` per field; they are dictionary-encoding internals and
-can be ignored.)
+The column names are in `.fields[].name`. A simple `data_type` is a string. A type with parameters
+is an object with one key. That key holds the arguments. A client can therefore build the exact
+type. It parses no display string. Arrow also writes `dict_id` and `dict_is_ordered` for each field.
+Those two fields are internal to the dictionary encoding. You can ignore them.
 
 ## Tables
 
@@ -89,7 +89,7 @@ GET /api/tables
 
 ### Default table
 
-Beacon uses this table when a query omits `from`:
+Beacon uses this table when a query has no `from` field:
 
 ```http
 GET /api/default-table
@@ -97,10 +97,9 @@ GET /api/default-table
 
 ### Catalogs
 
-`GET /api/tables` lists only the tables in the default schema
-(`beacon.public`). To browse the whole namespace — for the super-user that
-includes beacon's `system` schema, `information_schema`, and any catalog added
-with `ATTACH` — ask for the catalog tree:
+`GET /api/tables` lists only the tables of the default schema, `beacon.public`. Ask for the catalog
+tree to see the whole namespace. For the super-user, that tree also holds the `system` schema of
+Beacon, the `information_schema` and every catalog from an `ATTACH`:
 
 ```http
 GET /api/catalogs
@@ -122,14 +121,13 @@ GET /api/catalogs
 }
 ```
 
-Tables outside `default_catalog`.`default_schema` need their qualified name in
-SQL (`beacon.system.query_metrics`).
+A table outside `default_catalog`.`default_schema` needs its full name in SQL, for example
+`beacon.system.query_metrics`.
 
-Both this and `/api/tables` answer per caller: the metadata schemas
-(`information_schema`, `beacon.system`) are the super-user's alone, and everyone
-else is listed only the tables their roles grant `SELECT` on — so a listing shows
-exactly what that caller could go on to read. See
-[Access control](/docs/2.0.0-rc2/security/access-control).
+This endpoint and `/api/tables` answer per caller. The metadata schemas belong to the super-user
+only. Those schemas are `information_schema` and `beacon.system`. Every other caller sees only the
+tables with a `SELECT` grant from their roles. A listing therefore shows exactly what that caller
+can read. See [Access control](/docs/2.0.0-rc2/security/access-control).
 
 ### Table schema
 
@@ -137,8 +135,8 @@ exactly what that caller could go on to read. See
 GET /api/table-schema?table_name=default
 ```
 
-The table is resolved in the default catalog and schema. Add `catalog` and
-`schema` for one that lives elsewhere:
+Beacon resolves the table in the default catalog and schema. Add `catalog` and `schema` for a table
+in another place:
 
 ```http
 GET /api/table-schema?table_name=query_metrics&catalog=beacon&schema=system
@@ -146,22 +144,21 @@ GET /api/table-schema?table_name=query_metrics&catalog=beacon&schema=system
 
 ### Default table schema
 
-The Arrow schema of the default table (the one queried when a request omits
-`from`):
+The Arrow schema of the default table. Beacon queries that table when a request has no `from`
+field:
 
 ```http
 GET /api/default-table-schema
 ```
 
 ::: info Deprecated alias
-`GET /api/query/available-columns` is a deprecated endpoint that returns only the
-column names of the default table schema. Use `/api/default-table-schema` in new
-code.
+`GET /api/query/available-columns` is deprecated. It returns only the column names of the default
+table schema. Use `/api/default-table-schema` in new code.
 :::
 
 ### All tables with schemas
 
-Convenient for UI discovery, but can be slow on large installations:
+This helps a UI. It can be slow on a large installation:
 
 ```http
 GET /api/tables-with-schema
@@ -169,47 +166,48 @@ GET /api/tables-with-schema
 
 ### Table configuration
 
-::: warning Deprecated — no longer supported
-`GET /api/admin/table-config` no longer returns a table's configuration. A
-table's stored definition is how Beacon rebuilds it — credentials and internal
-option keys included — which is engine bookkeeping rather than an API contract,
-so it is not served over HTTP at all.
+::: warning Deprecated. No longer supported
+`GET /api/admin/table-config` no longer returns the configuration of a table. Beacon rebuilds a
+table from its stored definition. That definition holds the credentials and the internal option
+keys. It is internal to the engine. It is not an API contract. Beacon therefore never serves it over
+HTTP.
 
-The endpoint stays routed (still admin-only) and answers `200` with a notice:
+The endpoint still exists, for an admin only. It answers `200` with a notice:
 
 ```json
 { "message": "Table configuration is no longer supported. ..." }
 ```
 
-Use `GET /api/table-schema` for a table's columns, and
-`SHOW EXTENSIONS FOR <table>` through `/api/query` for its extensions.
+Use `GET /api/table-schema` for the columns of a table. Use `SHOW EXTENSIONS FOR <table>` through
+`/api/query` for its extensions.
 :::
 
 ## Functions
 
-List the scalar, aggregate, and window functions available in queries, with their
-signatures and descriptions:
+List the scalar, aggregate and window functions of a query. The list holds their signatures and
+descriptions:
 
 ```http
 GET /api/functions
 ```
 
-This is DataFusion's own function catalog (the same one `SHOW FUNCTIONS` reads).
-Table functions (`read_netcdf`, `read_zarr`, …) are **not** in it — DataFusion
-does not catalog table-valued functions.
+This is the function catalog of DataFusion. `SHOW FUNCTIONS` reads the same catalog. A table
+function such as `read_netcdf` or `read_zarr` is **not** in it. DataFusion does not catalog a table
+function.
 
 ::: info Deprecated
-`GET /api/table-functions` is still routed for clients that call it, but nothing
-catalogs table-valued functions, so it always returns an empty list.
+`GET /api/table-functions` still exists for older clients. No catalog holds a table function. The
+endpoint therefore always returns an empty list.
 :::
 
-See the [table function reference](/docs/2.0.0-rc2/beacondb/sql/table-functions)
-for every table function and its signature, and the
-[Function Reference](/docs/2.0.0-rc2/beacondb/sql/function-reference) for the rest.
+The [table function reference](/docs/2.0.0-rc2/beacondb/sql/table-functions) holds every table
+function and its signature. The
+[Function Reference](/docs/2.0.0-rc2/beacondb/sql/function-reference) holds the other functions.
 
 ## Table lifecycle
 
-**Table lifecycle is SQL-only.** Create, replace, or remove tables by sending SQL DDL to the query endpoint:
+**The table lifecycle uses SQL only.** Send SQL DDL to the query endpoint to create, replace or
+remove a table:
 
 ```http
 POST /api/query
@@ -225,42 +223,39 @@ Content-Type: application/json
 { "sql": "DROP TABLE argo" }
 ```
 
-Write operations require the admin credentials (`BEACON_ADMIN_USERNAME` /
-`BEACON_ADMIN_PASSWORD`) via HTTP basic auth; anonymous requests are read-only.
+A write operation needs the admin credentials, `BEACON_ADMIN_USERNAME` and
+`BEACON_ADMIN_PASSWORD`, over HTTP basic auth. An anonymous request is read-only.
 
 ## Admin
 
-All `/api/admin/*` endpoints require the admin credentials
-(`BEACON_ADMIN_USERNAME` / `BEACON_ADMIN_PASSWORD`) via HTTP basic auth;
-unauthenticated requests get `401`.
+Every `/api/admin/*` endpoint needs the admin credentials, `BEACON_ADMIN_USERNAME` and
+`BEACON_ADMIN_PASSWORD`, over HTTP basic auth. A request without credentials gets `401`.
 
-Creating, replacing, and removing tables can still be done through authenticated
-SQL DDL on `/api/query` (see [Table lifecycle](#table-lifecycle) above). In
-addition, these dedicated, JSON-typed admin endpoints are available:
+You can still create, replace and remove a table with authenticated SQL DDL on `/api/query`. See
+[Table lifecycle](#table-lifecycle) above. These JSON admin endpoints also exist:
 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
-| `GET` | `/api/admin/check` | Connectivity check; returns `{ "is_admin": true }` |
-| `GET` | `/api/admin/table-config` | **Deprecated** — answers a notice; table configuration is no longer served |
-| `POST` | `/api/admin/crawlers` | Define (or replace) a crawler |
-| `GET` | `/api/admin/crawlers` | List defined crawlers |
-| `GET` | `/api/admin/crawlers/{name}` | Get one crawler (or `404`) |
-| `POST` | `/api/admin/crawlers/{name}/run` | Run a crawler once; returns its crawl report |
-| `DELETE` | `/api/admin/crawlers/{name}` | Drop a crawler (crawled tables are left in place) |
+| `GET` | `/api/admin/check` | Check the connection. Returns `{ "is_admin": true }` |
+| `GET` | `/api/admin/table-config` | **Deprecated.** It answers a notice. Beacon no longer serves a table configuration |
+| `POST` | `/api/admin/crawlers` | Define or replace a crawler |
+| `GET` | `/api/admin/crawlers` | List every crawler |
+| `GET` | `/api/admin/crawlers/{name}` | Return one crawler. Returns `404` for an unknown name |
+| `POST` | `/api/admin/crawlers/{name}/run` | Run a crawler once. Returns its crawl report |
+| `DELETE` | `/api/admin/crawlers/{name}` | Drop a crawler. Beacon keeps the crawled tables |
 | `POST` | `/api/admin/external-tables` | Create an external table from structured fields |
 
-Every example below sends the credentials via HTTP Basic auth
-(`Authorization: Basic <base64(username:password)>`); the header is omitted from
-the snippets after the first for brevity.
+Every example below sends the credentials over HTTP Basic auth, as
+`Authorization: Basic <base64(username:password)>`. Only the first example shows the header.
 
-Check that your credentials are accepted:
+Check that Beacon accepts your credentials:
 
 ```http
 GET /api/admin/check
 Authorization: Basic <base64(username:password)>
 ```
 
-Create a crawler (the structured equivalent of [`CREATE CRAWLER`](/docs/2.0.0-rc2/data-lake/crawlers)):
+Create a crawler. This endpoint matches [`CREATE CRAWLER`](/docs/2.0.0-rc2/data-lake/crawlers):
 
 ```http
 POST /api/admin/crawlers
@@ -271,8 +266,8 @@ Content-Type: application/json
   "schedule_secs": 900, "table_naming": "crawler_prefixed" }
 ```
 
-Create an external table (the structured equivalent of
-[`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table)):
+Create an external table. This endpoint matches
+[`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table):
 
 ```http
 POST /api/admin/external-tables
@@ -283,7 +278,7 @@ Content-Type: application/json
   "partition_cols": ["year", "month"] }
 ```
 
-List the defined crawlers, or fetch a single one by name:
+List the crawlers, or fetch one crawler by name:
 
 ```http
 GET /api/admin/crawlers
@@ -293,13 +288,13 @@ GET /api/admin/crawlers
 GET /api/admin/crawlers/argo
 ```
 
-Run a crawler once on demand (returns its crawl report):
+Run a crawler once on demand. It returns its crawl report:
 
 ```http
 POST /api/admin/crawlers/argo/run
 ```
 
-Drop a crawler (its already-crawled tables are left in place):
+Drop a crawler. Beacon keeps the tables that the crawler created:
 
 ```http
 DELETE /api/admin/crawlers/argo
@@ -307,8 +302,8 @@ DELETE /api/admin/crawlers/argo
 
 ## OpenAPI
 
-This page is a curated subset. The complete, always-current request and response
-shapes are generated from the server itself:
+This page holds a selection. The server generates the full request and response shapes. Those shapes
+are always current:
 
 - Swagger UI: `/swagger`
 - Scalar UI: `/scalar/`

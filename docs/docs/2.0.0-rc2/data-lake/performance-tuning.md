@@ -2,113 +2,124 @@
 
 ## Beacon Query Engine Settings
 
-This chapter focuses on practical performance knobs that are safe to tune in production.
+This chapter gives the performance settings that are safe to change in production.
 
-Beacon is built on DataFusion. Most performance tuning comes down to:
+Beacon uses DataFusion. Performance tuning covers three points:
 
-- How much parallelism Beacon is allowed to use (threads)
-- How much memory is available to the query engine before spilling to disk
-- Whether Beacon can avoid unnecessary IO (projection pushdown, caches)
+- The parallelism that Beacon can use, in threads.
+- The memory of the query engine, before a spill to disk.
+- The I/O that Beacon can avoid, with projection pushdown and caches.
 
 ::: tip
-All settings below are environment variables. See the full list in [configuration.md](configuration.md).
+Every setting below is an environment variable. [configuration.md](configuration.md) holds the full list.
 :::
 
 ### CPU and concurrency
 
 #### `BEACON_WORKER_THREADS`
 
-Beacon uses this value to size its Tokio runtime (the executor that runs API requests and query work).
+This value sizes the Tokio runtime of Beacon. That runtime runs the API requests and the query work.
 
-- If you run Beacon on a dedicated machine, start with `BEACON_WORKER_THREADS` ~= number of physical cores.
-- If the same host also runs other heavy services, cap this to leave headroom.
+- On a dedicated machine, set `BEACON_WORKER_THREADS` to the number of physical cores.
+- On a shared host, set a lower value. Other services then keep enough CPU.
 
-For IO-heavy workloads (remote object storage, NetCDF reads over HTTP), more threads can help. For CPU-heavy workloads (aggregations, joins), scaling is limited by CPU.
+More threads help an I/O-heavy workload, such as a read from object storage or a NetCDF read over
+HTTP. A CPU-heavy workload, such as an aggregate or a join, does not scale past the CPU count.
 
 ### Memory and disk spilling
 
 #### `BEACON_VM_MEMORY_SIZE`
 
-This controls the DataFusion memory pool size (in MB). When queries exceed this pool, DataFusion can spill to disk.
+This value sets the size of the DataFusion memory pool, in MB. A query above this limit spills to
+disk.
 
-- Larger values generally improve performance by reducing spill frequency.
-- If you see high disk activity and slow queries under load, increase this first.
+- A larger value gives better performance, because Beacon spills less often.
+- Do you see high disk activity and slow queries under load? Then increase this value first.
 
 ::: warning
-Spilling uses the OS temp area (DataFusion disk manager). For best performance, ensure your temp directory is on fast storage and has enough free space.
+A spill goes to the OS temp area, through the DataFusion disk manager. Put that directory on fast
+storage. It also needs enough free space.
 :::
 
-### Avoiding unnecessary reads
+### Avoid unnecessary reads
 
 #### `BEACON_ENABLE_PUSHDOWN_PROJECTION`
 
-When enabled, Beacon will attempt to project only the columns referenced by your JSON query `select` list when building the scan.
+With this setting on, Beacon projects only the columns from the `select` list of your JSON query. It
+builds the scan with those columns.
 
-- Enabled by default (`true`), so queries on “wide” datasets only decode the columns they select.
-- Set to `false` only to work around a suspected projection bug or to force the simplest scan behavior.
+- The default is `true`. A query on a wide dataset therefore decodes only the selected columns.
+- Set it to `false` only for a suspected projection bug, or to force the simplest scan.
 
 ### Query language and parsing
 
 #### `BEACON_ENABLE_SQL`
 
-SQL parsing/execution is guarded by this flag.
+This flag controls the SQL parser and the SQL execution.
 
-- Set to `true` to allow SQL queries.
-- Keep `false` if you only use the JSON query API and want to reduce exposed surface area.
+- Set it to `true` to allow SQL queries.
+- Keep it `false` if you use the JSON query API only. This reduces the exposed interface.
 
-### Object-store listing
+### Object store listings
 
 #### `BEACON_S3_DATA_LAKE`, `BEACON_S3_BUCKET`, `BEACON_S3_ENABLE_VIRTUAL_HOSTING`
 
-These control whether the datasets store lives in an S3-compatible bucket and how it is addressed.
-Object-store reads pay network latency on every listing and read.
+These settings decide if the datasets store lives on an S3-compatible bucket. They also set the
+address form. Every listing and every read on object storage costs network latency.
 
-- For performance, prefer placing Beacon close (network-wise) to the object store.
-- If listings are slow, use a [crawler](/docs/2.0.0-rc2/data-lake/crawlers) so the catalog is
-  maintained in the background instead of rescanning at query time.
+- Put Beacon near the object store in the network. This gives better performance.
+- Are the listings slow? Then use a [crawler](/docs/2.0.0-rc2/data-lake/crawlers). It keeps the
+  catalog current in the background. Beacon then does not scan at query time.
 
 ## NetCDF Tuning
 
-NetCDF performance in Beacon is mainly affected by:
+Two points control the NetCDF performance:
 
-- How often Beacon needs to open the file and infer schema
-- Whether opened readers are cached
+- The number of times that Beacon opens the file and infers the schema.
+- The cache of the open readers.
 
 ::: tip
-For extremely large `.nc` files, performance may improve by splitting them into smaller files or converting to chunk-friendly formats (e.g. Zarr), depending on your access pattern. Scans are emitted in batches of `BEACON_BATCH_SIZE` rows (default `64000`).
+For a very large `.nc` file, split it into smaller files. You can also convert it to a chunked
+format such as Zarr. Your access pattern decides the gain. A scan returns batches of
+`BEACON_BATCH_SIZE` rows. The default is `64000`.
 :::
 
-### Reader cache (avoid reopening files)
+### Reader cache (no repeated file open)
 
 #### `BEACON_NETCDF_USE_READER_CACHE` and `BEACON_NETCDF_READER_CACHE_SIZE`
 
-With reader caching enabled, Beacon reuses opened NetCDF readers (also keyed by path + last-modified time). This helps when the same files are accessed repeatedly across queries.
+With the reader cache on, Beacon uses an open NetCDF reader again. The cache key is the path and the
+last modification time. This helps when several queries read the same files.
 
 Recommendations:
 
-- Keep `BEACON_NETCDF_USE_READER_CACHE=true` (default) for repeated-access workloads.
-- Increase `BEACON_NETCDF_READER_CACHE_SIZE` if your “hot set” of NetCDF files is larger than the default (128).
-- Disable reader caching if you have extremely high file churn and want to minimize open file handles.
+- Keep `BEACON_NETCDF_USE_READER_CACHE=true`, the default, for a workload with repeated access.
+- Increase `BEACON_NETCDF_READER_CACHE_SIZE` if your active set of NetCDF files is larger than the
+  default of 128.
+- Switch the reader cache off if your files change very often. This also keeps the number of open
+  file handles low.
 
-### Suggested starting points
+### Suggested start values
 
-For a “many NetCDF files” deployment:
+For a deployment with many NetCDF files:
 
 - `BEACON_NETCDF_USE_READER_CACHE=true`
-- `BEACON_NETCDF_READER_CACHE_SIZE=16384` (size the cache to your hot set of files)
+- `BEACON_NETCDF_READER_CACHE_SIZE=16384`. Match the cache size to your active set of files.
 
-Per-file statistics used for query pruning are controlled separately by
-`BEACON_NETCDF_ENABLE_STATISTICS` (default `true`); keep it on unless you are
-debugging pruning behavior.
+`BEACON_NETCDF_ENABLE_STATISTICS` controls the statistics of each file. Beacon uses them to prune a
+query. The default is `true`. Keep it on. Switch it off only to debug the pruning.
 
 ## Zarr predicate pushdown
 
-Beacon’s Zarr reader applies predicate pushdown **automatically** through the shared N-dimensional engine. Based on your query’s filters, Beacon:
+The Zarr reader of Beacon applies predicate pushdown **automatically**. It uses the shared
+N-dimensional engine. Beacon reads the filters of your query. It then does two things:
 
-- Prunes Zarr chunks that cannot satisfy the predicate, so only the relevant chunks are read.
-- Slices 1D “coordinate-like” arrays (for example `time`, `latitude`, `longitude`) to the requested ranges.
+- It prunes the Zarr chunks that cannot match the predicate. It reads only the other chunks.
+- It slices the one-dimensional coordinate arrays to your ranges. Examples are `time`, `latitude`
+  and `longitude`.
 
-There is nothing to configure, no `statistics_columns` to declare and no statistics to pre-compute. Just read the store and filter; the engine handles the rest.
+You configure nothing. You declare no `statistics_columns`. You compute no statistics first. Read the
+store and filter it. The engine does the rest.
 
 ### SQL
 
@@ -145,20 +156,27 @@ Content-Type: application/json
 ```
 
 ::: tip
-For collections that are queried repeatedly, re-encode the Zarr stores into a single [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) collection. Atlas adds per-dataset statistics pruning on top of chunk pruning, dropping whole datasets before any chunk is read.
+Do you query a collection often? Then convert the Zarr stores into one
+[Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) collection. Atlas adds dataset pruning
+with statistics, next to the chunk pruning. It drops whole datasets before it reads a chunk.
 :::
 
 ## Atlas Tuning
 
-[Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) stores are opened through a `atlas.json` registry. To avoid re-opening the same store on every query, Beacon keeps a cache of opened Atlas readers.
+Beacon opens an [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) store through its
+`atlas.json` registry. Beacon caches the open Atlas readers. It therefore does not open the same
+store for every query.
 
-### Reader cache (avoid reopening stores)
+### Reader cache (no repeated store open)
 
 #### `BEACON_ATLAS_USE_READER_CACHE` and `BEACON_ATLAS_READER_CACHE_SIZE`
 
-With reader caching enabled, Beacon reuses opened Atlas readers across queries instead of re-parsing the `atlas.json` registry each time.
+With the reader cache on, Beacon uses an open Atlas reader again. It therefore does not parse the
+`atlas.json` registry for every query.
 
 Recommendations:
 
-- Keep `BEACON_ATLAS_USE_READER_CACHE=true` (default) when the same Atlas collections are queried repeatedly.
-- Increase `BEACON_ATLAS_READER_CACHE_SIZE` (default `32`) if you query more distinct Atlas stores than the cache can hold at once.
+- Keep `BEACON_ATLAS_USE_READER_CACHE=true`, the default, when several queries read the same Atlas
+  collections.
+- Increase `BEACON_ATLAS_READER_CACHE_SIZE`, default `32`, if you query more Atlas stores than the
+  cache holds.

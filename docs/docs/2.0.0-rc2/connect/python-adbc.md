@@ -1,20 +1,26 @@
 # Python, ADBC (Arrow Database Connectivity)
 
-[ADBC](https://arrow.apache.org/adbc/) is a database-connectivity standard built on Apache Arrow. The `adbc-driver-flightsql` package connects to any Arrow Flight SQL server, including Beacon, and returns results as zero-copy Arrow record batches, making it ideal for data science workloads.
+[ADBC](https://arrow.apache.org/adbc/) is a database connectivity standard on Apache Arrow. The
+`adbc-driver-flightsql` package connects to any Arrow Flight SQL server, also to Beacon. It returns
+the results as Arrow record batches, with zero copy. This fits data science work.
 
-## Installation
+## Install
 
 ```bash
 pip install adbc-driver-flightsql adbc-driver-manager pyarrow
 ```
 
-## Connecting
+## Connect
 
-Beacon's Arrow Flight SQL server listens on port `32011` by default (separate from the HTTP API on port `5001`). Make sure that port is reachable, see the [Docker Compose note](#expose-the-flight-sql-port) below.
+The Arrow Flight SQL server of Beacon listens on port `32011` by default. The HTTP API uses port
+`5001`. Make that port reachable. See
+[Expose the Flight SQL port](#expose-the-flight-sql-port) below.
 
 ### DBAPI 2.0 interface (recommended)
 
-The `adbc_driver_flightsql.dbapi` module exposes a standard [PEP 249](https://peps.python.org/pep-0249/) interface, compatible with `pandas.read_sql` and similar helpers.
+The `adbc_driver_flightsql.dbapi` module gives a standard
+[PEP 249](https://peps.python.org/pep-0249/) interface. It works with `pandas.read_sql` and similar
+helpers.
 
 ```python
 import adbc_driver_flightsql.dbapi as flight_sql
@@ -30,7 +36,8 @@ conn = flight_sql.connect(
 
 ### Low-level `AdbcDatabase` interface
 
-Use `adbc_driver_manager.AdbcDatabase` when you need direct control over the connection lifecycle or want to integrate with libraries that accept the ADBC database handle.
+Use `adbc_driver_manager.AdbcDatabase` for direct control over the connection. It also helps with a
+library that takes an ADBC database handle.
 
 ```python
 import adbc_driver_manager as mgr
@@ -45,7 +52,7 @@ db = mgr.AdbcDatabase(
 conn = db.connect()
 ```
 
-## Running queries
+## Run queries
 
 ### Fetch rows with a cursor
 
@@ -79,7 +86,7 @@ with flight_sql.connect("grpc://localhost:32011", db_kwargs={...}) as conn:
 
 ## Expose the Flight SQL port
 
-When running Beacon via Docker Compose, publish port `32011` alongside the HTTP API:
+With Docker Compose, publish port `32011` next to the HTTP API:
 
 ```yaml
 services:
@@ -92,7 +99,7 @@ services:
 
 ## TLS connections
 
-If your Beacon instance is behind TLS, use `grpc+tls://` as the URI scheme:
+Does your Beacon server use TLS? Then use the `grpc+tls://` URI scheme:
 
 ```python
 conn = flight_sql.connect(
@@ -104,7 +111,7 @@ conn = flight_sql.connect(
 )
 ```
 
-For self-signed certificates, disable certificate verification:
+For a self-signed certificate, switch the certificate check off:
 
 ```python
 import adbc_driver_flightsql as flightsql
@@ -123,8 +130,8 @@ conn = flight_sql.connect(
 
 | Variable | Default | Description |
 | ----------------------------------- | --------- | --------------------------------------- |
-| `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable or disable the Flight SQL server |
-| `BEACON_FLIGHT_SQL_HOST` | `0.0.0.0` | IP address to listen on |
-| `BEACON_FLIGHT_SQL_PORT` | `32011` | Port for the Flight SQL gRPC server |
-| `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS` | `false` | Allow unauthenticated connections |
-| `BEACON_FLIGHT_SQL_TOKEN_TTL_SECS` | `3600` | Auth token lifetime in seconds |
+| `BEACON_FLIGHT_SQL_ENABLE` | `true` | Switch the Flight SQL server on or off |
+| `BEACON_FLIGHT_SQL_HOST` | `0.0.0.0` | The IP address of the listener |
+| `BEACON_FLIGHT_SQL_PORT` | `32011` | The port of the Flight SQL gRPC server |
+| `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS` | `false` | Allow a connection without credentials |
+| `BEACON_FLIGHT_SQL_TOKEN_TTL_SECS` | `3600` | The lifetime of an auth token, in seconds |

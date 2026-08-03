@@ -1,5 +1,5 @@
 ---
-description: Beacon's built-in MCP server lets AI agents (e.g. Claude) discover tables and run read-only queries over the Model Context Protocol, with per-table tools generated from table extensions, per-user auth, and a large-result export path.
+description: Beacon has a built-in MCP server. AI agents discover tables and run read-only queries over the Model Context Protocol, with per-table tools and per-user auth.
 # Unreleased: kept out of the local search index. Also listed in
 # .vitepress/config.mts UNRELEASED_PAGES (sitemap + noindex). Remove both to release.
 search: false
@@ -7,56 +7,55 @@ search: false
 
 # MCP Server
 
-Beacon ships a built-in [MCP](https://modelcontextprotocol.io) server so AI agents
-(e.g. Claude) can discover your tables and run **read-only** queries over the
-Model Context Protocol. It is served over the streamable-HTTP transport at
-`POST/GET/DELETE /mcp`, alongside the REST API.
+Beacon has a built-in [MCP](https://modelcontextprotocol.io) server. AI agents such as Claude
+discover your tables through it. They then run **read-only** queries over the Model Context
+Protocol. The server uses the streamable-HTTP transport at `POST/GET/DELETE /mcp`. It runs next to
+the REST API.
 
-The tool set is generated from your data: a few generic tools plus one tool per
-table you opt in via the table's `mcp` extension.
+Beacon generates the tool set from your data. It gives a few generic tools. It adds one tool for
+each table with an enabled `mcp` extension.
 
-## Enabling & configuration
+## Enable and configure
 
-The endpoint is mounted by default. Relevant environment variables:
+Beacon mounts the endpoint by default. These environment variables control it:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `BEACON_MCP_ENABLED` | `true` | Mount `/mcp`. Set `false`/`0`/`off` to disable. |
-| `BEACON_AUTH_ANONYMOUS_ENABLED` | `true` | Unauthenticated requests resolve to the anonymous principal. |
-| `BEACON_AUTH_ENFORCE` | `false` | Apply per-role read grants at query time. |
+| `BEACON_MCP_ENABLED` | `true` | Mount `/mcp`. Set `false`, `0` or `off` to switch it off. |
+| `BEACON_AUTH_ANONYMOUS_ENABLED` | `true` | Beacon maps a request without credentials to the anonymous principal. |
+| `BEACON_AUTH_ENFORCE` | `false` | Beacon applies the read grants of each role at query time. |
 
-With the defaults, `/mcp` is on and open (anonymous, read-only). To lock it down,
-set `BEACON_AUTH_ENFORCE=true` and `BEACON_AUTH_ANONYMOUS_ENABLED=false`, then
-give each agent a credential (see [Authenticating an agent](#authenticating-an-agent)).
+The defaults keep `/mcp` on and open. Access is anonymous and read-only. To restrict access, set
+`BEACON_AUTH_ENFORCE=true` and `BEACON_AUTH_ANONYMOUS_ENABLED=false`. Then give each agent a
+credential. See [Authenticate an agent](#authenticate-an-agent).
 
 ## Tools
 
-Generated dynamically on every `tools/list`:
+Beacon builds this list on every `tools/list` call:
 
-- **`list_tables`**: registered tables and their MCP exposure status.
-- **`describe_table`**: a merged per-column view (`name`, `data_type`,
-  `nullable`, `description`), scoped to `exposed_columns` when set or all columns
-  otherwise, plus the table's extensions.
-- **`run_sql`**: run a read-only `SELECT` and get JSON rows. A **bounded
-  preview** (capped at 1000 rows); larger results are truncated and steer you to
-  `export_query`.
-- **`export_query`**: for **large** results: returns a recipe (an `/api/query`
-  request + a Python snippet) to fetch the result as a Parquet/Arrow/CSV file. See
+- **`list_tables`**: returns the registered tables and their MCP status.
+- **`describe_table`**: returns one row per column with `name`, `data_type`, `nullable` and
+  `description`. It returns the `exposed_columns` if you set them. If not, it returns all columns.
+  It also returns the extensions of the table.
+- **`run_sql`**: runs a read-only `SELECT` and returns JSON rows. It is a **bounded preview** with a
+  limit of 1000 rows. Beacon truncates a larger result and points you to `export_query`.
+- **`export_query`**: for **large** results. It returns a recipe: an `/api/query` request and a
+  Python snippet. The recipe reads the result as a Parquet, Arrow or CSV file. See
   [Large results](#large-results).
-- **one tool per table** whose `mcp` extension is enabled, generated from the
-  extension: `select` (restricted to the exposed columns), `preset` (an enum of
-  the table's named filter sets), and `limit`.
+- **one tool for each table** with an enabled `mcp` extension. Beacon builds the tool from the
+  extension. The tool takes `select`, limited to the exposed columns. It takes `preset`, an enum of
+  the named filter sets of the table. It also takes `limit`.
 
-The MCP surface is **strictly read-only**: every tool call runs with super-user
-privileges cleared, so the planner rejects any DDL/DML (`CREATE`, `INSERT`,
-`UPDATE`, `DELETE`, `SET EXTENSION`, …) regardless of who connects. Each tool
-carries `annotations.readOnlyHint: true`.
+The MCP interface is **read-only**. Every tool call runs without super-user privileges. The planner
+therefore rejects `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `SET EXTENSION` and every other DDL or DML
+statement. This holds for every caller. Each tool carries `annotations.readOnlyHint: true`.
 
-## Exposing a table to MCP
+## Expose a table to MCP
 
-A table becomes an MCP tool when its `mcp` [extension](/docs/2.0.0-rc2/data-lake/extensions)
-is enabled. Set it via SQL (`SET EXTENSION`) or the admin REST API. An optional
-`preset` extension adds named, predefined filter sets.
+A table becomes an MCP tool when you enable its
+`mcp` [extension](/docs/2.0.0-rc2/data-lake/extensions). Set the extension with SQL
+(`SET EXTENSION`) or with the admin REST API. The optional `preset` extension adds named filter
+sets.
 
 ```sql
 SET EXTENSION 'mcp' FOR obs TO '{
@@ -79,29 +78,29 @@ SET EXTENSION 'preset' FOR obs TO '{
 }';
 ```
 
-Read back or remove with `SHOW EXTENSIONS FOR obs` / `DROP EXTENSION 'mcp' FOR obs`.
+Use `SHOW EXTENSIONS FOR obs` to read the extensions. Use `DROP EXTENSION 'mcp' FOR obs` to delete
+one.
 
 ### Fields → the MCP `Tool` standard
 
 | Extension field | MCP `Tool` | Notes |
 |---|---|---|
-| `tool_name` | `name` | Validated to 1–64 chars of `[A-Za-z0-9_-]`; the generated default (`query_<table>`) is sanitized. |
-| `title` | `title` | Human-readable label. |
+| `tool_name` | `name` | Beacon accepts 1 to 64 characters from `[A-Za-z0-9_-]`. Beacon cleans the default name, `query_<table>`. |
+| `title` | `title` | A label for a human reader. |
 | `description` | `description` | What the **table** means. |
-| `exposed_columns` | `inputSchema` | Constrains `select`; per-column meanings feed its help + `describe_table`. |
+| `exposed_columns` | `inputSchema` | Limits `select`. The column descriptions go into the tool help and into `describe_table`. |
 |-| `annotations.readOnlyHint` | Always `true`. |
 
-`exposed_columns` entries are a bare name (`"lat"`) or `{"name", "description"}`.
-The per-column meanings are folded into the tool's `select` help and returned by
-`describe_table`, so the model knows what each field represents. Payloads parse
-strictly (unknown keys and invalid operators are rejected).
+An `exposed_columns` entry is a bare name such as `"lat"`. It can also be an object with `name` and
+`description`. Beacon adds the column descriptions to the `select` help of the tool.
+`describe_table` also returns them. The model then knows what each field means. Beacon parses the
+payload strictly. It rejects unknown keys and invalid operators.
 
 ### Advisory guard rails
 
-The `mcp` descriptor may carry a free-form `guardrails` map, arbitrary key/value
-pairs that beacon surfaces to the agent (appended to the tool's description and
-returned by `describe_table`) but does **not** enforce. Use it to nudge model
-behavior:
+The `mcp` descriptor can hold a free-form `guardrails` map. The map takes any key and value pair.
+Beacon adds the map to the description of the tool. `describe_table` also returns it. Beacon does
+**not** enforce the map. Use it to guide the model:
 
 ```sql
 SET EXTENSION 'mcp' FOR obs TO '{
@@ -113,21 +112,20 @@ SET EXTENSION 'mcp' FOR obs TO '{
 }';
 ```
 
-Any keys are allowed, these are hints only. Enforcement of result size is the
-separate, built-in `run_sql` preview cap (below).
+Beacon allows any key. The values are hints only. The built-in `run_sql` preview limit controls the
+result size. See the next section.
 
 ## Large results
 
-`run_sql` inlines rows into the model's context and is capped (1000 rows), for
-previews and reasoning, not bulk data. When a result exceeds the cap it is marked
-`"truncated": true` with `guidance` steering the model to `export_query`, so a
-partial preview is never mistaken for the full result.
+`run_sql` puts the rows into the context of the model. The limit is 1000 rows. Use it for previews,
+not for bulk data. Beacon marks a larger result with `"truncated": true`. It adds a `guidance` field
+that points the model to `export_query`. The model therefore never treats a partial preview as the
+full result.
 
-`export_query` returns a **fetch recipe** rather than data: the model gets a small
-JSON blob, and a Python script fetches the file directly from `/api/query` (which
-streams the Parquet/Arrow/CSV in one response). Calling it with
-`{"sql": "SELECT …", "format": "parquet"}` yields a `request` (POST body for
-`/api/query`) and a runnable `python` snippet:
+`export_query` returns a **recipe**, not data. The model gets a small JSON object. A Python script
+then reads the file from `/api/query`. That endpoint streams the Parquet, Arrow or CSV file in one
+response. Call the tool with `{"sql": "SELECT …", "format": "parquet"}`. It returns a `request`
+field, the POST body for `/api/query`. It also returns a `python` field with a runnable snippet:
 
 ```python
 import io, requests, pandas as pd
@@ -138,22 +136,22 @@ resp.raise_for_status()
 df = pd.read_parquet(io.BytesIO(resp.content))
 ```
 
-Formats: `parquet` (default), `arrow` (IPC), `csv`. Only read-only `SELECT`/`WITH`
-queries are accepted; the query runs when the script runs, under whatever
-credential the script sends.
+The formats are `parquet` (default), `arrow` (IPC) and `csv`. Beacon accepts read-only `SELECT` and
+`WITH` queries only. The query runs when the script runs. It runs under the credential that the
+script sends.
 
-## Authenticating an agent
+## Authenticate an agent
 
-`/mcp` authenticates via the HTTP `Authorization` header (the same identity
-resolution as the [client API](/docs/2.0.0-rc2/security/access-control)):
+`/mcp` authenticates with the HTTP `Authorization` header. It resolves the identity in the same way
+as the [client API](/docs/2.0.0-rc2/security/access-control):
 
-- **Basic**: `Authorization: Basic base64(user:pass)` → a beacon user's roles.
-- **Bearer**: `Authorization: Bearer <token>` → an OIDC/OAuth2 JWT.
-- **No header** → the anonymous principal (if enabled), else no access.
+- **Basic**: `Authorization: Basic base64(user:pass)` gives the roles of a Beacon user.
+- **Bearer**: `Authorization: Bearer <token>` takes an OIDC or OAuth2 JWT.
+- **No header** gives the anonymous principal. If anonymous access is off, the caller gets no access.
 
-MCP is read-only regardless of identity; the identity only decides *which reads*
-are allowed (when `BEACON_AUTH_ENFORCE=true`). Create a read-only user for an
-agent (as a super-user, via SQL or the admin API):
+MCP stays read-only for every identity. The identity decides *which reads* Beacon allows. This
+applies when `BEACON_AUTH_ENFORCE=true`. Create a read-only user for the agent. Use SQL or the admin
+API as a super-user:
 
 ```sql
 CREATE USER agent WITH PASSWORD 's3cret';
@@ -162,12 +160,12 @@ GRANT ROLE readers TO USER agent;
 ```
 
 ::: tip
-Beacon's built-in super-user is **config-only** (`BEACON_ADMIN_*`) and is not a
-client identity, so those admin credentials do **not** authenticate on `/mcp`.
-Use a `CREATE USER` account or an OIDC token.
+The built-in super-user of Beacon comes from the configuration only (`BEACON_ADMIN_*`). It is not a
+client identity. Those admin credentials do **not** authenticate on `/mcp`. Use a `CREATE USER`
+account or an OIDC token.
 :::
 
-## Connecting a client
+## Connect a client
 
 **Claude Code (CLI):**
 
@@ -189,7 +187,7 @@ claude mcp add --transport http beacon https://your-host/mcp \
 
 :::
 
-**GitHub Copilot CLI**: add Beacon as an MCP server via `gh copilot`:
+**GitHub Copilot CLI**: add Beacon as an MCP server with `gh copilot`:
 
 ::: code-group
 
@@ -227,7 +225,7 @@ code --add-mcp "{\"name\":\"beacon\",\"type\":\"http\",\"url\":\"https://your-ho
 
 :::
 
-**Claude Desktop**: bridge a static token with `mcp-remote`:
+**Claude Desktop**: pass a static token with `mcp-remote`:
 
 ```json
 {
@@ -241,7 +239,7 @@ code --add-mcp "{\"name\":\"beacon\",\"type\":\"http\",\"url\":\"https://your-ho
 }
 ```
 
-For an open/anonymous local instance, point straight at the URL:
+For an open local server, use the URL alone:
 `{ "mcpServers": { "beacon": { "url": "http://localhost:5001/mcp" } } }`.
 
 **Programmatic (MCP SDKs)**: set the header on the streamable-HTTP transport:
@@ -252,8 +250,8 @@ new StreamableHTTPClientTransport(new URL("https://your-host/mcp"), {
 });
 ```
 
-The transport attaches the header to every request, beacon authenticates per
-request, even within a long-lived session.
+The transport adds the header to every request. Beacon authenticates each request. This holds inside
+a long session too.
 
 ### Quick check
 
@@ -265,25 +263,24 @@ curl -s -X POST http://127.0.0.1:5001/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"c","version":"0"}}}'
 ```
 
-A `200` with an `initialize` result means the credential was accepted; `401` means
-it was rejected.
+A `200` response with an `initialize` result means Beacon accepts the credential. A `401` response
+means Beacon rejects it.
 
 ## How it works
 
-The MCP server is a thin protocol adapter in front of beacon's query runtime, it
-adds no query engine of its own. Every tool call becomes a normal beacon query, so
-MCP inherits the planner, catalog, metrics, and access control.
+The MCP server is a thin protocol adapter in front of the Beacon query runtime. It adds no query
+engine. Every tool call becomes a normal Beacon query. MCP therefore uses the same planner, catalog,
+metrics and access control.
 
-- **Transport**: an `rmcp` streamable-HTTP service mounted at `/mcp`, behind the
-  `BEACON_MCP_ENABLED` flag and the same identity-resolution middleware as the
-  client API.
-- **`tools/list`**: rebuilt per call: the generic tools plus one per enabled
-  table, generated from the `mcp`/`preset` extensions (so newly-exposed tables
-  appear without a restart).
-- **`tools/call`**: resolves the caller's identity, **clears super-user** (MCP is
-  read-only), and dispatches: `run_sql`/table tools build a `SELECT` and run it;
-  `export_query` returns a fetch recipe; `describe_table`/`list_tables` read the
-  catalog. Per-table tools expand the chosen `preset` into a `WHERE` clause with
-  safely-rendered values, the model never supplies raw SQL through them.
-- **Results**: capped and returned as JSON tool content; errors come back as MCP
-  tool errors (`isError: true`) so the model can react.
+- **Transport**: an `rmcp` streamable-HTTP service at `/mcp`. The `BEACON_MCP_ENABLED` flag controls
+  it. It uses the same identity middleware as the client API.
+- **`tools/list`**: Beacon builds the list on every call. It returns the generic tools and one tool
+  for each enabled table. It reads the `mcp` and `preset` extensions. A new table appears without a
+  restart.
+- **`tools/call`**: Beacon resolves the identity of the caller. It then **clears super-user**,
+  because MCP is read-only. `run_sql` and the table tools build a `SELECT` and run it.
+  `export_query` returns a recipe. `describe_table` and `list_tables` read the catalog. A table tool
+  expands the chosen `preset` into a `WHERE` clause with safe values. The model never sends raw SQL
+  through a table tool.
+- **Results**: Beacon limits the rows and returns them as JSON tool content. Beacon returns an error
+  as an MCP tool error with `isError: true`. The model can then react.

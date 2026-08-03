@@ -1,14 +1,15 @@
 ---
-description: CREATE SECRET stores credentials for object stores (S3/GCS/Azure) and remote Beacons as named, scoped secrets, session or persisted encrypted into the beacon.db file.
+description: CREATE SECRET stores credentials for object stores and remote Beacons as named, scoped secrets. A secret lives in the session or in the beacon.db file.
 ---
 
 # Secrets
 
-`CREATE SECRET` stores credentials, for a cloud object store or a remote Beacon, as a **named,
-scoped** secret, so `read_parquet('s3://…')` and [`ATTACH`](/docs/2.0.0-rc2/beacondb/sql/remote-tables) resolve
-them without environment variables.
+`CREATE SECRET` stores a credential as a **named, scoped** secret. The credential belongs to a cloud
+object store or to a remote Beacon. `read_parquet('s3://…')` and
+[`ATTACH`](/docs/2.0.0-rc2/beacondb/sql/remote-tables) then find it. You need no environment
+variable.
 
-## Object-store secrets
+## Object store secrets
 
 ```sql
 CREATE SECRET my_s3 (
@@ -20,11 +21,12 @@ CREATE SECRET my_s3 (
 SELECT * FROM read_parquet('s3://my-bucket/obs/*.parquet');   -- uses my_s3
 ```
 
-- **`TYPE`**: `S3`, `GCS`, `AZURE`, `HTTP`, or `BEACON` (remote Beacon; see below).
-- **`SCOPE`**: a URL prefix; the best match (longest scope prefix) wins, so a broad `s3://` secret is
-  the default and `s3://bucket` overrides it. Omitted, it defaults to the whole backend.
-- The standard parameter names (`KEY_ID`, `SECRET`, `REGION`, `SESSION_TOKEN`, `ENDPOINT`, …) map to
-  the underlying `object_store` config keys; any native key also works.
+- **`TYPE`**: `S3`, `GCS`, `AZURE`, `HTTP` or `BEACON`. `BEACON` covers a remote Beacon. See below.
+- **`SCOPE`**: a URL prefix. The longest scope prefix wins. A broad `s3://` secret is therefore the
+  default. A `s3://bucket` secret then overrides it. Without a `SCOPE`, the secret covers the whole
+  backend.
+- The standard parameter names map to the `object_store` configuration keys. The names include
+  `KEY_ID`, `SECRET`, `REGION`, `SESSION_TOKEN` and `ENDPOINT`. A native key also works.
 
 ## Inspect and remove
 
@@ -36,21 +38,24 @@ DROP SECRET IF EXISTS my_s3;
 
 ## Session vs. persistent
 
-A plain `CREATE SECRET` is **session-only** (held in memory). `CREATE PERSISTENT SECRET` is written
-**into the database file, encrypted** (XChaCha20-Poly1305), and reloaded on open:
+A plain `CREATE SECRET` lives in the **session only**. Beacon holds it in memory. Beacon writes a
+`CREATE PERSISTENT SECRET` **into the database file, encrypted** with XChaCha20-Poly1305. Beacon
+reloads it when it opens the file:
 
 ```sql
 CREATE PERSISTENT SECRET my_s3 (TYPE S3, KEY_ID '…', SECRET '…', SCOPE 's3://bucket');
 ```
 
-Persisting requires a configured **master key** (`BEACON_SECRETS_KEY`, or `secrets_key=` in
-[`beacondb.connect`](/docs/2.0.0-rc2/beacondb/python/secrets)) and a file-backed database, Beacon **refuses to
-write a plaintext credential to disk**. Only the name/type/scope are stored in the clear; the values
-are encrypted.
+A persistent secret needs a **master key** and a file-backed database. Set the key with
+`BEACON_SECRETS_KEY`, or with `secrets_key=` in
+[`beacondb.connect`](/docs/2.0.0-rc2/beacondb/python/secrets). Beacon **never writes a plaintext
+credential to disk**. Beacon stores the name, the type and the scope in the clear. It encrypts the
+values.
 
-## Remote-Beacon secrets
+## Remote Beacon secrets
 
-A `TYPE BEACON` secret stores the credentials for [`ATTACH`](/docs/2.0.0-rc2/beacondb/sql/remote-tables):
+A `TYPE BEACON` secret holds the credentials for
+[`ATTACH`](/docs/2.0.0-rc2/beacondb/sql/remote-tables):
 
 ```sql
 CREATE SECRET lake (TYPE BEACON, USERNAME 'analyst', PASSWORD '…');   -- or TOKEN '…'

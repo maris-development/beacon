@@ -1,47 +1,48 @@
 ---
-description: Read GeoParquet files with read_geoparquet(). Geometry columns are decoded to native GeoArrow and can be filtered with Beacon's geospatial functions.
+description: Read GeoParquet files with read_geoparquet(). Beacon decodes geometry columns to native GeoArrow. Filter them with the geospatial functions.
 ---
 
 # GeoParquet
 
-## Reading
+## Read the files
 
 ```text
 read_geoparquet(glob_paths)
 ```
 
-Reads [GeoParquet](https://geoparquet.org/) files. Geometry columns described in the file's `geo` metadata are decoded to their native [GeoArrow](https://geoarrow.org/) representation; files without geometry are read like ordinary Parquet.
+Beacon reads [GeoParquet](https://geoparquet.org/) files. The `geo` metadata of a file describes its
+geometry columns. Beacon decodes those columns to native [GeoArrow](https://geoarrow.org/). Beacon
+reads a file without geometry as ordinary Parquet.
 
 ```sql
 SELECT * FROM read_geoparquet('spatial/**/*.geoparquet') LIMIT 100
 ```
 
-## Inspecting the schema
+## Inspect the schema
 
-Before writing a query it is usually worth checking which columns a file actually has, and
-what their types are.
+Check the columns of a file before you write a query. Also check their types.
 
-`read_schema()` does not cover this format, so inspect it through the reader itself.
-A `LIMIT 0` query resolves the schema without returning any rows:
+`read_schema()` does not cover this format. Inspect it through the reader. A `LIMIT 0` query
+returns the schema and no rows:
 
 ```sql
 SELECT * FROM read_geoparquet('spatial/**/*.geoparquet') LIMIT 0;
 ```
 
-To go further than names and types, [`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) profiles every column in one pass, adding
-min/max, distinct counts, and the share of nulls:
+[`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) gives more than names and types. It profiles every column in
+one pass. It adds the minimum, the maximum, the distinct count and the share of nulls:
 
 ```sql
 SUMMARIZE (SELECT * FROM read_geoparquet('spatial/**/*.geoparquet'));
 ```
 
-If the files are registered as a table, `DESCRIBE` works directly:
+If the files have a table name, use `DESCRIBE`:
 
 ```sql
 DESCRIBE stations;
 ```
 
-From Python, the Arrow schema of any relation is available without collecting rows:
+From Python, read the Arrow schema of a relation. Beacon collects no rows:
 
 ```python
 con.sql("SELECT * FROM read_geoparquet('spatial/**/*.geoparquet') LIMIT 0").arrow().schema
@@ -49,19 +50,24 @@ con.sql("SELECT * FROM read_geoparquet('spatial/**/*.geoparquet') LIMIT 0").arro
 
 ## Format details
 
-[GeoParquet](https://geoparquet.org/) files (`.geoparquet`) are Parquet files that carry geospatial geometry columns and a `geo` metadata key. Beacon reads them in addition to writing them.
+A [GeoParquet](https://geoparquet.org/) file (`.geoparquet`) is a Parquet file with geometry columns
+and a `geo` metadata key. Beacon reads and writes this format.
 
-- Geometry columns described in the file's `geo` metadata are decoded to their native [GeoArrow](https://geoarrow.org/) representation on read (a non-geospatial Parquet file is read like ordinary Parquet, so `read_geoparquet()` is safe to point at mixed folders).
-- Column projection is applied, only the columns a query selects are materialized.
-- Works over local disk and S3-compatible object stores.
+- Beacon decodes the geometry columns from the `geo` metadata to native
+  [GeoArrow](https://geoarrow.org/). Beacon reads a plain Parquet file as ordinary Parquet. You can
+  therefore point `read_geoparquet()` at a mixed folder.
+- Beacon applies column projection. It materializes only the columns that a query selects.
+- The reader works on local disk and on S3-compatible object stores.
 
-Query a GeoParquet file with the [`read_geoparquet()`](/docs/2.0.0-rc2/beacondb/sql/table-functions#read-geoparquet) table function:
+Query a GeoParquet file with the
+[`read_geoparquet()`](/docs/2.0.0-rc2/beacondb/sql/table-functions#read-geoparquet) table function:
 
 ```sql
 SELECT * FROM read_geoparquet(['spatial/**/*.geoparquet']) LIMIT 100
 ```
 
-Or register a stable table name with an [external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables):
+You can also register a stable table name with an
+[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables):
 
 ```sql
 CREATE EXTERNAL TABLE stations
@@ -73,16 +79,20 @@ SELECT * FROM stations LIMIT 10;
 
 ### Geometry columns
 
-Geometry columns are decoded to native GeoArrow. For point data with separated coordinates this surfaces as a `Struct` column with `x` / `y` child fields, addressed with standard struct accessors:
+Beacon decodes a geometry column to native GeoArrow. Point data with separate coordinates becomes a
+`Struct` column with `x` and `y` child fields. Use the standard struct accessors:
 
 ```sql
 SELECT geometry['x'] AS lon, geometry['y'] AS lat
 FROM stations
 ```
 
-### Spatial filtering
+### Spatial filters
 
-Geometry pairs naturally with Beacon's [geospatial functions](/docs/2.0.0-rc2/beacondb/sql/function-reference#geospatial-functions). For example, keep only rows inside a bounding polygon with [`st_within_point`](/docs/2.0.0-rc2/beacondb/sql/function-reference#st-within-point-wkt-lon-lat):
+Use a geometry column with the
+[geospatial functions](/docs/2.0.0-rc2/beacondb/sql/function-reference#geospatial-functions). This
+example keeps only the rows inside a polygon. It uses
+[`st_within_point`](/docs/2.0.0-rc2/beacondb/sql/function-reference#st-within-point-wkt-lon-lat):
 
 ```sql
 SELECT station_id, geometry
@@ -95,11 +105,13 @@ WHERE st_within_point(
 ```
 
 :::tip
-Beacon can also *write* GeoParquet: a query result with longitude/latitude columns is mapped into a geometry column on output. See [querying output formats](/docs/2.0.0-rc2/api/querying/).
+Beacon also *writes* GeoParquet. It maps the longitude and latitude columns of a query result into a
+geometry column on output. See [output formats](/docs/2.0.0-rc2/api/querying/).
 :::
 
 :::warning
-Spatial bounding-box pruning (row-group skipping via the GeoParquet `bbox` covering) is not yet applied on read, queries perform a full scan with column projection. Geometry-aware predicate pushdown is planned.
+Beacon does not yet use the GeoParquet `bbox` covering to skip row groups on read. A query runs a
+full scan with column projection. Beacon plans support for geometry predicate pushdown.
 :::
 
 ## As an external table
@@ -110,6 +122,9 @@ STORED AS GEOPARQUET
 LOCATION 'spatial/stations/*.geoparquet'
 ```
 
-Geometry columns are decoded to their native [GeoArrow](https://geoarrow.org/) representation on read. See [GeoParquet in Supported Formats](/docs/2.0.0-rc2/data-lake/datasets#supported-formats) for details.
+Beacon decodes the geometry columns to native [GeoArrow](https://geoarrow.org/) on read. See
+[GeoParquet in Supported Formats](/docs/2.0.0-rc2/data-lake/datasets#supported-formats) for the
+details.
 
-See [Creating External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL, and [Reading External Files](/docs/2.0.0-rc2/beacondb/data-sources/) for the general reading model.
+See [Create External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/) for the
+full read model.

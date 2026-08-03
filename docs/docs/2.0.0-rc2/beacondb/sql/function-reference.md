@@ -1,21 +1,21 @@
 # Function Reference
 
-Beacon's SQL runtime exposes two families of functions:
+The SQL runtime of Beacon gives two families of functions:
 
-1. **DataFusion built-ins**: Beacon inherits Apache DataFusion's full scalar and
-   aggregate function library. The tables below are a curated selection; for the
-   exhaustive list see DataFusion's
+1. **DataFusion built-ins**: Beacon takes the full scalar and aggregate function
+   library of Apache DataFusion. The tables below hold a selection. For the full
+   list, see the DataFusion
    [scalar](https://datafusion.apache.org/user-guide/sql/scalar_functions.html)
    and [aggregate](https://datafusion.apache.org/user-guide/sql/aggregate_functions.html)
    references.
-2. **[Beacon-specific functions](#beacon-specific-functions)**: added by Beacon
-   for geospatial filtering, type conversion, and domain-specific vocabulary
-   mapping. That section is exhaustive.
+2. **[Beacon-specific functions](#beacon-specific-functions)**: Beacon adds these
+   functions for geospatial filters, type conversion and vocabulary mapping.
+   That section holds the full list.
 
 ## DataFusion built-in functions (inherited)
 
-A curated selection of the inherited DataFusion library, anything in
-DataFusion's reference works even if it is not listed here.
+This is a selection of the DataFusion library. Every function in the DataFusion
+reference works, also the functions that this page does not list.
 
 ### Aggregate functions
 
@@ -132,7 +132,7 @@ DataFusion's reference works even if it is not listed here.
 | `regexp_match(s, pattern[, flags])` | Returns the first match as an array of capture groups |
 | `regexp_replace(s, pattern, replacement[, flags])` | Replace matches with `replacement` |
 
-Common flags: `i` (case-insensitive), `g` (global / all occurrences).
+The common flags are `i` for a match without case, and `g` for every occurrence.
 
 ### Binary string functions
 
@@ -235,7 +235,7 @@ FROM ocean_profiles
 
 ### `try_arrow_cast(expr, type_str)`
 
-Like `TRY_CAST`, but uses Arrow type names instead of SQL type names. Returns NULL if the cast fails rather than raising an error.
+This function works like `TRY_CAST`. It uses Arrow type names instead of SQL type names. It returns `NULL` if the cast fails. It raises no error.
 
 ```sql
 -- Cast using an Arrow type name
@@ -249,7 +249,7 @@ FROM events
 
 ### `cast_int8_as_char(n)`
 
-Interprets an `Int8` value as an ASCII code and returns the corresponding single-character string. Useful for NetCDF3 `char` variables stored as `Int8`.
+Reads an `Int8` value as an ASCII code. Returns the matching string of one character. Use it for a NetCDF3 `char` variable that the file stores as `Int8`.
 
 ```sql
 SELECT cast_int8_as_char(platform_type_code) AS platform_type
@@ -262,7 +262,7 @@ FROM argo_profiles
 
 ### `beacon_version()`
 
-Returns the current Beacon server version as a string.
+Returns the version of the Beacon server as a string.
 
 ```sql
 SELECT beacon_version()
@@ -270,7 +270,7 @@ SELECT beacon_version()
 
 ### `coalesce_label(col1, 'label1', col2, 'label2', …)`
 
-Returns the label corresponding to the first non-NULL column from a list of `(column, label)` pairs. All labels must be non-NULL string literals.
+Takes a list of `(column, label)` pairs. Returns the label of the first non-null column. Every label must be a non-null string literal.
 
 ```sql
 SELECT coalesce_label(
@@ -286,7 +286,7 @@ FROM ocean_profiles
 
 ### `st_within_point(wkt, lon, lat)`
 
-Returns `true` if the point `(lon, lat)` lies within the geometry described by the WKT string. Supports any WKT geometry type (polygon, multipolygon, etc.). When the geometry is a scalar constant, Beacon uses a bounding-rectangle pre-filter and an LRU cache to accelerate repeated evaluations.
+Returns `true` if the point `(lon, lat)` lies inside the geometry of the WKT string. It supports every WKT geometry type, such as polygon and multipolygon. For a constant geometry, Beacon adds a bounding rectangle pre-filter and an LRU cache. Repeated calls are then faster.
 
 | Argument | Type | Description |
 | -------- | ---- | ----------- |
@@ -294,7 +294,7 @@ Returns `true` if the point `(lon, lat)` lies within the geometry described by t
 | `lon` | `DOUBLE` | Longitude |
 | `lat` | `DOUBLE` | Latitude |
 
-Returns `BOOLEAN`. Returns `false` if any argument is NULL.
+Returns `BOOLEAN`. Returns `false` if one argument is `NULL`.
 
 ```sql
 SELECT *
@@ -308,7 +308,7 @@ WHERE st_within_point(
 
 ### `st_geojson_as_wkt(geojson)`
 
-Converts a GeoJSON geometry string to WKT. Use this to pass GeoJSON bounding polygons to `st_within_point`.
+Converts a GeoJSON geometry string to WKT. Use it to give a GeoJSON polygon to `st_within_point`.
 
 | Argument | Type | Description |
 | -------- | ---- | ----------- |
@@ -324,7 +324,7 @@ SELECT st_geojson_as_wkt('{"type":"Polygon","coordinates":[[[0,50],[10,50],[10,6
 
 ## Domain mapping functions
 
-These functions map vocabulary codes between standards used in oceanographic datasets. They are provided for datasets ingested through the BlueCloud / SeaDataNet ecosystem.
+These functions map vocabulary codes between the standards of oceanographic datasets. They cover the datasets of the BlueCloud and SeaDataNet ecosystem.
 
 **Vocabulary abbreviations used below:**
 
@@ -344,14 +344,14 @@ These functions map vocabulary codes between standards used in oceanographic dat
 
 #### `pressure_to_depth_teos_10(pressure, latitude)`
 
-Converts pressure in dbar to depth in metres using the TEOS-10 formula. Latitude is required because the geoid shape affects the conversion.
+Converts a pressure in dbar to a depth in metres. It uses the TEOS-10 formula. The function needs the latitude, because the shape of the geoid changes the result.
 
 | Argument | Type | Description |
 | -------- | ---- | ----------- |
 | `pressure` | `DOUBLE` | Pressure in dbar |
 | `latitude` | `DOUBLE` | Latitude in decimal degrees |
 
-Returns `DOUBLE` (depth in metres, positive downward).
+Returns `DOUBLE`, the depth in metres. A positive value goes down.
 
 ```sql
 SELECT pressure_to_depth_teos_10(pressure, latitude) AS depth_m
@@ -360,7 +360,7 @@ FROM argo_profiles
 
 #### `map_units(unit, target_unit, value)`
 
-Converts a numeric `value` from `unit` to `target_unit` using the SeaDataNet unit registry. Unit strings must be valid SeaDataNet unit identifiers (e.g. `'SDN:P06::UPAA'`).
+Converts a numeric `value` from `unit` to `target_unit`. It uses the SeaDataNet unit registry. Each unit string must be a valid SeaDataNet unit identifier, for example `'SDN:P06::UPAA'`.
 
 | Argument | Type | Description |
 | -------- | ---- | ----------- |
@@ -377,7 +377,7 @@ FROM seadatanet_profiles
 
 ### Cross-vocabulary mapping
 
-All mapping functions return `NULL` when the input code is not found in the lookup table.
+Every mapping function returns `NULL` if the lookup table does not hold the input code.
 
 #### Common
 

@@ -1,13 +1,14 @@
 ---
-description: Writing SQL against beacondb — lazy execution, the catalog-driven readers with keyword options, streaming results, file sinks, and EXPLAIN.
+description: Write SQL against beacondb. Lazy execution, catalog-driven readers with keyword options, result streams, file sinks and EXPLAIN.
 ---
 
 # Querying
 
 ## SQL in, results out
 
-`sql()`, `query()`, `table()`, and `view()` return a **relation**: a query that has been built but
-not yet run. You shape it in SQL, and nothing touches the engine until a terminal method:
+`sql()`, `query()`, `table()` and `view()` return a **relation**. A relation is a query that Beacon
+builds but does not run. You shape it in SQL. Nothing reaches the engine until you call a terminal
+method:
 
 ```python
 rel = con.sql("""
@@ -24,19 +25,19 @@ rel.explain()    # logical + physical plan; rel.explain(analyze=True) runs it wi
 rel.df()         # now it runs
 ```
 
-Terminals are `fetchall`/`fetchmany`/`fetchone`, `arrow`/`df`/`pl`, `record_batch`, `show`,
-`create`/`create_view`, and the `to_*` sinks. Everything before one of those is free, so
-`rel.sql`, `rel.columns` and `rel.types` are cheap ways to check a query before paying for it.
+The terminal methods are `fetchall`, `fetchmany`, `fetchone`, `arrow`, `df`, `pl`, `record_batch`,
+`show`, `create`, `create_view` and the `to_*` sinks. Everything before a terminal method costs
+nothing. `rel.sql`, `rel.columns` and `rel.types` are therefore cheap ways to check a query first.
 
 ::: info No method chaining
-BeaconDB does not currently expose relational composition (`.filter()`, `.aggregate()`,
-`.join()`, …). Write the SQL instead — it is the same engine, and one statement reads back more
-clearly than the equivalent chain.
+BeaconDB does not yet give relational composition, such as `.filter()`, `.aggregate()` and
+`.join()`. Write the SQL instead. It uses the same engine. One statement also reads better than the
+equal chain.
 :::
 
 ## Reading files
 
-The readers are Beacon's table functions surfaced as methods; every one returns a lazy relation:
+The readers are the table functions of Beacon as methods. Each one returns a lazy relation:
 
 ```python
 con.read_parquet("obs/*.parquet").df()
@@ -52,22 +53,22 @@ con.sql("""
 con.read_csv("stations.csv"); con.read_zarr(...); con.read_delta(...); con.list_datasets()
 ```
 
-Every table function Beacon registers is a method, `con.table_functions()` lists them, and
+Every table function of Beacon is also a method. `con.table_functions()` lists them.
 `con.read(fn, *args)` is the general form.
 
-**Reader options.** Pass format options positionally or by keyword (matched to the reader's declared
-parameters), plus a universal `columns=[...]` projection:
+**Reader options.** Give the format options by position or by keyword. Beacon matches a keyword to a
+declared parameter of the reader. Every reader also takes a `columns=[...]` projection:
 
 ```python
 con.read_csv("stations.csv", delimiter=";")
 con.read_parquet("obs/*.parquet", columns=["depth", "temp"])
 ```
 
-## Streaming large results
+## Stream large results
 
-`.arrow()`/`.df()` collect the whole result. For a result too big for memory, `.record_batch()`
-returns a **`pyarrow.RecordBatchReader`** that pulls batches from the engine on demand (the GIL is
-released during each pull):
+`.arrow()` and `.df()` collect the whole result. For a result that does not fit in memory, use
+`.record_batch()`. It returns a **`pyarrow.RecordBatchReader`**. The reader pulls batches from the
+engine on demand. Beacon releases the GIL during each pull:
 
 ```python
 for batch in con.read_parquet("huge/*.parquet").record_batch():
@@ -76,7 +77,7 @@ for batch in con.read_parquet("huge/*.parquet").record_batch():
 con.sql("SELECT * FROM obs").record_batch(50_000)   # ~50k rows per batch
 ```
 
-## Writing files
+## Write files
 
 ```python
 rel.to_parquet("out.parquet")
@@ -89,11 +90,11 @@ rel.to_odv("out.zip", longitude="lon", latitude="lat",       # Ocean Data View a
            depth="pres", time="juld", key="platform")
 ```
 
-Local paths only for now; a `scheme://` destination raises `NotSupportedError`.
+A sink writes to a local path only. A `scheme://` destination raises `NotSupportedError`.
 
 ## Data profiling
 
-`SUMMARIZE` gives a one-row-per-column profile, the first thing to run on a new dataset:
+`SUMMARIZE` returns one row for each column. Run it first on a new dataset:
 
 ```python
 con.sql("SUMMARIZE read_parquet('obs/*.parquet')").df()

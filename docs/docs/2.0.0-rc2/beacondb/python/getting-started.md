@@ -1,5 +1,5 @@
 ---
-description: Install BeaconDB, open a database, run your first query, and understand the two auth modes.
+description: Install BeaconDB, open a database and run your first query. This page also explains the two auth modes.
 ---
 
 # Getting started with BeaconDB
@@ -12,9 +12,10 @@ pip install "beacondb[pandas]"   # optional: .df()
 pip install "beacondb[all]"      # optional: every integration at once
 ```
 
-The wheel is **abi3** (`cp310-abi3`), so one wheel per platform covers CPython 3.10+. Wheels exist
-for Linux glibc (`x86_64`/`aarch64`), macOS (`arm64`/`x86_64`) and Windows (`x64`) — but **not for
-Alpine/musl**, where pip falls back to the source distribution and compiles the engine. See
+The wheel is **abi3** (`cp310-abi3`). One wheel per platform therefore covers CPython 3.10 and later.
+Beacon publishes wheels for Linux glibc (`x86_64`, `aarch64`), macOS (`arm64`, `x86_64`) and Windows
+(`x64`). There is **no wheel for Alpine or musl**. There, pip uses the source distribution and
+compiles the engine. See
 [platform support](/docs/2.0.0-rc2/beacondb/python/#platform-support).
 
 ## Open a database and query
@@ -29,8 +30,8 @@ con.sql("SELECT 1 AS a").fetchall()                       # [(1,)]
 con.sql("SELECT * FROM read_parquet('obs/*.parquet')").df()
 ```
 
-`connect()` returns a PEP 249-style connection. Read results as rows (`fetchone`/`fetchmany`/
-`fetchall`), as Arrow (`.arrow()`), or as a DataFrame (`.df()` / `.pl()`).
+`connect()` returns a PEP 249 connection. Read the results as rows with `fetchone`, `fetchmany` or
+`fetchall`. Read them as Arrow with `.arrow()`. Read them as a dataframe with `.df()` or `.pl()`.
 
 ### In-memory vs file
 
@@ -39,8 +40,9 @@ beacondb.connect(":memory:")     # ephemeral; nothing persisted
 beacondb.connect("beacon.db")    # one portable file; managed tables + catalog live here
 ```
 
-Each `:memory:` connection is its own database. A file is held under an exclusive lock, so one process
-opens one `beacon.db`; a second `connect()` to the same path in the same process shares it.
+Each `:memory:` connection gets its own database. Beacon holds a file under an exclusive lock. One
+process therefore opens one `beacon.db`. A second `connect()` to the same path in the same process
+shares that connection.
 
 ## DB-API and cursors
 
@@ -51,13 +53,13 @@ cur.fetchone(); cur.fetchall()
 cur.description; cur.rowcount
 ```
 
-Parameters are **bound** (never string-interpolated), with `?` or `$1` placeholders, injection-safe.
-`executemany(sql, rows)` runs the statement per row.
+Beacon **binds** the parameters. It never puts them into the string. Use a `?` or `$1` placeholder.
+This is safe against injection. `executemany(sql, rows)` runs the statement for each row.
 
 ## Authentication
 
-Auth is **off by default**, following the usual embedded-database contract: *possession of the file
-is full control*.
+Auth is **off by default**. This follows the usual contract of an embedded database: the file gives
+full control.
 
 ```python
 con = beacondb.connect("beacon.db")
@@ -65,8 +67,9 @@ con.whoami()
 # {'username': 'local', 'roles': [], 'is_super_user': True, 'auth': False}
 ```
 
-Pass `auth=True` to switch on Beacon's [RBAC](/docs/2.0.0-rc2/security/access-control). A session is then
-the anonymous, read-only principal until credentials are supplied:
+Pass `auth=True` to switch on the [RBAC](/docs/2.0.0-rc2/security/access-control) of Beacon. A
+session then starts as the anonymous, read-only principal. It stays that way until you give
+credentials:
 
 ```python
 anon = beacondb.connect("beacon.db", auth=True,
@@ -75,9 +78,9 @@ anon.execute("CREATE TABLE t (a INT)")     # NotPermittedError
 analyst = anon.connect_as(username="analyst", password=...)
 ```
 
-Supplying credentials with `auth=False` is an error, not a no-op. RBAC written into a database is
-**not** enforced when it is opened with `auth=False`: it is a boundary for *served* access
-(Beacon Data Lake), not against local possession of the file.
+Credentials with `auth=False` give an error. Beacon does not ignore them. Beacon does **not** apply
+the RBAC of a database that you open with `auth=False`. RBAC is a boundary for *served* access
+through Beacon Data Lake. It does not protect a local file.
 
 ## Read-only
 
@@ -87,11 +90,11 @@ con.sql("SELECT * FROM t").df()            # ok
 con.execute("INSERT INTO t VALUES (1)")    # refused: opened read-only
 ```
 
-Every write, DDL/DML and side-effecting statements (`ATTACH`, `CREATE SECRET`, …), is refused,
-while `SELECT` and `SHOW …` work.
+Beacon refuses every write. This covers DDL, DML and statements with a side effect, such as `ATTACH`
+and `CREATE SECRET`. `SELECT` and `SHOW …` still work.
 
 ## Next
 
-- [Querying](/docs/2.0.0-rc2/beacondb/python/querying), the lazy relation, readers, and file sinks.
-- [Bringing data in](/docs/2.0.0-rc2/beacondb/python/data-in)-`register()` / `append()`.
-- The full [SQL reference](/docs/2.0.0-rc2/beacondb/sql/) applies unchanged.
+- [Querying](/docs/2.0.0-rc2/beacondb/python/querying): the lazy relation, the readers and the file sinks.
+- [Bring data in](/docs/2.0.0-rc2/beacondb/python/data-in): `register()` and `append()`.
+- The full [SQL reference](/docs/2.0.0-rc2/beacondb/sql/) applies without a change.

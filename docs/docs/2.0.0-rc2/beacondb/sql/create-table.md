@@ -6,7 +6,9 @@ STORED AS PARQUET
 LOCATION 'profiles/'
 ```
 
-An external table is a SQL table backed by files in Beacon's storage. Once registered, you can query it with `SELECT`, `JOIN`, or reference it from a `VIEW`, Beacon reads the files on demand without copying them. Table definitions survive restarts.
+An external table is a SQL table over files in the storage of Beacon. After you register it, you can
+query it with `SELECT` and `JOIN`. A `VIEW` can also reference it. Beacon reads the files on demand.
+It does not copy them. A table definition survives a restart.
 
 ## Syntax
 
@@ -17,7 +19,7 @@ LOCATION '<path>'
 [PARTITIONED BY (<col>, ...)]
 ```
 
-`LOCATION` is resolved relative to Beacon's storage root. It can be a folder or a glob pattern:
+Beacon resolves `LOCATION` against its storage root. Give a folder or a glob pattern:
 
 ```sql
 -- Entire folder
@@ -44,9 +46,16 @@ CREATE EXTERNAL TABLE argo STORED AS NC LOCATION 'argo/**/*.nc'
 | `POSTGRES` | External PostgreSQL table (federated) |
 | `MYSQL` | External MySQL table (federated) |
 
-`DELTA` points at an existing [Delta Lake](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake) table directory and additionally supports time travel and `INSERT INTO`. `REMOTE` federates a table on another Beacon instance, see [Remote Tables](/docs/2.0.0-rc2/beacondb/data-sources/remote-tables). `POSTGRES` / `MYSQL` federate a table in an external SQL database, see [SQL Databases](/docs/2.0.0-rc2/beacondb/data-sources/sql-databases); their `LOCATION` is the remote table name and connection details (including an encrypted `password`) go in `OPTIONS`.
+`DELTA` points at an existing
+[Delta Lake](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake) table directory. It also
+supports time travel and `INSERT INTO`. `REMOTE` federates a table on another Beacon server. See
+[Remote Tables](/docs/2.0.0-rc2/beacondb/data-sources/remote-tables). `POSTGRES` and `MYSQL`
+federate a table in an external SQL database. See
+[SQL Databases](/docs/2.0.0-rc2/beacondb/data-sources/sql-databases). Their `LOCATION` is the remote
+table name. The connection details go in `OPTIONS`, with an encrypted `password`.
 
-Zarr tables should point at `zarr.json` entry files, and Atlas tables at `atlas.json` markers:
+A Zarr table must point at a `zarr.json` entry file. An Atlas table must point at an `atlas.json`
+marker:
 
 ```sql
 CREATE EXTERNAL TABLE sst STORED AS ZARR LOCATION 'sst/*/zarr.json'
@@ -54,11 +63,13 @@ CREATE EXTERNAL TABLE sst STORED AS ZARR LOCATION 'sst/*/zarr.json'
 CREATE EXTERNAL TABLE sensor STORED AS ATLAS LOCATION 'sensor/atlas.json'
 ```
 
-`GEOPARQUET` reads Parquet files whose geometry columns are decoded to native GeoArrow, see [GeoParquet in File Formats](/docs/2.0.0-rc2/beacondb/data-sources/formats/geoparquet) for querying geometry and read behaviour.
+`GEOPARQUET` reads Parquet files. Beacon decodes their geometry columns to native GeoArrow. See
+[GeoParquet in File Formats](/docs/2.0.0-rc2/beacondb/data-sources/formats/geoparquet) for the read
+behaviour and for geometry queries.
 
 ## `IF NOT EXISTS`
 
-Silently skip registration if the table name is already taken:
+Beacon skips the registration if the table name already exists. Beacon returns no error:
 
 ```sql
 CREATE EXTERNAL TABLE IF NOT EXISTS argo
@@ -68,7 +79,7 @@ LOCATION 'argo/**/*.nc'
 
 ## `OR REPLACE`
 
-Re-register and overwrite an existing table definition:
+Register the table again. Beacon overwrites the existing definition:
 
 ```sql
 CREATE OR REPLACE EXTERNAL TABLE argo
@@ -78,7 +89,8 @@ LOCATION 'argo/**/*.nc'
 
 ## `PARTITIONED BY`
 
-When files are organized in Hive-style directories (`year=2024/month=01/...`), declare the partition columns so Beacon can prune them at query time:
+Your files can use Hive-style directories such as `year=2024/month=01/...`. Declare the partition
+columns. Beacon can then prune them at query time:
 
 ```sql
 CREATE EXTERNAL TABLE observations
@@ -93,7 +105,7 @@ SELECT * FROM observations WHERE year = 2024 AND month = 6
 
 ## `DROP TABLE`
 
-Remove a table from the catalog. The underlying files are not deleted.
+`DROP TABLE` removes a table from the catalog. Beacon does not delete the files.
 
 ```sql
 DROP TABLE argo
@@ -109,4 +121,5 @@ SHOW TABLES;
 DESCRIBE ocean_profiles;
 ```
 
-See the [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) setup guide for per-format examples and the HTTP API for listing tables.
+The [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) setup guide gives an
+example for each format. It also shows the HTTP API that lists the tables.

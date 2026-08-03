@@ -1,6 +1,6 @@
 # SQL
 
-Beacon can execute SQL through DataFusion. SQL queries are submitted to the same endpoint as JSON queries:
+Beacon runs SQL through DataFusion. A SQL query goes to the same endpoint as a JSON query:
 
 ```http
 POST /api/query
@@ -10,18 +10,19 @@ Content-Type: application/json
 ```
 
 :::warning
-SQL is enabled by default. Disable it by setting the environment variable `BEACON_ENABLE_SQL=false`. Requests with `"sql": "..."` return an error when SQL is disabled.
+SQL is on by default. Set the environment variable `BEACON_ENABLE_SQL=false` to switch it off. A
+request with `"sql": "..."` then returns an error.
 :::
 
 ## Query a registered table
 
-List available tables:
+List the available tables:
 
 ```http
 GET /api/tables
 ```
 
-Run a SQL query against a table:
+Run a SQL query on a table:
 
 ```http
 POST /api/query
@@ -33,7 +34,7 @@ Content-Type: application/json
 }
 ```
 
-Inspect the table schema:
+Inspect the schema of the table:
 
 ```http
 GET /api/table-schema?table_name=default
@@ -41,11 +42,11 @@ GET /api/table-schema?table_name=default
 
 ## Query files directly
 
-Table functions let you query files without registering a table first. Paths are resolved relative to Beacon's dataset root and support glob patterns.
+A table function queries files. You register no table first. Beacon resolves a path against its
+dataset root. A path also takes a glob pattern.
 
-Every table function and its signature is in the
-[table function reference](/docs/2.0.0-rc2/beacondb/sql/table-functions) —
-`GET /api/table-functions` is deprecated and returns an empty list.
+The [table function reference](/docs/2.0.0-rc2/beacondb/sql/table-functions) holds every table
+function and its signature. `GET /api/table-functions` is deprecated. It returns an empty list.
 
 ### NetCDF
 
@@ -71,7 +72,8 @@ Content-Type: application/json
 }
 ```
 
-Predicate pushdown is automatic, Beacon prunes chunks and slices coordinate dimensions based on your `WHERE` clause, with no extra arguments to configure:
+Predicate pushdown is automatic. Beacon prunes the chunks and slices the coordinate dimensions. It
+uses your `WHERE` clause. You configure no extra argument:
 
 ```http
 POST /api/query
@@ -95,11 +97,14 @@ Content-Type: application/json
 }
 ```
 
-Other table functions: `read_arrow`, `read_csv`, `read_odv_ascii`, `read_bbf`, `read_tiff`. See [Reading Files](/docs/2.0.0-rc2/beacondb/sql/table-functions) for full signatures.
+The other table functions are `read_arrow`, `read_csv`, `read_odv_ascii`, `read_bbf` and
+`read_tiff`. See [Read Files](/docs/2.0.0-rc2/beacondb/sql/table-functions) for the full
+signatures.
 
 ## Output formats
 
-See [Querying, Output formats](/docs/2.0.0-rc2/api/querying/#output-formats) for the full list. Add `output` alongside `sql` in the same request body:
+See [Querying, Output formats](/docs/2.0.0-rc2/api/querying/#output-formats) for the full list. Put
+`output` next to `sql` in the same request body:
 
 ```http
 POST /api/query
@@ -117,7 +122,7 @@ Content-Type: application/json
 
 ## Explain and metrics
 
-Explain the physical plan for a SQL query:
+Get the physical plan of a SQL query:
 
 ```http
 POST /api/explain-query
@@ -126,7 +131,7 @@ Content-Type: application/json
 { "sql": "SELECT * FROM default LIMIT 10" }
 ```
 
-Fetch metrics after execution (query ID comes from the `x-beacon-query-id` response header):
+Fetch the metrics after the query. The query ID comes from the `x-beacon-query-id` response header:
 
 ```http
 GET /api/query/metrics/{query_id}

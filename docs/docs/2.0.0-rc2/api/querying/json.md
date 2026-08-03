@@ -1,6 +1,7 @@
 # JSON Query DSL
 
-The JSON DSL lets you express queries as a typed object, no SQL string building required. It is the preferred interface for programmatic clients and query builders.
+The JSON DSL gives a query as a typed object. You build no SQL string. Use this interface in a
+client program and in a query builder.
 
 ```http
 POST /api/query
@@ -8,7 +9,7 @@ Content-Type: application/json
 ```
 
 :::tip
-Discover available columns before querying:
+Find the available columns before you write a query:
 
 - Default table: `GET /api/table-schema?table_name=default`
 - From a file glob: `GET /api/dataset-schema?file=argo/**/*.nc`
@@ -28,7 +29,7 @@ Discover available columns before querying:
 | `distinct` | No | DISTINCT ON expression |
 | `output` | No | Output format (default: Arrow IPC stream) |
 
-## Selecting columns
+## Select columns
 
 ### Plain column
 
@@ -56,7 +57,7 @@ Discover available columns before querying:
 }
 ```
 
-`args` entries are either a column name string or a literal `{ "value": … }` object.
+An `args` entry is a column name string, or a literal object `{ "value": … }`.
 
 ## Choosing the data source (`from`)
 
@@ -74,11 +75,13 @@ Content-Type: application/json
 }
 ```
 
-Use `GET /api/tables` to list available table names. When `from` is omitted, Beacon uses the configured default table.
+Use `GET /api/tables` to list the table names. Without a `from` field, Beacon uses the default
+table.
 
 ### Query files directly
 
-Pass a format key with a `paths` array. Paths are resolved relative to Beacon's dataset root and support glob patterns.
+Give a format key with a `paths` array. Beacon resolves a path against its dataset root. A path also
+takes a glob pattern.
 
 **NetCDF:**
 
@@ -108,7 +111,8 @@ Content-Type: application/json
 }
 ```
 
-Predicate pushdown is automatic for large Zarr stores, Beacon prunes chunks and slices coordinate dimensions from your `filters`, with no extra options to configure:
+Predicate pushdown is automatic on a large Zarr store. Beacon prunes the chunks and slices the
+coordinate dimensions. It uses your `filters`. You configure no extra option:
 
 ```http
 POST /api/query
@@ -141,11 +145,12 @@ Content-Type: application/json
 }
 ```
 
-Other supported format keys: `csv`, `arrow`, `odv`, `tiff`, `bbf`.
+The other format keys are `csv`, `arrow`, `odv`, `tiff` and `bbf`.
 
 ## Filters
 
-`filters` is an array of filter objects. Multiple entries are combined with AND. A filter can be placed on any column in the schema.
+`filters` is an array of filter objects. Beacon combines the entries with `AND`. A filter works on
+any column of the schema.
 
 ### Range (min / max)
 
@@ -153,7 +158,7 @@ Other supported format keys: `csv`, `arrow`, `odv`, `tiff`, `bbf`.
 { "filters": [{ "column": "temperature", "min": 2, "max": 10 }] }
 ```
 
-Either `min` or `max` can be omitted for an open-ended range.
+Omit `min` or `max` for a range with one limit.
 
 ### Equality
 
@@ -180,7 +185,7 @@ Content-Type: application/json
 
 ### OR
 
-Wrap OR branches in a single `or` filter object:
+Put the `OR` branches in one `or` filter object:
 
 ```http
 POST /api/query
@@ -203,7 +208,8 @@ Content-Type: application/json
 
 ### GeoJSON spatial filter
 
-Tests whether a point (lon/lat columns) falls within a GeoJSON geometry:
+Tests if a point lies inside a GeoJSON geometry. The point comes from a longitude column and a
+latitude column:
 
 ```http
 POST /api/query
@@ -228,8 +234,8 @@ Content-Type: application/json
 
 ### Filter operator reference
 
-Every leaf filter names a column with `column` (alias `for_query_parameter`) plus
-one operator key. The full set:
+Every leaf filter names a column with `column`. The alias is `for_query_parameter`. Each filter also
+takes one operator key. This is the full set:
 
 | Operator | Key(s) | Example |
 | --- | --- | --- |
@@ -246,9 +252,9 @@ one operator key. The full set:
 | Any of | `or` | `{ "or": [ … ] }` |
 | Point-in-geometry | `longitude_column` + `latitude_column` + `geometry` | see [GeoJSON spatial filter](#geojson-spatial-filter) |
 
-The `min` / `max` keys used elsewhere on this page are aliases of `gt_eq` / `lt_eq`.
+The `min` and `max` keys on this page are aliases of `gt_eq` and `lt_eq`.
 
-## Sorting and pagination
+## Sort and paginate
 
 | Field | Description |
 | ----- | ----------- |
@@ -257,7 +263,8 @@ The `min` / `max` keys used elsewhere on this page are aliases of `gt_eq` / `lt_
 | `offset` | Number of rows to skip |
 
 :::warning
-`sort_by` enum keys are case-sensitive: `"Asc"` and `"Desc"`, not `"asc"` / `"desc"`.
+The `sort_by` enum keys use exact case. Write `"Asc"` and `"Desc"`. Do not write `"asc"` or
+`"desc"`.
 :::
 
 ```http
@@ -275,7 +282,7 @@ Content-Type: application/json
 
 ## DISTINCT ON
 
-Return one row per unique combination of the `on` columns:
+Returns one row for each unique combination of the `on` columns:
 
 ```http
 POST /api/query
@@ -294,4 +301,5 @@ Content-Type: application/json
 
 ## Output formats
 
-See [Querying, Output formats](/docs/2.0.0-rc2/api/querying/#output-formats) for the full list. The `output` field is identical for JSON DSL and SQL queries.
+See [Querying, Output formats](/docs/2.0.0-rc2/api/querying/#output-formats) for the full list. The
+`output` field is the same for a JSON DSL query and a SQL query.

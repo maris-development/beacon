@@ -6,17 +6,26 @@ INSERT INTO observations VALUES (1, 'a'), (2, 'b');
 SELECT * FROM observations;
 ```
 
-A **managed table** is a SQL table whose data Beacon owns and stores itself. Unlike an [external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables), which only points at existing files, a managed table is created empty (or from a query) and populated with `INSERT`. It supports `UPDATE`, `DELETE`, schema evolution with `ALTER TABLE`, and secondary `INDEX`es. Table definitions and data survive restarts.
+A **managed table** is a SQL table. Beacon owns and stores its data. An
+[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) only points at existing
+files. A managed table starts empty, or Beacon fills it from a query. You add rows with `INSERT`. A
+managed table supports `UPDATE`, `DELETE`, schema changes with `ALTER TABLE` and secondary indexes.
+The table definition and the data survive a restart.
 
-Managed tables are an authenticated, write capability: `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, and `CREATE/DROP INDEX` require admin credentials. Anonymous access remains read-only.
+A managed table needs write access. `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE INDEX`
+and `DROP INDEX` need admin credentials. Anonymous access stays read-only.
 
 ## Storage engine
 
-Managed tables are backed by **[Lance](https://lancedb.github.io/lance/)**: a columnar, versioned format with native row-level updates/deletes (deletion vectors / fragment rewrite) and scalar secondary indexes (btree, bitmap, full-text). Table data and definitions live in Beacon's single-file `db://` store (`beacon.db`) alongside each table's `table.json`, regardless of where your datasets are stored (S3 only ever applies to the datasets store).
+**[Lance](https://lancedb.github.io/lance/)** holds a managed table. Lance is a columnar format with
+versions. It supports row-level updates and deletes through deletion vectors and fragment rewrites.
+It also supports scalar secondary indexes: btree, bitmap and full text. The table data and the
+definitions live in the single-file `db://` store of Beacon (`beacon.db`), next to the `table.json`
+of each table. The location of your datasets does not matter. S3 applies to the dataset store only.
 
 ## `CREATE TABLE`
 
-Define columns explicitly:
+Define the columns:
 
 ```sql
 CREATE TABLE measurements (
@@ -26,7 +35,7 @@ CREATE TABLE measurements (
 );
 ```
 
-`IF NOT EXISTS` makes creation a no-op when the table already exists:
+With `IF NOT EXISTS`, Beacon does nothing if the table already exists:
 
 ```sql
 CREATE TABLE IF NOT EXISTS measurements (id BIGINT, name VARCHAR);
@@ -34,7 +43,7 @@ CREATE TABLE IF NOT EXISTS measurements (id BIGINT, name VARCHAR);
 
 ### `CREATE TABLE AS SELECT`
 
-Create and populate a table from a query (CTAS). The table's schema is the schema of the query result:
+Create a table from a query and fill it (CTAS). The result of the query gives the schema:
 
 ```sql
 CREATE TABLE warm_profiles AS
@@ -45,7 +54,7 @@ WHERE temperature > 20;
 
 ## `INSERT INTO`
 
-Append rows from literal values or a query:
+Append rows from literal values or from a query:
 
 ```sql
 INSERT INTO measurements VALUES (1, 'argo', 12.5), (2, 'glider', 9.0);
@@ -64,7 +73,7 @@ SELECT name, avg(value) FROM measurements GROUP BY name;
 
 ## `DELETE`
 
-Remove rows matching a predicate, or all rows when no `WHERE` is given:
+Delete the rows that match a predicate. Without a `WHERE` clause, Beacon deletes every row:
 
 ```sql
 DELETE FROM measurements WHERE value IS NULL;
@@ -72,11 +81,12 @@ DELETE FROM measurements WHERE value IS NULL;
 DELETE FROM measurements;        -- empties the table
 ```
 
-On **Lance** tables this is a native delete (deletion vectors), it does not rewrite the whole table. On **Iceberg** tables it is copy-on-write.
+On a **Lance** table this is a native delete with deletion vectors. Beacon does not rewrite the whole
+table. On an **Iceberg** table it is copy-on-write.
 
 ## `UPDATE`
 
-Change column values for matching rows; unmatched rows are untouched:
+Change the column values of the matching rows. Beacon does not touch the other rows:
 
 ```sql
 UPDATE measurements SET name = 'unknown' WHERE name IS NULL;
@@ -84,11 +94,13 @@ UPDATE measurements SET name = 'unknown' WHERE name IS NULL;
 UPDATE measurements SET value = value * 1.0;   -- every row
 ```
 
-On **Lance** tables this rewrites only the affected fragments; on **Iceberg** it is copy-on-write. `UPDATE ... FROM` / joins are not supported.
+On a **Lance** table Beacon rewrites only the affected fragments. On **Iceberg** it is copy-on-write.
+Beacon does not support `UPDATE ... FROM` or a join in an `UPDATE`.
 
 ## `ALTER TABLE`
 
-Evolve the schema. Existing rows keep reading correctly: added columns read `NULL`, renames preserve values.
+Change the schema. The existing rows stay readable. A new column reads `NULL`. A rename keeps the
+values.
 
 ```sql
 -- Add a (nullable) column
@@ -104,15 +116,19 @@ ALTER TABLE measurements DROP COLUMN quality_flag;
 ALTER TABLE measurements ALTER COLUMN id TYPE BIGINT;
 ```
 
-On **Lance** tables schema changes are applied natively (no table rebuild). On **Iceberg** tables, only safe type promotions are allowed: `INT → BIGINT`, `FLOAT → DOUBLE`, and decimal precision increases at the same scale; narrowing or incompatible changes are rejected.
+On a **Lance** table Beacon applies a schema change directly. It does not rebuild the table. On an
+**Iceberg** table Beacon allows safe type promotions only: `INT` to `BIGINT`, `FLOAT` to `DOUBLE`,
+and a higher decimal precision at the same scale. Beacon rejects a narrower type and an incompatible
+change.
 
 ## Indexes
 
 ::: info Lance engine only
-Secondary indexes are a feature of the **Lance** engine. They are not available on Iceberg-backed tables.
+Secondary indexes are a Lance feature. An Iceberg table does not support them.
 :::
 
-Create a scalar index on a column to speed up filters. Once created, queries use it automatically, no query changes are needed.
+Create a scalar index on a column to make filters faster. Queries then use the index automatically.
+You change no query.
 
 ```sql
 -- Default (BTREE) index; auto-named <table>_<column>_idx
@@ -126,11 +142,11 @@ CREATE INDEX name_idx   ON measurements (name)         USING inverted;
 
 | Type | Use for |
 | --- | --- |
-| `btree` *(default)* | range / equality filters (`=`, `<`, `BETWEEN`, …) |
-| `bitmap` | low-cardinality columns (few distinct values) |
-| `inverted` | full-text search over string columns |
+| `btree` *(default)* | range and equality filters: `=`, `<`, `BETWEEN` and more |
+| `bitmap` | a column with few distinct values |
+| `inverted` | full text search over a string column |
 
-List a table's indexes, or drop one by name:
+List the indexes of a table, or drop one by name:
 
 ```sql
 SHOW INDEXES ON measurements;
@@ -140,7 +156,8 @@ DROP INDEX value_idx ON measurements;
 
 ## `DROP TABLE`
 
-Remove a managed table. Unlike an external table, this **deletes the table's data**:
+`DROP TABLE` removes a managed table. It also **deletes the data of the table**. An external table
+behaves differently:
 
 ```sql
 DROP TABLE measurements;
@@ -148,14 +165,21 @@ DROP TABLE measurements;
 DROP TABLE IF EXISTS measurements;
 ```
 
-## Notes & limitations
+## Notes and limitations
 
-- **Storage**: Lance tables live on the local filesystem (the tables directory); Iceberg tables live in Beacon's internal storage area alongside the datasets (local or S3). There is nothing extra to configure.
-- **Lance write model**: `INSERT` streams directly into the table; `DELETE`/`UPDATE` are native (deletion vectors / fragment rewrite); `ALTER` is applied without a rebuild. Each write commits a new dataset version, and readers always see a consistent snapshot.
-- **Iceberg write model**: `DELETE`/`UPDATE` are copy-on-write and `ALTER` rebuilds the table; best suited to moderate-sized tables and occasional schema changes rather than high-frequency row churn.
-- **Scope**: `ALTER` supports single-table `ADD` / `DROP` / `RENAME COLUMN` and `ALTER COLUMN TYPE`; added columns are nullable. Indexes are scalar only (vector/ANN indexes are not yet exposed).
+- **Storage**: a Lance table lives on the local file system, in the tables directory. An Iceberg
+  table lives in the internal storage area of Beacon, next to the datasets, on local disk or on S3.
+  You configure nothing.
+- **Lance write model**: `INSERT` streams directly into the table. `DELETE` and `UPDATE` are native,
+  through deletion vectors and fragment rewrites. `ALTER` needs no rebuild. Each write commits a new
+  dataset version. A reader always sees a consistent snapshot.
+- **Iceberg write model**: `DELETE` and `UPDATE` are copy-on-write. `ALTER` rebuilds the table. Use
+  Iceberg for a table of moderate size with few schema changes, not for frequent row changes.
+- **Scope**: `ALTER` supports `ADD COLUMN`, `DROP COLUMN`, `RENAME COLUMN` and `ALTER COLUMN TYPE` on
+  one table. A new column is nullable. The indexes are scalar only. Beacon does not yet expose vector
+  or ANN indexes.
 
-## Querying and inspecting
+## Query and inspect
 
 ```sql
 SHOW TABLES;

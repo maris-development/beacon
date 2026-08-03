@@ -6,30 +6,43 @@ STORED AS REMOTE
 LOCATION 'beacon://other-beacon:50051/ocean_profiles'
 ```
 
-A **remote table** points at a table living on **another Beacon instance**. Once created, you can `SELECT`, `JOIN`, aggregate, and `DROP` it like any other table, but the data stays on the remote. When you query it, Beacon pushes as much of the work as possible (filters, projected columns, `LIMIT`, and whole joins/aggregates between remote tables) **down to the remote instance**, so only the reduced result set travels over the network.
+A **remote table** points at a table on **another Beacon server**. After you create it, you can run
+`SELECT`, `JOIN`, aggregates and `DROP` on it, like any other table. The data stays on the remote
+server. Beacon pushes as much work as possible **down to the remote server**. This includes filters,
+projected columns, `LIMIT` and whole joins and aggregates between remote tables. Only the reduced
+result travels over the network.
 
-This is built on Arrow Flight SQL: the remote Beacon already exposes a Flight SQL server, and your local instance acts as a client to it.
+Remote tables use Arrow Flight SQL. The remote Beacon runs a Flight SQL server. Your local server
+acts as a client.
 
 :::warning Anonymous access required
-Remote tables connect to the remote **anonymously**: no credentials are stored anywhere. The remote Beacon instance must therefore **allow anonymous Flight SQL access** (`BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS=true` on the remote). If anonymous access is disabled there, queries against the remote table fail with an authentication error. Anonymous Flight SQL access is read-only, which is exactly what federation needs.
+A remote table connects **anonymously**. Beacon stores no credentials. The remote Beacon server must
+therefore **allow anonymous Flight SQL access**. Set `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS=true` on the
+remote server. If anonymous access is off there, a query against the remote table fails with an
+authentication error. Anonymous Flight SQL access is read-only. Federation needs no more.
 :::
 
 :::tip External vs managed vs remote
-- An [**external table**](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) reads files in Beacon's own storage in place.
-- A [**managed table**](/docs/2.0.0-rc2/beacondb/sql/managed-tables) is owned by Beacon and mutable with `INSERT` / `UPDATE` / `DELETE`.
-- A **remote table** owns no data locally at all, it is a federated pointer at a table on another Beacon, queried on demand.
+
+- An [**external table**](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) reads files in the
+  storage of Beacon, in place.
+- A [**managed table**](/docs/2.0.0-rc2/beacondb/sql/managed-tables) belongs to Beacon. You can
+  change the rows with `INSERT`, `UPDATE` and `DELETE`.
+- A **remote table** holds no local data. It is a federated pointer at a table on another Beacon.
+  Beacon queries it on demand.
 :::
 
-DDL can be submitted through any of Beacon's SQL surfaces:
+You can send the DDL through any SQL interface of Beacon:
 
 - **HTTP**: `POST /api/query` with `{ "sql": "CREATE EXTERNAL TABLE ... STORED AS REMOTE ..." }`
-- **Arrow Flight SQL**: any Flight SQL client (DataGrip, ADBC, DBeaver, …)
+- **Arrow Flight SQL**: any Flight SQL client, such as DataGrip, ADBC or DBeaver
 
 :::info
-Creating a remote table is admin-only DDL. Running DDL over the HTTP API needs the SQL interface, which is enabled by default (`BEACON_ENABLE_SQL`); Arrow Flight SQL does not require this flag.
+Only an admin can create a remote table. DDL over the HTTP API needs the SQL interface. That
+interface is on by default (`BEACON_ENABLE_SQL`). Arrow Flight SQL does not need this flag.
 :::
 
-## Defining a remote table
+## Define a remote table
 
 ```sql
 CREATE EXTERNAL TABLE <local_name>
@@ -40,14 +53,15 @@ OPTIONS ('tls' 'false')
 
 ### `LOCATION`
 
-The location encodes the remote Flight SQL endpoint and the table name on that instance:
+The location holds the remote Flight SQL endpoint and the table name on that server:
 
 ```
 beacon://<host>:<port>/<remote_table>
 ```
 
-- `<host>:<port>`, the remote Beacon's Flight SQL address (its Flight SQL port, **not** the HTTP port).
-- `<remote_table>`, the name of the table as it is registered on the remote instance.
+- `<host>:<port>`: the Flight SQL address of the remote Beacon. Use its Flight SQL port, **not** its
+  HTTP port.
+- `<remote_table>`: the name of the table on the remote server.
 
 ### `OPTIONS`
 
@@ -55,11 +69,14 @@ beacon://<host>:<port>/<remote_table>
 | ------ | -------- | ---------------------------------------------------------- |
 | `tls` | No (default `false`) | Set to `'true'` to connect over `https` instead of `http`. |
 
-No credentials are configured: remote tables connect anonymously, so the table definition (`table.json`) never contains secrets. The remote must allow anonymous Flight SQL access, see the note above.
+You configure no credentials. A remote table connects anonymously. The table definition
+(`table.json`) therefore never holds a secret. The remote server must allow anonymous Flight SQL
+access. See the warning above.
 
 ## How pushdown works
 
-When you query a remote table, Beacon's planner federates the largest sub-plan rooted at it and sends it to the remote as SQL. For example:
+The planner federates the largest sub-plan under a remote table. It sends that sub-plan to the
+remote server as SQL. For example:
 
 ```sql
 SELECT count(*), avg(temperature)
@@ -67,17 +84,19 @@ FROM remote_profiles
 WHERE depth < 50 AND platform = 'argo';
 ```
 
-The `WHERE` filter and the aggregate are executed **on the remote**, and only the small aggregated result is returned. You can confirm what gets pushed down with `EXPLAIN`:
+The `WHERE` filter and the aggregate run **on the remote server**. Only the small aggregate result
+comes back. Use `EXPLAIN` to check what Beacon pushes down:
 
 ```sql
 EXPLAIN SELECT count(*) FROM remote_profiles WHERE depth < 50;
 ```
 
-The plan shows a federated (virtual) scan node in place of a local table scan.
+The plan shows a federated scan node in place of a local table scan.
 
 ### Joins across the same remote
 
-Tables that live on the **same** remote instance federate together, so a join between two remote tables on that instance is pushed down and executed remotely:
+Tables on the **same** remote server federate together. Beacon pushes a join between two remote
+tables down. The join runs on the remote server:
 
 ```sql
 SELECT p.id, m.station_name
@@ -85,17 +104,22 @@ FROM remote_profiles p
 JOIN remote_stations m ON p.station_id = m.id;
 ```
 
-Joins that mix a remote table with a **local** table (or with a table on a *different* remote) are executed locally: Beacon fetches the needed remote rows and joins them on this instance.
+A join between a remote table and a **local** table runs locally. The same holds for a join across
+two *different* remote servers. Beacon fetches the remote rows and joins them on this server.
 
 ## Schema handling
 
-The remote table's schema is fetched from the remote instance **once, when the table is created**, and pinned into the table definition. This means:
+Beacon reads the schema of a remote table from the remote server **once, at creation time**. It then
+pins the schema into the table definition. This has three effects:
 
-- After creation, planning is fast and offline, `SELECT`, schema inspection, and joins do not need a round-trip just to learn the columns.
-- On restart, the table reloads from its pinned schema, so a temporarily unreachable remote does **not** block Beacon from starting (only querying the table requires the remote to be up).
-- If the remote table's schema changes, drop and recreate the remote table to pick up the new schema.
+- Beacon plans fast and offline after creation. `SELECT`, schema inspection and joins need no
+  request to learn the columns.
+- After a restart, Beacon loads the table from the pinned schema. An unreachable remote server does
+  **not** block the start of Beacon. Only a query on the table needs the remote server.
+- If the schema on the remote server changes, drop the remote table and create it again. Beacon then
+  reads the new schema.
 
-## Querying and inspecting
+## Query and inspect
 
 A remote table behaves like any other table:
 
@@ -104,11 +128,12 @@ GET /api/tables
 GET /api/table-schema?table_name=remote_profiles
 ```
 
-For the SQL equivalents (`SHOW TABLES`, `DESCRIBE`), see the [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table#querying-and-inspecting) reference.
+The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table#querying-and-inspecting)
+reference gives the SQL equivalents, `SHOW TABLES` and `DESCRIBE`.
 
-## Removing a remote table
+## Remove a remote table
 
-Dropping a remote table removes it from the local catalog only, nothing on the remote instance is affected.
+`DROP TABLE` removes the table from the local catalog only. It changes nothing on the remote server.
 
 ```sql
 DROP TABLE remote_profiles;
@@ -116,6 +141,10 @@ DROP TABLE remote_profiles;
 
 ## Limitations
 
-- **Custom functions must exist on both sides.** A filter or projection that uses a Beacon UDF (e.g. a geospatial `st_*` function) is only pushed down if the remote instance has the same function. When in doubt, the safe pattern is to keep remote-pushed predicates to standard SQL comparisons; Beacon falls back to local execution where it must.
-- **One endpoint per table.** A remote table maps to a single remote Flight SQL endpoint; it does not shard across multiple remotes.
-- **Remote connections are anonymous.** A remote table connects to its target Flight SQL endpoint without credentials, so the remote instance must allow anonymous access. The only connection `OPTIONS` key is `tls`.
+- **A custom function must exist on both sides.** Beacon pushes a filter or projection with a UDF
+  down only if the remote server has the same function. A geospatial `st_*` function is an example.
+  Use standard SQL comparisons in the predicates that must push down. Beacon runs the rest locally.
+- **One endpoint per table.** A remote table maps to one remote Flight SQL endpoint. It does not
+  shard across several remote servers.
+- **A remote connection is anonymous.** A remote table connects to its Flight SQL endpoint without
+  credentials. The remote server must allow anonymous access. The only connection option is `tls`.

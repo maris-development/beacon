@@ -6,25 +6,41 @@ STORED AS DELTA
 LOCATION 'delta/ocean_profiles'
 ```
 
-A **Delta Lake table** is a directory containing a `_delta_log` transaction log alongside its Parquet data files, not a single file or a glob of files. Beacon reads the transaction log to resolve exactly which Parquet files make up the current (or a historical) version of the table, so you get consistent snapshots, **time travel**, and `INSERT` support that ordinary file-format tables don't have.
+A **Delta Lake table** is a directory. It holds a `_delta_log` transaction log next to its Parquet
+data files. It is not one file and not a glob of files. Beacon reads the transaction log. The log
+gives the exact Parquet files of the current version or of an older version. You therefore get
+consistent snapshots, **time travel** and `INSERT` support. An ordinary file format table does not
+give you these.
 
-Delta tables work over both local storage and S3 / object storage, resolved against Beacon's configured dataset storage root just like every other source.
+A Delta table works on local storage and on object storage. Beacon resolves the path against its
+dataset storage root, like every other source.
 
 :::tip External vs managed vs Delta
-- An [**external table**](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) (`STORED AS PARQUET`, `NETCDF`, …) reads a folder/glob of files in place; it is read-only.
-- A [**managed table**](/docs/2.0.0-rc2/beacondb/sql/managed-tables) is owned by Beacon (Lance-backed by default, or Iceberg) and mutable with `INSERT` / `UPDATE` / `DELETE`.
-- A **Delta table** points at an existing Delta Lake table directory. It is read in place, supports snapshot-consistent reads and time travel, and accepts `INSERT INTO` which commits a new Delta version.
+
+- An [**external table**](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) (`STORED AS
+  PARQUET`, `NETCDF`, …) reads a folder or a glob of files in place. It is read-only.
+- A [**managed table**](/docs/2.0.0-rc2/beacondb/sql/managed-tables) belongs to Beacon. Lance holds
+  the data by default. Iceberg is the other option. You can change the rows with `INSERT`, `UPDATE`
+  and `DELETE`.
+- A **Delta table** points at an existing Delta Lake table directory. Beacon reads it in place. It
+  supports consistent snapshots and time travel. It accepts `INSERT INTO`, which commits a new Delta
+  version.
 :::
 
 :::info The Delta table must already exist
-Beacon registers and reads (and appends to) an **existing** Delta table. It does not yet create a brand-new, empty Delta table from a `CREATE EXTERNAL TABLE` column list, and `CREATE TABLE AS … STORED AS DELTA` is not supported, use a managed table for those. Create the Delta table with any Delta writer (delta-rs, Spark, etc.), then register it in Beacon.
+Beacon registers, reads and appends to an **existing** Delta table. Beacon does not yet create a new,
+empty Delta table from a `CREATE EXTERNAL TABLE` column list. Beacon does not support
+`CREATE TABLE AS … STORED AS DELTA`. Use a managed table for those two cases. Create the Delta table
+with any Delta writer, such as delta-rs or Spark. Then register it in Beacon.
 :::
 
 ## Two ways to query a Delta table
 
 ### Ad-hoc with `read_delta`
 
-Query a Delta table directly in a `FROM` clause without registering it first, useful for exploration. See the [`read_delta`](/docs/2.0.0-rc2/beacondb/sql/table-functions#read-delta) table function.
+Query a Delta table directly in a `FROM` clause. You register nothing first. This helps during
+exploration. See the [`read_delta`](/docs/2.0.0-rc2/beacondb/sql/table-functions#read-delta) table
+function.
 
 ```sql
 SELECT count(*) FROM read_delta('delta/ocean_profiles');
@@ -32,18 +48,20 @@ SELECT count(*) FROM read_delta('delta/ocean_profiles');
 
 ### Persisted external table
 
-`CREATE EXTERNAL TABLE … STORED AS DELTA` registers the table in the catalog so it can be `SELECT`ed, `JOIN`ed, inserted into, and reloaded on restart like any other table.
+`CREATE EXTERNAL TABLE … STORED AS DELTA` puts the table in the catalog. You can then run `SELECT`
+and `JOIN` on it. You can insert into it. Beacon reloads it after a restart, like any other table.
 
-DDL can be submitted through any of Beacon's SQL surfaces:
+You can send the DDL through any SQL interface of Beacon:
 
 - **HTTP**: `POST /api/query` with `{ "sql": "CREATE EXTERNAL TABLE ... STORED AS DELTA ..." }`
-- **Arrow Flight SQL**: any Flight SQL client (DataGrip, ADBC, DBeaver, …)
+- **Arrow Flight SQL**: any Flight SQL client, such as DataGrip, ADBC or DBeaver
 
 :::info
-Creating an external table is admin-only DDL. Running DDL over the HTTP API needs the SQL interface, which is enabled by default (`BEACON_ENABLE_SQL`); Arrow Flight SQL does not require this flag.
+Only an admin can create an external table. DDL over the HTTP API needs the SQL interface. That
+interface is on by default (`BEACON_ENABLE_SQL`). Arrow Flight SQL does not need this flag.
 :::
 
-## Defining a Delta external table
+## Define a Delta external table
 
 ```sql
 CREATE EXTERNAL TABLE <name>
@@ -54,7 +72,8 @@ OPTIONS ('version' '12')
 
 ### `LOCATION`
 
-Unlike file-format tables, the `LOCATION` points at the **Delta table directory** (the folder that contains `_delta_log/`), not a folder of loose files or a glob:
+The `LOCATION` points at the **Delta table directory**. That directory holds `_delta_log/`. This
+differs from a file format table. Do not give a folder of loose files or a glob:
 
 ```sql
 CREATE EXTERNAL TABLE ocean_profiles
@@ -62,16 +81,18 @@ STORED AS DELTA
 LOCATION 'delta/ocean_profiles'
 ```
 
-The path is resolved relative to Beacon's configured dataset storage root (`/beacon/data/datasets` in the default Docker container, or the S3 prefix when using object storage). The table's schema is read from the transaction log, you do not declare columns.
+Beacon resolves the path against its dataset storage root. In the default Docker container the root
+is `/beacon/data/datasets`. On object storage the root is the S3 prefix. Beacon reads the schema
+from the transaction log. You declare no columns.
 
 ### `OPTIONS`, time travel
 
-Pin the table to a historical snapshot. Use **one** of:
+Pin the table to an older snapshot. Use **one** of these options:
 
 | Option | Description |
 | ----------- | --------------------------------------------------------------------------- |
-| `version` | A Delta version number (snapshot), e.g. `'12'`. |
-| `timestamp` | An RFC-3339 timestamp; the latest version at or before it, e.g. `'2026-01-01T00:00:00Z'`. |
+| `version` | A Delta version number, for example `'12'`. |
+| `timestamp` | An RFC-3339 timestamp. Beacon takes the last version at or before it, for example `'2026-01-01T00:00:00Z'`. |
 
 ```sql
 -- Register the table as it looked at version 12
@@ -87,33 +108,39 @@ LOCATION 'delta/ocean_profiles'
 OPTIONS ('timestamp' '2026-01-01T00:00:00Z');
 ```
 
-Without a `version`/`timestamp` option the table always tracks the latest committed version.
+Without a `version` or `timestamp` option, the table always follows the latest committed version.
 
-## Writing: `INSERT INTO`
+## Write with `INSERT INTO`
 
-A Delta external table accepts `INSERT INTO`, which appends the rows as a **new Delta version** (committed atomically through the transaction log):
+A Delta external table accepts `INSERT INTO`. Beacon appends the rows as a **new Delta version**. The
+transaction log commits the version atomically:
 
 ```sql
 INSERT INTO ocean_profiles
 SELECT * FROM read_parquet('staging/new_profiles.parquet');
 ```
 
-The commit is written through Beacon's storage backend, so it lands in the same local-FS or S3 location as the rest of the table. On S3 the commit uses object-store conditional writes, so no external lock table is required.
+Beacon writes the commit through its storage backend. The commit therefore lands in the same local
+disk or S3 location as the rest of the table. On S3 the commit uses a conditional write of the
+object store. You need no external lock table.
 
 :::tip
-Pinning the table to a historical `version`/`timestamp` is intended for reading old snapshots; insert into a table registered at the latest version.
+Pin a table to an older `version` or `timestamp` to read an old snapshot. Insert only into a table
+that Beacon registers at the latest version.
 :::
 
 ## Storage backends
 
-Delta tables resolve through Beacon's dataset store, so they work the same way on:
+Beacon resolves a Delta table through its dataset store. A Delta table therefore works the same way
+on both backends:
 
-- **Local filesystem**: under the configured datasets directory.
-- **S3 / object storage**: under the configured bucket/prefix.
+- **Local file system**: under the configured datasets directory.
+- **Object storage**: under the configured bucket and prefix.
 
-No Delta-specific configuration is needed; the table location is interpreted exactly like other dataset paths. See [Configuration](/docs/2.0.0-rc2/data-lake/configuration) for storage setup.
+You need no Delta configuration. Beacon reads the table location like any other dataset path. See
+[Configuration](/docs/2.0.0-rc2/data-lake/configuration) for the storage setup.
 
-## Querying and inspecting
+## Query and inspect
 
 A Delta table behaves like any other registered table:
 
@@ -122,11 +149,13 @@ GET /api/tables
 GET /api/table-schema?table_name=ocean_profiles
 ```
 
-For the SQL equivalents (`SHOW TABLES`, `DESCRIBE`), see the [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table#querying-and-inspecting) reference.
+The [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table#querying-and-inspecting)
+reference gives the SQL equivalents, `SHOW TABLES` and `DESCRIBE`.
 
-## Removing a Delta table
+## Remove a Delta table
 
-Dropping the table removes it from the catalog, the underlying Delta table directory and its files are **not** deleted.
+`DROP TABLE` removes the table from the catalog. Beacon does **not** delete the Delta table
+directory or its files.
 
 ```sql
 DROP TABLE ocean_profiles;
@@ -134,38 +163,41 @@ DROP TABLE ocean_profiles;
 
 ## Limitations
 
-- **The Delta table must already exist.** Beacon does not create an empty Delta table from a column list, and `CREATE TABLE AS … STORED AS DELTA` is not supported. Use a managed table or an external Delta writer to create one.
-- **`INSERT` appends.** `UPDATE` / `DELETE` / `MERGE` on Delta tables are not exposed through Beacon's SQL; use a [managed table](/docs/2.0.0-rc2/beacondb/sql/managed-tables) when you need full row mutation.
-- **One directory per table.** A Delta table maps to a single table directory containing `_delta_log/`; it is not a glob over many tables.
+- **The Delta table must already exist.** Beacon does not create an empty Delta table from a column
+  list. Beacon does not support `CREATE TABLE AS … STORED AS DELTA`. Use a managed table or an
+  external Delta writer.
+- **`INSERT` appends only.** Beacon does not expose `UPDATE`, `DELETE` or `MERGE` on a Delta table.
+  Use a [managed table](/docs/2.0.0-rc2/beacondb/sql/managed-tables) to change rows.
+- **One directory per table.** A Delta table maps to one table directory with `_delta_log/`. It is
+  not a glob over many tables.
 
-## Inspecting the schema
+## Inspect the schema
 
-Before writing a query it is usually worth checking which columns a file actually has, and
-what their types are.
+Check the columns of a file before you write a query. Also check their types.
 
-`read_schema()` does not cover this format, so inspect it through the reader itself.
-A `LIMIT 0` query resolves the schema without returning any rows:
+`read_schema()` does not cover this format. Inspect it through the reader. A `LIMIT 0` query
+returns the schema and no rows:
 
 ```sql
 SELECT * FROM read_delta('delta/ocean_profiles') LIMIT 0;
 ```
 
-Point at the Delta table directory (the folder containing `_delta_log/`).
+Point at the Delta table directory. That directory holds `_delta_log/`.
 
-To go further than names and types, [`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) profiles every column in one pass, adding
-min/max, distinct counts, and the share of nulls:
+[`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) gives more than names and types. It profiles every column in
+one pass. It adds the minimum, the maximum, the distinct count and the share of nulls:
 
 ```sql
 SUMMARIZE (SELECT * FROM read_delta('delta/ocean_profiles'));
 ```
 
-If the files are registered as a table, `DESCRIBE` works directly:
+If the files have a table name, use `DESCRIBE`:
 
 ```sql
 DESCRIBE ocean_profiles;
 ```
 
-From Python, the Arrow schema of any relation is available without collecting rows:
+From Python, read the Arrow schema of a relation. Beacon collects no rows:
 
 ```python
 con.sql("SELECT * FROM read_delta('delta/ocean_profiles') LIMIT 0").arrow().schema

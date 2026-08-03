@@ -1,15 +1,15 @@
 ---
-description: Write BeaconDB query results to Parquet, CSV, NetCDF, HDF5, GeoParquet, or ODV, stream large results in batches, or hand them to pandas, Polars, and Arrow.
+description: Write BeaconDB results to Parquet, CSV, NetCDF, HDF5, GeoParquet or ODV. Stream a large result in batches, or read it with pandas, Polars and Arrow.
 ---
 
 # Export Query Results
 
-A query result can go straight to a file, into a dataframe, or out in batches. Which you choose
-mostly depends on how big the result is.
+A query result goes to a file, to a dataframe or out in batches. The size of the result decides your
+choice.
 
 ## To a dataframe
 
-For results that fit in memory:
+Use a dataframe for a result that fits in memory:
 
 ```python
 import beacondb
@@ -21,12 +21,12 @@ rel.df()      # pandas
 rel.arrow()   # pyarrow.Table
 ```
 
-Relations are lazy: nothing executes until you ask for results, so you can build a query up in steps
-without paying for intermediate passes.
+A relation is lazy. Beacon runs nothing until you ask for the results. You can therefore build a
+query in steps. Beacon makes no intermediate pass.
 
 ## To a file
 
-Write directly from a relation, without materializing it in Python first:
+Write directly from a relation. Python holds no copy of the data:
 
 ```python
 rel.to_parquet("out.parquet")
@@ -35,7 +35,7 @@ rel.to_netcdf("out.nc")                       # a real NetCDF-4 file
 rel.to_hdf5("out.h5")
 ```
 
-Geospatial and multi-dimensional targets take the columns that define their structure:
+A geospatial or multi-dimensional target needs the columns that give its structure:
 
 ```python
 rel.to_geoparquet("pts.parquet", longitude="lon", latitude="lat")
@@ -45,14 +45,14 @@ rel.to_odv("out.zip", longitude="lon", latitude="lat",
 ```
 
 :::warning Local destinations only
-File sinks currently write to local paths. A `scheme://` destination such as `s3://…` raises
+A file sink writes to a local path. A `scheme://` destination such as `s3://…` raises
 `NotSupportedError`.
 :::
 
 ## Results too large for memory
 
-`.df()` and `.arrow()` collect everything. For a large export, pull batches instead. The engine
-produces them on demand and releases the GIL while doing so:
+`.df()` and `.arrow()` collect everything. For a large export, read batches instead. The engine
+makes them on demand. It releases the GIL during each pull:
 
 ```python
 for batch in con.sql("SELECT * FROM read_parquet('huge/*.parquet')").record_batch():
@@ -61,25 +61,25 @@ for batch in con.sql("SELECT * FROM read_parquet('huge/*.parquet')").record_batc
 con.sql("SELECT * FROM obs").record_batch(50_000)   # about 50k rows per batch
 ```
 
-This keeps memory flat regardless of result size, and pairs well with writing incrementally to your
-own sink.
+The memory then stays flat for any result size. This also fits a write to your own sink, step by
+step.
 
-## Keeping results in the database
+## Keep results in the database
 
-When the result is something you will query again rather than hand to another tool, store it instead
-of exporting it:
+Do you query the result again, instead of a hand-over to another tool? Then store the result. Do not
+export it:
 
 ```sql
 CREATE TABLE hot_profiles AS
 SELECT * FROM read_netcdf('argo/**/*.nc') WHERE temperature > 25;
 ```
 
-That creates a [managed table](/docs/2.0.0-rc2/beacondb/data-sources/internal-format) inside `beacon.db`.
-If the underlying data changes and you want the result refreshed on demand, use a
-[materialized view](/docs/2.0.0-rc2/beacondb/sql/create-materialized-view) instead.
+This creates a [managed table](/docs/2.0.0-rc2/beacondb/data-sources/internal-format) inside
+`beacon.db`. Does the source data change? Do you want a refresh on demand? Then use a
+[materialized view](/docs/2.0.0-rc2/beacondb/sql/create-materialized-view).
 
 ## Over the server
 
-Beacon Data Lake exposes the same conversions over HTTP: set `output.format` to `csv`, `parquet`,
-`netcdf`, or `ipc` on a query request, with options for GeoParquet, N-dimensional NetCDF, and ODV.
-See [querying output formats](/docs/2.0.0-rc2/api/querying/#output-formats).
+Beacon Data Lake gives the same conversions over HTTP. Set `output.format` on a query request to
+`csv`, `parquet`, `netcdf` or `ipc`. There are also options for GeoParquet, N-dimensional NetCDF and
+ODV. See [output formats](/docs/2.0.0-rc2/api/querying/#output-formats).

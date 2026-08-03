@@ -1,19 +1,19 @@
 ---
-description: Get Beacon running in a couple of minutes, either embedded in Python with BeaconDB or as a server with Beacon Data Lake. Both use the same SQL and read the same formats.
+description: Start Beacon in a few minutes. Embed it in Python with BeaconDB, or run it as a server with Beacon Data Lake.
 ---
 
 # Quick Start
 
-Beacon runs two ways. Both share the same engine, the same SQL dialect, and the same file
-formats, so pick whichever fits how you work and switch later without rewriting a query.
+Beacon runs in two ways. Both ways use the same engine, the same SQL dialect and the same file
+formats. Choose the option that fits your work. You can change later. Your queries stay the same.
 
-- **[Embed it](#embed-it-beacondb)** with **BeaconDB**: the engine in your Python process.
-- **[Serve it](#serve-it-beacon-data-lake)** with **Beacon Data Lake**: the engine as a server for your team.
+- **[Embed it](#embed-it-beacondb)** with **BeaconDB**. The engine runs in your Python process.
+- **[Serve it](#serve-it-beacon-data-lake)** with **Beacon Data Lake**. The engine runs as a server for your team.
 
 ## Embed it: BeaconDB
 
-Install the package and query a file in three lines. There is no server to start and no import
-step: BeaconDB reads your files in place.
+Install the package. Then query a file in three lines. There is no server to start and no import
+step. BeaconDB reads your files in place.
 
 ```bash
 pip install beacondb
@@ -26,16 +26,18 @@ con = beacondb.connect("beacon.db")          # or ":memory:" for a throwaway dat
 con.sql("SELECT * FROM read_parquet('data/*.parquet') LIMIT 10").df()
 ```
 
-`connect()` returns a [PEP 249](https://peps.python.org/pep-0249/) connection. Read results as
-plain rows (`fetchall()`) or as a dataframe (`.df()` for pandas, plus Polars and Arrow). The whole
-query engine runs in your process, backed by one portable `beacon.db` file.
+`connect()` returns a [PEP 249](https://peps.python.org/pep-0249/) connection. Read the results as
+plain rows with `fetchall()`. Read them as a dataframe with `.df()` for pandas. Polars and Arrow
+also work. The whole query engine runs in your process. One portable `beacon.db` file holds the
+state.
 
 Next: [BeaconDB getting started](/docs/2.0.0-rc2/beacondb/python/getting-started) or the
 [SQL reference](/docs/2.0.0-rc2/beacondb/sql/).
 
 ## Serve it: Beacon Data Lake
 
-Run the server, drop in files, and query them over HTTP or from the bundled admin UI.
+Start the server. Copy your files into the dataset folder. Then query them over HTTP or from the
+admin UI.
 
 ```bash
 docker run -d --name beacon -p 5001:5001 \
@@ -45,9 +47,9 @@ docker run -d --name beacon -p 5001:5001 \
   ghcr.io/maris-development/beacon:latest
 ```
 
-Drop supported files (`.parquet`, `.nc`, `.zarr`, `.csv`, and more) into `./datasets`. Beacon
-discovers them automatically. Then open the admin UI at
-[http://localhost:5001/admin](http://localhost:5001/admin), or query over HTTP:
+Copy supported files into `./datasets`. Supported files include `.parquet`, `.nc`, `.zarr` and
+`.csv`. Beacon finds them automatically. Then open the admin UI at
+[http://localhost:5001/admin](http://localhost:5001/admin). You can also query over HTTP:
 
 ```bash
 curl -X POST http://localhost:5001/api/query \
@@ -58,19 +60,19 @@ curl -X POST http://localhost:5001/api/query \
   }'
 ```
 
-Next: [Beacon Data Lake getting started](/docs/2.0.0-rc2/getting-started) for reproducible Docker
-Compose and S3 setups, or [connect a client](/docs/2.0.0-rc2/connect/beacon-python-sdk).
+Next: [Beacon Data Lake getting started](/docs/2.0.0-rc2/getting-started) for Docker Compose and S3
+setups. Or [connect a client](/docs/2.0.0-rc2/connect/beacon-python-sdk).
 
 ## Which one should I start with?
 
 | If you want to… | Start with |
 |---|---|
-| Query files from a notebook, script, or app, locally | **BeaconDB** |
-| Ship a single portable `beacon.db` file | **BeaconDB** |
+| Query local files from a notebook, script or application | **BeaconDB** |
+| Ship one portable `beacon.db` file | **BeaconDB** |
 | Serve datasets to many users over HTTP or Flight SQL | **Beacon Data Lake** |
-| Add access control, a web admin UI, and crawlers | **Beacon Data Lake** |
+| Add access control, a web admin UI and crawlers | **Beacon Data Lake** |
 
-You are not locked in either way. A local BeaconDB can
-[`ATTACH`](/docs/2.0.0-rc2/beacondb/python/remote-catalogs) a running Beacon Data Lake and query it,
-joining remote tables against local files. See [Concepts](/docs/2.0.0-rc2/concepts) for how the engine,
-the `beacon.db` file, and tables fit together.
+You are not locked in. A local BeaconDB can
+[`ATTACH`](/docs/2.0.0-rc2/beacondb/python/remote-catalogs) a Beacon Data Lake and query it. You can
+then join remote tables against local files. See [Concepts](/docs/2.0.0-rc2/concepts) for the
+engine, the `beacon.db` file and tables.

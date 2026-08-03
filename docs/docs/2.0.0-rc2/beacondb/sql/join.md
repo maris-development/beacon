@@ -1,6 +1,6 @@
 # JOIN
 
-Combine rows from two tables by matching a condition:
+A join combines the rows of two tables. A condition matches the rows:
 
 ```sql
 SELECT p.time, p.latitude, p.longitude, p.temperature, m.platform_name
@@ -11,7 +11,7 @@ WHERE p.time >= '2024-01-01'
 
 ## INNER JOIN
 
-Returns only rows where the join condition matches in both tables. `JOIN` and `INNER JOIN` are equivalent:
+An inner join returns only the rows that match in both tables. `JOIN` and `INNER JOIN` do the same:
 
 ```sql
 SELECT p.time, p.temperature, m.platform_name
@@ -21,7 +21,7 @@ INNER JOIN platform_metadata m ON p.platform_code = m.platform_code
 
 ## LEFT JOIN
 
-Returns all rows from the left table. Rows with no match in the right table get `NULL` for the right-side columns:
+A left join returns every row of the left table. A row without a match gets `NULL` in the right columns:
 
 ```sql
 SELECT p.time, p.temperature, m.platform_name
@@ -29,7 +29,7 @@ FROM ocean_profiles p
 LEFT JOIN platform_metadata m ON p.platform_code = m.platform_code
 ```
 
-## Joining on multiple columns
+## Join on several columns
 
 ```sql
 SELECT *
@@ -40,9 +40,9 @@ JOIN qc_flags q
  AND o.depth         = q.depth
 ```
 
-## Joining a table function
+## Join a table function
 
-You can join directly against a `read_*` table function without creating an external table first:
+You can join directly against a `read_*` table function. You create no external table first:
 
 ```sql
 SELECT p.time, p.temperature, m.platform_name

@@ -1,19 +1,23 @@
 ---
-description: Read Atlas array stores with read_atlas(). Statistics-based dataset pruning makes range queries over large collections fast.
+description: Read Atlas array stores with read_atlas(). Dataset pruning with statistics makes range queries over large collections fast.
 ---
 
 # Atlas
 
-## Reading
+## Read the files
 
 ```text
 read_atlas(glob_paths)
 read_atlas(glob_paths, dimensions)
 ```
 
-Reads [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) array stores matching one or more glob patterns. Each path must point at an `atlas.json` marker file, an exact path or a glob such as `**/atlas.json`.
+Beacon reads the [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) array stores that match
+one or more glob patterns. Each path must point at an `atlas.json` marker file. Give an exact path
+or a glob such as `**/atlas.json`.
 
-The optional `dimensions` argument filters the arrays to those matching the listed dimension names. Atlas prunes whole datasets using per-column statistics, so range queries over large collections only read the datasets that can match the predicate.
+The optional `dimensions` argument selects the arrays with the listed dimension names. Atlas holds
+statistics for each column. Beacon drops whole datasets with those statistics. A range query over a
+large collection therefore reads only the datasets that can match the predicate.
 
 ```sql
 SELECT * FROM read_atlas('collections/sensor/atlas.json')
@@ -24,34 +28,33 @@ FROM read_atlas(['collections/**/atlas.json'], ['time', 'latitude', 'longitude']
 WHERE time >= '2024-01-01'
 ```
 
-## Inspecting the schema
+## Inspect the schema
 
-Before writing a query it is usually worth checking which columns a file actually has, and
-what their types are.
+Check the columns of a file before you write a query. Also check their types.
 
-`read_schema()` does not cover this format, so inspect it through the reader itself.
-A `LIMIT 0` query resolves the schema without returning any rows:
+`read_schema()` does not cover this format. Inspect it through the reader. A `LIMIT 0` query
+returns the schema and no rows:
 
 ```sql
 SELECT * FROM read_atlas('collections/sensor/atlas.json') LIMIT 0;
 ```
 
-Point at the store's `atlas.json` marker, exactly as you would when querying it.
+Point at the `atlas.json` marker of the store. Use the same path as in a query.
 
-To go further than names and types, [`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) profiles every column in one pass, adding
-min/max, distinct counts, and the share of nulls:
+[`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) gives more than names and types. It profiles every column in
+one pass. It adds the minimum, the maximum, the distinct count and the share of nulls:
 
 ```sql
 SUMMARIZE (SELECT * FROM read_atlas('collections/sensor/atlas.json'));
 ```
 
-If the files are registered as a table, `DESCRIBE` works directly:
+If the files have a table name, use `DESCRIBE`:
 
 ```sql
 DESCRIBE sensor_atlas;
 ```
 
-From Python, the Arrow schema of any relation is available without collecting rows:
+From Python, read the Arrow schema of a relation. Beacon collects no rows:
 
 ```python
 con.sql("SELECT * FROM read_atlas('collections/sensor/atlas.json') LIMIT 0").arrow().schema
@@ -59,16 +62,29 @@ con.sql("SELECT * FROM read_atlas('collections/sensor/atlas.json') LIMIT 0").arr
 
 ## Format details
 
-[Atlas](https://github.com/maris-development/atlas) is a directory-based array store designed for fast analytical access to multi-dimensional scientific data. Like Parquet or Zarr, it is just another file format: place Atlas stores in the datasets folder and Beacon discovers and queries them automatically, no registration step is required. An Atlas store is a directory containing a single `atlas.json` registry that describes one or more named datasets, each holding its own set of arrays.
+[Atlas](https://github.com/maris-development/atlas) is an array store in a directory. It gives fast
+analytical access to multi-dimensional scientific data. Atlas is a file format, like Parquet or
+Zarr. Put an Atlas store in the datasets folder. Beacon then finds it and queries it automatically.
+You register nothing. An Atlas store is a directory with one `atlas.json` registry. The registry
+describes one or more named datasets. Each dataset holds its own arrays.
 
 What it does:
 
-- **Statistics-based dataset pruning.** Atlas keeps per-dataset, per-column statistics. When a query carries a predicate (e.g. a time or latitude range), Beacon drops whole datasets that cannot match *before reading any array data*, so range queries over large collections only touch the relevant data.
-- **Column projection.** Only the arrays referenced by a query are read, keeping I/O proportional to the columns actually selected.
-- **Compact, self-describing layout.** Arrays are stored compressed (zstd) and the `atlas.json` registry is opened once and cached for the lifetime of the process, avoiding repeated metadata parsing across queries.
-- **Object-store friendly.** Atlas stores can live on local disk or S3-compatible object storage.
+- **Dataset pruning with statistics.** Atlas keeps statistics for each dataset and each column. A
+  query with a predicate, for example a time or latitude range, drops the datasets that cannot
+  match. Beacon drops them *before it reads any array data*. A range query over a large collection
+  therefore touches only the relevant data.
+- **Column projection.** Beacon reads only the arrays that a query names. The I/O stays proportional
+  to the selected columns.
+- **Compact, self-describing layout.** Atlas compresses the arrays with zstd. Beacon opens the
+  `atlas.json` registry once and caches it for the life of the process. It therefore parses the
+  metadata only once.
+- **Object storage support.** An Atlas store lives on local disk or on S3-compatible object storage.
 
-Query an Atlas store with the [`read_atlas()`](/docs/2.0.0-rc2/beacondb/sql/table-functions#read-atlas) table function, pointing at its `atlas.json` marker file, an exact path or a glob such as `**/atlas.json`. An optional second argument filters the arrays to those matching the listed dimensions.
+Query an Atlas store with the
+[`read_atlas()`](/docs/2.0.0-rc2/beacondb/sql/table-functions#read-atlas) table function. Point at
+the `atlas.json` marker file. Give an exact path or a glob such as `**/atlas.json`. The optional
+second argument selects the arrays with the listed dimensions.
 
 ```sql
 SELECT * FROM read_atlas(['collections/sensor/atlas.json'])
@@ -76,7 +92,9 @@ SELECT * FROM read_atlas(['collections/sensor/atlas.json'])
 
 ### External tables over Atlas
 
-For a stable, reusable table name, register the store as an [External Table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables#atlas). Like Zarr, point the `LOCATION` at the `atlas.json` marker (or a glob over several markers):
+For a stable table name, register the store as an
+[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables#atlas). Point the `LOCATION`
+at the `atlas.json` marker, as with Zarr. A glob over several markers also works:
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
@@ -88,19 +106,25 @@ FROM sensor_atlas
 WHERE time >= '2024-01-01';
 ```
 
-### Optimizing NetCDF and Zarr with Atlas
+### Optimize NetCDF and Zarr with Atlas
 
-Atlas is the recommended way to speed up repeated queries over large NetCDF or Zarr collections: convert the source files into a single Atlas collection. Consolidating many NetCDF or Zarr files into one statistics-aware store lets Beacon prune whole datasets using column statistics and read only the projected arrays, so spatial and temporal range queries are typically much faster than scanning the original files directly.
+Do you query a large NetCDF or Zarr collection often? Then convert the source files into one Atlas
+collection. Atlas merges many files into one store with statistics. Beacon can then drop whole
+datasets with the column statistics. It reads only the arrays that you select. A spatial or time
+range query is therefore much faster than a scan of the original files.
 
-See the [Atlas repository](https://github.com/maris-development/atlas) for the store format and tooling to build Atlas collections.
+The [Atlas repository](https://github.com/maris-development/atlas) documents the store format. It
+also holds the tools that build an Atlas collection.
 
 :::tip
-Heavy, repeated aggregations over an Atlas collection, or any other table, can be cached with a [materialized view](/docs/2.0.0-rc2/beacondb/sql/create-materialized-view) and recomputed with `REFRESH` when the underlying data changes.
+Cache a large, repeated aggregation with a
+[materialized view](/docs/2.0.0-rc2/beacondb/sql/create-materialized-view). This works over an Atlas
+collection and over any other table. Run `REFRESH` when the source data changes.
 :::
 
 ## As an external table
 
-Like Zarr, Atlas tables point at the store's `atlas.json` marker file rather than a folder:
+An Atlas table points at the `atlas.json` marker file, not at a folder. This is the same as Zarr:
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
@@ -108,7 +132,7 @@ STORED AS ATLAS
 LOCATION 'collections/sensor/atlas.json'
 ```
 
-To combine several Atlas stores under one table, use a glob over their markers:
+Use a glob over the markers to put several Atlas stores in one table:
 
 ```sql
 CREATE EXTERNAL TABLE sensor_atlas
@@ -116,6 +140,8 @@ STORED AS ATLAS
 LOCATION 'collections/*/atlas.json'
 ```
 
-See [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) for what the format does and how it speeds up NetCDF/Zarr workloads.
+See [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) for the format details. That page
+also explains how Atlas speeds up NetCDF and Zarr work.
 
-See [Creating External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL, and [Reading External Files](/docs/2.0.0-rc2/beacondb/data-sources/) for the general reading model.
+See [Create External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) for the full DDL. See [Data Sources](/docs/2.0.0-rc2/beacondb/data-sources/) for the
+full read model.

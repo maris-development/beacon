@@ -1,65 +1,70 @@
 ---
-description: Beacon ships a bundled admin web UI, an Athena-style query workbench plus pages to manage tables, datasets, crawlers and external tables, served at /admin straight from the Beacon server and Docker image.
+description: Beacon includes an admin web UI at /admin. It gives a query workbench and pages for tables, datasets, crawlers and external tables.
 ---
 
 # Admin Web UI
 
-Beacon ships with a bundled **admin web interface**: an Athena-style query
-workbench and data-lake admin console. It is built into the Beacon server and the
-official Docker image, so there is nothing extra to deploy: when a build is
-present, the server serves it at **`/admin`**.
+Beacon includes an **admin web interface**. It is a query workbench and a data
+lake admin console. The Beacon server and the official Docker image hold it. You
+deploy nothing extra. The server serves the UI at **`/admin`**.
 
 ```
 http://localhost:5001/admin
 ```
 
-The UI is a React single-page app (Vite, Tailwind CSS, shadcn/ui) that talks to
-Beacon exclusively through the [`@beacon/client`](/docs/2.0.0-rc2/connect/beacon-typescript-sdk)
-TypeScript SDK.
+The UI is a React single-page application. It uses Vite, Tailwind CSS and
+shadcn/ui. It reaches Beacon through the
+[`@beacon/client`](/docs/2.0.0-rc2/connect/beacon-typescript-sdk) TypeScript SDK
+only.
 
-## Logging in
+## Log in
 
-The UI is **admin-only**: a login screen gates the whole app. Sign in with the
-Beacon server URL and the admin Basic-auth credentials configured on the server:
+The UI is **for an admin only**. A login screen protects the whole application.
+Sign in with the URL of the Beacon server. Also give the admin Basic auth
+credentials of that server:
 
 ```bash
 BEACON_ADMIN_USERNAME=beacon-admin
 BEACON_ADMIN_PASSWORD=beacon-password
 ```
 
-Credentials are verified against `GET /api/admin/check` and stored in the
-browser's `localStorage`, then sent on every request.
+The UI checks the credentials with `GET /api/admin/check`. It stores them in the
+`localStorage` of the browser. It then sends them on every request.
 
 :::warning
-This is browser-side gating over Beacon's HTTP Basic admin auth, it restricts
-who uses the UI, it is not a secret-keeping mechanism. Serve Beacon over HTTPS
-and expose `/admin` only to trusted operators.
+This login runs in the browser, over the HTTP Basic admin auth of Beacon. It
+controls who uses the UI. It keeps no secret. Serve Beacon over HTTPS. Give
+`/admin` only to operators that you trust.
 :::
 
 ## Features
 
-- **Query editor**: an Athena-style workbench: a searchable table/column data
-  panel, a CodeMirror SQL editor (run with <kbd>⌘</kbd>/<kbd>Ctrl</kbd> +
-  <kbd>Enter</kbd>), a results grid, and CSV / Parquet download. **Explain**
-  renders the query's logical plan as a collapsible tree, and queries can be
-  **saved** to the browser and reloaded.
-- **Tables**: browse registered tables, their Arrow schemas and table
-  configuration, register an [external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables)
-  over files in the datasets store, and drop a table (`DROP TABLE`, leaving the
-  underlying files in place).
-- **Datasets**: explore discovered dataset files and inspect each file's schema.
-- **Crawlers**: list, [create, run, and delete crawlers](/docs/2.0.0-rc2/data-lake/crawlers).
-- **Users & roles**: manage [role-based access control](/docs/2.0.0-rc2/security/access-control):
-  users, roles, and privileges.
-- **Server**: runtime info, health, and the available scalar / table functions.
-- **Light / dark / system theme**: switch from the top bar; the choice persists
-  in the browser.
+- **Query editor**: a workbench with a data panel for tables and columns. The
+  panel has a search. It also has a CodeMirror SQL editor. Run a query with
+  <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd>. The editor shows a results
+  grid. You can download CSV or Parquet. **Explain** shows the logical plan as a
+  tree. You can also **save** a query in the browser and load it again.
+- **Tables**: browse the registered tables, their Arrow schemas and their
+  configuration. Register an
+  [external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) over the
+  files in the datasets store. Drop a table with `DROP TABLE`. Beacon keeps the
+  files.
+- **Datasets**: explore the dataset files that Beacon finds. Inspect the schema of
+  each file.
+- **Crawlers**: list, [create, run and delete crawlers](/docs/2.0.0-rc2/data-lake/crawlers).
+- **Users and roles**: manage the
+  [role-based access control](/docs/2.0.0-rc2/security/access-control). This covers
+  users, roles and privileges.
+- **Server**: the runtime information, the health and the available scalar and
+  table functions.
+- **Light, dark and system theme**: change it in the top bar. The browser keeps
+  your choice.
 
-## Running it standalone
+## Run it standalone
 
-The bundled copy is enough for most deployments. To run the UI from source (for
-development) it lives in the `beacon-datalake-clients/` npm workspace and depends on the SDK,
-which must be built first:
+The included copy is enough for most deployments. You can also run the UI from
+source, for development. The source lives in the `beacon-datalake-clients/` npm
+workspace. It depends on the SDK. Build the SDK first:
 
 ```bash
 # from beacon-datalake-clients/
@@ -68,6 +73,6 @@ npm run build -w @beacon/client   # build the SDK so beacon-web can import it
 npm run dev -w @beacon/web        # start the Vite dev server
 ```
 
-Point it at any running Beacon server; the default CORS policy permits the dev
-server to call the API directly. The app source is in
+Point the UI at any Beacon server. The default CORS policy lets the development
+server call the API directly. The application source is in
 [`beacon-datalake-clients/beacon-web`](https://github.com/maris-development/beacon/tree/main/beacon-datalake-clients/beacon-web).

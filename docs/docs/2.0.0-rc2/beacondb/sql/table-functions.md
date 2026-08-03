@@ -1,8 +1,12 @@
-# Reading Files
+# Read Files
 
-Table functions let you query files directly in a `FROM` clause without creating a persistent [External Table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) first. They are useful for ad-hoc exploration or when you want to embed the file path logic inside a [View](/docs/2.0.0-rc2/data-lake/view).
+A table function queries files directly in a `FROM` clause. You create no
+[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) first. Use a table function
+for ad-hoc exploration. Also use it to put the file paths inside a
+[view](/docs/2.0.0-rc2/data-lake/view).
 
-All functions take the file path(s) to read as their first argument. This can be **either a single glob/path string** or **a list of strings**. Globs are resolved relative to Beacon's configured dataset storage root.
+The first argument of every function gives the file paths. Use **one path or glob string**, or **a
+list of strings**. Beacon resolves a glob against its dataset storage root.
 
 ```sql
 -- Single path
@@ -15,7 +19,8 @@ SELECT * FROM read_netcdf('argo/**/*.nc')
 SELECT * FROM read_netcdf(['argo/**/*.nc', 'wod/**/*.nc'])
 ```
 
-In every signature below, the `glob_paths` argument accepts either form, a single string or a list of strings.
+The `glob_paths` argument of every signature below accepts both forms: one string or a list of
+strings.
 
 ## `read_netcdf`
 
@@ -24,9 +29,11 @@ read_netcdf(glob_paths)
 read_netcdf(glob_paths, dimensions)
 ```
 
-Reads NetCDF files matching one or more glob patterns.
+Beacon reads the NetCDF files that match one or more glob patterns.
 
-The optional `dimensions` argument filters which variables are returned: a variable is included only if all of its dimensions are a subset of the provided list. Use it to exclude high-dimensional variables you don't need, or to resolve ambiguity when files contain variables with incompatible dimensionalities.
+The optional `dimensions` argument selects the variables. Beacon returns a variable only if the list
+holds all of its dimensions. Use the argument to drop variables with many dimensions. Also use it
+when the files hold variables with different dimensions.
 
 ```sql
 SELECT time, latitude, longitude, temperature
@@ -39,7 +46,10 @@ FROM read_netcdf(['argo/**/*.nc'], ['time', 'pressure'])
 
 ### Variable attributes
 
-NetCDF variable attributes (e.g. `units`, `long_name`) are exposed as additional columns using the pattern `<variable>.<attribute>`. Attribute columns preserve the original type (string, integer, float, …). File-level global attributes use a leading dot with no variable prefix: `.<attribute>`. Quote these column names because they contain a dot.
+Beacon shows the NetCDF variable attributes, such as `units` and `long_name`, as extra columns. It
+uses the pattern `<variable>.<attribute>`. An attribute column keeps the type from the file: string,
+integer, float and so on. A file attribute has no variable prefix. It uses a leading dot:
+`.<attribute>`. Quote these column names, because they contain a dot.
 
 ```sql
 -- Variable attribute
@@ -60,11 +70,15 @@ read_zarr(glob_paths)
 read_zarr(glob_paths, dimensions)
 ```
 
-Reads Zarr stores matching one or more glob patterns. Each path should point at a `zarr.json` entry file.
+Beacon reads the Zarr stores that match one or more glob patterns. Each path must point at a
+`zarr.json` entry file.
 
-The optional `dimensions` argument restricts the arrays returned to those whose dimensions are a subset of the provided list, use it to drop high-dimensional arrays you don't need.
+The optional `dimensions` argument selects the arrays. Beacon returns an array only if the list
+holds all of its dimensions. Use the argument to drop arrays with many dimensions.
 
-Predicate pushdown is automatic: Beacon prunes chunks and slices coordinate dimensions (e.g. `time`, `latitude`, `longitude`) based on the query's `WHERE` clause, no statistics columns need to be declared.
+Predicate pushdown is automatic. Beacon prunes chunks and slices the coordinate dimensions such as
+`time`, `latitude` and `longitude`. It uses the `WHERE` clause of your query. You declare no
+statistics columns.
 
 ```sql
 SELECT * FROM read_zarr('sst/*/zarr.json')
@@ -77,7 +91,10 @@ WHERE time >= '2024-01-01'
 
 ### Array attributes
 
-Per-array attributes are exposed as additional columns using the pattern `<array>.<attribute>`. Attribute columns preserve the original type (string, integer, float, …). Root-level store attributes use a leading dot with no array prefix: `.<attribute>`. Quote these column names because they contain a dot.
+Beacon shows the attributes of an array as extra columns. It uses the pattern
+`<array>.<attribute>`. An attribute column keeps the type from the file: string, integer, float and
+so on. A root attribute of the store has no array prefix. It uses a leading dot: `.<attribute>`.
+Quote these column names, because they contain a dot.
 
 ```sql
 -- Array attribute
@@ -98,9 +115,13 @@ read_atlas(glob_paths)
 read_atlas(glob_paths, dimensions)
 ```
 
-Reads [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) array stores matching one or more glob patterns. Each path must point at an `atlas.json` marker file, an exact path or a glob such as `**/atlas.json`.
+Beacon reads the [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas) array stores that match
+one or more glob patterns. Each path must point at an `atlas.json` marker file. Give an exact path
+or a glob such as `**/atlas.json`.
 
-The optional `dimensions` argument filters the arrays to those matching the listed dimension names. Atlas prunes whole datasets using per-column statistics, so range queries over large collections only read the datasets that can match the predicate.
+The optional `dimensions` argument selects the arrays with the listed dimension names. Atlas holds
+statistics for each column. Beacon drops whole datasets with those statistics. A range query over a
+large collection therefore reads only the datasets that can match the predicate.
 
 ```sql
 SELECT * FROM read_atlas('collections/sensor/atlas.json')
@@ -127,7 +148,9 @@ SELECT * FROM read_parquet('obs/**/*.parquet') LIMIT 100
 read_geoparquet(glob_paths)
 ```
 
-Reads [GeoParquet](https://geoparquet.org/) files. Geometry columns described in the file's `geo` metadata are decoded to their native [GeoArrow](https://geoarrow.org/) representation; files without geometry are read like ordinary Parquet.
+Beacon reads [GeoParquet](https://geoparquet.org/) files. The `geo` metadata of a file describes its
+geometry columns. Beacon decodes those columns to native [GeoArrow](https://geoarrow.org/). Beacon
+reads a file without geometry as ordinary Parquet.
 
 ```sql
 SELECT * FROM read_geoparquet('spatial/**/*.geoparquet') LIMIT 100
@@ -139,7 +162,7 @@ SELECT * FROM read_geoparquet('spatial/**/*.geoparquet') LIMIT 100
 read_arrow(glob_paths)
 ```
 
-Reads Arrow IPC stream files (`.arrow`, `.feather`).
+Beacon reads Arrow IPC stream files (`.arrow`, `.feather`).
 
 ```sql
 SELECT * FROM read_arrow('streams/*.arrow')
@@ -153,10 +176,10 @@ read_csv(glob_paths, delimiter)
 read_csv(glob_paths, delimiter, infer_records)
 ```
 
-Schema is inferred from the file contents. The first row must be a header row.
+Beacon infers the schema from the file contents. The first row must be a header row.
 
-- `delimiter`, single-character field separator (default: `,`)
-- `infer_records`, number of rows to sample when inferring column types (default: `128000`)
+- `delimiter`: the field separator, one character (default: `,`)
+- `infer_records`: the number of rows that Beacon samples for the column types (default: `128000`)
 
 ```sql
 SELECT * FROM read_csv('metadata/*.csv')
@@ -181,7 +204,7 @@ SELECT * FROM read_odv_ascii('odv/**/*.txt')
 read_bbf(glob_paths)
 ```
 
-Reads Beacon Binary Format files.
+Beacon reads Beacon Binary Format files.
 
 ```sql
 SELECT * FROM read_bbf('bbf/**/*.bbf')
@@ -193,7 +216,7 @@ SELECT * FROM read_bbf('bbf/**/*.bbf')
 read_tiff(glob_paths)
 ```
 
-Reads GeoTIFF and Cloud-Optimized GeoTIFF files.
+Beacon reads GeoTIFF and Cloud-Optimized GeoTIFF files.
 
 ```sql
 SELECT * FROM read_tiff('rasters/elevation.tif')
@@ -201,7 +224,10 @@ SELECT * FROM read_tiff('rasters/elevation.tif')
 
 ### Tag attributes
 
-Per-band TIFF tags are exposed as additional columns using the pattern `<band>.<attribute>`. Attribute columns preserve the original type (string, integer, float, …). File-level tags not tied to a specific band use a leading dot with no band prefix: `.<attribute>`. Quote these column names because they contain a dot.
+Beacon shows the TIFF tags of a band as extra columns. It uses the pattern `<band>.<attribute>`. An
+attribute column keeps the type from the file: string, integer, float and so on. A file tag belongs
+to no band. It uses a leading dot: `.<attribute>`. Quote these column names, because they contain a
+dot.
 
 ```sql
 -- Band attribute
@@ -222,12 +248,15 @@ read_delta(location)
 read_delta(location, version_or_timestamp)
 ```
 
-Reads a [Delta Lake](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake) table. Unlike the other functions, `location` is a **single path to the Delta table directory** (the folder containing `_delta_log/`), not a glob or a list. The schema is read from the transaction log.
+Beacon reads a [Delta Lake](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake) table. The
+`location` argument differs from the other functions. It is **one path to the Delta table
+directory**. That directory holds `_delta_log/`. It is not a glob and not a list. Beacon reads the
+schema from the transaction log.
 
 The optional second argument selects a snapshot for **time travel**:
 
-- an integer is a Delta **version** number, e.g. `12`
-- any other string is an RFC-3339 **timestamp**: the latest version at or before it
+- An integer gives a Delta **version** number, for example `12`.
+- Any other string gives an RFC-3339 **timestamp**. Beacon takes the last version at or before it.
 
 ```sql
 -- Latest version
@@ -240,4 +269,5 @@ SELECT count(*) FROM read_delta('delta/ocean_profiles', 12)
 SELECT * FROM read_delta('delta/ocean_profiles', '2026-01-01T00:00:00Z')
 ```
 
-To register a Delta table persistently (and to `INSERT INTO` it), use [`CREATE EXTERNAL TABLE … STORED AS DELTA`](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake).
+Use [`CREATE EXTERNAL TABLE … STORED AS DELTA`](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake)
+to register a Delta table permanently. That form also supports `INSERT INTO`.

@@ -1,6 +1,8 @@
 # UNION ALL BY NAME
 
-`UNION ALL BY NAME` merges rows from multiple queries by matching columns by **name** rather than position. It is the standard way to harmonize datasets that share a common set of column names but may differ in column order, optional variables, or numeric precision.
+`UNION ALL BY NAME` merges the rows of several queries. It matches the columns by **name**, not by
+position. Use it on datasets that share column names. The datasets can differ in column order, in
+optional variables and in numeric precision.
 
 ```sql
 SELECT * FROM read_netcdf(['argo/**/*.nc'])
@@ -10,18 +12,19 @@ UNION ALL BY NAME
 SELECT * FROM read_netcdf(['cora/**/*.nc'])
 ```
 
-## How it differs from plain `UNION ALL`
+## The difference from plain `UNION ALL`
 
 | | `UNION ALL` | `UNION ALL BY NAME` |
 | --- | --- | --- |
 | Column matching | By position | By name |
 | Column order must match | Yes | No |
-| Missing columns | Error | Filled with `NULL` |
-| Type mismatches | Error | Widened automatically |
+| Missing columns | Error | Beacon sets them to `NULL` |
+| Type mismatches | Error | Beacon widens the type |
 
 ## Missing columns become NULL
 
-If a column exists in one input but not another, the missing side is filled with `NULL` and the column is marked nullable in the result:
+A column can exist in one input and not in the other. Beacon sets the missing side to `NULL`. The
+column is then nullable in the result:
 
 ```sql
 -- argo has 'salinity', wod does not
@@ -33,7 +36,8 @@ SELECT * FROM wod_table
 
 ## Automatic type widening
 
-When the same column name has different numeric types across inputs, Beacon widens to a common supertype:
+One column name can have different numeric types in the inputs. Beacon then widens the type to a
+common supertype:
 
 | Left | Right | Result |
 | ---- | ----- | ------ |
@@ -45,11 +49,12 @@ When the same column name has different numeric types across inputs, Beacon wide
 | `Date32` | `Date64` | `Date64` |
 | any | `Null` | the non-null type |
 
-Incompatible types (e.g. `Boolean` and `Int32`) produce a planning error.
+Two incompatible types give a planning error. `Boolean` and `Int32` are an example.
 
-## Narrowing to a shared schema
+## Reduce to a shared schema
 
-Select only the columns you want before the union to keep the output schema clean, regardless of what extra variables each source file contains:
+Select only the columns that you need before the union. The output schema then stays clean. Extra
+variables in a source file do not matter:
 
 ```sql
 SELECT time, latitude, longitude, temperature, salinity
@@ -61,7 +66,7 @@ SELECT time, latitude, longitude, temperature, salinity
 FROM read_netcdf(['wod/**/*.nc'])
 ```
 
-## Persisting the result as a view
+## Store the result as a view
 
 Wrap the union in a `CREATE VIEW` to give it a stable name:
 

@@ -1,15 +1,15 @@
 ---
-description: Which file formats Beacon Data Lake auto-discovers from its datasets store, and where those files live on disk or in object storage.
+description: The file formats that Beacon Data Lake finds in its datasets store. This page also shows where those files live.
 ---
 
 # Supported Formats
 
-Beacon Data Lake discovers datasets from its configured storage root automatically, with no
-registration step. Place files in the datasets folder (or S3 prefix) and they become immediately
-queryable through [reader functions](/docs/2.0.0-rc2/beacondb/data-sources/formats/) or
-[external tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables).
+Beacon Data Lake finds the datasets in its storage root automatically. You register nothing. Copy
+your files into the datasets folder or the S3 prefix. You can then query them at once. Use a
+[reader function](/docs/2.0.0-rc2/beacondb/data-sources/formats/) or an
+[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables).
 
-Default local path inside the Docker container: `/beacon/data/datasets/`
+The default local path in the Docker container is `/beacon/data/datasets/`.
 
 ## Format support matrix
 
@@ -27,31 +27,32 @@ Default local path inside the Docker container: `/beacon/data/datasets/`
 | [Delta Lake](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake) | `_delta_log/` directory | `DELTA` | `read_delta` | no |
 | [ODV ASCII](/docs/2.0.0-rc2/beacondb/data-sources/formats/odv) | `.txt` | not supported | `read_odv_ascii` | yes |
 
-Every format above is auto-discovered from the datasets store except **Delta Lake** and **ODV
-ASCII**: point a [`read_*` function](/docs/2.0.0-rc2/beacondb/data-sources/formats/) (or, for Delta,
-`CREATE EXTERNAL TABLE … STORED AS DELTA LOCATION …`) at those directly. "Output format" marks
-formats a query result can be exported to via
-[`output.format`](/docs/2.0.0-rc2/api/querying/#output-formats).
+Beacon finds every format above in the datasets store. **Delta Lake** and **ODV ASCII** are the
+exception. Point a [`read_*` function](/docs/2.0.0-rc2/beacondb/data-sources/formats/) at them. For
+Delta, `CREATE EXTERNAL TABLE … STORED AS DELTA LOCATION …` also works. The "Output format" column
+marks the formats that
+[`output.format`](/docs/2.0.0-rc2/api/querying/#output-formats) can export a query result to.
 
 :::tip Per-format reference
-Each format has its own chapter covering its read behaviour, attribute columns, limitations, and
-tuning. See [External Files](/docs/2.0.0-rc2/beacondb/data-sources/formats/).
+Each format has its own chapter. The chapter covers the read behaviour, the attribute columns, the
+limitations and the tuning. See [External Files](/docs/2.0.0-rc2/beacondb/data-sources/formats/).
 :::
 
 ## Where files live
 
-The datasets store is either a local directory or an S3-compatible bucket:
+The datasets store is a local directory or an S3-compatible bucket:
 
-- **Local disk**: files under the datasets folder, mounted into the container.
-- **Object storage**: an S3, GCS, or Azure prefix. See
-  [Object Storage](/docs/2.0.0-rc2/beacondb/data-sources/object-storage) for credentials and setup.
+- **Local disk**: the files under the datasets folder. Mount that folder into the container.
+- **Object storage**: an S3, GCS or Azure prefix. See
+  [Object Storage](/docs/2.0.0-rc2/beacondb/data-sources/object-storage) for the credentials and the
+  setup.
 
-Files are read in place. Beacon never copies or converts them, and adding a file makes it queryable
-immediately. To register many datasets under a prefix as named tables in one step, including
-partitioned layouts, use a [crawler](/docs/2.0.0-rc2/data-lake/crawlers).
+Beacon reads the files in place. Beacon never copies or converts them. A new file is queryable at
+once. Use a [crawler](/docs/2.0.0-rc2/data-lake/crawlers) to register many datasets under a prefix
+as named tables in one step. A crawler also handles a partitioned layout.
 
 ## Next
 
-- **[External Files](/docs/2.0.0-rc2/beacondb/data-sources/formats/)**: the per-format reading reference.
-- **[Creating External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables)**: give a set of files a stable table name.
-- **[Performance Tuning](/docs/2.0.0-rc2/data-lake/performance-tuning)**: layout and format choices that speed up scans.
+- **[External Files](/docs/2.0.0-rc2/beacondb/data-sources/formats/)**: the read reference for each format.
+- **[Create External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables)**: give a set of files a stable table name.
+- **[Performance Tuning](/docs/2.0.0-rc2/data-lake/performance-tuning)**: the layout and format choices that make a scan faster.

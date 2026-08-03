@@ -1,14 +1,15 @@
 ---
-description: Give BeaconDB credentials for object stores (S3/GCS/Azure) and remote Beacons as named secrets, session-only or persisted encrypted into the beacon.db file.
+description: Give BeaconDB credentials for object stores and remote Beacons as named secrets. A secret lives in the session or in the beacon.db file.
 ---
 
 # Secrets
 
-Give Beacon credentials for a cloud object store or a remote Beacon as a named, scoped
-`SECRET`, instead of environment variables. This is the shared [`CREATE SECRET`](/docs/2.0.0-rc2/beacondb/sql/secrets)
-statement; the notes here are what's specific to beacondb.
+Give Beacon the credentials of a cloud object store or a remote Beacon as a named, scoped `SECRET`.
+A secret replaces an environment variable. This page uses the shared
+[`CREATE SECRET`](/docs/2.0.0-rc2/beacondb/sql/secrets) statement. The notes below cover beacondb
+only.
 
-## Object-store secrets
+## Object store secrets
 
 ```python
 con.execute("CREATE SECRET my_s3 (TYPE S3, KEY_ID '…', SECRET '…', "
@@ -19,15 +20,15 @@ con.sql("SHOW SECRETS").df()      # name, type, scope, option_keys, persistent �
 con.execute("DROP SECRET my_s3")
 ```
 
-`TYPE` is `S3`/`GCS`/`AZURE`/`HTTP`; `SCOPE` defaults to the whole backend and a longer scope overrides
-it per bucket. The best-matching secret (longest scope prefix) supplies credentials when a store is
-built.
+`TYPE` takes `S3`, `GCS`, `AZURE` or `HTTP`. Without a `SCOPE`, the secret covers the whole backend.
+A longer scope overrides it for one bucket. Beacon takes the secret with the longest scope prefix
+when it opens a store.
 
 ## Session vs. persistent
 
-By default a secret is session-only (in memory for the process). A `CREATE PERSISTENT SECRET` is
-written **into the `beacon.db` file, encrypted** (XChaCha20-Poly1305), so a copied file carries its
-own cloud access:
+By default a secret lives in the session only. Beacon holds it in memory for the process. Beacon
+writes a `CREATE PERSISTENT SECRET` **into the `beacon.db` file, encrypted** with
+XChaCha20-Poly1305. A copy of the file therefore holds its own cloud access:
 
 ```python
 con = beacondb.connect("beacon.db", secrets_key=…)   # base64 32-byte key (or $BEACON_SECRETS_KEY)
@@ -35,12 +36,14 @@ con.execute("CREATE PERSISTENT SECRET my_s3 (TYPE S3, KEY_ID '…', SECRET '…'
 # reopen later with the same key -> my_s3 is still there
 ```
 
-Persisting requires a **master key** (`secrets_key=` or the `BEACON_SECRETS_KEY` env var), BeaconDB
-**refuses to write a plaintext credential to disk**: and a file-backed database (not `:memory:`).
+A persistent secret needs a **master key**. Set it with `secrets_key=` or with the
+`BEACON_SECRETS_KEY` environment variable. BeaconDB **never writes a plaintext credential to disk**.
+A persistent secret also needs a file-backed database, not `:memory:`.
 
-## Remote-Beacon secrets
+## Remote Beacon secrets
 
-A `TYPE BEACON` secret stores the credentials for [`ATTACH`](/docs/2.0.0-rc2/beacondb/python/remote-catalogs):
+A `TYPE BEACON` secret holds the credentials for
+[`ATTACH`](/docs/2.0.0-rc2/beacondb/python/remote-catalogs):
 
 ```python
 con.execute("CREATE SECRET lake (TYPE BEACON, USERNAME 'analyst', PASSWORD '…')")  # or TOKEN '…'

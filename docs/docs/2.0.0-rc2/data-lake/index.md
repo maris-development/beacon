@@ -1,37 +1,56 @@
 # Data lake
 
-Beacon provides a lightweight data lake model that makes scientific datasets easy to discover, query, and serve through a single API. It supports array and tabular formats (NetCDF, Zarr, Parquet, ODV, CSV) and exposes them through Arrow + DataFusion for fast columnar reads.
+Beacon gives a light data lake model. It makes scientific datasets easy to find, to query and to
+serve through one API. It supports array formats and table formats, such as NetCDF, Zarr, Parquet,
+ODV and CSV. It exposes them through Arrow and DataFusion for fast columnar reads.
 
 ## Core concepts
 
-- **Datasets**: Individual files or stores (for example `.nc`, `.zarr`, `.parquet`). Datasets can be queried directly and are the smallest unit in Beacon.
-- **External tables**: A registered name over one or more files (a folder or glob pattern) with a merged schema, queryable as one logical table. See [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables).
-- **Managed tables**: tables Beacon owns and can mutate with `INSERT` / `UPDATE` / `DELETE`, backed by the Lance engine (default) or Iceberg. See [Managed Tables](/docs/2.0.0-rc2/beacondb/sql/managed-tables).
-- **Views**: A saved query exposed as a table. See [Views](/docs/2.0.0-rc2/data-lake/view).
-- **Metadata & schema**: Beacon inspects dataset metadata and builds schemas so you can discover available columns before running queries.
-- **Pushdown & partitioning**: Filters and projections are pushed down to reduce IO and speed up queries over large data.
+- **Datasets**: single files or stores, for example `.nc`, `.zarr` and `.parquet`. You query a
+  dataset directly. It is the smallest unit in Beacon.
+- **External tables**: a registered name over one or more files. Give a folder or a glob pattern.
+  Beacon merges the schemas. You query the files as one table. See
+  [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables).
+- **Managed tables**: tables that Beacon owns. You change them with `INSERT`, `UPDATE` and
+  `DELETE`. The Lance engine holds them by default. Iceberg is the other option. See
+  [Managed Tables](/docs/2.0.0-rc2/beacondb/sql/managed-tables).
+- **Views**: a saved query that behaves like a table. See
+  [Views](/docs/2.0.0-rc2/data-lake/view).
+- **Metadata and schema**: Beacon reads the dataset metadata and builds the schemas. You can
+  therefore see the available columns before you write a query.
+- **Pushdown and partitions**: Beacon pushes filters and projections down. This reduces the I/O and
+  makes a query over large data faster.
 <!-- MCP is unreleased. Restore on release:
-- **MCP server**: Expose your lakehouse to AI agents (e.g. Claude) as read-only tools over the Model Context Protocol, so they can discover tables and run `SELECT` queries. See [MCP Server](/docs/2.0.0-rc2/mcp).
+- **MCP server**: give your lakehouse to AI agents such as Claude, as read-only tools over the Model
+  Context Protocol. The agents find the tables and run `SELECT` queries. See
+  [MCP Server](/docs/2.0.0-rc2/mcp).
 -->
 
 ## How it works at a glance
 
-1. **Register or place datasets** in the configured data directories or object store.
-2. **Inspect schemas** through the API to understand available columns.
-3. **Query datasets or tables** using SQL or the JSON query DSL.
+1. **Register or copy the datasets** into the configured data directories or object store.
+2. **Inspect the schemas** through the API. You then know the available columns.
+3. **Query a dataset or a table** with SQL or with the JSON query DSL.
 <!-- MCP is unreleased. Restore on release:
-4. **Serve it to AI agents** (optional): opt tables in via their `mcp` extension and let agents query the lakehouse over MCP. See [MCP Server](/docs/2.0.0-rc2/mcp).
+4. **Serve it to AI agents**, optional. Enable the `mcp` extension of a table. The agents then query
+   the lakehouse over MCP. See [MCP Server](/docs/2.0.0-rc2/mcp).
 -->
 
-For detailed guidance, see the [SQL query docs](/docs/2.0.0-rc2/api/querying/sql) and [JSON query docs](/docs/2.0.0-rc2/api/querying/json).
+For the full detail, see the [SQL query docs](/docs/2.0.0-rc2/api/querying/sql) and the
+[JSON query docs](/docs/2.0.0-rc2/api/querying/json).
 
 <!-- MCP is unreleased. Restore this whole section on release:
 
 ## Serve the lakehouse to AI agents (MCP)
 
-Once your datasets and tables are registered, Beacon can expose them to AI agents (e.g. Claude, GitHub Copilot) through its built-in [MCP Server](/docs/2.0.0-rc2/mcp), the same lakehouse, the same access control, served as **read-only** tools over the Model Context Protocol. Agents can discover your tables, inspect their schemas, and run `SELECT` queries without any extra service.
+Register your datasets and tables first. Beacon can then give them to AI agents such as Claude and
+GitHub Copilot. It uses its built-in [MCP Server](/docs/2.0.0-rc2/mcp). The lakehouse and the access
+control stay the same. Beacon serves the tables as **read-only** tools over the Model Context
+Protocol. An agent finds your tables, inspects their schemas and runs `SELECT` queries. You deploy
+no extra service.
 
-Exposure is opt-in per table via the table's `mcp` [extension](/docs/2.0.0-rc2/data-lake/extensions), so agents only ever see the tables and columns you choose:
+You enable each table with its `mcp` [extension](/docs/2.0.0-rc2/data-lake/extensions). An agent
+therefore sees only the tables and columns that you choose:
 
 ```sql
 SET EXTENSION 'mcp' FOR obs TO '{
@@ -42,8 +61,12 @@ SET EXTENSION 'mcp' FOR obs TO '{
 }';
 ```
 
-Each opted-in table becomes a dedicated tool (restricted to its exposed columns), alongside generic `list_tables`, `describe_table`, and `run_sql` tools. Access is governed by the same identity and role grants as the rest of Beacon, see [Access control](/docs/2.0.0-rc2/security/access-control).
+Each enabled table becomes its own tool. The tool covers the exposed columns only. Beacon also gives
+the generic tools `list_tables`, `describe_table` and `run_sql`. The same identity and role grants
+control the access. See [Access control](/docs/2.0.0-rc2/security/access-control).
 
-To connect a client, lock down authentication, or expose large results, see the full [MCP Server guide](/docs/2.0.0-rc2/mcp). The queries agents run are ordinary Beacon SQL, see the [SQL Guide](/docs/2.0.0-rc2/beacondb/sql/) for what they can express.
+The full [MCP Server guide](/docs/2.0.0-rc2/mcp) shows how to connect a client, how to restrict
+authentication and how to serve a large result. An agent runs ordinary Beacon SQL. The
+[SQL Guide](/docs/2.0.0-rc2/beacondb/sql/) gives the full dialect.
 
 -->

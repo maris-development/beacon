@@ -8,21 +8,30 @@ WITH ('format' 'parquet', 'schedule' '15m');
 RUN CRAWLER argo;
 ```
 
-A **crawler** automatically discovers datasets in Beacon's storage and registers them as [external tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables), so you don't have to write one `CREATE EXTERNAL TABLE` per dataset. It scans a prefix, groups files by format, detects Hive-style partitions, infers each table's schema, and registers a table for every dataset it finds. As new files land, a crawler keeps the catalog up to date on a schedule or in response to storage events.
+A **crawler** finds the datasets in the storage of Beacon. It registers them as
+[external tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables). You therefore write no
+`CREATE EXTERNAL TABLE` for each dataset. A crawler scans a prefix. It groups the files by format.
+It detects Hive-style partitions. It infers the schema of each table. It then registers a table for
+each dataset. A crawler also keeps the catalog current when new files arrive. It runs on a schedule
+or after a storage event.
 
-This is Beacon's equivalent of an AWS Glue crawler. The tables it produces are ordinary external tables: they persist across restarts, and you `SELECT`, `JOIN`, and `DROP` them like any other table.
+A Beacon crawler works like an AWS Glue crawler. It produces ordinary external tables. Those tables
+survive a restart. You run `SELECT`, `JOIN` and `DROP` on them, like any other table.
 
 :::tip When to use a crawler
-Reach for a crawler when you have **many** datasets under a prefix (often partitioned by date/region) and want them registered, and kept current, without maintaining DDL by hand. For a one-off table, a plain [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table) is simpler.
+Use a crawler when you have **many** datasets under a prefix. Such datasets often use a partition by
+date or by region. The crawler registers them and keeps them current. You write no DDL by hand. For
+one table, a plain [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table) is simpler.
 :::
 
-Crawler DDL can be submitted through any of Beacon's SQL surfaces:
+You can send the crawler DDL through any SQL interface of Beacon:
 
 - **HTTP**: `POST /api/query` with `{ "sql": "CREATE CRAWLER ..." }`
-- **Arrow Flight SQL**: any Flight SQL client (DataGrip, ADBC, DBeaver, …)
+- **Arrow Flight SQL**: any Flight SQL client, such as DataGrip, ADBC or DBeaver
 
 :::info
-Running DDL over the HTTP API needs the SQL interface, which is enabled by default (`BEACON_ENABLE_SQL`). Arrow Flight SQL does not require this flag.
+DDL over the HTTP API needs the SQL interface. That interface is on by default
+(`BEACON_ENABLE_SQL`). Arrow Flight SQL does not need this flag.
 :::
 
 ## CREATE CRAWLER
@@ -34,20 +43,23 @@ CREATE CRAWLER <name>
 ```
 
 - **`<name>`**: a unique crawler name.
-- **`ON '<prefix>'`**: the storage prefix to scan, relative to the datasets root (e.g. `argo/`). Equivalent to the `target_prefix` option.
-- **`WITH (...)`**: key/value options, using the same shape as `CREATE EXTERNAL TABLE … OPTIONS (…)`.
+- **`ON '<prefix>'`**: the storage prefix to scan, relative to the datasets root, for example
+  `argo/`. It equals the `target_prefix` option.
+- **`WITH (...)`**: the key and value options. They use the same form as
+  `CREATE EXTERNAL TABLE … OPTIONS (…)`.
 
 ### Options
 
 | Option | Default | Description |
 |---|---|---|
-| `format` | all formats | Comma-separated list restricting which formats to discover, e.g. `'parquet,nc'`. |
-| `detect_partitions` | `true` | Detect Hive-style `key=value/` partitions and map them to partition columns. |
-| `schedule` | _none_ | Periodic re-crawl interval: `30s`, `15m`, `2h`, `1d`, or a bare number of seconds. Omit for no timer. |
-| `event_driven` | `false` | Re-crawl when storage events fire under the prefix (see [Triggers](#triggers)). |
-| `table_naming` | `leaf_prefix` | `leaf_prefix` (use the prefix leaf) or `crawler_prefixed` (`<crawler>_<leaf>`). |
+| `format` | all formats | A list with commas. It limits the formats that the crawler finds, for example `'parquet,nc'`. |
+| `detect_partitions` | `true` | Detect Hive-style `key=value/` partitions. Map them to partition columns. |
+| `schedule` | _none_ | The interval between two crawls: `30s`, `15m`, `2h`, `1d`, or a number of seconds. Omit it for no timer. |
+| `event_driven` | `false` | Crawl again after a storage event under the prefix. See [Triggers](#triggers). |
+| `table_naming` | `leaf_prefix` | `leaf_prefix` uses the last part of the prefix. `crawler_prefixed` gives `<crawler>_<leaf>`. |
 
-Any **other** key in `WITH (...)` is forwarded verbatim into every discovered table's format `OPTIONS`, for example `'read_dimensions' 'lat,lon'` for NetCDF.
+The crawler copies any **other** key in `WITH (...)` into the format `OPTIONS` of each table that it
+finds. `'read_dimensions' 'lat,lon'` for NetCDF is an example.
 
 ```sql
 CREATE CRAWLER profiles
@@ -61,7 +73,9 @@ WITH (
 );
 ```
 
-Defining a crawler **persists** it (it reloads on restart) and starts its triggers, but does not crawl immediately, issue `RUN CRAWLER` for the first pass, or wait for the first scheduled tick.
+`CREATE CRAWLER` **stores** the crawler. Beacon reloads it after a restart. The statement also starts
+the triggers. It does not crawl at once. Run `RUN CRAWLER` for the first pass, or wait for the first
+scheduled run.
 
 ## RUN CRAWLER
 
@@ -69,7 +83,8 @@ Defining a crawler **persists** it (it reloads on restart) and starts its trigge
 RUN CRAWLER <name>
 ```
 
-Runs a crawl once, on demand. Each run scans the prefix and creates or updates the tables it owns. Runs are idempotent, re-running registers no duplicates.
+Runs one crawl on demand. Each run scans the prefix. It then creates or updates the tables that it
+owns. A run is idempotent. A second run registers no duplicate.
 
 ## SHOW CRAWLERS
 
@@ -77,7 +92,8 @@ Runs a crawl once, on demand. Each run scans the prefix and creates or updates t
 SHOW CRAWLERS
 ```
 
-Lists every defined crawler with its prefix, format filter, schedule, partition and event settings, and naming policy.
+Lists every crawler. Each row gives the prefix, the format filter, the schedule, the partition and
+event settings, and the name policy.
 
 ## DROP CRAWLER
 
@@ -85,11 +101,12 @@ Lists every defined crawler with its prefix, format filter, schedule, partition 
 DROP CRAWLER <name>
 ```
 
-Removes the crawler definition and stops its triggers. **The tables it created are left in place**: dropping a crawler never deletes data or tables. Drop the tables separately with `DROP TABLE` if you want them gone.
+Removes the crawler definition and stops its triggers. **Beacon keeps the tables that it created.**
+`DROP CRAWLER` never deletes data or a table. Use `DROP TABLE` to remove a table.
 
 ## Partition detection
 
-With `detect_partitions` enabled (the default), the crawler recognises Hive-style directory partitioning:
+`detect_partitions` is on by default. The crawler then recognizes a Hive-style directory partition:
 
 ```
 argo/year=2024/month=01/part-0.parquet
@@ -97,76 +114,104 @@ argo/year=2024/month=02/part-1.parquet
 argo/year=2025/month=01/part-2.parquet
 ```
 
-becomes a single table partitioned by `year` and `month`. The partition columns are added to the table schema and support partition pruning:
+These files become one table with a partition by `year` and `month`. The crawler adds the partition
+columns to the table schema. Beacon can then prune the partitions:
 
 ```sql
 SELECT count(*) FROM argo WHERE year = '2024' AND month = '01';
 ```
 
-Files that share a format and a base prefix are grouped into one table; the partition columns are read from the `key=value` path segments.
+The crawler groups the files with the same format and the same base prefix into one table. It reads
+the partition columns from the `key=value` parts of the path.
 
 ## Table naming
 
-A discovered group is named after the **leaf** of its base prefix. For example, files under `data/argo_floats/…` produce a table named `argo_floats`. Use `table_naming` `crawler_prefixed` to prefix the crawler name (`<crawler>_argo_floats`). Names are slugified to valid SQL identifiers, and collisions are disambiguated deterministically.
+The crawler names a group after the **last part** of its base prefix. The files under
+`data/argo_floats/…` therefore give a table named `argo_floats`. Set `table_naming` to
+`crawler_prefixed` to add the crawler name, as in `<crawler>_argo_floats`. The crawler converts each
+name into a valid SQL identifier. It also resolves a name conflict in the same way each time.
 
 ## Ownership
 
-Crawled tables are tagged internally as owned by the crawler that created them. This guarantees two things:
+Beacon marks each crawled table with the crawler that created it. This gives two guarantees:
 
-- A crawl **never overwrites a hand-created table** (or one owned by a different crawler), such tables are skipped.
-- Re-running a crawler **updates its own tables** (new files, new partitions, schema changes) rather than creating duplicates.
+- A crawl **never overwrites a table that you created by hand**. It also never overwrites a table of
+  another crawler. The crawler skips those tables.
+- A second run of a crawler **updates its own tables**. It adds new files, new partitions and schema
+  changes. It creates no duplicate.
 
-The ownership marker is internal and is hidden from the table config API.
+The owner marker is internal. The table config API does not show it.
 
 ## Triggers
 
-Crawlers can keep the catalog current automatically through two mechanisms:
+A crawler keeps the catalog current in two ways:
 
 ### Scheduled
 
-When `schedule` is set, Beacon runs the crawl on that interval. Scheduling re-lists the prefix every tick and reconciles new files, new partitions, and schema changes. This is the baseline mechanism and works on every storage backend, including S3.
+With a `schedule`, Beacon runs the crawl on that interval. Each run lists the prefix again. It then
+adds the new files, the new partitions and the schema changes. This is the basic mechanism. It works
+on every storage backend, also on S3.
 
 ### Event-driven
 
-When `event_driven` is `true` **and** storage events are available, Beacon subscribes to change events under the prefix and runs an incremental crawl shortly after new or changed files appear (debounced to coalesce bursts). This gives lower latency than polling.
+Set `event_driven` to `true`. Storage events must also be available. Beacon then subscribes to the
+change events under the prefix. It runs a small crawl soon after a new or changed file appears. A
+debounce merges a burst of events. This gives a lower latency than a schedule.
 
 :::warning Event availability
-Storage change events are not currently wired up on any backend, so `event_driven` crawlers do not fire on file changes today. If a crawler requests `event_driven` **and** has no `schedule`, Beacon falls back to a default poll interval so the crawler still makes progress rather than sitting idle, see [Configuration](#configuration).
+No backend supports storage change events today. An `event_driven` crawler therefore does not react
+to a file change. A crawler with `event_driven` and **no** `schedule` gets a default poll interval.
+The crawler then still makes progress. See [Configuration](#configuration).
 :::
 
 ## Configuration
 
 | Environment variable | Default | Description |
 |---|---|---|
-| `BEACON_CRAWLER_ENABLE` | `true` | Master switch for crawler background triggers. When `false`, crawlers can still be defined and run on demand, but no scheduled/event tasks are spawned. |
-| `BEACON_CRAWLER_DEFAULT_INTERVAL_SECS` | `900` | Fallback poll interval applied to an `event_driven` crawler when storage events are unavailable and no explicit schedule is set. |
+| `BEACON_CRAWLER_ENABLE` | `true` | The main switch for the background triggers. With `false`, you can still define a crawler and run it on demand. Beacon starts no scheduled task and no event task. |
+| `BEACON_CRAWLER_DEFAULT_INTERVAL_SECS` | `900` | The default poll interval of an `event_driven` crawler. Beacon uses it when storage events are absent and the crawler has no schedule. |
 
 ## Admin REST API
 
-Besides the SQL DDL above, crawlers can be managed over HTTP. All of these
-endpoints require admin basic auth (the same credentials used for other write
-operations) and back the admin web UI:
+You can also manage a crawler over HTTP, next to the SQL DDL above. Each endpoint needs admin basic
+auth. It uses the same credentials as the other write operations. The admin web UI uses these
+endpoints:
 
 | Method & path | Purpose |
 | --- | --- |
-| `POST /api/admin/crawlers` | Define (or replace) a crawler and start its triggers. |
-| `GET /api/admin/crawlers` | List all defined crawlers. |
-| `GET /api/admin/crawlers/{name}` | Fetch one crawler's definition (404 if unknown). |
-| `POST /api/admin/crawlers/{name}/run` | Run a crawler once on demand and return its report. |
-| `DELETE /api/admin/crawlers/{name}` | Remove a crawler and stop its triggers (crawled tables are left in place). |
+| `POST /api/admin/crawlers` | Define or replace a crawler. Start its triggers. |
+| `GET /api/admin/crawlers` | List every crawler. |
+| `GET /api/admin/crawlers/{name}` | Return the definition of one crawler. Returns 404 for an unknown name. |
+| `POST /api/admin/crawlers/{name}/run` | Run a crawler once on demand. Return its report. |
+| `DELETE /api/admin/crawlers/{name}` | Remove a crawler and stop its triggers. Beacon keeps the crawled tables. |
 
 ## Supported formats and limitations
 
-The crawler discovers **file-per-dataset** formats whose filename extension exactly equals the format identifier: `parquet`, `geoparquet`, `csv`, `nc` (NetCDF), `bbf`, `arrow`, and `tiff`. Alias extensions are **not** crawled, a file must use the canonical extension. In particular `.tsv` (read as CSV), `.feather` (read as Arrow), and `.tif` (read as TIFF) are skipped by the crawler even though those formats can read them directly; register such files with an explicit table function or `CREATE EXTERNAL TABLE`.
+The crawler finds **one file per dataset** formats. The file extension must equal the format
+identifier exactly. The identifiers are `parquet`, `geoparquet`, `csv`, `nc` for NetCDF, `bbf`,
+`arrow` and `tiff`. The crawler does **not** read an alias extension. A file must use the canonical
+extension. The crawler therefore skips `.tsv` (CSV), `.feather` (Arrow) and `.tif` (TIFF). The
+readers open those files directly. Register such a file with a table function or with
+`CREATE EXTERNAL TABLE`.
 
-Directory/marker-based stores, **Zarr** (`*.zarr/zarr.json`) and **Atlas** (`atlas.json`), are **skipped** by the crawler. They are not registered as external tables through the listing-table path (Zarr is read via [`read_zarr`](/docs/2.0.0-rc2/beacondb/sql/table-functions#read-zarr)); a crawl that encounters them ignores them and continues with the other datasets. Register these with an explicit table function or `CREATE EXTERNAL TABLE` instead.
+The crawler **skips** a store with a directory and a marker file. **Zarr** (`*.zarr/zarr.json`) and
+**Atlas** (`atlas.json`) are such stores. The listing path does not register them as external
+tables. Read a Zarr store with
+[`read_zarr`](/docs/2.0.0-rc2/beacondb/sql/table-functions#read-zarr). A crawl ignores these stores
+and continues with the other datasets. Register them with a table function or with
+`CREATE EXTERNAL TABLE`.
 
-GeoParquet files are matched by the `.geoparquet` extension and crawled as GeoParquet tables (with GeoArrow geometry decoding). A plain `.parquet` file, even one carrying `geo` metadata, is crawled as an ordinary Parquet table; to get geometry decoding for such a file, give it the `.geoparquet` extension or register a GeoParquet external table explicitly.
+The crawler matches a GeoParquet file by the `.geoparquet` extension. It creates a GeoParquet table
+with GeoArrow geometry decoding. The crawler reads a plain `.parquet` file as an ordinary Parquet
+table, also with `geo` metadata. To get geometry decoding for such a file, give it the
+`.geoparquet` extension. You can also register a GeoParquet external table yourself.
 
-**Delta Lake** tables, directories containing a `_delta_log/`, are also **not** auto-crawled. Register them explicitly with [`CREATE EXTERNAL TABLE ... STORED AS DELTA`](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake).
+The crawler also **skips** a **Delta Lake** table. Such a table is a directory with a `_delta_log/`
+folder. Register it with
+[`CREATE EXTERNAL TABLE ... STORED AS DELTA`](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake).
 
 ## See also
 
-- [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables), the tables a crawler produces
-- [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table), the manual equivalent, including `PARTITIONED BY`
-- [Configuration](/docs/2.0.0-rc2/data-lake/configuration), all Beacon settings
+- [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables): the tables that a crawler produces
+- [`CREATE EXTERNAL TABLE`](/docs/2.0.0-rc2/beacondb/sql/create-table): the manual form, with `PARTITIONED BY`
+- [Configuration](/docs/2.0.0-rc2/data-lake/configuration): every Beacon setting

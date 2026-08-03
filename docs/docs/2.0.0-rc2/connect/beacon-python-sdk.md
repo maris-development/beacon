@@ -1,8 +1,9 @@
 # Beacon Python SDK
 
-Beacon has an official Python client library that makes it easy to explore a data lake and run queries without manually constructing HTTP requests.
+Beacon has an official Python client library. Use it to explore a data lake and to run queries. You
+build no HTTP request by hand.
 
-The SDK documentation lives here:
+The SDK documentation is here:
 
 - [Beacon Python SDK docs](https://maris-development.github.io/beacon-py/latest/)
 
@@ -20,7 +21,7 @@ from beacon_api import Client
 
 ## Connect to a Beacon node
 
-Create a client using your Beacon base URL:
+Create a client with the base URL of your Beacon server:
 
 ```python
 from beacon_api import Client
@@ -39,7 +40,7 @@ print(info.get("beacon_version"))
 
 ## Explore tables
 
-`list_tables()` returns a mapping of table names to `DataTable` helpers.
+`list_tables()` returns a map. It maps each table name to a `DataTable` helper.
 
 ```python
 tables = client.list_tables()
@@ -48,7 +49,7 @@ for name, table in tables.items():
     print(name, table.get_table_type(), table.get_table_description())
 ```
 
-Inspect the Arrow schema for a table:
+Inspect the Arrow schema of a table:
 
 ```python
 default_table = tables["default"]
@@ -58,9 +59,9 @@ for field in schema:
     print(f"{field.name}: {field.type}")
 ```
 
-## Explore datasets (Beacon ≥ 1.4.0)
+## Explore datasets (Beacon 1.4.0 and later)
 
-If your node supports dataset listing, you can query files directly (without creating a table first).
+Does your node list datasets? Then you can query the files directly. You create no table first.
 
 ```python
 datasets = client.list_datasets(pattern="**/*.parquet", limit=10)
@@ -72,7 +73,7 @@ schema = first.get_schema()
 
 ## Query with the JSON builder (recommended)
 
-Start from a table (or dataset) and chain selects and filters.
+Start from a table or a dataset. Then chain the selects and the filters.
 
 ```python
 stations = client.list_tables()["default"]
@@ -95,7 +96,7 @@ print(df.head())
 
 ### Expressions and functions
 
-The SDK exposes helpers for building common server-side expressions:
+The SDK gives helpers for common server-side expressions:
 
 ```python
 from beacon_api.query import Functions
@@ -126,7 +127,7 @@ filtered = (
 )
 ```
 
-For custom boolean logic, compose filter nodes and pass them to `add_filter()`:
+For your own boolean logic, combine filter nodes. Then give them to `add_filter()`:
 
 ```python
 from beacon_api.query import AndFilter, RangeFilter
@@ -139,7 +140,7 @@ filtered = filtered.add_filter(
 )
 ```
 
-### Distinct and sorting
+### Distinct and sort
 
 ```python
 query = (
@@ -155,16 +156,17 @@ query = (
 
 ### Explain the plan
 
-`explain()` calls the Beacon `/api/explain-query` endpoint so you can inspect how the server plans to execute your request.
+`explain()` calls the `/api/explain-query` endpoint of Beacon. You then see the plan of the server
+for your request.
 
 ```python
 plan = query.explain()
 print(plan)
 ```
 
-## Export results (Pandas / GeoPandas / Parquet / NetCDF / ...)
+## Export results (Pandas, GeoPandas, Parquet, NetCDF and more)
 
-Every query can materialize into common Python data structures or write directly to disk.
+A query returns a common Python data structure. It also writes directly to disk.
 
 ```python
 query = (
@@ -186,12 +188,12 @@ query.to_csv("subset.csv")
 ```
 
 ::: tip
-If your Beacon node supports server-side NdNetCDF (Beacon ≥ 1.5.0), you can export using `to_nd_netcdf(path, dimension_columns=[...])`.
+Does your Beacon node support server-side NdNetCDF? That needs Beacon 1.5.0 or later. Then export with `to_nd_netcdf(path, dimension_columns=[...])`.
 :::
 
 ## Query with SQL
 
-If you already have SQL, build an `SQLQuery` and use the same output helpers:
+Do you already have SQL? Then build an `SQLQuery`. It uses the same output helpers:
 
 ```python
 sql = client.sql_query(

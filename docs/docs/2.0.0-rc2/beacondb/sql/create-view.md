@@ -6,7 +6,8 @@ CREATE VIEW north_atlantic AS
     WHERE latitude BETWEEN 0 AND 70
 ```
 
-A view is a saved `SELECT` statement that behaves like a table. It holds no data, Beacon runs the query on the fly whenever the view is referenced. Views are persisted and survive restarts.
+A view is a saved `SELECT` statement. It behaves like a table. It holds no data. Beacon runs the
+query each time that you reference the view. Beacon stores a view. It survives a restart.
 
 ## Syntax
 
@@ -17,7 +18,7 @@ CREATE [OR REPLACE] VIEW <view_name> AS
 
 ## `OR REPLACE`
 
-Redefine an existing view without dropping it first:
+Define an existing view again. You do not drop it first:
 
 ```sql
 CREATE OR REPLACE VIEW north_atlantic AS
@@ -26,9 +27,10 @@ CREATE OR REPLACE VIEW north_atlantic AS
       AND longitude BETWEEN -80 AND 0
 ```
 
-## Querying over a table function
+## Query over a table function
 
-Views work over [table functions](/docs/2.0.0-rc2/beacondb/sql/table-functions) as well as external tables, useful when you want to expose a specific file set as a named table:
+A view works over a [table function](/docs/2.0.0-rc2/beacondb/sql/table-functions) and over an
+external table. Use it to give a set of files a table name:
 
 ```sql
 CREATE VIEW argo_2024 AS
@@ -37,9 +39,11 @@ CREATE VIEW argo_2024 AS
     WHERE time >= '2024-01-01'
 ```
 
-## Harmonizing datasets with `UNION ALL BY NAME`
+## Combine datasets with `UNION ALL BY NAME`
 
-Use a view to expose multiple datasets with different schemas as a single unified table. See [UNION ALL BY NAME](/docs/2.0.0-rc2/beacondb/sql/union-by-name) for how column matching and type widening work.
+A view can show several datasets with different schemas as one table. See
+[UNION ALL BY NAME](/docs/2.0.0-rc2/beacondb/sql/union-by-name) for the column matching and the type
+widening.
 
 ```sql
 CREATE VIEW all_profiles AS
@@ -50,7 +54,7 @@ CREATE VIEW all_profiles AS
 
 ## `DROP TABLE`
 
-Remove a view from the catalog:
+`DROP TABLE` removes a view from the catalog:
 
 ```sql
 DROP TABLE north_atlantic
@@ -59,5 +63,5 @@ DROP TABLE IF EXISTS north_atlantic
 ```
 
 :::info
-`DROP TABLE` removes both external tables and views, there is no separate `DROP VIEW` statement.
+`DROP TABLE` removes an external table and a view. There is no separate `DROP VIEW` statement.
 :::
