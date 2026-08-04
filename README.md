@@ -1,19 +1,38 @@
-# Beacon: a query engine for scientific data
+<div align="center">
 
-[![Release](https://img.shields.io/github/v/release/maris-development/beacon?label=release&color=success)](https://github.com/maris-development/beacon/releases)
-[![Docs](https://img.shields.io/github/actions/workflow/status/maris-development/beacon/pages.yml?label=docs)](https://maris-development.github.io/beacon/)
-[![codecov](https://codecov.io/gh/maris-development/beacon/branch/main/graph/badge.svg)](https://codecov.io/gh/maris-development/beacon)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/maris-development/beacon/pkgs/container/beacon)
-[![License](https://img.shields.io/github/license/maris-development/beacon)](LICENSE)
-[![Slack](https://img.shields.io/badge/slack-join-4A154B?logo=slack&logoColor=white)](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg)
+<img src="docs/public/beacon-logo-small.png" alt="" width="120">
+
+<h1>Beacon</h1>
+
+<p><b>Query millions of files with one SQL statement</b></p>
+
+<p>
+Beacon is a query engine for scientific data. One server serves your whole community over SQL.<br>
+It reads NetCDF, Zarr, Parquet and ODV where the files already are.<br>
+No download. No conversion. No ETL.
+</p>
+
+<p>
+<a href="https://github.com/maris-development/beacon/releases"><img src="https://img.shields.io/github/v/release/maris-development/beacon?label=release&color=success" alt="Release"></a>
+<a href="https://maris-development.github.io/beacon/"><img src="https://img.shields.io/github/actions/workflow/status/maris-development/beacon/pages.yml?label=docs" alt="Docs"></a>
+<a href="https://codecov.io/gh/maris-development/beacon"><img src="https://codecov.io/gh/maris-development/beacon/branch/main/graph/badge.svg" alt="codecov"></a>
+<a href="https://github.com/maris-development/beacon/pkgs/container/beacon"><img src="https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
+<a href="LICENSE"><img src="https://img.shields.io/github/license/maris-development/beacon" alt="License"></a>
+<a href="https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg"><img src="https://img.shields.io/badge/slack-join-4A154B?logo=slack&logoColor=white" alt="Slack"></a>
+</p>
+
+<p>
+<a href="#1-start-a-server"><b>Get started</b></a> &nbsp;·&nbsp;
+<a href="https://maris-development.github.io/beacon/why-beacon">Why Beacon</a> &nbsp;·&nbsp;
+<a href="https://maris-development.github.io/beacon/">Documentation</a> &nbsp;·&nbsp;
+<a href="#query-a-public-server">Try a live server</a>
+</p>
+
+</div>
 
 Beacon is a server. Point it at an archive of scientific files. Your users then query that archive
-with SQL.
-
-Beacon reads NetCDF, Zarr, Parquet, ODV and more in place. It runs no import job. It makes no second
-copy. It sends back only the rows and columns of the answer.
-
-Read [Why Beacon](https://maris-development.github.io/beacon/why-beacon) for the problems it solves.
+with SQL. It runs no import job. It makes no second copy. It sends back only the rows and columns of
+the answer.
 
 ## 1. Start a server
 
