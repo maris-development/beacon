@@ -7,7 +7,7 @@
 <p><b>Query millions of files with one SQL statement</b></p>
 
 <p>
-Beacon is a query engine for scientific data. One server serves your whole community over SQL.<br>
+Beacon is a query engine for scientific data. One server serves your whole community over SQL and JSON.<br>
 It reads NetCDF, Zarr, Parquet and ODV where the files already are.<br>
 No download. No conversion. No ETL.
 </p>
@@ -31,8 +31,8 @@ No download. No conversion. No ETL.
 </div>
 
 Beacon is a server. Point it at an archive of scientific files. Your users then query that archive
-with SQL. It runs no import job. It makes no second copy. It sends back only the rows and columns of
-the answer.
+with SQL or with a JSON query. It runs no import job. It makes no second copy. It sends back only the
+rows and columns of the answer.
 
 ## 1. Start a server
 
@@ -96,9 +96,29 @@ df = client.sql_query(
 ).to_pandas_dataframe()
 ```
 
+### Query with JSON instead of SQL
+
+`POST /api/query` also takes a typed JSON query. Build it in a client program or a query builder.
+You write no SQL string:
+
+```bash
+curl -X POST http://localhost:5001/api/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "select": ["time", "latitude", "longitude", "temperature"],
+    "from": { "netcdf": { "paths": ["**/*.nc"] } },
+    "filters": [{ "column": "temperature", "min": 20, "max": 35 }],
+    "limit": 10,
+    "output": { "format": "csv" }
+  }'
+```
+
+Both interfaces compile to the same plan. See the
+[JSON Query DSL](https://maris-development.github.io/beacon/docs/2.0.0-rc2/api/querying/json).
+
 ### Other clients
 
-Beacon also answers plain HTTP at `POST /api/query`. There is a
+There is a
 [TypeScript SDK](https://maris-development.github.io/beacon/docs/2.0.0-rc2/connect/typescript), a
 [terminal client](https://maris-development.github.io/beacon/docs/2.0.0-rc2/connect/cli), and an
 Arrow Flight SQL endpoint for JDBC and ADBC tools.
@@ -110,7 +130,7 @@ Arrow Flight SQL endpoint for JDBC and ADBC tools.
 | Name your files as tables and views | [Server Setup](https://maris-development.github.io/beacon/docs/2.0.0-rc2/server/) |
 | Set ports, storage and limits | [Configuration](https://maris-development.github.io/beacon/docs/2.0.0-rc2/server/configuration) |
 | Decide who reads what | [Access Control](https://maris-development.github.io/beacon/docs/2.0.0-rc2/security/access-control) |
-| Write queries | [SQL Reference](https://maris-development.github.io/beacon/docs/2.0.0-rc2/sql/) |
+| Write queries | [SQL Reference](https://maris-development.github.io/beacon/docs/2.0.0-rc2/sql/) · [REST API](https://maris-development.github.io/beacon/docs/2.0.0-rc2/api/querying/) |
 | Move from an xarray loop | [Coming from xarray](https://maris-development.github.io/beacon/docs/2.0.0-rc2/coming-from-xarray) |
 
 Documentation home: <https://maris-development.github.io/beacon/>
