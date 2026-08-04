@@ -1,6 +1,6 @@
 # REST API
 
-Beacon gives an HTTP API. Use it to query datasets, to inspect schemas and to manage the data lake.
+Beacon gives an HTTP API. Use it to query datasets, to inspect schemas and to manage the server.
 Every endpoint uses JSON over HTTP.
 
 ## OpenAPI reference
@@ -32,7 +32,7 @@ Returns `200 OK` when Beacon runs and is ready.
 
 | Section | Description |
 | ------- | ----------- |
-| [Exploring the Data Lake](/docs/2.0.0-rc2/api/exploring-data-lake) | Find datasets, tables and schemas |
+| [Exploring the catalog](/docs/2.0.0-rc2/api/exploring-data) | Find datasets, tables and schemas |
 | [Querying](/docs/2.0.0-rc2/api/querying/) | Run a query with the JSON DSL or with SQL, and get the results |
 | [JSON Query DSL](/docs/2.0.0-rc2/api/querying/json) | A structured query format for a client program |
 | [SQL](/docs/2.0.0-rc2/api/querying/sql) | Full SQL through DataFusion |

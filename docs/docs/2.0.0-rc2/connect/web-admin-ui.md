@@ -14,7 +14,7 @@ http://localhost:5001/admin
 
 The UI is a React single-page application. It uses Vite, Tailwind CSS and
 shadcn/ui. It reaches Beacon through the
-[`@beacon/client`](/docs/2.0.0-rc2/connect/beacon-typescript-sdk) TypeScript SDK
+[`@beacon/client`](/docs/2.0.0-rc2/connect/typescript) TypeScript SDK
 only.
 
 ## Log in
@@ -46,12 +46,12 @@ controls who uses the UI. It keeps no secret. Serve Beacon over HTTPS. Give
   tree. You can also **save** a query in the browser and load it again.
 - **Tables**: browse the registered tables, their Arrow schemas and their
   configuration. Register an
-  [external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) over the
+  [external table](/docs/2.0.0-rc2/data-sources/external-tables) over the
   files in the datasets store. Drop a table with `DROP TABLE`. Beacon keeps the
   files.
 - **Datasets**: explore the dataset files that Beacon finds. Inspect the schema of
   each file.
-- **Crawlers**: list, [create, run and delete crawlers](/docs/2.0.0-rc2/data-lake/crawlers).
+- **Crawlers**: list, [create, run and delete crawlers](/docs/2.0.0-rc2/server/crawlers).
 - **Users and roles**: manage the
   [role-based access control](/docs/2.0.0-rc2/security/access-control). This covers
   users, roles and privileges.
@@ -63,11 +63,11 @@ controls who uses the UI. It keeps no secret. Serve Beacon over HTTPS. Give
 ## Run it standalone
 
 The included copy is enough for most deployments. You can also run the UI from
-source, for development. The source lives in the `beacon-datalake-clients/` npm
+source, for development. The source lives in the `beacon-clients/` npm
 workspace. It depends on the SDK. Build the SDK first:
 
 ```bash
-# from beacon-datalake-clients/
+# from beacon-clients/
 npm install                       # installs the JS workspace (beacon-ts + beacon-web)
 npm run build -w @beacon/client   # build the SDK so beacon-web can import it
 npm run dev -w @beacon/web        # start the Vite dev server
@@ -75,4 +75,4 @@ npm run dev -w @beacon/web        # start the Vite dev server
 
 Point the UI at any Beacon server. The default CORS policy lets the development
 server call the API directly. The application source is in
-[`beacon-datalake-clients/beacon-web`](https://github.com/maris-development/beacon/tree/main/beacon-datalake-clients/beacon-web).
+[`beacon-clients/beacon-web`](https://github.com/maris-development/beacon/tree/main/beacon-clients/beacon-web).

@@ -1,5 +1,5 @@
 ---
-description: Answers to common Beacon questions. Choose between BeaconDB and Beacon Data Lake. Fix credentials, schema mismatches, slow queries and frequent errors.
+description: Answers to common Beacon questions. Fix credentials, schema mismatches, slow queries and frequent errors.
 ---
 
 # FAQ
@@ -9,48 +9,45 @@ follow your task.
 
 ## Choose and start
 
-### Should I use BeaconDB or Beacon Data Lake?
+### Do I have to run a server to try Beacon?
 
-Use **BeaconDB** for a notebook, a script or an application on one machine. Use **Beacon Data Lake**
-when other people or services query the data over the network. Also use it when you need access
-control, a web UI or crawlers.
+No. Query a public node first. Install the Python client, point it at the node and run SQL. See
+[Query a public node](/docs/2.0.0-rc2/quickstart#query-a-public-node).
 
-Both options use the same engine. This choice does not lock you in. Develop against BeaconDB. Then
-run the same queries on a server. See
-[Which should I use?](/docs/2.0.0-rc2/introduction#which-should-i-use).
+Run your own server when the data is yours, or when you need access control, a web UI or crawlers.
 
 ### Do I need to import or convert my files first?
 
 No. Beacon reads files in place. Point a
-[`read_*()` function](/docs/2.0.0-rc2/beacondb/data-sources/formats/) or an
-[external table](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) at a path. Then query it.
+[`read_*()` function](/docs/2.0.0-rc2/formats/) or an
+[external table](/docs/2.0.0-rc2/data-sources/external-tables) at a path. Then query it.
 Beacon copies nothing.
 
 ### Which formats are supported?
 
 Parquet, GeoParquet, CSV, TSV, Arrow IPC, NetCDF, Zarr, Atlas, GeoTIFF, COG, BBF, Delta Lake and ODV
 ASCII. Each format has its own chapter in
-[File Formats](/docs/2.0.0-rc2/beacondb/data-sources/formats/).
+[File Formats](/docs/2.0.0-rc2/formats/).
 
 ## Read files
 
 ### How do I see what columns and types a file has?
 
-[`read_schema()`](/docs/2.0.0-rc2/beacondb/sql/table-functions-utility#read-schema) returns the
+[`read_<format>_schema()`](/docs/2.0.0-rc2/sql/table-functions-utility#read-format-schema) returns the
 schema. It reads no data:
 
 ```sql
-SELECT * FROM read_schema('argo/**/*.nc', 'netcdf');
+SELECT * FROM read_netcdf_schema('argo/**/*.nc');
 ```
 
 It covers `parquet`, `netcdf`, `zarr`, `arrow`, `csv`, `bbf` and `tiff`. For GeoParquet, Atlas, Delta
-Lake and ODV, use a `LIMIT 0` query. [`SUMMARIZE`](/docs/2.0.0-rc2/beacondb/sql/summarize) also
+Lake and ODV, use a `LIMIT 0` query. [`SUMMARIZE`](/docs/2.0.0-rc2/sql/summarize) also
 works.
 
 ### My files have different columns
 
 The query fails or returns nulls. Use
-[`UNION BY NAME`](/docs/2.0.0-rc2/beacondb/sql/union-by-name) to combine the files by column name,
+[`UNION BY NAME`](/docs/2.0.0-rc2/sql/union-by-name) to combine the files by column name,
 not by position. Beacon sets a missing column to null. The columns stay aligned.
 
 Some NetCDF collections mix variables with different dimensions. Give an explicit dimension list.
@@ -70,14 +67,14 @@ marker, not at the store directory or the chunks.
 
 These two formats are the exception. Beacon finds every other format in the dataset store
 automatically. Beacon does not find ODV ASCII and Delta Lake. Point
-[`read_odv_ascii()`](/docs/2.0.0-rc2/beacondb/data-sources/formats/odv) or
-[`read_delta()`](/docs/2.0.0-rc2/beacondb/data-sources/formats/delta-lake) at the data. For Delta,
+[`read_odv_ascii()`](/docs/2.0.0-rc2/formats/odv) or
+[`read_delta()`](/docs/2.0.0-rc2/formats/delta-lake) at the data. For Delta,
 you can also create an external table with `CREATE EXTERNAL TABLE … STORED AS DELTA`.
 
 ### Is there a `STORED AS ODV`?
 
 No. ODV ASCII has no external table form. Read it with `read_odv_ascii()`. Wrap the call in a
-[view](/docs/2.0.0-rc2/data-lake/view) to get a stable name.
+[view](/docs/2.0.0-rc2/server/view) to get a stable name.
 
 ## Object storage and credentials
 
@@ -85,13 +82,13 @@ No. ODV ASCII has no external table form. Read it with `read_odv_ascii()`. Wrap 
 
 Use an `s3://` path. For a public bucket, set `AWS_SKIP_SIGNATURE=true`. You need nothing else. For a
 private bucket, store the credentials as a named
-[secret](/docs/2.0.0-rc2/beacondb/sql/secrets):
+[secret](/docs/2.0.0-rc2/sql/secrets):
 
 ```sql
 CREATE SECRET my_s3 (TYPE S3, KEY_ID '…', SECRET '…', REGION 'eu-west-1', SCOPE 's3://my-bucket');
 ```
 
-See [Query Data on S3](/docs/2.0.0-rc2/beacondb/guides/query-s3).
+See [Query Data on S3](/docs/2.0.0-rc2/guides/query-s3).
 
 ### Beacon ignores my region setting
 
@@ -101,15 +98,14 @@ Beacon reads `AWS_REGION`. It does **not** use `AWS_DEFAULT_REGION`.
 
 NetCDF on object storage supports **anonymous access only**. Beacon cannot yet do an authenticated S3
 read for NetCDF. Make the objects public, or copy them to local disk. You can also convert the
-collection to [Zarr](/docs/2.0.0-rc2/beacondb/data-sources/formats/zarr) or
-[Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas). Both formats have full object storage
+collection to [Zarr](/docs/2.0.0-rc2/formats/zarr) or
+[Atlas](/docs/2.0.0-rc2/formats/atlas). Both formats have full object storage
 support.
 
 ### `CREATE PERSISTENT SECRET` fails
 
 A persistent secret needs a master key and a file-backed database. Set the key with
-`BEACON_SECRETS_KEY`, or with `secrets_key=` on `beacondb.connect`. Beacon never writes a plaintext
-credential to disk. A plain `CREATE SECRET` needs no key. That secret lives only for the session.
+`BEACON_SECRETS_KEY`. Beacon never writes a plaintext credential to disk. A plain `CREATE SECRET` needs no key. That secret lives only for the session.
 
 ### I rotated `BEACON_SECRETS_KEY` and my SQL database tables stopped working
 
@@ -125,8 +121,8 @@ scan prunes nothing.
 
 The usual fixes come in this order of impact. Select fewer columns. Filter on coordinate columns. Do
 not put a predicate inside a function that the reader cannot interpret. Merge large NetCDF or Zarr
-collections into [Atlas](/docs/2.0.0-rc2/beacondb/data-sources/formats/atlas). See
-[Speed Up Slow Queries](/docs/2.0.0-rc2/beacondb/guides/speed-up-queries) for the full detail.
+collections into [Atlas](/docs/2.0.0-rc2/formats/atlas). See
+[Speed Up Slow Queries](/docs/2.0.0-rc2/guides/speed-up-queries) for the full detail.
 
 ### My spatial filter on GeoParquet prunes nothing
 
@@ -139,35 +135,40 @@ for geometry predicate pushdown.
 Do not collect the whole result. Read batches instead:
 
 ```python
-for batch in con.sql("SELECT * FROM obs").record_batch(50_000):
+import adbc_driver_flightsql.dbapi as flight_sql
+
+conn = flight_sql.connect("grpc+tls://beacon.example.com:32011")
+cursor = conn.cursor()
+cursor.execute("SELECT * FROM obs")
+
+while (batch := cursor.fetch_record_batch().read_next_batch()) is not None:
     process(batch)
 ```
 
 On the server, a query can spill to disk. The spill goes to the OS temp area. Put that area on fast
 storage with free space. See
-[Performance Tuning](/docs/2.0.0-rc2/data-lake/performance-tuning).
+[Performance Tuning](/docs/2.0.0-rc2/server/performance-tuning).
 
 ## The `beacon.db` file
 
 ### Can two processes open the same `beacon.db`?
 
-No. Beacon holds a file-backed database under an **exclusive lock**. One process opens one
-`beacon.db`. A second `connect()` to the same path *in the same process* shares the open connection.
-For access from several processes or machines, run
-[Beacon Data Lake](/docs/2.0.0-rc2/getting-started) and connect to it.
+No. Beacon holds the file under an **exclusive lock**. One server opens one `beacon.db`, so two
+servers cannot share a data directory. For access from several processes or machines, run one
+[server](/docs/2.0.0-rc2/getting-started) and connect every client to it.
 
 ### Does a copy of `beacon.db` include my data?
 
 A copy includes everything that Beacon **owns**: the catalog and the managed table data. A copy does
 not include the external files. Beacon must still reach those files from the new location. See
-[Internal Format](/docs/2.0.0-rc2/beacondb/data-sources/internal-format).
+[Storage internals](/docs/2.0.0-rc2/internals/storage).
 
 ### When should I use a managed table instead of an external table?
 
 Use an external table to read data that you already have. Use a managed table when Beacon owns the
 rows. A managed table also gives you `INSERT`, `UPDATE` and `DELETE`. For a cached result with a
 periodic refresh, use a
-[materialized view](/docs/2.0.0-rc2/beacondb/sql/create-materialized-view).
+[materialized view](/docs/2.0.0-rc2/sql/create-materialized-view).
 
 ### Can I write query results to S3?
 
@@ -188,16 +189,11 @@ The `BEACON_ADMIN_*` credentials protect the admin UI and the write operations. 
 reads. To control who reads data, set `BEACON_AUTH_ENFORCE=true`. See
 [Access Control](/docs/2.0.0-rc2/security/access-control).
 
-### Why is authentication off by default in BeaconDB?
-
-A local file already gives the user full control. This is the usual contract for an embedded
-database. Set `auth=True` to switch access control on.
-
 ### My remote table fails with an authentication error
 
 A remote table connects **anonymously** and stores no credentials. The remote server must allow
 anonymous Flight SQL access. Set `BEACON_FLIGHT_SQL_ALLOW_ANONYMOUS=true` on the remote server. For
-an authenticated connection, use [`ATTACH`](/docs/2.0.0-rc2/beacondb/data-sources/attach). It accepts
+an authenticated connection, use [`ATTACH`](/docs/2.0.0-rc2/data-sources/attach). It accepts
 a user name and password, a token or a secret.
 
 ### My remote table still shows the old columns
@@ -214,27 +210,26 @@ comparisons in the predicates that must push down.
 ### Beacon does not find new files automatically
 
 Beacon does not watch storage for changes. It reads no local file system events and no S3 events.
-Use a [crawler](/docs/2.0.0-rc2/data-lake/crawlers) with a schedule to find new files.
+Use a [crawler](/docs/2.0.0-rc2/server/crawlers) with a schedule to find new files.
 
 ## Python
 
-### `.df()` raises an ImportError
+### Which Python package do I install?
 
-The dataframe helpers are optional extras:
+`beacon-api` is the client. It talks to a running server over HTTP:
 
 ```bash
-pip install "beacondb[pandas]"       # .df()
-pip install "beacondb[polars]"       # .pl()
-pip install "beacondb[sqlalchemy]"   # the beacondb:// dialect
-pip install "beacondb[all]"          # all of the above
+pip install beacon-api
 ```
 
-`.arrow()` needs no extra.
+See [Python client](/docs/2.0.0-rc2/connect/python). For a terminal instead of a notebook, install
+[`beacon-datalake-cli`](/docs/2.0.0-rc2/connect/cli).
 
-### Can I use BeaconDB with SQLAlchemy?
+### Can I connect a SQL tool instead?
 
-Yes. The package includes a `beacondb://` dialect. See
-[SQLAlchemy](/docs/2.0.0-rc2/beacondb/python/sqlalchemy).
+Yes. The server speaks Arrow Flight SQL and JDBC. See
+[DataGrip / JDBC](/docs/2.0.0-rc2/connect/datagrip) and
+[Python ADBC](/docs/2.0.0-rc2/connect/python-adbc).
 
 ---
 

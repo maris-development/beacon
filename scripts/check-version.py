@@ -8,9 +8,9 @@ The counterpart to bump-version.py: that one writes the version, this one proves
 Every publish workflow calls it, so a release fails *before* anything is uploaded rather than after
 — PyPI and npm do not let a version be replaced.
 
-Checking all four manifests everywhere (not just the one being published) is deliberate: they all
-release off the same tag, so bumping beacondb and forgetting beacon-ts should stop the release, not
-produce a half-published version pair.
+Checking every manifest (not just the one being published) is deliberate: they all release off the
+same tag, so bumping the server and forgetting beacon-ts should stop the release, not produce a
+half-published version pair.
 
 An empty argument means "no expected version" — a manual run with the version field blank just
 confirms the manifests agree with each other and publishes what is committed.
@@ -40,14 +40,11 @@ def _json(rel: str, key: str) -> str:
 def declared() -> dict[str, str]:
     return {
         "Cargo.toml [workspace.package]": _toml("Cargo.toml", "workspace", "package", "version"),
-        "beacon-db-py/pyproject.toml": _toml(
-            "beacon-db/beacon-db-py/pyproject.toml", "project", "version"
-        ),
         "beacon-datalake-cli/pyproject.toml": _toml(
-            "beacon-datalake-clients/beacon-datalake-cli/pyproject.toml", "project", "version"
+            "beacon-clients/beacon-datalake-cli/pyproject.toml", "project", "version"
         ),
         "beacon-ts/package.json": _json(
-            "beacon-datalake-clients/beacon-ts/package.json", "version"
+            "beacon-clients/beacon-ts/package.json", "version"
         ),
     }
 
@@ -72,8 +69,8 @@ def main(expected: str | None) -> None:
     release = next(iter(parsed.values()))
 
     if expected:
-        # Tags may be `v2.0.0-rc.1` or `beacondb-v2.0.0-rc.1`.
-        wanted = expected.removeprefix("beacondb-").removeprefix("v")
+        # Tags are `v2.0.0-rc.1`.
+        wanted = expected.removeprefix("v")
         try:
             want = Version(wanted)
         except InvalidVersion:

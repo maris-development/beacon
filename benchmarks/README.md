@@ -15,8 +15,16 @@ two ways:
 Metrics: **query latency** (cold + warm p50/p95), **ingestion time** (make data
 query-ready), and **resource usage** (peak memory / mean CPU via `docker stats`).
 
-📊 **Read the write-up:** [Too big for memory — Beacon vs PostgreSQL, Trino, Presto & DuckDB at 250M rows](https://maris-development.github.io/beacon/docs/benchmarks/beacon-vs-sql-engines-250m)
-(source: [`docs/docs/benchmarks/`](../docs/docs/benchmarks/beacon-vs-sql-engines-250m.md)).
+> **No published write-up yet.** This README used to link one at
+> `docs/docs/benchmarks/beacon-vs-sql-engines-250m`. That page has never existed in this
+> repository, so the link was dead; it is removed rather than left to rot.
+>
+> Run the harness yourself with the steps below. Results land in `results/report.md`.
+>
+> Before publishing a write-up, re-run this on a **real** collection (an Argo or EMODnet subset)
+> rather than the synthetic Parquet in `data-gen/`. The generated data exercises the engines
+> fairly, but it does not demonstrate the case Beacon is actually built for: many small files, one
+> schema per file, and array formats no other engine reads without conversion.
 
 ```
 benchmarks/

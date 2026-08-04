@@ -2,29 +2,29 @@
 import { withBase } from 'vitepress'
 import Icon from './Icon.vue'
 
+// Two steps of one path, not two products: deploy a node, or query one that
+// already runs. Both land on 2.0.0-rc2 — that is the release this page
+// describes, and the 1.8.0 tree still uses the old two-product naming.
 const paths = [
   {
-    key: 'db',
-    eyebrow: 'Embed it',
-    icon: 'database',
-    name: 'BeaconDB',
-    blurb: 'Run the engine in-process, straight from Python.',
-    cmd: 'pip install beacondb',
-    cta: 'Get started with BeaconDB',
-    // BeaconDB only exists in 2.0.0, so this necessarily lands on the
-    // pre-release docs (which carry the pre-release banner).
-    link: withBase('/docs/2.0.0-rc2/beacondb/python/getting-started'),
+    key: 'run',
+    eyebrow: 'Your archive',
+    icon: 'server',
+    name: 'Deploy a node',
+    blurb: 'Point Beacon at a directory or a bucket. It finds the files itself.',
+    cmd: 'docker pull ghcr.io/maris-development/beacon:latest',
+    cta: 'Deploy a server',
+    link: withBase('/docs/2.0.0-rc2/getting-started'),
   },
   {
-    key: 'lake',
-    eyebrow: 'Serve it',
-    icon: 'server',
-    name: 'Beacon Data Lake',
-    blurb: 'Run the server and share one lakehouse with your team.',
-    cmd: 'docker pull ghcr.io/maris-development/beacon:latest',
-    cta: 'Run the server',
-    // Data Lake ships in the stable release, so point at it rather than the RC.
-    link: withBase('/docs/1.8.0/getting-started'),
+    key: 'try',
+    eyebrow: 'No setup',
+    icon: 'database',
+    name: 'Query a live node',
+    blurb: 'Point the Python client at the public Beacon and read real data back.',
+    cmd: 'pip install beacon-api',
+    cta: 'Run the first query',
+    link: withBase('/docs/2.0.0-rc2/quickstart#query-the-public-node'),
   },
 ]
 </script>
@@ -32,7 +32,7 @@ const paths = [
 <template>
   <section class="cta">
     <h2 class="cta-title">Get started in minutes</h2>
-    <p class="cta-sub">Two ways to run it. Same SQL either way, so you can switch later.</p>
+    <p class="cta-sub">Stand one up over your own archive, or query a node that already runs.</p>
 
     <div class="cta-grid">
       <article
@@ -55,7 +55,7 @@ const paths = [
     </div>
 
     <p class="cta-foot">
-      Free and open source under AGPL-3.0.
+      Free and open source under AGPL-3.0. Clients are Apache-2.0.
       <a href="https://github.com/maris-development/beacon" target="_blank" rel="noopener">View on GitHub</a>
     </p>
   </section>
@@ -108,13 +108,13 @@ const paths = [
   transform: translateY(-4px);
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.12);
 }
-.accent-db { border-top-color: var(--vp-c-brand-1); }
-.accent-db:hover {
+.accent-try { border-top-color: var(--vp-c-brand-1); }
+.accent-try:hover {
   border-color: color-mix(in srgb, var(--vp-c-brand-1) 55%, var(--vp-c-divider));
   border-top-color: var(--vp-c-brand-1);
 }
-.accent-lake { border-top-color: var(--vp-c-green-1); }
-.accent-lake:hover {
+.accent-run { border-top-color: var(--vp-c-green-1); }
+.accent-run:hover {
   border-color: color-mix(in srgb, var(--vp-c-green-1) 55%, var(--vp-c-divider));
   border-top-color: var(--vp-c-green-1);
 }
@@ -134,12 +134,12 @@ const paths = [
   border-radius: 11px;
   border: 1px solid var(--vp-c-divider);
 }
-.accent-db .cta-icon {
+.accent-try .cta-icon {
   color: var(--vp-c-brand-1);
   background: color-mix(in srgb, var(--vp-c-brand-1) 12%, transparent);
   border-color: color-mix(in srgb, var(--vp-c-brand-1) 30%, var(--vp-c-divider));
 }
-.accent-lake .cta-icon {
+.accent-run .cta-icon {
   color: var(--vp-c-green-1);
   background: color-mix(in srgb, var(--vp-c-green-1) 12%, transparent);
   border-color: color-mix(in srgb, var(--vp-c-green-1) 30%, var(--vp-c-divider));
@@ -159,8 +159,8 @@ const paths = [
   letter-spacing: -0.02em;
   border: 0;
 }
-.accent-db .cta-name { color: var(--vp-c-brand-1); }
-.accent-lake .cta-name { color: var(--vp-c-green-1); }
+.accent-try .cta-name { color: var(--vp-c-brand-1); }
+.accent-run .cta-name { color: var(--vp-c-green-1); }
 
 .cta-blurb {
   margin: 0 0 1.15rem;
@@ -200,10 +200,10 @@ const paths = [
   transition: transform 0.2s ease;
 }
 .cta-btn:hover span { transform: translateX(3px); }
-.accent-db .cta-btn { background: var(--vp-c-brand-3); }
-.accent-db .cta-btn:hover { filter: brightness(1.08); }
-.accent-lake .cta-btn { background: var(--vp-c-green-2, var(--vp-c-green-1)); }
-.accent-lake .cta-btn:hover { filter: brightness(1.08); }
+.accent-try .cta-btn { background: var(--vp-c-brand-3); }
+.accent-try .cta-btn:hover { filter: brightness(1.08); }
+.accent-run .cta-btn { background: var(--vp-c-green-2, var(--vp-c-green-1)); }
+.accent-run .cta-btn:hover { filter: brightness(1.08); }
 
 .cta-foot {
   margin: 1.75rem 0 0;

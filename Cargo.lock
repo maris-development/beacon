@@ -1741,65 +1741,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-datalake"
-version = "2.0.0-rc.2"
-dependencies = [
- "anyhow",
- "arrow 58.3.0",
- "arrow-flight",
- "arrow-ipc 58.3.0",
- "arrow-json 58.3.0",
- "axum",
- "axum-streams",
- "base64",
- "beacon-core",
- "beacon-datafusion-ext",
- "beacon-datalake-config",
- "beacon-mcp",
- "bytes",
- "datafusion",
- "futures",
- "object_store 0.13.2",
- "pprof",
- "prost",
- "serde",
- "serde_json",
- "sysinfo",
- "tempfile",
- "thiserror 2.0.18",
- "tikv-jemallocator",
- "tokio",
- "tokio-util",
- "tonic",
- "tower",
- "tower-http",
- "tracing",
- "tracing-appender",
- "tracing-panic",
- "tracing-subscriber",
- "utoipa",
- "utoipa-axum",
- "utoipa-scalar",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
-name = "beacon-datalake-config"
-version = "2.0.0-rc.2"
-dependencies = [
- "base64",
- "beacon-arrow-atlas",
- "beacon-arrow-bbf",
- "beacon-arrow-netcdf",
- "beacon-common",
- "envconfig",
- "object_store 0.13.2",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "beacon-db-py"
 version = "2.0.0-rc.2"
 dependencies = [
@@ -1984,6 +1925,65 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "beacon-server"
+version = "2.0.0-rc.2"
+dependencies = [
+ "anyhow",
+ "arrow 58.3.0",
+ "arrow-flight",
+ "arrow-ipc 58.3.0",
+ "arrow-json 58.3.0",
+ "axum",
+ "axum-streams",
+ "base64",
+ "beacon-core",
+ "beacon-datafusion-ext",
+ "beacon-mcp",
+ "beacon-server-config",
+ "bytes",
+ "datafusion",
+ "futures",
+ "object_store 0.13.2",
+ "pprof",
+ "prost",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-appender",
+ "tracing-panic",
+ "tracing-subscriber",
+ "utoipa",
+ "utoipa-axum",
+ "utoipa-scalar",
+ "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "beacon-server-config"
+version = "2.0.0-rc.2"
+dependencies = [
+ "base64",
+ "beacon-arrow-atlas",
+ "beacon-arrow-bbf",
+ "beacon-arrow-netcdf",
+ "beacon-common",
+ "envconfig",
+ "object_store 0.13.2",
+ "thiserror 2.0.18",
  "tracing",
 ]
 

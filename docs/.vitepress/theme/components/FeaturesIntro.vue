@@ -1,10 +1,11 @@
 <template>
   <div class="feat-intro">
-    <h2 class="feat-intro-title">Built for scientific data</h2>
+    <h2 class="feat-intro-title">A data server for scientific archives</h2>
     <p class="feat-intro-sub">
-      Query your existing NetCDF, Zarr, Parquet and more as-is, with fast,
-      standards-based SQL that's fully open source. Embed it with BeaconDB, or
-      serve it with Beacon Data Lake.
+      Point one node at your archive and it becomes a queryable service for
+      everyone who needs it. Ragged profiles, one schema per file, hundreds of
+      thousands of small files: Beacon reads the shape observational data
+      actually has, with no conversion step.
     </p>
   </div>
 </template>

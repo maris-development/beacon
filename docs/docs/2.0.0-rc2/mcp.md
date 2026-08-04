@@ -53,7 +53,7 @@ statement. This holds for every caller. Each tool carries `annotations.readOnlyH
 ## Expose a table to MCP
 
 A table becomes an MCP tool when you enable its
-`mcp` [extension](/docs/2.0.0-rc2/data-lake/extensions). Set the extension with SQL
+`mcp` [extension](/docs/2.0.0-rc2/server/extensions). Set the extension with SQL
 (`SET EXTENSION`) or with the admin REST API. The optional `preset` extension adds named filter
 sets.
 

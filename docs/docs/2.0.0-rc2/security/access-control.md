@@ -263,5 +263,5 @@ directly. That check runs before both providers.
 Over HTTP, a client sends its credentials with **Basic auth**. With OIDC it sends
 a `Bearer` token. Arrow Flight SQL authenticates in its handshake. It then issues
 a bearer token. See the
-[Flight SQL settings](/docs/2.0.0-rc2/data-lake/configuration#arrow-flight-sql).
+[Flight SQL settings](/docs/2.0.0-rc2/server/configuration#arrow-flight-sql).
 :::
