@@ -3,10 +3,55 @@
 Notable changes to Beacon. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Every artifact in this repository — the `beacon-datalake` server image, the `beacondb` Python
-package, `beacon-datalake-cli`, and `@beacon/client`, shares one version and is released from a
-single `v*` tag. Releases before 2.0.0 are recorded in the
+Every artifact in this repository — the `beacon-server` image, the `beacondb` Python package,
+`beacon-datalake-cli`, and `@beacon/client` — shares one version and is released from a single `v*`
+tag. Releases before 2.0.0 are recorded in the
 [GitHub releases](https://github.com/maris-development/beacon/releases).
+
+## [Unreleased]
+
+### Changed
+
+- **One product, one name.** "Beacon Data Lake" and "BeaconDB" are gone as marketed products.
+  There is one thing, and it is called **Beacon**. Where the running process needs a name, the
+  docs say "the Beacon server" in lowercase. The tagline is now "a query engine for scientific
+  data"; "data lake" and "data lakehouse" are dropped everywhere, because Beacon reads files in
+  place and does not own the storage those terms promise.
+- **Crates and directories follow the name.** `beacon-datalake/` is now `beacon-server/`, with
+  the crates `beacon-datalake` → `beacon-server` and `beacon-datalake-config` →
+  `beacon-server-config`. The binary is `beacon-server`. Internally the `DataLake` type is now
+  `Server` and its module is `crate::server`.
+- **`beacon-datalake-clients/` is now `beacon-clients/`.** The `beacon-datalake-cli` package keeps
+  its name, its module and its console script — only the directory above it moved.
+- **`BEACON_S3_DATA_LAKE` is now `BEACON_S3_DATASETS`.** The old name still works and still turns
+  the S3 datasets store on; it is deprecated and will be removed one major version after 2.0.
+- **Licensing is stated in one place.** The root `LICENSE` (AGPL-3.0) covers the Rust workspace;
+  the `beacon-server` crates restate it in their manifests because they are publishable. The
+  clients under `beacon-clients/` remain Apache-2.0. [LICENSING.md](LICENSING.md) documents it.
+- **Secrets are documented as an `ATTACH` mechanism only.** A server reads one datasets store,
+  local or a single bucket, chosen at startup from configuration. `CREATE SECRET` covers reaching
+  another Beacon server.
+
+### Removed
+
+- **The `beacondb` wheel is no longer published.** Its release workflow, the manylinux build
+  scripts and the `make wheel` targets are gone, and the version scripts no longer track it. The
+  crate stays in the workspace and still builds locally with maturin; it is marked
+  `publish = false` and `Private :: Do Not Upload`. Beacon is a server, and the embeddable wheel
+  was the last artifact still selling it as something else.
+
+### Fixed
+
+- **`read_schema(paths, format)` never existed.** The docs, and one integration test, called a
+  generic function that is not registered. The real API is a per-reader counterpart —
+  `read_parquet_schema`, `read_netcdf_schema`, and so on, one for every reader including
+  GeoParquet, Atlas, Delta and ODV.
+- **`SUMMARIZE read_netcdf(...)` does not parse.** `SUMMARIZE` takes a name or a query, so a bare
+  table function needs wrapping: `SUMMARIZE (SELECT * FROM read_netcdf(...))`.
+- **HDF5 was undocumented.** `read_hdf5` and `STORED AS HDF5` have always worked; they now have a
+  format page and a row in the format tables.
+- **Dead benchmark link.** `benchmarks/README.md` pointed at a write-up that has never existed in
+  this repository.
 
 ## [2.0.0-rc.1] — 2026-07-31
 

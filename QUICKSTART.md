@@ -51,7 +51,7 @@ you ask for:
 curl -X POST http://localhost:5001/api/query \
   -H "Content-Type: application/json" \
   -d '{
-    "sql": "SELECT * FROM read_parquet([\"datasets/**/*.parquet\"]) LIMIT 10",
+    "sql": "SELECT * FROM read_parquet([\"**/*.parquet\"]) LIMIT 10",
     "output": { "format": "csv" }
   }'
 ```
@@ -62,5 +62,5 @@ Interactive API docs are at <http://localhost:5001/swagger/>.
 
 - [README](README.md) — features, configuration, and query examples.
 - [Documentation](https://maris-development.github.io/beacon/) — full data model and API reference.
-- [Configuration reference](https://maris-development.github.io/beacon/docs/1.8.0/data-lake/configuration.html) — all `BEACON_*` settings.
+- [Configuration reference](https://maris-development.github.io/beacon/docs/2.0.0-rc2/server/configuration.html) — all `BEACON_*` settings.
 - Community [Slack](https://beacontechnic-wwa5548.slack.com/join/shared_invite/zt-2dp1vv56r-tj_KFac0sAKNuAgUKPPDRg).

@@ -3,7 +3,7 @@
 `con.attach(name, url)` mirrors a remote Beacon's schemas and tables under a local catalog name,
 with joins/filters/aggregates pushed down to it over Flight SQL. The full round-trip (enumeration +
 lazy resolution + pushdown) needs a live remote and is proven by the Rust integration test
-`attached_remote_catalog_resolves_and_queries_tables` in beacon-datalake — the binding cannot start
+`attached_remote_catalog_resolves_and_queries_tables` in beacon-server — the binding cannot start
 a Flight SQL server (it links only beacon-core), so these tests pin the surface and the
 attach-time failure contract, which do not need a server.
 """

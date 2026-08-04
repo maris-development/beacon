@@ -45,7 +45,7 @@ GET /api/table-schema?table_name=default
 A table function queries files. You register no table first. Beacon resolves a path against its
 dataset root. A path also takes a glob pattern.
 
-The [table function reference](/docs/2.0.0-rc2/beacondb/sql/table-functions) holds every table
+The [table function reference](/docs/2.0.0-rc2/sql/table-functions) holds every table
 function and its signature. `GET /api/table-functions` is deprecated. It returns an empty list.
 
 ### NetCDF
@@ -98,7 +98,7 @@ Content-Type: application/json
 ```
 
 The other table functions are `read_arrow`, `read_csv`, `read_odv_ascii`, `read_bbf` and
-`read_tiff`. See [Read Files](/docs/2.0.0-rc2/beacondb/sql/table-functions) for the full
+`read_tiff`. See [Read Files](/docs/2.0.0-rc2/sql/table-functions) for the full
 signatures.
 
 ## Output formats

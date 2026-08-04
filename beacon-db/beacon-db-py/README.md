@@ -15,8 +15,8 @@ else is referenced from it: netCDF/Zarr/Parquet files on disk or in S3, Delta an
 tables, remote Postgres/MySQL. Copy `beacon.db` and the managed lake travels with you.
 
 This is the engine linked **in-process**. There is no server and no HTTP; for talking to a
-running Beacon server, use [`beacon-datalake-cli`](../../beacon-datalake-clients/beacon-datalake-cli/) or
-[`@beacon/client`](../../beacon-datalake-clients/beacon-ts/).
+running Beacon server, use [`beacon-datalake-cli`](../../beacon-clients/beacon-datalake-cli/) or
+[`@beacon/client`](../../beacon-clients/beacon-ts/).
 
 ## Install
 
@@ -103,7 +103,7 @@ Supplying credentials with `auth=False` is an error, not a no-op — a connectio
 restricted but is not would be worse than a clear refusal.
 
 RBAC written into a database is **not** enforced when it is opened with `auth=False`. It is
-a boundary for *served* access (the `beacon-datalake` HTTP / Flight SQL transports), not
+a boundary for *served* access (the `beacon-server` HTTP / Flight SQL transports), not
 against local possession of the file.
 
 ## One file, one handle
@@ -248,7 +248,7 @@ con.append("obs", pd.DataFrame({"a": [4, 5]}))   # appends; errors if `obs` does
 
 ## Attaching another Beacon (remote catalogs)
 
-Point beacondb at a running **beacon-datalake** server and mirror its whole catalog under a local
+Point beacondb at a running **beacon-server** server and mirror its whole catalog under a local
 name — every remote schema and table becomes queryable as `name.schema.table`, in the usual
 `ATTACH` style:
 
@@ -266,7 +266,7 @@ con.attached()        # ['lake']
 con.detach("lake")    # True
 ```
 
-The same thing works as **SQL**, so it reaches any entry point (the beacon-datalake server, CLI,
+The same thing works as **SQL**, so it reaches any entry point (the beacon-server server, CLI,
 SQLAlchemy), not just this binding — `con.attached()` reflects either path:
 
 ```python

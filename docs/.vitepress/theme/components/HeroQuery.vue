@@ -9,12 +9,17 @@ const tab = ref('sql')
 const phase = ref('typing') // 'typing' | 'running' | 'results'
 const typed = ref(0)        // number of chars revealed
 
+// The public, unauthenticated Beacon the front-page snippet points at.
+// PUBLIC NODE URL: grep the repo for "PUBLIC NODE URL" to find every copy.
+const PUBLIC_NODE = 'https://beacon-wod.maris.nl'
+
+// Real rows from the public node — the query in both tabs below, run against it.
 const rows = [
-  ['2024-01-03', '36.21', '-5.43', '21.8'],
-  ['2024-01-03', '35.88', '-6.10', '22.4'],
-  ['2024-01-04', '37.02', '-4.77', '20.9'],
-  ['2024-01-04', '36.55', '-5.92', '23.1'],
-  ['2024-01-05', '35.40', '-6.58', '22.0'],
+  ['1999-09-12', '42.6919', '5.1911', '23.50'],
+  ['1999-09-12', '42.6919', '5.1911', '23.84'],
+  ['1999-09-12', '42.6961', '5.1981', '23.67'],
+  ['1999-09-12', '42.6961', '5.1981', '23.92'],
+  ['1999-09-19', '42.5750', '4.7369', '23.33'],
 ]
 
 // Pre-tokenized code so we can reveal char-by-char while keeping syntax colors.
@@ -24,15 +29,19 @@ const tokens = {
     { t: ' time, latitude, longitude, temperature\n', c: '' },
     { t: 'FROM', c: 'k' },
     { t: ' ', c: '' },
-    { t: 'read_netcdf', c: 'fn' },
-    { t: '(', c: '' },
-    { t: "'argo/**/*.nc'", c: 's' },
-    { t: ')\n', c: '' },
+    { t: '"easy-wod"', c: 's' },
+    { t: '\n', c: '' },
     { t: 'WHERE', c: 'k' },
     { t: ' temperature ', c: '' },
     { t: '>', c: 'o' },
     { t: ' ', c: '' },
     { t: '20', c: 'n' },
+    { t: ' ', c: '' },
+    { t: 'AND', c: 'k' },
+    { t: ' depth ', c: '' },
+    { t: '<', c: 'o' },
+    { t: ' ', c: '' },
+    { t: '10', c: 'n' },
     { t: '\n', c: '' },
     { t: 'LIMIT', c: 'k' },
     { t: ' ', c: '' },
@@ -40,23 +49,26 @@ const tokens = {
     { t: ';', c: '' },
   ],
   python: [
+    { t: 'from', c: 'k' },
+    { t: ' beacon_api ', c: '' },
     { t: 'import', c: 'k' },
-    { t: ' beacondb\n\ncon ', c: '' },
+    { t: ' Client\n\nclient ', c: '' },
     { t: '=', c: 'o' },
-    { t: ' beacondb.', c: '' },
-    { t: 'connect', c: 'fn' },
+    { t: ' ', c: '' },
+    { t: 'Client', c: 'fn' },
     { t: '(', c: '' },
-    { t: '"beacon.db"', c: 's' },
+    // PUBLIC NODE URL — see docs/2.0.0-rc2/quickstart.md for the other copies.
+    { t: `"${PUBLIC_NODE}"`, c: 's' },
     { t: ')\ndf ', c: '' },
     { t: '=', c: 'o' },
-    { t: ' con.', c: '' },
-    { t: 'sql', c: 'fn' },
+    { t: ' client.', c: '' },
+    { t: 'sql_query', c: 'fn' },
     { t: '(\n    ', c: '' },
-    { t: `"SELECT * FROM read_netcdf('argo/**/*.nc') "`, c: 's' },
+    { t: `'SELECT time, latitude, longitude, temperature '`, c: 's' },
     { t: '\n    ', c: '' },
-    { t: `"WHERE temperature > 20 LIMIT 5"`, c: 's' },
+    { t: `'FROM "easy-wod" WHERE temperature > 20 LIMIT 5'`, c: 's' },
     { t: '\n).', c: '' },
-    { t: 'df', c: 'fn' },
+    { t: 'to_pandas_dataframe', c: 'fn' },
     { t: '()', c: '' },
   ],
 }
@@ -180,7 +192,7 @@ onBeforeUnmount(clear)
         <div class="hq-foot">
           <template v-if="phase === 'results'">
             <span class="hq-ok">●</span>
-            {{ tab === 'python' ? 'pandas.DataFrame · 5 rows × 4 columns' : '5 rows · 12 ms · Arrow IPC' }}
+            {{ tab === 'python' ? 'pandas.DataFrame · 5 rows × 4 columns' : '5 rows · 3.3 billion scanned · Arrow IPC' }}
           </template>
           <template v-else>executing…</template>
         </div>

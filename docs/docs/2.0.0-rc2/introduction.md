@@ -1,100 +1,125 @@
 ---
-description: Beacon is a fast SQL engine for scientific data. Query NetCDF, Zarr, Parquet, GeoTIFF and more in place, on local disk or S3.
+description: Beacon is a query engine for scientific data. One server node lets many clients query NetCDF, Zarr, Parquet, GeoTIFF and more in place.
 ---
 
 # Introduction
 
-Beacon is a fast SQL engine for scientific data. Point Beacon at your existing files and query them
-with SQL. Beacon reads NetCDF, Zarr, Parquet, CSV, ODV, GeoTIFF and more, on local disk or in S3.
-There is no import step and no conversion into a proprietary format. Beacon reads your files *in
-place*. Beacon uses Rust, [Apache Arrow](https://arrow.apache.org/) and
-[DataFusion](https://datafusion.apache.org/).
+Beacon is a query engine for scientific data. It runs as a **server**: you stand up one node over
+an archive, and everyone who needs that data queries it with SQL.
 
-You can run Beacon in **two ways**. Both ways use the same engine and the same SQL dialect:
+Beacon reads NetCDF, Zarr, Parquet, CSV, ODV, GeoTIFF and more. There is no import step. There is no
+conversion into a proprietary format. Beacon reads the files *in place*. It uses Rust,
+[Apache Arrow](https://arrow.apache.org/) and [DataFusion](https://datafusion.apache.org/).
 
-- **[BeaconDB](#beacondb-the-embeddable-engine)** is the embeddable engine. One Python package runs
-  the whole query engine in your process. A single portable `beacon.db` file holds the state. It is
-  an in-process analytical database for scientific data.
-- **[Beacon Data Lake](#beacon-data-lake-the-server)** is the server. It runs the same engine as a
-  service. It adds an HTTP API, an Arrow Flight SQL API, a managed dataset store, crawlers,
-  role-based access control, a web admin UI and client SDKs.
+Many clients reach one server at the same time. A client is a notebook, a portal, a dashboard, a BI
+tool or a terminal. All clients share one catalog, one set of paths and one set of
+[grants](/docs/2.0.0-rc2/security/access-control). You therefore decide in one place what each user
+may read. File copies no longer decide it.
 
-**Beacon Data Lake is BeaconDB as a service.** The query engine, the supported formats and the SQL
-dialect are the same in both. Build a prototype locally with BeaconDB. Then run the same queries
-against Beacon Data Lake. You do not change a line.
+Beacon solves one problem. An institution holds an archive. Many people need parts of it. Nobody
+needs to download the whole archive.
 
 New here? Go to the **[Quick Start](/docs/2.0.0-rc2/quickstart)**. It takes a few minutes.
 
 ## How it fits together
 
 One engine sits between your data and your tools. It reads files, object storage, SQL databases and
-other Beacons in place. It exposes them through the same SQL. This is true for BeaconDB and for
-Beacon Data Lake.
+other Beacon servers in place. It exposes all of them through the same SQL.
 
 <SystemDiagram />
 
-:::info Open source (AGPL-3.0)
-Beacon uses the AGPL-3.0 license. Find the source and contribute here:
+:::info Open source
+Beacon uses AGPL-3.0; the clients are Apache-2.0. Find the source here:
 [github.com/maris-development/beacon](https://github.com/maris-development/beacon)
 :::
 
-## BeaconDB: the embeddable engine
+## One store, one namespace
 
-BeaconDB is an analytical database in a Python package. Run `pip install beacondb`, then
-`import beacondb`. The engine runs **in your process**. There is no server and no HTTP. One portable
-`beacon.db` file holds everything that Beacon owns. It also references everything else: files, S3
-and remote Beacons.
+A server reads its datasets from **one** store: a local directory, or a single S3-compatible
+bucket. You choose which at startup.
 
-Use BeaconDB in a notebook, a script or an application. It gives your application a fast local query
-engine for scientific formats.
+Clients never see that choice. **Every path in a query is relative to the datasets root**, so the
+same SQL runs against a test node and against the production one:
 
-```python
-import beacondb
-
-con = beacondb.connect("beacon.db")
-con.sql("SELECT platform, avg(temperature) AS t "
-        "FROM read_netcdf('argo/*.nc') GROUP BY platform").df()
+```sql
+SELECT * FROM read_parquet('obs/*.parquet') LIMIT 10;
 ```
 
-[Get started with BeaconDB &rarr;](/docs/2.0.0-rc2/beacondb/python/getting-started)
+Where the bytes live is an operator's decision, made once in configuration. See
+[Object Storage](/docs/2.0.0-rc2/data-sources/object-storage).
 
-## Beacon Data Lake: the server
+## Four ways to name data
 
-Beacon Data Lake runs the same engine behind an HTTP API and an Arrow Flight SQL API. It adds a
-managed dataset store, crawlers, role-based access control, a web admin UI and client SDKs.
+Reading files by path suits an ad-hoc query. For anything you run twice, give it a name. Beacon has
+four kinds, and you query all of them the same way:
 
-Use Beacon Data Lake to serve datasets to many clients from shared or cloud storage. Clients include
-portals, dashboards, notebooks and BI tools.
+| Kind | What it is | Beacon stores |
+|---|---|---|
+| [External table](/docs/2.0.0-rc2/data-sources/external-tables) | A name over files in the datasets store | The definition |
+| [View](/docs/2.0.0-rc2/sql/create-view) | A saved query | The definition |
+| [Materialized view](/docs/2.0.0-rc2/sql/create-materialized-view) | A saved query, with its result kept and refreshed | The definition and the rows |
+| [Managed table](/docs/2.0.0-rc2/sql/managed-tables) | A table Beacon owns and writes | The rows |
 
-```bash
-docker run -d --name beacon -p 5001:5001 \
-  -v ./datasets:/beacon/data/datasets \
-  ghcr.io/maris-development/beacon:latest
+```sql
+CREATE EXTERNAL TABLE obs STORED AS PARQUET LOCATION 'obs/';
+CREATE VIEW warm AS SELECT * FROM obs WHERE temperature > 20;
+CREATE MATERIALIZED VIEW warm_cached AS SELECT * FROM obs WHERE temperature > 20;
+CREATE TABLE curated AS SELECT * FROM obs WHERE qc_flag = 1;
 ```
 
-[Get started with Beacon Data Lake &rarr;](/docs/2.0.0-rc2/getting-started)
+Only a managed table accepts `INSERT`, `UPDATE` and `DELETE`. The other three read from files that
+stay exactly as they are.
 
-## One engine, one SQL
+## What Beacon owns
 
-The SQL dialect, the supported formats and the query semantics are the same in both options.
-Everything in the [SQL reference](/docs/2.0.0-rc2/beacondb/sql/) works in both. A query takes the
-same path from client to engine to storage and back. This is true on your laptop, on your own server
-and in the cloud.
+Beacon reads most data in place. It does own some state, and that state lives in one `beacon.db`
+file:
+
+- **The catalog.** Every external table, view and materialized view definition above.
+- **Managed table rows.** The only data Beacon holds itself.
+- **Users, roles and grants.** See [Access Control](/docs/2.0.0-rc2/security/access-control).
+- **Secrets.** Credentials for another Beacon server, encrypted at rest. See
+  [CREATE SECRET](/docs/2.0.0-rc2/sql/secrets).
+
+Everything else stays where it is. Beacon never copies your source files. See
+[Storage internals](/docs/2.0.0-rc2/internals/storage).
+
+## One SQL, every source
+
+One SQL dialect covers every source. A local NetCDF file, a Parquet prefix in S3, a Postgres table
+and a table on another Beacon server all read the same way. You join across them in one statement.
+
+```sql
+SELECT a.platform, a.temperature, b.station_name
+FROM read_netcdf('argo/**/*.nc') AS a
+JOIN remote_wod.stations AS b ON a.platform = b.platform
+WHERE a.temperature > 20;
+```
+
+Read the [SQL reference](/docs/2.0.0-rc2/sql/) for the full dialect.
 
 <QueryFlow />
 
-## Which should I use?
+## Where to go next
 
-| You want to… | Use |
+**Running a node**
+
+| You want to… | Read |
 |---|---|
-| Query local files from a notebook or script | **BeaconDB** |
-| Ship an application with an embedded query engine | **BeaconDB** |
-| One portable file (`beacon.db`) that you can copy | **BeaconDB** |
-| Serve datasets to many users over HTTP or Flight SQL | **Beacon Data Lake** |
-| Use role-based access, a web admin UI, crawlers and a managed lakehouse | **Beacon Data Lake** |
-| Query a remote lake from a local engine | **both**: `ATTACH` the server from BeaconDB |
+| Deploy one with Docker | [Getting Started](/docs/2.0.0-rc2/getting-started) |
+| Set ports, storage and limits | [Configuration](/docs/2.0.0-rc2/server/configuration) |
+| Register your data as tables | [Server Setup](/docs/2.0.0-rc2/server/) |
+| Decide who may read what | [Access Control](/docs/2.0.0-rc2/security/access-control) |
+| Make a slow query fast | [Performance Tuning](/docs/2.0.0-rc2/server/performance-tuning) |
 
-You are not locked in. A local **BeaconDB** can
-[`ATTACH`](/docs/2.0.0-rc2/beacondb/python/remote-catalogs) a **Beacon Data Lake** and query it. You
-can then join remote tables against local files. See [Concepts](/docs/2.0.0-rc2/concepts) for the
-engine, the `beacon.db` file, catalogs and tables.
+**Querying one**
+
+| You want to… | Read |
+|---|---|
+| Run your first query against a live node | [Quick Start](/docs/2.0.0-rc2/quickstart) |
+| Understand how a file becomes rows | [Arrays to tables](/docs/2.0.0-rc2/arrays-to-tables) |
+| Replace an xarray loop with SQL | [Coming from xarray](/docs/2.0.0-rc2/coming-from-xarray) |
+| See which formats support what | [File formats](/docs/2.0.0-rc2/formats/) |
+| Query another institution's node | [ATTACH](/docs/2.0.0-rc2/data-sources/attach) |
+
+See [Concepts](/docs/2.0.0-rc2/concepts) for the engine, the `beacon.db` file, catalogs and tables.

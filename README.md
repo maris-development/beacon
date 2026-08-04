@@ -1,4 +1,4 @@
-# Beacon: Query Engine for Data Lakehouses
+# Beacon: a query engine for scientific data
 
 [![Release](https://img.shields.io/github/v/release/maris-development/beacon?label=release&color=success)](https://github.com/maris-development/beacon/releases)
 [![Docs](https://img.shields.io/github/actions/workflow/status/maris-development/beacon/pages.yml?label=docs)](https://maris-development.github.io/beacon/)
@@ -151,15 +151,15 @@ Beacon streams the response as a file in the `output.format` value. This example
 
 ### CLI
 
-[`beacon-datalake-cli`](beacon-datalake-clients/beacon-datalake-cli) is a Python client for the terminal.
+[`beacon-datalake-cli`](beacon-clients/beacon-datalake-cli) is a Python client for the terminal.
 It uses the same `/api/*` endpoints as the server. Run SQL, read tables, datasets,
 and schemas, and export results from the shell. Install the client from a local copy
 of the repository:
 
 ```bash
-pip install -e beacon-datalake-clients/beacon-datalake-cli
+pip install -e beacon-clients/beacon-datalake-cli
 # or, with uv:
-uv pip install -e beacon-datalake-clients/beacon-datalake-cli
+uv pip install -e beacon-clients/beacon-datalake-cli
 ```
 
 The command installs the `beacon-datalake-cli` console script:
@@ -199,7 +199,7 @@ You configure Beacon with `BEACON_*` environment variables. The most common vari
 | `BEACON_FLIGHT_SQL_ENABLE` | `true` | Enable the Arrow Flight SQL endpoint. |
 | `BEACON_FLIGHT_SQL_PORT` | `32011` | Port for Arrow Flight SQL. |
 
-S3-compatible storage, CORS, the NetCDF cache, the crawler, and Flight SQL authentication use more `BEACON_*` variables. Read the [configuration reference](https://maris-development.github.io/beacon/docs/1.8.0/data-lake/configuration.html) for the complete list.
+S3-compatible storage, CORS, the NetCDF cache, the crawler, and Flight SQL authentication use more `BEACON_*` variables. Read the [configuration reference](https://maris-development.github.io/beacon/docs/2.0.0-rc2/server/configuration.html) for the complete list.
 
 ## Documentation
 
@@ -224,3 +224,5 @@ Send issues and pull requests to [GitHub](https://github.com/maris-development/b
 ## License
 
 Beacon uses the **GNU Affero General Public License v3.0** (AGPL-3.0). Read [LICENSE](LICENSE) for the full text.
+
+The clients under `beacon-clients/` are **Apache-2.0**, so they can be embedded freely. See [LICENSING.md](LICENSING.md).

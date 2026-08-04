@@ -1,11 +1,14 @@
 <script setup>
 import Icon from './Icon.vue'
 
+// The datasets store is *one* thing — a local directory or a single S3 bucket,
+// chosen at startup — so it is one chip, not two. SQL databases and other
+// servers are genuinely separate sources reached per query.
 const sources = [
-  { icon: 'files', name: 'Local files', sub: 'NetCDF, Zarr, Parquet…' },
-  { icon: 'cloud', name: 'Object storage', sub: 'S3, GCS, Azure' },
+  { icon: 'files', name: 'Datasets store', sub: 'a local dir or one S3 bucket' },
+  { icon: 'cloud', name: 'NetCDF, Zarr, Parquet…', sub: 'read in place, never copied' },
   { icon: 'database', name: 'SQL databases', sub: 'Postgres, MySQL' },
-  { icon: 'satellite-dish', name: 'Other Beacons', sub: 'remote catalogs' },
+  { icon: 'satellite-dish', name: 'Other Beacon servers', sub: 'remote catalogs' },
 ]
 
 const consumers = [
@@ -34,12 +37,12 @@ const consumers = [
         <span class="dot" style="--d: 1.6s"></span>
       </div>
 
-      <!-- core: BeaconDB is the engine, nested inside the Beacon Data Lake service -->
+      <!-- core: one server, with the query engine as its inner layer -->
       <div class="sysd-core">
         <div class="sysd-lake">
           <div class="sysd-lake-head">
             <span class="sysd-lake-ico"><Icon name="server" :size="17" /></span>
-            <span class="sysd-lake-name">Beacon Data Lake</span>
+            <span class="sysd-lake-name">Beacon</span>
             <span class="sysd-tag lake">the server</span>
           </div>
           <div class="sysd-services">
@@ -53,16 +56,16 @@ const consumers = [
           <div class="sysd-db">
             <div class="sysd-db-head">
               <span class="sysd-db-ico"><Icon name="database" :size="17" /></span>
-              <span class="sysd-db-name">BeaconDB</span>
-              <span class="sysd-tag db">the engine</span>
+              <span class="sysd-db-name">Query engine</span>
+              <span class="sysd-tag db">inside it</span>
             </div>
             <p class="sysd-db-sub">
               Rust, on Apache Arrow and DataFusion. One SQL dialect, the format readers, and the
-              portable <code>beacon.db</code> file.
+              managed tables in <code>beacon.db</code>.
             </p>
           </div>
 
-          <p class="sysd-nest-note">Beacon Data Lake runs BeaconDB inside it</p>
+          <p class="sysd-nest-note">One process. One SQL dialect. One catalog.</p>
         </div>
       </div>
 
@@ -82,8 +85,8 @@ const consumers = [
       </div>
     </div>
     <figcaption class="sysd-cap-foot">
-      BeaconDB is the engine. Embed it on its own, or run Beacon Data Lake, which wraps that same
-      engine in a service.
+      One engine between your data and your tools. It reads every source in place and exposes
+      them through the same SQL.
     </figcaption>
   </figure>
 </template>
@@ -162,7 +165,7 @@ const consumers = [
   100% { left: calc(100% - 7px); opacity: 0; }
 }
 
-/* core: outer service box (Beacon Data Lake) containing the engine (BeaconDB) */
+/* core: outer server box containing the query engine */
 .sysd-core { align-self: center; }
 
 .sysd-lake {

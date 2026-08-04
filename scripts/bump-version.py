@@ -28,10 +28,9 @@ REPO = Path(__file__).resolve().parent.parent
 # Every file whose `version = "..."` line is the beacon release version.
 CARGO_WORKSPACE = REPO / "Cargo.toml"
 PYPROJECTS = (
-    REPO / "beacon-db/beacon-db-py/pyproject.toml",
-    REPO / "beacon-datalake-clients/beacon-datalake-cli/pyproject.toml",
+    REPO / "beacon-clients/beacon-datalake-cli/pyproject.toml",
 )
-NPM_PACKAGE = REPO / "beacon-datalake-clients/beacon-ts"
+NPM_PACKAGE = REPO / "beacon-clients/beacon-ts"
 
 
 def pep440(version: str) -> str:

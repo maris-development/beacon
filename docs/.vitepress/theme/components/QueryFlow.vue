@@ -50,7 +50,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 <template>
   <div class="qflow">
     <svg class="qflow-svg" viewBox="0 0 980 260" role="img"
-         aria-label="A client sends an SQL or JSON query to Beacon along a request lane; Beacon reads from storage and the results (Parquet, NetCDF or Arrow) flow back along a response lane. Beacon can be deployed in the cloud, on-premise, or fully locally.">
+         aria-label="A client sends an SQL or JSON query to Beacon along a request lane; Beacon reads from storage and the results (Parquet, NetCDF or Arrow) flow back along a response lane. Beacon can be deployed in the cloud or on-premise.">
       <!-- ===== resizing deployment-environment box ===== -->
       <rect class="env-fill" :class="cur.cls" :x="cur.box.x" y="56" :width="cur.box.w" height="176" rx="18" />
       <rect class="env-border" :x="cur.box.x" y="56" :width="cur.box.w" height="176" rx="18" />
