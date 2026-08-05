@@ -459,6 +459,75 @@ mod tests {
         assert_eq!(arrays["obs3d"].shape(), &[n_obs, n_calib, n_param]);
     }
 
+    // ── Chunk shape ────────────────────────────────────────────────────
+
+    mod chunk_shape {
+        use super::*;
+
+        const GRIDDED_PATH: &str =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/test_files/gridded-example.nc");
+        const WOD_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test_files/wod_ctd_1964.nc");
+
+        /// A chunked variable reports the chunk shape the file stores, not the
+        /// full shape. The nd engine reads one chunk at a time with it.
+        #[test]
+        fn a_chunked_variable_reports_the_chunk_shape_of_the_file() {
+            let arrays = read_arrays(GRIDDED_PATH).unwrap();
+            assert_eq!(arrays["analysed_sst"].shape(), vec![1, 1208, 1920]);
+            assert_eq!(arrays["analysed_sst"].chunk_shape(), vec![1, 604, 960]);
+            assert_eq!(arrays["analysis_error"].chunk_shape(), vec![1, 604, 960]);
+            assert_eq!(arrays["lon"].chunk_shape(), vec![1920]);
+        }
+
+        /// One chunk holds the whole array. The two shapes are then equal.
+        #[test]
+        fn a_single_chunk_reports_the_full_shape() {
+            let arrays = read_arrays(GRIDDED_PATH).unwrap();
+            assert_eq!(
+                arrays["sea_ice_fraction"].chunk_shape(),
+                vec![1, 1208, 1920]
+            );
+            assert_eq!(arrays["mask"].chunk_shape(), vec![1, 1208, 1920]);
+        }
+
+        /// The WOD file stores every variable contiguously. A variable with no
+        /// chunks reports its full shape.
+        #[test]
+        fn a_variable_with_no_chunks_reports_the_full_shape() {
+            let arrays = read_arrays(WOD_PATH).unwrap();
+            for (name, array) in &arrays {
+                assert_eq!(
+                    array.chunk_shape(),
+                    array.shape(),
+                    "'{name}' has no chunks, so it must report its full shape"
+                );
+            }
+        }
+
+        /// A fixed-size string variable drops its length axis from the shape.
+        /// The chunk shape drops the same axis.
+        #[test]
+        fn a_string_variable_keeps_the_rank_of_its_shape() {
+            let tmp = make_char_nc("station", &["ABC", "DEF"], 8);
+            let arrays = read_arrays(tmp.path()).unwrap();
+            assert_eq!(arrays["station"].shape(), vec![2]);
+            assert_eq!(arrays["station"].chunk_shape(), vec![2]);
+        }
+
+        /// Every array keeps one chunk length for each of its axes.
+        #[test]
+        fn every_array_keeps_the_rank_of_its_shape() {
+            let arrays = read_arrays(GRIDDED_PATH).unwrap();
+            for (name, array) in &arrays {
+                assert_eq!(
+                    array.chunk_shape().len(),
+                    array.shape().len(),
+                    "rank of the chunk shape of '{name}'"
+                );
+            }
+        }
+    }
+
     // ── Dataset dimensions ─────────────────────────────────────────────
 
     #[tokio::test]

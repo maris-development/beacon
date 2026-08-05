@@ -250,6 +250,70 @@ mod tests {
             .await
     }
 
+    // ── Chunk shape ────────────────────────────────────────────────────
+
+    /// A chunked variable reports the chunk shape the file stores, not the
+    /// full shape. The nd engine reads one chunk at a time with it.
+    #[tokio::test]
+    async fn a_chunked_variable_reports_the_chunk_shape_of_the_file() {
+        let any = open(GRIDDED_FILE).await;
+
+        let sst = any.get_array("analysed_sst").unwrap();
+        assert_eq!(sst.shape(), vec![1, 1208, 1920]);
+        assert_eq!(sst.chunk_shape(), vec![1, 604, 960]);
+
+        let error = any.get_array("analysis_error").unwrap();
+        assert_eq!(error.chunk_shape(), vec![1, 604, 960]);
+
+        let lon = any.get_array("lon").unwrap();
+        assert_eq!(lon.chunk_shape(), vec![1920]);
+    }
+
+    /// One chunk holds the whole array. The two shapes are then equal.
+    #[tokio::test]
+    async fn a_single_chunk_reports_the_full_shape() {
+        let any = open(GRIDDED_FILE).await;
+
+        let ice = any.get_array("sea_ice_fraction").unwrap();
+        assert_eq!(ice.chunk_shape(), vec![1, 1208, 1920]);
+
+        let mask = any.get_array("mask").unwrap();
+        assert_eq!(mask.chunk_shape(), vec![1, 1208, 1920]);
+    }
+
+    /// The WOD file stores every variable contiguously. A variable with no
+    /// chunks reports its full shape. That includes the fixed-size string
+    /// variables, which drop their length axis from both shapes.
+    #[tokio::test]
+    async fn a_variable_with_no_chunks_reports_the_full_shape() {
+        let any = open(WOD_FILE).await;
+        for (name, array) in &any.dataset().arrays {
+            assert_eq!(
+                array.chunk_shape(),
+                array.shape(),
+                "'{name}' has no chunks, so it must report its full shape"
+            );
+        }
+    }
+
+    /// Both readers must report the same chunk shape. The nd engine picks its
+    /// batch size from it, so a table keeps its batches when the reader changes.
+    #[tokio::test]
+    async fn both_readers_report_the_same_chunk_shape() {
+        for file in [WOD_FILE, GRIDDED_FILE] {
+            let rust = open(file).await;
+            let c = open_with_netcdf_c(file).await;
+
+            for key in rust.dataset().arrays.keys() {
+                assert_eq!(
+                    rust.get_array(key).unwrap().chunk_shape(),
+                    c.get_array(key).unwrap().chunk_shape(),
+                    "chunk shape of '{key}' differs for {file}"
+                );
+            }
+        }
+    }
+
     // ── CF decoding ────────────────────────────────────────────────────
 
     /// `analysed_sst` is packed `int16` with `scale_factor` and `add_offset`,
