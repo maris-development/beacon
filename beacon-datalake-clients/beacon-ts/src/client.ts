@@ -121,6 +121,23 @@ export class BeaconClient {
   }
 
   /**
+   * Runs a query and yields each arriving chunk as an `apache-arrow` Table,
+   * without buffering the whole result in memory.
+   *
+   * This is the stream of {@link queryStream} with every `RecordBatch` wrapped in
+   * a single-batch Table. Use it when the consumer takes a Table — `getChild`,
+   * `schema`, {@link rowsFromTable} — instead of a batch.
+   */
+  async *queryArrowTableStream(
+    query: QueryInput,
+    signal?: AbortSignal,
+  ): AsyncGenerator<ArrowTable> {
+    const decoder = await getArrowDecoder();
+    const { batches } = await this.queryBatches(query, signal);
+    for await (const batch of batches) yield decoder.tableFromBatches([batch]);
+  }
+
+  /**
    * Opens a streaming query, returning the server-assigned query id together
    * with an async iterable of Arrow `RecordBatch`es as they arrive.
    *
