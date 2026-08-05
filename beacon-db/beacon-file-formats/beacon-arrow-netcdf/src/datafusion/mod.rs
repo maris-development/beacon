@@ -885,7 +885,7 @@ mod reader_backend_tests {
     ///
     /// The other comparisons check data variables, or check that attributes are
     /// *present* with the right type and shape. Neither would catch an
-    /// attribute whose **value** differs between the readers. `SELECT *` reads
+    /// attribute whose **value** differs between the readers. This one reads
     /// the lot: data variables, variable attributes (`analysed_sst.units`) and
     /// global attributes (`.Conventions`), the last two broadcast onto every
     /// row by the nd pipeline.
@@ -893,12 +893,21 @@ mod reader_backend_tests {
     async fn both_readers_return_identical_values_for_every_column() {
         use arrow::compute::concat_batches;
 
-        // The ragged file in full, and a slice of the gridded one — a whole
-        // gridded scan is millions of rows and does not need materialising to
-        // prove the point.
+        // The ragged file in full: 418 rows over 147 columns, ~1 MiB.
+        //
+        // The gridded file gets an explicit column list, not `SELECT *`. Its
+        // grid is 2.3M rows, and `LIMIT` does not bound what the scan
+        // materialises: the nd broadcast emits the whole grid as one batch and
+        // the limit only slices it, so `SELECT *` here costs ~10 GiB for each
+        // reader. The columns below are the ones this test is actually for — a
+        // global attribute, a variable attribute, and the two CF decodes.
         for (file, query) in [
             (WOD_FILE, "SELECT * FROM {table}"),
-            (GRIDDED_FILE, "SELECT * FROM {table} LIMIT 512"),
+            (
+                GRIDDED_FILE,
+                r#"SELECT ".Conventions", "analysed_sst.units", analysed_sst, time
+                   FROM {table}"#,
+            ),
         ] {
             let ctx = session();
             register(&ctx, "netcdf_c", ReaderBackend::NetcdfC, file).await;
