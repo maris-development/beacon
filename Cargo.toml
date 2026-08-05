@@ -78,6 +78,10 @@ datafusion-federation = { version = "=0.5.3", features = ["sql"] }
 datafusion-table-providers = { version = "=0.11.0", default-features = false }
 geodatafusion = "0.4.0"
 object_store = { version = "0.13.1", features = ["aws", "gcp", "azure", "http"] }
+# Pure-Rust netCDF-4 / classic reader. It parses the HDF5 container itself, so it
+# holds no global lock and reads through `object_store` by byte range. The
+# netcdf-c bindings do neither. See `beacon-arrow-netcdf`, which offers both.
+oxcdf = { git = "https://github.com/robinskil/oxcdf.git", version = "0.1.0", features = ["async", "object-store", "ndarray"] }
 tonic = "0.14.1"
 
 

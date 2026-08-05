@@ -9,6 +9,10 @@
 //!
 //! `count(*)` did not catch it: it is answered without decoding nd arrays, so
 //! it stayed correct while the scan returned fewer rows.
+//!
+//! The decode layer is shared, so the loss hit both readers. Each case
+//! therefore runs on both, and the two must agree on the row count as well as
+//! reach the expected one.
 
 use std::sync::Arc;
 
@@ -16,7 +20,7 @@ use beacon_datafusion_ext::file_collection::FileCollection;
 use beacon_datafusion_ext::listing_factory::{ListingFactory, RootStore};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
-use crate::datafusion::{options::NetcdfOptions, NetcdfFormat};
+use crate::datafusion::{options::NetcdfOptions, FileAccess, NetcdfFormat, ReaderBackend};
 
 /// Copy the ragged fixture `copies` times into a fresh temp dir.
 fn stage_files(copies: usize) -> tempfile::TempDir {
@@ -30,20 +34,29 @@ fn stage_files(copies: usize) -> tempfile::TempDir {
     dir
 }
 
-async fn ctx_for(dir: &tempfile::TempDir, target_partitions: usize) -> SessionContext {
+async fn ctx_for(
+    dir: &tempfile::TempDir,
+    target_partitions: usize,
+    backend: ReaderBackend,
+) -> SessionContext {
     let config = SessionConfig::new().with_target_partitions(target_partitions);
     let ctx = SessionContext::new_with_config(config);
     let state = ctx.state();
 
+    // netcdf-c opens a path itself, so it takes the resolver
+    // `create_with_native_root` builds for a `file://` listing url: object paths
+    // are absolute w.r.t. the filesystem root. The `oxcdf` reader goes through
+    // the object store and takes nothing.
+    let access = match backend {
+        ReaderBackend::NetcdfC => FileAccess::netcdf_c(
+            crate::datafusion::object_meta_resolver::create_object_resolver(
+                &RootStore::FileSystem(std::path::PathBuf::from("/")),
+            ),
+        ),
+        ReaderBackend::Oxcdf => FileAccess::Oxcdf,
+    };
     let factory = Arc::new(ListingFactory::dynamic());
-    // Same wiring `create_with_native_root` does for a `file://` listing url:
-    // object paths are absolute w.r.t. the filesystem root.
-    let resolver = crate::datafusion::object_meta_resolver::create_object_resolver(
-        &RootStore::FileSystem(std::path::PathBuf::from("/")),
-    );
-    let format = Arc::new(
-        NetcdfFormat::new(factory, NetcdfOptions::default()).with_object_path_resolver(resolver),
-    );
+    let format = Arc::new(NetcdfFormat::new(factory, NetcdfOptions::default()).with_access(access));
 
     let url = datafusion::datasource::listing::ListingTableUrl::parse(format!(
         "file://{}/",
@@ -90,10 +103,16 @@ async fn count_star(ctx: &SessionContext) -> usize {
 async fn scan_reads_every_file_regardless_of_target_partitions() {
     const FILES: usize = 32;
 
-    // One file first, to learn the per-file row count.
+    // One file first, to learn the per-file row count. Both readers must agree
+    // on it, or the comparison below rests on nothing.
     let one = stage_files(1);
-    let per_file = scanned_rows(&ctx_for(&one, 4).await).await;
+    let per_file = scanned_rows(&ctx_for(&one, 4, ReaderBackend::NetcdfC).await).await;
     assert!(per_file > 0, "fixture produced no rows");
+    assert_eq!(
+        scanned_rows(&ctx_for(&one, 4, ReaderBackend::Oxcdf).await).await,
+        per_file,
+        "the two readers disagree on the row count of one file"
+    );
 
     let dir = stage_files(FILES);
     let expected = per_file * FILES;
@@ -102,19 +121,27 @@ async fn scan_reads_every_file_regardless_of_target_partitions() {
     // do not, so a coalescing RoundRobinBatch repartition is inserted — those
     // were the shapes that silently lost files. 33 exceeds the file count, so
     // coalescing has nothing to merge.
+    //
+    // The decode layer is shared, so both readers meet the same coalescing.
     let mut failures = vec![];
-    for tp in [1usize, 8, 9, 16, 24, 31, 32, 33] {
-        let ctx = ctx_for(&dir, tp).await;
-        let scanned = scanned_rows(&ctx).await;
-        let counted = count_star(&ctx).await;
+    for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
+        for tp in [1usize, 8, 9, 16, 24, 31, 32, 33] {
+            let ctx = ctx_for(&dir, tp, backend).await;
+            let scanned = scanned_rows(&ctx).await;
+            let counted = count_star(&ctx).await;
 
-        if scanned != expected || counted != expected {
-            failures.push(format!(
-                "target_partitions={tp}: scanned {scanned} ({} files), count(*) {counted}, \
-                 expected {expected}",
-                scanned / per_file
-            ));
+            if scanned != expected || counted != expected {
+                failures.push(format!(
+                    "{backend:?} target_partitions={tp}: scanned {scanned} ({} files), \
+                     count(*) {counted}, expected {expected}",
+                    scanned / per_file
+                ));
+            }
         }
     }
-    assert!(failures.is_empty(), "row loss:\n  {}", failures.join("\n  "));
+    assert!(
+        failures.is_empty(),
+        "row loss:\n  {}",
+        failures.join("\n  ")
+    );
 }
