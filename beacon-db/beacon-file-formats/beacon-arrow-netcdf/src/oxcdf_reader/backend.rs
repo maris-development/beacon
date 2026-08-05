@@ -16,6 +16,28 @@ use beacon_nd_array::{
 use ndarray::ArrayD;
 use oxcdf::{AsyncNetcdfFile, AsyncVariable, Extent, Extents};
 
+/// The chunk shape the file stores for a variable.
+///
+/// The read costs no bytes. The open holds the layout of every variable.
+///
+/// The value falls back to `shape`:
+///
+/// - for a contiguous variable, and for a classic file, which has no chunks;
+/// - for a chunk shape of a lower rank than `shape`, which cannot map onto it.
+///
+/// A fixed-size string variable drops its length axis from `shape`. The chunk
+/// shape drops the same axis, so both keep the same rank.
+fn file_chunk_shape(file: &AsyncNetcdfFile, name: &str, shape: &[usize]) -> Vec<usize> {
+    let chunks = file
+        .variable(name)
+        .and_then(|variable| variable.chunking().ok().flatten());
+
+    match chunks {
+        Some(chunks) if chunks.len() >= shape.len() => chunks[..shape.len()].to_vec(),
+        _ => shape.to_vec(),
+    }
+}
+
 /// One variable, bound to the file that holds it.
 ///
 /// [`AsyncVariable`] borrows the file, so a backend cannot keep one. It keeps
@@ -27,6 +49,8 @@ pub struct VariableRef {
     name: String,
     /// The logical shape. A fixed-size string variable drops its length axis.
     shape: Vec<usize>,
+    /// The chunk shape of the file, on the axes of `shape`.
+    chunk_shape: Vec<usize>,
     /// The logical dimension names, one for each axis of `shape`.
     dimensions: Vec<String>,
     /// The trailing string-length axis, when the variable has one. It is part
@@ -36,16 +60,21 @@ pub struct VariableRef {
 
 impl VariableRef {
     /// Bind a variable of the given logical shape.
+    ///
+    /// The chunk shape comes from the file once, here. A later read of it costs
+    /// nothing.
     pub fn new(
         file: Arc<AsyncNetcdfFile>,
         name: String,
         shape: Vec<usize>,
         dimensions: Vec<String>,
     ) -> Self {
+        let chunk_shape = file_chunk_shape(&file, &name, &shape);
         Self {
             file,
             name,
             shape,
+            chunk_shape,
             dimensions,
             string_width: None,
         }
@@ -107,6 +136,11 @@ impl VariableRef {
     fn element_count(&self) -> usize {
         self.shape.iter().product()
     }
+
+    /// The chunk shape the file stores, on the axes of the logical shape.
+    fn chunk_shape(&self) -> Vec<usize> {
+        self.chunk_shape.clone()
+    }
 }
 
 /// Reshape flat, row-major values into the shape the subset selected.
@@ -152,6 +186,10 @@ where
 
     fn shape(&self) -> Vec<usize> {
         self.variable.shape.clone()
+    }
+
+    fn chunk_shape(&self) -> Vec<usize> {
+        self.variable.chunk_shape()
     }
 
     fn dimensions(&self) -> Vec<String> {
@@ -214,6 +252,10 @@ impl ArrayBackend<f64> for ScaleOffsetBackend {
         self.variable.shape.clone()
     }
 
+    fn chunk_shape(&self) -> Vec<usize> {
+        self.variable.chunk_shape()
+    }
+
     fn dimensions(&self) -> Vec<String> {
         self.variable.dimensions.clone()
     }
@@ -258,6 +300,10 @@ impl ArrayBackend<TimestampNanosecond> for TimestampBackend {
 
     fn shape(&self) -> Vec<usize> {
         self.variable.shape.clone()
+    }
+
+    fn chunk_shape(&self) -> Vec<usize> {
+        self.variable.chunk_shape()
     }
 
     fn dimensions(&self) -> Vec<String> {
@@ -317,6 +363,10 @@ impl ArrayBackend<String> for StringBackend {
 
     fn shape(&self) -> Vec<usize> {
         self.variable.shape.clone()
+    }
+
+    fn chunk_shape(&self) -> Vec<usize> {
+        self.variable.chunk_shape()
     }
 
     fn dimensions(&self) -> Vec<String> {
