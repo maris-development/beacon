@@ -140,6 +140,12 @@ A variable can be both packed and filled. Beacon then decodes the fill value wit
 arithmetic before it compares. A packed sentinel maps to the decoded fill exactly. Beacon sets it to
 `NULL`. You do not unpack the sentinel yourself.
 
+### Fill and time together
+
+A time variable can carry a `_FillValue` too. Beacon decodes that fill with the same time arithmetic
+as the data, then compares. A fill cell becomes `NULL`, not a date far outside the record. A
+`_FillValue = -32768` on `days since 1970-01-01` is a null, not `1880-03-15`.
+
 ### `missing_value` is not applied
 
 CF also allows an older `missing_value` attribute. Beacon does **not** treat it as a null. Those

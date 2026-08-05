@@ -74,8 +74,12 @@ where
         return Ok(Arc::new(NdArray::new_with_backend(backend)?));
     }
 
+    // The `_FillValue` of a time variable decodes with the same arithmetic as
+    // the data, so a fill cell nulls out instead of reaching a query as a real
+    // date.
     if let Some((epoch, unit)) = cf_time_epoch_unit {
-        let backend = TimestampBackend::new(variable, epoch, unit);
+        let raw_fill = fill_value.map(|f| f.as_());
+        let backend = TimestampBackend::new(variable, epoch, unit, raw_fill);
         return Ok(Arc::new(NdArray::new_with_backend(backend)?));
     }
 

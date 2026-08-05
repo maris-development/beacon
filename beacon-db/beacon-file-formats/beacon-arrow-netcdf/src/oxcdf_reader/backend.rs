@@ -279,15 +279,27 @@ pub struct TimestampBackend {
     variable: VariableRef,
     epoch: hifitime::Epoch,
     unit: hifitime::Unit,
+    fill_value: Option<TimestampNanosecond>,
 }
 
 impl TimestampBackend {
     /// Build a CF time backend from a reference epoch and a unit.
-    pub fn new(variable: VariableRef, epoch: hifitime::Epoch, unit: hifitime::Unit) -> Self {
+    ///
+    /// `raw_fill_value` is the fill in the numeric units of the variable. It
+    /// decodes with the same arithmetic as the data, so a fill cell maps onto
+    /// the decoded fill and the engine nulls it after the decode.
+    pub fn new(
+        variable: VariableRef,
+        epoch: hifitime::Epoch,
+        unit: hifitime::Unit,
+        raw_fill_value: Option<f64>,
+    ) -> Self {
         Self {
             variable,
             epoch,
             unit,
+            fill_value: raw_fill_value
+                .map(|f| crate::decoders::cf_time::cf_offset_to_timestamp(f, epoch, unit)),
         }
     }
 }
@@ -308,6 +320,10 @@ impl ArrayBackend<TimestampNanosecond> for TimestampBackend {
 
     fn dimensions(&self) -> Vec<String> {
         self.variable.dimensions.clone()
+    }
+
+    fn fill_value(&self) -> Option<TimestampNanosecond> {
+        self.fill_value
     }
 
     async fn read_subset(

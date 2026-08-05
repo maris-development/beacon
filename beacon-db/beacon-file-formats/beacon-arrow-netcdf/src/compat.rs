@@ -81,13 +81,18 @@ where
         return Ok(Arc::new(nd_array));
     }
 
+    // CF time units → nanosecond timestamps. The `_FillValue` decodes with the
+    // same arithmetic, so a fill cell nulls out instead of reaching a query as a
+    // real date.
     if let Some((epoch, unit)) = cf_time_epoch_unit {
+        let raw_fill = fill_value.map(|f| f.as_());
         let time_backend = VariableBackend::new(
             Arc::new(CFTimeVariableDecoder::new(
                 variable_name.to_string(),
                 default_decoder,
                 epoch,
                 unit,
+                raw_fill,
             )),
             nc_file,
             shape,
