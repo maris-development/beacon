@@ -34,7 +34,7 @@ use object_store::ObjectMeta;
 
 use crate::datafusion::object_meta_resolver::NetCDFObjectResolver;
 
-use super::reader::{self, NetcdfReaderCache};
+use super::reader::{self, NetcdfInput, NetcdfReaderCache, ReaderBackend};
 
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
 ///
@@ -51,6 +51,8 @@ pub struct NetCDFSource {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Reader cache to consult for this scan. `None` disables caching.
     cache: Option<NetcdfReaderCache>,
+    /// The reader that opens each file of this scan.
+    reader_backend: ReaderBackend,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
 }
@@ -70,6 +72,7 @@ impl NetCDFSource {
             batch_size: usize::MAX,
             predicate: None,
             cache: None,
+            reader_backend: ReaderBackend::default(),
             projection: None,
         }
     }
@@ -78,6 +81,12 @@ impl NetCDFSource {
     /// opened datasets. The format wires in the runtime's shared cache here.
     pub fn with_cache(mut self, cache: Option<NetcdfReaderCache>) -> Self {
         self.cache = cache;
+        self
+    }
+
+    /// Returns a copy of this source that opens files with `reader_backend`.
+    pub fn with_reader_backend(mut self, reader_backend: ReaderBackend) -> Self {
+        self.reader_backend = reader_backend;
         self
     }
 
@@ -93,7 +102,7 @@ impl NetCDFSource {
 impl FileSource for NetCDFSource {
     fn create_file_opener(
         &self,
-        _object_store: Arc<dyn object_store::ObjectStore>,
+        object_store: Arc<dyn object_store::ObjectStore>,
         base_config: &FileScanConfig,
         partition: usize,
     ) -> datafusion::error::Result<Arc<dyn FileOpener>> {
@@ -110,6 +119,8 @@ impl FileSource for NetCDFSource {
             self.cache.clone(),
             self.execution_plan_metrics.clone(),
             partition,
+            self.reader_backend,
+            object_store,
         )))
     }
 
@@ -205,6 +216,11 @@ struct NetCDFOpener {
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
     object_path_resolver: Arc<dyn NetCDFObjectResolver>,
+    /// The reader that opens each file.
+    reader_backend: ReaderBackend,
+    /// The store the scan lists from. The `oxcdf` reader reads through it; the
+    /// netcdf-c reader ignores it and opens a resolved native path instead.
+    object_store: Arc<dyn object_store::ObjectStore>,
 }
 
 impl NetCDFOpener {
@@ -219,6 +235,8 @@ impl NetCDFOpener {
         cache: Option<NetcdfReaderCache>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
+        reader_backend: ReaderBackend,
+        object_store: Arc<dyn object_store::ObjectStore>,
     ) -> Self {
         let pruning_predicate = predicate
             .as_ref()
@@ -235,12 +253,24 @@ impl NetCDFOpener {
             metrics,
             partition,
             object_path_resolver,
+            reader_backend,
+            object_store,
         }
+    }
+
+    /// Describe where one object's bytes come from, for this opener's reader.
+    fn input_for(&self, object: &ObjectMeta) -> datafusion::error::Result<NetcdfInput> {
+        reader::netcdf_input(
+            self.reader_backend,
+            &self.object_path_resolver,
+            &self.object_store,
+            object,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn read_task(
-        object_path_resolver: Arc<dyn NetCDFObjectResolver>,
+        input: NetcdfInput,
         object: ObjectMeta,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
@@ -249,13 +279,7 @@ impl NetCDFOpener {
         cache: Option<NetcdfReaderCache>,
         metrics: Option<DatasetReadMetrics>,
     ) -> datafusion::error::Result<BoxStream<'static, datafusion::error::Result<RecordBatch>>> {
-        let native_path = object_path_resolver.resolve(&object).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to resolve object metadata (path) to NetCDF native path: {}",
-                e
-            ))
-        })?;
-        let dataset = reader::open_dataset(cache.as_ref(), native_path, object.clone())
+        let dataset = reader::open_dataset(cache.as_ref(), input, object.clone())
             .await
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
@@ -430,8 +454,9 @@ impl FileOpener for NetCDFOpener {
         };
 
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
+        let input = self.input_for(&file.object_meta)?;
         let fut = Self::read_task(
-            self.object_path_resolver.clone(),
+            input,
             file.object_meta,
             self.projected_schema.clone(),
             self.read_dimensions.clone(),

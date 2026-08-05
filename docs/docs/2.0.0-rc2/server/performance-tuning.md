@@ -109,6 +109,35 @@ For a deployment with many NetCDF files:
 `BEACON_NETCDF_ENABLE_STATISTICS` controls the statistics of each file. Beacon uses them to prune a
 query. The default is `true`. Keep it on. Switch it off only to debug the pruning.
 
+### Pure-Rust reader (parallel reads and object storage)
+
+#### `BEACON_NETCDF_USE_RUST_READER`
+
+Beacon reads NetCDF with the netCDF-C library by default. That library is not thread safe. Its Rust
+bindings hold one lock for each call. The lock covers the input, the decompression and the type
+conversion. A query that reads many files therefore reads one file at a time. The library also opens
+only a local path or an `http`/`https` URL.
+
+Set `BEACON_NETCDF_USE_RUST_READER=true` to use the pure-Rust reader. It holds no lock, so Beacon
+reads many files at the same time. It also reads byte ranges through the object store, so a file in
+S3, GCS or Azure needs no local copy.
+
+Recommendations:
+
+- Set it to `true` for a query that scans many NetCDF files.
+- Set it to `true` for NetCDF files in an object store. The netCDF-C library cannot open those.
+- Keep the default `false` if you must match the behaviour of the netCDF-C library exactly.
+
+Both readers give the same schema and the same values. Writes always use the netCDF-C library.
+
+You can also set the reader for one table:
+
+```sql
+CREATE EXTERNAL TABLE my_table STORED AS NC
+LOCATION 's3://bucket/data/'
+OPTIONS ('use_rust_reader' 'true');
+```
+
 ## Zarr predicate pushdown
 
 The Zarr reader of Beacon applies predicate pushdown **automatically**. It uses the shared

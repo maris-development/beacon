@@ -40,7 +40,7 @@ pub mod source;
 pub mod statistics;
 pub mod table_function;
 
-pub use reader::NetcdfReaderCache;
+pub use reader::{NetcdfInput, NetcdfReaderCache, ReaderBackend};
 pub use table_function::ReadNetCDFFunc;
 
 /// Runtime configuration for the NetCDF format.
@@ -57,6 +57,13 @@ pub struct NetcdfConfig {
     pub reader_cache_size: usize,
     /// Whether to generate per-file statistics during planning.
     pub enable_statistics: bool,
+    /// Whether reads go through the pure-Rust [`oxcdf`] reader instead of
+    /// netcdf-c.
+    ///
+    /// Off by default, so the netcdf-c path stays the one a runtime uses until
+    /// an operator opts in. Turn it on to get parallel reads and native object
+    /// store access; see [`crate::oxcdf_reader`]. Writes always use netcdf-c.
+    pub use_rust_reader: bool,
 }
 
 impl Default for NetcdfConfig {
@@ -65,6 +72,7 @@ impl Default for NetcdfConfig {
             use_reader_cache: true,
             reader_cache_size: 128,
             enable_statistics: true,
+            use_rust_reader: false,
         }
     }
 }
@@ -114,12 +122,23 @@ impl NetCDFFormatFactory {
         options: NetcdfOptions,
         use_reader_cache: bool,
         enable_statistics: bool,
+        reader_backend: ReaderBackend,
     ) -> NetcdfFormat {
         let cache = use_reader_cache.then(|| self.cache.clone());
         NetcdfFormat::new(self.listing_factory.clone(), options)
             .with_cache(cache)
             .with_enable_statistics(enable_statistics)
+            .with_reader_backend(reader_backend)
             .with_output_dir(self.output_dir.clone())
+    }
+}
+
+/// The reader a `use_rust_reader` setting selects.
+fn reader_backend_for(use_rust_reader: bool) -> ReaderBackend {
+    if use_rust_reader {
+        ReaderBackend::Oxcdf
+    } else {
+        ReaderBackend::NetcdfC
     }
 }
 
@@ -134,6 +153,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
         let mut options = self.options.clone();
         let mut use_reader_cache = self.config.use_reader_cache;
         let mut enable_statistics = self.config.enable_statistics;
+        let mut use_rust_reader = self.config.use_rust_reader;
 
         if let Some(value) = format_options.get("read_dimensions") {
             options.read_dimensions = Some(
@@ -150,11 +170,15 @@ impl FileFormatFactory for NetCDFFormatFactory {
         if let Some(value) = format_options.get("enable_statistics") {
             enable_statistics = parse_bool_option("enable_statistics", value)?;
         }
+        if let Some(value) = format_options.get("use_rust_reader") {
+            use_rust_reader = parse_bool_option("use_rust_reader", value)?;
+        }
 
         Ok(Arc::new(self.build_format(
             options,
             use_reader_cache,
             enable_statistics,
+            reader_backend_for(use_rust_reader),
         )))
     }
 
@@ -163,6 +187,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
             self.options.clone(),
             self.config.use_reader_cache,
             self.config.enable_statistics,
+            reader_backend_for(self.config.use_rust_reader),
         ))
     }
 
@@ -178,13 +203,17 @@ impl GetExt for NetCDFFormatFactory {
 }
 
 impl FileFormatFactoryExt for NetCDFFormatFactory {
-    /// netCDF is read by netcdf-c, which opens a local path or an http(s) URL and
-    /// never the object store, so the format needs a [`NetCDFObjectResolver`] built
-    /// from the root store `url` resolves against. Plain [`FileFormatFactory::create`]
-    /// has no location to work from and yields a format whose resolver always errors.
+    /// netcdf-c opens a local path or an http(s) URL and never the object store,
+    /// so a format on that reader needs a [`NetCDFObjectResolver`] built from the
+    /// root store `url` resolves against. Plain [`FileFormatFactory::create`] has
+    /// no location to work from and yields a format whose resolver always errors.
     ///
     /// `native_read_root` rejects a scheme netcdf-c cannot open (s3/gs/az) here,
     /// naming the location, rather than failing later per listed object.
+    ///
+    /// The `oxcdf` reader reads through the object store, so it needs no
+    /// resolver and no native root. A format on that reader is returned as it
+    /// is, which is what lets a table live in s3, gs or az.
     fn create_with_native_root(
         &self,
         state: &dyn Session,
@@ -192,7 +221,6 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
         url: &datafusion::datasource::listing::ListingTableUrl,
         listing: &ListingFactory,
     ) -> datafusion::error::Result<Arc<dyn FileFormat>> {
-        let root = listing.native_read_root(url)?;
         let format = self.create(state, format_options)?;
         let netcdf = format
             .as_any()
@@ -200,9 +228,14 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
             .ok_or_else(|| {
                 exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
             })?
-            .clone()
-            .with_object_path_resolver(object_meta_resolver::create_object_resolver(&root));
-        Ok(Arc::new(netcdf))
+            .clone();
+        if netcdf.reader_backend == ReaderBackend::Oxcdf {
+            return Ok(Arc::new(netcdf));
+        }
+        let root = listing.native_read_root(url)?;
+        Ok(Arc::new(netcdf.with_object_path_resolver(
+            object_meta_resolver::create_object_resolver(&root),
+        )))
     }
 
     fn discover_datasets(
@@ -237,6 +270,8 @@ pub struct NetcdfFormat {
     enable_statistics: bool,
     /// Local directory the netcdf-c writer emits output files into.
     output_dir: PathBuf,
+    /// The reader that opens each file of this table.
+    pub reader_backend: ReaderBackend,
     pub object_path_resolver: Arc<dyn NetCDFObjectResolver>,
 }
 
@@ -248,8 +283,29 @@ impl NetcdfFormat {
             cache: None,
             enable_statistics: false,
             output_dir: std::env::temp_dir(),
+            reader_backend: ReaderBackend::default(),
             object_path_resolver: Arc::new(DefaultNetCDFObjectResolver),
         }
+    }
+
+    /// Select the reader that opens each file.
+    pub fn with_reader_backend(mut self, reader_backend: ReaderBackend) -> Self {
+        self.reader_backend = reader_backend;
+        self
+    }
+
+    /// Describe where one object's bytes come from, for the format's reader.
+    fn input_for(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        object: &ObjectMeta,
+    ) -> datafusion::error::Result<NetcdfInput> {
+        reader::netcdf_input(
+            self.reader_backend,
+            &self.object_path_resolver,
+            store,
+            object,
+        )
     }
 
     /// Wire in a reader cache (`Some`) or disable caching (`None`).
@@ -301,21 +357,15 @@ impl FileFormat for NetcdfFormat {
     async fn infer_schema(
         &self,
         _state: &dyn Session,
-        _store: &Arc<dyn ObjectStore>,
+        store: &Arc<dyn ObjectStore>,
         objects: &[ObjectMeta],
     ) -> datafusion::error::Result<SchemaRef> {
         let mut tasks = vec![];
         let cache = self.cache.as_ref();
         for object in objects {
-            let native_path = self.object_path_resolver.resolve(object).map_err(|e| {
-                exec_datafusion_err!(
-                    "Failed to resolve object metadata (path) to NetCDF native path: {}",
-                    e
-                )
-            })?;
             let task = reader::fetch_schema(
                 cache,
-                native_path,
+                self.input_for(store, object)?,
                 object.clone(),
                 self.options.read_dimensions.clone(),
             );
@@ -338,31 +388,24 @@ impl FileFormat for NetcdfFormat {
     async fn infer_stats(
         &self,
         _state: &dyn Session,
-        _store: &Arc<dyn ObjectStore>,
+        store: &Arc<dyn ObjectStore>,
         table_schema: SchemaRef,
         object: &ObjectMeta,
     ) -> datafusion::error::Result<Statistics> {
         if self.enable_statistics {
-            // Resolved through the same resolver the reader uses, so statistics and
-            // scans can never disagree about where a file is.
-            let native_path = self.object_path_resolver.resolve(object).map_err(|e| {
-                exec_datafusion_err!(
-                    "Failed to resolve object metadata (path) to NetCDF native path: {}",
-                    e
-                )
-            })?;
-            Ok(
-                statistics::generate_statistics(native_path, &table_schema)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(
-                            "Failed to generate statistics for object {}: {}",
-                            object.location,
-                            e
-                        );
-                        Statistics::new_unknown(&table_schema)
-                    }),
-            )
+            // Built the same way the reader builds it, so statistics and scans
+            // can never disagree about where a file is or which reader opens it.
+            let input = self.input_for(store, object)?;
+            Ok(statistics::generate_statistics(input, &table_schema)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to generate statistics for object {}: {}",
+                        object.location,
+                        e
+                    );
+                    Statistics::new_unknown(&table_schema)
+                }))
         } else {
             Ok(Statistics::new_unknown(&table_schema))
         }
@@ -393,6 +436,7 @@ impl FileFormat for NetcdfFormat {
             table_schema,
         )
         .with_cache(self.cache.clone())
+        .with_reader_backend(self.reader_backend)
         .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -474,8 +518,340 @@ impl FileFormat for NetcdfFormat {
                 self.options.read_dimensions.clone(),
                 table_schema,
             )
-            .with_cache(self.cache.clone()),
+            .with_cache(self.cache.clone())
+            .with_reader_backend(self.reader_backend),
         )
+    }
+}
+
+/// The reader-backend flag: how it is set, and that both readers agree.
+#[cfg(test)]
+mod reader_backend_tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use beacon_common::super_table::SuperListingTable;
+    use beacon_datafusion_ext::listing_factory::RootStore;
+    use datafusion::datasource::listing::ListingTableUrl;
+    use datafusion::execution::session_state::SessionStateBuilder;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    use super::*;
+
+    const GRIDDED_FILE: &str = "gridded-example.nc";
+    const WOD_FILE: &str = "wod_ctd_1964.nc";
+
+    /// The absolute path of a bundled test file.
+    fn test_file(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test_files")
+            .join(name)
+    }
+
+    fn factory() -> NetCDFFormatFactory {
+        NetCDFFormatFactory::new(
+            Arc::new(ListingFactory::dynamic()),
+            std::env::temp_dir(),
+            NetcdfOptions::default(),
+            NetcdfConfig::default(),
+        )
+    }
+
+    /// The backend of a format the factory built from `format_options`.
+    fn backend_of(
+        factory: &NetCDFFormatFactory,
+        state: &dyn Session,
+        format_options: &HashMap<String, String>,
+    ) -> datafusion::error::Result<ReaderBackend> {
+        let format = factory.create(state, format_options)?;
+        Ok(format
+            .as_any()
+            .downcast_ref::<NetcdfFormat>()
+            .expect("the factory builds a NetcdfFormat")
+            .reader_backend)
+    }
+
+    /// A format on `backend`, ready to read the bundled test files.
+    ///
+    /// netcdf-c opens a path itself, so it gets a resolver over the filesystem
+    /// root. `oxcdf` reads through the object store and needs none.
+    fn format_on(backend: ReaderBackend) -> NetcdfFormat {
+        let format = NetcdfFormat::new(
+            Arc::new(ListingFactory::dynamic()),
+            NetcdfOptions::default(),
+        )
+        .with_reader_backend(backend);
+
+        match backend {
+            ReaderBackend::NetcdfC => {
+                format.with_object_path_resolver(object_meta_resolver::create_object_resolver(
+                    &RootStore::FileSystem(PathBuf::from("/")),
+                ))
+            }
+            ReaderBackend::Oxcdf => format,
+        }
+    }
+
+    /// A single-partition session, so a scan yields rows in a stable order.
+    fn session() -> SessionContext {
+        let state = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_target_partitions(1))
+            .with_default_features()
+            .build();
+        SessionContext::new_with_state(state)
+    }
+
+    /// Register one test file as a table read on `backend`.
+    async fn register(ctx: &SessionContext, table: &str, backend: ReaderBackend, file: &str) {
+        let url = ListingTableUrl::parse(test_file(file).to_string_lossy()).unwrap();
+        let listing = SuperListingTable::new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
+            .await
+            .unwrap_or_else(|e| panic!("register {file} on {backend:?}: {e}"));
+        ctx.register_table(table, Arc::new(listing)).unwrap();
+    }
+
+    // ── The flag ───────────────────────────────────────────────────────
+
+    /// netcdf-c stays the reader until an operator opts in.
+    #[test]
+    fn the_default_config_keeps_netcdf_c() {
+        assert!(!NetcdfConfig::default().use_rust_reader);
+        assert_eq!(ReaderBackend::default(), ReaderBackend::NetcdfC);
+    }
+
+    #[tokio::test]
+    async fn a_table_option_selects_the_rust_reader() {
+        let factory = factory();
+        let ctx = session();
+        let state = ctx.state();
+
+        assert_eq!(
+            backend_of(&factory, &state, &HashMap::new()).unwrap(),
+            ReaderBackend::NetcdfC,
+            "no option means the runtime default"
+        );
+
+        let options = HashMap::from([("use_rust_reader".to_string(), "true".to_string())]);
+        assert_eq!(
+            backend_of(&factory, &state, &options).unwrap(),
+            ReaderBackend::Oxcdf
+        );
+
+        let options = HashMap::from([("use_rust_reader".to_string(), "off".to_string())]);
+        assert_eq!(
+            backend_of(&factory, &state, &options).unwrap(),
+            ReaderBackend::NetcdfC
+        );
+
+        let options = HashMap::from([("use_rust_reader".to_string(), "maybe".to_string())]);
+        assert!(
+            backend_of(&factory, &state, &options).is_err(),
+            "a malformed boolean is a hard error"
+        );
+    }
+
+    /// The runtime config sets the default that a table inherits.
+    #[tokio::test]
+    async fn the_runtime_config_sets_the_default() {
+        let factory = NetCDFFormatFactory::new(
+            Arc::new(ListingFactory::dynamic()),
+            std::env::temp_dir(),
+            NetcdfOptions::default(),
+            NetcdfConfig {
+                use_rust_reader: true,
+                ..NetcdfConfig::default()
+            },
+        );
+        let ctx = session();
+
+        assert_eq!(
+            backend_of(&factory, &ctx.state(), &HashMap::new()).unwrap(),
+            ReaderBackend::Oxcdf
+        );
+
+        // And one table can still opt back out.
+        let options = HashMap::from([("use_rust_reader".to_string(), "false".to_string())]);
+        assert_eq!(
+            backend_of(&factory, &ctx.state(), &options).unwrap(),
+            ReaderBackend::NetcdfC
+        );
+    }
+
+    /// `FileFormatFactory::default` also carries the configured reader.
+    #[test]
+    fn the_default_format_carries_the_configured_reader() {
+        let factory = NetCDFFormatFactory::new(
+            Arc::new(ListingFactory::dynamic()),
+            std::env::temp_dir(),
+            NetcdfOptions::default(),
+            NetcdfConfig {
+                use_rust_reader: true,
+                ..NetcdfConfig::default()
+            },
+        );
+        let format = FileFormatFactory::default(&factory);
+        assert_eq!(
+            format
+                .as_any()
+                .downcast_ref::<NetcdfFormat>()
+                .unwrap()
+                .reader_backend,
+            ReaderBackend::Oxcdf
+        );
+    }
+
+    // ── Both readers agree ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn both_readers_infer_the_same_schema() {
+        for file in [GRIDDED_FILE, WOD_FILE] {
+            let ctx = session();
+            register(&ctx, "netcdf_c", ReaderBackend::NetcdfC, file).await;
+            register(&ctx, "rust", ReaderBackend::Oxcdf, file).await;
+
+            // Compare the Arrow schemas: a `DFSchema` also carries the table
+            // name, which differs here by construction.
+            let c = ctx
+                .table("netcdf_c")
+                .await
+                .unwrap()
+                .schema()
+                .as_arrow()
+                .clone();
+            let rust = ctx.table("rust").await.unwrap().schema().as_arrow().clone();
+            assert_eq!(rust, c, "schemas differ for {file}");
+        }
+    }
+
+    /// A full scan through the object store gives the same rows as netcdf-c.
+    #[tokio::test]
+    async fn both_readers_return_the_same_rows() {
+        use arrow::compute::concat_batches;
+
+        let ctx = session();
+        register(&ctx, "netcdf_c", ReaderBackend::NetcdfC, GRIDDED_FILE).await;
+        register(&ctx, "rust", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        let query = "SELECT analysed_sst, lat, lon FROM {table}";
+        let collect = async |table: &str| {
+            let batches = ctx
+                .sql(&query.replace("{table}", table))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let schema = batches[0].schema();
+            concat_batches(&schema, &batches).unwrap()
+        };
+
+        let rust = collect("rust").await;
+        assert!(rust.num_rows() > 0, "the scan must return rows");
+        assert_eq!(rust, collect("netcdf_c").await);
+    }
+
+    // ── Partitioning ───────────────────────────────────────────────────
+
+    /// A scan of many files already runs one file for each partition, on either
+    /// reader: `ListingTable` splits the file groups by `target_partitions`
+    /// before `FileSource::repartitioned` is ever consulted. So neither reader
+    /// needs a repartition rule to read files in parallel. What the Rust reader
+    /// adds is that those partitions then run at the same time, because it
+    /// holds no global lock.
+    #[tokio::test]
+    async fn a_multi_file_scan_gets_one_partition_for_each_file() {
+        use datafusion::physical_plan::ExecutionPlanProperties;
+
+        let files = 4;
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..files {
+            std::fs::copy(test_file(GRIDDED_FILE), dir.path().join(format!("f{i}.nc"))).unwrap();
+        }
+
+        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
+            let state = SessionStateBuilder::new()
+                .with_config(SessionConfig::new().with_target_partitions(files))
+                .with_default_features()
+                .build();
+            let ctx = SessionContext::new_with_state(state);
+            let url = ListingTableUrl::parse(dir.path().to_string_lossy()).unwrap();
+            let table =
+                SuperListingTable::new(&ctx.state(), Arc::new(format_on(backend)), vec![url])
+                    .await
+                    .unwrap();
+            ctx.register_table("many", Arc::new(table)).unwrap();
+
+            let plan = ctx
+                .sql("SELECT analysed_sst FROM many")
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            assert_eq!(
+                plan.output_partitioning().partition_count(),
+                files,
+                "{backend:?} should scan {files} files in {files} partitions"
+            );
+        }
+    }
+
+    /// [`NetCDFSource::repartitioned`] must keep returning `None`, on either
+    /// reader. DataFusion's file-group partitioner splits a file by **byte
+    /// range**, and a byte range of a NetCDF file is not a NetCDF file. The
+    /// opener ignores [`PartitionedFile::range`] and opens the whole dataset, so
+    /// a range split would return every row once for each range. File-level
+    /// parallelism does not go through here (see the test above).
+    ///
+    /// [`PartitionedFile::range`]: datafusion::datasource::listing::PartitionedFile::range
+    #[test]
+    fn the_source_never_splits_a_file_by_byte_range() {
+        use datafusion::datasource::table_schema::TableSchema;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+
+        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
+            let table_schema =
+                TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
+            let source = NetCDFSource::new(
+                Arc::new(object_meta_resolver::DefaultNetCDFObjectResolver),
+                None,
+                table_schema,
+            )
+            .with_reader_backend(backend);
+            let config = FileScanConfigBuilder::new(
+                ObjectStoreUrl::local_filesystem(),
+                Arc::new(source.clone()) as Arc<dyn FileSource>,
+            )
+            .build();
+
+            assert!(
+                source.repartitioned(8, 1, None, &config).unwrap().is_none(),
+                "{backend:?} must not accept a byte-range repartition"
+            );
+        }
+    }
+
+    /// A projection and a predicate push down the same way on either reader.
+    #[tokio::test]
+    async fn a_pushed_down_predicate_gives_the_same_answer() {
+        let ctx = session();
+        register(&ctx, "netcdf_c", ReaderBackend::NetcdfC, GRIDDED_FILE).await;
+        register(&ctx, "rust", ReaderBackend::Oxcdf, GRIDDED_FILE).await;
+
+        let count = async |table: &str| {
+            let sql = format!("SELECT count(*) FROM {table} WHERE lat > 0");
+            let batches = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0)
+        };
+
+        let rust = count("rust").await;
+        assert!(rust > 0, "the predicate must keep some rows");
+        assert_eq!(rust, count("netcdf_c").await);
     }
 }
 

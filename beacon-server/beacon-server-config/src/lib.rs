@@ -404,6 +404,14 @@ struct RawConfig {
     #[envconfig(from = "BEACON_NETCDF_READER_CACHE_SIZE", default = "128")]
     netcdf_reader_cache_size: usize,
 
+    /// Read netCDF with the pure-Rust `oxcdf` reader instead of netcdf-c.
+    ///
+    /// Off by default: netcdf-c is the path this server has always used. Turn
+    /// it on for parallel reads and for netCDF files in an object store (s3, gs
+    /// or az), which netcdf-c cannot open. Writes always use netcdf-c.
+    #[envconfig(from = "BEACON_NETCDF_USE_RUST_READER", default = "false")]
+    netcdf_use_rust_reader: bool,
+
     #[envconfig(from = "BEACON_ATLAS_USE_READER_CACHE", default = "true")]
     atlas_use_reader_cache: bool,
     #[envconfig(from = "BEACON_ATLAS_READER_CACHE_SIZE", default = "32")]
@@ -520,6 +528,7 @@ impl From<RawConfig> for Config {
                 use_reader_cache: raw.netcdf_use_reader_cache,
                 reader_cache_size: raw.netcdf_reader_cache_size,
                 enable_statistics: raw.netcdf_enable_statistics,
+                use_rust_reader: raw.netcdf_use_rust_reader,
             },
             atlas: AtlasConfig {
                 use_reader_cache: raw.atlas_use_reader_cache,
@@ -725,7 +734,9 @@ fn create_dir(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_master_key, normalize_base_path, validate_storage, Config, PathBuf, RawConfig};
+    use super::{
+        decode_master_key, normalize_base_path, validate_storage, Config, PathBuf, RawConfig,
+    };
     use envconfig::Envconfig;
     use std::collections::HashMap;
 
@@ -805,7 +816,10 @@ mod tests {
         // A trailing slash on the endpoint must not double up.
         let mut slashed = minio.to_vec();
         slashed[2] = ("AWS_ENDPOINT", "http://minio:9000/");
-        assert_eq!(with(&slashed).as_deref(), Some("http://minio:9000/datasets"));
+        assert_eq!(
+            with(&slashed).as_deref(),
+            Some("http://minio:9000/datasets")
+        );
 
         // No endpoint: real AWS, where the region is part of the hostname.
         let aws = [

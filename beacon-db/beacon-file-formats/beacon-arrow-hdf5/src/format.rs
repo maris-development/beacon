@@ -76,8 +76,10 @@ impl FileFormatFactory for Hdf5FormatFactory {
 }
 
 impl FileFormatFactoryExt for Hdf5FormatFactory {
-    /// Delegates to the netCDF factory's native-root path — HDF5 is read by netcdf-c, which opens
-    /// a local path / http(s) URL, exactly like netCDF.
+    /// Delegates to the netCDF factory's native-root path, which handles both readers: netcdf-c
+    /// opens a local path / http(s) URL, and the pure-Rust reader goes through the object store.
+    /// A NetCDF-4 file is HDF5 and both readers parse plain HDF5 too, so neither needs a change
+    /// here.
     fn create_with_native_root(
         &self,
         state: &dyn Session,
@@ -150,7 +152,10 @@ mod tests {
     #[test]
     fn advertises_hdf5_extensions_and_name() {
         let f = factory("hdf5");
-        assert_eq!(f.file_extensions(), vec!["h5".to_string(), "hdf5".to_string()]);
+        assert_eq!(
+            f.file_extensions(),
+            vec!["h5".to_string(), "hdf5".to_string()]
+        );
         assert_eq!(f.get_ext(), "hdf5");
         assert_eq!(f.file_format_name(), "hdf5");
     }
@@ -160,7 +165,10 @@ mod tests {
         let f = factory("h5");
         assert_eq!(f.get_ext(), "h5");
         // The recognized extensions are the same regardless of which key this instance answers to.
-        assert_eq!(f.file_extensions(), vec!["h5".to_string(), "hdf5".to_string()]);
+        assert_eq!(
+            f.file_extensions(),
+            vec!["h5".to_string(), "hdf5".to_string()]
+        );
     }
 
     #[test]

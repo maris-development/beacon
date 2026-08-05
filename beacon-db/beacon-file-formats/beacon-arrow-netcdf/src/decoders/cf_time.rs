@@ -65,7 +65,11 @@ where
     }
 }
 
-fn convert_to_timestamp_nanoseconds<T>(
+/// Convert numeric CF time offsets into nanosecond timestamps.
+///
+/// Shared with the [`oxcdf`](crate::oxcdf_reader) path, so both readers apply
+/// the same arithmetic.
+pub(crate) fn convert_to_timestamp_nanoseconds<T>(
     array: ndarray::ArrayViewD<T>,
     epoch: hifitime::Epoch,
     unit: hifitime::Unit,

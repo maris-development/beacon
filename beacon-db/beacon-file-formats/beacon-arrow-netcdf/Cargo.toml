@@ -15,6 +15,10 @@ static = ["netcdf/static", "netcdf-sys/static"]
 [dependencies]
 netcdf = { git ="https://github.com/robinskil/netcdf.git", features = ["ndarray"], version = "0.11.1"}
 netcdf-sys = { git ="https://github.com/robinskil/netcdf.git", package = "netcdf-sys" }
+# The second reader. It is always compiled; the format picks between the two at
+# runtime (see `datafusion::ReaderBackend`). It is pure Rust and pulls in no C
+# library, so it costs the build almost nothing.
+oxcdf = { workspace = true }
 arrow = { workspace = true }
 
 anyhow = { workspace=true }

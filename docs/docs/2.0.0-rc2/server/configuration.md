@@ -195,6 +195,7 @@ change them.
 | `BEACON_NETCDF_ENABLE_STATISTICS` | `true` | Compute and cache per-file statistics used for query pruning. |
 | `BEACON_NETCDF_USE_READER_CACHE` | `true` | Cache opened NetCDF readers in memory. |
 | `BEACON_NETCDF_READER_CACHE_SIZE` | `128` | Max NetCDF reader entries to keep cached. |
+| `BEACON_NETCDF_USE_RUST_READER` | `false` | Read NetCDF with the pure-Rust reader instead of the netCDF-C library. |
 
 ### Atlas
 
