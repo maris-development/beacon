@@ -44,6 +44,8 @@ pub use netcdf_sys;
 pub use oxcdf;
 /// Array backend implementations used by decoders.
 pub mod backend;
+#[cfg(test)]
+mod cf_time_fill_tests;
 /// Conversion helpers from NetCDF values to ND Arrow arrays.
 pub mod compat;
 /// DataFusion integration components.
