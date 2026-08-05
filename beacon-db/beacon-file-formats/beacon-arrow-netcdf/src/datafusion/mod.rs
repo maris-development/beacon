@@ -34,6 +34,8 @@ pub const NETCDF_EXTENSION: &str = "nc";
 
 pub mod object_meta_resolver;
 pub mod options;
+#[cfg(test)]
+mod partition_coverage_tests;
 pub mod reader;
 pub mod sink;
 pub mod source;
