@@ -881,6 +881,71 @@ mod reader_backend_tests {
         }
     }
 
+    /// Every column, including every attribute, comes back identical.
+    ///
+    /// The other comparisons check data variables, or check that attributes are
+    /// *present* with the right type and shape. Neither would catch an
+    /// attribute whose **value** differs between the readers. `SELECT *` reads
+    /// the lot: data variables, variable attributes (`analysed_sst.units`) and
+    /// global attributes (`.Conventions`), the last two broadcast onto every
+    /// row by the nd pipeline.
+    #[tokio::test]
+    async fn both_readers_return_identical_values_for_every_column() {
+        use arrow::compute::concat_batches;
+
+        // The ragged file in full, and a slice of the gridded one — a whole
+        // gridded scan is millions of rows and does not need materialising to
+        // prove the point.
+        for (file, query) in [
+            (WOD_FILE, "SELECT * FROM {table}"),
+            (GRIDDED_FILE, "SELECT * FROM {table} LIMIT 512"),
+        ] {
+            let ctx = session();
+            register(&ctx, "netcdf_c", ReaderBackend::NetcdfC, file).await;
+            register(&ctx, "rust", ReaderBackend::Oxcdf, file).await;
+
+            let collect = async |table: &str| {
+                let batches = ctx
+                    .sql(&query.replace("{table}", table))
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                    .unwrap();
+                let schema = batches[0].schema();
+                concat_batches(&schema, &batches).unwrap()
+            };
+
+            let rust = collect("rust").await;
+            let c = collect("netcdf_c").await;
+
+            assert!(rust.num_rows() > 0, "{file}: the scan must return rows");
+            // Guard the guard: a column set that lost the attributes would make
+            // the comparison below pass without checking any of them.
+            let schema = rust.schema();
+            let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            assert!(
+                names.iter().any(|n| n.starts_with('.')),
+                "{file}: no global attribute in {names:?}"
+            );
+            assert!(
+                names.iter().any(|n| n.contains('.') && !n.starts_with('.')),
+                "{file}: no variable attribute in {names:?}"
+            );
+
+            // Compare column by column, so a failure names the column.
+            for (i, field) in rust.schema().fields().iter().enumerate() {
+                assert_eq!(
+                    rust.column(i),
+                    c.column(i),
+                    "{file}: column '{}' differs between the readers",
+                    field.name()
+                );
+            }
+            assert_eq!(rust, c, "{file}: batches differ");
+        }
+    }
+
     /// A projection and a predicate push down the same way on either reader.
     #[tokio::test]
     async fn a_pushed_down_predicate_gives_the_same_answer() {
