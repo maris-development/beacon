@@ -67,8 +67,8 @@ pub fn dataset_as_nd_stream(
         Err(e) => return futures::stream::once(async move { Err(exec_err(e)) }).boxed(),
     };
 
-    // Honour a native chunk layout when present; otherwise cut the outer axis to
-    // approach `batch_size`.
+    // Honour a native chunk layout when present; otherwise fill a chunk from the
+    // last axis to approach `batch_size`.
     let effective_chunk_shape = if chunk_shape != max_shape {
         chunk_shape
     } else {
