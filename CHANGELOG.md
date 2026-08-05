@@ -42,6 +42,11 @@ tag. Releases before 2.0.0 are recorded in the
 
 ### Fixed
 
+- **A netCDF time variable kept its `_FillValue` cells as dates.** Both netCDF readers dropped the
+  `_FillValue` of a CF time variable, so a fill cell reached a query as a real timestamp:
+  `units = "days since 1970-01-01"` with `_FillValue = -32768` gave `1880-03-15`. Such a value
+  passed a filter and joined a group. The readers now decode the fill with the same CF arithmetic
+  as the data, and the cell is NULL. Zarr already did this, so the same dataset gave two answers.
 - **`read_schema(paths, format)` never existed.** The docs, and one integration test, called a
   generic function that is not registered. The real API is a per-reader counterpart —
   `read_parquet_schema`, `read_netcdf_schema`, and so on, one for every reader including
