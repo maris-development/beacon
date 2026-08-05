@@ -23,7 +23,6 @@ use datafusion::{
 };
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::datafusion::object_meta_resolver::{DefaultNetCDFObjectResolver, NetCDFObjectResolver};
 use crate::datafusion::{
     options::NetcdfOptions,
     sink::{NetCDFNdSink, NetCDFSink},
@@ -42,7 +41,7 @@ pub mod source;
 pub mod statistics;
 pub mod table_function;
 
-pub use reader::{NetcdfInput, NetcdfReaderCache, ReaderBackend};
+pub use reader::{FileAccess, NetcdfInput, NetcdfReaderCache, ReaderBackend};
 pub use table_function::ReadNetCDFFunc;
 
 /// Runtime configuration for the NetCDF format.
@@ -124,23 +123,28 @@ impl NetCDFFormatFactory {
         options: NetcdfOptions,
         use_reader_cache: bool,
         enable_statistics: bool,
-        reader_backend: ReaderBackend,
+        access: FileAccess,
     ) -> NetcdfFormat {
         let cache = use_reader_cache.then(|| self.cache.clone());
         NetcdfFormat::new(self.listing_factory.clone(), options)
             .with_cache(cache)
             .with_enable_statistics(enable_statistics)
-            .with_reader_backend(reader_backend)
+            .with_access(access)
             .with_output_dir(self.output_dir.clone())
     }
 }
 
-/// The reader a `use_rust_reader` setting selects.
-fn reader_backend_for(use_rust_reader: bool) -> ReaderBackend {
+/// The access a `use_rust_reader` setting selects, for a format built without a
+/// location.
+///
+/// `oxcdf` is complete as it stands: it reads through the scan's object store.
+/// netcdf-c needs a resolver it cannot have yet, so it gets the unresolvable
+/// default; `create_with_native_root` is where it gets a real one.
+fn access_for(use_rust_reader: bool) -> FileAccess {
     if use_rust_reader {
-        ReaderBackend::Oxcdf
+        FileAccess::Oxcdf
     } else {
-        ReaderBackend::NetcdfC
+        FileAccess::default()
     }
 }
 
@@ -180,7 +184,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
             options,
             use_reader_cache,
             enable_statistics,
-            reader_backend_for(use_rust_reader),
+            access_for(use_rust_reader),
         )))
     }
 
@@ -189,7 +193,7 @@ impl FileFormatFactory for NetCDFFormatFactory {
             self.options.clone(),
             self.config.use_reader_cache,
             self.config.enable_statistics,
-            reader_backend_for(self.config.use_rust_reader),
+            access_for(self.config.use_rust_reader),
         ))
     }
 
@@ -205,17 +209,19 @@ impl GetExt for NetCDFFormatFactory {
 }
 
 impl FileFormatFactoryExt for NetCDFFormatFactory {
+    /// This is where a [`FileAccess::NetcdfC`] gets its resolver.
+    ///
     /// netcdf-c opens a local path or an http(s) URL and never the object store,
-    /// so a format on that reader needs a [`NetCDFObjectResolver`] built from the
-    /// root store `url` resolves against. Plain [`FileFormatFactory::create`] has
-    /// no location to work from and yields a format whose resolver always errors.
+    /// so it needs a resolver built from the root store `url` resolves against.
+    /// Plain [`FileFormatFactory::create`] has no location to work from, so it
+    /// leaves [`FileAccess::default`] in place, which resolves nothing.
     ///
     /// `native_read_root` rejects a scheme netcdf-c cannot open (s3/gs/az) here,
     /// naming the location, rather than failing later per listed object.
     ///
-    /// The `oxcdf` reader reads through the object store, so it needs no
-    /// resolver and no native root. A format on that reader is returned as it
-    /// is, which is what lets a table live in s3, gs or az.
+    /// [`FileAccess::Oxcdf`] reads through the object store, so it needs no
+    /// resolver and no native root. It is returned as it is, which is what lets
+    /// a table live in s3, gs or az.
     fn create_with_native_root(
         &self,
         state: &dyn Session,
@@ -231,13 +237,17 @@ impl FileFormatFactoryExt for NetCDFFormatFactory {
                 exec_datafusion_err!("the NetCDF factory did not produce a NetcdfFormat")
             })?
             .clone();
-        if netcdf.reader_backend == ReaderBackend::Oxcdf {
-            return Ok(Arc::new(netcdf));
+        match netcdf.access {
+            // Already complete: it reads through the scan's object store.
+            FileAccess::Oxcdf => Ok(Arc::new(netcdf)),
+            // Supply the resolver `create` had no location to build.
+            FileAccess::NetcdfC { .. } => {
+                let root = listing.native_read_root(url)?;
+                Ok(Arc::new(netcdf.with_access(FileAccess::netcdf_c(
+                    object_meta_resolver::create_object_resolver(&root),
+                ))))
+            }
         }
-        let root = listing.native_read_root(url)?;
-        Ok(Arc::new(netcdf.with_object_path_resolver(
-            object_meta_resolver::create_object_resolver(&root),
-        )))
     }
 
     fn discover_datasets(
@@ -272,9 +282,8 @@ pub struct NetcdfFormat {
     enable_statistics: bool,
     /// Local directory the netcdf-c writer emits output files into.
     output_dir: PathBuf,
-    /// The reader that opens each file of this table.
-    pub reader_backend: ReaderBackend,
-    pub object_path_resolver: Arc<dyn NetCDFObjectResolver>,
+    /// How this table reaches its files, and which reader opens them.
+    pub access: FileAccess,
 }
 
 impl NetcdfFormat {
@@ -285,29 +294,19 @@ impl NetcdfFormat {
             cache: None,
             enable_statistics: false,
             output_dir: std::env::temp_dir(),
-            reader_backend: ReaderBackend::default(),
-            object_path_resolver: Arc::new(DefaultNetCDFObjectResolver),
+            access: FileAccess::default(),
         }
     }
 
-    /// Select the reader that opens each file.
-    pub fn with_reader_backend(mut self, reader_backend: ReaderBackend) -> Self {
-        self.reader_backend = reader_backend;
+    /// Set how this format reaches its files.
+    pub fn with_access(mut self, access: FileAccess) -> Self {
+        self.access = access;
         self
     }
 
-    /// Describe where one object's bytes come from, for the format's reader.
-    fn input_for(
-        &self,
-        store: &Arc<dyn ObjectStore>,
-        object: &ObjectMeta,
-    ) -> datafusion::error::Result<NetcdfInput> {
-        reader::netcdf_input(
-            self.reader_backend,
-            &self.object_path_resolver,
-            store,
-            object,
-        )
+    /// The reader this format opens files with.
+    pub fn reader_backend(&self) -> ReaderBackend {
+        self.access.backend()
     }
 
     /// Wire in a reader cache (`Some`) or disable caching (`None`).
@@ -326,11 +325,6 @@ impl NetcdfFormat {
     /// OS temp dir).
     pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
         self.output_dir = output_dir;
-        self
-    }
-
-    pub fn with_object_path_resolver(mut self, resolver: Arc<dyn NetCDFObjectResolver>) -> Self {
-        self.object_path_resolver = resolver;
         self
     }
 }
@@ -367,7 +361,7 @@ impl FileFormat for NetcdfFormat {
         for object in objects {
             let task = reader::fetch_schema(
                 cache,
-                self.input_for(store, object)?,
+                self.access.input_for(store, object)?,
                 object.clone(),
                 self.options.read_dimensions.clone(),
             );
@@ -397,7 +391,7 @@ impl FileFormat for NetcdfFormat {
         if self.enable_statistics {
             // Built the same way the reader builds it, so statistics and scans
             // can never disagree about where a file is or which reader opens it.
-            let input = self.input_for(store, object)?;
+            let input = self.access.input_for(store, object)?;
             Ok(statistics::generate_statistics(input, &table_schema)
                 .await
                 .unwrap_or_else(|e| {
@@ -433,12 +427,11 @@ impl FileFormat for NetcdfFormat {
         // source — rebuilding the source below would otherwise drop it.
         let projection = conf.file_source().projection().cloned();
         let source = NetCDFSource::new(
-            self.object_path_resolver.clone(),
+            self.access.clone(),
             self.options.read_dimensions.clone(),
             table_schema,
         )
         .with_cache(self.cache.clone())
-        .with_reader_backend(self.reader_backend)
         .with_projection(projection);
         let conf = FileScanConfigBuilder::from(conf)
             .with_source(Arc::new(source))
@@ -516,12 +509,11 @@ impl FileFormat for NetcdfFormat {
     ) -> Arc<dyn FileSource> {
         Arc::new(
             NetCDFSource::new(
-                self.object_path_resolver.clone(),
+                self.access.clone(),
                 self.options.read_dimensions.clone(),
                 table_schema,
             )
-            .with_cache(self.cache.clone())
-            .with_reader_backend(self.reader_backend),
+            .with_cache(self.cache.clone()),
         )
     }
 }
@@ -570,28 +562,31 @@ mod reader_backend_tests {
             .as_any()
             .downcast_ref::<NetcdfFormat>()
             .expect("the factory builds a NetcdfFormat")
-            .reader_backend)
+            .reader_backend())
     }
 
-    /// A format on `backend`, ready to read the bundled test files.
+    /// The access that reads the bundled test files on `backend`.
     ///
-    /// netcdf-c opens a path itself, so it gets a resolver over the filesystem
-    /// root. `oxcdf` reads through the object store and needs none.
-    fn format_on(backend: ReaderBackend) -> NetcdfFormat {
-        let format = NetcdfFormat::new(
-            Arc::new(ListingFactory::dynamic()),
-            NetcdfOptions::default(),
-        )
-        .with_reader_backend(backend);
-
+    /// netcdf-c opens a path itself, so it takes a resolver over the filesystem
+    /// root. `oxcdf` reads through the object store and takes nothing.
+    fn access_on(backend: ReaderBackend) -> FileAccess {
         match backend {
             ReaderBackend::NetcdfC => {
-                format.with_object_path_resolver(object_meta_resolver::create_object_resolver(
+                FileAccess::netcdf_c(object_meta_resolver::create_object_resolver(
                     &RootStore::FileSystem(PathBuf::from("/")),
                 ))
             }
-            ReaderBackend::Oxcdf => format,
+            ReaderBackend::Oxcdf => FileAccess::Oxcdf,
         }
+    }
+
+    /// A format on `backend`, ready to read the bundled test files.
+    fn format_on(backend: ReaderBackend) -> NetcdfFormat {
+        NetcdfFormat::new(
+            Arc::new(ListingFactory::dynamic()),
+            NetcdfOptions::default(),
+        )
+        .with_access(access_on(backend))
     }
 
     /// A single-partition session, so a scan yields rows in a stable order.
@@ -610,6 +605,64 @@ mod reader_backend_tests {
             .await
             .unwrap_or_else(|e| panic!("register {file} on {backend:?}: {e}"));
         ctx.register_table(table, Arc::new(listing)).unwrap();
+    }
+
+    // ── FileAccess ─────────────────────────────────────────────────────
+
+    /// Each variant carries what its own reader needs, so the two cannot be
+    /// mismatched: `Oxcdf` reads through the store it is handed, and `NetcdfC`
+    /// cannot be built without a resolver.
+    #[test]
+    fn each_access_resolves_an_object_its_own_way() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::local::LocalFileSystem::new());
+        let object = ObjectMeta {
+            location: object_store::path::Path::from("dir/file.nc"),
+            last_modified: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        };
+
+        // oxcdf keeps the store and the object path as they are.
+        let input = FileAccess::Oxcdf.input_for(&store, &object).unwrap();
+        assert!(matches!(input, NetcdfInput::Oxcdf { .. }));
+        assert_eq!(input.backend(), ReaderBackend::Oxcdf);
+        assert_eq!(input.location(), "dir/file.nc");
+
+        // netcdf-c turns it into a native path through its resolver.
+        let access = FileAccess::netcdf_c(object_meta_resolver::create_object_resolver(
+            &RootStore::HttpsStore("https://example.org/data".to_string()),
+        ));
+        let input = access.input_for(&store, &object).unwrap();
+        assert_eq!(input.backend(), ReaderBackend::NetcdfC);
+        assert_eq!(
+            input.location(),
+            "https://example.org/data/dir/file.nc#mode=bytes"
+        );
+    }
+
+    /// The default is netcdf-c with no location supplied yet. It fails per
+    /// object, naming the path, rather than being silently unusable.
+    #[test]
+    fn the_default_access_cannot_resolve_and_says_so() {
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::local::LocalFileSystem::new());
+        let object = ObjectMeta {
+            location: object_store::path::Path::from("dir/file.nc"),
+            last_modified: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            size: 0,
+            e_tag: None,
+            version: None,
+        };
+
+        assert_eq!(FileAccess::default().backend(), ReaderBackend::NetcdfC);
+        let err = FileAccess::default()
+            .input_for(&store, &object)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("dir/file.nc"),
+            "error should name the path: {err}"
+        );
     }
 
     // ── The flag ───────────────────────────────────────────────────────
@@ -697,7 +750,7 @@ mod reader_backend_tests {
                 .as_any()
                 .downcast_ref::<NetcdfFormat>()
                 .unwrap()
-                .reader_backend,
+                .reader_backend(),
             ReaderBackend::Oxcdf
         );
     }
@@ -814,12 +867,7 @@ mod reader_backend_tests {
         for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
             let table_schema =
                 TableSchema::from_file_schema(Arc::new(arrow::datatypes::Schema::empty()));
-            let source = NetCDFSource::new(
-                Arc::new(object_meta_resolver::DefaultNetCDFObjectResolver),
-                None,
-                table_schema,
-            )
-            .with_reader_backend(backend);
+            let source = NetCDFSource::new(access_on(backend), None, table_schema);
             let config = FileScanConfigBuilder::new(
                 ObjectStoreUrl::local_filesystem(),
                 Arc::new(source.clone()) as Arc<dyn FileSource>,

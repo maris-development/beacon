@@ -20,7 +20,7 @@ use beacon_datafusion_ext::file_collection::FileCollection;
 use beacon_datafusion_ext::listing_factory::{ListingFactory, RootStore};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
-use crate::datafusion::{options::NetcdfOptions, NetcdfFormat, ReaderBackend};
+use crate::datafusion::{options::NetcdfOptions, FileAccess, NetcdfFormat, ReaderBackend};
 
 /// Copy the ragged fixture `copies` times into a fresh temp dir.
 fn stage_files(copies: usize) -> tempfile::TempDir {
@@ -43,20 +43,20 @@ async fn ctx_for(
     let ctx = SessionContext::new_with_config(config);
     let state = ctx.state();
 
-    let factory = Arc::new(ListingFactory::dynamic());
-    let format = NetcdfFormat::new(factory, NetcdfOptions::default()).with_reader_backend(backend);
-    // netcdf-c opens a path itself, so it needs the wiring
-    // `create_with_native_root` does for a `file://` listing url: object paths
+    // netcdf-c opens a path itself, so it takes the resolver
+    // `create_with_native_root` builds for a `file://` listing url: object paths
     // are absolute w.r.t. the filesystem root. The `oxcdf` reader goes through
-    // the object store and needs no resolver.
-    let format = Arc::new(match backend {
-        ReaderBackend::NetcdfC => format.with_object_path_resolver(
+    // the object store and takes nothing.
+    let access = match backend {
+        ReaderBackend::NetcdfC => FileAccess::netcdf_c(
             crate::datafusion::object_meta_resolver::create_object_resolver(
                 &RootStore::FileSystem(std::path::PathBuf::from("/")),
             ),
         ),
-        ReaderBackend::Oxcdf => format,
-    });
+        ReaderBackend::Oxcdf => FileAccess::Oxcdf,
+    };
+    let factory = Arc::new(ListingFactory::dynamic());
+    let format = Arc::new(NetcdfFormat::new(factory, NetcdfOptions::default()).with_access(access));
 
     let url = datafusion::datasource::listing::ListingTableUrl::parse(format!(
         "file://{}/",

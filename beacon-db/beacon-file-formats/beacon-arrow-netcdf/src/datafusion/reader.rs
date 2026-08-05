@@ -3,12 +3,15 @@ use std::sync::Arc;
 use beacon_nd_array::dataset::AnyDataset;
 use object_store::{ObjectMeta, ObjectStore};
 
-use crate::datafusion::object_meta_resolver::NetCDFObjectResolver;
+use crate::datafusion::object_meta_resolver::{DefaultNetCDFObjectResolver, NetCDFObjectResolver};
 
 /// Which reader opens a NetCDF file.
 ///
 /// The two readers produce the same dataset, so this only decides how the bytes
 /// are fetched and decoded. See [`crate::oxcdf_reader`] for the trade-off.
+///
+/// This is the bare choice, small enough to key a cache by. [`FileAccess`] is
+/// the choice plus whatever that reader needs to reach a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReaderBackend {
     /// netcdf-c, through its Rust bindings. The default.
@@ -18,11 +21,87 @@ pub enum ReaderBackend {
     Oxcdf,
 }
 
+/// How a table reaches its files, and which reader opens them.
+///
+/// The two readers do not need the same things, so each variant carries exactly
+/// what its reader needs and nothing else. That is the point of the type: a
+/// format cannot hold a resolver the reader never consults, and it cannot pick
+/// netcdf-c without one.
+#[derive(Debug, Clone)]
+pub enum FileAccess {
+    /// netcdf-c opens a path itself, so it cannot work without a resolver to
+    /// turn an object path into that path.
+    NetcdfC {
+        /// Builds the native path netcdf-c opens, from the table's root store.
+        resolver: Arc<dyn NetCDFObjectResolver>,
+    },
+    /// `oxcdf` reads byte ranges through the scan's own object store. It needs
+    /// nothing else, which is why this variant carries nothing.
+    Oxcdf,
+}
+
+impl Default for FileAccess {
+    /// netcdf-c with a resolver that cannot resolve anything.
+    ///
+    /// This is the "no location was supplied" state, which
+    /// [`FileFormatFactory::create`](datafusion::datasource::file_format::FileFormatFactory::create)
+    /// and [`FileFormatFactory::default`](datafusion::datasource::file_format::FileFormatFactory::default)
+    /// produce. A scan on it fails per object, naming the path it could not
+    /// resolve. See [`FileFormatFactoryExt::create_with_native_root`](beacon_datafusion_ext::format_ext::FileFormatFactoryExt::create_with_native_root)
+    /// for the path that supplies one.
+    fn default() -> Self {
+        Self::NetcdfC {
+            resolver: Arc::new(DefaultNetCDFObjectResolver),
+        }
+    }
+}
+
+impl FileAccess {
+    /// netcdf-c, reading through `resolver`.
+    pub fn netcdf_c(resolver: Arc<dyn NetCDFObjectResolver>) -> Self {
+        Self::NetcdfC { resolver }
+    }
+
+    /// The reader this access uses.
+    pub fn backend(&self) -> ReaderBackend {
+        match self {
+            FileAccess::NetcdfC { .. } => ReaderBackend::NetcdfC,
+            FileAccess::Oxcdf => ReaderBackend::Oxcdf,
+        }
+    }
+
+    /// Describe where one object's bytes come from.
+    ///
+    /// netcdf-c resolves the object to a native path. `oxcdf` takes the scan's
+    /// store and the object path as they are, so it also reads s3, gs and az.
+    /// The format, the statistics and the opener all come through here, so they
+    /// can never disagree about a file.
+    pub fn input_for(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        object: &ObjectMeta,
+    ) -> datafusion::error::Result<NetcdfInput> {
+        match self {
+            FileAccess::NetcdfC { resolver } => {
+                let native_path = resolver.resolve(object).map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to resolve object metadata (path) to NetCDF native path: {e}"
+                    ))
+                })?;
+                Ok(NetcdfInput::NetcdfC(native_path))
+            }
+            FileAccess::Oxcdf => Ok(NetcdfInput::Oxcdf {
+                store: store.clone(),
+                path: object.location.clone(),
+            }),
+        }
+    }
+}
+
 /// Where a reader gets the bytes of one NetCDF object.
 ///
 /// The variant also names the reader: netcdf-c opens a path itself, and `oxcdf`
-/// reads through the object store. A caller builds the variant that matches the
-/// format's [`ReaderBackend`].
+/// reads through the object store. Build one with [`FileAccess::input_for`].
 #[derive(Debug, Clone)]
 pub enum NetcdfInput {
     /// netcdf-c opens this native path directly. It is a local path, or an
@@ -66,34 +145,6 @@ impl NetcdfInput {
                 crate::oxcdf_reader::open_dataset(store, path).await
             }
         }
-    }
-}
-
-/// Describe where one object's bytes come from, for the given reader.
-///
-/// netcdf-c needs a native path, which `resolver` builds from the table's root
-/// store. `oxcdf` takes the store and the object path as they are, so it also
-/// reads s3, gs and az. The format and the opener both call this, so a scan and
-/// its statistics can never disagree about a file.
-pub fn netcdf_input(
-    backend: ReaderBackend,
-    resolver: &Arc<dyn NetCDFObjectResolver>,
-    store: &Arc<dyn ObjectStore>,
-    object: &ObjectMeta,
-) -> datafusion::error::Result<NetcdfInput> {
-    match backend {
-        ReaderBackend::NetcdfC => {
-            let native_path = resolver.resolve(object).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to resolve object metadata (path) to NetCDF native path: {e}"
-                ))
-            })?;
-            Ok(NetcdfInput::NetcdfC(native_path))
-        }
-        ReaderBackend::Oxcdf => Ok(NetcdfInput::Oxcdf {
-            store: store.clone(),
-            path: object.location.clone(),
-        }),
     }
 }
 

@@ -14,7 +14,7 @@ use datafusion::{
 use beacon_common::table_function::BeaconTableFunctionImpl;
 
 use crate::datafusion::object_meta_resolver::create_object_resolver;
-use crate::datafusion::{NetcdfFormat, ReaderBackend};
+use crate::datafusion::{FileAccess, NetcdfFormat};
 
 /// Format identity the NetCDF factory is registered under (its `get_ext`).
 const NETCDF_FORMAT: &str = "nc";
@@ -162,29 +162,31 @@ impl TableFunctionImpl for ReadNetCDFFunc {
 
         // netcdf-c opens a path itself, so the format needs a resolver built from
         // the one root store every path shares. The `oxcdf` reader reads through
-        // the object store, so it needs neither, and it takes s3, gs and az too.
-        let netcdf_file_format = if netcdf_file_format.reader_backend == ReaderBackend::Oxcdf {
-            netcdf_file_format
-        } else {
-            let mut root_store: Option<RootStore> = None;
-            for url in &listing_urls {
-                // Reject a remote object store (s3/gs/az) here with a clear
-                // error rather than failing later inside the reader.
-                let native_read_store = listing_factory.native_read_root(url)?;
-                match &root_store {
-                    Some(store) if store != &native_read_store => {
-                        return plan_err!(
-                            "read_netcdf: all glob paths must resolve to the same root store (local or http/https)"
-                        );
+        // the object store, so it needs none, and it takes s3, gs and az too.
+        let netcdf_file_format = match netcdf_file_format.access {
+            FileAccess::Oxcdf => netcdf_file_format,
+            FileAccess::NetcdfC { .. } => {
+                let mut root_store: Option<RootStore> = None;
+                for url in &listing_urls {
+                    // Reject a remote object store (s3/gs/az) here with a clear
+                    // error rather than failing later inside the reader.
+                    let native_read_store = listing_factory.native_read_root(url)?;
+                    match &root_store {
+                        Some(store) if store != &native_read_store => {
+                            return plan_err!(
+                                "read_netcdf: all glob paths must resolve to the same root store (local or http/https)"
+                            );
+                        }
+                        Some(_) => {}
+                        None => root_store = Some(native_read_store),
                     }
-                    Some(_) => {}
-                    None => root_store = Some(native_read_store),
                 }
+                let Some(root_store) = root_store else {
+                    return plan_err!("read_netcdf: no root store could be determined from the provided glob paths. NetCDF files only work for local or http/https paths.");
+                };
+                netcdf_file_format
+                    .with_access(FileAccess::netcdf_c(create_object_resolver(&root_store)))
             }
-            let Some(root_store) = root_store else {
-                return plan_err!("read_netcdf: no root store could be determined from the provided glob paths. NetCDF files only work for local or http/https paths.");
-            };
-            netcdf_file_format.with_object_path_resolver(create_object_resolver(&root_store))
         };
 
         let super_listing_table = tokio::task::block_in_place(|| {

@@ -32,9 +32,7 @@ use datafusion::{
 use futures::{stream::BoxStream, FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
 
-use crate::datafusion::object_meta_resolver::NetCDFObjectResolver;
-
-use super::reader::{self, NetcdfInput, NetcdfReaderCache, ReaderBackend};
+use super::reader::{self, FileAccess, NetcdfInput, NetcdfReaderCache};
 
 /// DataFusion [`FileSource`] for NetCDF (`.nc`) files.
 ///
@@ -43,7 +41,8 @@ use super::reader::{self, NetcdfInput, NetcdfReaderCache, ReaderBackend};
 #[derive(Debug, Clone)]
 pub struct NetCDFSource {
     schema_adapter_factory: Option<Arc<dyn SchemaAdapterFactory>>,
-    object_path_resolver: Arc<dyn NetCDFObjectResolver>,
+    /// How this scan reaches its files, and which reader opens them.
+    access: FileAccess,
     table_schema: TableSchema,
     execution_plan_metrics: ExecutionPlanMetricsSet,
     read_dimensions: Option<Vec<String>>,
@@ -51,28 +50,25 @@ pub struct NetCDFSource {
     predicate: Option<Arc<dyn PhysicalExpr>>,
     /// Reader cache to consult for this scan. `None` disables caching.
     cache: Option<NetcdfReaderCache>,
-    /// The reader that opens each file of this scan.
-    reader_backend: ReaderBackend,
     /// Projection pushed down by the scan, applied on top of the table schema.
     projection: Option<ProjectionExprs>,
 }
 
 impl NetCDFSource {
     pub fn new(
-        object_path_resolver: Arc<dyn NetCDFObjectResolver>,
+        access: FileAccess,
         read_dimensions: Option<Vec<String>>,
         table_schema: TableSchema,
     ) -> Self {
         Self {
             schema_adapter_factory: None,
-            object_path_resolver,
+            access,
             table_schema,
             execution_plan_metrics: ExecutionPlanMetricsSet::new(),
             read_dimensions,
             batch_size: usize::MAX,
             predicate: None,
             cache: None,
-            reader_backend: ReaderBackend::default(),
             projection: None,
         }
     }
@@ -81,12 +77,6 @@ impl NetCDFSource {
     /// opened datasets. The format wires in the runtime's shared cache here.
     pub fn with_cache(mut self, cache: Option<NetcdfReaderCache>) -> Self {
         self.cache = cache;
-        self
-    }
-
-    /// Returns a copy of this source that opens files with `reader_backend`.
-    pub fn with_reader_backend(mut self, reader_backend: ReaderBackend) -> Self {
-        self.reader_backend = reader_backend;
         self
     }
 
@@ -110,7 +100,7 @@ impl FileSource for NetCDFSource {
         let projected_schema = base_config.projected_schema()?;
 
         Ok(Arc::new(NetCDFOpener::new(
-            self.object_path_resolver.clone(),
+            self.access.clone(),
             projected_schema,
             self.read_dimensions.clone(),
             self.batch_size,
@@ -119,7 +109,6 @@ impl FileSource for NetCDFSource {
             self.cache.clone(),
             self.execution_plan_metrics.clone(),
             partition,
-            self.reader_backend,
             object_store,
         )))
     }
@@ -215,9 +204,8 @@ struct NetCDFOpener {
     cache: Option<NetcdfReaderCache>,
     metrics: ExecutionPlanMetricsSet,
     partition: usize,
-    object_path_resolver: Arc<dyn NetCDFObjectResolver>,
-    /// The reader that opens each file.
-    reader_backend: ReaderBackend,
+    /// How this opener reaches its files, and which reader opens them.
+    access: FileAccess,
     /// The store the scan lists from. The `oxcdf` reader reads through it; the
     /// netcdf-c reader ignores it and opens a resolved native path instead.
     object_store: Arc<dyn object_store::ObjectStore>,
@@ -226,7 +214,7 @@ struct NetCDFOpener {
 impl NetCDFOpener {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        object_path_resolver: Arc<dyn NetCDFObjectResolver>,
+        access: FileAccess,
         projected_schema: SchemaRef,
         read_dimensions: Option<Vec<String>>,
         batch_size: usize,
@@ -235,7 +223,6 @@ impl NetCDFOpener {
         cache: Option<NetcdfReaderCache>,
         metrics: ExecutionPlanMetricsSet,
         partition: usize,
-        reader_backend: ReaderBackend,
         object_store: Arc<dyn object_store::ObjectStore>,
     ) -> Self {
         let pruning_predicate = predicate
@@ -252,20 +239,9 @@ impl NetCDFOpener {
             cache,
             metrics,
             partition,
-            object_path_resolver,
-            reader_backend,
+            access,
             object_store,
         }
-    }
-
-    /// Describe where one object's bytes come from, for this opener's reader.
-    fn input_for(&self, object: &ObjectMeta) -> datafusion::error::Result<NetcdfInput> {
-        reader::netcdf_input(
-            self.reader_backend,
-            &self.object_path_resolver,
-            &self.object_store,
-            object,
-        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -454,7 +430,9 @@ impl FileOpener for NetCDFOpener {
         };
 
         let metrics = Some(DatasetReadMetrics::new(&self.metrics, self.partition));
-        let input = self.input_for(&file.object_meta)?;
+        let input = self
+            .access
+            .input_for(&self.object_store, &file.object_meta)?;
         let fut = Self::read_task(
             input,
             file.object_meta,
