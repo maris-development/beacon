@@ -449,8 +449,12 @@ mod tests {
             "projection must be pushed below the broadcast:\n{rendered}"
         );
 
-        // Same result as a session without the rule.
-        let bare = SessionContext::new();
+        // Same result as a session without the rule. This session also needs a
+        // single partition: the scan yields one batch per chunk, and a
+        // repartition would interleave them and break the positional compare.
+        let bare = SessionContext::new_with_config(
+            datafusion::prelude::SessionConfig::new().with_target_partitions(1),
+        );
         register_example(&bare).await;
         let expected = bare
             .sql("SELECT lat * 2 AS lat2 FROM gridded")

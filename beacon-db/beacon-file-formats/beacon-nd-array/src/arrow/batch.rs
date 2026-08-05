@@ -629,16 +629,39 @@ pub(crate) fn generate_array_subset_from_chunk(
     ArraySubset::new(start, shape)
 }
 
-/// Compute a C-memory-ordered chunk shape targeting approximately `batch_size` elements.
-/// Inner dimensions are kept whole; only the outermost axis is cut.
+/// Compute a C-memory-ordered chunk shape that holds about `batch_size` elements.
+///
+/// The chunk fills from the last axis. An axis stays whole while the chunk fits.
+/// The first axis that does not fit is cut. Every axis outside that one keeps a
+/// length of one. A shape with a short first axis therefore still gives many
+/// chunks: `[1, 1208, 1920]` at `batch_size` 8192 gives the chunk `[1, 4, 1920]`.
+///
+/// The chunk is one continuous run in C order, so the row order does not change.
 pub(crate) fn c_order_chunk_shape(shape: &[usize], batch_size: usize) -> Vec<usize> {
     if shape.is_empty() {
         return vec![];
     }
-    let inner: usize = shape[1..].iter().product::<usize>().max(1);
-    let rows = (batch_size / inner).max(1).min(shape[0].max(1));
-    let mut chunk = shape.to_vec();
-    chunk[0] = rows;
+
+    let mut chunk = vec![1usize; shape.len()];
+    // Element count of the axes that are already whole.
+    let mut inner = 1usize;
+
+    for axis in (0..shape.len()).rev() {
+        let len = shape[axis].max(1);
+        // `checked_mul` guards a shape that overflows `usize`. An overflow never fits.
+        match inner.checked_mul(len) {
+            Some(size) if size <= batch_size => {
+                chunk[axis] = len;
+                inner = size;
+            }
+            _ => {
+                // This axis does not fit. Cut it and leave the outer axes at 1.
+                chunk[axis] = (batch_size / inner).max(1).min(len);
+                break;
+            }
+        }
+    }
+
     chunk
 }
 
@@ -981,13 +1004,73 @@ mod tests {
 
     #[test]
     fn test_c_order_chunk_shape_batch_smaller_than_row() {
-        // batch_size < one inner row → rows=1 (minimum)
-        assert_eq!(c_order_chunk_shape(&[10, 100], 50), vec![1, 100]);
+        // batch_size < one inner row → the last axis is cut too
+        assert_eq!(c_order_chunk_shape(&[10, 100], 50), vec![1, 50]);
     }
 
     #[test]
     fn test_c_order_chunk_shape_empty() {
         assert_eq!(c_order_chunk_shape(&[], 100), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_short_first_axis_cuts_inner_axis() {
+        // A gridded file: shape [time=1, lat=1208, lon=1920].
+        // The first axis is 1, so a cut of that axis alone gives one chunk.
+        // The last axis fits whole (1920 ≤ 8192). The middle axis is cut:
+        // 8192 / 1920 = 4 → [1, 4, 1920] = 7680 elements.
+        assert_eq!(
+            c_order_chunk_shape(&[1, 1208, 1920], 8192),
+            vec![1, 4, 1920]
+        );
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_never_much_larger_than_batch_size() {
+        // Every axis is longer than the batch size, so only the last axis is cut.
+        assert_eq!(c_order_chunk_shape(&[500, 500, 500], 128), vec![1, 1, 128]);
+    }
+
+    #[test]
+    fn test_c_order_chunk_shape_outer_axes_stay_at_one() {
+        // The last axis fits whole, the middle axis is cut, so the first stays at 1.
+        assert_eq!(c_order_chunk_shape(&[8, 6, 4], 10), vec![1, 2, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_chunked_stream_short_first_axis_splits_and_keeps_order() {
+        // shape [1, 4, 3] — a first axis of 1. The old rule gave one batch.
+        // batch_size 6 → chunk [1, 2, 3] → 2 batches of 6 rows, in C order.
+        let nd = NdArray::<i32>::try_new_from_vec_in_mem(
+            (1..=12).collect::<Vec<i32>>(),
+            vec![1, 4, 3],
+            vec!["time".to_string(), "y".to_string(), "x".to_string()],
+            None,
+        )
+        .unwrap();
+        let ds = make_dataset(vec![("vals", Arc::new(nd))]).await;
+        let batches: Vec<RecordBatch> = dataset_as_record_batch_stream(ds, 6, None, None)
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 6);
+        assert_eq!(batches[1].num_rows(), 6);
+
+        // The row order matches the flat C order of the array.
+        let values: Vec<i32> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(values, (1..=12).collect::<Vec<i32>>());
     }
 
     #[tokio::test]

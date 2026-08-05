@@ -977,6 +977,54 @@ mod reader_backend_tests {
         assert!(rust > 0, "the predicate must keep some rows");
         assert_eq!(rust, count("netcdf_c").await);
     }
+
+    /// A gridded scan must respect the batch size. `gridded-example.nc` has the
+    /// shape `[time=1, lat=1208, lon=1920]`. The engine cut only the first axis,
+    /// so the short `time` axis gave one chunk that held the whole array. See
+    /// issue #338.
+    ///
+    /// `sea_ice_fraction` is contiguous in the file, so it reports its full
+    /// shape as its chunk shape and the engine computes the chunk itself.
+    #[tokio::test]
+    async fn a_short_first_axis_still_splits_into_batches() {
+        for backend in [ReaderBackend::NetcdfC, ReaderBackend::Oxcdf] {
+            for batch_size in [4096usize, 8192] {
+                let state = SessionStateBuilder::new()
+                    .with_config(
+                        SessionConfig::new()
+                            .with_target_partitions(1)
+                            .with_batch_size(batch_size),
+                    )
+                    .with_default_features()
+                    .build();
+                let ctx = SessionContext::new_with_state(state);
+                register(&ctx, "gridded", backend, GRIDDED_FILE).await;
+
+                let batches = ctx
+                    .sql("SELECT sea_ice_fraction FROM gridded")
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                    .unwrap();
+
+                let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                let largest = batches.iter().map(|b| b.num_rows()).max().unwrap_or(0);
+                assert_eq!(rows, 1208 * 1920, "{backend:?} must read every row");
+                assert!(
+                    batches.len() > 1,
+                    "{backend:?} at batch size {batch_size} gave {} batch(es)",
+                    batches.len()
+                );
+                // The chunk fills from the last axis, so it holds at most
+                // `batch_size` elements. Here one row of `lon` is 1920 ≤ 4096.
+                assert!(
+                    largest <= batch_size,
+                    "{backend:?} at batch size {batch_size} gave a batch of {largest} rows"
+                );
+            }
+        }
+    }
 }
 
 // #[cfg(test)]
