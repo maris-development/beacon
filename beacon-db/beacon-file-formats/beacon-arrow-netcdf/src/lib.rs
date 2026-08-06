@@ -5,8 +5,23 @@
 //! - Writing Arrow record batches into NetCDF files.
 //! - Decoder/encoder building blocks for extending conversion behaviour.
 //!
+//! # Two readers
+//!
+//! The crate reads a file in one of two ways:
+//!
+//! - [`reader`] calls netcdf-c. It is the default, and it is the only path that
+//!   writes files.
+//! - [`oxcdf_reader`] calls [`oxcdf`], a pure-Rust reader. It holds no global
+//!   lock and reads through `object_store`, so scans run in parallel and S3,
+//!   GCS and Azure need no local copy.
+//!
+//! Both produce the same dataset. The
+//! [`use_rust_reader`](datafusion::NetcdfConfig::use_rust_reader) flag selects
+//! between them.
+//!
 //! # Key modules
-//! - [`reader`]: high-level NetCDF -> Arrow reader API.
+//! - [`reader`]: high-level NetCDF -> Arrow reader API (netcdf-c).
+//! - [`oxcdf_reader`]: the same API over [`oxcdf`] and `object_store`.
 //! - [`writer`]: high-level Arrow -> NetCDF writer API.
 //! - [`compat`]: variable/attribute conversion helpers.
 //! - [`decoders`] and [`encoders`]: pluggable conversion components.
@@ -25,14 +40,20 @@ pub mod writer;
 pub use netcdf;
 /// Re-export of low-level `netcdf-sys` bindings.
 pub use netcdf_sys;
+/// Re-export of the pure-Rust `oxcdf` reader used by [`oxcdf_reader`].
+pub use oxcdf;
 /// Array backend implementations used by decoders.
 pub mod backend;
+#[cfg(test)]
+mod cf_time_fill_tests;
 /// Conversion helpers from NetCDF values to ND Arrow arrays.
 pub mod compat;
 /// DataFusion integration components.
 pub mod datafusion;
 /// Decoder implementations and decoder traits.
 pub mod decoders;
+/// Pure-Rust NetCDF reader over `object_store`.
+pub mod oxcdf_reader;
 
 /// Placeholder wrapper for fixed-size string payload bytes.
 ///

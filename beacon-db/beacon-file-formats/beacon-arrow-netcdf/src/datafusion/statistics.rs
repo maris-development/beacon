@@ -18,22 +18,25 @@ use datafusion::{
     scalar::ScalarValue,
 };
 
-use crate::reader::open_dataset;
+use crate::datafusion::reader::NetcdfInput;
 
 // ─── Public entry point ─────────────────────────────────────────────────────
 
-/// Open the NetCDF file at `netcdf_path` and return DataFusion [`Statistics`] for
-/// the columns in `table_schema`.
+/// Open the NetCDF object `input` names and return DataFusion [`Statistics`]
+/// for the columns in `table_schema`.
 ///
-/// `netcdf_path` is the already-resolved path/URL the netCDF-c reader opens
-/// directly, produced by the format's `NetCDFObjectResolver`. Resolution is the
-/// caller's job so statistics and scans go through one mechanism (see
-/// `datafusion::reader::open_dataset` for how the scheme is interpreted).
+/// `input` already says which reader opens the file and where its bytes are.
+/// The caller builds it, so statistics and scans go through one mechanism and
+/// can never disagree about a file (see [`NetcdfInput`]).
 pub async fn generate_statistics(
-    netcdf_path: String,
+    input: NetcdfInput,
     table_schema: &arrow::datatypes::Schema,
 ) -> anyhow::Result<Statistics> {
-    let dataset = open_dataset(netcdf_path).await?;
+    let location = input.location();
+    let dataset = input
+        .open()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to open NetCDF dataset {location}: {e}"))?;
 
     match dataset {
         AnyDataset::Regular(dataset) => {

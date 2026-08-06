@@ -1,6 +1,34 @@
 # Available data nodes
 
-The European projects Blue-Cloud2026 and FAIR-EASE run a set of Beacon nodes. These nodes are not public. You need an access token. See [Obtain personal access token](#obtain-personal-access-token) for the steps.
+## Try it now: the World Ocean Database node
+
+<!-- PUBLIC NODE URL: also in .vitepress/theme/components/HeroQuery.vue and docs/2.0.0-rc2/quickstart.md. -->
+
+One node is **open to everyone**. It needs no account and no token:
+
+**<https://beacon-wod.maris.nl>**
+
+It serves the World Ocean Database as one table, `easy-wod`, holding 3.3 billion measurements:
+
+```bash
+curl -X POST https://beacon-wod.maris.nl/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT time, latitude, longitude, depth, temperature FROM \"easy-wod\" WHERE temperature > 20 AND depth < 10 LIMIT 5", "output": {"format": "csv"}}'
+```
+
+| Column | Type |
+|---|---|
+| `time` | timestamp |
+| `longitude`, `latitude` | float |
+| `depth` | float |
+| `temperature`, `salinity`, `oxygen` | float |
+
+Reads are anonymous and rate-limited. See the
+[Quick Start](/docs/2.0.0-rc2/quickstart#query-a-public-node) for the Python client.
+
+## The Blue-Cloud and FAIR-EASE nodes
+
+The European projects Blue-Cloud2026 and FAIR-EASE run a further set of Beacon nodes. **Those nodes need an access token.** See [Obtain personal access token](#obtain-personal-access-token) for the steps.
 
 This page shows some of the data nodes in use today. Each node has example notebooks and curl scripts. The examples are in the Beacon Blue-Cloud [GitHub repository](https://github.com/maris-development/beacon-blue-cloud).
 

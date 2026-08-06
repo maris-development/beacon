@@ -1,0 +1,20 @@
+[package]
+name = "beacon-mcp"
+version.workspace = true
+edition = "2021"
+
+rust-version.workspace = true
+# The server is the AGPL zone; the beacon-db engine under it is Apache-2.0. See LICENSING.md.
+license = "AGPL-3.0-only"
+[dependencies]
+beacon-core = { path = "../../beacon-db/beacon-core" }
+rmcp = { version = "=1.8.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+arrow = { workspace = true }
+arrow-json = "58"
+http = "1"

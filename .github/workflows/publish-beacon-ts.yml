@@ -24,7 +24,7 @@ permissions:
 
 defaults:
   run:
-    working-directory: beacon-datalake-clients/beacon-ts
+    working-directory: beacon-clients/beacon-ts
 
 jobs:
   publish:

@@ -17,10 +17,11 @@ pub struct CFTimeVariableDecoder<T>
 where
     T: NcTypeDescriptor + AsPrimitive<f64>,
 {
-    pub variable_name: String,
-    pub inner_decoder: Arc<dyn VariableDecoder<T>>,
-    pub epoch: hifitime::Epoch,
-    pub unit: hifitime::Unit,
+    variable_name: String,
+    inner_decoder: Arc<dyn VariableDecoder<T>>,
+    epoch: hifitime::Epoch,
+    unit: hifitime::Unit,
+    fill_value: Option<TimestampNanosecond>,
 }
 
 impl<T> CFTimeVariableDecoder<T>
@@ -30,18 +31,23 @@ where
     /// Create a CF-time decoder.
     ///
     /// `inner_decoder` provides the raw numeric values; `epoch` and `unit`
-    /// define the CF conversion rule.
+    /// define the CF conversion rule. `raw_fill_value` is the fill value in the
+    /// *numeric* units of the variable; it goes through the same CF arithmetic
+    /// so a raw fill cell maps exactly onto the decoded fill, which the engine
+    /// then nulls.
     pub fn new(
         variable_name: String,
         inner_decoder: Arc<dyn VariableDecoder<T>>,
         epoch: hifitime::Epoch,
         unit: hifitime::Unit,
+        raw_fill_value: Option<f64>,
     ) -> Self {
         Self {
             variable_name,
             inner_decoder,
             epoch,
             unit,
+            fill_value: raw_fill_value.map(|f| cf_offset_to_timestamp(f, epoch, unit)),
         }
     }
 }
@@ -60,12 +66,37 @@ where
         Ok(ts_array)
     }
 
+    fn fill_value(&self) -> Option<TimestampNanosecond> {
+        self.fill_value
+    }
+
     fn variable_name(&self) -> &str {
         &self.variable_name
     }
 }
 
-fn convert_to_timestamp_nanoseconds<T>(
+/// Convert one numeric CF time offset into a nanosecond timestamp.
+///
+/// Every CF time value takes this path, the data cells and the `_FillValue`
+/// alike. One function keeps the two results comparable, so the engine nulls a
+/// fill cell.
+pub(crate) fn cf_offset_to_timestamp<T>(
+    value: T,
+    epoch: hifitime::Epoch,
+    unit: hifitime::Unit,
+) -> TimestampNanosecond
+where
+    T: num_traits::cast::AsPrimitive<f64>,
+{
+    let time = epoch + (value.as_() * unit);
+    TimestampNanosecond(time.to_unix(hifitime::Unit::Nanosecond).as_())
+}
+
+/// Convert numeric CF time offsets into nanosecond timestamps.
+///
+/// Shared with the [`oxcdf`](crate::oxcdf_reader) path, so both readers apply
+/// the same arithmetic.
+pub(crate) fn convert_to_timestamp_nanoseconds<T>(
     array: ndarray::ArrayViewD<T>,
     epoch: hifitime::Epoch,
     unit: hifitime::Unit,
@@ -73,12 +104,7 @@ fn convert_to_timestamp_nanoseconds<T>(
 where
     T: num_traits::cast::AsPrimitive<f64>,
 {
-    let array: ndarray::ArrayD<TimestampNanosecond> = array.mapv(|v| {
-        let time = epoch + (v.as_() * unit);
-        TimestampNanosecond(time.to_unix(hifitime::Unit::Nanosecond).as_())
-    });
-
-    array
+    array.mapv(|v| cf_offset_to_timestamp(v, epoch, unit))
 }
 
 /// Parse a CF `units` (and optional `calendar`) attribute into a reference
@@ -157,12 +183,13 @@ mod tests {
             None,
         ));
 
-        let decoder = CFTimeVariableDecoder {
-            variable_name: var_name.to_string(),
-            inner_decoder: inner,
-            epoch: unix_epoch(),
-            unit: hifitime::Unit::Day,
-        };
+        let decoder = CFTimeVariableDecoder::new(
+            var_name.to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            None,
+        );
 
         let array = decoder
             .read(&variable, netcdf::Extents::All)
@@ -198,12 +225,13 @@ mod tests {
             None,
         ));
 
-        let decoder = CFTimeVariableDecoder {
-            variable_name: var_name.to_string(),
-            inner_decoder: inner,
-            epoch: unix_epoch(),
-            unit: hifitime::Unit::Second,
-        };
+        let decoder = CFTimeVariableDecoder::new(
+            var_name.to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Second,
+            None,
+        );
 
         let array = decoder
             .read(&variable, netcdf::Extents::All)
@@ -239,12 +267,13 @@ mod tests {
             None,
         ));
 
-        let decoder = CFTimeVariableDecoder {
-            variable_name: var_name.to_string(),
-            inner_decoder: inner,
-            epoch: unix_epoch(),
-            unit: hifitime::Unit::Day,
-        };
+        let decoder = CFTimeVariableDecoder::new(
+            var_name.to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            None,
+        );
 
         let array = decoder
             .read(&variable, netcdf::Extents::All)
@@ -275,12 +304,13 @@ mod tests {
             None,
         ));
 
-        let decoder = CFTimeVariableDecoder {
-            variable_name: var_name.to_string(),
-            inner_decoder: inner,
-            epoch: unix_epoch(),
-            unit: hifitime::Unit::Day,
-        };
+        let decoder = CFTimeVariableDecoder::new(
+            var_name.to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            None,
+        );
 
         let array = decoder
             .read(&variable, netcdf::Extents::All)
@@ -307,14 +337,88 @@ mod tests {
     fn test_cf_time_variable_name() {
         let inner = Arc::new(DefaultVariableDecoder::<f64>::new("time".to_string(), None));
 
-        let decoder = CFTimeVariableDecoder {
-            variable_name: "time".to_string(),
-            inner_decoder: inner,
-            epoch: unix_epoch(),
-            unit: hifitime::Unit::Day,
-        };
+        let decoder = CFTimeVariableDecoder::new(
+            "time".to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            None,
+        );
 
         assert_eq!(decoder.variable_name(), "time");
+    }
+
+    // ── _FillValue ─────────────────────────────────────────────────────────
+
+    /// The decoded fill value equals the raw fill run through the same CF
+    /// arithmetic, so a fill cell nulls out.
+    #[test]
+    fn decoded_fill_matches_cf_time_arithmetic() {
+        let inner = Arc::new(DefaultVariableDecoder::<i16>::new(
+            "time".to_string(),
+            Some(-32768),
+        ));
+
+        let decoder = CFTimeVariableDecoder::new(
+            "time".to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            Some(-32768.0),
+        );
+
+        let fill = decoder
+            .fill_value()
+            .expect("the decoder holds a fill value");
+        let expected = -32768 * NANOS_PER_DAY;
+        assert!(
+            (fill.0 - expected).abs() <= MAX_NS_ERROR,
+            "fill mismatch: got {}, expected ~{expected}",
+            fill.0
+        );
+    }
+
+    /// The fill value follows the unit of the variable, not only its number.
+    #[test]
+    fn decoded_fill_follows_the_cf_unit() {
+        let inner = Arc::new(DefaultVariableDecoder::<f64>::new(
+            "time".to_string(),
+            Some(-999.0),
+        ));
+
+        let decoder = CFTimeVariableDecoder::new(
+            "time".to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Second,
+            Some(-999.0),
+        );
+
+        let fill = decoder
+            .fill_value()
+            .expect("the decoder holds a fill value");
+        let expected = -999 * NANOS_PER_SECOND;
+        assert!(
+            (fill.0 - expected).abs() <= MAX_NS_ERROR,
+            "fill mismatch: got {}, expected ~{expected}",
+            fill.0
+        );
+    }
+
+    /// A variable with no `_FillValue` masks nothing.
+    #[test]
+    fn no_fill_stays_none() {
+        let inner = Arc::new(DefaultVariableDecoder::<f64>::new("time".to_string(), None));
+
+        let decoder = CFTimeVariableDecoder::new(
+            "time".to_string(),
+            inner,
+            unix_epoch(),
+            hifitime::Unit::Day,
+            None,
+        );
+
+        assert_eq!(decoder.fill_value(), None);
     }
 
     #[test]

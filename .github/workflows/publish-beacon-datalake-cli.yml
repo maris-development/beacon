@@ -25,7 +25,7 @@ permissions:
 
 defaults:
   run:
-    working-directory: beacon-datalake-clients/beacon-datalake-cli
+    working-directory: beacon-clients/beacon-datalake-cli
 
 jobs:
   build:
@@ -73,7 +73,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: beacon-datalake-cli-dist
-          path: beacon-datalake-clients/beacon-datalake-cli/dist/*
+          path: beacon-clients/beacon-datalake-cli/dist/*
           if-no-files-found: error
 
   publish:

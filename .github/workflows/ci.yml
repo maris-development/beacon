@@ -34,7 +34,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Check layer boundary (beacon-db must not depend on beacon-datalake)
+      - name: Check layer boundary (beacon-db must not depend on beacon-server)
         run: ./scripts/check-layer-boundary.sh
 
       - name: Install system dependencies (Dockerfile parity)

@@ -1,14 +1,23 @@
 ---
-description: Start Beacon with Docker in minutes, on local disk or on S3 object storage. Explore it in the admin UI, then query your files.
+description: Deploy a Beacon server with Docker, on local disk or on S3 object storage. Then register datasets, secure it and expose it to clients.
 ---
 
 # Getting Started
 
-This guide starts a Beacon server with Docker. The **[Quick Start](#quick-start)** below is the
-fastest path. Start the server, add data, then explore the data in the admin UI. The
-**[Local](#local)** and **[S3](#s3-compatible-object-storage)** sections show Docker Compose setups.
+This guide deploys a Beacon node with Docker. The **[Quick Start](#quick-start)** below is the
+fastest path: start the server, add data, then explore it in the admin UI. The **[Local](#local)**
+and **[S3](#s3-compatible-object-storage)** sections show production-shaped Docker Compose setups.
 The [beacon-example repository](https://github.com/maris-development/beacon-example) holds ready-made
 examples with MinIO and sample datasets.
+
+Running a node is four jobs, in this order:
+
+1. **Deploy** it, on this page.
+2. **[Configure](/docs/2.0.0-rc2/server/configuration)** the ports, the datasets store and the
+   resource limits.
+3. **[Register your data](/docs/2.0.0-rc2/server/)** as tables and views, so clients query names
+   instead of paths.
+4. **[Secure and expose](/docs/2.0.0-rc2/security/access-control)** it, then point clients at it.
 
 ## Prerequisites
 
@@ -61,7 +70,7 @@ Every request goes to one endpoint. Beacon streams back a file in the format tha
 curl -X POST http://localhost:5001/api/query \
   -H "Content-Type: application/json" \
   -d '{
-    "sql": "SELECT * FROM read_parquet([\"datasets/**/*.parquet\"]) LIMIT 10",
+    "sql": "SELECT * FROM read_parquet([\"**/*.parquet\"]) LIMIT 10",
     "output": { "format": "csv" }
   }'
 ```
@@ -116,10 +125,10 @@ at once.
 Beacon exposes two endpoints. The **HTTP API** on port `5001` serves SQL and JSON queries, the admin
 UI and the OpenAPI docs. The **Arrow Flight SQL** server on port `32011` uses a columnar protocol
 with high throughput. Clients such as
-[JetBrains DataGrip](/docs/2.0.0-rc2/connect/jetbrains-datagrip) and the
+[JetBrains DataGrip](/docs/2.0.0-rc2/connect/datagrip) and the
 [Python ADBC driver](/docs/2.0.0-rc2/connect/python-adbc) use it. Flight SQL authenticates with a
 bearer token. Tune it or switch it off with the `BEACON_FLIGHT_SQL_*`
-[settings](/docs/2.0.0-rc2/data-lake/configuration#arrow-flight-sql).
+[settings](/docs/2.0.0-rc2/server/configuration#arrow-flight-sql).
 :::
 
 ::: warning Secure your instance
@@ -184,11 +193,33 @@ For Compose, run `docker compose up -d`. You can query the files in the S3 bucke
 
 ## Next steps
 
+**Configure the node**
+
 | | |
 | - | - |
+| **Every setting** | [Configuration](/docs/2.0.0-rc2/server/configuration) |
+| **Put the datasets on a bucket** | [Object Storage](/docs/2.0.0-rc2/data-sources/object-storage) |
+| **Memory, concurrency, caches** | [Performance Tuning](/docs/2.0.0-rc2/server/performance-tuning) |
+
+**Register the data**
+
+| | |
+| - | - |
+| **Name a set of files** | [External Tables](/docs/2.0.0-rc2/data-sources/external-tables) |
+| **Save a query** | [Views](/docs/2.0.0-rc2/server/view) · [Materialized Views](/docs/2.0.0-rc2/sql/create-materialized-view) |
+| **Register a large tree on a schedule** | [Crawlers](/docs/2.0.0-rc2/server/crawlers) |
+| **Own the rows yourself** | [Managed Tables](/docs/2.0.0-rc2/sql/managed-tables) |
+| **Reach another node or a database** | [ATTACH](/docs/2.0.0-rc2/data-sources/attach) · [SQL Databases](/docs/2.0.0-rc2/data-sources/sql-databases) |
+
+**Expose it**
+
+| | |
+| - | - |
+| **Decide who reads what** | [Access Control](/docs/2.0.0-rc2/security/access-control) |
 | **Explore in the browser** | [Admin Web UI](/docs/2.0.0-rc2/connect/web-admin-ui) |
-| **Connect a client** | [JetBrains DataGrip](/docs/2.0.0-rc2/connect/jetbrains-datagrip) · [Python ADBC](/docs/2.0.0-rc2/connect/python-adbc) · [TypeScript SDK](/docs/2.0.0-rc2/connect/beacon-typescript-sdk) |
-| **Register datasets as SQL tables** | [External Tables](/docs/2.0.0-rc2/beacondb/data-sources/external-tables) · [Views](/docs/2.0.0-rc2/data-lake/view) |
-| **Write queries** | [SQL Guide](/docs/2.0.0-rc2/beacondb/sql/) |
-| **Secure access** | [Authentication & Access Control](/docs/2.0.0-rc2/security/access-control) |
-| **Tune performance** | [Performance Tuning](/docs/2.0.0-rc2/data-lake/performance-tuning) |
+| **Point clients at it** | [Python](/docs/2.0.0-rc2/connect/python) · [TypeScript](/docs/2.0.0-rc2/connect/typescript) · [CLI](/docs/2.0.0-rc2/connect/cli) · [DataGrip](/docs/2.0.0-rc2/connect/datagrip) · [Python ADBC](/docs/2.0.0-rc2/connect/python-adbc) |
+| **Document the query API** | [REST API](/docs/2.0.0-rc2/api/) |
+
+**When something is wrong**
+
+[Troubleshooting](/docs/2.0.0-rc2/troubleshooting) · [FAQ](/docs/2.0.0-rc2/faq)

@@ -2,7 +2,7 @@
 
 The suite generates a ``stations.csv`` alongside the Parquet data but never reads
 it. These tests cover the ``read_csv`` table function, schema inspection via
-``read_schema``, the JSON DSL ``csv`` source, and a join that combines the CSV
+``read_parquet_schema``, the JSON DSL ``csv`` source, and a join that combines the CSV
 lookup table with the Parquet observations — proving Beacon mixes file formats in
 one query.
 """
@@ -29,7 +29,9 @@ def test_read_csv_columns(client):
 
 
 def test_read_schema_reports_parquet_columns(client):
-    rows = client.sql_rows("SELECT * FROM read_schema(['obs/*.parquet'], 'parquet')")
+    # Each reader has its own `<reader>_schema` counterpart; there is no generic
+    # `read_schema(paths, format)` function.
+    rows = client.sql_rows("SELECT * FROM read_parquet_schema(['obs/*.parquet'])")
     flat = {cell for row in rows for cell in row}
     assert "temperature" in flat
     assert "salinity" in flat

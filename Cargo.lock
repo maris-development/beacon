@@ -1464,6 +1464,7 @@ dependencies = [
  "num-traits",
  "object_store 0.13.2",
  "ordered-float 5.3.0",
+ "oxcdf",
  "serde",
  "tempfile",
  "tokio",
@@ -1741,65 +1742,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beacon-datalake"
-version = "2.0.0-rc.2"
-dependencies = [
- "anyhow",
- "arrow 58.3.0",
- "arrow-flight",
- "arrow-ipc 58.3.0",
- "arrow-json 58.3.0",
- "axum",
- "axum-streams",
- "base64",
- "beacon-core",
- "beacon-datafusion-ext",
- "beacon-datalake-config",
- "beacon-mcp",
- "bytes",
- "datafusion",
- "futures",
- "object_store 0.13.2",
- "pprof",
- "prost",
- "serde",
- "serde_json",
- "sysinfo",
- "tempfile",
- "thiserror 2.0.18",
- "tikv-jemallocator",
- "tokio",
- "tokio-util",
- "tonic",
- "tower",
- "tower-http",
- "tracing",
- "tracing-appender",
- "tracing-panic",
- "tracing-subscriber",
- "utoipa",
- "utoipa-axum",
- "utoipa-scalar",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
-name = "beacon-datalake-config"
-version = "2.0.0-rc.2"
-dependencies = [
- "base64",
- "beacon-arrow-atlas",
- "beacon-arrow-bbf",
- "beacon-arrow-netcdf",
- "beacon-common",
- "envconfig",
- "object_store 0.13.2",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "beacon-db-py"
 version = "2.0.0-rc.2"
 dependencies = [
@@ -1984,6 +1926,65 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "beacon-server"
+version = "2.0.0-rc.2"
+dependencies = [
+ "anyhow",
+ "arrow 58.3.0",
+ "arrow-flight",
+ "arrow-ipc 58.3.0",
+ "arrow-json 58.3.0",
+ "axum",
+ "axum-streams",
+ "base64",
+ "beacon-core",
+ "beacon-datafusion-ext",
+ "beacon-mcp",
+ "beacon-server-config",
+ "bytes",
+ "datafusion",
+ "futures",
+ "object_store 0.13.2",
+ "pprof",
+ "prost",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-appender",
+ "tracing-panic",
+ "tracing-subscriber",
+ "utoipa",
+ "utoipa-axum",
+ "utoipa-scalar",
+ "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "beacon-server-config"
+version = "2.0.0-rc.2"
+dependencies = [
+ "base64",
+ "beacon-arrow-atlas",
+ "beacon-arrow-bbf",
+ "beacon-arrow-netcdf",
+ "beacon-common",
+ "envconfig",
+ "object_store 0.13.2",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -7605,6 +7606,36 @@ name = "os_str_bytes"
 version = "6.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
+
+[[package]]
+name = "oxcdf"
+version = "0.1.0"
+source = "git+https://github.com/robinskil/oxcdf.git#ac3c1b93446fea41c81d70b6fd3556508ccde798"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "ndarray 0.17.2",
+ "object_store 0.13.2",
+ "oxcdf-hdf5",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "oxcdf-hdf5"
+version = "0.1.0"
+source = "git+https://github.com/robinskil/oxcdf.git#ac3c1b93446fea41c81d70b6fd3556508ccde798"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "flate2",
+ "lz4_flex 0.11.6",
+ "moka",
+ "object_store 0.13.2",
+ "thiserror 2.0.18",
+ "tokio",
+ "zstd",
+]
 
 [[package]]
 name = "page_size"

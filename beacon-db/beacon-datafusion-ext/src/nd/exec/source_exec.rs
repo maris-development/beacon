@@ -16,7 +16,7 @@ use datafusion::physical_plan::{
 };
 use futures::{StreamExt, TryStreamExt};
 
-use crate::nd::encoding::{decode_nd_record_batch, logical_schema};
+use crate::nd::encoding::{decode_nd_record_batch_row, logical_schema, nd_batch_count};
 
 use super::{NdBroadcastExec, NdExecutionPlan, SendableNdBatchStream};
 
@@ -127,16 +127,28 @@ impl NdExecutionPlan for NdSourceExec {
                 let _timer = baseline.elapsed_compute().timer();
                 match item {
                     // An empty encoded batch carries no nd array — skip it.
-                    Ok(batch) if batch.num_rows() == 0 => Ok(None),
-                    Ok(batch) => decode_nd_record_batch(&batch).map(|nd| {
-                        nd_batches.add(1);
-                        baseline.record_output(nd.num_rows());
-                        Some(nd)
-                    }),
+                    Ok(batch) if batch.num_rows() == 0 => Ok(Vec::new()),
+                    Ok(batch) => {
+                        // One nd array per encoded row: a batch that has been
+                        // through a coalescing operator (RoundRobinBatch
+                        // repartitioning, `CoalesceBatchesExec`, …) carries
+                        // several, and decoding only row 0 would silently drop
+                        // the rest.
+                        let count = nd_batch_count(&batch);
+                        let mut decoded = Vec::with_capacity(count);
+                        for row in 0..count {
+                            let nd = decode_nd_record_batch_row(&batch, row)?;
+                            nd_batches.add(1);
+                            baseline.record_output(nd.num_rows());
+                            decoded.push(nd);
+                        }
+                        Ok(decoded)
+                    }
                     Err(e) => Err(e),
                 }
             })
-            .try_filter_map(|decoded| async move { Ok(decoded) });
+            .map_ok(|decoded| futures::stream::iter(decoded.into_iter().map(Ok)))
+            .try_flatten();
         Ok(Box::pin(stream))
     }
 }

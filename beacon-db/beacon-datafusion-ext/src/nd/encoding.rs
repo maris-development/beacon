@@ -251,10 +251,33 @@ pub fn logical_schema(encoded: &Schema) -> Result<SchemaRef> {
     Ok(Arc::new(Schema::new(fields)))
 }
 
-/// Decode an nd-encoded `RecordBatch` (row 0 of each struct column) back into an
-/// [`NdRecordBatch`]. The target grid is inferred as the union of the columns'
-/// dimensions, ordered by the highest-rank column.
+/// Decode row 0 of an nd-encoded `RecordBatch` back into an [`NdRecordBatch`].
+///
+/// An encoded row carries one whole nd array per column, so a batch with more
+/// than one row carries *several* nd batches; this only sees the first. Use
+/// [`nd_batch_count`] + [`decode_nd_record_batch_row`] to decode all of them —
+/// anything that concatenates encoded batches (DataFusion's `RoundRobinBatch`
+/// repartitioning coalesces small batches, for one) produces multi-row batches.
 pub fn decode_nd_record_batch(batch: &RecordBatch) -> Result<NdRecordBatch> {
+    decode_nd_record_batch_row(batch, 0)
+}
+
+/// How many nd batches an encoded `RecordBatch` carries.
+///
+/// One per row, except for a zero-column `COUNT(*)`-style carrier, whose rows
+/// are the payload rather than an nd-array-per-row.
+pub fn nd_batch_count(batch: &RecordBatch) -> usize {
+    if batch.num_columns() == 0 {
+        1
+    } else {
+        batch.num_rows()
+    }
+}
+
+/// Decode a single row of an nd-encoded `RecordBatch` into an [`NdRecordBatch`].
+/// The target grid is inferred as the union of the columns' dimensions, ordered
+/// by the highest-rank column.
+pub fn decode_nd_record_batch_row(batch: &RecordBatch, row: usize) -> Result<NdRecordBatch> {
     // A zero-column batch is a COUNT(*)-style row carrier: preserve its row
     // count via a synthetic one-axis grid so the broadcast reproduces it.
     if batch.num_columns() == 0 {
@@ -265,7 +288,7 @@ pub fn decode_nd_record_batch(batch: &RecordBatch) -> Result<NdRecordBatch> {
     let columns = batch
         .columns()
         .iter()
-        .map(|column| decode_nd_array(column, 0))
+        .map(|column| decode_nd_array(column, row))
         .collect::<Result<Vec<_>>>()?;
 
     let target = infer_target(&columns)?;
@@ -499,6 +522,41 @@ mod tests {
         let decoded = decode_nd_array(&encode_nd_array(&scalar), 0).unwrap();
         assert_eq!(decoded.dims().rank(), 0);
         assert_eq!(decoded.values().len(), 1);
+    }
+
+    #[test]
+    fn every_row_of_a_coalesced_encoded_batch_decodes() {
+        // `encode_nd_record_batch` emits one row per nd batch, but any operator
+        // that concatenates batches (RoundRobinBatch repartitioning coalesces
+        // small ones) yields a multi-row encoded batch. Decoding row 0 alone
+        // silently drops the rest, which loses whole files from a scan.
+        let batch_of = |values: Vec<i32>, rows: usize, cols: usize| {
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, true)]));
+            let column = NdArrowArray::try_new(
+                Arc::new(Int32Array::from(values)),
+                dims(&[("time", rows), ("lat", cols)]),
+            )
+            .unwrap();
+            let target = dims(&[("time", rows), ("lat", cols)]);
+            NdRecordBatch::try_new(schema, vec![column], target).unwrap()
+        };
+
+        let first = encode_nd_record_batch(&batch_of(vec![1, 2, 3, 4, 5, 6], 2, 3)).unwrap();
+        let second = encode_nd_record_batch(&batch_of(vec![7, 8, 9, 10], 2, 2)).unwrap();
+        assert_eq!(first.num_rows(), 1);
+        assert_eq!(second.num_rows(), 1);
+
+        let merged =
+            arrow::compute::concat_batches(&first.schema(), &[first, second]).unwrap();
+        assert_eq!(nd_batch_count(&merged), 2);
+
+        let rows: Vec<usize> = (0..nd_batch_count(&merged))
+            .map(|r| decode_nd_record_batch_row(&merged, r).unwrap().num_rows())
+            .collect();
+        assert_eq!(rows, vec![6, 4], "both nd batches must survive the concat");
+
+        // The row-0-only helper still sees exactly the first one.
+        assert_eq!(decode_nd_record_batch(&merged).unwrap().num_rows(), 6);
     }
 
     #[test]
