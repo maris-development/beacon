@@ -51,12 +51,17 @@ impl FileStatsStore {
         let finished = builder.finish()?;
 
         let mut manifest = self.manifest.write().await;
-        let name = format!("segment-{:08}.bfs", manifest.segments.len());
+        // From the monotonic counter, not from the list length: a compaction
+        // shrinks the list, and a length-derived name would then be handed to
+        // the next write while a live segment still held it.
+        let seq = manifest.claim_seq();
+        let name = format!("segment-{seq:08}.bfs");
         self.store
             .put(&self.prefix.clone().join(name.as_str()), finished.bytes.into())
             .await?;
 
         let entry = SegmentEntry {
+            seq,
             name,
             min_file_id: finished.min_file_id,
             max_file_id: finished.max_file_id,

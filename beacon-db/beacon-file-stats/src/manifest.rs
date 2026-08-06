@@ -32,6 +32,14 @@ pub const MANIFEST_NAME: &str = "manifest.bin";
 /// One segment, as the manifest sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SegmentEntry {
+    /// Monotonic write order, assigned by [`Manifest::add_segment`].
+    ///
+    /// This is what "newest wins" means when a file appears in more than one
+    /// segment. It cannot be the position in [`Manifest::segments`]: a
+    /// compaction replaces many entries with one, and position stops tracking
+    /// age the moment it does. A stale range winning over a fresh one is a
+    /// silently wrong answer, so recency gets its own field.
+    pub seq: u64,
     /// Object name within the statistics prefix.
     pub name: String,
     pub min_file_id: FileId,
@@ -58,6 +66,10 @@ pub struct Manifest {
     pub segments: Vec<SegmentEntry>,
     /// Bumped on every write, so a reader can tell it read a stale copy.
     pub generation: u64,
+    /// Never decreases, so a name is never reused. Deriving names from
+    /// `segments.len()` would hand a live segment's name to the next write as
+    /// soon as a compaction shrank the list.
+    pub next_seq: u64,
 }
 
 impl Manifest {
@@ -65,7 +77,16 @@ impl Manifest {
         Self::default()
     }
 
+    /// Claim the next write order. The caller names its object from this, so the
+    /// name is claimed before the segment exists.
+    pub fn claim_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
+
     pub fn add_segment(&mut self, entry: SegmentEntry) {
+        self.next_seq = self.next_seq.max(entry.seq + 1);
         self.segments.push(entry);
         self.generation += 1;
     }
@@ -75,15 +96,20 @@ impl Manifest {
     ///
     /// This is the whole point of the manifest: it answers without touching a
     /// segment, so a selective query reads only the few segments that matter.
+    /// Returned oldest first, by [`SegmentEntry::seq`], because the reader folds
+    /// them in that order and lets the newest row for a file win.
     pub fn candidates(
         &self,
         column_id: ColumnId,
         file_id_range: (FileId, FileId),
     ) -> Vec<&SegmentEntry> {
-        self.segments
+        let mut found: Vec<&SegmentEntry> = self
+            .segments
             .iter()
             .filter(|entry| entry.overlaps(file_id_range) && entry.contains_column(column_id))
-            .collect()
+            .collect();
+        found.sort_by_key(|entry| entry.seq);
+        found
     }
 
     /// Files covered across every segment, tombstones included.
@@ -122,6 +148,7 @@ mod tests {
 
     fn entry(name: &str, files: (FileId, FileId), columns: &[ColumnId]) -> SegmentEntry {
         SegmentEntry {
+            seq: 0,
             name: name.to_string(),
             min_file_id: files.0,
             max_file_id: files.1,
@@ -155,6 +182,48 @@ mod tests {
         assert!(segment.overlaps((0, 10)));
         assert!(!segment.overlaps((21, 30)));
         assert!(!segment.overlaps((0, 9)));
+    }
+
+    /// Recency must follow `seq`, not position, because a compaction rewrites the
+    /// list. If it followed position, a compacted segment could sort ahead of a
+    /// fresher one and its stale range would win.
+    #[test]
+    fn candidates_come_back_oldest_first_whatever_the_list_order() {
+        let mut manifest = Manifest::new();
+        let mut old = entry("compacted", (0, 99), &[1]);
+        old.seq = 2;
+        let mut new = entry("fresh", (0, 99), &[1]);
+        new.seq = 9;
+
+        // Pushed newest first, as a compaction that replaced entries would leave
+        // them.
+        manifest.segments.push(new);
+        manifest.segments.push(old);
+
+        let order: Vec<&str> = manifest
+            .candidates(1, (0, 99))
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(order, vec!["compacted", "fresh"]);
+    }
+
+    /// A name is never handed out twice, however far the list shrinks.
+    #[test]
+    fn sequence_numbers_never_go_backwards() {
+        let mut manifest = Manifest::new();
+        for _ in 0..3 {
+            let seq = manifest.claim_seq();
+            let mut e = entry(&format!("segment-{seq}"), (0, 9), &[1]);
+            e.seq = seq;
+            manifest.add_segment(e);
+        }
+        assert_eq!(manifest.next_seq, 3);
+
+        // A compaction collapses all three into one.
+        manifest.segments.clear();
+        let seq = manifest.claim_seq();
+        assert_eq!(seq, 3, "the next name must not collide with a retired one");
     }
 
     #[tokio::test]

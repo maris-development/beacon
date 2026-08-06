@@ -223,6 +223,7 @@ fn prefix_local_batches_let_the_manifest_skip() {
 
     fn entry(name: &str, finished: &beacon_file_stats::segment::FinishedSegment) -> SegmentEntry {
         SegmentEntry {
+            seq: 0,
             name: name.to_string(),
             min_file_id: finished.min_file_id,
             max_file_id: finished.max_file_id,
