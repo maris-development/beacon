@@ -180,28 +180,48 @@ impl StatsCollector {
         files: Vec<(FileId, FileRecord)>,
         report: &mut CollectReport,
     ) -> Result<()> {
-        // `buffer_unordered` rather than spawned tasks: it bounds concurrency
-        // without forcing every future to be 'static, so the analyzer can borrow
-        // from self.
-        let outcomes: Vec<(FileId, Result<FileAnalysis>)> = stream::iter(files)
-            .map(|(id, record)| async move {
-                let outcome = self.analyzer.analyze(&record).await;
-                (id, outcome)
-            })
-            .buffer_unordered(self.config.concurrency)
-            .collect()
-            .await;
+        // Each analysis is *spawned*, and `buffer_unordered` bounds how many are
+        // in flight. Both halves matter, and the first was a real mistake to get
+        // wrong: `buffer_unordered` on its own gives concurrency, not
+        // parallelism. Every future it holds is polled from one task, so work
+        // that is CPU bound between await points runs single-threaded however
+        // high the limit is set.
+        //
+        // Reading a netCDF file's ranges is exactly that shape: fetch, then
+        // parse and scan. Measured on eight cores, `buffer_unordered(8)` alone
+        // managed 296 files/s against 287 serial. Spawning the same work reached
+        // 1193 -- see `statistics_backfill_cost` in beacon-arrow-netcdf.
+        // The crate's `Result` alias fixes the error type, so the join result is spelled out.
+        type Joined = std::result::Result<(FileId, Result<FileAnalysis>), tokio::task::JoinError>;
+        let outcomes: Vec<Joined> =
+            stream::iter(files)
+                .map(|(id, record)| {
+                    let analyzer = self.analyzer.clone();
+                    tokio::spawn(async move {
+                        let outcome = analyzer.analyze(&record).await;
+                        (id, outcome)
+                    })
+                })
+                .buffer_unordered(self.config.concurrency)
+                .collect()
+                .await;
 
         let mut analyzed: Vec<(FileId, FileAnalysis)> = Vec::with_capacity(outcomes.len());
         let mut failed: Vec<FileId> = Vec::new();
-        for (id, outcome) in outcomes {
+        for outcome in outcomes {
             match outcome {
-                Ok(analysis) => analyzed.push((id, analysis)),
-                Err(error) => {
+                Ok((id, Ok(analysis))) => analyzed.push((id, analysis)),
+                Ok((id, Err(error))) => {
                     // A bad file must not stop the batch, and it must leave the
                     // queue: a failure that stays pending is retried forever.
                     tracing::warn!(file_id = id, %error, "file statistics analysis failed");
                     failed.push(id);
+                }
+                Err(error) => {
+                    // A panic inside an analysis. The file stays pending rather
+                    // than being marked failed, because nothing was learned
+                    // about it -- including which file it was.
+                    tracing::error!(%error, "a file statistics analysis task panicked");
                 }
             }
         }
