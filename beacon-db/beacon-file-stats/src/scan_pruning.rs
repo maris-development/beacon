@@ -31,6 +31,7 @@ use datafusion::datasource::physical_plan::{FileGroup, FileScanConfig};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::metrics::MetricBuilder;
 use datafusion::prelude::Expr;
 
 use crate::store::FileStatsStore;
@@ -120,6 +121,9 @@ async fn try_prune_scan(
     let df_schema = DFSchema::try_from(schema.as_ref().clone()).ok()?;
     let predicate = state.create_physical_expr(predicate, &df_schema).ok()?;
 
+    let file_range = (candidates[0], candidates[candidates.len() - 1]);
+    let columns_used =
+        crate::pruning::columns_with_statistics(&store, &predicate, &schema, file_range).await;
     let kept: HashSet<FileId> = crate::pruning::prune_files(&store, &predicate, &schema, &candidates)
         .await
         .into_iter()
@@ -160,5 +164,25 @@ async fn try_prune_scan(
 
     let mut pruned = config.clone();
     pruned.file_groups = groups;
+
+    // Report what happened where people already look. The counts are known at
+    // plan time, but `DataSourceExec` shares one `ExecutionPlanMetricsSet` with
+    // its `FileSource` through an `Arc`, so registering here surfaces them under
+    // the scan node in `EXPLAIN ANALYZE` -- with no extra plan node, and so no
+    // risk of blocking a later repartition or limit pushdown.
+    //
+    // Without this the only evidence pruning happened is a smaller file list in
+    // the plan, which tells you the result but never the ratio.
+    let metrics = datafusion::datasource::source::DataSource::metrics(&pruned);
+    MetricBuilder::new(&metrics)
+        .global_counter("file_stats_files_considered")
+        .add(paths.len());
+    MetricBuilder::new(&metrics)
+        .global_counter("file_stats_files_pruned")
+        .add(dropped);
+    MetricBuilder::new(&metrics)
+        .global_counter("file_stats_columns_used")
+        .add(columns_used);
+
     Some(Arc::new(DataSourceExec::new(Arc::new(pruned))))
 }

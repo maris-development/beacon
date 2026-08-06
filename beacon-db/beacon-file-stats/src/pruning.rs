@@ -331,3 +331,34 @@ fn concat(arrays: &[ArrayRef]) -> Option<ArrayRef> {
     arrow::compute::concat(&refs).ok()
 }
 
+
+/// How many of `predicate`'s columns the store actually holds statistics for.
+///
+/// A diagnostic, not a decision: a predicate on three columns that finds
+/// statistics for none of them prunes nothing, and that reads identically to a
+/// predicate that pruned nothing because every file matched. The count separates
+/// the two.
+pub async fn columns_with_statistics(
+    store: &FileStatsStore,
+    predicate: &Arc<dyn PhysicalExpr>,
+    schema: &SchemaRef,
+    range: (FileId, FileId),
+) -> usize {
+    let Ok(pruning_predicate) = PruningPredicate::try_new(predicate.clone(), schema.clone()) else {
+        return 0;
+    };
+    let mut found = 0;
+    for column in collect_columns(pruning_predicate.orig_expr()) {
+        if schema.field_with_name(column.name()).is_err() {
+            continue;
+        }
+        let segments = store
+            .column_stats_by_name(column.name(), range)
+            .await
+            .unwrap_or_default();
+        if !segments.is_empty() {
+            found += 1;
+        }
+    }
+    found
+}

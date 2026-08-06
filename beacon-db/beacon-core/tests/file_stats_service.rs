@@ -550,3 +550,39 @@ async fn analyze_files_says_when_the_subsystem_is_off() {
         "the error should name the switch: {error}"
     );
 }
+
+/// A pruned scan reports what it did, where people already look.
+///
+/// The plan alone shows the surviving files but never the ratio, so "pruning ran
+/// and kept everything" and "pruning never ran" read identically. The counters
+/// separate them, and `columns_used` separates a third case: a predicate whose
+/// columns the store holds no statistics for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pruned_scan_reports_its_metrics() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/cold.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/mild.parquet"), 20.0, 25.0);
+    write_parquet(&root.path().join("datasets/obs/hot.parquet"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let analyzed = query(
+        &runtime,
+        "EXPLAIN ANALYZE SELECT * FROM read_parquet('obs/*.parquet') WHERE \"TEMP\" > 80",
+    )
+    .await;
+
+    assert!(
+        analyzed.contains("file_stats_files_considered=3"),
+        "the scan should report how many files it started from:\n{analyzed}"
+    );
+    assert!(
+        analyzed.contains("file_stats_files_pruned=2"),
+        "and how many it dropped:\n{analyzed}"
+    );
+    assert!(
+        analyzed.contains("file_stats_columns_used=1"),
+        "and that TEMP actually had statistics to prune on:\n{analyzed}"
+    );
+}
