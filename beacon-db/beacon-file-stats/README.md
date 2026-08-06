@@ -3,6 +3,9 @@
 Durable, column-addressable statistics for every file a Beacon instance knows
 about. A query reads only the columns its `WHERE` clause names.
 
+For diagrams of the write path, the read path, the segment layout, and the file
+lifecycle, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## The problem
 
 A Beacon node can hold a million files. Those files draw on 160 000 distinct
