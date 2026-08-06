@@ -84,11 +84,15 @@ async fn store() -> (Arc<FileStatsStore>, tempfile::TempDir) {
     (Arc::new(store), dir)
 }
 
+/// The tests below pin grouping behaviour, so they fix the depth rather than
+/// letting it be derived. `collector.rs`'s unit tests cover the derivation.
 fn config(prefix_depth: usize) -> CollectorConfig {
     CollectorConfig {
         batch_files: 100,
         concurrency: 4,
-        prefix_depth,
+        target_group_files: 10_000,
+        min_group_files: 500,
+        prefix_depth: Some(prefix_depth),
     }
 }
 
@@ -248,7 +252,9 @@ async fn run_until_idle_covers_more_files_than_one_batch() {
     let small_batches = CollectorConfig {
         batch_files: 10,
         concurrency: 4,
-        prefix_depth: 2,
+        target_group_files: 10_000,
+        min_group_files: 500,
+        prefix_depth: Some(2),
     };
     let collector = StatsCollector::new(store.clone(), Arc::new(FakeAnalyzer::new()), small_batches);
 

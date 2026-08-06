@@ -177,7 +177,11 @@ async fn main() -> anyhow::Result<()> {
         CollectorConfig {
             batch_files: FILES_PER_FAMILY as usize,
             concurrency: 8,
-            prefix_depth: 2,
+            target_group_files: 10_000,
+            min_group_files: 500,
+            // Derived from the paths, which is the default. The shape here is
+            // family{n}/2024/{i}.nc, so it should land on one segment per family.
+            prefix_depth: None,
         },
     );
     let start = Instant::now();

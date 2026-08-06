@@ -67,9 +67,25 @@ pub struct CollectorConfig {
     /// Files analyzed at once. Analysis is IO bound, and this is the knob that
     /// keeps a background pass from starving queries.
     pub concurrency: usize,
-    /// Path segments that define a batch group. `argo/2024/01/f.nc` at depth 2
-    /// groups under `argo/2024`.
-    pub prefix_depth: usize,
+    /// Files a segment should aim to cover.
+    ///
+    /// The grouping descends the path tree while a coherent group is larger
+    /// than this, so segments land near this size wherever the layout allows.
+    /// Smaller means narrower segments and sharper skipping for rare columns,
+    /// but more segments to read for a column present in all of them.
+    pub target_group_files: usize,
+    /// Never split a group smaller than this, even across directories.
+    ///
+    /// A block costs ~112 bytes of framing however few rows it holds, so
+    /// splitting a handful of files across several segments pays that many
+    /// times over for no skip worth having.
+    pub min_group_files: usize,
+    /// Fix the grouping at this directory depth instead of deriving it.
+    ///
+    /// `None` derives it per batch, which is what suits a store whose roots
+    /// have different shapes: `argo/f.nc` beside `cmems/2024/01/15/f.nc`. Set
+    /// it only when a layout is known and the derivation gets it wrong.
+    pub prefix_depth: Option<usize>,
 }
 
 impl Default for CollectorConfig {
@@ -79,7 +95,9 @@ impl Default for CollectorConfig {
             concurrency: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4),
-            prefix_depth: 2,
+            target_group_files: 10_000,
+            min_group_files: 500,
+            prefix_depth: None,
         }
     }
 }
@@ -139,13 +157,17 @@ impl StatsCollector {
             return Ok(CollectReport::default());
         }
 
-        // `next_pending` hands out ascending ids, so each group's subsequence is
-        // ascending too, which is what `SegmentBuilder::push_file` requires.
-        let mut groups: BTreeMap<String, Vec<(FileId, FileRecord)>> = BTreeMap::new();
-        for (id, record) in pending {
-            let key = prefix_of(&record.path, self.config.prefix_depth);
-            groups.entry(key).or_default().push((id, record));
-        }
+        // `next_pending` hands out ascending ids, and every grouping below keeps
+        // input order within a group, so each group stays ascending -- which is
+        // what `SegmentBuilder::push_file` requires.
+        let groups = match self.config.prefix_depth {
+            Some(depth) => group_at_depth(pending, depth),
+            None => group_by_locality(
+                pending,
+                self.config.target_group_files.max(1),
+                self.config.min_group_files,
+            ),
+        };
 
         let mut report = CollectReport::default();
         for (prefix, files) in groups {
@@ -292,29 +314,270 @@ impl StatsCollector {
 
 }
 
-/// The batch group a path belongs to: its leading directory segments, without
-/// the file name.
-///
-/// A path with no directory groups under the empty string, which keeps
-/// everything at the store root in one group rather than one group each.
-fn prefix_of(path: &str, depth: usize) -> String {
+/// One batch item.
+type Item = (FileId, FileRecord);
+
+/// The directory components of a path, without the file name.
+fn directories(path: &str) -> Vec<&str> {
     let mut segments: Vec<&str> = path.split('/').collect();
-    segments.pop(); // the file name is not part of the group
-    segments.truncate(depth);
-    segments.join("/")
+    segments.pop();
+    segments
+}
+
+/// Group at a fixed directory depth. The explicit-override path.
+fn group_at_depth(files: Vec<Item>, depth: usize) -> Vec<(String, Vec<Item>)> {
+    let mut groups: BTreeMap<String, Vec<Item>> = BTreeMap::new();
+    for item in files {
+        let mut key = directories(&item.1.path);
+        key.truncate(depth);
+        groups.entry(key.join("/")).or_default().push(item);
+    }
+    groups.into_iter().collect()
+}
+
+/// Derive the grouping from the paths themselves.
+///
+/// Descends the path tree, splitting wherever a directory level actually
+/// separates the batch, and stopping once a coherent group is small enough to be
+/// a segment. That handles a store whose roots have different shapes without
+/// anyone configuring a depth per root, which a single global depth cannot.
+///
+/// Input order is preserved inside every group, so ascending file ids stay
+/// ascending.
+fn group_by_locality(files: Vec<Item>, target: usize, min_group: usize) -> Vec<(String, Vec<Item>)> {
+    let mut out = Vec::new();
+    descend(files, 0, String::new(), target, min_group, &mut out);
+    out
+}
+
+fn descend(
+    files: Vec<Item>,
+    depth: usize,
+    prefix: String,
+    target: usize,
+    min_group: usize,
+    out: &mut Vec<(String, Vec<Item>)>,
+) {
+    if files.is_empty() {
+        return;
+    }
+
+    // Partition by this level's directory component. `None` means the file sits
+    // at this level and cannot be descended any further.
+    let mut buckets: BTreeMap<Option<String>, Vec<Item>> = BTreeMap::new();
+    for item in files {
+        let component = directories(&item.1.path)
+            .get(depth)
+            .map(|segment| (*segment).to_string());
+        buckets.entry(component).or_default().push(item);
+    }
+
+    let total: usize = buckets.values().map(|bucket| bucket.len()).sum();
+
+    // Splitting a small group buys a skip that is not worth the block framing.
+    if total <= min_group {
+        out.push((prefix, buckets.into_values().flatten().collect()));
+        return;
+    }
+
+    if buckets.len() == 1 {
+        let (component, only) = buckets.into_iter().next().expect("one bucket");
+        let Some(component) = component else {
+            // Every file is at this level, so there is nothing left to split on.
+            // A directory holding more than a segment's worth gets cut by size.
+            emit_chunked(only, prefix, target, out);
+            return;
+        };
+        // One shared component: descending cannot separate anything yet, so keep
+        // going only while the group is bigger than a segment should be.
+        if only.len() <= target {
+            out.push((join(&prefix, &component), only));
+        } else {
+            descend(only, depth + 1, join(&prefix, &component), target, min_group, out);
+        }
+        return;
+    }
+
+    // This level separates the batch, so take it.
+    for (component, bucket) in buckets {
+        match component {
+            Some(component) => descend(
+                bucket,
+                depth + 1,
+                join(&prefix, &component),
+                target,
+                min_group,
+                out,
+            ),
+            // Files sitting at this level, beside subdirectories.
+            None => emit_chunked(bucket, prefix.clone(), target, out),
+        }
+    }
+}
+
+/// Cut a group that cannot be split structurally into segment-sized pieces.
+fn emit_chunked(files: Vec<Item>, prefix: String, target: usize, out: &mut Vec<(String, Vec<Item>)>) {
+    if files.len() <= target {
+        out.push((prefix, files));
+        return;
+    }
+    for chunk in files.chunks(target) {
+        out.push((prefix.clone(), chunk.to_vec()));
+    }
+}
+
+fn join(prefix: &str, component: &str) -> String {
+    if prefix.is_empty() {
+        component.to_string()
+    } else {
+        format!("{prefix}/{component}")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn items(paths: &[&str]) -> Vec<Item> {
+        paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (index as FileId, FileRecord::pending(*path, 1, 1)))
+            .collect()
+    }
+
+    fn keys(groups: &[(String, Vec<Item>)]) -> Vec<(String, usize)> {
+        groups
+            .iter()
+            .map(|(prefix, files)| (prefix.clone(), files.len()))
+            .collect()
+    }
+
     #[test]
-    fn a_group_is_the_leading_directories_without_the_file_name() {
-        assert_eq!(prefix_of("argo/2024/01/f.nc", 2), "argo/2024");
-        assert_eq!(prefix_of("argo/2024/01/f.nc", 1), "argo");
-        assert_eq!(prefix_of("argo/f.nc", 2), "argo");
-        assert_eq!(prefix_of("f.nc", 2), "");
-        assert_eq!(prefix_of("argo/2024/01/f.nc", 0), "");
+    fn a_fixed_depth_still_works_when_asked_for() {
+        let groups = group_at_depth(items(&["argo/2024/01/a.nc", "argo/2024/02/b.nc"]), 2);
+        assert_eq!(keys(&groups), vec![("argo/2024".to_string(), 2)]);
+
+        let groups = group_at_depth(items(&["argo/a.nc", "ctd/b.nc"]), 1);
+        assert_eq!(
+            keys(&groups),
+            vec![("argo".to_string(), 1), ("ctd".to_string(), 1)]
+        );
+    }
+
+    /// Roots of different shapes are exactly what a single global depth cannot
+    /// serve. The derivation splits each at the level that separates it.
+    #[test]
+    fn roots_with_different_shapes_each_get_their_own_depth() {
+        let mut paths: Vec<String> = Vec::new();
+        for i in 0..600 {
+            paths.push(format!("argo/{i:04}.nc"));
+        }
+        for i in 0..600 {
+            paths.push(format!("cmems/2024/01/{i:04}.nc"));
+        }
+        for i in 0..600 {
+            paths.push(format!("cmems/2024/02/{i:04}.nc"));
+        }
+        let refs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+
+        let groups = group_by_locality(items(&refs), 500, 100);
+
+        // Each root resolved to its own depth: `argo` at one level, `cmems` at
+        // three. A single global depth cannot do both.
+        let mut names: Vec<&str> = groups.iter().map(|(p, _)| p.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names, vec!["argo", "cmems/2024/01", "cmems/2024/02"]);
+
+        // Each of those holds 600 files against a target of 500, and has nothing
+        // left to split on, so the size rule cuts each into two segments.
+        assert_eq!(groups.len(), 6);
+        assert_eq!(groups.iter().map(|(_, f)| f.len()).sum::<usize>(), 1_800);
+    }
+
+    /// A group small enough to be one segment is left whole, however many
+    /// directories it spans. Block framing costs more than the skip would save.
+    #[test]
+    fn a_small_batch_is_not_split_across_directories() {
+        let groups = group_by_locality(
+            items(&["argo/a.nc", "ctd/b.nc", "wod/c.nc"]),
+            10_000,
+            500,
+        );
+        assert_eq!(groups.len(), 1, "three files must not become three segments");
+        assert_eq!(groups[0].1.len(), 3);
+    }
+
+    /// One directory holding more than a segment's worth, with nothing to split
+    /// on, is cut by size rather than left as one huge segment.
+    #[test]
+    fn a_flat_directory_larger_than_the_target_is_chunked() {
+        let paths: Vec<String> = (0..25).map(|i| format!("argo/{i:03}.nc")).collect();
+        let refs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+
+        let groups = group_by_locality(items(&refs), 10, 5);
+        assert_eq!(groups.len(), 3, "25 files at a target of 10");
+        assert_eq!(groups.iter().map(|(_, f)| f.len()).sum::<usize>(), 25);
+    }
+
+    /// The rule `SegmentBuilder::push_file` depends on: whatever the grouping
+    /// does, ids inside a group stay ascending.
+    #[test]
+    fn every_group_keeps_its_ids_ascending() {
+        let mut paths: Vec<String> = Vec::new();
+        for family in 0..4 {
+            for i in 0..300 {
+                paths.push(format!("fam{family}/2024/{i:04}.nc"));
+            }
+        }
+        let refs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+
+        for (prefix, files) in group_by_locality(items(&refs), 200, 50) {
+            let ids: Vec<FileId> = files.iter().map(|(id, _)| *id).collect();
+            assert!(
+                ids.windows(2).all(|w| w[0] < w[1]),
+                "group {prefix} came out unsorted"
+            );
+        }
+    }
+
+    /// Files sitting beside subdirectories are their own group rather than being
+    /// silently dropped or merged into a sibling.
+    #[test]
+    fn files_beside_subdirectories_are_kept() {
+        let mut paths: Vec<String> = vec!["root.nc".to_string()];
+        for i in 0..600 {
+            paths.push(format!("argo/{i:04}.nc"));
+        }
+        let refs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+
+        let groups = group_by_locality(items(&refs), 500, 100);
+        let total: usize = groups.iter().map(|(_, f)| f.len()).sum();
+        assert_eq!(total, 601, "no file may be lost by the grouping");
+        assert!(groups.iter().any(|(prefix, _)| prefix.is_empty()));
+    }
+
+    /// Nothing is lost and nothing is duplicated, whatever the shape.
+    #[test]
+    fn grouping_is_a_partition() {
+        let mut paths: Vec<String> = Vec::new();
+        for i in 0..50 {
+            paths.push(format!("a/b/{i}.nc"));
+        }
+        for i in 0..50 {
+            paths.push(format!("a/c/d/{i}.nc"));
+        }
+        paths.push("top.nc".to_string());
+        let refs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+
+        let groups = group_by_locality(items(&refs), 20, 5);
+        let mut seen: Vec<FileId> = groups
+            .iter()
+            .flat_map(|(_, files)| files.iter().map(|(id, _)| *id))
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..101).collect::<Vec<FileId>>());
     }
 
     #[test]

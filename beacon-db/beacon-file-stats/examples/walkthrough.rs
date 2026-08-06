@@ -118,7 +118,9 @@ async fn main() -> anyhow::Result<()> {
         CollectorConfig {
             batch_files: 1_000,
             concurrency: 4,
-            prefix_depth: 2,
+            target_group_files: 10_000,
+            min_group_files: 500,
+            prefix_depth: Some(2),
         },
     );
     let report = collector.run_once().await?;

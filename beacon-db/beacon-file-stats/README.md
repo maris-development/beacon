@@ -252,6 +252,13 @@ predicate on a column it does not hold. A segment batched by arrival order holds
 a broad slice of the column space, matches nearly every query, and the manifest's
 skip stops working.
 
+The collector does this for you. It derives the grouping from each batch's
+paths, descending the tree while a level actually separates the batch and
+stopping once a coherent group is about `target_group_files` big. That handles a
+store whose roots have different shapes -- `argo/f.nc` beside
+`cmems/2024/01/15/f.nc` -- which no single configured depth can. Set
+`prefix_depth` only to override it.
+
 The second rule is easy to get wrong because it looks fine at small scale. The
 test measures it: for one column across four segments, prefix-local reads **1 of
 4**, scattered reads **4 of 4**.
