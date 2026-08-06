@@ -141,8 +141,26 @@ alternative.
 | `query(q, { format: "csv" })` | `csv` | `{ rows, queryId }` — all values are strings |
 | `queryArrow()` | default Arrow stream | an `apache-arrow` `Table` |
 | `queryStream()` | default Arrow stream | `AsyncGenerator<RecordBatch>` — streamed, unbuffered |
+| `queryArrowTableStream()` | default Arrow stream | `AsyncGenerator<Table>` — one Table per batch, unbuffered |
 | `queryCsv()` | `csv` | `{ rows, queryId }` — string-valued rows |
 | `queryRaw(query, format?)` | any (or default stream) | the raw `fetch` `Response` |
+
+`getArrowDecoder()` exposes the same decoder the methods above use — a loaded,
+zstd-enabled `apache-arrow` — so you can decode Beacon's Arrow output yourself:
+
+```ts
+import { getArrowDecoder, responseByteStream } from "@beacon/client";
+
+const decoder = await getArrowDecoder();
+const res = await beacon.queryRaw("SELECT * FROM ctd");
+
+// A whole response at once...
+const table = decoder.tableFromIPC(new Uint8Array(await res.arrayBuffer()));
+// ...or batch by batch, over any byte source.
+for await (const batch of await decoder.readStream(responseByteStream(res))) {
+  console.log(batch.numRows);
+}
+```
 
 Use `queryRaw` to stream large results or write a materialized format (CSV,
 Parquet, NetCDF, GeoParquet, ODV, …) to disk:
@@ -181,8 +199,9 @@ npm run build
 ## API surface
 
 - **Query builder:** `from`, `select` → fluent `QueryBuilder` (see above)
-- **Query:** `query`, `queryArrow`, `queryStream`, `queryCsv`, `queryRaw`, `parseQuery`, `explainQuery`, `queryMetrics`
+- **Query:** `query`, `queryArrow`, `queryStream`, `queryArrowTableStream`, `queryBatches`, `queryCsv`, `queryRaw`, `parseQuery`, `explainQuery`, `queryMetrics`
 - **Tables:** `tables`, `catalogs`, `tablesWithSchema`, `tableSchema`, `defaultTable`, `defaultTableSchema` (`tableConfig` is deprecated)
 - **Datasets:** `datasets`, `datasetSchema`, `totalDatasets`
 - **Functions / info:** `functions`, `info`, `health`
+- **Arrow helpers (module-level):** `getArrowDecoder`, `rowsFromTable`, `rowsFromBatch`, `responseByteStream`
 - **Admin (`beacon.admin`):** `check`, `listCrawlers`, `createCrawler`, `getCrawler`, `runCrawler`, `dropCrawler`, `createExternalTable`
