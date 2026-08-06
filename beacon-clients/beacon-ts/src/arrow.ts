@@ -26,11 +26,18 @@ export interface ArrowRecordBatch {
   toArray(): unknown[];
 }
 
-interface ArrowDecoder {
+/**
+ * The Arrow entry points the SDK itself decodes with, backed by a loaded,
+ * zstd-enabled `apache-arrow`. Get one from {@link getArrowDecoder} to decode a
+ * `queryRaw` response yourself.
+ */
+export interface ArrowDecoder {
   /** Decodes a complete Arrow IPC payload (stream or file) into a Table. */
   tableFromIPC(bytes: Uint8Array): ArrowTable;
   /** Opens a streaming reader over a chunked Arrow IPC source. */
   readStream(source: AsyncIterable<Uint8Array>): Promise<AsyncIterable<ArrowRecordBatch>>;
+  /** Wraps already-decoded record batches (which must share a schema) in a Table. */
+  tableFromBatches(batches: ArrowRecordBatch[]): ArrowTable;
 }
 
 // Shape of the bits of the apache-arrow module we touch.
@@ -41,6 +48,7 @@ interface ArrowModule {
   RecordBatchReader: {
     from(source: unknown): Promise<AsyncIterable<ArrowRecordBatch>> | AsyncIterable<ArrowRecordBatch>;
   };
+  Table: new (...batches: ArrowRecordBatch[]) => ArrowTable;
   CompressionType: { ZSTD: number };
   compressionRegistry: {
     get(type: number): { decode?: (b: Uint8Array) => Uint8Array } | null;
@@ -50,7 +58,19 @@ interface ArrowModule {
 
 let loaded: ArrowDecoder | undefined;
 
-/** Loads apache-arrow (and registers the zstd codec on first use). */
+/**
+ * Loads apache-arrow (and registers the zstd codec on first use), returning the
+ * decoder the query methods use. The module is loaded once and cached.
+ *
+ * Call it to decode Beacon's Arrow output on your own terms — e.g. over a
+ * `queryRaw` response, a file, or bytes from another transport:
+ *
+ * ```ts
+ * const decoder = await getArrowDecoder();
+ * const res = await beacon.queryRaw("SELECT 1 AS n");
+ * const table = decoder.tableFromIPC(new Uint8Array(await res.arrayBuffer()));
+ * ```
+ */
 export async function getArrowDecoder(): Promise<ArrowDecoder> {
   if (loaded) return loaded;
   const arrow = (await import("apache-arrow")) as unknown as ArrowModule;
@@ -59,6 +79,7 @@ export async function getArrowDecoder(): Promise<ArrowDecoder> {
   loaded = {
     tableFromIPC: (bytes) => arrow.tableFromIPC(bytes),
     readStream: async (source) => arrow.RecordBatchReader.from(source),
+    tableFromBatches: (batches) => new arrow.Table(...batches),
   };
   return loaded;
 }

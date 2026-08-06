@@ -1,7 +1,7 @@
-import { tableFromArrays, tableToIPC } from "apache-arrow";
+import { Table, tableFromArrays, tableToIPC } from "apache-arrow";
 import { describe, expect, it, vi } from "vitest";
 
-import { ApiError, BeaconClient, basicAuthHeader } from "../src/index.js";
+import { ApiError, BeaconClient, basicAuthHeader, rowsFromTable } from "../src/index.js";
 
 /** Builds a fetch stub that records calls and returns a fresh `response` each time. */
 function stubFetch(makeResponse: () => Response) {
@@ -61,6 +61,34 @@ describe("BeaconClient.query (Arrow path)", () => {
     const client = new BeaconClient({ url: "http://beacon.test", fetch: fn });
     const table = await client.queryArrow("SELECT 7");
     expect(table.numRows).toBe(1);
+  });
+});
+
+describe("BeaconClient streaming", () => {
+  /** An Arrow IPC stream carrying one record batch per `columns` entry. */
+  function multiBatchResponse(columns: Record<string, unknown[]>[]): Response {
+    const batches = columns.flatMap((c) => tableFromArrays(c).batches);
+    return new Response(tableToIPC(new Table(...batches), "stream"), {
+      status: 200,
+      headers: { "x-beacon-query-id": "q-1" },
+    });
+  }
+
+  it("queryArrowTableStream yields one Table per record batch", async () => {
+    const { fn } = stubFetch(() =>
+      multiBatchResponse([{ n: Int32Array.from([1, 2]) }, { n: Int32Array.from([3]) }]),
+    );
+    const client = new BeaconClient({ url: "http://beacon.test", fetch: fn });
+
+    const tables = [];
+    for await (const table of client.queryArrowTableStream("SELECT n")) tables.push(table);
+
+    expect(tables.map((t) => t.numRows)).toEqual([2, 1]);
+    expect(tables.flatMap((t) => rowsFromTable<{ n: number }>(t))).toEqual([
+      { n: 1 },
+      { n: 2 },
+      { n: 3 },
+    ]);
   });
 });
 

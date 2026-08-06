@@ -6,7 +6,13 @@ import {
 } from "apache-arrow";
 import { describe, expect, it, vi } from "vitest";
 
-import { BeaconClient, parseCsv } from "../src/index.js";
+import {
+  BeaconClient,
+  getArrowDecoder,
+  parseCsv,
+  responseByteStream,
+  rowsFromTable,
+} from "../src/index.js";
 
 describe("parseCsv", () => {
   it("parses a simple table", () => {
@@ -41,5 +47,23 @@ describe("zstd codec registration", () => {
 
     const codec = compressionRegistry.get(CompressionType.ZSTD);
     expect(typeof codec?.decode).toBe("function");
+  });
+});
+
+describe("getArrowDecoder", () => {
+  const ipc = () => tableToIPC(tableFromArrays({ n: Int32Array.from([1, 2]) }), "stream");
+
+  it("decodes a whole payload without a client", async () => {
+    const decoder = await getArrowDecoder();
+    const table = decoder.tableFromIPC(ipc());
+    expect(rowsFromTable(table)).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
+  it("reads a response body batch by batch", async () => {
+    const decoder = await getArrowDecoder();
+    const batches = await decoder.readStream(responseByteStream(new Response(ipc())));
+    const seen = [];
+    for await (const batch of batches) seen.push(batch.numRows);
+    expect(seen).toEqual([2]);
   });
 });

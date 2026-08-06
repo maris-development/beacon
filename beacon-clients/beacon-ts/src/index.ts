@@ -15,8 +15,9 @@ export type {
 export { Http, basicAuthHeader } from "./http.js";
 export type { ClientOptions, FetchLike } from "./http.js";
 export { BeaconError, ApiError, ConnectionError, TimeoutError } from "./errors.js";
-export { rowsFromTable, rowsFromBatch } from "./arrow.js";
-export type { ArrowTable, ArrowRecordBatch } from "./arrow.js";
+export { getArrowDecoder, rowsFromTable, rowsFromBatch } from "./arrow.js";
+export type { ArrowDecoder, ArrowTable, ArrowRecordBatch } from "./arrow.js";
+export { responseByteStream } from "./stream.js";
 export { parseCsv, parseCsvRows } from "./csv.js";
 export {
   QueryBuilder,
