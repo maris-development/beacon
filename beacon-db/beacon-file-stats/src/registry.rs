@@ -482,6 +482,66 @@ impl Registry {
         })
     }
 
+    /// Every file the registry knows, ascending by id.
+    ///
+    /// Materializes the lot, so it is a diagnostic path rather than a hot one:
+    /// at a million files this is a million records. Nothing on the query or
+    /// collection paths calls it.
+    pub fn scan_records(&self) -> Result<Vec<(FileId, FileRecord)>> {
+        let read = self.db.begin_read()?;
+        let table = read.open_table(FILES_BY_ID)?;
+        let mut out = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            let id = read_u64(key.value())?;
+            let record: FileRecord = bincode::deserialize(value.value())
+                .map_err(|e| FileStatsError::Registry(format!("file record {id}: {e}")))?;
+            out.push((id, record));
+        }
+        Ok(out)
+    }
+
+    /// Put already-analyzed files back on the queue.
+    ///
+    /// Nothing else does this. A file whose content has not changed is never
+    /// re-queued, which is right until the *reader* changes: turn on netCDF's
+    /// Rust reader and every file is `Analyzed` with no columns, correctly
+    /// recorded and permanently useless. This is the way out.
+    ///
+    /// Their statistics are suppressed until the re-analysis lands, so pruning
+    /// pauses over the affected files rather than trusting rows that are about
+    /// to be replaced. Safe, and briefly slower.
+    ///
+    /// `prefix` restricts it; `None` takes everything.
+    pub fn requeue(&self, prefix: Option<&str>) -> Result<usize> {
+        let ids: Vec<FileId> = {
+            let read = self.db.begin_read()?;
+            let by_path = read.open_table(FILES_BY_PATH)?;
+            let by_id = read.open_table(FILES_BY_ID)?;
+
+            let mut ids = Vec::new();
+            let start = prefix.unwrap_or("");
+            for entry in by_path.range(start.as_bytes()..)? {
+                let (key, value) = entry?;
+                let path = String::from_utf8_lossy(key.value()).into_owned();
+                if let Some(prefix) = prefix
+                    && !path.starts_with(prefix)
+                {
+                    break; // the scan has walked past the prefix
+                }
+                let id = read_u64(value.value())?;
+                if let Some(record) = read_record(&by_id, id)?
+                    && record.state == FileState::Analyzed
+                {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
+        self.set_state_batch(&ids, FileState::Pending)?;
+        Ok(ids.len())
+    }
+
     pub fn num_pending(&self) -> Result<u64> {
         let read = self.db.begin_read()?;
         Ok(read.open_table(PENDING)?.len()?)

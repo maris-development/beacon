@@ -362,6 +362,69 @@ impl UserDefinedLogicalNodeCore for RunCrawlerNode {
     }
 }
 
+/// The report `ANALYZE FILES` returns.
+pub(crate) fn analyze_files_arrow_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("discovered", DataType::UInt64, false),
+        Field::new("requeued", DataType::UInt64, false),
+        Field::new("analyzed", DataType::UInt64, false),
+        Field::new("failed", DataType::UInt64, false),
+        Field::new("segments", DataType::UInt64, false),
+        Field::new("pending", DataType::UInt64, false),
+    ]))
+}
+
+fn analyze_files_df_schema() -> &'static DFSchemaRef {
+    static SCHEMA: OnceLock<DFSchemaRef> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        Arc::new(
+            DFSchema::try_from(analyze_files_arrow_schema().as_ref().clone())
+                .expect("ANALYZE FILES schema is valid"),
+        )
+    })
+}
+
+/// Logical node for `ANALYZE FILES ['<prefix>'] [FORCE]`.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
+pub(crate) struct AnalyzeFilesNode {
+    pub(crate) prefix: Option<String>,
+    pub(crate) force: bool,
+}
+
+impl AnalyzeFilesNode {
+    pub(crate) fn new(prefix: Option<String>, force: bool) -> Self {
+        Self { prefix, force }
+    }
+}
+
+impl UserDefinedLogicalNodeCore for AnalyzeFilesNode {
+    fn name(&self) -> &str {
+        "AnalyzeFiles"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        analyze_files_df_schema()
+    }
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "AnalyzeFiles: prefix={:?} force={}",
+            self.prefix, self.force
+        )
+    }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
+        Ok(Self {
+            prefix: self.prefix.clone(),
+            force: self.force,
+        })
+    }
+}
+
 /// Logical node for `DROP CRAWLER <name>`.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash)]
 pub(crate) struct DropCrawlerNode {

@@ -9,7 +9,9 @@
 
 use std::{any::Any, sync::Arc};
 
+use arrow::array::{ArrayRef, UInt64Array};
 use arrow::datatypes::{Schema, SchemaRef};
+use arrow::record_batch::RecordBatch;
 use datafusion::{
     error::{DataFusionError, Result},
     execution::{SendableRecordBatchStream, TaskContext},
@@ -28,7 +30,8 @@ use futures::{StreamExt, TryStreamExt};
 use super::{
     actions, crawler,
     logical::{
-        count_arrow_schema, run_crawler_arrow_schema, show_crawlers_arrow_schema,
+        analyze_files_arrow_schema, count_arrow_schema, run_crawler_arrow_schema,
+        show_crawlers_arrow_schema,
         show_indexes_arrow_schema, show_secrets_arrow_schema, AlterTableSpec,
         Mutation,
     },
@@ -1068,6 +1071,106 @@ impl ExecutionPlan for RunCrawlerExec {
         let schema = run_crawler_arrow_schema();
         let stream = futures::stream::once(async move {
             crawler::run_crawler(&session, &name).await.map_err(to_df_err)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+    }
+}
+
+/// Physical node for `ANALYZE FILES ['<prefix>'] [FORCE]`.
+#[derive(Debug)]
+pub(crate) struct AnalyzeFilesExec {
+    prefix: Option<String>,
+    force: bool,
+    session: SessionCell,
+    cache: Arc<PlanProperties>,
+}
+
+impl AnalyzeFilesExec {
+    pub(crate) fn new(prefix: Option<String>, force: bool, session: SessionCell) -> Self {
+        Self {
+            prefix,
+            force,
+            session,
+            // Row-producing: the pass report is the result, the way RUN CRAWLER
+            // returns its crawl report.
+            cache: Arc::new(plan_properties(analyze_files_arrow_schema())),
+        }
+    }
+}
+
+impl DisplayAs for AnalyzeFilesExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => write!(
+                f,
+                "AnalyzeFilesExec: prefix={:?} force={}",
+                self.prefix, self.force
+            ),
+            DisplayFormatType::TreeRender => write!(f, "AnalyzeFilesExec"),
+        }
+    }
+}
+
+impl ExecutionPlan for AnalyzeFilesExec {
+    fn name(&self) -> &str {
+        "AnalyzeFilesExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let session = upgrade_session(&self.session)?;
+        let prefix = self.prefix.clone();
+        let force = self.force;
+        let schema = analyze_files_arrow_schema();
+
+        let stream = futures::stream::once(async move {
+            let handle = session
+                .state()
+                .config()
+                .get_extension::<std::sync::OnceLock<Arc<crate::file_stats::FileStatsService>>>()
+                .and_then(|handle| handle.get().cloned());
+            let Some(service) = handle else {
+                return Err(datafusion::error::DataFusionError::Plan(
+                    "file statistics are not enabled on this runtime; set \
+                     BEACON_FILE_STATS_ENABLE=true"
+                        .to_string(),
+                ));
+            };
+
+            let pass = service
+                .analyze_now(prefix.as_deref(), force)
+                .await
+                .map_err(to_df_err)?;
+
+            RecordBatch::try_new(
+                analyze_files_arrow_schema(),
+                vec![
+                    Arc::new(UInt64Array::from(vec![pass.discovered as u64])) as ArrayRef,
+                    Arc::new(UInt64Array::from(vec![pass.requeued as u64])),
+                    Arc::new(UInt64Array::from(vec![pass.analyzed as u64])),
+                    Arc::new(UInt64Array::from(vec![pass.failed as u64])),
+                    Arc::new(UInt64Array::from(vec![pass.segments as u64])),
+                    Arc::new(UInt64Array::from(vec![pass.pending])),
+                ],
+            )
+            .map_err(Into::into)
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }

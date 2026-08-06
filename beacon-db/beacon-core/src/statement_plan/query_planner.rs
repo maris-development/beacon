@@ -200,6 +200,14 @@ impl ExtensionPlanner for BeaconExtensionPlanner {
             ))));
         }
 
+        if let Some(analyze) = any.downcast_ref::<logical::AnalyzeFilesNode>() {
+            return Ok(Some(Arc::new(physical::AnalyzeFilesExec::new(
+                analyze.prefix.clone(),
+                analyze.force,
+                session,
+            ))));
+        }
+
         if let Some(drop) = any.downcast_ref::<logical::DropCrawlerNode>() {
             return Ok(Some(Arc::new(physical::DropCrawlerExec::new(
                 drop.name.clone(),

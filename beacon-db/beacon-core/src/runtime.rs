@@ -541,6 +541,9 @@ impl Runtime {
                 Ok(crate::statement_plan::drop_crawler_plan(statement))
             }
             BeaconStatement::ShowCrawlers => Ok(crate::statement_plan::show_crawlers_plan()),
+            BeaconStatement::AnalyzeFiles(statement) => {
+                Ok(crate::statement_plan::analyze_files_plan(statement))
+            }
             BeaconStatement::SetExtension(statement) => {
                 Ok(crate::statement_plan::set_extension_plan(statement))
             }

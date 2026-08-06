@@ -36,7 +36,7 @@ use crate::parser::statement::{
     AttachStatement, AuthStatement, CreateCrawlerStatement, CreateIndexStatement,
     CreateMaterializedViewStatement, CreateSecretStatement, DetachStatement, DropCrawlerStatement,
     DropExtensionStatement, DropIndexStatement, DropSecretStatement, RefreshStatement,
-    RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
+    AnalyzeFilesStatement, RunCrawlerStatement, SetExtensionStatement, ShowExtensionsStatement, ShowIndexesStatement,
     SummarizeStatement,
 };
 
@@ -207,6 +207,16 @@ pub(crate) fn create_crawler_plan(statement: CreateCrawlerStatement) -> LogicalP
 pub(crate) fn run_crawler_plan(statement: RunCrawlerStatement) -> LogicalPlan {
     LogicalPlan::Extension(Extension {
         node: Arc::new(logical::RunCrawlerNode::new(object_name_value(&statement.name))),
+    })
+}
+
+/// Build the logical plan for `ANALYZE FILES ['<prefix>'] [FORCE]`.
+pub(crate) fn analyze_files_plan(statement: AnalyzeFilesStatement) -> LogicalPlan {
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(logical::AnalyzeFilesNode::new(
+            statement.prefix,
+            statement.force,
+        )),
     })
 }
 

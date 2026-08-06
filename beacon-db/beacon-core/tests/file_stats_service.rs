@@ -349,3 +349,204 @@ async fn nothing_is_pruned_when_the_subsystem_is_off() {
     .await;
     assert_eq!(files_in_plan(&plan), 2, "no statistics means no pruning:\n{plan}");
 }
+
+// ── the SQL surface ─────────────────────────────────────────────────────────
+
+async fn query(runtime: &Runtime, sql: &str) -> String {
+    let batches = runtime
+        .run_query(Query::sql(sql.to_string()), AuthIdentity::system())
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        .into_record_stream()
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    arrow::util::pretty::pretty_format_batches(&batches)
+        .unwrap()
+        .to_string()
+}
+
+/// `beacon.system.file_stats` is how an operator sees a background process at
+/// all. Without it, a subsystem that analyzes everything and stores nothing
+/// looks exactly like one that works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_view_shows_what_the_subsystem_knows() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/b.parquet"), 90.0, 100.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let rows = query(
+        &runtime,
+        "SELECT path, state, format, column_count FROM beacon.system.file_stats ORDER BY path",
+    )
+    .await;
+    assert!(rows.contains("obs/a.parquet"), "{rows}");
+    assert!(rows.contains("Analyzed"), "{rows}");
+    assert!(rows.contains("parquet"), "{rows}");
+
+    // The diagnosis query from the module docs: which formats yield nothing.
+    let barren = query(
+        &runtime,
+        "SELECT format, count(*) AS files, \
+         sum(CASE WHEN column_count = 0 THEN 1 ELSE 0 END) AS barren \
+         FROM beacon.system.file_stats GROUP BY format",
+    )
+    .await;
+    assert!(barren.contains("parquet"), "{barren}");
+    assert!(barren.contains("| 2 "), "two files analyzed:\n{barren}");
+}
+
+/// The segments view answers the question nothing else can on a live node:
+/// whether the batching is producing narrow segments.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_segments_view_shows_the_batching() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/argo/a.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/ctd/b.parquet"), 0.0, 5.0);
+
+    // `min_group_files` must allow a split, or the rule correctly keeps a
+    // two-file batch whole and there is nothing to observe.
+    let splitting = FileStatsConfig {
+        min_group_files: 1,
+        ..enabled()
+    };
+    let runtime = builder(root.path(), splitting).build().await.unwrap();
+    runtime.file_stats().unwrap().run_once().await.unwrap();
+
+    let rows = query(
+        &runtime,
+        "SELECT segment, num_files, num_columns FROM beacon.system.file_stats_segments \
+         ORDER BY seq",
+    )
+    .await;
+    // Two roots, so two segments, each holding one file's columns.
+    assert_eq!(rows.matches("segment-").count(), 2, "{rows}");
+}
+
+/// Both views are empty rather than an error when the subsystem never started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_views_are_empty_when_the_subsystem_is_off() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), FileStatsConfig::default())
+        .build()
+        .await
+        .unwrap();
+
+    let rows = query(&runtime, "SELECT count(*) FROM beacon.system.file_stats").await;
+    assert!(rows.contains("| 0 "), "no store means no rows:\n{rows}");
+}
+
+/// `ANALYZE FILES` drains the queue now instead of waiting for the timer, and
+/// reports what it did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn analyze_files_runs_a_pass_on_demand() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/obs/b.parquet"), 9.0, 9.5);
+
+    // An interval long enough that the timer cannot be what did the work.
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+
+    let report = query(&runtime, "ANALYZE FILES").await;
+    assert!(report.contains("discovered"), "{report}");
+    assert!(report.contains("| 2 "), "two files analyzed:\n{report}");
+
+    let rows = query(
+        &runtime,
+        "SELECT count(*) FROM beacon.system.file_stats WHERE state = 'Analyzed'",
+    )
+    .await;
+    assert!(rows.contains("| 2 "), "{rows}");
+}
+
+/// A prefix restricts it, so an operator can validate one corner of a store
+/// before turning the subsystem loose on all of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn analyze_files_can_be_restricted_to_a_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/argo/a.parquet"), 0.0, 5.0);
+    write_parquet(&root.path().join("datasets/ctd/b.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    query(&runtime, "ANALYZE FILES 'argo/'").await;
+
+    let rows = query(
+        &runtime,
+        "SELECT path FROM beacon.system.file_stats ORDER BY path",
+    )
+    .await;
+    assert!(rows.contains("argo/a.parquet"), "{rows}");
+    assert!(
+        !rows.contains("ctd/b.parquet"),
+        "the other prefix was never discovered:\n{rows}"
+    );
+}
+
+/// FORCE is the way back from a reader that could not produce ranges. Without
+/// it, an already-analyzed file is never re-queued, because its content did not
+/// change -- only what Beacon can read from it did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn analyze_files_force_re_analyzes() {
+    let root = tempfile::tempdir().unwrap();
+    write_parquet(&root.path().join("datasets/obs/a.parquet"), 0.0, 5.0);
+
+    let runtime = builder(root.path(), enabled()).build().await.unwrap();
+    query(&runtime, "ANALYZE FILES").await;
+
+    let store = runtime.file_stats().unwrap().store();
+    let id = store.registry().file_id("obs/a.parquet").unwrap().unwrap();
+    assert_eq!(store.registry().record(id).unwrap().unwrap().stats_epoch, 1);
+
+    // Without FORCE nothing is re-queued: the file has not changed.
+    query(&runtime, "ANALYZE FILES").await;
+    assert_eq!(store.registry().record(id).unwrap().unwrap().stats_epoch, 1);
+
+    let report = query(&runtime, "ANALYZE FILES FORCE").await;
+    assert!(report.contains("| 1 "), "one file requeued:\n{report}");
+    assert_eq!(
+        store.registry().record(id).unwrap().unwrap().stats_epoch,
+        2,
+        "FORCE rewrote its statistics"
+    );
+}
+
+/// With the subsystem off the statement says so, rather than reporting a pass
+/// that did nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn analyze_files_says_when_the_subsystem_is_off() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = builder(root.path(), FileStatsConfig::default())
+        .build()
+        .await
+        .unwrap();
+
+    // The statement plans fine; the refusal comes when the stream is polled, so
+    // the error has to be collected rather than awaited.
+    let error = match runtime
+        .run_query(
+            Query::sql("ANALYZE FILES".to_string()),
+            AuthIdentity::system(),
+        )
+        .await
+    {
+        Err(error) => error.to_string(),
+        Ok(result) => result
+            .into_record_stream()
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default(),
+    };
+    assert!(
+        error.contains("BEACON_FILE_STATS_ENABLE"),
+        "the error should name the switch: {error}"
+    );
+}

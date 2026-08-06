@@ -250,6 +250,16 @@ fn to_column_stat(
 
 // ── the background service ──────────────────────────────────────────────────
 
+/// Shared, late-filled handle to the service, registered as a session extension
+/// so `ANALYZE FILES` can reach it. The same pattern the crawler manager uses,
+/// and for the same reason: the session owns the runtime that owns this.
+pub type FileStatsServiceHandle = Arc<std::sync::OnceLock<Arc<FileStatsService>>>;
+
+/// Create an empty handle to register as a session extension.
+pub fn new_file_stats_service_handle() -> FileStatsServiceHandle {
+    Arc::new(std::sync::OnceLock::new())
+}
+
 /// Owns the store and the collector, and drives them on a timer.
 ///
 /// One pass discovers, then analyzes:
@@ -332,6 +342,44 @@ impl FileStatsService {
         *self.task.lock() = Some(handle);
     }
 
+    /// Run to completion now, rather than waiting for the timer.
+    ///
+    /// Backing `ANALYZE FILES`. The timer takes `batch_files` every
+    /// `interval_secs`, so a fresh store is hours from being useful; this drains
+    /// it, optionally over one prefix.
+    ///
+    /// `force` re-queues files that are already analyzed. Nothing else does, and
+    /// without it a reader that has only just become able to produce ranges
+    /// (netCDF's, after `use_rust_reader`) leaves every file recorded as analyzed
+    /// with nothing in it.
+    pub async fn analyze_now(
+        &self,
+        prefix: Option<&str>,
+        force: bool,
+    ) -> anyhow::Result<AnalyzePass> {
+        let requeued = if force {
+            self.store.registry().requeue(prefix)?
+        } else {
+            0
+        };
+
+        let discovered = self.discover_under(prefix).await?;
+        let report = self
+            .collector
+            .run_until_idle(MAX_ON_DEMAND_PASSES)
+            .await
+            .map_err(|e| anyhow::anyhow!("file statistics collection failed: {e}"))?;
+
+        Ok(AnalyzePass {
+            discovered,
+            requeued,
+            analyzed: report.analyzed,
+            failed: report.failed,
+            segments: report.segments,
+            pending: self.store.registry().num_pending().unwrap_or(0),
+        })
+    }
+
     /// Discover, then analyze. Exposed so a caller can force a pass.
     pub async fn run_once(&self) -> anyhow::Result<FileStatsPass> {
         let discovered = self.discover().await?;
@@ -363,6 +411,11 @@ impl FileStatsService {
 
     /// Register everything the datasets store currently lists, in chunks.
     async fn discover(&self) -> anyhow::Result<usize> {
+        self.discover_under(None).await
+    }
+
+    /// The same, restricted to a prefix. `None` uses the configured scan prefix.
+    async fn discover_under(&self, prefix: Option<&str>) -> anyhow::Result<usize> {
         let session = self.session()?;
         let store = session
             .state()
@@ -370,8 +423,8 @@ impl FileStatsService {
             .object_store(&self.datasets_url)
             .map_err(|e| anyhow::anyhow!("datasets store unavailable: {e}"))?;
 
-        let prefix = (!self.config.scan_prefix.is_empty())
-            .then(|| Path::from(self.config.scan_prefix.as_str()));
+        let scan_prefix = prefix.unwrap_or(self.config.scan_prefix.as_str());
+        let prefix = (!scan_prefix.is_empty()).then(|| Path::from(scan_prefix));
         let mut listing = store.list(prefix.as_ref());
 
         let mut batch: Vec<ObservedFile> = Vec::with_capacity(self.config.discovery_chunk);
@@ -416,6 +469,24 @@ impl Drop for FileStatsService {
             task.abort();
         }
     }
+}
+
+/// How many passes `analyze_now` will run before giving up.
+///
+/// A bound rather than a loop: a file that fails, re-queues and fails again
+/// would otherwise trap the statement forever.
+const MAX_ON_DEMAND_PASSES: usize = 10_000;
+
+/// What `ANALYZE FILES` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnalyzePass {
+    pub discovered: usize,
+    /// Files put back on the queue by `FORCE`.
+    pub requeued: usize,
+    pub analyzed: usize,
+    pub failed: usize,
+    pub segments: usize,
+    pub pending: u64,
 }
 
 /// What one pass of the service did.

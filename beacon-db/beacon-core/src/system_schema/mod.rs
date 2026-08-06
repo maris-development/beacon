@@ -27,6 +27,7 @@
 //! returns only what their roles grant.
 
 mod auth;
+mod file_stats;
 mod table;
 
 use std::{any::Any, collections::HashMap, sync::Arc};
@@ -79,13 +80,27 @@ impl SystemSchemaProvider {
     /// Builds the schema over the runtime's live state: the auth context that
     /// owns users and roles, and the session through which `query_metrics`
     /// resolves to its managed table.
-    pub fn new(session: SessionCell, auth: Arc<beacon_auth::AuthContext>) -> Self {
+    pub fn new(
+        session: SessionCell,
+        auth: Arc<beacon_auth::AuthContext>,
+        file_stats: beacon_file_stats::FileStatsHandle,
+    ) -> Self {
         let mut tables: HashMap<String, Arc<dyn TableProvider>> = HashMap::new();
         tables.insert(
             "users".to_string(),
             Arc::new(auth::users_table(auth.clone())),
         );
         tables.insert("roles".to_string(), Arc::new(auth::roles_table(auth)));
+        // The handle is late-filled, so these read whatever the subsystem has
+        // at query time -- including nothing, when it never started.
+        tables.insert(
+            "file_stats".to_string(),
+            Arc::new(file_stats::file_stats_table(file_stats.clone())),
+        );
+        tables.insert(
+            "file_stats_segments".to_string(),
+            Arc::new(file_stats::segments_table(file_stats)),
+        );
         Self { tables, session }
     }
 

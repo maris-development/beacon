@@ -428,6 +428,13 @@ async fn init_file_stats(
     {
         let _ = handle.set(service.store().clone());
     }
+    if let Some(handle) = session_ctx
+        .state()
+        .config()
+        .get_extension::<std::sync::OnceLock<Arc<crate::file_stats::FileStatsService>>>()
+    {
+        let _ = handle.set(service.clone());
+    }
 
     tracing::info!(
         interval_secs = builder.file_stats.interval_secs,
@@ -686,7 +693,15 @@ fn register_system_schema(
     session_cell: SessionCell,
     auth: Arc<AuthContext>,
 ) -> anyhow::Result<()> {
-    let provider = Arc::new(SystemSchemaProvider::new(session_cell, auth));
+    // The same late-filled handle the scan path prunes against, so the tables
+    // show whatever the subsystem has at query time. Absent on a session built
+    // without the extension, which reads as "no rows".
+    let file_stats = session_ctx
+        .state()
+        .config()
+        .get_extension::<std::sync::OnceLock<Arc<beacon_file_stats::FileStatsStore>>>()
+        .unwrap_or_else(beacon_file_stats::new_file_stats_handle);
+    let provider = Arc::new(SystemSchemaProvider::new(session_cell, auth, file_stats));
 
     session_ctx
         .catalog("beacon")
@@ -847,6 +862,10 @@ fn build_session_config(
         // off. A scan reads it to prune its file list; empty simply means no
         // pruning, which is always a correct answer.
         .with_extension(beacon_file_stats::new_file_stats_handle())
+        // Late-filled by `init_file_stats`. `ANALYZE FILES` reaches the service
+        // through this; an empty handle is what makes that statement say the
+        // subsystem is off rather than silently doing nothing.
+        .with_extension(crate::file_stats::new_file_stats_service_handle())
         .with_extension(secrets_store.clone())
         .with_extension(Arc::new(ArrowTypeWidening::new(
             builder

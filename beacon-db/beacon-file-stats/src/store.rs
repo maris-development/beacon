@@ -163,6 +163,11 @@ impl FileStatsStore {
         }
     }
 
+    /// A snapshot of the manifest, for diagnostics.
+    pub async fn segments(&self) -> Vec<SegmentEntry> {
+        self.manifest.read().await.segments.clone()
+    }
+
     pub async fn num_segments(&self) -> usize {
         self.manifest.read().await.segments.len()
     }
