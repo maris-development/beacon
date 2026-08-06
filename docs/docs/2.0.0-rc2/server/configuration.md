@@ -173,23 +173,24 @@ then registers them as external tables.
 
 ## File statistics
 
-Beacon records the value range of each column in each file, in the background, and uses it to skip
-files a query cannot match. See [File statistics](/docs/2.0.0-rc2/internals/file-statistics).
+Beacon records the value range of each column in each file. A query then prunes the files that
+cannot match. See [File statistics](/docs/2.0.0-rc2/internals/file-statistics).
 
-Off by default. On a netCDF server you also need `BEACON_NETCDF_USE_RUST_READER=true` (see
-[File formats](#file-formats)), or the pass runs and stores nothing.
+Beacon does not enable this feature by default. For netCDF, also set
+`BEACON_NETCDF_USE_RUST_READER=true` (see [File formats](#file-formats)). Without that variable,
+Beacon reads each netCDF file and records no ranges.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `BEACON_FILE_STATS_ENABLE` | `false` | Master switch. When `false`, nothing is discovered, read or stored, and no background task runs. |
-| `BEACON_FILE_STATS_INTERVAL_SECS` | `900` | Seconds between passes. |
-| `BEACON_FILE_STATS_CONCURRENCY` | a quarter of the cores, minimum 2 | Files read at once. A fraction of the machine by default, so a backfill does not compete with queries. Raise it well above your core count for data in object storage, where the work is waiting on the network. |
-| `BEACON_FILE_STATS_BATCH_FILES` | `10000` | Files read per pass. Bounds how much memory one pass uses. |
-| `BEACON_FILE_STATS_TARGET_GROUP_FILES` | `10000` | Files a stored group should cover. Smaller groups skip more sharply for rare columns, at the cost of more of them to read for a common one. |
-| `BEACON_FILE_STATS_MIN_GROUP_FILES` | `500` | Never split a group below this, even across folders. |
-| `BEACON_FILE_STATS_PREFIX_DEPTH` | unset | Fix the grouping at this folder depth instead of deriving it from your paths. Leave unset: the derivation handles roots of differing shape, which one depth cannot. |
-| `BEACON_FILE_STATS_SCAN_PREFIX` | *(everything)* | Restrict discovery to this prefix of the datasets store. |
-| `BEACON_FILE_STATS_DISCOVERY_CHUNK` | `10000` | Files registered per transaction, so listing a large store is never held whole in memory. |
+| `BEACON_FILE_STATS_ENABLE` | `false` | Master switch. When `false`, Beacon finds nothing, reads nothing and starts no background task. |
+| `BEACON_FILE_STATS_INTERVAL_SECS` | `900` | The seconds between two passes. |
+| `BEACON_FILE_STATS_CONCURRENCY` | one quarter of the cores, minimum 2 | The files that Beacon reads at the same time. A pass uses part of the machine, so it does not compete with queries. Increase this value above your core count for data in object storage. |
+| `BEACON_FILE_STATS_BATCH_FILES` | `10000` | The files that Beacon reads in one pass. This value limits the memory of one pass. |
+| `BEACON_FILE_STATS_TARGET_GROUP_FILES` | `10000` | The files that one segment covers. A small value prunes more for a rare column. It also adds segments to read for a common column. |
+| `BEACON_FILE_STATS_MIN_GROUP_FILES` | `500` | Beacon does not split a group below this size, even across folders. |
+| `BEACON_FILE_STATS_PREFIX_DEPTH` | *(derived)* | The folder depth for a group. Leave this variable unset. Beacon derives the depth from your paths and handles roots of different shapes. |
+| `BEACON_FILE_STATS_SCAN_PREFIX` | *(all files)* | Beacon finds files under this prefix of the datasets store only. |
+| `BEACON_FILE_STATS_DISCOVERY_CHUNK` | `10000` | The files that Beacon registers in one transaction. Beacon does not hold a large listing in memory. |
 
 ## CORS
 
